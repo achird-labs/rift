@@ -27,7 +27,7 @@ mod js_engine;
 #[cfg(feature = "javascript")]
 pub use js_engine::{
     clear_imposter_state, compile_js_to_bytecode, execute_mountebank_decorate,
-    execute_mountebank_inject, JsEngine, MountebankRequest,
+    execute_mountebank_inject, execute_predicate_inject, JsEngine, MountebankRequest,
 };
 #[cfg(feature = "javascript")]
 #[expect(unused_imports, reason = "public API for library consumers")]

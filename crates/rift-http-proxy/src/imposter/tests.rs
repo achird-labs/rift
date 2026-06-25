@@ -72,7 +72,8 @@ fn test_predicate_matching() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(stub_matches(
         &stub.predicates,
@@ -83,7 +84,8 @@ fn test_predicate_matching() {
         None,
         None,
         None,
-        None
+        None,
+        0
     )); // case-insensitive method
 
     // Should not match
@@ -96,7 +98,8 @@ fn test_predicate_matching() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(!stub_matches(
         &stub.predicates,
@@ -107,7 +110,8 @@ fn test_predicate_matching() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -486,7 +490,8 @@ fn test_predicate_ends_with() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(stub_matches(
         &predicates,
@@ -497,7 +502,8 @@ fn test_predicate_ends_with() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Should not match
@@ -510,7 +516,8 @@ fn test_predicate_ends_with() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(!stub_matches(
         &predicates,
@@ -521,7 +528,8 @@ fn test_predicate_ends_with() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -543,7 +551,8 @@ fn test_predicate_deep_equals_method() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(stub_matches(
         &predicates,
@@ -554,7 +563,8 @@ fn test_predicate_deep_equals_method() {
         None,
         None,
         None,
-        None
+        None,
+        0
     )); // case-insensitive
     assert!(!stub_matches(
         &predicates,
@@ -565,7 +575,8 @@ fn test_predicate_deep_equals_method() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -588,7 +599,8 @@ fn test_predicate_deep_equals_body() {
         Some(""),
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(stub_matches(
         &predicates,
@@ -599,7 +611,8 @@ fn test_predicate_deep_equals_body() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Non-empty body should not match
@@ -612,7 +625,8 @@ fn test_predicate_deep_equals_body() {
         Some("content"),
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -635,7 +649,8 @@ fn test_predicate_contains_query() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(stub_matches(
         &predicates,
@@ -646,7 +661,8 @@ fn test_predicate_contains_query() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(stub_matches(
         &predicates,
@@ -657,7 +673,8 @@ fn test_predicate_contains_query() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Should not match
@@ -670,7 +687,8 @@ fn test_predicate_contains_query() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(!stub_matches(
         &predicates,
@@ -681,7 +699,8 @@ fn test_predicate_contains_query() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -704,7 +723,8 @@ fn test_predicate_equals_headers() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Header key lookup is case-insensitive
@@ -719,7 +739,8 @@ fn test_predicate_equals_headers() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Wrong value
@@ -734,7 +755,8 @@ fn test_predicate_equals_headers() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Missing header
@@ -748,7 +770,8 @@ fn test_predicate_equals_headers() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -776,7 +799,8 @@ fn test_predicate_exists() {
         Some("body content"),
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Missing query param
@@ -789,7 +813,8 @@ fn test_predicate_exists() {
         Some("body content"),
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Missing header
@@ -803,7 +828,8 @@ fn test_predicate_exists() {
         Some("body content"),
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Missing body
@@ -816,7 +842,8 @@ fn test_predicate_exists() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -839,7 +866,8 @@ fn test_predicate_logical_not() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(stub_matches(
         &predicates,
@@ -850,7 +878,8 @@ fn test_predicate_logical_not() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(!stub_matches(
         &predicates,
@@ -861,7 +890,8 @@ fn test_predicate_logical_not() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -886,7 +916,8 @@ fn test_predicate_logical_or() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(stub_matches(
         &predicates,
@@ -897,7 +928,8 @@ fn test_predicate_logical_or() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(!stub_matches(
         &predicates,
@@ -908,7 +940,8 @@ fn test_predicate_logical_or() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -933,7 +966,8 @@ fn test_predicate_logical_and() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(!stub_matches(
         &predicates,
@@ -944,7 +978,8 @@ fn test_predicate_logical_and() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(!stub_matches(
         &predicates,
@@ -955,7 +990,8 @@ fn test_predicate_logical_and() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -980,7 +1016,8 @@ fn test_predicate_matches_regex_all_fields() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(stub_matches(
         &predicates,
@@ -991,7 +1028,8 @@ fn test_predicate_matches_regex_all_fields() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(!stub_matches(
         &predicates,
@@ -1002,7 +1040,8 @@ fn test_predicate_matches_regex_all_fields() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(!stub_matches(
         &predicates,
@@ -1013,7 +1052,8 @@ fn test_predicate_matches_regex_all_fields() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1035,7 +1075,8 @@ fn test_predicate_matches_body_regex() {
         Some(r#"{"userId": "abc-123-def"}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
     assert!(!stub_matches(
         &predicates,
@@ -1046,7 +1087,8 @@ fn test_predicate_matches_body_regex() {
         Some(r#"{"userId": "invalid!"}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1077,7 +1119,8 @@ fn test_exists_predicate_body_object_field_present() {
         Some(r#"{"blah": "hello", "other": "stuff"}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Body does NOT have "blah" field → should not match
@@ -1090,7 +1133,8 @@ fn test_exists_predicate_body_object_field_present() {
         Some(r#"{"other": "stuff"}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1117,7 +1161,8 @@ fn test_exists_predicate_body_object_field_absent() {
         Some(r#"{"blah": "hello"}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Body does NOT have "blah" field → should match
@@ -1130,7 +1175,8 @@ fn test_exists_predicate_body_object_field_absent() {
         Some(r#"{"other": "stuff"}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1156,7 +1202,8 @@ fn test_exists_predicate_body_object_non_json_body() {
         Some("not json at all"),
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1180,7 +1227,8 @@ fn test_exists_predicate_body_boolean_still_works() {
         Some("any body content"),
         None,
         None,
-        None
+        None,
+        0
     ));
 
     assert!(!stub_matches(
@@ -1192,7 +1240,8 @@ fn test_exists_predicate_body_boolean_still_works() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1221,7 +1270,8 @@ fn test_ends_with_object_value_does_not_always_match() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1246,7 +1296,8 @@ fn test_ends_with_path_as_json_object() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Path is a JSON string but field doesn't end with "123"
@@ -1259,7 +1310,8 @@ fn test_ends_with_path_as_json_object() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1283,7 +1335,8 @@ fn test_starts_with_object_value_does_not_always_match() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1310,7 +1363,8 @@ fn test_equals_body_as_json_object() {
         Some(r#"{"blah": "123", "other": "ignored"}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Body with wrong value
@@ -1323,7 +1377,8 @@ fn test_equals_body_as_json_object() {
         Some(r#"{"blah": "456"}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Body missing the field
@@ -1336,7 +1391,8 @@ fn test_equals_body_as_json_object() {
         Some(r#"{"other": "123"}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1360,7 +1416,8 @@ fn test_ends_with_body_object_with_numeric_value() {
         Some(r#"{"abc": "other123"}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 
     assert!(!stub_matches(
@@ -1372,7 +1429,8 @@ fn test_ends_with_body_object_with_numeric_value() {
         Some(r#"{"abc": "other456"}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1403,7 +1461,8 @@ fn test_ends_with_query_object_value_does_not_always_match() {
             None,
             None,
             None,
-            None
+            None,
+            0
         ),
         "Object expected value in query should not match a plain string"
     );
@@ -1430,7 +1489,8 @@ fn test_ends_with_query_object_value_recursive_match() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // query param 'data' has a field NOT ending in "123"
@@ -1443,7 +1503,8 @@ fn test_ends_with_query_object_value_recursive_match() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1470,7 +1531,8 @@ fn test_ends_with_header_object_value_does_not_always_match() {
             None,
             None,
             None,
-            None
+            None,
+            0
         ),
         "Object expected value in headers should not match a plain string"
     );
@@ -1500,7 +1562,8 @@ fn test_ends_with_header_object_value_recursive_match() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Header value with field NOT ending in "123"
@@ -1514,7 +1577,8 @@ fn test_ends_with_header_object_value_recursive_match() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1542,7 +1606,8 @@ fn test_ends_with_form_object_value_does_not_always_match() {
             None,
             None,
             None,
-            Some(&form)
+            Some(&form),
+            0
         ),
         "Object expected value in form should not match a plain string"
     );
@@ -1573,7 +1638,8 @@ fn test_ends_with_form_object_value_recursive_match() {
         None,
         None,
         None,
-        Some(&form)
+        Some(&form),
+        0
     ));
 
     // Form field with value NOT ending in "123"
@@ -1587,7 +1653,8 @@ fn test_ends_with_form_object_value_recursive_match() {
         None,
         None,
         None,
-        Some(&form)
+        Some(&form),
+        0
     ));
 }
 
@@ -1612,7 +1679,8 @@ fn test_contains_query_object_value() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // query param 'data' does NOT contain "ohn"
@@ -1625,7 +1693,8 @@ fn test_contains_query_object_value() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1654,7 +1723,8 @@ fn test_equals_header_object_value() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Mismatched value
@@ -1668,7 +1738,8 @@ fn test_equals_header_object_value() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1697,7 +1768,8 @@ fn test_matches_query_object_value_does_not_always_match() {
             None,
             None,
             None,
-            None
+            None,
+            0
         ),
         "Object expected value in matches/query should not match a plain string"
     );
@@ -1724,7 +1796,8 @@ fn test_matches_query_object_value_recursive_regex() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // "Jane" does NOT match ^J.*n$ (ends with 'e')
@@ -1737,7 +1810,8 @@ fn test_matches_query_object_value_recursive_regex() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1765,7 +1839,8 @@ fn test_matches_header_object_value_recursive_regex() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // "abc" does NOT match ^\d+$
@@ -1779,7 +1854,8 @@ fn test_matches_header_object_value_recursive_regex() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1808,7 +1884,8 @@ fn test_matches_form_object_value_recursive_regex() {
         None,
         None,
         None,
-        Some(&form)
+        Some(&form),
+        0
     ));
 
     // "abcd" does NOT match ^[A-Z]{3}$
@@ -1822,7 +1899,8 @@ fn test_matches_form_object_value_recursive_regex() {
         None,
         None,
         None,
-        Some(&form)
+        Some(&form),
+        0
     ));
 }
 
@@ -1850,7 +1928,8 @@ fn test_deep_equals_body_extra_keys_rejected() {
         Some(r#"{"a": "1"}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Extra key should be rejected by deepEquals
@@ -1863,7 +1942,8 @@ fn test_deep_equals_body_extra_keys_rejected() {
         Some(r#"{"a": "1", "b": "2"}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1887,7 +1967,8 @@ fn test_equals_body_extra_keys_allowed() {
         Some(r#"{"a": "1", "b": "2"}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1911,7 +1992,8 @@ fn test_deep_equals_body_nested_extra_keys_rejected() {
         Some(r#"{"outer": {"inner": "val"}}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Extra key in nested object
@@ -1924,7 +2006,8 @@ fn test_deep_equals_body_nested_extra_keys_rejected() {
         Some(r#"{"outer": {"inner": "val", "extra": "x"}}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -1948,7 +2031,8 @@ fn test_deep_equals_body_array_comparison() {
         Some(r#"{"items": [1, 2, 3]}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Different length array
@@ -1961,7 +2045,8 @@ fn test_deep_equals_body_array_comparison() {
         Some(r#"{"items": [1, 2, 3, 4]}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 
     // Different values
@@ -1974,7 +2059,8 @@ fn test_deep_equals_body_array_comparison() {
         Some(r#"{"items": [1, 2, 99]}"#),
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -2001,7 +2087,8 @@ fn test_exists_predicate_query_key_case_insensitive() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -2025,7 +2112,8 @@ fn test_exists_predicate_query_key_case_sensitive() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     assert!(stub_matches(
@@ -2037,7 +2125,8 @@ fn test_exists_predicate_query_key_case_sensitive() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -2062,7 +2151,8 @@ fn test_exists_predicate_form_key_case_insensitive() {
         None,
         None,
         None,
-        Some(&form)
+        Some(&form),
+        0
     ));
 }
 
@@ -2087,7 +2177,8 @@ fn test_exists_predicate_headers_key_case_sensitive() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 
     let mut headers_exact = HashMap::new();
@@ -2102,7 +2193,8 @@ fn test_exists_predicate_headers_key_case_sensitive() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -2146,7 +2238,8 @@ fn test_header_predicate_matches_title_case() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -2186,7 +2279,8 @@ fn test_bare_query_param_exists_predicate() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -2209,7 +2303,8 @@ fn test_bare_query_param_equals_empty_string() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -2247,7 +2342,8 @@ fn test_multi_valued_query_param_equals() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }
 
@@ -2269,6 +2365,7 @@ fn test_multi_valued_query_param_contains() {
         None,
         None,
         None,
-        None
+        None,
+        0
     ));
 }

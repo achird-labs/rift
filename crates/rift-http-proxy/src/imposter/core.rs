@@ -250,6 +250,7 @@ impl Imposter {
         // Parse form data if Content-Type is application/x-www-form-urlencoded
         let form = Self::parse_form_data(headers, body);
 
+        let imposter_port = self.config.port.unwrap_or(0);
         for (index, stub_state) in stubs.iter().enumerate() {
             let stub = &stub_state.stub;
             if stub_matches(
@@ -262,6 +263,7 @@ impl Imposter {
                 request_from,
                 client_ip,
                 form.as_ref(),
+                imposter_port,
             ) {
                 // TODO(perf): It's unfortunate that we end up deep cloning the whole stub here
                 return Some((stub_state.clone(), index));

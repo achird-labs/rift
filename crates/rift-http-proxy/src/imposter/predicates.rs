@@ -19,6 +19,7 @@ pub fn stub_matches(
     request_from: Option<&str>,
     client_ip: Option<&str>,
     form: Option<&HashMap<String, String>>,
+    imposter_port: u16,
 ) -> bool {
     // If no predicates, match everything
     if predicates.is_empty() {
@@ -37,6 +38,7 @@ pub fn stub_matches(
             request_from,
             client_ip,
             form,
+            imposter_port,
         ) {
             return false;
         }
@@ -63,6 +65,7 @@ pub fn predicate_matches(
     request_from: Option<&str>,
     client_ip: Option<&str>,
     form: Option<&HashMap<String, String>>,
+    imposter_port: u16,
 ) -> bool {
     // Get predicate options
     let case_sensitive = predicate.parameters.case_sensitive.unwrap_or(false);
@@ -256,6 +259,7 @@ pub fn predicate_matches(
             request_from,
             client_ip,
             form,
+            imposter_port,
         ),
         PredicateOperation::Or(children) => children.iter().any(|p| {
             predicate_matches(
@@ -268,6 +272,7 @@ pub fn predicate_matches(
                 request_from,
                 client_ip,
                 form,
+                imposter_port,
             )
         }),
         PredicateOperation::And(children) => children.iter().all(|p| {
@@ -281,8 +286,32 @@ pub fn predicate_matches(
                 request_from,
                 client_ip,
                 form,
+                imposter_port,
             )
         }),
+        PredicateOperation::Inject(inject_fn) => {
+            #[cfg(feature = "javascript")]
+            {
+                use crate::scripting::{execute_predicate_inject, MountebankRequest};
+                let query_map = parse_query(query);
+                let mb_request = MountebankRequest {
+                    method: method.to_string(),
+                    path: path.to_string(),
+                    query: query_map,
+                    headers: headers.clone(),
+                    body: body.map(|b| b.to_string()),
+                };
+                execute_predicate_inject(inject_fn, &mb_request, imposter_port)
+            }
+            #[cfg(not(feature = "javascript"))]
+            {
+                tracing::warn!(
+                    "inject predicate requires the 'javascript' feature; predicate will not match"
+                );
+                let _ = inject_fn;
+                false
+            }
+        }
     }
 }
 
@@ -1000,6 +1029,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(
@@ -1055,6 +1085,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(
@@ -1089,6 +1120,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(
@@ -1117,6 +1149,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(result, "deepEquals should match identical string bodies");
@@ -1147,6 +1180,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(
@@ -1175,7 +1209,7 @@ mod tests {
         headers.insert("Content-Type".to_string(), "application/json".to_string());
 
         let result = predicate_matches(
-            &pred, "GET", "/test", None, &headers, None, None, None, None,
+            &pred, "GET", "/test", None, &headers, None, None, None, None, 0,
         );
 
         assert!(
@@ -1208,6 +1242,7 @@ mod tests {
             None,
             None,
             Some(&form),
+            0,
         );
 
         assert!(
@@ -1245,7 +1280,7 @@ mod tests {
         headers.insert("Content-Type".to_string(), "application/json".to_string());
 
         let result = predicate_matches(
-            &pred, "GET", "/test", None, &headers, None, None, None, None,
+            &pred, "GET", "/test", None, &headers, None, None, None, None, 0,
         );
 
         assert!(
@@ -1280,6 +1315,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(
@@ -1310,6 +1346,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         // Default is case-insensitive
         assert!(predicate_matches(
@@ -1322,6 +1359,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         assert!(!predicate_matches(
             &pred,
@@ -1333,6 +1371,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1355,6 +1394,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         assert!(!predicate_matches(
             &pred,
@@ -1366,6 +1406,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1386,6 +1427,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         assert!(!predicate_matches(
             &pred,
@@ -1397,6 +1439,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1417,6 +1460,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         assert!(!predicate_matches(
             &pred,
@@ -1428,6 +1472,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1448,6 +1493,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         assert!(!predicate_matches(
             &pred,
@@ -1459,6 +1505,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1481,6 +1528,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         assert!(!predicate_matches(
             &pred,
@@ -1492,6 +1540,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1513,6 +1562,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         assert!(predicate_matches(
             &pred,
@@ -1524,6 +1574,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1550,6 +1601,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         assert!(predicate_matches(
             &pred,
@@ -1561,6 +1613,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         assert!(!predicate_matches(
             &pred,
@@ -1572,6 +1625,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1597,6 +1651,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         assert!(!predicate_matches(
             &pred,
@@ -1608,6 +1663,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         assert!(!predicate_matches(
             &pred,
@@ -1619,6 +1675,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1645,6 +1702,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         // With caseSensitive: true, "post" should NOT match "POST"
         assert!(!predicate_matches(
@@ -1657,6 +1715,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1686,6 +1745,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1711,6 +1771,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         // Body does not exist
         assert!(!predicate_matches(
@@ -1723,6 +1784,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         // Body should NOT exist (false) - empty body
         assert!(predicate_matches(
@@ -1735,6 +1797,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1751,7 +1814,7 @@ mod tests {
         headers.insert("content-type".to_string(), "application/json".to_string());
 
         assert!(predicate_matches(
-            &pred, "GET", "/", None, &headers, None, None, None, None,
+            &pred, "GET", "/", None, &headers, None, None, None, None, 0
         ));
         assert!(!predicate_matches(
             &pred,
@@ -1763,6 +1826,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1786,6 +1850,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         // Extra param - should fail for deepEquals
         assert!(!predicate_matches(
@@ -1798,6 +1863,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1828,6 +1894,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
         assert!(!predicate_matches(
             &pred,
@@ -1839,6 +1906,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         ));
     }
 
@@ -1855,6 +1923,7 @@ mod tests {
             None,
             None,
             None,
+            0
         ));
     }
 
@@ -1880,6 +1949,7 @@ mod tests {
             None,
             None,
             None,
+            0
         ));
         assert!(!stub_matches(
             &predicates,
@@ -1891,6 +1961,7 @@ mod tests {
             None,
             None,
             None,
+            0
         ));
     }
 
@@ -1930,6 +2001,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(
@@ -1967,6 +2039,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(
@@ -1994,6 +2067,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(
@@ -2028,6 +2102,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(
@@ -2054,6 +2129,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(
@@ -2080,6 +2156,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(
@@ -2106,6 +2183,7 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(
@@ -2131,11 +2209,103 @@ mod tests {
             None,
             None,
             None,
+            0,
         );
 
         assert!(
             !result,
             "exists path=false should fail when path is present"
         );
+    }
+
+    // =========================================================================
+    // inject predicate tests (require javascript feature)
+    // =========================================================================
+
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn test_inject_predicate_matches_true() {
+        let pred = make_predicate(PredicateOperation::Inject(
+            "function(request) { return request.path === '/api'; }".to_string(),
+        ));
+        let result = predicate_matches(
+            &pred,
+            "GET",
+            "/api",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        assert!(result, "inject predicate returning true should match");
+    }
+
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn test_inject_predicate_matches_false() {
+        let pred = make_predicate(PredicateOperation::Inject(
+            "function(request) { return request.path === '/other'; }".to_string(),
+        ));
+        let result = predicate_matches(
+            &pred,
+            "GET",
+            "/api",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        assert!(!result, "inject predicate returning false should not match");
+    }
+
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn test_inject_predicate_checks_method() {
+        let pred = make_predicate(PredicateOperation::Inject(
+            "function(request) { return request.method === 'POST'; }".to_string(),
+        ));
+        let headers = HashMap::new();
+        let post_result = predicate_matches(
+            &pred, "POST", "/", None, &headers, None, None, None, None, 0,
+        );
+        let get_result =
+            predicate_matches(&pred, "GET", "/", None, &headers, None, None, None, None, 0);
+        assert!(post_result, "inject predicate should match POST");
+        assert!(!get_result, "inject predicate should not match GET");
+    }
+
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn test_inject_predicate_accesses_body() {
+        let pred = make_predicate(PredicateOperation::Inject(
+            r#"function(request) { return request.body && request.body.indexOf('hello') >= 0; }"#
+                .to_string(),
+        ));
+        let result = predicate_matches(
+            &pred,
+            "POST",
+            "/",
+            None,
+            &empty_headers(),
+            Some("hello world"),
+            None,
+            None,
+            None,
+            0,
+        );
+        assert!(result, "inject predicate should access request body");
+    }
+
+    #[test]
+    fn test_inject_predicate_deserializes() {
+        let json = r#"{"inject": "function(request) { return true; }"}"#;
+        let op: PredicateOperation = serde_json::from_str(json).expect("should deserialize inject");
+        assert!(matches!(op, PredicateOperation::Inject(_)));
     }
 }

@@ -811,6 +811,64 @@ pub fn execute_mountebank_inject(
     parse_mountebank_response(&mut context, result)
 }
 
+/// Execute a Mountebank-style predicate inject function.
+/// The function signature is: `function(request, logger, imposterState) { return bool; }`
+/// Returns `true` if the predicate matches, `false` otherwise.
+pub fn execute_predicate_inject(
+    inject_fn: &str,
+    request: &MountebankRequest,
+    imposter_port: u16,
+) -> bool {
+    let mut context = Context::default();
+
+    let request_obj = match create_mountebank_request_object(&mut context, request) {
+        Ok(obj) => obj,
+        Err(e) => {
+            tracing::warn!("inject predicate: failed to build request object: {e}");
+            return false;
+        }
+    };
+
+    let state_map = get_imposter_state(imposter_port);
+    let state_obj = match json_to_js(&mut context, &Value::Object(state_map)) {
+        Ok(obj) => obj,
+        Err(e) => {
+            tracing::warn!("inject predicate: failed to build state object: {e}");
+            return false;
+        }
+    };
+
+    let global = context.global_object();
+    let _ = global.set(js_string!("__request"), request_obj, false, &mut context);
+    let _ = global.set(js_string!("__state"), state_obj, false, &mut context);
+
+    let wrapper_script = format!(
+        r#"
+        var __injectFn = {inject_fn};
+        var __logger = {{ debug: function() {{}}, info: function() {{}}, warn: function() {{}}, error: function() {{}} }};
+        var __result = __injectFn(__request, __logger, __state);
+        Boolean(__result);
+        "#
+    );
+
+    let result = match context.eval(Source::from_bytes(wrapper_script.as_bytes())) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("inject predicate: script execution error: {e}");
+            return false;
+        }
+    };
+
+    // Update state
+    if let Ok(updated_state) = global.get(js_string!("__state"), &mut context) {
+        if let Ok(Value::Object(map)) = js_to_json(&mut context, &updated_state) {
+            save_imposter_state(imposter_port, map);
+        }
+    }
+
+    result.to_boolean()
+}
+
 /// Request structure for Mountebank inject functions
 #[derive(Debug, Clone)]
 pub struct MountebankRequest {
