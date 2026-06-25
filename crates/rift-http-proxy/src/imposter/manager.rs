@@ -400,6 +400,9 @@ mod tests {
         .unwrap();
 
         manager.create_imposter(config).await.expect("create");
+        // Wait for the initial write-through to complete before modifying stubs.
+        // Without this, the create and add_stub writes race and can corrupt the file.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let stub: Stub = serde_json::from_value(serde_json::json!({
             "predicates": [],
@@ -408,7 +411,7 @@ mod tests {
         .unwrap();
 
         manager.add_stub(19503, stub, None).unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let file = dir.path().join("19503.json");
         let content = std::fs::read_to_string(&file).unwrap();
