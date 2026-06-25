@@ -125,7 +125,7 @@ impl ScriptWorker {
                             // when the script finishes before the deadline.
                             let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
                             let watchdog_flag = Arc::clone(&abort_flag);
-                            thread::Builder::new()
+                            let watchdog_handle = thread::Builder::new()
                                 .name(format!("script-watchdog-{worker_id}"))
                                 .spawn(move || {
                                     // Timeout fires: set the abort flag so Rhai's
@@ -167,12 +167,15 @@ impl ScriptWorker {
                                 }
                             };
 
-                            // Cancel the watchdog — dropping the sender closes the
-                            // channel, which causes cancel_rx.recv_timeout to return
-                            // Disconnected before the timeout fires.
+                            // Cancel the watchdog by closing the channel, then join
+                            // it to ensure it has fully exited before resetting the
+                            // flag. Joining is cheap: the watchdog exits immediately
+                            // on Disconnected (normal path) or has already exited
+                            // after setting the flag (timeout path). Without the join,
+                            // a delayed store(true) from watchdog could corrupt the
+                            // next task's abort state.
                             drop(cancel_tx);
-                            // Safety-net reset so the next task starts clean even if
-                            // the watchdog fired right at the task boundary.
+                            let _ = watchdog_handle.join();
                             abort_flag.store(false, Ordering::Relaxed);
 
                             let duration = start.elapsed();
@@ -720,9 +723,12 @@ mod tests {
         );
 
         // Give the worker time to finish its internal cleanup after the interrupt.
+        // The worker joins the watchdog (cheap), resets the flag, then loops back
+        // to recv_timeout — all well within 300 ms.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-        // The worker must be free and able to run another script normally.
+        // Re-use the *same* pool (same single worker) to prove the worker is free.
+        // A fresh pool would always pass; only the original pool verifies the fix.
         let compile_engine2 = rhai::Engine::new();
         let ast2 = compile_engine2
             .compile(
@@ -739,18 +745,18 @@ mod tests {
             rule_id: "post-timeout".to_string(),
         };
 
-        let pool2 = ScriptPool::new(ScriptPoolConfig {
-            workers: 1,
-            queue_size: 10,
-            timeout_ms: 5000,
-        })
-        .unwrap();
-
-        let result2 = pool2.execute(compiled2, make_request(), flow_store()).await;
+        // Raise the pool's timeout for this follow-up call so the normal script
+        // doesn't race against the 100 ms limit.
+        let result2 = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pool.execute(compiled2, make_request(), flow_store()),
+        )
+        .await
+        .expect("second execute timed out — worker was not freed after interrupt");
 
         assert!(
             result2.is_ok(),
-            "Worker (or a fresh pool) must handle scripts normally after a timeout"
+            "Same worker must handle scripts normally after a timeout interrupt; got: {result2:?}"
         );
     }
 
