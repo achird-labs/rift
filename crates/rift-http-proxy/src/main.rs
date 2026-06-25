@@ -135,6 +135,10 @@ struct Cli {
     /// Custom protocol definitions file (custom protocols not yet supported; accepted for compatibility)
     #[arg(long, value_name = "FILE")]
     protofile: Option<PathBuf>,
+
+    /// Require this token in the Authorization header for all admin API requests
+    #[arg(long, value_name = "TOKEN", env = "MB_APIKEY")]
+    api_key: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -296,7 +300,7 @@ fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
             );
         }
 
-        let server = AdminApiServer::new(addr, manager);
+        let server = AdminApiServer::new(addr, manager, cli.api_key);
         server.run().await?;
 
         Ok(())
