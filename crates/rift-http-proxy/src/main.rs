@@ -423,42 +423,6 @@ fn save_imposters(cli: &Cli, savefile: &PathBuf) -> Result<(), anyhow::Error> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    #[test]
-    fn test_no_parse_flag_accepted() {
-        let cli = Cli::try_parse_from(["rift", "--noParse"]).expect("--noParse should be accepted");
-        assert!(cli.no_parse);
-    }
-
-    #[test]
-    fn test_no_parse_snake_case_accepted() {
-        let cli =
-            Cli::try_parse_from(["rift", "--no-parse"]).expect("--no-parse should be accepted");
-        assert!(cli.no_parse);
-    }
-
-    #[test]
-    fn test_formatter_flag_accepted() {
-        let cli = Cli::try_parse_from(["rift", "--formatter", "mountebank-formatters"])
-            .expect("--formatter should be accepted");
-        assert_eq!(cli.formatter.as_deref(), Some("mountebank-formatters"));
-    }
-
-    #[test]
-    fn test_protofile_flag_accepted() {
-        let cli = Cli::try_parse_from(["rift", "--protofile", "protocols.json"])
-            .expect("--protofile should be accepted");
-        assert_eq!(
-            cli.protofile.as_deref(),
-            Some(std::path::Path::new("protocols.json"))
-        );
-    }
-}
-
 /// Run the metrics server
 async fn run_metrics_server(port: u16) -> anyhow::Result<()> {
     use hyper::server::conn::http1;
@@ -495,5 +459,41 @@ async fn run_metrics_server(port: u16) -> anyhow::Result<()> {
                 error!("Metrics server connection error: {}", err);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_no_parse_flag_accepted() {
+        let cli = Cli::try_parse_from(["rift", "--noParse"]).expect("--noParse should be accepted");
+        assert!(cli.no_parse);
+    }
+
+    #[test]
+    fn test_no_parse_snake_case_accepted() {
+        let cli =
+            Cli::try_parse_from(["rift", "--no-parse"]).expect("--no-parse should be accepted");
+        assert!(cli.no_parse);
+    }
+
+    #[test]
+    fn test_formatter_flag_accepted() {
+        let cli = Cli::try_parse_from(["rift", "--formatter", "mountebank-formatters"])
+            .expect("--formatter should be accepted");
+        assert_eq!(cli.formatter.as_deref(), Some("mountebank-formatters"));
+    }
+
+    #[test]
+    fn test_protofile_flag_accepted() {
+        let cli = Cli::try_parse_from(["rift", "--protofile", "protocols.json"])
+            .expect("--protofile should be accepted");
+        assert_eq!(
+            cli.protofile.as_deref(),
+            Some(std::path::Path::new("protocols.json"))
+        );
     }
 }
