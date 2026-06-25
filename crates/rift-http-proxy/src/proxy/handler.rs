@@ -548,7 +548,7 @@ async fn handle_yaml_rule(
 
             // Apply shell transform (Mountebank-compatible)
             if let Some(ref bhvs) = behaviors {
-                if let Some(ref cmd) = bhvs.shell_transform {
+                for cmd in &bhvs.shell_transform {
                     debug!("Applying shell transform: {}", cmd);
                     match apply_shell_transform(cmd, &request_context, &processed_body, status) {
                         Ok(transformed) => {
@@ -601,7 +601,7 @@ async fn handle_yaml_rule(
                 if !bhvs.lookup.is_empty() {
                     response.set_header(&X_RIFT_BEHAVIOR_LOOKUP, &VALUE_TRUE);
                 }
-                if bhvs.shell_transform.is_some() {
+                if !bhvs.shell_transform.is_empty() {
                     response.set_header(&X_RIFT_BEHAVIOR_SHELL, &VALUE_TRUE);
                 }
                 if bhvs.decorate.is_some() {

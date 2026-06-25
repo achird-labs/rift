@@ -30,15 +30,56 @@ pub struct ResponseBehaviors {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lookup: Vec<LookupBehavior>,
 
-    /// Shell transform - external program transforms response
-    /// The program receives MB_REQUEST and MB_RESPONSE env vars
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shell_transform: Option<String>,
+    /// Shell transform - external program(s) transform response.
+    /// Accepts a single command string or an array of commands chained in sequence.
+    /// Each program receives MB_REQUEST and MB_RESPONSE env vars; stdout becomes the next response.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_shell_transforms",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub shell_transform: Vec<String>,
 
     /// Decorate - Rhai script to post-process response (Mountebank-compatible)
     /// Script receives `request` and `response` variables and can modify response
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decorate: Option<String>,
+}
+
+/// Deserialize shellTransform accepting a single string or an array of strings.
+fn deserialize_shell_transforms<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+
+    struct ShellTransformVisitor;
+
+    impl<'de> Visitor<'de> for ShellTransformVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a shell command string or array of shell command strings")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(vec![v.to_string()])
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+            Ok(vec![v])
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut commands = Vec::new();
+            while let Some(cmd) = seq.next_element::<String>()? {
+                commands.push(cmd);
+            }
+            Ok(commands)
+        }
+    }
+
+    deserializer.deserialize_any(ShellTransformVisitor)
 }
 
 /// Custom deserializer for copy behaviors that accepts both object and array
@@ -111,9 +152,20 @@ shellTransform: "echo 'transformed'"
 "#;
         let behaviors: ResponseBehaviors = serde_yaml::from_str(yaml).unwrap();
         assert!(matches!(behaviors.wait, Some(WaitBehavior::Fixed(100))));
+        assert_eq!(behaviors.shell_transform, vec!["echo 'transformed'"]);
+    }
+
+    #[test]
+    fn test_shell_transform_array_serde() {
+        let yaml = r#"
+shellTransform:
+  - "./transform1.sh"
+  - "./transform2.sh"
+"#;
+        let behaviors: ResponseBehaviors = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
             behaviors.shell_transform,
-            Some("echo 'transformed'".to_string())
+            vec!["./transform1.sh", "./transform2.sh"]
         );
     }
 

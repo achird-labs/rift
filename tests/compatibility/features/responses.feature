@@ -535,3 +535,29 @@ Feature: Response Behavior Compatibility
     Then both services should return status 200
     And both responses should have body "start-decorated"
     And both responses should take at least 50ms
+
+  # ==========================================================================
+  # ShellTransform Array Format Accepted (format, not execution)
+  # ==========================================================================
+
+  @rift-only
+  Scenario: shellTransform array format is accepted without parse error
+    Given an imposter on port 4545 on Rift with:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "predicates": [{"equals": {"path": "/shell-array"}}],
+          "responses": [{
+            "is": {"statusCode": 200, "body": "original"},
+            "_behaviors": {
+              "shellTransform": ["./transform1.sh", "./transform2.sh"]
+            }
+          }]
+        }]
+      }
+      """
+    When I send GET request to "/shell-array" on Rift imposter 4545
+    Then Rift should return status 200
+    And Rift response body should be "original"
