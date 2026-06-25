@@ -266,3 +266,14 @@ Feature: Admin API Compatibility
   Scenario: Get stub for non-existent imposter returns 404
     When I send GET request to "/imposters/9999/stubs/0" on both services
     Then both services should return status 404
+
+  # ==========================================================================
+  # DELETE /requests alias for savedRequests
+  # ==========================================================================
+
+  Scenario: DELETE requests path is alias for savedRequests
+    Given an imposter on port 4545 with recordRequests enabled
+    And I send 3 GET requests to "/test" on imposter 4545
+    When I send DELETE request to "/imposters/4545/requests" on both admin APIs
+    Then both services should return status 200
+    And imposter 4545 should have numberOfRequests equal to 0 on both services
