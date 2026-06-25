@@ -156,7 +156,4 @@ impl LintResult {
 
 /// Options for validation.
 #[derive(Debug, Clone, Default)]
-pub struct LintOptions {
-    /// Enable verbose output (for CLI).
-    pub verbose: bool,
-}
+pub struct LintOptions {}

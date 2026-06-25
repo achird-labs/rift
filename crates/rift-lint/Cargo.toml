@@ -27,9 +27,6 @@ clap = { version = "4", features = ["derive"], optional = true }
 # JavaScript validation (optional)
 boa_engine = { version = "0.19", optional = true }
 
-# Error handling
-thiserror = "1.0"
-
 [dev-dependencies]
 tempfile = "3"
 

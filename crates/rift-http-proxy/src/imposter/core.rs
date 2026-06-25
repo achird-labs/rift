@@ -3,6 +3,10 @@
 //! This module contains the Imposter struct which represents a single
 //! running imposter instance with its configuration, stubs, and state.
 
+/// Maximum number of requests retained in memory per imposter when recording is enabled.
+/// Once the cap is reached, the oldest entry is evicted (ring-buffer semantics).
+const MAX_RECORDED_REQUESTS: usize = 10_000;
+
 use super::predicates::stub_matches;
 use super::response::{
     create_response_preview, create_stub_from_proxy_response, execute_stub_response_with_rift,
@@ -907,10 +911,18 @@ impl Imposter {
         ))
     }
 
-    /// Record a request
+    /// Record a request. Evicts the oldest entry when the cap is reached.
     pub fn record_request(&self, req: &RecordedRequest) {
         if self.config.record_requests {
             let mut requests = self.recorded_requests.write();
+            if requests.len() >= MAX_RECORDED_REQUESTS {
+                tracing::warn!(
+                    port = self.config.port,
+                    max = MAX_RECORDED_REQUESTS,
+                    "Recorded requests cap reached; oldest entry evicted"
+                );
+                requests.remove(0);
+            }
             requests.push(req.clone());
         }
     }

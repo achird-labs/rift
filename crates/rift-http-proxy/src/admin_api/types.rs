@@ -152,11 +152,17 @@ pub struct ImposterListEntry {
 // Helper functions for generating HATEOAS links
 // =============================================================================
 
-/// Extract base URL from request headers for HATEOAS links
+/// Extract base URL from request headers for HATEOAS links.
+///
+/// The Host header is validated to prevent SSRF via a malicious Host value
+/// (e.g. `attacker.com/evil`). Only `hostname` or `hostname:port` forms are accepted.
 pub fn get_base_url(req: &Request<Incoming>) -> String {
     if let Some(host) = req.headers().get("host") {
         if let Ok(host_str) = host.to_str() {
-            return format!("http://{}", host_str);
+            // Reject values containing path separators or protocol schemes
+            if !host_str.contains('/') && !host_str.contains("://") {
+                return format!("http://{}", host_str);
+            }
         }
     }
     "http://localhost:2525".to_string()

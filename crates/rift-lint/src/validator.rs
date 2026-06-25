@@ -273,15 +273,8 @@ pub fn validate_predicate(
     for key in ["and", "or", "not"] {
         if let Some(nested) = predicate.get(key) {
             if key == "not" {
-                if let Some(nested_pred) = nested.as_object() {
-                    validate_predicate(
-                        file,
-                        &Value::Object(nested_pred.clone()),
-                        &format!("{location}.not"),
-                        result,
-                        options,
-                    );
-                }
+                // `not` wraps a single predicate object — pass it directly
+                validate_predicate(file, nested, &format!("{location}.not"), result, options);
             } else if let Some(nested_array) = nested.as_array() {
                 for (i, nested_pred) in nested_array.iter().enumerate() {
                     validate_predicate(

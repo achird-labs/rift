@@ -51,6 +51,18 @@ pub async fn handle_add(
     if let Ok(imposter) = manager.get_imposter(port) {
         let existing_stubs = imposter.get_stubs();
         let insert_index = add_req.index.unwrap_or(existing_stubs.len());
+
+        // Reject out-of-bounds index before mutating state
+        if insert_index > existing_stubs.len() {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "Stub index {insert_index} is out of range (imposter has {} stubs)",
+                    existing_stubs.len()
+                ),
+            );
+        }
+
         let analysis = analyze_new_stub(&existing_stubs, &add_req.stub, insert_index);
 
         for warning in &analysis.warnings {

@@ -417,10 +417,12 @@ fn preprocess_ejs(content: &str, config_path: &std::path::Path) -> Result<String
         match std::fs::read_to_string(&abs_path) {
             Ok(included) => result.push_str(&included),
             Err(e) => {
-                warn!(
-                    "EJS include '{}' not found: {}; substituting empty string",
-                    include_path, e
-                );
+                return Err(anyhow::anyhow!(
+                    "EJS include file '{}' not found ({}): {}",
+                    include_path,
+                    abs_path.display(),
+                    e
+                ));
             }
         }
         last = full.end();
@@ -778,10 +780,15 @@ mod tests {
     }
 
     #[test]
-    fn test_ejs_missing_include_becomes_empty() {
+    fn test_ejs_missing_include_is_fatal_error() {
         let content = r#"<% include 'nonexistent.json' %>"#;
         let path = std::path::PathBuf::from("config.json");
-        let result = preprocess_ejs(content, &path).unwrap();
-        assert_eq!(result, "");
+        let result = preprocess_ejs(content, &path);
+        assert!(result.is_err(), "missing include file should return Err");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("nonexistent.json"),
+            "error message should name the missing file"
+        );
     }
 }
