@@ -139,6 +139,10 @@ struct Cli {
     /// Require this token in the Authorization header for all admin API requests
     #[arg(long, value_name = "TOKEN", env = "MB_APIKEY")]
     api_key: Option<String>,
+
+    /// RC file with default flag values (Mountebank compatibility; partial support — port/host/loglevel only)
+    #[arg(long, value_name = "FILE")]
+    rcfile: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -162,11 +166,11 @@ enum Commands {
 
     /// Save current imposters to a file
     Save {
-        /// Output file path
-        #[arg(long, required = true)]
+        /// Output file path (default: mb.json, matching Mountebank)
+        #[arg(long, default_value = "mb.json")]
         savefile: PathBuf,
 
-        /// Include recorded requests in output
+        /// Strip proxy-recorded stubs (those with recordedFrom set) from the output
         #[arg(long)]
         remove_proxies: bool,
     },
@@ -180,7 +184,15 @@ enum Commands {
 }
 
 fn main() -> Result<(), anyhow::Error> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // Apply rcfile defaults before using CLI values (only for fields at their clap defaults)
+    if let Some(ref rcfile) = cli.rcfile.clone() {
+        match apply_rcfile_defaults(&mut cli, rcfile) {
+            Ok(()) => {}
+            Err(e) => eprintln!("Warning: failed to load --rcfile {:?}: {}", rcfile, e),
+        }
+    }
 
     // Install default cryptographic provider for rustls
     rustls::crypto::ring::default_provider()
@@ -235,8 +247,11 @@ fn main() -> Result<(), anyhow::Error> {
             stop_server(pidfile)?;
             // Fall through to start
         }
-        Some(Commands::Save { savefile, .. }) => {
-            return save_imposters(&cli, savefile);
+        Some(Commands::Save {
+            savefile,
+            remove_proxies,
+        }) => {
+            return save_imposters(&cli, savefile, *remove_proxies);
         }
         Some(Commands::Replay { configfile }) => {
             // Load the config file and start
@@ -512,13 +527,86 @@ fn stop_server(pidfile: &PathBuf) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// Apply defaults from a Mountebank-compatible rcfile (JSON) to the CLI struct.
+/// Only sets fields that are still at their clap defaults (i.e., not explicitly supplied
+/// on the command line). Only a subset of keys is supported; unrecognised keys are warned.
+fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &std::path::Path) -> Result<(), anyhow::Error> {
+    let raw = std::fs::read_to_string(rcfile)?;
+    let obj: serde_json::Value = serde_json::from_str(&raw)?;
+    let map = obj
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("rcfile must be a JSON object"))?;
+
+    for (key, val) in map {
+        match key.as_str() {
+            "port" => {
+                if cli.port == 2525 {
+                    if let Some(p) = val.as_u64() {
+                        cli.port = p as u16;
+                    }
+                }
+            }
+            "host" => {
+                if cli.host == "0.0.0.0" {
+                    if let Some(h) = val.as_str() {
+                        cli.host = h.to_string();
+                    }
+                }
+            }
+            "logLevel" | "loglevel" => {
+                if cli.loglevel == "info" {
+                    if let Some(l) = val.as_str() {
+                        cli.loglevel = l.to_string();
+                    }
+                }
+            }
+            "allowInjection" | "allow_injection" => {
+                if !cli.allow_injection {
+                    cli.allow_injection = val.as_bool().unwrap_or(false);
+                }
+            }
+            "localOnly" | "local_only" => {
+                if !cli.local_only {
+                    cli.local_only = val.as_bool().unwrap_or(false);
+                }
+            }
+            "datadir" => {
+                if cli.datadir.is_none() {
+                    if let Some(d) = val.as_str() {
+                        cli.datadir = Some(std::path::PathBuf::from(d));
+                    }
+                }
+            }
+            "configfile" => {
+                if cli.configfile.is_none() {
+                    if let Some(f) = val.as_str() {
+                        cli.configfile = Some(std::path::PathBuf::from(f));
+                    }
+                }
+            }
+            other => {
+                warn!("--rcfile: unsupported key '{}' (ignored)", other);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Save imposters to a file
-fn save_imposters(cli: &Cli, savefile: &PathBuf) -> Result<(), anyhow::Error> {
+fn save_imposters(
+    cli: &Cli,
+    savefile: &PathBuf,
+    remove_proxies: bool,
+) -> Result<(), anyhow::Error> {
     let runtime = tokio::runtime::Runtime::new()?;
 
     runtime.block_on(async {
         let client = reqwest::Client::new();
-        let url = format!("http://{}:{}/imposters?replayable=true", cli.host, cli.port);
+        let mut query = "replayable=true".to_string();
+        if remove_proxies {
+            query.push_str("&removeProxies=true");
+        }
+        let url = format!("http://{}:{}/imposters?{}", cli.host, cli.port, query);
 
         let response = client.get(&url).send().await?;
         let content = response.text().await?;
