@@ -426,3 +426,85 @@ Feature: Alternative Mountebank Format Compatibility
     # Note: This will fail to connect but validates the format is accepted
     When I send GET request to "/proxy-redirect" on imposter 4545
     Then both services should return same error type
+
+  # ==========================================================================
+  # Mimeo Solo Compatibility: rules alias, delayRange, recordedFrom
+  # These formats are emitted by the Mimeo Solo recorder and are not part of
+  # Mountebank's own format — tests run against Rift only.
+  # ==========================================================================
+
+  @rift-only
+  Scenario: rules key is accepted as alias for predicates (Mimeo Solo format)
+    Given an imposter on port 4545 on Rift with:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "rules": [{"equals": {"path": "/rules-alias"}}],
+          "responses": [{"is": {"statusCode": 200, "body": "rules alias matched"}}]
+        }]
+      }
+      """
+    When I send GET request to "/rules-alias" on Rift imposter 4545
+    Then Rift should return status 200
+    And Rift response body should be "rules alias matched"
+
+  @rift-only
+  Scenario: predicates wins over rules when both present
+    Given an imposter on port 4545 on Rift with:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "predicates": [{"equals": {"path": "/pred-wins"}}],
+          "rules": [{"equals": {"path": "/rules-loses"}}],
+          "responses": [{"is": {"statusCode": 200, "body": "predicates won"}}]
+        }]
+      }
+      """
+    When I send GET request to "/pred-wins" on Rift imposter 4545
+    Then Rift should return status 200
+    When I send GET request to "/rules-loses" on Rift imposter 4545
+    Then Rift should return status 404
+
+  @rift-only
+  Scenario: delayRange array is converted to wait behavior (Mimeo Solo format)
+    Given an imposter on port 4545 on Rift with:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "predicates": [{"equals": {"path": "/delay-range"}}],
+          "delayRange": [{"min": "100", "max": "200"}],
+          "responses": [{"is": {"statusCode": 200, "body": "delayed"}}]
+        }]
+      }
+      """
+    When I send GET request to "/delay-range" on Rift imposter 4545 and measure time
+    Then Rift should return status 200
+    And Rift response should take at least 100ms
+
+  @rift-only
+  Scenario: recordedFrom field is preserved on stubs
+    Given an imposter on port 4545 on Rift with:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "predicates": [{"equals": {"path": "/recorded"}}],
+          "recordedFrom": "http://upstream:9090",
+          "responses": [{"is": {"statusCode": 200, "body": "recorded stub"}}]
+        }]
+      }
+      """
+    When I send GET request to "/recorded" on Rift imposter 4545
+    Then Rift should return status 200
+    And Rift response body should be "recorded stub"
+    When I query "/imposters/4545" on Rift admin API
+    Then Rift should return status 200
+    And Rift response body should contain "recordedFrom"
+    And Rift response body should contain "http://upstream:9090"

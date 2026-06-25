@@ -333,6 +333,35 @@ async fn check_rift_header_same_as_previous(world: &mut CompatibilityWorld, head
 }
 
 // ==========================================================================
+// Admin API Steps
+// ==========================================================================
+
+#[when(expr = "I query {string} on Rift admin API")]
+async fn query_rift_admin(world: &mut CompatibilityWorld, path: String) {
+    let url = format!("{}{}", world.config.rift_admin_url, path);
+
+    let response = world.client
+        .get(&url)
+        .send()
+        .await
+        .expect("Failed to send request to Rift admin API");
+
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+
+    world.last_response = Some(crate::world::DualResponse {
+        mb_status: 0,
+        mb_body: String::new(),
+        mb_headers: HashMap::new(),
+        mb_duration: std::time::Duration::ZERO,
+        rift_status: status,
+        rift_body: body,
+        rift_headers: HashMap::new(),
+        rift_duration: std::time::Duration::ZERO,
+    });
+}
+
+// ==========================================================================
 // Script Validation Steps
 // ==========================================================================
 
