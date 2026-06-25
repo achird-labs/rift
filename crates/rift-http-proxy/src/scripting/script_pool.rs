@@ -128,11 +128,14 @@ impl ScriptWorker {
                             thread::Builder::new()
                                 .name(format!("script-watchdog-{worker_id}"))
                                 .spawn(move || {
-                                    match cancel_rx.recv_timeout(timeout) {
-                                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                                            watchdog_flag.store(true, Ordering::Relaxed);
-                                        }
-                                        _ => {} // cancelled or disconnected before timeout
+                                    // Timeout fires: set the abort flag so Rhai's
+                                    // on_progress callback interrupts the script.
+                                    // Any other outcome (Ok or Disconnected) means the
+                                    // task completed or was cancelled — nothing to do.
+                                    if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                                        cancel_rx.recv_timeout(timeout)
+                                    {
+                                        watchdog_flag.store(true, Ordering::Relaxed);
                                     }
                                 })
                                 .expect("Failed to spawn watchdog thread");
