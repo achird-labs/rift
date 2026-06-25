@@ -79,16 +79,36 @@ pub fn extract_jsonpath(json_str: &str, path: &str) -> Option<String> {
     }
 }
 
-/// Extract value using XPath
-/// Used by copy behaviors and predicate xpath parameter
+/// Extract value using XPath, optionally with namespace prefix bindings.
+/// Used by copy behaviors and predicate xpath parameter.
 pub fn extract_xpath(xml_str: &str, path: &str) -> Option<String> {
+    extract_xpath_with_ns(xml_str, path, None)
+}
+
+/// Extract value using XPath with optional namespace prefix→URI map.
+pub fn extract_xpath_with_ns(
+    xml_str: &str,
+    path: &str,
+    ns: Option<&std::collections::HashMap<String, String>>,
+) -> Option<String> {
     use sxd_document::parser;
-    use sxd_xpath::{evaluate_xpath, Value};
+    use sxd_xpath::{Context, Factory, Value};
 
     let package = parser::parse(xml_str).ok()?;
     let document = package.as_document();
 
-    match evaluate_xpath(&document, path) {
+    let factory = Factory::new();
+    let xpath = factory.build(path).ok()??;
+
+    let mut context = Context::new();
+    if let Some(namespaces) = ns {
+        for (prefix, uri) in namespaces {
+            context.set_namespace(prefix, uri);
+        }
+    }
+
+    let root = document.root();
+    match xpath.evaluate(&context, root) {
         Ok(Value::String(s)) => Some(s),
         Ok(Value::Number(n)) => Some(n.to_string()),
         Ok(Value::Boolean(b)) => Some(b.to_string()),
@@ -340,5 +360,30 @@ mod tests {
             }
             _ => panic!("Expected Regex with options"),
         }
+    }
+
+    #[test]
+    fn test_extract_xpath_without_namespaces() {
+        let xml = r#"<root><child>value</child></root>"#;
+        assert_eq!(extract_xpath(xml, "//child"), Some("value".to_string()));
+    }
+
+    #[test]
+    fn test_extract_xpath_with_ns_map() {
+        let xml = r#"<ns:root xmlns:ns="http://example.com/ns"><ns:item>hello</ns:item></ns:root>"#;
+        let mut ns = std::collections::HashMap::new();
+        ns.insert("ns".to_string(), "http://example.com/ns".to_string());
+        let result = extract_xpath_with_ns(xml, "//ns:item", Some(&ns));
+        assert_eq!(result, Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_extract_xpath_with_multiple_ns_bindings() {
+        let xml = r#"<a:root xmlns:a="http://a.com" xmlns:b="http://b.com"><a:x><b:y>found</b:y></a:x></a:root>"#;
+        let mut ns = std::collections::HashMap::new();
+        ns.insert("a".to_string(), "http://a.com".to_string());
+        ns.insert("b".to_string(), "http://b.com".to_string());
+        let result = extract_xpath_with_ns(xml, "//a:x/b:y", Some(&ns));
+        assert_eq!(result, Some("found".to_string()));
     }
 }

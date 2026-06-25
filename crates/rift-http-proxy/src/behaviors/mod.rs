@@ -29,7 +29,7 @@ mod wait;
 pub use copy::{apply_copy_behaviors, CopyBehavior, CopySource};
 pub use cycler::{HasRepeatBehavior, ResponseCycler, RuleCycler};
 #[allow(unused_imports)]
-pub use extraction::{extract_jsonpath, extract_xpath, ExtractionMethod};
+pub use extraction::{extract_jsonpath, extract_xpath, extract_xpath_with_ns, ExtractionMethod};
 #[allow(unused_imports)]
 pub use lookup::{
     apply_lookup_behaviors, CsvCache, CsvData, CsvDataSource, DataSource, LookupBehavior, LookupKey,

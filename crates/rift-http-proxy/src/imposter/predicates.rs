@@ -3,10 +3,9 @@
 //! Supports: equals, deepEquals, contains, startsWith, endsWith, matches, exists, not, or, and
 //! Also supports requestFrom, ip, and form fields.
 
-use crate::behaviors::{extract_jsonpath, extract_xpath};
+use crate::behaviors::{extract_jsonpath, extract_xpath_with_ns};
 use crate::imposter::types::{Predicate, PredicateOperation, PredicateSelector};
 use std::collections::HashMap;
-use tracing::warn;
 
 /// Check if a stub matches a request based on its predicates
 #[allow(clippy::too_many_arguments)]
@@ -134,10 +133,8 @@ pub fn predicate_matches(
             selector,
             namespaces,
         }) => {
-            extracted_body = extract_xpath(body_str, selector).unwrap_or_default();
-            if namespaces.is_some() {
-                warn!("XPath namespaces are not supported yet");
-            }
+            extracted_body =
+                extract_xpath_with_ns(body_str, selector, namespaces.as_ref()).unwrap_or_default();
             &extracted_body
         }
         None => body_str,
