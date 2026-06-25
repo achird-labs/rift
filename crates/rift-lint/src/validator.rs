@@ -92,7 +92,17 @@ fn check_protocol(file: &Path, imposter: &Value, result: &mut LintResult) {
                     file.to_path_buf(),
                 )
                 .with_location("protocol")
-                .with_suggestion("Use 'http', 'https', or 'tcp'"),
+                .with_suggestion("Use 'http' or 'https' (tcp is not yet supported by Rift)"),
+            );
+        } else if protocol == "tcp" {
+            result.add_issue(
+                LintIssue::warning(
+                    "W010",
+                    "Protocol 'tcp' is not yet implemented by Rift and will fail at runtime",
+                    file.to_path_buf(),
+                )
+                .with_location("protocol")
+                .with_suggestion("Use 'http' or 'https' instead"),
             );
         }
     }
@@ -369,19 +379,33 @@ pub fn validate_response(
         .unwrap_or(false);
     let has_inject = response.get("inject").is_some();
     let has_fault = response.get("fault").is_some();
+    let has_rift = response.get("_rift").is_some();
 
-    let response_types = [has_is, has_proxy, has_inject, has_fault];
+    if has_rift {
+        result.add_issue(
+            LintIssue::info(
+                "I003",
+                "Response uses Rift '_rift' extension (not Mountebank-compatible)",
+                file.to_path_buf(),
+            )
+            .with_location(location),
+        );
+    }
+
+    let response_types = [has_is, has_proxy, has_inject, has_fault, has_rift];
     let active_types = response_types.iter().filter(|&&t| t).count();
 
     if active_types == 0 {
         result.add_issue(
             LintIssue::error(
                 "E014",
-                "Response has no response type (is, proxy, inject, or fault)",
+                "Response has no response type (is, proxy, inject, fault, or _rift)",
                 file.to_path_buf(),
             )
             .with_location(location)
-            .with_suggestion("Add 'is', 'proxy', 'inject', or 'fault' to define the response"),
+            .with_suggestion(
+                "Add 'is', 'proxy', 'inject', 'fault', or '_rift' to define the response",
+            ),
         );
     } else if active_types > 1 && has_is && has_proxy {
         let proxy_val = response.get("proxy");
@@ -669,14 +693,34 @@ pub fn validate_behavior(
                 result,
                 options,
             );
-        } else if !wait.is_number() {
+        } else if wait.is_number() {
+            // fixed millisecond delay — valid
+        } else if is_valid_wait_range(wait) {
+            // {min, max} range object — valid Rift extension
+        } else {
             result.add_issue(
                 LintIssue::error(
                     "E025",
-                    "Wait behavior must be a number or JavaScript function string",
+                    "Wait behavior must be a number, JavaScript function string, or {min, max} object",
                     file.to_path_buf(),
                 )
-                .with_location(format!("{location}.wait")),
+                .with_location(format!("{location}.wait"))
+                .with_suggestion("Use a millisecond number, a JS function string, or {\"min\": N, \"max\": M}"),
+            );
+        }
+    }
+
+    if let Some(repeat) = obj.get("repeat") {
+        let valid = repeat.as_u64().map(|n| n > 0).unwrap_or(false);
+        if !valid {
+            result.add_issue(
+                LintIssue::error(
+                    "E035",
+                    "Repeat behavior must be a positive integer",
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}.repeat"))
+                .with_suggestion("Use a positive integer, e.g. \"repeat\": 3"),
             );
         }
     }
@@ -784,6 +828,15 @@ fn validate_javascript_behavior(
             );
         }
     }
+}
+
+/// Check whether a wait value is a valid {min, max} range object.
+fn is_valid_wait_range(wait: &Value) -> bool {
+    let Some(obj) = wait.as_object() else {
+        return false;
+    };
+    obj.get("min").and_then(|v| v.as_u64()).is_some()
+        && obj.get("max").and_then(|v| v.as_u64()).is_some()
 }
 
 /// Validate copy behavior.
