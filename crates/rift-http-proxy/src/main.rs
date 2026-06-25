@@ -122,6 +122,19 @@ struct Cli {
     /// Metrics server port
     #[arg(long, default_value = "9090", env = "RIFT_METRICS_PORT")]
     metrics_port: u16,
+
+    // === Mountebank compatibility flags (accepted, no-op) ===
+    /// Disable EJS template rendering of --configfile (Rift doesn't use EJS; accepted for compatibility)
+    #[arg(long, visible_alias = "noParse")]
+    no_parse: bool,
+
+    /// Custom config formatter module name (Rift auto-detects JSON/YAML; accepted for compatibility)
+    #[arg(long)]
+    formatter: Option<String>,
+
+    /// Custom protocol definitions file (custom protocols not yet supported; accepted for compatibility)
+    #[arg(long, value_name = "FILE")]
+    protofile: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -272,6 +285,17 @@ fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
             info!("JavaScript injection enabled");
         }
 
+        if cli.formatter.is_some() {
+            tracing::warn!(
+                "--formatter is not supported; Rift auto-detects JSON/YAML config formats"
+            );
+        }
+        if cli.protofile.is_some() {
+            tracing::warn!(
+                "--protofile is not supported; custom protocols are not yet implemented"
+            );
+        }
+
         let server = AdminApiServer::new(addr, manager);
         server.run().await?;
 
@@ -397,6 +421,42 @@ fn save_imposters(cli: &Cli, savefile: &PathBuf) -> Result<(), anyhow::Error> {
 
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_no_parse_flag_accepted() {
+        let cli = Cli::try_parse_from(["rift", "--noParse"]).expect("--noParse should be accepted");
+        assert!(cli.no_parse);
+    }
+
+    #[test]
+    fn test_no_parse_snake_case_accepted() {
+        let cli =
+            Cli::try_parse_from(["rift", "--no-parse"]).expect("--no-parse should be accepted");
+        assert!(cli.no_parse);
+    }
+
+    #[test]
+    fn test_formatter_flag_accepted() {
+        let cli = Cli::try_parse_from(["rift", "--formatter", "mountebank-formatters"])
+            .expect("--formatter should be accepted");
+        assert_eq!(cli.formatter.as_deref(), Some("mountebank-formatters"));
+    }
+
+    #[test]
+    fn test_protofile_flag_accepted() {
+        let cli = Cli::try_parse_from(["rift", "--protofile", "protocols.json"])
+            .expect("--protofile should be accepted");
+        assert_eq!(
+            cli.protofile.as_deref(),
+            Some(std::path::Path::new("protocols.json"))
+        );
+    }
 }
 
 /// Run the metrics server
