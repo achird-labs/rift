@@ -177,7 +177,7 @@ impl DecisionCache {
             return None;
         }
 
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.write().expect("decision cache lock poisoned");
         let ttl = Duration::from_secs(self.config.ttl_seconds);
 
         // First, check if entry exists and handle expiration
@@ -226,7 +226,7 @@ impl DecisionCache {
             return Ok(());
         }
 
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.write().expect("decision cache lock poisoned");
 
         // Check if we need to evict entries
         if state.entries.len() >= self.config.max_size && !state.entries.contains_key(&key) {
@@ -264,7 +264,7 @@ impl DecisionCache {
 
     /// Clear all cache entries
     pub fn clear(&self) {
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.write().expect("decision cache lock poisoned");
         state.entries.clear();
         state.metrics.size = 0;
         debug!("Cache cleared");
@@ -272,7 +272,11 @@ impl DecisionCache {
 
     /// Get current cache metrics
     pub fn metrics(&self) -> CacheMetrics {
-        self.state.read().unwrap().metrics.clone()
+        self.state
+            .read()
+            .expect("decision cache lock poisoned")
+            .metrics
+            .clone()
     }
 
     /// Remove expired entries (can be called periodically)
@@ -281,7 +285,7 @@ impl DecisionCache {
             return;
         }
 
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.write().expect("decision cache lock poisoned");
         let ttl = Duration::from_secs(self.config.ttl_seconds);
 
         let expired_keys: Vec<CacheKey> = state
@@ -305,7 +309,11 @@ impl DecisionCache {
 
     /// Get cache size
     pub fn size(&self) -> usize {
-        self.state.read().unwrap().entries.len()
+        self.state
+            .read()
+            .expect("decision cache lock poisoned")
+            .entries
+            .len()
     }
 }
 

@@ -152,11 +152,21 @@ pub struct ImposterListEntry {
 // Helper functions for generating HATEOAS links
 // =============================================================================
 
-/// Extract base URL from request headers for HATEOAS links
+/// Extract base URL from request headers for HATEOAS links.
 pub fn get_base_url(req: &Request<Incoming>) -> String {
-    if let Some(host) = req.headers().get("host") {
+    base_url_from_headers(req.headers())
+}
+
+/// Inner helper so the sanitization logic is unit-testable without a live `Request<Incoming>`.
+///
+/// Rejects Host header values containing `/` or `://` to prevent link-injection via a
+/// malformed Host header (e.g. `attacker.com/evil`).
+fn base_url_from_headers(headers: &hyper::HeaderMap) -> String {
+    if let Some(host) = headers.get("host") {
         if let Ok(host_str) = host.to_str() {
-            return format!("http://{}", host_str);
+            if !host_str.contains('/') && !host_str.contains("://") {
+                return format!("http://{}", host_str);
+            }
         }
     }
     "http://localhost:2525".to_string()
@@ -379,5 +389,53 @@ mod tests {
     fn test_not_found_response() {
         let resp = not_found();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_base_url_from_valid_host() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("host", "example.com:2525".parse().unwrap());
+        assert_eq!(base_url_from_headers(&headers), "http://example.com:2525");
+    }
+
+    #[test]
+    fn test_base_url_from_host_no_port() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("host", "localhost".parse().unwrap());
+        assert_eq!(base_url_from_headers(&headers), "http://localhost");
+    }
+
+    #[test]
+    fn test_base_url_rejects_host_with_path() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("host", "attacker.com/evil".parse().unwrap());
+        // hyper's HeaderValue parser will accept this string, but our check rejects it
+        assert_eq!(
+            base_url_from_headers(&headers),
+            "http://localhost:2525",
+            "Host with path segment must fall back to default"
+        );
+    }
+
+    #[test]
+    fn test_base_url_rejects_host_with_scheme() {
+        // hyper rejects "http://..." in the Host header at the header-value level, so we test
+        // our guard with a value that contains "://" but slips through as a raw string.
+        let mut headers = hyper::HeaderMap::new();
+        // Use a raw insert via from_bytes to bypass high-level validation
+        if let Ok(v) = hyper::header::HeaderValue::from_bytes(b"http://attacker.com") {
+            headers.insert("host", v);
+            assert_eq!(
+                base_url_from_headers(&headers),
+                "http://localhost:2525",
+                "Host with scheme must fall back to default"
+            );
+        }
+    }
+
+    #[test]
+    fn test_base_url_no_host_header() {
+        let headers = hyper::HeaderMap::new();
+        assert_eq!(base_url_from_headers(&headers), "http://localhost:2525");
     }
 }

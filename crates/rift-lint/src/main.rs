@@ -46,10 +46,6 @@ struct Args {
     #[arg(short = 'e', long)]
     errors_only: bool,
 
-    /// Verbose output
-    #[arg(short, long)]
-    verbose: bool,
-
     /// Strict mode - treat warnings as errors
     #[arg(short, long)]
     strict: bool,
@@ -62,9 +58,7 @@ fn main() {
     println!("{DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}");
 
     let mut result = LintResult::default();
-    let options = LintOptions {
-        verbose: args.verbose,
-    };
+    let options = LintOptions::default();
 
     // Collect all imposter files
     let files = collect_imposter_files(&args.path);

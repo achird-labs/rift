@@ -3,6 +3,10 @@
 //! This module contains the Imposter struct which represents a single
 //! running imposter instance with its configuration, stubs, and state.
 
+/// Maximum number of requests retained in memory per imposter when recording is enabled.
+/// Once the cap is reached, the oldest entry is evicted (ring-buffer semantics).
+const MAX_RECORDED_REQUESTS: usize = 10_000;
+
 use super::predicates::stub_matches;
 use super::response::{
     create_response_preview, create_stub_from_proxy_response, execute_stub_response_with_rift,
@@ -907,10 +911,18 @@ impl Imposter {
         ))
     }
 
-    /// Record a request
+    /// Record a request. Evicts the oldest entry when the cap is reached.
     pub fn record_request(&self, req: &RecordedRequest) {
         if self.config.record_requests {
             let mut requests = self.recorded_requests.write();
+            if requests.len() >= MAX_RECORDED_REQUESTS {
+                tracing::warn!(
+                    port = self.config.port,
+                    max = MAX_RECORDED_REQUESTS,
+                    "Recorded requests cap reached; oldest entry evicted"
+                );
+                requests.remove(0);
+            }
             requests.push(req.clone());
         }
     }
@@ -1198,6 +1210,37 @@ mod tests {
 
         // matches generator produces 1, inject generator returns 2 (original + new path)
         assert_eq!(predicates.len(), 3);
+    }
+
+    #[test]
+    fn test_record_request_cap_enforced() {
+        let config = ImposterConfig {
+            port: Some(0),
+            protocol: "http".to_string(),
+            record_requests: true,
+            ..Default::default()
+        };
+        let imposter = Imposter::new(config);
+        let req = RecordedRequest {
+            request_from: "127.0.0.1".to_string(),
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            query: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            body: None,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        for _ in 0..MAX_RECORDED_REQUESTS + 10 {
+            imposter.record_request(&req);
+        }
+
+        let recorded = imposter.recorded_requests.read();
+        assert_eq!(
+            recorded.len(),
+            MAX_RECORDED_REQUESTS,
+            "Recorded requests must not exceed the cap"
+        );
     }
 
     #[cfg(feature = "javascript")]

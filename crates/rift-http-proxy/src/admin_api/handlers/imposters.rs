@@ -273,8 +273,10 @@ pub async fn handle_delete(
             });
             json_response(StatusCode::OK, &response)
         }
-        // For delete, NotFound returns empty object (idempotent delete)
-        Err(ImposterError::NotFound(_)) => json_response(StatusCode::OK, &serde_json::json!({})),
+        Err(ImposterError::NotFound(_)) => error_response(
+            StatusCode::NOT_FOUND,
+            &format!("No imposter exists on port {port}"),
+        ),
         Err(e) => e.into(),
     }
 }
