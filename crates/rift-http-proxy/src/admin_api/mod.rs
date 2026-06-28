@@ -9,6 +9,7 @@
 //! The API listens on a configurable port (default: 2525).
 
 mod handlers;
+mod request_filter;
 mod router;
 mod server;
 pub mod types;
