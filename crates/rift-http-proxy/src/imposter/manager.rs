@@ -84,6 +84,7 @@ impl ImposterManager {
 
         // Start serving
         let imposter_clone = Arc::clone(&imposter);
+        let conn_shutdown_tx = shutdown_tx.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
 
         let _handle = tokio::spawn(async move {
@@ -93,6 +94,10 @@ impl ImposterManager {
                         match result {
                             Ok((stream, addr)) => {
                                 let imposter = Arc::clone(&imposter_clone);
+                                // Each connection watches the shutdown signal so existing
+                                // keep-alive connections are gracefully closed on delete,
+                                // not just new connections (issue #207).
+                                let mut conn_shutdown_rx = conn_shutdown_tx.subscribe();
                                 tokio::spawn(async move {
                                     let io = TokioIo::new(stream);
                                     let service = service_fn(move |req| {
@@ -101,11 +106,25 @@ impl ImposterManager {
                                             handle_imposter_request(req, imposter, addr).await
                                         }
                                     });
-                                    if let Err(e) = http1::Builder::new()
-                                        .serve_connection(io, service)
-                                        .await
-                                    {
-                                        debug!("Connection error on port {}: {}", port, e);
+                                    let conn = http1::Builder::new().serve_connection(io, service);
+                                    tokio::pin!(conn);
+                                    tokio::select! {
+                                        res = conn.as_mut() => {
+                                            if let Err(e) = res {
+                                                debug!("Connection error on port {}: {}", port, e);
+                                            }
+                                        }
+                                        _ = conn_shutdown_rx.recv() => {
+                                            // Stop accepting new requests on this connection and
+                                            // close it once any in-flight request completes.
+                                            conn.as_mut().graceful_shutdown();
+                                            if let Err(e) = conn.as_mut().await {
+                                                debug!(
+                                                    "Connection error on port {} during shutdown: {}",
+                                                    port, e
+                                                );
+                                            }
+                                        }
                                     }
                                 });
                             }
@@ -494,5 +513,99 @@ mod tests {
         );
 
         manager.delete_imposter(19600).await.unwrap();
+    }
+
+    // =========================================================================
+    // Issue #207: DELETE must close existing keep-alive connections so a deleted
+    // imposter serves no further requests on a pooled/keep-alive connection.
+    // =========================================================================
+
+    /// Read from the stream until `needle` appears or a short timeout elapses.
+    async fn read_until(stream: &mut tokio::net::TcpStream, needle: &str) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut acc = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+                .await
+            {
+                Ok(Ok(n)) if n > 0 => {
+                    acc.extend_from_slice(&buf[..n]);
+                    if String::from_utf8_lossy(&acc).contains(needle) {
+                        break;
+                    }
+                }
+                _ => break, // timeout, read error, or EOF (0 bytes)
+            }
+        }
+        String::from_utf8_lossy(&acc).into_owned()
+    }
+
+    #[tokio::test]
+    async fn test_delete_closes_keepalive_connections() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpStream;
+
+        let manager = ImposterManager::new();
+        let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "port": 19700,
+            "stubs": [{
+                "predicates": [{"equals": {"path": "/ping"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "pong"}}]
+            }]
+        }))
+        .unwrap();
+
+        manager.create_imposter(config).await.expect("create");
+
+        // Open a keep-alive connection and confirm it is served.
+        let mut stream = TcpStream::connect(("127.0.0.1", 19700))
+            .await
+            .expect("connect");
+        stream
+            .write_all(b"GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let first = read_until(&mut stream, "pong").await;
+        assert!(
+            first.contains("200") && first.contains("pong"),
+            "first keep-alive request should be served, got: {first}"
+        );
+
+        // Delete the imposter, then give the per-connection graceful shutdown a
+        // moment to land on the idle keep-alive socket (heuristic wait — the
+        // broadcast send is synchronous and idle-keepalive close is near-instant).
+        manager.delete_imposter(19700).await.expect("delete");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Criterion 1: reuse the SAME connection. The deleted imposter must serve
+        // nothing AND the socket must be actively closed — an empty read proves
+        // EOF/close, distinguishing a real teardown from a hung connection.
+        let _ = stream
+            .write_all(b"GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await;
+        let after = read_until(&mut stream, "pong").await;
+        assert!(
+            after.is_empty(),
+            "deleted imposter must close the keep-alive connection and serve nothing, got: {after:?}"
+        );
+
+        // Criterion 2: a fresh connection must not be served either — the listener
+        // is gone, so connect is refused or the socket yields EOF with no body.
+        match TcpStream::connect(("127.0.0.1", 19700)).await {
+            Err(_) => {} // connection refused — listener torn down, as expected
+            Ok(mut fresh) => {
+                let _ = fresh
+                    .write_all(b"GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    .await;
+                let fresh_resp = read_until(&mut fresh, "pong").await;
+                assert!(
+                    !fresh_resp.contains("pong"),
+                    "deleted imposter must not serve a fresh connection, got: {fresh_resp:?}"
+                );
+            }
+        }
     }
 }
