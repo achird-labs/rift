@@ -939,6 +939,14 @@ impl Imposter {
         self.request_count.store(0, Ordering::SeqCst);
     }
 
+    /// Retain only the recorded requests for which `keep` returns true.
+    /// Used for targeted clears (a single correlated slice); unlike
+    /// `clear_recorded_requests` it does not reset the total request count,
+    /// since other slices' requests remain.
+    pub fn retain_recorded_requests<F: Fn(&RecordedRequest) -> bool>(&self, keep: F) {
+        self.recorded_requests.write().retain(|r| keep(r));
+    }
+
     /// Clear saved proxy responses
     pub fn clear_proxy_responses(&self) {
         self.recording_store.clear();
@@ -1240,6 +1248,55 @@ mod tests {
             recorded.len(),
             MAX_RECORDED_REQUESTS,
             "Recorded requests must not exceed the cap"
+        );
+    }
+
+    // Issue #201: a targeted retain removes only the non-kept entries and, unlike a
+    // full clear, must NOT reset the total request count (other slices' requests remain).
+    #[test]
+    fn test_retain_recorded_requests_preserves_count() {
+        let config = ImposterConfig {
+            port: Some(0),
+            protocol: "http".to_string(),
+            record_requests: true,
+            ..Default::default()
+        };
+        let imposter = Imposter::new(config);
+
+        let req = |space: &str| {
+            let mut headers = std::collections::HashMap::new();
+            headers.insert("X-Mock-Space".to_string(), space.to_string());
+            RecordedRequest {
+                request_from: "127.0.0.1".to_string(),
+                method: "GET".to_string(),
+                path: "/".to_string(),
+                query: std::collections::HashMap::new(),
+                headers,
+                body: None,
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+            }
+        };
+        imposter.record_request(&req("A"));
+        imposter.record_request(&req("B"));
+        imposter.record_request(&req("A"));
+        for _ in 0..3 {
+            imposter.increment_request_count();
+        }
+
+        imposter.retain_recorded_requests(|r| r.headers.get("X-Mock-Space").unwrap() != "A");
+        assert_eq!(imposter.get_recorded_requests().len(), 1, "only B kept");
+        assert_eq!(
+            imposter.get_request_count(),
+            3,
+            "targeted retain must not reset the request count"
+        );
+
+        imposter.clear_recorded_requests();
+        assert_eq!(imposter.get_recorded_requests().len(), 0);
+        assert_eq!(
+            imposter.get_request_count(),
+            0,
+            "full clear resets the request count"
         );
     }
 

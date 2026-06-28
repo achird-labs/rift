@@ -161,9 +161,12 @@ async fn route_imposter(
             stubs::handle_delete(port, index, base_url, manager).await
         }
 
-        // /imposters/:port/savedRequests
+        // /imposters/:port/savedRequests (alias /requests)
+        (&Method::GET, ImposterRoute::SavedRequests) => {
+            imposters::handle_get_requests(port, query, manager).await
+        }
         (&Method::DELETE, ImposterRoute::SavedRequests) => {
-            imposters::handle_clear_requests(port, base_url, manager).await
+            imposters::handle_clear_requests(port, query, base_url, manager).await
         }
 
         // /imposters/:port/savedProxyResponses

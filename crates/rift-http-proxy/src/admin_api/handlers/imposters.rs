@@ -1,12 +1,15 @@
 //! Imposter CRUD handlers.
 
+use crate::admin_api::request_filter::{parse_match_clauses, request_matches};
 use crate::admin_api::types::{
     collect_body, error_response, json_response, make_imposter_links, make_stub_links,
     ImposterDetail, ImposterListEntry, ImposterQueryParams, ImposterSummary, ListImpostersResponse,
     RiftImposterExtensions, StubWithLinks,
 };
 use crate::extensions::stub_analysis::analyze_stubs;
-use crate::imposter::{ImposterConfig, ImposterError, ImposterManager, StubResponse};
+use crate::imposter::{
+    Imposter, ImposterConfig, ImposterError, ImposterManager, RecordedRequest, StubResponse,
+};
 use crate::scripting::validate_stubs;
 use bytes::Bytes;
 use http_body_util::Full;
@@ -310,15 +313,64 @@ async fn handle_set_enabled(
     }
 }
 
-/// DELETE /imposters/:port/savedRequests - Clear recorded requests
+/// Resolve the imposter's `flow_id_source` (default `"imposter_port"`).
+fn flow_id_source(imposter: &Imposter) -> String {
+    imposter
+        .config
+        .rift
+        .as_ref()
+        .and_then(|r| r.flow_state.as_ref())
+        .and_then(|fs| fs.mountebank_state_mapping.as_ref())
+        .map(|m| m.flow_id_source.clone())
+        .unwrap_or_else(|| "imposter_port".to_string())
+}
+
+/// GET /imposters/:port/requests[?match=...] - recorded requests, optionally
+/// filtered by `header:<Name>=<Value>` / `flow_id=<Value>` clauses (AND'd).
+pub async fn handle_get_requests(
+    port: u16,
+    query: Option<&str>,
+    manager: Arc<ImposterManager>,
+) -> Response<Full<Bytes>> {
+    let clauses = match parse_match_clauses(query) {
+        Ok(c) => c,
+        Err(msg) => return error_response(StatusCode::BAD_REQUEST, &msg),
+    };
+    match manager.get_imposter(port) {
+        Ok(imposter) => {
+            let source = flow_id_source(&imposter);
+            let filtered: Vec<RecordedRequest> = imposter
+                .get_recorded_requests()
+                .into_iter()
+                .filter(|r| request_matches(r, &clauses, &source, port))
+                .collect();
+            json_response(StatusCode::OK, &filtered)
+        }
+        Err(e) => e.into(),
+    }
+}
+
+/// DELETE /imposters/:port/savedRequests - Clear recorded requests.
+/// With `match=...` clauses, only the matching slice is removed (the rest are kept);
+/// without clauses, all recorded requests are cleared.
 pub async fn handle_clear_requests(
     port: u16,
+    query: Option<&str>,
     base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
+    let clauses = match parse_match_clauses(query) {
+        Ok(c) => c,
+        Err(msg) => return error_response(StatusCode::BAD_REQUEST, &msg),
+    };
     match manager.get_imposter(port) {
         Ok(imposter) => {
-            imposter.clear_recorded_requests();
+            if clauses.is_empty() {
+                imposter.clear_recorded_requests();
+            } else {
+                let source = flow_id_source(&imposter);
+                imposter.retain_recorded_requests(|r| !request_matches(r, &clauses, &source, port));
+            }
             handle_get(port, None, base_url, manager).await
         }
         Err(e) => e.into(),
@@ -376,4 +428,209 @@ fn filter_proxy_stubs(stubs: Vec<crate::imposter::Stub>) -> Vec<crate::imposter:
             }
         })
         .collect()
+}
+
+// Issue #201: filter recorded requests by header / flow_id via
+// GET /imposters/:port/requests?match=...  (and targeted DELETE).
+#[cfg(test)]
+mod requests_filter_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    use std::collections::HashMap;
+
+    fn rec(space: &str, tenant: Option<&str>) -> RecordedRequest {
+        let mut headers = HashMap::new();
+        headers.insert("X-Mock-Space".to_string(), space.to_string());
+        if let Some(t) = tenant {
+            headers.insert("X-Tenant".to_string(), t.to_string());
+        }
+        RecordedRequest {
+            request_from: "127.0.0.1".to_string(),
+            method: "GET".to_string(),
+            path: "/p".to_string(),
+            query: HashMap::new(),
+            headers,
+            body: None,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    async fn manager_with(
+        port: u16,
+        flow_id_source: Option<&str>,
+        recorded: &[RecordedRequest],
+    ) -> Arc<ImposterManager> {
+        let manager = Arc::new(ImposterManager::new());
+        let mut cfg = serde_json::json!({
+            "port": port, "protocol": "http", "recordRequests": true, "stubs": []
+        });
+        if let Some(src) = flow_id_source {
+            cfg["_rift"] = serde_json::json!({
+                "flowState": { "mountebankStateMapping": { "flowIdSource": src } }
+            });
+        }
+        let config = serde_json::from_value(cfg).expect("config");
+        manager.create_imposter(config).await.expect("create");
+        let imposter = manager.get_imposter(port).expect("imposter");
+        for r in recorded {
+            imposter.record_request(r);
+        }
+        manager
+    }
+
+    async fn requests(resp: Response<Full<Bytes>>) -> Vec<RecordedRequest> {
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("decode requests")
+    }
+
+    #[tokio::test]
+    async fn get_requests_returns_all_without_match() {
+        let m = manager_with(19731, None, &[rec("A", None), rec("B", None)]).await;
+        let resp = handle_get_requests(19731, None, m.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(requests(resp).await.len(), 2);
+        let _ = m.delete_imposter(19731).await;
+    }
+
+    #[tokio::test]
+    async fn get_requests_filters_by_header() {
+        let m = manager_with(
+            19732,
+            None,
+            &[rec("A", None), rec("B", None), rec("A", None)],
+        )
+        .await;
+        let resp = handle_get_requests(19732, Some("match=header:X-Mock-Space=A"), m.clone()).await;
+        let got = requests(resp).await;
+        assert_eq!(got.len(), 2, "only the two X-Mock-Space=A requests");
+        assert!(got
+            .iter()
+            .all(|r| r.headers.get("X-Mock-Space").unwrap() == "A"));
+        let _ = m.delete_imposter(19732).await;
+    }
+
+    #[tokio::test]
+    async fn get_requests_no_match_is_empty_200() {
+        let m = manager_with(19733, None, &[rec("A", None)]).await;
+        let resp =
+            handle_get_requests(19733, Some("match=header:X-Mock-Space=ZZZ"), m.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(requests(resp).await.is_empty());
+        let _ = m.delete_imposter(19733).await;
+    }
+
+    #[tokio::test]
+    async fn get_requests_flow_id_header_source_parity() {
+        let m = manager_with(
+            19734,
+            Some("header:X-Mock-Space"),
+            &[rec("A", None), rec("B", None)],
+        )
+        .await;
+        let by_flow_id =
+            requests(handle_get_requests(19734, Some("match=flow_id=A"), m.clone()).await).await;
+        let by_header = requests(
+            handle_get_requests(19734, Some("match=header:X-Mock-Space=A"), m.clone()).await,
+        )
+        .await;
+        assert_eq!(by_flow_id.len(), 1);
+        assert_eq!(by_flow_id[0].headers.get("X-Mock-Space").unwrap(), "A");
+        assert_eq!(
+            serde_json::to_value(&by_flow_id).unwrap(),
+            serde_json::to_value(&by_header).unwrap(),
+            "flow_id= and header: must return the identical slice when flow_id_source is that header"
+        );
+        let _ = m.delete_imposter(19734).await;
+    }
+
+    #[tokio::test]
+    async fn get_requests_flow_id_imposter_port() {
+        let m = manager_with(19735, None, &[rec("A", None), rec("B", None)]).await;
+        // default flow_id_source = imposter_port → every request shares flow_id = port
+        let all = handle_get_requests(19735, Some("match=flow_id=19735"), m.clone()).await;
+        assert_eq!(requests(all).await.len(), 2);
+        let none = handle_get_requests(19735, Some("match=flow_id=9999"), m.clone()).await;
+        assert!(requests(none).await.is_empty());
+        let _ = m.delete_imposter(19735).await;
+    }
+
+    #[tokio::test]
+    async fn get_requests_multiple_match_anded() {
+        let m = manager_with(
+            19736,
+            None,
+            &[
+                rec("A", Some("t1")),
+                rec("A", Some("t2")),
+                rec("B", Some("t1")),
+            ],
+        )
+        .await;
+        let resp = handle_get_requests(
+            19736,
+            Some("match=header:X-Mock-Space=A&match=header:X-Tenant=t1"),
+            m.clone(),
+        )
+        .await;
+        let got = requests(resp).await;
+        assert_eq!(got.len(), 1, "only the A+t1 request matches both clauses");
+        let _ = m.delete_imposter(19736).await;
+    }
+
+    #[tokio::test]
+    async fn get_requests_unknown_port_404() {
+        let m = Arc::new(ImposterManager::new());
+        let resp = handle_get_requests(19737, None, m).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_requests_malformed_match_400() {
+        let m = manager_with(19738, None, &[rec("A", None)]).await;
+        let resp = handle_get_requests(19738, Some("match=path=/foo"), m.clone()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let _ = m.delete_imposter(19738).await;
+    }
+
+    #[tokio::test]
+    async fn delete_requests_targeted_clear_removes_only_slice() {
+        let m = manager_with(
+            19739,
+            None,
+            &[rec("A", None), rec("B", None), rec("A", None)],
+        )
+        .await;
+        let base = "http://localhost:2525";
+        handle_clear_requests(19739, Some("match=header:X-Mock-Space=A"), base, m.clone()).await;
+        let remaining = requests(handle_get_requests(19739, None, m.clone()).await).await;
+        assert_eq!(remaining.len(), 1, "only the B request survives");
+        assert_eq!(remaining[0].headers.get("X-Mock-Space").unwrap(), "B");
+        let _ = m.delete_imposter(19739).await;
+    }
+
+    #[tokio::test]
+    async fn delete_requests_without_match_clears_all() {
+        let m = manager_with(19740, None, &[rec("A", None), rec("B", None)]).await;
+        let base = "http://localhost:2525";
+        handle_clear_requests(19740, None, base, m.clone()).await;
+        let remaining = requests(handle_get_requests(19740, None, m.clone()).await).await;
+        assert!(remaining.is_empty());
+        let _ = m.delete_imposter(19740).await;
+    }
+
+    #[tokio::test]
+    async fn delete_requests_malformed_match_400() {
+        let m = manager_with(19741, None, &[rec("A", None)]).await;
+        let base = "http://localhost:2525";
+        let resp = handle_clear_requests(19741, Some("match=path=/foo"), base, m.clone()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // a rejected clear must leave the buffer untouched
+        let remaining = requests(handle_get_requests(19741, None, m.clone()).await).await;
+        assert_eq!(
+            remaining.len(),
+            1,
+            "malformed DELETE must not clear anything"
+        );
+        let _ = m.delete_imposter(19741).await;
+    }
 }
