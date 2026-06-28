@@ -816,3 +816,89 @@ fn lint_directory_reads_json_files() {
     assert_eq!(result.files_checked, 2, "should check 2 JSON files");
     assert!(result.has_errors(), "should find error in invalid.json");
 }
+
+// ─── Issue #217: config wrapper / multi-imposter formats ─────────────────────
+
+#[test]
+fn wrapper_object_validates_each_imposter() {
+    // `{"imposters":[...]}` — the form `rift --configfile` accepts — must not be
+    // treated as a single imposter (which would spuriously flag E003 on the wrapper).
+    let cfg = json!({ "imposters": [ make_imposter(json!([minimal_stub()])) ] }).to_string();
+    let r = lint_json(&cfg, "<wrap>", &opts());
+    assert!(
+        !has_code(&r, "E003"),
+        "wrapper object must not produce E003, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn bare_array_validates_each_imposter() {
+    let cfg = json!([make_imposter(json!([minimal_stub()]))]).to_string();
+    let r = lint_json(&cfg, "<arr>", &opts());
+    assert!(
+        !has_code(&r, "E003"),
+        "bare array must not produce E003, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn wrapper_reports_inner_imposter_errors() {
+    // The inner imposter has an INVALID protocol → E004. E004 can only come from an
+    // imposter that actually has a `protocol` field, so (unlike E003) it can't be
+    // produced by the old "validate the wrapper as one imposter" path — proving the
+    // array element itself is reached and validated.
+    let cfg =
+        json!({ "imposters": [ { "port": 3000, "protocol": "smtp", "stubs": [] } ] }).to_string();
+    let r = lint_json(&cfg, "<wrap>", &opts());
+    assert!(
+        has_code(&r, "E004"),
+        "invalid protocol inside the wrapper must surface E004, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn array_validates_every_element_not_just_first() {
+    // A bare array whose SECOND element has an invalid protocol must be flagged — guards
+    // the `for imposter in arr` loop (a first-element-only bug would pass everything else).
+    let cfg = json!([
+        make_imposter(json!([minimal_stub()])),
+        { "port": 3001, "protocol": "smtp", "stubs": [] }
+    ])
+    .to_string();
+    let r = lint_json(&cfg, "<arr>", &opts());
+    assert!(
+        has_code(&r, "E004"),
+        "invalid protocol on a non-first array element must surface E004, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn empty_imposters_set_is_clean() {
+    // An empty imposter set is valid (matches `rift --configfile`) — no spurious E003.
+    for cfg in [
+        json!({ "imposters": [] }).to_string(),
+        json!([]).to_string(),
+    ] {
+        let r = lint_json(&cfg, "<empty>", &opts());
+        assert!(
+            !has_code(&r, "E003"),
+            "empty imposter set must not produce E003, got {:?}",
+            codes(&r)
+        );
+    }
+}
+
+#[test]
+fn single_imposter_still_validates() {
+    let cfg = make_imposter(json!([minimal_stub()])).to_string();
+    let r = lint_json(&cfg, "<single>", &opts());
+    assert!(
+        !has_code(&r, "E003"),
+        "single imposter must still validate cleanly, got {:?}",
+        codes(&r)
+    );
+}

@@ -35,6 +35,29 @@ pub use validator::{
     validate_predicate, validate_proxy_response, validate_response, validate_stub,
 };
 
+/// Validate a parsed config value, accepting the same shapes `rift --configfile` accepts:
+/// a single imposter object, a `{"imposters": [...]}` wrapper, or a bare `[...]` array.
+/// Each imposter is validated individually so the wrapper itself isn't mistaken for one.
+fn validate_config(
+    path: &Path,
+    value: &serde_json::Value,
+    result: &mut LintResult,
+    options: &LintOptions,
+) {
+    let imposters = value
+        .get("imposters")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| value.as_array());
+    match imposters {
+        Some(arr) => {
+            for imposter in arr {
+                validate_imposter(path, imposter, result, options);
+            }
+        }
+        None => validate_imposter(path, value, result, options),
+    }
+}
+
 /// Lint a single imposter configuration file.
 ///
 /// Returns a `LintResult` containing all issues found.
@@ -66,7 +89,7 @@ pub fn lint_file(path: &Path, options: &LintOptions) -> LintResult {
         }
     };
 
-    validate_imposter(path, &value, &mut result, options);
+    validate_config(path, &value, &mut result, options);
     result
 }
 
@@ -120,7 +143,7 @@ pub fn lint_json(json: &str, source_name: &str, options: &LintOptions) -> LintRe
         }
     };
 
-    validate_imposter(path, &value, &mut result, options);
+    validate_config(path, &value, &mut result, options);
     result
 }
 
@@ -136,6 +159,6 @@ pub fn lint_value(
     result.files_checked = 1;
 
     let path = Path::new(source_name);
-    validate_imposter(path, value, &mut result, options);
+    validate_config(path, value, &mut result, options);
     result
 }
