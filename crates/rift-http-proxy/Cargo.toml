@@ -25,10 +25,14 @@ hyper = { version = "1.5", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["full"] }
-hyper-rustls = { version = "0.27", features = ["http1"] }
-rustls = { version = "0.23", features = ["ring"] }
+# Pin the rustls crypto provider to `ring` everywhere. hyper-rustls/tokio-rustls
+# default to the `aws-lc-rs` provider, whose C build (aws-lc-sys) fails to compile
+# on the windows-msvc CI runner (C11 atomics). The runtime provider is ring
+# (see main.rs), so aws-lc-rs is dead weight; disabling it keeps the build portable.
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "native-tokio", "tls12", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2.0"
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
