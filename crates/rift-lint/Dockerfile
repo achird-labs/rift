@@ -21,9 +21,11 @@ COPY crates/rift-lint/Cargo.toml ./crates/rift-lint/
 # rift-lint depends on rift-http-proxy for types
 COPY crates/rift-http-proxy/Cargo.toml ./crates/rift-http-proxy/
 COPY crates/rift-tui/Cargo.toml ./crates/rift-tui/
+COPY crates/rift-types/Cargo.toml ./crates/rift-types/
 
 # Create dummy source files to build dependencies
-RUN mkdir -p crates/rift-lint/src crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches crates/rift-tui/src && \
+RUN mkdir -p crates/rift-lint/src crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches crates/rift-tui/src crates/rift-types/src && \
+    echo "" > crates/rift-types/src/lib.rs && \
     echo "pub fn lint() {}" > crates/rift-lint/src/lib.rs && \
     echo "fn main() {}" > crates/rift-lint/src/main.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/src/main.rs && \
