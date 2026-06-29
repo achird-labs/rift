@@ -492,3 +492,104 @@ async fn stub_by_id_admin_endpoints() {
 
     let _ = manager.delete_imposter(19776).await;
 }
+
+// Issue #239: _rift.fault.tcp must produce a REAL client-observable transport failure (not a 502).
+mod tcp_faults {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    async fn fault_imposter(port: u16, kind: &str) -> Arc<ImposterManager> {
+        let manager = Arc::new(ImposterManager::new());
+        let config = serde_json::from_value(serde_json::json!({
+            "port": port, "protocol": "http",
+            "stubs": [{"responses": [{
+                "is": {"statusCode": 200, "body": "should-never-be-seen"},
+                "_rift": {"fault": {"tcp": kind}}
+            }]}]
+        }))
+        .unwrap();
+        manager
+            .create_imposter(config)
+            .await
+            .expect("create imposter");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        manager
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Observed {
+        /// The request failed before a valid HTTP response (reset / empty close / bad framing).
+        SendFailed,
+        /// Response headers parsed (real status line) but the body read failed.
+        BodyFailed,
+        /// A complete, normal HTTP response — the fault did NOT fire (regression).
+        FullResponse,
+    }
+
+    /// What an HTTP client observes against the imposter — used to assert that a real transport
+    /// failure occurred and to distinguish the fault kinds (never `FullResponse`).
+    async fn observe(port: u16) -> Observed {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        match client
+            .get(format!("http://127.0.0.1:{port}/x"))
+            .send()
+            .await
+        {
+            Err(_) => Observed::SendFailed,
+            Ok(resp) => match resp.bytes().await {
+                Err(_) => Observed::BodyFailed,
+                Ok(_) => Observed::FullResponse,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_fault_reset_is_real() {
+        let manager = fault_imposter(19830, "CONNECTION_RESET_BY_PEER").await;
+        assert_eq!(
+            observe(19830).await,
+            Observed::SendFailed,
+            "reset must fail the request at the transport layer, not return a 502"
+        );
+        let _ = manager.delete_imposter(19830).await;
+    }
+
+    #[tokio::test]
+    async fn tcp_fault_empty_response_is_real() {
+        let manager = fault_imposter(19831, "EMPTY_RESPONSE").await;
+        assert_eq!(
+            observe(19831).await,
+            Observed::SendFailed,
+            "empty-response must close with no response, failing the request"
+        );
+        let _ = manager.delete_imposter(19831).await;
+    }
+
+    #[tokio::test]
+    async fn tcp_fault_malformed_chunk_is_real() {
+        let manager = fault_imposter(19832, "MALFORMED_RESPONSE_CHUNK").await;
+        // Distinct signal: the real status line parses (send succeeds) but the malformed chunked
+        // body fails to decode — proves this kind is not collapsed into reset/empty.
+        assert_eq!(
+            observe(19832).await,
+            Observed::BodyFailed,
+            "malformed-chunk must deliver a status line then fail the body read"
+        );
+        let _ = manager.delete_imposter(19832).await;
+    }
+
+    #[tokio::test]
+    async fn tcp_fault_random_data_is_real() {
+        let manager = fault_imposter(19833, "RANDOM_DATA_THEN_CLOSE").await;
+        assert_eq!(
+            observe(19833).await,
+            Observed::SendFailed,
+            "random-data must fail HTTP parsing, not return a normal response"
+        );
+        let _ = manager.delete_imposter(19833).await;
+    }
+}

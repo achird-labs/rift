@@ -4,12 +4,13 @@
 //! each running on its own port.
 
 use super::core::Imposter;
+use super::fault_io::{FaultCell, FaultIo, TcpFaultKind};
 use super::handler::handle_imposter_request;
 use super::types::{ImposterConfig, ImposterError, Stub};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -99,11 +100,25 @@ impl ImposterManager {
                                 // not just new connections (issue #207).
                                 let mut conn_shutdown_rx = conn_shutdown_tx.subscribe();
                                 tokio::spawn(async move {
-                                    let io = TokioIo::new(stream);
+                                    // Per-connection slot for a real transport fault (issue #239);
+                                    // armed by the handler, applied by FaultIo on the response write.
+                                    let fault_cell: FaultCell = Arc::new(Mutex::new(None));
+                                    let io =
+                                        TokioIo::new(FaultIo::new(stream, Arc::clone(&fault_cell)));
                                     let service = service_fn(move |req| {
                                         let imposter = Arc::clone(&imposter);
+                                        let fault_cell = Arc::clone(&fault_cell);
                                         async move {
-                                            handle_imposter_request(req, imposter, addr).await
+                                            let response =
+                                                handle_imposter_request(req, imposter, addr).await?;
+                                            if let Some(kind) = response
+                                                .extensions()
+                                                .get::<TcpFaultKind>()
+                                                .copied()
+                                            {
+                                                *fault_cell.lock() = Some(kind);
+                                            }
+                                            Ok::<_, std::convert::Infallible>(response)
                                         }
                                     });
                                     let conn = http1::Builder::new().serve_connection(io, service);

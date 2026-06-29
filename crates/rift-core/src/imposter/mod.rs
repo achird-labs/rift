@@ -17,6 +17,7 @@
 //! - `core`: Core Imposter struct and implementation
 
 mod core;
+mod fault_io;
 mod handler;
 mod manager;
 mod predicates;

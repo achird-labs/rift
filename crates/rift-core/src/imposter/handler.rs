@@ -836,27 +836,20 @@ async fn apply_rift_fault(
 
     // Check for TCP fault
     if let Some(ref tcp_fault) = fault_config.tcp {
-        match tcp_fault.as_str() {
-            "reset" | "CONNECTION_RESET_BY_PEER" => {
-                debug!("Applying _rift.fault TCP reset");
-                return Some(build_response_with_headers(
-                    StatusCode::BAD_GATEWAY,
-                    [("x-rift-fault", "CONNECTION_RESET_BY_PEER")],
-                    Bytes::new(),
-                ));
-            }
-            "garbage" | "RANDOM_DATA_THEN_CLOSE" => {
-                debug!("Applying _rift.fault TCP garbage");
-                return Some(build_response_with_headers(
-                    StatusCode::BAD_GATEWAY,
-                    [("x-rift-fault", "RANDOM_DATA_THEN_CLOSE")],
-                    Bytes::from_static(b"\x00\xff\xfe\xfd"),
-                ));
-            }
-            _ => {
-                warn!("Unknown TCP fault type: {}", tcp_fault);
-            }
+        if let Some(kind) = super::fault_io::TcpFaultKind::parse(tcp_fault) {
+            debug!("Applying _rift.fault.tcp: {:?}", kind);
+            // Carrier response: the serve loop's `FaultIo` aborts the connection before this is
+            // ever sent. The `TcpFaultKind` extension tells it which real transport fault to apply
+            // (issue #239) — the status/body here are never observed by the client.
+            let mut response = build_response_with_headers(
+                StatusCode::BAD_GATEWAY,
+                [("x-rift-fault", tcp_fault.as_str())],
+                Bytes::new(),
+            );
+            response.extensions_mut().insert(kind);
+            return Some(response);
         }
+        warn!("Unknown TCP fault type: {}", tcp_fault);
     }
 
     None
