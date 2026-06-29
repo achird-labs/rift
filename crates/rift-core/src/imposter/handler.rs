@@ -9,7 +9,6 @@ use super::response::apply_js_or_rhai_decorate;
 use super::types::{
     DebugMatchResult, DebugRequest, DebugResponse, ProxyResponse, RecordedRequest, ResponseMode,
 };
-use crate::admin_api::types::{build_response, build_response_with_headers};
 use crate::behaviors::{
     apply_copy_behaviors, apply_lookup_behaviors, header_to_title_case, CsvCache, RequestContext,
     ResponseBehaviors,
@@ -17,6 +16,7 @@ use crate::behaviors::{
 #[cfg(feature = "javascript")]
 use crate::scripting::{execute_mountebank_inject, MountebankRequest};
 use crate::scripting::{FaultDecision, ScriptEngine, ScriptRequest};
+use crate::util::{build_response, build_response_with_headers};
 use base64::Engine;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};

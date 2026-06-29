@@ -1,8 +1,7 @@
 //! Response types and HATEOAS structures for the Admin API.
 
 use crate::extensions::stub_analysis::StubWarning;
-use crate::imposter::{ImposterError, RecordedRequest, Stub};
-use crate::response::builder::ErrorResponseBuilder;
+use crate::imposter::{RecordedRequest, Stub};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -87,18 +86,9 @@ pub struct RiftImposterExtensions {
     pub warnings: Vec<StubWarning>,
 }
 
-/// Error response structure
-#[derive(Debug, Serialize)]
-pub struct ErrorResponse {
-    pub errors: Vec<ErrorDetail>,
-}
-
-/// Individual error detail
-#[derive(Debug, Serialize)]
-pub struct ErrorDetail {
-    pub code: String,
-    pub message: String,
-}
+// Error types + `error_response` + the `From<ImposterError>` conversion moved to
+// `rift_core::response` (issue #203). Re-exported so admin call sites are unchanged.
+pub use rift_core::response::error_response;
 
 /// Request to add a stub
 #[derive(Debug, Deserialize)]
@@ -203,84 +193,10 @@ pub fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Ful
     build_response_with_headers(status, [("Content-Type", "application/json")], json)
 }
 
-/// Build an HTTP response with the given status and body.
-///
-/// This function handles the unlikely case where Response::builder() fails
-/// by returning a minimal 500 error response.
-pub fn build_response(status: StatusCode, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
-    Response::builder()
-        .status(status)
-        .body(Full::new(body.into()))
-        .unwrap_or_else(|_| {
-            // This should never happen with valid StatusCode, but handle gracefully
-            Response::new(Full::new(Bytes::from("Internal Server Error")))
-        })
-}
-
-/// Build an HTTP response with headers.
-///
-/// This function handles the unlikely case where Response::builder() fails
-/// by returning a minimal 500 error response.
-pub fn build_response_with_headers(
-    status: StatusCode,
-    headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
-    body: impl Into<Bytes>,
-) -> Response<Full<Bytes>> {
-    let mut builder = Response::builder().status(status);
-    for (key, value) in headers {
-        builder = builder.header(key.as_ref(), value.as_ref());
-    }
-    builder.body(Full::new(body.into())).unwrap_or_else(|_| {
-        // This should never happen with valid inputs, but handle gracefully
-        Response::new(Full::new(Bytes::from("Internal Server Error")))
-    })
-}
-
-/// Create an error response
-pub fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
-    let error = ErrorResponse {
-        errors: vec![ErrorDetail {
-            code: status.as_str().to_string(),
-            message: message.to_string(),
-        }],
-    };
-
-    let json = serde_json::to_string_pretty(&error).unwrap_or_else(|_| "{}".to_string());
-    ErrorResponseBuilder::new(status)
-        .body(json)
-        .header("Content-Type", "application/json")
-        .build_full()
-}
-
-/// Convert ImposterError to HTTP Response for cleaner error handling in handlers.
-impl From<ImposterError> for Response<Full<Bytes>> {
-    fn from(err: ImposterError) -> Self {
-        match err {
-            ImposterError::PortInUse(p) => error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("Port {p} is already in use"),
-            ),
-            ImposterError::NotFound(p) => error_response(
-                StatusCode::NOT_FOUND,
-                &format!("Imposter not found on port {p}"),
-            ),
-            ImposterError::BindError(p, e) => error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to bind port {p}: {e}"),
-            ),
-            ImposterError::InvalidProtocol(p) => {
-                error_response(StatusCode::BAD_REQUEST, &format!("Invalid protocol: {p}"))
-            }
-            ImposterError::StubIndexOutOfBounds(i) => {
-                error_response(StatusCode::NOT_FOUND, &format!("Stub index {i} not found"))
-            }
-            ImposterError::PersistError(msg) => error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &format!("Persistence error: {msg}"),
-            ),
-        }
-    }
-}
+// The generic response builders moved to `rift_core::util` (issue #203) so the engine can use
+// them without depending on the admin server. Re-exported here so `crate::admin_api::types::*`
+// call sites are unchanged.
+pub use rift_core::util::build_response_with_headers;
 
 /// Create a not found response
 pub fn not_found() -> Response<Full<Bytes>> {

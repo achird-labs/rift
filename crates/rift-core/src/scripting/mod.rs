@@ -31,25 +31,25 @@ pub use js_engine::{
     JsEngine, MountebankRequest,
 };
 #[cfg(feature = "javascript")]
-#[expect(unused_imports, reason = "public API for library consumers")]
+#[allow(unused_imports)]
 pub use js_engine::{execute_js_bytecode, MountebankDecorateResponse, MountebankInjectResponse};
 
 // Validator trait and unified error types
 mod validator;
-#[expect(unused_imports, reason = "public API for library consumers")]
+#[allow(unused_imports)]
 pub use validator::ScriptValidationError;
 pub use validator::ScriptValidator;
 
 // Validator modules - used by config validation and stub_validator
 mod rhai_validator;
-#[expect(unused_imports, reason = "public API for library consumers")]
+#[allow(unused_imports)]
 pub use rhai_validator::RhaiValidationError;
 pub use rhai_validator::RhaiValidator;
 
 #[cfg(feature = "lua")]
 mod lua_validator;
 #[cfg(feature = "lua")]
-#[expect(unused_imports, reason = "public API for library consumers")]
+#[allow(unused_imports)]
 pub use lua_validator::LuaValidationError;
 #[cfg(feature = "lua")]
 pub use lua_validator::LuaValidator;
@@ -57,7 +57,7 @@ pub use lua_validator::LuaValidator;
 #[cfg(feature = "javascript")]
 mod js_validator;
 #[cfg(feature = "javascript")]
-#[expect(unused_imports, reason = "public API for library consumers")]
+#[allow(unused_imports)]
 pub use js_validator::JsValidationError;
 #[cfg(feature = "javascript")]
 pub use js_validator::JsValidator;

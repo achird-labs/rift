@@ -18,25 +18,12 @@
 //! rift --datadir ./mb-data                # Persist imposters to directory
 //! ```
 
-// ===== Core Mountebank-compatible modules =====
+// The CLI-free engine lives in `rift-core` (issue #203). Bring the modules this binary
+// references into its crate root so the existing `crate::<module>` paths resolve unchanged.
+use rift_core::{extensions, imposter, scripting};
+
+// ===== Admin HTTP server (control plane — server crate only) =====
 mod admin_api;
-mod backends;
-mod behaviors;
-mod config;
-mod imposter;
-mod predicate;
-mod proxy;
-mod recording;
-
-// ===== Rift Extensions (features beyond Mountebank) =====
-mod extensions;
-mod response;
-
-// Shared utilities
-mod util;
-
-// Internal modules
-mod scripting;
 
 // Re-export extension modules for convenience
 use extensions::metrics;

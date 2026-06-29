@@ -2,31 +2,13 @@
 // Allow dead_code for library targets - functions are used by the binary but not by tests
 #![allow(dead_code)]
 
-// ===== Core Mountebank-compatible modules =====
+// The CLI-free engine now lives in the `rift-core` crate (issue #203). Re-export its modules at
+// the crate root so existing `crate::<module>` paths in the admin server, CLI and tests keep
+// resolving unchanged — the server is a thin consumer of the core.
+pub use rift_core::{
+    backends, behaviors, config, extensions, fault, flow_state, imposter, matcher, predicate,
+    proxy, recording, response, routing, rule_index, scripting, stub_analysis, template, util,
+};
+
+// ===== Admin HTTP server (control plane — server crate only) =====
 pub mod admin_api;
-pub mod behaviors;
-pub mod config;
-pub mod imposter;
-pub mod predicate;
-pub mod proxy;
-pub mod recording;
-
-// ===== Rift Extensions (features beyond Mountebank) =====
-pub mod extensions;
-pub mod response;
-
-// Re-export extension modules at top level for backward compatibility
-pub use extensions::fault;
-pub use extensions::flow_state;
-pub use extensions::matcher;
-pub use extensions::routing;
-pub use extensions::rule_index;
-pub use extensions::stub_analysis;
-pub use extensions::template;
-
-// Shared utilities
-pub mod util;
-
-// Backends (pub for integration tests)
-pub mod backends;
-mod scripting;

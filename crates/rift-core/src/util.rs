@@ -1,8 +1,35 @@
 //! Shared utility functions used across proxy recording, stub generation,
 //! and response building pipelines.
 
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::{Response, StatusCode};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Build an HTTP response with the given status and body. Falls back to a minimal 500 if the
+/// builder fails (which should not happen with a valid `StatusCode`).
+pub fn build_response(status: StatusCode, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(status)
+        .body(Full::new(body.into()))
+        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from("Internal Server Error"))))
+}
+
+/// Build an HTTP response with headers. Falls back to a minimal 500 if the builder fails.
+pub fn build_response_with_headers(
+    status: StatusCode,
+    headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+    body: impl Into<Bytes>,
+) -> Response<Full<Bytes>> {
+    let mut builder = Response::builder().status(status);
+    for (key, value) in headers {
+        builder = builder.header(key.as_ref(), value.as_ref());
+    }
+    builder
+        .body(Full::new(body.into()))
+        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from("Internal Server Error"))))
+}
 
 /// Merge a slice of `(key, value)` header pairs into a `HashMap`,
 /// comma-joining values for duplicate keys per HTTP spec (RFC 9110 §5.3).
