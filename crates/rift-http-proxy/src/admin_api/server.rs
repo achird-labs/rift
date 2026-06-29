@@ -1,6 +1,7 @@
 //! Admin API server.
 
 use crate::admin_api::router::route_request;
+use crate::config_loader::ConfigSource;
 use crate::imposter::ImposterManager;
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -18,6 +19,7 @@ pub struct AdminApiServer {
     addr: SocketAddr,
     manager: Arc<ImposterManager>,
     api_key: Option<Arc<String>>,
+    config_source: Option<Arc<ConfigSource>>,
 }
 
 impl AdminApiServer {
@@ -27,7 +29,16 @@ impl AdminApiServer {
             addr,
             manager,
             api_key: api_key.map(Arc::new),
+            config_source: None,
         }
+    }
+
+    /// Set the config source (`--configfile`/`--datadir`) so `POST /admin/reload` can re-read it
+    /// (issue #197). Without it, reload is a no-op.
+    #[must_use]
+    pub fn with_config_source(mut self, source: ConfigSource) -> Self {
+        self.config_source = Some(Arc::new(source));
+        self
     }
 
     /// Run the admin API server
@@ -47,11 +58,13 @@ impl AdminApiServer {
             let io = TokioIo::new(stream);
             let manager = Arc::clone(&self.manager);
             let api_key = self.api_key.clone();
+            let config_source = self.config_source.clone();
 
             tokio::spawn(async move {
                 let service = service_fn(move |req| {
                     let manager = Arc::clone(&manager);
                     let api_key = api_key.clone();
+                    let config_source = config_source.clone();
                     async move {
                         if let Some(ref key) = api_key {
                             let auth = req
@@ -63,7 +76,7 @@ impl AdminApiServer {
                                 return Ok::<_, hyper::Error>(unauthorized_response());
                             }
                         }
-                        route_request(req, manager).await
+                        route_request(req, manager, config_source).await
                     }
                 });
 

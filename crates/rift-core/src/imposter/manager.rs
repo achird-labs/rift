@@ -11,6 +11,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -59,10 +60,16 @@ impl ImposterManager {
             if self.imposters.read().contains_key(&p) {
                 return Err(ImposterError::PortInUse(p));
             }
+            // Bind with SO_REUSEADDR/REUSEPORT so a hot-reload (#197) can re-bind the same port
+            // immediately after the previous imposter's listener is torn down.
+            let addr = (bind_host, p)
+                .to_socket_addrs()
+                .map_err(|e| ImposterError::BindError(p, e.to_string()))?
+                .next()
+                .ok_or_else(|| ImposterError::BindError(p, "no socket address".to_string()))?;
             (
                 p,
-                TcpListener::bind((bind_host, p))
-                    .await
+                crate::proxy::network::create_reusable_listener(addr)
                     .map_err(|e| ImposterError::BindError(p, e.to_string()))?,
             )
         } else {
@@ -141,9 +148,16 @@ impl ImposterManager {
             }
         });
 
-        // Store imposter
+        // Store imposter. Re-check the port under the write lock to close the TOCTOU between the
+        // earlier read-only check and the bind: with SO_REUSEADDR/REUSEPORT two concurrent creates
+        // for the same explicit port can both bind, so the loser of the insert race must stop the
+        // listener it just started rather than leave an orphan accepting on the shared port.
         {
             let mut imposters = self.imposters.write();
+            if imposters.contains_key(&port) {
+                let _ = shutdown_tx.send(());
+                return Err(ImposterError::PortInUse(port));
+            }
             imposters.insert(port, Arc::clone(&imposter));
         }
 
@@ -237,6 +251,36 @@ impl ImposterManager {
         }
 
         configs
+    }
+
+    /// Replace all imposters with a fresh set (issue #197 hot-reload). The whole set is validated
+    /// — parseable already (the caller parsed it), plus protocol validity and no duplicate ports
+    /// here — **before** the running imposters are torn down, so an invalid config leaves them
+    /// intact rather than half-applied. Once validation passes, the old imposters are removed
+    /// (releasing their ports) and the new ones created; in-flight requests against the old
+    /// imposters complete naturally (each is held behind its own `Arc`). A residual bind failure
+    /// after teardown (e.g. a port grabbed by an external process) is returned and may leave a
+    /// partial set — the caller surfaces it as a 5xx. Reload resets all imposter state (recorded
+    /// requests, scenario state, response cyclers).
+    pub async fn reload(&self, configs: Vec<ImposterConfig>) -> Result<(), ImposterError> {
+        let mut seen = std::collections::HashSet::new();
+        for config in &configs {
+            match config.protocol.as_str() {
+                "http" | "https" => {}
+                other => return Err(ImposterError::InvalidProtocol(other.to_string())),
+            }
+            if let Some(port) = config.port {
+                if !seen.insert(port) {
+                    return Err(ImposterError::PortInUse(port));
+                }
+            }
+        }
+
+        self.delete_all().await;
+        for config in configs {
+            self.create_imposter(config).await?;
+        }
+        Ok(())
     }
 
     /// Get imposter count (for future metrics)

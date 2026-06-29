@@ -4,6 +4,7 @@
 
 use crate::admin_api::handlers::{imposters, scenarios, stubs, system};
 use crate::admin_api::types::{error_response, get_base_url, not_found};
+use crate::config_loader::ConfigSource;
 use crate::imposter::ImposterManager;
 use bytes::Bytes;
 use http_body_util::Full;
@@ -68,6 +69,7 @@ impl ImposterRoute {
 pub async fn route_request(
     req: Request<Incoming>,
     manager: Arc<ImposterManager>,
+    config_source: Option<Arc<ConfigSource>>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -76,11 +78,21 @@ pub async fn route_request(
 
     debug!("Admin API: {} {}", method, path);
 
-    let response = route_by_path(&method, &path, query.as_deref(), req, &base_url, manager).await;
+    let response = route_by_path(
+        &method,
+        &path,
+        query.as_deref(),
+        req,
+        &base_url,
+        manager,
+        config_source,
+    )
+    .await;
     Ok(response)
 }
 
 /// Route based on path
+#[allow(clippy::too_many_arguments)]
 async fn route_by_path(
     method: &Method,
     path: &str,
@@ -88,6 +100,7 @@ async fn route_by_path(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
+    config_source: Option<Arc<ConfigSource>>,
 ) -> Response<Full<Bytes>> {
     // Fast path for common routes
     match (method, path) {
@@ -95,7 +108,9 @@ async fn route_by_path(
         (&Method::GET, "/health") => return system::handle_health(),
         (&Method::GET, "/config") => return system::handle_config(),
         (&Method::GET, "/logs") => return system::handle_logs(query),
-        (&Method::POST, "/admin/reload") => return system::handle_reload(),
+        (&Method::POST, "/admin/reload") => {
+            return system::handle_reload(manager, config_source).await
+        }
         (&Method::GET, "/metrics") => return system::handle_metrics(manager).await,
         _ => {}
     }

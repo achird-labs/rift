@@ -623,3 +623,167 @@ mod multi_value_headers {
         let _ = manager.delete_imposter(19822).await;
     }
 }
+
+// Issue #197: POST /admin/reload re-reads the config source and replaces imposters.
+mod reload {
+    use super::*;
+    use rift_http_proxy::config_loader::{load_configs, ConfigSource};
+
+    fn cfg(port: u16, body: &str) -> String {
+        format!(
+            r#"{{"imposters":[{{"port":{port},"protocol":"http","stubs":[
+                {{"predicates":[{{"equals":{{"path":"/p"}}}}],
+                 "responses":[{{"is":{{"statusCode":200,"body":"{body}"}}}}]}}]}}]}}"#
+        )
+    }
+
+    fn stub_body(manager: &ImposterManager, port: u16) -> String {
+        let stubs = manager.get_imposter(port).unwrap().get_stubs();
+        serde_json::to_value(&stubs[0]).unwrap()["responses"][0]["is"]["body"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    async fn start(port: u16, src: Option<ConfigSource>) -> std::sync::Arc<ImposterManager> {
+        let manager = std::sync::Arc::new(ImposterManager::new());
+        let mut server = rift_http_proxy::admin_api::AdminApiServer::new(
+            format!("127.0.0.1:{port}").parse().unwrap(),
+            manager.clone(),
+            None,
+        );
+        if let Some(src) = src {
+            server = server.with_config_source(src);
+        }
+        tokio::spawn(server.run());
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        manager
+    }
+
+    #[tokio::test]
+    async fn reload_replaces_imposters_from_configfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("imposters.json");
+        std::fs::write(&path, cfg(19790, "v1")).unwrap();
+        let source = ConfigSource::File {
+            path: path.clone(),
+            no_parse: false,
+        };
+
+        let manager = start(12597, Some(source.clone())).await;
+        manager
+            .reload(load_configs(&source).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(stub_body(&manager, 19790), "v1");
+
+        // change the file on disk, then reload via the admin endpoint
+        std::fs::write(&path, cfg(19790, "v2")).unwrap();
+        let resp = reqwest::Client::new()
+            .post("http://127.0.0.1:12597/admin/reload")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            stub_body(&manager, 19790),
+            "v2",
+            "reload picked up the file change"
+        );
+        // the listener was actually re-bound on the same port and now serves v2 over the wire
+        let served = reqwest::get("http://127.0.0.1:19790/p")
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(served, "v2", "reloaded imposter serves the new content");
+
+        let _ = manager.delete_imposter(19790).await;
+    }
+
+    #[tokio::test]
+    async fn reload_semantic_error_keeps_existing_imposters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("imposters.json");
+        std::fs::write(&path, cfg(19792, "good")).unwrap();
+        let source = ConfigSource::File {
+            path: path.clone(),
+            no_parse: false,
+        };
+
+        let manager = start(12600, Some(source.clone())).await;
+        manager
+            .reload(load_configs(&source).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(stub_body(&manager, 19792), "good");
+
+        // parses fine, but the protocol is invalid → must be rejected BEFORE delete_all,
+        // leaving the running imposter intact (the destructive partial-teardown guard)
+        std::fs::write(
+            &path,
+            r#"{"imposters":[{"port":19792,"protocol":"tcp","stubs":[]}]}"#,
+        )
+        .unwrap();
+        let resp = reqwest::Client::new()
+            .post("http://127.0.0.1:12600/admin/reload")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 500);
+        assert_eq!(
+            stub_body(&manager, 19792),
+            "good",
+            "a semantically-invalid config must not tear down the running imposters"
+        );
+
+        let _ = manager.delete_imposter(19792).await;
+    }
+
+    #[tokio::test]
+    async fn reload_parse_error_keeps_existing_imposters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("imposters.json");
+        std::fs::write(&path, cfg(19791, "good")).unwrap();
+        let source = ConfigSource::File {
+            path: path.clone(),
+            no_parse: false,
+        };
+
+        let manager = start(12598, Some(source.clone())).await;
+        manager
+            .reload(load_configs(&source).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(stub_body(&manager, 19791), "good");
+
+        // corrupt the file → reload must 500 and leave the running imposter intact
+        std::fs::write(&path, "{ not valid json").unwrap();
+        let resp = reqwest::Client::new()
+            .post("http://127.0.0.1:12598/admin/reload")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 500);
+        assert_eq!(
+            stub_body(&manager, 19791),
+            "good",
+            "existing imposter unchanged on parse error"
+        );
+
+        let _ = manager.delete_imposter(19791).await;
+    }
+
+    #[tokio::test]
+    async fn reload_with_no_source_is_noop_200() {
+        let manager = start(12599, None).await;
+        let resp = reqwest::Client::new()
+            .post("http://127.0.0.1:12599/admin/reload")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let _ = manager;
+    }
+}

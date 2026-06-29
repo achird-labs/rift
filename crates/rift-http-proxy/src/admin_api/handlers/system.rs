@@ -116,12 +116,47 @@ pub fn handle_logs(query: Option<&str>) -> Response<Full<Bytes>> {
     json_response(StatusCode::OK, &logs)
 }
 
-/// POST /admin/reload - Reload configuration (Rift extension)
-pub fn handle_reload() -> Response<Full<Bytes>> {
-    json_response(
-        StatusCode::OK,
-        &serde_json::json!({"message": "Reload not implemented yet"}),
-    )
+/// POST /admin/reload - re-read the startup config source and replace all imposters (issue #197,
+/// Rift extension). No-op (200) when no `--configfile`/`--datadir` was given. The new set is
+/// validated before the running imposters are touched, so a parse or semantic error (bad
+/// protocol, duplicate port) returns 500 with the running imposters left unchanged. Reload resets
+/// all imposter state (recorded requests, scenario state, response cyclers).
+pub async fn handle_reload(
+    manager: Arc<ImposterManager>,
+    config_source: Option<Arc<crate::config_loader::ConfigSource>>,
+) -> Response<Full<Bytes>> {
+    let Some(source) = config_source else {
+        return json_response(
+            StatusCode::OK,
+            &serde_json::json!({"message": "No config source configured; nothing to reload"}),
+        );
+    };
+
+    // Parse before touching state — a bad config leaves the running imposters intact.
+    let configs = match crate::config_loader::load_configs(&source) {
+        Ok(configs) => configs,
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Reload failed (imposters unchanged): {e}"),
+            )
+        }
+    };
+
+    let count = configs.len();
+    match manager.reload(configs).await {
+        Ok(()) => json_response(
+            StatusCode::OK,
+            &serde_json::json!({ "message": format!("Reloaded {count} imposter(s)") }),
+        ),
+        // A reload failure is a server-side config problem, not a bad client request — report 5xx.
+        // Protocol/duplicate-port errors are caught before teardown (running imposters intact); a
+        // residual error here is a post-teardown bind failure.
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Reload failed: {e}"),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -146,9 +181,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    #[test]
-    fn test_handle_reload() {
-        let resp = handle_reload();
+    #[tokio::test]
+    async fn test_handle_reload_no_source_is_noop() {
+        let manager = Arc::new(ImposterManager::new());
+        let resp = handle_reload(manager, None).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 

@@ -12,3 +12,6 @@ pub use rift_core::{
 
 // ===== Admin HTTP server (control plane — server crate only) =====
 pub mod admin_api;
+
+// Imposter config loading (--configfile / --datadir), shared with hot-reload (issue #197)
+pub mod config_loader;

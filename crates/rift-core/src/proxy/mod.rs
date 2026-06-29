@@ -22,7 +22,7 @@ mod client;
 mod forwarding;
 mod handler;
 mod headers;
-mod network;
+pub(crate) mod network;
 mod response_ext;
 mod server;
 mod tls;

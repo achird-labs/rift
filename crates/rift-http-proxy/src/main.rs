@@ -25,6 +25,9 @@ use rift_core::{extensions, imposter, scripting};
 // ===== Admin HTTP server (control plane — server crate only) =====
 mod admin_api;
 
+// Imposter config loading (--configfile / --datadir), shared with hot-reload (issue #197)
+mod config_loader;
+
 // Re-export extension modules for convenience
 use extensions::metrics;
 
@@ -319,7 +322,16 @@ fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
             );
         }
 
-        let server = AdminApiServer::new(addr, manager, cli.api_key);
+        // Retain the config source so POST /admin/reload can re-read it (issue #197).
+        let mut server = AdminApiServer::new(addr, manager, cli.api_key);
+        if let Some(ref configfile) = cli.configfile {
+            server = server.with_config_source(config_loader::ConfigSource::File {
+                path: configfile.clone(),
+                no_parse: cli.no_parse,
+            });
+        } else if let Some(ref datadir) = cli.datadir {
+            server = server.with_config_source(config_loader::ConfigSource::Dir(datadir.clone()));
+        }
         server.run().await?;
 
         Ok(())
@@ -334,32 +346,12 @@ async fn load_imposters_from_file(
 ) -> Result<(), anyhow::Error> {
     info!("Loading imposters from configfile: {:?}", path);
 
-    let raw = std::fs::read_to_string(path)?;
-    let content = if no_parse {
-        raw
-    } else {
-        preprocess_ejs(&raw, path)?
-    };
+    let configs = config_loader::load_configs(&config_loader::ConfigSource::File {
+        path: path.clone(),
+        no_parse,
+    })?;
 
-    // Try to parse as JSON (Mountebank format)
-    let imposters: Vec<ImposterConfig> = if content.trim().starts_with('{') {
-        // Single imposter or wrapper object
-        let value: serde_json::Value = serde_json::from_str(&content)?;
-        if let Some(imposters) = value.get("imposters") {
-            serde_json::from_value(imposters.clone())?
-        } else {
-            // Single imposter
-            vec![serde_json::from_value(value)?]
-        }
-    } else if content.trim().starts_with('[') {
-        // Array of imposters
-        serde_json::from_str(&content)?
-    } else {
-        // Try YAML
-        serde_yaml::from_str(&content)?
-    };
-
-    for config in imposters {
+    for config in configs {
         info!(
             "Creating imposter on port {:?} from configfile",
             config.port
@@ -371,88 +363,6 @@ async fn load_imposters_from_file(
     }
 
     Ok(())
-}
-
-/// Pre-process EJS tokens in a config file before JSON/YAML parsing.
-///
-/// Handles the patterns emitted by Mountebank and compatible tooling:
-/// - `<% include 'path' %>` — inline the referenced file (relative to the config file)
-/// - `<%= process.env.VAR %>` — substitute with the env var value (empty string if unset)
-/// - `<%= process.env.VAR || 'default' %>` — substitute with env var or the literal default
-///
-/// Any other `<%= expr %>` token is replaced with an empty string and logged as a warning.
-/// `<% expr %>` (without `=`) statements (e.g., `<% for (...) %>`) are removed and logged.
-fn preprocess_ejs(content: &str, config_path: &std::path::Path) -> Result<String, anyhow::Error> {
-    if !content.contains("<%") {
-        return Ok(content.to_string());
-    }
-
-    let config_dir = config_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-
-    // Process include directives first:
-    // `<% include 'path' %>`, `<% include "path" %>`, or `<% include path %>`
-    let include_re = regex::Regex::new(r#"<%\s*include\s+['"]?([^'">\s]+)['"]?\s*%>"#).unwrap();
-    let mut result = String::new();
-    let mut last = 0;
-    for cap in include_re.captures_iter(content) {
-        let full = cap.get(0).unwrap();
-        let include_path = cap.get(1).unwrap().as_str();
-        result.push_str(&content[last..full.start()]);
-        let abs_path = config_dir.join(include_path);
-        match std::fs::read_to_string(&abs_path) {
-            Ok(included) => result.push_str(&included),
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "EJS include file '{}' not found ({}): {}",
-                    include_path,
-                    abs_path.display(),
-                    e
-                ));
-            }
-        }
-        last = full.end();
-    }
-    result.push_str(&content[last..]);
-    let content = result;
-
-    // Process expression tags: `<%= expr %>`
-    let expr_re = regex::Regex::new(r"<%=\s*(.*?)\s*%>").unwrap();
-    let env_var_re = regex::Regex::new(
-        r#"^process\.env\.([A-Za-z_][A-Za-z0-9_]*)(?:\s*\|\|\s*['"]([^'"]*)['"]\s*)?$"#,
-    )
-    .unwrap();
-
-    let mut result = String::new();
-    let mut last = 0;
-    for cap in expr_re.captures_iter(&content) {
-        let full = cap.get(0).unwrap();
-        let expr = cap.get(1).unwrap().as_str().trim();
-        result.push_str(&content[last..full.start()]);
-
-        if let Some(env_cap) = env_var_re.captures(expr) {
-            let var_name = env_cap.get(1).unwrap().as_str();
-            let default_val = env_cap.get(2).map(|m| m.as_str()).unwrap_or("");
-            let value = std::env::var(var_name).unwrap_or_else(|_| default_val.to_string());
-            result.push_str(&value);
-        } else {
-            warn!(
-                "EJS expression '{}' is not supported; substituting empty string",
-                expr
-            );
-        }
-        last = full.end();
-    }
-    result.push_str(&content[last..]);
-    let content = result;
-
-    // Strip remaining `<% ... %>` control blocks (non-expression tags); (?s) enables dotall
-    let stmt_re = regex::Regex::new(r"(?s)<%[^=].*?%>").unwrap();
-    if stmt_re.is_match(&content) {
-        warn!("EJS statement blocks (<% ... %>) are not supported and will be removed");
-    }
-    Ok(stmt_re.replace_all(&content, "").to_string())
 }
 
 /// Load imposters from a data directory
@@ -700,82 +610,5 @@ mod tests {
         let cli = Cli::try_parse_from(["rift"]).expect("default parse");
         assert!(!cli.nologfile);
         assert!(cli.log.is_none());
-    }
-
-    // =========================================================================
-    // Gap 8.1: EJS configfile pre-processing
-    // =========================================================================
-
-    #[test]
-    fn test_ejs_no_tokens_passthrough() {
-        let content = r#"{"imposters": []}"#;
-        let path = std::path::PathBuf::from("config.json");
-        assert_eq!(preprocess_ejs(content, &path).unwrap(), content);
-    }
-
-    #[test]
-    fn test_ejs_env_var_substitution() {
-        std::env::set_var("RIFT_TEST_HOST", "myhost");
-        let content = r#"{"body": "<%= process.env.RIFT_TEST_HOST %>"}"#;
-        let path = std::path::PathBuf::from("config.json");
-        let result = preprocess_ejs(content, &path).unwrap();
-        assert_eq!(result, r#"{"body": "myhost"}"#);
-        std::env::remove_var("RIFT_TEST_HOST");
-    }
-
-    #[test]
-    fn test_ejs_env_var_with_default() {
-        std::env::remove_var("RIFT_TEST_UNSET_VAR");
-        let content = r#"{"port": "<%= process.env.RIFT_TEST_UNSET_VAR || '4545' %>"}"#;
-        let path = std::path::PathBuf::from("config.json");
-        let result = preprocess_ejs(content, &path).unwrap();
-        assert_eq!(result, r#"{"port": "4545"}"#);
-    }
-
-    #[test]
-    fn test_ejs_env_var_present_overrides_default() {
-        std::env::set_var("RIFT_TEST_PORT", "8080");
-        let content = r#"{"port": "<%= process.env.RIFT_TEST_PORT || '4545' %>"}"#;
-        let path = std::path::PathBuf::from("config.json");
-        let result = preprocess_ejs(content, &path).unwrap();
-        assert_eq!(result, r#"{"port": "8080"}"#);
-        std::env::remove_var("RIFT_TEST_PORT");
-    }
-
-    #[test]
-    fn test_ejs_include_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let partial_path = dir.path().join("partial.json");
-        std::fs::write(&partial_path, r#"{"key": "value"}"#).unwrap();
-
-        let content = r#"<% include 'partial.json' %>"#.to_string();
-        let config_path = dir.path().join("config.ejs");
-        let result = preprocess_ejs(&content, &config_path).unwrap();
-        assert_eq!(result, r#"{"key": "value"}"#);
-    }
-
-    #[test]
-    fn test_ejs_include_unquoted_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let partial_path = dir.path().join("partial.json");
-        std::fs::write(&partial_path, r#"[1,2,3]"#).unwrap();
-
-        let content = r#"<% include partial.json %>"#;
-        let config_path = dir.path().join("config.ejs");
-        let result = preprocess_ejs(content, &config_path).unwrap();
-        assert_eq!(result, "[1,2,3]");
-    }
-
-    #[test]
-    fn test_ejs_missing_include_is_fatal_error() {
-        let content = r#"<% include 'nonexistent.json' %>"#;
-        let path = std::path::PathBuf::from("config.json");
-        let result = preprocess_ejs(content, &path);
-        assert!(result.is_err(), "missing include file should return Err");
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("nonexistent.json"),
-            "error message should name the missing file"
-        );
     }
 }
