@@ -585,7 +585,9 @@ async fn handle_request_inner(
         };
     }
 
-    // No matching rule - return default response or 404
+    // No matching rule — return the configured `defaultResponse`, else fall through to a 200
+    // with an empty body below (Mountebank parity — Rift never returns 404 for an unmatched
+    // request). A `defaultForward` upstream, if configured, was already handled above.
     if let Some(ref default) = imposter.config.default_response {
         let body_str = default
             .body
