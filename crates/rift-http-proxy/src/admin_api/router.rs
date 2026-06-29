@@ -20,6 +20,8 @@ enum ImposterRoute {
     Stubs,
     /// GET/PUT/DELETE /imposters/:port/stubs/:index
     StubByIndex(usize),
+    /// GET/PUT/DELETE /imposters/:port/stubs/by-id/:id (issue #202)
+    StubById(String),
     /// DELETE /imposters/:port/savedRequests
     SavedRequests,
     /// DELETE /imposters/:port/savedProxyResponses
@@ -46,6 +48,7 @@ impl ImposterRoute {
         match segments {
             [] => Some(ImposterRoute::Root),
             ["stubs"] => Some(ImposterRoute::Stubs),
+            ["stubs", "by-id", id] => Some(ImposterRoute::StubById((*id).to_string())),
             ["stubs", index_str] => index_str.parse().ok().map(ImposterRoute::StubByIndex),
             ["savedRequests"] | ["requests"] => Some(ImposterRoute::SavedRequests),
             ["savedProxyResponses"] => Some(ImposterRoute::SavedProxyResponses),
@@ -207,6 +210,17 @@ async fn route_imposter(
         }
         (&Method::DELETE, ImposterRoute::StubByIndex(index)) => {
             stubs::handle_delete(port, index, base_url, manager).await
+        }
+
+        // /imposters/:port/stubs/by-id/:id (issue #202)
+        (&Method::GET, ImposterRoute::StubById(id)) => {
+            stubs::handle_get_by_id(port, &id, manager).await
+        }
+        (&Method::PUT, ImposterRoute::StubById(id)) => {
+            stubs::handle_replace_by_id(port, &id, req, base_url, manager).await
+        }
+        (&Method::DELETE, ImposterRoute::StubById(id)) => {
+            stubs::handle_delete_by_id(port, &id, base_url, manager).await
         }
 
         // /imposters/:port/savedRequests (alias /requests)

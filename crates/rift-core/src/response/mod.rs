@@ -57,6 +57,13 @@ impl From<ImposterError> for Response<Full<Bytes>> {
             ImposterError::StubIndexOutOfBounds(i) => {
                 error_response(StatusCode::NOT_FOUND, &format!("Stub index {i} not found"))
             }
+            ImposterError::StubNotFound(id) => {
+                error_response(StatusCode::NOT_FOUND, &format!("No stub with id '{id}'"))
+            }
+            ImposterError::StubIdConflict(id) => error_response(
+                StatusCode::CONFLICT,
+                &format!("A stub with id '{id}' already exists"),
+            ),
             ImposterError::PersistError(msg) => error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 &format!("Persistence error: {msg}"),

@@ -3168,3 +3168,174 @@ mod default_forward_tests {
         let _ = manager.delete_imposter(19786).await;
     }
 }
+
+// Issue #202: id-addressed stub operations (get/replace/delete by Stub.id), race-free.
+#[cfg(test)]
+mod id_addressed_stub_tests {
+    use super::*;
+
+    fn stub_with_id(id: &str, body: &str) -> Stub {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "predicates": [{ "equals": { "path": format!("/{id}") } }],
+            "responses": [{ "is": { "statusCode": 200, "body": body } }]
+        }))
+        .unwrap()
+    }
+
+    async fn imposter_on(port: u16) -> std::sync::Arc<ImposterManager> {
+        let manager = std::sync::Arc::new(ImposterManager::new());
+        let config = serde_json::from_value(serde_json::json!({
+            "port": port, "protocol": "http", "stubs": []
+        }))
+        .unwrap();
+        manager.create_imposter(config).await.expect("create");
+        manager
+    }
+
+    #[tokio::test]
+    async fn delete_stub_by_id_preserves_position() {
+        let manager = imposter_on(19810).await;
+        for id in ["a", "b", "c"] {
+            manager
+                .add_stub(19810, stub_with_id(id, id), None)
+                .await
+                .unwrap();
+        }
+        manager.delete_stub_by_id(19810, "b").await.unwrap();
+
+        let stubs = manager.get_imposter(19810).unwrap().get_stubs();
+        let ids: Vec<_> = stubs.iter().map(|s| s.id.clone().unwrap()).collect();
+        assert_eq!(ids, vec!["a", "c"], "b removed; a/c keep relative order");
+        assert!(matches!(
+            manager.get_stub_by_id(19810, "b"),
+            Err(ImposterError::StubNotFound(_))
+        ));
+        let _ = manager.delete_imposter(19810).await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_stub_id_conflicts() {
+        let manager = imposter_on(19811).await;
+        manager
+            .add_stub(19811, stub_with_id("x", "first"), None)
+            .await
+            .unwrap();
+        let dup = manager
+            .add_stub(19811, stub_with_id("x", "second"), None)
+            .await;
+        assert!(
+            matches!(dup, Err(ImposterError::StubIdConflict(_))),
+            "duplicate id rejected"
+        );
+        // the original is untouched
+        assert_eq!(
+            manager.get_stub_by_id(19811, "x").unwrap().responses.len(),
+            1
+        );
+        let _ = manager.delete_imposter(19811).await;
+    }
+
+    #[tokio::test]
+    async fn replace_stub_by_id_in_place() {
+        let manager = imposter_on(19812).await;
+        for id in ["a", "b", "c"] {
+            manager
+                .add_stub(19812, stub_with_id(id, id), None)
+                .await
+                .unwrap();
+        }
+        // replace b's content; a PUT body whose id differs must not change the addressable id
+        let mut replacement = stub_with_id("ignored", "B2");
+        replacement.id = Some("ignored".into());
+        manager
+            .replace_stub_by_id(19812, "b", replacement)
+            .await
+            .unwrap();
+
+        let stubs = manager.get_imposter(19812).unwrap().get_stubs();
+        let ids: Vec<_> = stubs.iter().map(|s| s.id.clone().unwrap()).collect();
+        assert_eq!(
+            ids,
+            vec!["a", "b", "c"],
+            "position + addressable id preserved"
+        );
+        // content updated, still addressable by the path id
+        let got = manager.get_stub_by_id(19812, "b").unwrap();
+        assert_eq!(got.id.as_deref(), Some("b"));
+        let body = serde_json::to_value(&got).unwrap();
+        assert_eq!(
+            body["responses"][0]["is"]["body"], "B2",
+            "content actually replaced"
+        );
+
+        assert!(matches!(
+            manager
+                .replace_stub_by_id(19812, "missing", stub_with_id("missing", "z"))
+                .await,
+            Err(ImposterError::StubNotFound(_))
+        ));
+        let _ = manager.delete_imposter(19812).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_id_add_exactly_one_wins() {
+        let manager = imposter_on(19814).await;
+        // 12 tasks race to add the SAME id — the atomic dedup-under-lock must admit exactly one.
+        let mut adds = tokio::task::JoinSet::new();
+        for _ in 0..12 {
+            let m = manager.clone();
+            adds.spawn(async move { m.add_stub(19814, stub_with_id("dup", "v"), None).await });
+        }
+        let mut wins = 0;
+        let mut conflicts = 0;
+        while let Some(r) = adds.join_next().await {
+            match r.unwrap() {
+                Ok(()) => wins += 1,
+                Err(ImposterError::StubIdConflict(_)) => conflicts += 1,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        assert_eq!(wins, 1, "exactly one add succeeds");
+        assert_eq!(conflicts, 11, "the rest are conflicts");
+        assert_eq!(manager.get_imposter(19814).unwrap().get_stubs().len(), 1);
+        let _ = manager.delete_imposter(19814).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_id_ops_stay_consistent() {
+        let manager = imposter_on(19813).await;
+        // add 0..20 concurrently, then delete the even ids concurrently
+        let mut adds = tokio::task::JoinSet::new();
+        for i in 0..20u32 {
+            let m = manager.clone();
+            adds.spawn(async move {
+                m.add_stub(19813, stub_with_id(&i.to_string(), "v"), None)
+                    .await
+            });
+        }
+        while let Some(r) = adds.join_next().await {
+            r.unwrap().unwrap();
+        }
+        let mut dels = tokio::task::JoinSet::new();
+        for i in (0..20u32).step_by(2) {
+            let m = manager.clone();
+            dels.spawn(async move { m.delete_stub_by_id(19813, &i.to_string()).await });
+        }
+        while let Some(r) = dels.join_next().await {
+            r.unwrap().unwrap();
+        }
+
+        let stubs = manager.get_imposter(19813).unwrap().get_stubs();
+        assert_eq!(
+            stubs.len(),
+            10,
+            "20 added, 10 deleted → 10 remain, no lost/dup"
+        );
+        for i in 0..20u32 {
+            let present = manager.get_stub_by_id(19813, &i.to_string()).is_ok();
+            assert_eq!(present, i % 2 == 1, "only odd ids survive ({i})");
+        }
+        let _ = manager.delete_imposter(19813).await;
+    }
+}

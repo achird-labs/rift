@@ -1149,6 +1149,61 @@ impl Imposter {
         stubs.insert(idx, StubState::new(stub));
     }
 
+    /// Add a stub, rejecting it if its `id` duplicates an existing stub (issue #202). The
+    /// duplicate check and the insert happen under one write lock so concurrent adds can't race.
+    /// Returns `false` (not added) on id conflict — the caller holds the id for the error.
+    #[must_use]
+    pub fn add_stub_unique(&self, stub: Stub, index: Option<usize>) -> bool {
+        let mut stubs = self.stubs.write();
+        if let Some(id) = stub.id.as_deref() {
+            if stubs.iter().any(|s| s.stub.id.as_deref() == Some(id)) {
+                return false;
+            }
+        }
+        let idx = index.unwrap_or(stubs.len()).min(stubs.len());
+        stubs.insert(idx, StubState::new(stub));
+        true
+    }
+
+    /// Replace the stub with `id` in place (position preserved). The replacement keeps `id` as its
+    /// addressable id regardless of the supplied stub's `id`. Returns `false` if no such id.
+    #[must_use]
+    pub fn replace_stub_by_id(&self, id: &str, mut stub: Stub) -> bool {
+        let mut stubs = self.stubs.write();
+        match stubs.iter().position(|s| s.stub.id.as_deref() == Some(id)) {
+            Some(i) => {
+                stub.id = Some(id.to_string());
+                // Swap the stub in place (like the index-based replace) to keep the slot's
+                // response-cycling state, rather than replacing the whole StubState.
+                stubs[i].stub = stub;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Delete the stub with `id`. Returns `false` if no such id.
+    #[must_use]
+    pub fn delete_stub_by_id(&self, id: &str) -> bool {
+        let mut stubs = self.stubs.write();
+        match stubs.iter().position(|s| s.stub.id.as_deref() == Some(id)) {
+            Some(i) => {
+                stubs.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Get a clone of the stub with `id`, if present.
+    pub fn get_stub_by_id(&self, id: &str) -> Option<Stub> {
+        self.stubs
+            .read()
+            .iter()
+            .find(|s| s.stub.id.as_deref() == Some(id))
+            .map(|s| s.stub.clone())
+    }
+
     /// Replace a stub at a specific index
     pub fn replace_stub(&self, index: usize, stub: Stub) -> Result<(), String> {
         let mut stubs = self.stubs.write();

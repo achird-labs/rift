@@ -974,6 +974,10 @@ pub enum ImposterError {
     InvalidProtocol(String),
     #[error("Stub index {0} out of bounds")]
     StubIndexOutOfBounds(usize),
+    #[error("No stub with id '{0}'")]
+    StubNotFound(String),
+    #[error("A stub with id '{0}' already exists")]
+    StubIdConflict(String),
     #[error("Failed to persist imposter: {0}")]
     PersistError(String),
 }

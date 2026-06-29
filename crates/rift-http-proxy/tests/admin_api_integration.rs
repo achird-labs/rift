@@ -370,3 +370,125 @@ async fn space_stub_registration_and_inspection_endpoints() {
 
     let _ = manager.delete_imposter(19775).await;
 }
+
+// Issue #202: id-addressed stub operations over the admin HTTP API.
+#[tokio::test]
+async fn stub_by_id_admin_endpoints() {
+    let manager = std::sync::Arc::new(ImposterManager::new());
+    let config = serde_json::from_value(serde_json::json!({
+        "port": 19776, "protocol": "http", "stubs": []
+    }))
+    .unwrap();
+    manager.create_imposter(config).await.expect("create");
+
+    let admin_addr = "127.0.0.1:12596".parse().unwrap();
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
+    tokio::spawn(server.run());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let c = reqwest::Client::new();
+    let admin = "http://127.0.0.1:12596";
+
+    let add = |id: serde_json::Value, body: &str| {
+        let stub = serde_json::json!({
+            "id": id,
+            "predicates": [{ "equals": { "path": "/p" } }],
+            "responses": [{ "is": { "statusCode": 200, "body": body } }]
+        });
+        c.post(format!("{admin}/imposters/19776/stubs"))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({ "stub": stub }).to_string())
+            .send()
+    };
+
+    // add a stub with an explicit id
+    assert_eq!(
+        add(serde_json::json!("s1"), "one").await.unwrap().status(),
+        200
+    );
+
+    // GET by id → 200 with the stub
+    let got: serde_json::Value =
+        serde_json::from_str(&text(&c, format!("{admin}/imposters/19776/stubs/by-id/s1")).await)
+            .unwrap();
+    assert_eq!(got["id"], "s1");
+
+    // duplicate id → 409 Conflict
+    assert_eq!(
+        add(serde_json::json!("s1"), "dup").await.unwrap().status(),
+        409
+    );
+
+    // PUT by id replaces in place
+    let put = c
+        .put(format!("{admin}/imposters/19776/stubs/by-id/s1"))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "id": "s1",
+                "predicates": [{ "equals": { "path": "/p" } }],
+                "responses": [{ "is": { "statusCode": 200, "body": "two" } }]
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 200);
+    // GET back confirms the content actually changed (not just the id preserved)
+    let after: serde_json::Value =
+        serde_json::from_str(&text(&c, format!("{admin}/imposters/19776/stubs/by-id/s1")).await)
+            .unwrap();
+    assert_eq!(
+        after["responses"][0]["is"]["body"], "two",
+        "PUT replaced the content"
+    );
+
+    // unknown id → 404 on GET and DELETE
+    assert_eq!(
+        c.get(format!("{admin}/imposters/19776/stubs/by-id/nope"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    assert_eq!(
+        c.delete(format!("{admin}/imposters/19776/stubs/by-id/nope"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+
+    // DELETE by id → 200, then it's gone
+    assert_eq!(
+        c.delete(format!("{admin}/imposters/19776/stubs/by-id/s1"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        c.get(format!("{admin}/imposters/19776/stubs/by-id/s1"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+
+    // POST without an id generates one so it is by-id addressable
+    assert_eq!(
+        add(serde_json::Value::Null, "auto").await.unwrap().status(),
+        200
+    );
+    let imposter = manager.get_imposter(19776).unwrap();
+    assert!(
+        imposter.get_stubs()[0].id.is_some(),
+        "POST without id should generate one"
+    );
+
+    let _ = manager.delete_imposter(19776).await;
+}

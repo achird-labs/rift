@@ -43,6 +43,9 @@ serde_json = "1.0"
 rift-types = { path = "../rift-types" }
 rift-core = { path = "../rift-core", default-features = false }
 
+# Stable stub id generation for id-addressed stub ops (issue #202)
+uuid = { version = "1.8", features = ["v4"] }
+
 # Logging & Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -91,7 +94,6 @@ reqwest = { version = "0.12", features = ["json"] }
 tokio-test = "0.4"
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["redis"] }
-uuid = { version = "1.8", features = ["v4"] }
 assert-json-diff = "2.0"
 serial_test = "3.0"
 tracing-test = "0.2"

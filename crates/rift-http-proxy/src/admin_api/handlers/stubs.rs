@@ -27,12 +27,18 @@ pub async fn handle_add(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
 
-    let add_req: AddStubRequest = match serde_json::from_slice(&body) {
+    let mut add_req: AddStubRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"))
         }
     };
+
+    // Issue #202: honor a caller-supplied `id`, but generate a stable one if absent so every
+    // stub is addressable via the by-id endpoints.
+    if add_req.stub.id.is_none() {
+        add_req.stub.id = Some(uuid::Uuid::new_v4().to_string());
+    }
 
     // Validate scripts in the stub before adding
     let insert_index = add_req.index.unwrap_or(0);
@@ -222,6 +228,67 @@ pub async fn handle_delete(
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
     match manager.delete_stub(port, index).await {
+        Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
+        Err(e) => e.into(),
+    }
+}
+
+// ── Id-addressed stub operations (issue #202) ───────────────────────────────────
+
+/// GET /imposters/:port/stubs/by-id/:id — fetch the stub addressed by id.
+pub async fn handle_get_by_id(
+    port: u16,
+    id: &str,
+    manager: Arc<ImposterManager>,
+) -> Response<Full<Bytes>> {
+    match manager.get_stub_by_id(port, id) {
+        Ok(stub) => json_response(StatusCode::OK, &stub),
+        Err(e) => e.into(),
+    }
+}
+
+/// PUT /imposters/:port/stubs/by-id/:id — replace the stub addressed by id, in place.
+pub async fn handle_replace_by_id(
+    port: u16,
+    id: &str,
+    req: Request<Incoming>,
+    base_url: &str,
+    manager: Arc<ImposterManager>,
+) -> Response<Full<Bytes>> {
+    let body = match collect_body(req).await {
+        Ok(b) => b,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+    };
+    let stub: Stub = match serde_json::from_slice(&body) {
+        Ok(s) => s,
+        Err(e) => {
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"))
+        }
+    };
+    let validation_result = validate_stub(&stub, 0);
+    if !validation_result.is_valid() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "Script validation failed: {}",
+                validation_result.into_error_message().unwrap_or_default()
+            ),
+        );
+    }
+    match manager.replace_stub_by_id(port, id, stub).await {
+        Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
+        Err(e) => e.into(),
+    }
+}
+
+/// DELETE /imposters/:port/stubs/by-id/:id — delete the stub addressed by id.
+pub async fn handle_delete_by_id(
+    port: u16,
+    id: &str,
+    base_url: &str,
+    manager: Arc<ImposterManager>,
+) -> Response<Full<Bytes>> {
+    match manager.delete_stub_by_id(port, id).await {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
         Err(e) => e.into(),
     }

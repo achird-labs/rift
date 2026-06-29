@@ -252,8 +252,43 @@ impl ImposterManager {
         index: Option<usize>,
     ) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
-        imposter.add_stub(stub, index);
+        // Reject a duplicate `id` atomically (issue #202); stubs without an id are unaffected.
+        let id = stub.id.clone();
+        if !imposter.add_stub_unique(stub, index) {
+            return Err(ImposterError::StubIdConflict(id.unwrap_or_default()));
+        }
         self.persist_imposter_checked(&imposter).await
+    }
+
+    /// Replace the stub addressed by `id` in place (issue #202), preserving its position.
+    pub async fn replace_stub_by_id(
+        &self,
+        port: u16,
+        id: &str,
+        stub: Stub,
+    ) -> Result<(), ImposterError> {
+        let imposter = self.get_imposter(port)?;
+        if !imposter.replace_stub_by_id(id, stub) {
+            return Err(ImposterError::StubNotFound(id.to_string()));
+        }
+        self.persist_imposter_checked(&imposter).await
+    }
+
+    /// Delete the stub addressed by `id` (issue #202).
+    pub async fn delete_stub_by_id(&self, port: u16, id: &str) -> Result<(), ImposterError> {
+        let imposter = self.get_imposter(port)?;
+        if !imposter.delete_stub_by_id(id) {
+            return Err(ImposterError::StubNotFound(id.to_string()));
+        }
+        self.persist_imposter_checked(&imposter).await
+    }
+
+    /// Get the stub addressed by `id` (issue #202).
+    pub fn get_stub_by_id(&self, port: u16, id: &str) -> Result<Stub, ImposterError> {
+        let imposter = self.get_imposter(port)?;
+        imposter
+            .get_stub_by_id(id)
+            .ok_or_else(|| ImposterError::StubNotFound(id.to_string()))
     }
 
     /// Tear down a correlation space (issue #223): remove its scoped stubs, recorded requests,
