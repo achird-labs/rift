@@ -1,0 +1,28 @@
+[package]
+name = "rift-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+description = "Rift C-ABI: a tiny opaque-handle + JSON in/out FFI over the rift-core engine, for embedding Rift in-process (e.g. via the JVM Panama FFM backend)."
+readme = "../../README.md"
+
+[lib]
+# cdylib: the C-ABI shared library the JVM downcalls into.
+# rlib: so the in-crate Rust integration test can link and exercise the same extern fns.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rift-core = { path = "../rift-core", default-features = false, features = ["lua", "javascript", "redis-backend"] }
+tokio = { version = "1.41", features = ["rt-multi-thread"] }
+serde_json = "1.0"
+# Emit a diagnostic before collapsing a typed error into a C sentinel; the embedding host
+# installs the subscriber (no-op if none is set).
+tracing = "0.1"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

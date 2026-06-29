@@ -3448,6 +3448,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rift-ffi"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "rift-core",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rift-http-proxy"
 version = "0.1.0"
 dependencies = [
