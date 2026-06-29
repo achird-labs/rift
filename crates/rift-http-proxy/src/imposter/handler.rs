@@ -6,7 +6,9 @@
 use super::core::Imposter;
 use super::predicates::parse_query_string;
 use super::response::apply_js_or_rhai_decorate;
-use super::types::{DebugMatchResult, DebugRequest, DebugResponse, RecordedRequest, ResponseMode};
+use super::types::{
+    DebugMatchResult, DebugRequest, DebugResponse, ProxyResponse, RecordedRequest, ResponseMode,
+};
 use crate::admin_api::types::{build_response, build_response_with_headers};
 use crate::behaviors::{
     apply_copy_behaviors, apply_lookup_behaviors, header_to_title_case, CsvCache, RequestContext,
@@ -531,6 +533,56 @@ async fn handle_request_inner(
                 build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
             }));
         }
+    }
+
+    // No matching rule. Issue #196: if `defaultForward` is set, transparently forward the
+    // request to the configured upstream before falling back to a static default. A
+    // defaultForward-only imposter runs in ProxyTransparent mode, so the upstream response is
+    // never cached/replayed. (The request still appears in the audit log when `recordRequests`
+    // is enabled — that is the separate, opt-in recording feature.)
+    if let Some(upstream) = &imposter.config.default_forward {
+        let proxy_config = ProxyResponse {
+            to: upstream.clone(),
+            ..Default::default()
+        };
+        return match imposter
+            .handle_proxy_request(
+                &proxy_config,
+                method_str,
+                &uri,
+                &headers_clone,
+                body_string.as_deref(),
+            )
+            .await
+        {
+            Ok((status, response_headers, body, _latency)) => {
+                let mut response = Response::builder().status(status);
+                for (k, v) in &response_headers {
+                    if !crate::util::is_hop_by_hop_header(k) {
+                        response = response.header(k, v);
+                    }
+                }
+                response = response.header("x-rift-imposter", "true");
+                response = response.header("x-rift-default-forward", "true");
+                Ok(response
+                    .body(Full::new(Bytes::from(body)))
+                    .unwrap_or_else(|e| {
+                        warn!("defaultForward response build failed (bad upstream header?): {e}");
+                        build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
+                    }))
+            }
+            Err(e) => {
+                warn!("defaultForward proxy to {} failed: {}", upstream, e);
+                Ok(build_response_with_headers(
+                    StatusCode::BAD_GATEWAY,
+                    [
+                        ("x-rift-imposter", "true"),
+                        ("x-rift-default-forward-error", "true"),
+                    ],
+                    format!(r#"{{"error": "defaultForward upstream error: {e}"}}"#),
+                ))
+            }
+        };
     }
 
     // No matching rule - return default response or 404

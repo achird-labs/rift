@@ -3311,3 +3311,179 @@ mod correlated_space_tests {
         let _ = manager.delete_imposter(19775).await;
     }
 }
+
+// Issue #196: defaultForward — transparently forward unmatched requests upstream.
+#[cfg(test)]
+mod default_forward_tests {
+    use super::*;
+
+    async fn get(port: u16, path: &str) -> reqwest::Response {
+        reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}{path}"))
+            .send()
+            .await
+            .expect("send")
+    }
+
+    /// Spin up an upstream imposter that echoes a body per path, on `port`.
+    async fn upstream(manager: &ImposterManager, port: u16) {
+        let config = serde_json::from_value(serde_json::json!({
+            "port": port, "protocol": "http", "stubs": [
+                { "predicates": [{ "equals": { "path": "/ping" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "PONG" } }] },
+                { "predicates": [{ "equals": { "path": "/api/v1/users" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "USERS" } }] }
+            ]
+        }))
+        .unwrap();
+        manager
+            .create_imposter(config)
+            .await
+            .expect("create upstream");
+    }
+
+    #[tokio::test]
+    async fn default_forward_proxies_unmatched() {
+        let manager = ImposterManager::new();
+        upstream(&manager, 19780).await;
+        let config = serde_json::from_value(serde_json::json!({
+            "port": 19781, "protocol": "http",
+            "defaultForward": "http://127.0.0.1:19780", "stubs": []
+        }))
+        .unwrap();
+        manager.create_imposter(config).await.expect("create");
+
+        let resp = get(19781, "/ping").await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("x-rift-default-forward")
+                .map(|v| v.to_str().unwrap()),
+            Some("true")
+        );
+        assert_eq!(
+            resp.text().await.unwrap(),
+            "PONG",
+            "unmatched request forwarded upstream"
+        );
+
+        let _ = manager.delete_imposter(19780).await;
+        let _ = manager.delete_imposter(19781).await;
+    }
+
+    #[tokio::test]
+    async fn default_forward_preserves_path() {
+        let manager = ImposterManager::new();
+        upstream(&manager, 19782).await;
+        let config = serde_json::from_value(serde_json::json!({
+            "port": 19783, "protocol": "http",
+            "defaultForward": "http://127.0.0.1:19782", "stubs": []
+        }))
+        .unwrap();
+        manager.create_imposter(config).await.expect("create");
+
+        // /api/v1/users on the imposter is forwarded to upstream + /api/v1/users
+        assert_eq!(
+            get(19783, "/api/v1/users").await.text().await.unwrap(),
+            "USERS"
+        );
+
+        let _ = manager.delete_imposter(19782).await;
+        let _ = manager.delete_imposter(19783).await;
+    }
+
+    #[tokio::test]
+    async fn matching_stub_takes_precedence_over_default_forward() {
+        let manager = ImposterManager::new();
+        upstream(&manager, 19784).await;
+        let config = serde_json::from_value(serde_json::json!({
+            "port": 19785, "protocol": "http",
+            "defaultForward": "http://127.0.0.1:19784",
+            "stubs": [
+                { "predicates": [{ "equals": { "path": "/local" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "LOCAL" } }] }
+            ]
+        }))
+        .unwrap();
+        manager.create_imposter(config).await.expect("create");
+
+        // a matched stub responds locally (not proxied)
+        let local = get(19785, "/local").await;
+        assert_eq!(local.headers().get("x-rift-default-forward"), None);
+        assert_eq!(local.text().await.unwrap(), "LOCAL");
+        // an unmatched path still forwards upstream
+        assert_eq!(get(19785, "/ping").await.text().await.unwrap(), "PONG");
+
+        let _ = manager.delete_imposter(19784).await;
+        let _ = manager.delete_imposter(19785).await;
+    }
+
+    #[tokio::test]
+    async fn default_forward_upstream_error_returns_502() {
+        let manager = ImposterManager::new();
+        // defaultForward points at a port with no listener → upstream leg fails
+        let config = serde_json::from_value(serde_json::json!({
+            "port": 19787, "protocol": "http",
+            "defaultForward": "http://127.0.0.1:19999", "stubs": []
+        }))
+        .unwrap();
+        manager.create_imposter(config).await.expect("create");
+
+        let resp = get(19787, "/anything").await;
+        assert_eq!(resp.status(), 502);
+        assert_eq!(
+            resp.headers()
+                .get("x-rift-default-forward-error")
+                .map(|v| v.to_str().unwrap()),
+            Some("true")
+        );
+
+        let _ = manager.delete_imposter(19787).await;
+    }
+
+    #[tokio::test]
+    async fn default_forward_request_is_audited_when_record_requests_enabled() {
+        // The forwarded request still appears in the recordRequests audit log — that feature is
+        // independent of the proxy replay cache the transparent forward bypasses.
+        let manager = ImposterManager::new();
+        upstream(&manager, 19788).await;
+        let config = serde_json::from_value(serde_json::json!({
+            "port": 19789, "protocol": "http", "recordRequests": true,
+            "defaultForward": "http://127.0.0.1:19788", "stubs": []
+        }))
+        .unwrap();
+        manager.create_imposter(config).await.expect("create");
+
+        assert_eq!(get(19789, "/ping").await.text().await.unwrap(), "PONG");
+
+        let recorded = manager.get_imposter(19789).unwrap().get_recorded_requests();
+        assert_eq!(recorded.len(), 1, "forwarded request is audited");
+        assert_eq!(recorded[0].path, "/ping");
+
+        let _ = manager.delete_imposter(19788).await;
+        let _ = manager.delete_imposter(19789).await;
+    }
+
+    #[tokio::test]
+    async fn without_default_forward_unmatched_is_unchanged() {
+        let manager = ImposterManager::new();
+        let config = serde_json::from_value(serde_json::json!({
+            "port": 19786, "protocol": "http", "stubs": []
+        }))
+        .unwrap();
+        manager.create_imposter(config).await.expect("create");
+
+        // existing no-match behaviour: 200 + x-rift-no-match, not a proxied body
+        let resp = get(19786, "/anything").await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("x-rift-no-match")
+                .map(|v| v.to_str().unwrap()),
+            Some("true")
+        );
+        assert!(resp.headers().get("x-rift-default-forward").is_none());
+
+        let _ = manager.delete_imposter(19786).await;
+    }
+}

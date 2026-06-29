@@ -665,7 +665,7 @@ pub struct PathRewrite {
     pub to: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyResponse {
     pub to: String,
@@ -716,6 +716,11 @@ pub struct ImposterConfig {
     pub stubs: Vec<Stub>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_response: Option<IsResponse>,
+    /// Fallback upstream for unmatched requests (issue #196): when set and no stub matches,
+    /// the request is transparently forwarded to `defaultForward + path` (no recording).
+    /// Takes precedence over `defaultResponse`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_forward: Option<String>,
     /// Allow CORS headers (Mountebank compatible)
     #[serde(
         default,
