@@ -428,13 +428,13 @@ Feature: Alternative Mountebank Format Compatibility
     Then both services should return same error type
 
   # ==========================================================================
-  # Mimeo Solo Compatibility: rules alias, delayRange, recordedFrom
-  # These formats are emitted by the Mimeo Solo recorder and are not part of
+  # Legacy recorder compatibility: rules alias, delayRange, recordedFrom
+  # These formats are emitted by a legacy recorder and are not part of
   # Mountebank's own format — tests run against Rift only.
   # ==========================================================================
 
   @rift-only
-  Scenario: rules key is accepted as alias for predicates (Mimeo Solo format)
+  Scenario: rules key is accepted as alias for predicates (legacy recorder format)
     Given an imposter on port 4545 on Rift with:
       """
       {
@@ -470,7 +470,7 @@ Feature: Alternative Mountebank Format Compatibility
     Then Rift should return status 404
 
   @rift-only
-  Scenario: delayRange array is converted to wait behavior (Mimeo Solo format)
+  Scenario: delayRange array is converted to wait behavior (legacy recorder format)
     Given an imposter on port 4545 on Rift with:
       """
       {
