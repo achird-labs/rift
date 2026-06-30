@@ -23,6 +23,9 @@ use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
 use std::time::Duration;
 
+#[path = "verify/dynamic.rs"]
+mod dynamic;
+
 // ANSI color codes
 const GREEN: &str = "\x1b[32m";
 const RED: &str = "\x1b[31m";
@@ -88,6 +91,12 @@ struct Args {
     /// declares `flowIdSource: "header:<Name>"`, every request carries `<Name>: <space>`.
     #[arg(long, default_value = "rift-verify")]
     space: String,
+
+    /// Opt-in: assert dynamic behaviors instead of skipping them (issue #251). Stands up an
+    /// embedded mock upstream for `proxy`, runs any `_verify` sequence against a fresh imposter,
+    /// and asserts deterministic `_rift.fault` outcomes. Off by default (safe-skip preserved).
+    #[arg(long)]
+    verify_dynamic: bool,
 }
 
 // ============================================================================
@@ -475,6 +484,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!();
     }
 
+    // Opt-in dynamic-behavior assertion (issue #251): proxy / `_verify` sequences / faults.
+    if args.verify_dynamic {
+        run_dynamic_verification(&client, &args.admin_url, &imposters, &mut summary).await;
+    }
+
     // Print summary
     print_summary(&summary, args.show_curl);
 
@@ -484,6 +498,93 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Run the opt-in dynamic-behavior assertions (issue #251) for every imposter and fold the
+/// resulting checks into the summary. Operates on the raw `GET /imposters/:port` JSON so all
+/// engine-preserved fields (`_verify`, `proxy`, `_rift.fault`) are visible.
+async fn run_dynamic_verification(
+    client: &Client,
+    admin_url: &str,
+    imposters: &[ImposterDetails],
+    summary: &mut VerificationSummary,
+) {
+    let verifier = dynamic::DynamicVerifier { client, admin_url };
+    println!();
+    println!("{BOLD}{CYAN}Dynamic assertions (--verify-dynamic){RESET}");
+
+    for imposter in imposters {
+        // The imposter list was already fetched successfully, so a per-imposter GET/parse failure
+        // here is anomalous — its dynamic checks could not run. Count it as a FAILURE (visible in
+        // the exit code) rather than a silent skip that still exits 0.
+        let fetch = client
+            .get(format!("{admin_url}/imposters/{}", imposter.port))
+            .send()
+            .await
+            .map_err(|e| format!("fetch: {e}"));
+        let raw: serde_json::Value = match fetch {
+            Ok(resp) => match resp.json().await {
+                Ok(value) => value,
+                Err(e) => {
+                    record_dynamic_fetch_failure(summary, imposter, format!("parse: {e}"));
+                    continue;
+                }
+            },
+            Err(e) => {
+                record_dynamic_fetch_failure(summary, imposter, e);
+                continue;
+            }
+        };
+
+        for check in verifier.verify_imposter(&raw).await {
+            if check.skipped {
+                summary.skipped += 1;
+                println!("   {YELLOW}SKIP{RESET} {} — {}", check.label, check.detail);
+            } else if check.passed {
+                summary.passed += 1;
+                println!("   {GREEN}PASS{RESET} {}", check.label);
+            } else {
+                summary.failed += 1;
+                println!("   {RED}FAIL{RESET} {} — {}", check.label, check.detail);
+                summary.failures.push(FailureDetails {
+                    imposter_port: imposter.port,
+                    imposter_name: imposter.name.clone(),
+                    stub_index: 0,
+                    stub_id: None,
+                    test_description: check.label,
+                    expected: "dynamic assertion".to_string(),
+                    actual: check.detail,
+                    curl_command: None,
+                    failure_reasons: vec![],
+                });
+            }
+        }
+    }
+}
+
+/// Record a per-imposter dynamic-fetch failure as a verification failure (issue #251): a verifier
+/// that can't even read an imposter must not report success for it.
+fn record_dynamic_fetch_failure(
+    summary: &mut VerificationSummary,
+    imposter: &ImposterDetails,
+    detail: String,
+) {
+    summary.failed += 1;
+    println!(
+        "   {RED}FAIL{RESET} imposter {} dynamic fetch — {detail}",
+        imposter.port
+    );
+    summary.failures.push(FailureDetails {
+        imposter_port: imposter.port,
+        imposter_name: imposter.name.clone(),
+        stub_index: 0,
+        stub_id: None,
+        test_description: "dynamic fetch".to_string(),
+        expected: "imposter detail fetched for dynamic assertion".to_string(),
+        actual: detail,
+        curl_command: None,
+        failure_reasons: vec![],
+    });
 }
 
 // ============================================================================

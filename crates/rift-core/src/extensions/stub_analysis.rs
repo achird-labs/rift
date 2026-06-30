@@ -421,6 +421,7 @@ mod tests {
             new_scenario_state: None,
             space: None,
             recorded_from: None,
+            verify: None,
         }
     }
 
@@ -435,6 +436,7 @@ mod tests {
             new_scenario_state: None,
             space: None,
             recorded_from: None,
+            verify: None,
         }
     }
 

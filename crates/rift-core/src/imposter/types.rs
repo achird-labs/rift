@@ -190,6 +190,11 @@ pub struct Stub {
     /// Upstream URL recorded from during proxy recording (Mountebank compatible)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recorded_from: Option<String>,
+    /// Engine-ignored verification annotation (issue #251). Preserved verbatim across the load
+    /// round-trip so `rift-verify --verify-dynamic` can read the declared expectation sequence
+    /// back from `GET /imposters`; the engine never acts on it.
+    #[serde(rename = "_verify", skip_serializing_if = "Option::is_none")]
+    pub verify: Option<serde_json::Value>,
 }
 
 /// Raw deserialization type for Stub — handles alternative field names and format conversions:
@@ -221,6 +226,9 @@ struct StubRaw {
     /// Stub-level latency range: `[{ "min": "50", "max": "100" }]`
     #[serde(default)]
     delay_range: Vec<DelayRange>,
+    /// Engine-ignored verification annotation, preserved verbatim (issue #251).
+    #[serde(default, rename = "_verify")]
+    verify: Option<serde_json::Value>,
 }
 
 /// A `delayRange` entry for stub-level latency configuration.
@@ -276,6 +284,7 @@ impl From<StubRaw> for Stub {
             predicates,
             responses,
             recorded_from: raw.recorded_from,
+            verify: raw.verify,
         }
     }
 }
@@ -1039,6 +1048,24 @@ pub enum ImposterError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // Issue #251: an engine-ignored `_verify` annotation on a stub must survive the load
+    // round-trip so rift-verify can read it back from GET /imposters.
+    #[test]
+    fn stub_preserves_verify_passthrough() {
+        let spec = json!({ "sequence": [
+            { "request": { "method": "GET", "path": "/r" }, "expect": { "status": 503 } }
+        ]});
+        let stub: Stub = serde_json::from_value(json!({
+            "predicates": [{ "equals": { "path": "/r" } }],
+            "responses": [{ "is": { "statusCode": 503 } }],
+            "_verify": spec.clone(),
+        }))
+        .unwrap();
+        assert_eq!(stub.verify.as_ref(), Some(&spec));
+        let out = serde_json::to_value(&stub).unwrap();
+        assert_eq!(out.get("_verify"), Some(&spec));
+    }
 
     // Issue #238: multi-value headers accept "k":"v" and "k":["v1","v2"]; serialize back as
     // a string for one value and an array for many (via IsResponse, which uses the helper).

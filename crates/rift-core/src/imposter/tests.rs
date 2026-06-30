@@ -61,6 +61,7 @@ fn test_predicate_matching() {
         new_scenario_state: None,
         space: None,
         recorded_from: None,
+        verify: None,
     };
 
     let empty_headers = HashMap::new();
@@ -153,6 +154,7 @@ fn test_execute_stub() {
         new_scenario_state: None,
         space: None,
         recorded_from: None,
+        verify: None,
     };
 
     let result = imposter.execute_stub_with_rift(&StubState::new(stub));
@@ -2442,6 +2444,7 @@ async fn test_cors_headers_on_stub_response() {
         new_scenario_state: None,
         space: None,
         recorded_from: None,
+        verify: None,
     };
     let config = ImposterConfig {
         port: None,

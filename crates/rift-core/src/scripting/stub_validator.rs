@@ -275,6 +275,7 @@ mod tests {
             new_scenario_state: None,
             space: None,
             recorded_from: None,
+            verify: None,
         }
     }
 
@@ -290,6 +291,7 @@ mod tests {
             new_scenario_state: None,
             space: None,
             recorded_from: None,
+            verify: None,
         }
     }
 
@@ -378,6 +380,7 @@ mod tests {
                 new_scenario_state: None,
                 space: None,
                 recorded_from: None,
+                verify: None,
             },
             Stub {
                 id: None, // No id, will use stub[1]
@@ -397,6 +400,7 @@ mod tests {
                 new_scenario_state: None,
                 space: None,
                 recorded_from: None,
+                verify: None,
             },
         ];
         let result = validate_stubs(&stubs);
