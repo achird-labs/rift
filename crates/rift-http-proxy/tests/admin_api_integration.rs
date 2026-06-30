@@ -888,3 +888,205 @@ mod reload {
         let _ = manager;
     }
 }
+
+// Issue #212: reach imposters through the single admin port via `/__rift/:port/<path>`.
+mod gateway {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Start an imposter (with the given stubs) + an AdminApiServer; returns (manager, admin_base).
+    async fn setup(
+        imposter_port: u16,
+        admin_port: u16,
+        stubs: serde_json::Value,
+    ) -> (Arc<ImposterManager>, String) {
+        let manager = Arc::new(ImposterManager::new());
+        manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({
+                    "port": imposter_port, "protocol": "http", "stubs": stubs
+                }))
+                .unwrap(),
+            )
+            .await
+            .expect("create imposter");
+        let server = rift_http_proxy::admin_api::AdminApiServer::new(
+            format!("127.0.0.1:{admin_port}").parse().unwrap(),
+            manager.clone(),
+            None,
+        );
+        tokio::spawn(server.run());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        (manager, format!("http://127.0.0.1:{admin_port}"))
+    }
+
+    #[tokio::test]
+    async fn gateway_routes_to_imposter() {
+        let (manager, admin) = setup(
+            19850,
+            12750,
+            serde_json::json!([{
+                "predicates": [{"equals": {"path": "/api/data"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "routed"}}]
+            }]),
+        )
+        .await;
+
+        // Hit the imposter through the admin port — the imposter must see path /api/data.
+        let resp = reqwest::get(format!("{admin}/__rift/19850/api/data"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.text().await.unwrap(), "routed");
+        let _ = manager.delete_imposter(19850).await;
+    }
+
+    #[tokio::test]
+    async fn gateway_preserves_method_and_query() {
+        let (manager, admin) = setup(
+            19851,
+            12751,
+            serde_json::json!([{
+                "predicates": [{"equals": {"method": "POST", "path": "/submit", "query": {"q": "1"}}}],
+                "responses": [{"is": {"statusCode": 201, "body": "posted"}}]
+            }]),
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{admin}/__rift/19851/submit?q=1"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201, "method + query must reach the imposter");
+        assert_eq!(resp.text().await.unwrap(), "posted");
+        let _ = manager.delete_imposter(19851).await;
+    }
+
+    #[tokio::test]
+    async fn gateway_unknown_port_404() {
+        let (manager, admin) = setup(
+            19852,
+            12752,
+            serde_json::json!([{"responses": [{"is": {"statusCode": 200, "body": "x"}}]}]),
+        )
+        .await;
+        let resp = reqwest::get(format!("{admin}/__rift/59999/anything"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "no imposter on that port → 404");
+        let _ = manager.delete_imposter(19852).await;
+    }
+
+    #[tokio::test]
+    async fn gateway_forwards_post_body() {
+        let (manager, admin) = setup(
+            19854,
+            12754,
+            serde_json::json!([{
+                "predicates": [{"equals": {"method": "POST", "path": "/echo", "body": "hello-body"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "got-body"}}]
+            }]),
+        )
+        .await;
+        let resp = reqwest::Client::new()
+            .post(format!("{admin}/__rift/19854/echo"))
+            .body("hello-body")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.text().await.unwrap(),
+            "got-body",
+            "the POST body must reach the imposter through the gateway"
+        );
+        let _ = manager.delete_imposter(19854).await;
+    }
+
+    #[tokio::test]
+    async fn gateway_no_subpath_routes_to_root() {
+        let (manager, admin) = setup(
+            19855,
+            12755,
+            serde_json::json!([{
+                "predicates": [{"equals": {"path": "/"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "root"}}]
+            }]),
+        )
+        .await;
+        let resp = reqwest::get(format!("{admin}/__rift/19855")).await.unwrap();
+        assert_eq!(
+            resp.text().await.unwrap(),
+            "root",
+            "no sub-path → imposter root"
+        );
+        let _ = manager.delete_imposter(19855).await;
+    }
+
+    #[tokio::test]
+    async fn gateway_non_numeric_port_400() {
+        let (manager, admin) = setup(
+            19856,
+            12756,
+            serde_json::json!([{"responses": [{"is": {"statusCode": 200, "body": "x"}}]}]),
+        )
+        .await;
+        let resp = reqwest::get(format!("{admin}/__rift/notaport/x"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            400,
+            "non-numeric port is a malformed gateway target → 400, distinct from 404"
+        );
+        let _ = manager.delete_imposter(19856).await;
+    }
+
+    #[tokio::test]
+    async fn gateway_not_gated_by_admin_apikey() {
+        // The gateway is data-plane imposter traffic: it must work WITHOUT the admin key, even
+        // when --apikey is set (otherwise the app-under-test would need the admin key).
+        let manager = Arc::new(ImposterManager::new());
+        manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({
+                    "port": 19857, "protocol": "http",
+                    "stubs": [{"predicates": [{"equals": {"path": "/x"}}],
+                              "responses": [{"is": {"statusCode": 200, "body": "open"}}]}]
+                }))
+                .unwrap(),
+            )
+            .await
+            .expect("create imposter");
+        let server = rift_http_proxy::admin_api::AdminApiServer::new(
+            "127.0.0.1:12757".parse().unwrap(),
+            manager.clone(),
+            Some("secret".to_string()),
+        );
+        tokio::spawn(server.run());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Admin route without the key → 401 (control plane stays protected).
+        let admin_resp = reqwest::get("http://127.0.0.1:12757/imposters")
+            .await
+            .unwrap();
+        assert_eq!(
+            admin_resp.status(),
+            401,
+            "admin route still requires the apikey"
+        );
+
+        // Gateway without the key → serves (data plane is not gated).
+        let gw = reqwest::get("http://127.0.0.1:12757/__rift/19857/x")
+            .await
+            .unwrap();
+        assert_eq!(gw.status(), 200);
+        assert_eq!(
+            gw.text().await.unwrap(),
+            "open",
+            "gateway works without the admin key"
+        );
+        let _ = manager.delete_imposter(19857).await;
+    }
+}

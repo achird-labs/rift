@@ -43,6 +43,9 @@ pub use types::{
 #[allow(unused_imports)]
 pub use core::Imposter;
 
+// Re-export the imposter request handler (single-port gateway dispatch, issue #212)
+pub use handler::handle_imposter_request;
+
 // Re-export manager
 pub use manager::ImposterManager;
 
