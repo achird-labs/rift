@@ -789,9 +789,10 @@ pub struct RiftFlowStateConfig {
     /// Redis configuration (required when backend is "redis")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redis: Option<RiftRedisConfig>,
-    /// Mountebank state mapping configuration
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mountebank_state_mapping: Option<MountebankStateMapping>,
+    /// Source for the correlation `flow_id`: `"imposter_port"` (default) or `"header:<Name>"`.
+    /// Flattened directly under `flowState` (issue #266). Absent ⇒ `"imposter_port"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_id_source: Option<String>,
 }
 
 fn default_flow_backend() -> String {
@@ -808,7 +809,7 @@ impl Default for RiftFlowStateConfig {
             backend: default_flow_backend(),
             ttl_seconds: default_flow_ttl(),
             redis: None,
-            mountebank_state_mapping: None,
+            flow_id_source: None,
         }
     }
 }
@@ -833,26 +834,6 @@ fn default_redis_pool() -> usize {
 
 fn default_redis_prefix() -> String {
     "rift:".to_string()
-}
-
-/// Configuration for bridging Mountebank state to flow store
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MountebankStateMapping {
-    /// Enable state mapping
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Source for flow_id: "imposter_port" or "header:X-Header-Name"
-    #[serde(default = "default_flow_id_source")]
-    pub flow_id_source: String,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_flow_id_source() -> String {
-    "imposter_port".to_string()
 }
 
 /// Metrics configuration for Rift extensions
@@ -1048,6 +1029,32 @@ pub enum ImposterError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // Issue #266: `flowIdSource` is flat under `flowState` and survives a serialize round-trip.
+    #[test]
+    fn flat_flow_id_source_round_trips() {
+        let fs: RiftFlowStateConfig = serde_json::from_value(json!({
+            "backend": "inmemory",
+            "flowIdSource": "header:X-Mock-Space"
+        }))
+        .unwrap();
+        assert_eq!(fs.flow_id_source.as_deref(), Some("header:X-Mock-Space"));
+        let out = serde_json::to_value(&fs).unwrap();
+        assert_eq!(
+            out.get("flowIdSource").and_then(|v| v.as_str()),
+            Some("header:X-Mock-Space")
+        );
+    }
+
+    // Issue #266: an absent `flowIdSource` deserializes to None and is omitted on serialize.
+    #[test]
+    fn absent_flow_id_source_is_none_and_omitted() {
+        let fs: RiftFlowStateConfig =
+            serde_json::from_value(json!({ "backend": "inmemory" })).unwrap();
+        assert_eq!(fs.flow_id_source, None);
+        let out = serde_json::to_value(&fs).unwrap();
+        assert!(out.get("flowIdSource").is_none());
+    }
 
     // Issue #251: an engine-ignored `_verify` annotation on a stub must survive the load
     // round-trip so rift-verify can read it back from GET /imposters.

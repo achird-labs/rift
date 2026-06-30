@@ -149,7 +149,6 @@ impl ImposterDetails {
         self.rift
             .as_ref()?
             .get("flowState")?
-            .get("mountebankStateMapping")?
             .get("flowIdSource")?
             .as_str()
             .and_then(flow_id_header_name)
@@ -2604,16 +2603,17 @@ mod verify_tests {
 
     #[test]
     fn imposter_flow_header_navigates_flow_state() {
+        // Flat shape (issue #266) — what `GET /imposters` emits.
         let with_header: ImposterDetails = serde_json::from_value(json!({
             "port": 4500, "protocol": "http", "stubs": [],
-            "_rift": { "flowState": { "mountebankStateMapping": { "flowIdSource": "header:X-Mock-Space" } } }
+            "_rift": { "flowState": { "flowIdSource": "header:X-Mock-Space" } }
         }))
         .unwrap();
         assert_eq!(with_header.flow_header().as_deref(), Some("X-Mock-Space"));
 
         let port_source: ImposterDetails = serde_json::from_value(json!({
             "port": 4500, "protocol": "http", "stubs": [],
-            "_rift": { "flowState": { "mountebankStateMapping": { "flowIdSource": "imposter_port" } } }
+            "_rift": { "flowState": { "flowIdSource": "imposter_port" } }
         }))
         .unwrap();
         assert_eq!(port_source.flow_header(), None);

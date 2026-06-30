@@ -2631,7 +2631,7 @@ mod scenario_fsm_tests {
     fn order_fsm(port: u16, flow_id_source: Option<&str>) -> serde_json::Value {
         let mut flow_state = serde_json::json!({ "backend": "inmemory", "ttlSeconds": 300 });
         if let Some(src) = flow_id_source {
-            flow_state["mountebankStateMapping"] = serde_json::json!({ "flowIdSource": src });
+            flow_state["flowIdSource"] = serde_json::json!(src);
         }
         serde_json::json!({
             "port": port, "protocol": "http",
@@ -2754,7 +2754,7 @@ mod scenario_fsm_tests {
     fn imposter_with_source(port: u16, src: Option<&str>) -> Imposter {
         let mut flow_state = serde_json::json!({ "backend": "inmemory", "ttlSeconds": 300 });
         if let Some(s) = src {
-            flow_state["mountebankStateMapping"] = serde_json::json!({ "flowIdSource": s });
+            flow_state["flowIdSource"] = serde_json::json!(s);
         }
         let cfg = serde_json::from_value(serde_json::json!({
             "port": port, "protocol": "http",
@@ -2848,7 +2848,7 @@ mod correlated_space_tests {
         serde_json::json!({
             "port": port, "protocol": "http", "recordRequests": true,
             "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300,
-                "mountebankStateMapping": { "flowIdSource": "header:X-Mock-Space" } } },
+                "flowIdSource": "header:X-Mock-Space" } },
             "stubs": stubs
         })
     }
