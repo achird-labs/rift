@@ -1121,6 +1121,79 @@ mod reload {
     }
 }
 
+// Issue #195: {{DAYS+N}}/{{NOW}} date templates are expanded in served stub bodies.
+mod date_templates {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn served_is_body_resolves_date_template() {
+        let manager = Arc::new(ImposterManager::new());
+        manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({
+                    "port": 19860, "protocol": "http",
+                    "stubs": [{"responses": [{"is": {"statusCode": 200,
+                        "body": "{\"exp\":\"{{DAYS+5}}\",\"now\":\"{{NOW}}\"}"}}]}]
+                }))
+                .unwrap(),
+            )
+            .await
+            .expect("create imposter");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let body = reqwest::get("http://127.0.0.1:19860/x")
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            !body.contains("{{DAYS+5}}") && !body.contains("{{NOW}}"),
+            "date templates must be expanded in the served body, got {body}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let exp = parsed["exp"].as_str().unwrap();
+        let expected = (chrono::Utc::now() + chrono::Duration::days(5)).date_naive();
+        let got = chrono::DateTime::parse_from_rfc3339(exp)
+            .unwrap()
+            .date_naive();
+        assert_eq!(got, expected, "{{DAYS+5}} resolved to the wrong date");
+
+        let _ = manager.delete_imposter(19860).await;
+    }
+
+    #[tokio::test]
+    async fn served_default_response_resolves_date_template() {
+        let manager = Arc::new(ImposterManager::new());
+        manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({
+                    "port": 19861, "protocol": "http",
+                    "defaultResponse": {"statusCode": 200, "body": "{\"d\":\"{{DAYS+3}}\"}"},
+                    "stubs": []
+                }))
+                .unwrap(),
+            )
+            .await
+            .expect("create imposter");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let body = reqwest::get("http://127.0.0.1:19861/nomatch")
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            !body.contains("{{DAYS+3}}"),
+            "defaultResponse body must expand date templates too, got {body}"
+        );
+        let _ = manager.delete_imposter(19861).await;
+    }
+}
+
 // Issue #212: reach imposters through the single admin port via `/__rift/:port/<path>`.
 mod gateway {
     use super::*;

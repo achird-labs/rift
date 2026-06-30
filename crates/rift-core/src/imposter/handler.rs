@@ -566,7 +566,8 @@ async fn handle_request_inner(
                         }
                     }
                 }
-                ResponseMode::Text => Bytes::from(body),
+                // Expand serve-time date templates ({{DAYS+N}}/{{MONTHS+N}}/{{NOW}}, issue #195).
+                ResponseMode::Text => Bytes::from(crate::extensions::apply_date_templates(&body)),
             };
 
             return Ok(response.body(Full::new(body_bytes)).unwrap_or_else(|_| {
@@ -655,7 +656,7 @@ async fn handle_request_inner(
                     }
                 }
             }
-            ResponseMode::Text => Bytes::from(body_str),
+            ResponseMode::Text => Bytes::from(crate::extensions::apply_date_templates(&body_str)),
         };
 
         let mut response = Response::builder().status(default.status_code);
