@@ -144,6 +144,45 @@ pub fn has_template_variables(s: &str) -> bool {
     get_template_regex().is_match(s)
 }
 
+static DAYS_REGEX: OnceLock<Regex> = OnceLock::new();
+static MONTHS_REGEX: OnceLock<Regex> = OnceLock::new();
+static NOW_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// Expand legacy-recorder relative-date templates in a response body (issue #195):
+/// `{{DAYS+N}}` / `{{MONTHS+N}}` → an RFC3339 timestamp `N` days/months from now, and `{{NOW}}` →
+/// the current UTC timestamp. A token whose offset overflows the representable date range is left
+/// unchanged rather than panicking. These are a legacy extension, not standard Mountebank/WireMock.
+pub fn apply_date_templates(body: &str) -> String {
+    let now = chrono::Utc::now();
+    let days_re = DAYS_REGEX.get_or_init(|| Regex::new(r"\{\{DAYS\+(\d+)\}\}").unwrap());
+    let months_re = MONTHS_REGEX.get_or_init(|| Regex::new(r"\{\{MONTHS\+(\d+)\}\}").unwrap());
+    let now_re = NOW_REGEX.get_or_init(|| Regex::new(r"\{\{NOW\}\}").unwrap());
+
+    let with_days = days_re.replace_all(body, |caps: &regex::Captures| {
+        match caps[1].parse::<i64>() {
+            // `Duration::days` panics on overflow, so go through the fallible `try_days` and let an
+            // out-of-range offset flow into the leave-token-unchanged fallback below.
+            Ok(n) => chrono::Duration::try_days(n)
+                .and_then(|d| now.checked_add_signed(d))
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_else(|| caps[0].to_string()),
+            Err(_) => caps[0].to_string(),
+        }
+    });
+    let with_months = months_re.replace_all(&with_days, |caps: &regex::Captures| {
+        match caps[1].parse::<u32>() {
+            Ok(n) => now
+                .checked_add_months(chrono::Months::new(n))
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_else(|| caps[0].to_string()),
+            Err(_) => caps[0].to_string(),
+        }
+    });
+    now_re
+        .replace_all(&with_months, |_: &regex::Captures| now.to_rfc3339())
+        .into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +326,78 @@ mod tests {
         ));
         assert!(!has_template_variables("no variables here"));
         assert!(!has_template_variables("${invalid}"));
+    }
+
+    // Issue #195: relative-date template expansion.
+    use chrono::{DateTime, Months, Utc};
+
+    fn parse_rfc3339(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s)
+            .expect("date template must produce valid RFC3339")
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn date_tpl_days_zero_is_today() {
+        let out = apply_date_templates("{{DAYS+0}}");
+        assert_eq!(parse_rfc3339(&out).date_naive(), Utc::now().date_naive());
+    }
+
+    #[test]
+    fn date_tpl_days_plus_offsets_by_days() {
+        let out = apply_date_templates("{{DAYS+5}}");
+        let expected = (Utc::now() + chrono::Duration::days(5)).date_naive();
+        assert_eq!(parse_rfc3339(&out).date_naive(), expected);
+    }
+
+    #[test]
+    fn date_tpl_months_plus_offsets_by_months() {
+        let out = apply_date_templates("{{MONTHS+1}}");
+        let expected = (Utc::now() + Months::new(1)).date_naive();
+        assert_eq!(parse_rfc3339(&out).date_naive(), expected);
+    }
+
+    #[test]
+    fn date_tpl_now_is_parseable() {
+        let out = apply_date_templates("{{NOW}}");
+        // Within a second of now.
+        let delta = (Utc::now() - parse_rfc3339(&out)).num_seconds().abs();
+        assert!(delta <= 2, "{{NOW}} should be ~now, delta={delta}s");
+    }
+
+    #[test]
+    fn date_tpl_no_tokens_unchanged() {
+        let body = r#"{"plain":"value","n":42}"#;
+        assert_eq!(apply_date_templates(body), body);
+    }
+
+    #[test]
+    fn date_tpl_mixed_resolves_dates_leaves_request_vars() {
+        let body = r#"{"exp":"{{DAYS+5}}","who":"${request.path}"}"#;
+        let out = apply_date_templates(body);
+        assert!(!out.contains("{{DAYS+5}}"), "date token must be expanded");
+        assert!(
+            out.contains("${request.path}"),
+            "only date tokens are expanded; other content (e.g. ${{...}}) is left untouched"
+        );
+    }
+
+    #[test]
+    fn date_tpl_multiple_tokens_in_one_body() {
+        let out = apply_date_templates(r#"{"a":"{{DAYS+1}}","b":"{{MONTHS+2}}","c":"{{NOW}}"}"#);
+        assert!(!out.contains("{{"), "all date tokens expanded: {out}");
+    }
+
+    #[test]
+    fn date_tpl_days_overflow_leaves_token_unchanged() {
+        // Parses as i64 but overflows the date range — must not panic (issue #195 no-panic contract).
+        let body = "{{DAYS+9999999999999}}";
+        assert_eq!(apply_date_templates(body), body);
+    }
+
+    #[test]
+    fn date_tpl_months_overflow_leaves_token_unchanged() {
+        let body = "{{MONTHS+4000000000}}";
+        assert_eq!(apply_date_templates(body), body);
     }
 }
