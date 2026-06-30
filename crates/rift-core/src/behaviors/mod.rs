@@ -35,7 +35,9 @@ pub use lookup::{
     apply_lookup_behaviors, CsvCache, CsvData, CsvDataSource, DataSource, LookupBehavior, LookupKey,
 };
 pub use request::{header_to_title_case, RequestContext};
-pub use transform::{apply_decorate, apply_shell_transform};
+pub use transform::{
+    apply_decorate, apply_shell_transform, is_js_config_decorate, rewrite_js_config_to_rhai,
+};
 pub use types::ResponseBehaviors;
 #[allow(unused_imports)]
 pub use wait::WaitBehavior;

@@ -47,6 +47,52 @@ pub fn apply_shell_transform(
     }
 }
 
+/// Detect Mountebank's JavaScript `config =>` decorate calling convention (issue #191): an arrow or
+/// `function(config)` whose body reads/writes `config.request`/`config.response`. These can't run in
+/// Rhai as-is (arrow syntax + the `config` variable model), so they need rewriting/routing.
+pub fn is_js_config_decorate(script: &str) -> bool {
+    let t = script.trim_start();
+    t.starts_with("config =>")
+        || t.starts_with("config=>")
+        || t.starts_with("(config) =>")
+        || t.starts_with("(config)=>")
+        || t.starts_with("function(config)")
+        || t.starts_with("function (config)")
+        || t.contains("config.request.")
+        || t.contains("config.response.")
+}
+
+static JSON_FN_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
+/// Rewrite a simple JS `config` decorate script into Rhai (issue #191, Part A). The body's field
+/// reads/writes on `config.request`/`config.response` map onto the `request`/`response` maps that
+/// `apply_decorate` already exposes. This covers inline scripts that do simple field access; full
+/// JavaScript (require/closures, JSON parsing of objects, spreads) is the separate JS-engine route.
+pub fn rewrite_js_config_to_rhai(script: &str) -> String {
+    // Strip a `config =>` / `function(config)` wrapper down to the function body.
+    let body = if script.contains("=>") || script.trim_start().starts_with("function") {
+        match (script.find('{'), script.rfind('}')) {
+            (Some(open), Some(close)) if close > open => &script[open + 1..close],
+            _ => script,
+        }
+    } else {
+        script
+    };
+
+    let mut rhai = body.trim().to_string();
+    rhai = rhai.replace("config.request.", "request.");
+    rhai = rhai.replace("config.response.", "response.");
+    // JS declarations → Rhai `let`.
+    rhai = rhai.replace("const ", "let ").replace("var ", "let ");
+    // Best-effort: JSON.parse(x) / JSON.stringify(x) with a simple (non-nested) arg → the arg
+    // itself — the body is already a string in Rhai scope, so simple field access needs no JSON.
+    let json_re = JSON_FN_RE
+        .get_or_init(|| regex::Regex::new(r"JSON\.(?:parse|stringify)\(([^()]*)\)").unwrap());
+    rhai = json_re.replace_all(&rhai, "$1").to_string();
+    // Mountebank scripts commonly use single-quoted strings; Rhai needs double quotes.
+    rhai.replace('\'', "\"")
+}
+
 /// Apply decorate behavior using Rhai script (Mountebank-compatible)
 /// The script can access and modify `request` and `response` variables
 pub fn apply_decorate(
@@ -291,5 +337,51 @@ mod tests {
         let result = apply_decorate(script, &request, "body", 200, &mut headers);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Decorate script error"));
+    }
+
+    // Issue #191: JS `config =>` decorate convention detection + rewrite.
+    #[test]
+    fn is_js_config_decorate_detects_convention() {
+        assert!(is_js_config_decorate(
+            "config => { config.response.body = 'x'; }"
+        ));
+        assert!(is_js_config_decorate(
+            "(config) => { config.response.body = 'x'; }"
+        ));
+        assert!(is_js_config_decorate(
+            "function(config) { config.response.body = 'x'; }"
+        ));
+        assert!(is_js_config_decorate("config.response.statusCode = 404;"));
+        // Plain Rhai and the 2-arg `function(request, response)` JS form are NOT this convention.
+        assert!(!is_js_config_decorate("response.body = request.body;"));
+        assert!(!is_js_config_decorate(
+            "function(request, response) { response.body = 'x'; }"
+        ));
+    }
+
+    #[test]
+    fn rewrite_js_config_maps_to_rhai() {
+        assert_eq!(
+            rewrite_js_config_to_rhai("config => { config.response.body = 'hello'; }").trim(),
+            r#"response.body = "hello";"#
+        );
+        assert_eq!(
+            rewrite_js_config_to_rhai("config => { config.response.body = config.request.body; }")
+                .trim(),
+            "response.body = request.body;"
+        );
+    }
+
+    #[test]
+    fn rewrite_js_config_simple_json_helpers_drop_to_arg() {
+        // Best-effort: a non-nested JSON.parse/stringify arg becomes the arg (the body is already
+        // a string in Rhai scope). Nested-paren args are left for the JS-engine route (Part B).
+        assert_eq!(
+            rewrite_js_config_to_rhai(
+                "config => { config.response.body = JSON.stringify(config.request.body); }"
+            )
+            .trim(),
+            "response.body = request.body;"
+        );
     }
 }

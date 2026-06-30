@@ -7,7 +7,10 @@ use super::types::{
     DebugResponsePreview, IsResponse, ResponseMode, RiftResponseExtension, RiftScriptConfig,
     StubResponse,
 };
-use crate::behaviors::{apply_decorate, HasRepeatBehavior, RequestContext};
+use crate::behaviors::{
+    apply_decorate, is_js_config_decorate, rewrite_js_config_to_rhai, HasRepeatBehavior,
+    RequestContext,
+};
 use crate::imposter::Predicate;
 use std::collections::HashMap;
 
@@ -279,6 +282,14 @@ pub fn apply_js_or_rhai_decorate(
     status: u16,
     headers: &mut HashMap<String, String>,
 ) -> Result<(String, u16), String> {
+    // Mountebank's JS `config =>` convention (issue #191): rewrite simple field access onto the
+    // Rhai request/response maps. Checked before the `function` route since arrow scripts don't
+    // start with "function" and `function(config)` uses the config model, not (request, response).
+    if is_js_config_decorate(script) {
+        let rhai_script = rewrite_js_config_to_rhai(script);
+        return apply_decorate(&rhai_script, request, body, status, headers);
+    }
+
     // Check if it's a JavaScript function declaration
     if script.trim().starts_with("function") {
         #[cfg(feature = "javascript")]
@@ -331,6 +342,106 @@ pub fn apply_js_or_rhai_decorate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Issue #191: the JS `config =>` decorate convention runs (rewritten to Rhai) end-to-end.
+    fn decorate_req() -> RequestContext {
+        RequestContext {
+            method: "GET".to_string(),
+            path: "/orders".to_string(),
+            query: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            body: Some("REQ-BODY".to_string()),
+        }
+    }
+
+    #[test]
+    fn decorate_js_config_sets_body() {
+        let mut headers = std::collections::HashMap::new();
+        let (body, status) = apply_js_or_rhai_decorate(
+            "config => { config.response.body = 'hello'; }",
+            &decorate_req(),
+            "original",
+            200,
+            &mut headers,
+        )
+        .unwrap();
+        assert_eq!(body, "hello");
+        assert_eq!(status, 200);
+    }
+
+    #[test]
+    fn decorate_js_config_reads_request_body() {
+        let mut headers = std::collections::HashMap::new();
+        let (body, _) = apply_js_or_rhai_decorate(
+            "config => { config.response.body = config.request.body; }",
+            &decorate_req(),
+            "original",
+            200,
+            &mut headers,
+        )
+        .unwrap();
+        assert_eq!(body, "REQ-BODY");
+    }
+
+    #[test]
+    fn decorate_js_config_sets_status() {
+        let mut headers = std::collections::HashMap::new();
+        let (_, status) = apply_js_or_rhai_decorate(
+            "config => { config.response.statusCode = 404; }",
+            &decorate_req(),
+            "original",
+            200,
+            &mut headers,
+        )
+        .unwrap();
+        assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn decorate_js_config_function_wrapper_executes() {
+        // `function(config) { ... }` must take the config-rewrite route, NOT the `function`→JS-engine
+        // route (it uses the config model, not (request, response)). Locks the detection ordering.
+        let mut headers = std::collections::HashMap::new();
+        let (body, _) = apply_js_or_rhai_decorate(
+            "function(config) { config.response.body = 'fn'; }",
+            &decorate_req(),
+            "original",
+            200,
+            &mut headers,
+        )
+        .unwrap();
+        assert_eq!(body, "fn");
+    }
+
+    #[test]
+    fn decorate_js_config_no_wrapper_executes() {
+        // A bare body (no arrow/function wrapper) is detected via `config.response.` and rewritten
+        // in place (no brace stripping).
+        let mut headers = std::collections::HashMap::new();
+        let (body, _) = apply_js_or_rhai_decorate(
+            "config.response.body = 'bare';",
+            &decorate_req(),
+            "original",
+            200,
+            &mut headers,
+        )
+        .unwrap();
+        assert_eq!(body, "bare");
+    }
+
+    #[test]
+    fn decorate_plain_rhai_still_works() {
+        let mut headers = std::collections::HashMap::new();
+        let (body, _) = apply_js_or_rhai_decorate(
+            "response.body = request.path;",
+            &decorate_req(),
+            "original",
+            200,
+            &mut headers,
+        )
+        .unwrap();
+        assert_eq!(body, "/orders", "existing Rhai decorate must be unchanged");
+    }
 
     // =========================================================================
     // Issue #116: Multi-valued headers preserved via create_stub_from_proxy_response
