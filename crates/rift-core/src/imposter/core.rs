@@ -319,8 +319,7 @@ impl Imposter {
             .rift
             .as_ref()
             .and_then(|r| r.flow_state.as_ref())
-            .and_then(|fs| fs.mountebank_state_mapping.as_ref())
-            .map(|m| m.flow_id_source.clone())
+            .and_then(|fs| fs.flow_id_source.clone())
             .unwrap_or_else(|| "imposter_port".to_string())
     }
 

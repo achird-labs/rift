@@ -332,10 +332,8 @@ fn expose_flow_state(fs: &rift_core::imposter::RiftFlowStateConfig) -> serde_jso
     let mut out = serde_json::Map::new();
     out.insert("backend".to_string(), serde_json::json!(fs.backend));
     out.insert("ttlSeconds".to_string(), serde_json::json!(fs.ttl_seconds));
-    if let Some(mapping) = &fs.mountebank_state_mapping {
-        if let Ok(value) = serde_json::to_value(mapping) {
-            out.insert("mountebankStateMapping".to_string(), value);
-        }
+    if let Some(source) = &fs.flow_id_source {
+        out.insert("flowIdSource".to_string(), serde_json::json!(source));
     }
     serde_json::Value::Object(out)
 }
@@ -347,8 +345,7 @@ fn flow_id_source(imposter: &Imposter) -> String {
         .rift
         .as_ref()
         .and_then(|r| r.flow_state.as_ref())
-        .and_then(|fs| fs.mountebank_state_mapping.as_ref())
-        .map(|m| m.flow_id_source.clone())
+        .and_then(|fs| fs.flow_id_source.clone())
         .unwrap_or_else(|| "imposter_port".to_string())
 }
 
@@ -474,7 +471,7 @@ mod redact_tests {
             "backend": "redis",
             "ttlSeconds": 300,
             "redis": { "url": "redis://user:secret@host:6379", "keyPrefix": "rift:" },
-            "mountebankStateMapping": { "flowIdSource": "header:X-Mock-Space" }
+            "flowIdSource": "header:X-Mock-Space"
         }))
         .unwrap();
         let out = expose_flow_state(&fs);
@@ -483,8 +480,7 @@ mod redact_tests {
             "redis (credentialed URL) must never be exposed"
         );
         assert_eq!(
-            out.pointer("/mountebankStateMapping/flowIdSource")
-                .and_then(|v| v.as_str()),
+            out.get("flowIdSource").and_then(|v| v.as_str()),
             Some("header:X-Mock-Space")
         );
         assert_eq!(out.get("backend").and_then(|v| v.as_str()), Some("redis"));
@@ -527,7 +523,7 @@ mod requests_filter_tests {
         });
         if let Some(src) = flow_id_source {
             cfg["_rift"] = serde_json::json!({
-                "flowState": { "mountebankStateMapping": { "flowIdSource": src } }
+                "flowState": { "flowIdSource": src }
             });
         }
         let config = serde_json::from_value(cfg).expect("config");

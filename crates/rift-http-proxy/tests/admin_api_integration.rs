@@ -26,7 +26,7 @@ async fn get(c: &reqwest::Client, port: u16, path: &str, space: Option<&str>) ->
 fn order_fsm(port: u16, flow_id_source: Option<&str>) -> serde_json::Value {
     let mut flow_state = serde_json::json!({ "backend": "inmemory", "ttlSeconds": 300 });
     if let Some(src) = flow_id_source {
-        flow_state["mountebankStateMapping"] = serde_json::json!({ "flowIdSource": src });
+        flow_state["flowIdSource"] = serde_json::json!(src);
     }
     serde_json::json!({
         "port": port, "protocol": "http",
@@ -49,7 +49,7 @@ fn correlated_config(port: u16, stubs: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "port": port, "protocol": "http", "recordRequests": true,
         "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300,
-            "mountebankStateMapping": { "flowIdSource": "header:X-Mock-Space" } } },
+            "flowIdSource": "header:X-Mock-Space" } },
         "stubs": stubs
     })
 }
@@ -1407,7 +1407,7 @@ async fn get_imposter_exposes_flowstate_redacted() {
         "port": 19771, "protocol": "http",
         "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300,
             "redis": { "url": "redis://user:topsecret@host:6379" },
-            "mountebankStateMapping": { "flowIdSource": "header:X-Mock-Space" } } },
+            "flowIdSource": "header:X-Mock-Space" } },
         "stubs": [{ "predicates": [{ "equals": { "path": "/x" } }],
             "responses": [{ "is": { "statusCode": 200, "body": "ok" } }] }]
     }))
@@ -1422,10 +1422,10 @@ async fn get_imposter_exposes_flowstate_redacted() {
     let c = reqwest::Client::new();
     let v = json(&c, "http://127.0.0.1:12596/imposters/19771".to_string()).await;
     assert_eq!(
-        v.pointer("/_rift/flowState/mountebankStateMapping/flowIdSource")
+        v.pointer("/_rift/flowState/flowIdSource")
             .and_then(|x| x.as_str()),
         Some("header:X-Mock-Space"),
-        "GET must expose flowIdSource so rift-verify can drive correlated isolation: {v}"
+        "GET must expose flat flowIdSource so rift-verify can drive correlated isolation: {v}"
     );
     assert!(
         v.pointer("/_rift/flowState/redis").is_none(),
