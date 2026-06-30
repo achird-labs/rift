@@ -535,16 +535,23 @@ pub fn validate_headers(file: &Path, headers: &Value, location: &str, result: &m
             );
         }
 
-        if value.is_array() {
-            result.add_issue(
-                LintIssue::error(
-                    "E018",
-                    format!("Header '{name}' value is an array, must be a string"),
-                    file.to_path_buf(),
-                )
-                .with_location(format!("{location}.{name}"))
-                .with_suggestion("Convert array to comma-separated string"),
-            );
+        if let Some(elements) = value.as_array() {
+            // Arrays of strings are valid multi-value headers (e.g. Set-Cookie),
+            // supported by the engine since #238. Only non-string elements are invalid.
+            if !elements.iter().all(Value::is_string) {
+                result.add_issue(
+                    LintIssue::error(
+                        "E018",
+                        format!(
+                            "Header '{name}' array contains a non-string element, \
+                             all multi-value header entries must be strings"
+                        ),
+                        file.to_path_buf(),
+                    )
+                    .with_location(format!("{location}.{name}"))
+                    .with_suggestion("Use an array of strings, e.g. [\"a=1\", \"b=2\"]"),
+                );
+            }
         } else if value.is_number() {
             result.add_issue(
                 LintIssue::error(
@@ -902,5 +909,66 @@ fn validate_lookup_behavior(file: &Path, lookup: &Value, location: &str, result:
                 .with_location(location),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod header_value_tests {
+    use super::validate_headers;
+    use crate::types::LintResult;
+    use serde_json::json;
+    use std::path::Path;
+
+    fn lint(headers: serde_json::Value) -> LintResult {
+        let mut result = LintResult::new();
+        validate_headers(Path::new("test.json"), &headers, "loc", &mut result);
+        result
+    }
+
+    fn has_code(result: &LintResult, code: &str) -> bool {
+        result.issues.iter().any(|i| i.code == code)
+    }
+
+    #[test]
+    fn array_of_strings_is_valid_header() {
+        // Multi-value headers (valid since #238) must not trigger E018.
+        let result = lint(json!({ "Set-Cookie": ["sessionId=abc", "theme=dark"] }));
+        assert!(!has_code(&result, "E018"));
+        assert_eq!(result.errors, 0);
+    }
+
+    #[test]
+    fn array_with_non_string_errors() {
+        // An array with any non-string element (scalar or nested) is not a valid
+        // multi-value header — the engine's `OneOrMany` deserialize would reject it.
+        for bad in [
+            json!(["ok", 42]),
+            json!(["ok", null]),
+            json!(["ok", { "k": "v" }]),
+        ] {
+            let result = lint(json!({ "X-Bad": bad }));
+            assert!(has_code(&result, "E018"));
+        }
+    }
+
+    #[test]
+    fn empty_array_is_valid_header() {
+        // An empty array carries no values; the engine omits it on serialize. No error.
+        let result = lint(json!({ "X-Empty": [] }));
+        assert_eq!(result.errors, 0);
+    }
+
+    #[test]
+    fn scalar_non_string_still_errors() {
+        let number = lint(json!({ "X-Count": 5 }));
+        assert!(has_code(&number, "E019"));
+        let boolean = lint(json!({ "X-Flag": true }));
+        assert!(has_code(&boolean, "E020"));
+    }
+
+    #[test]
+    fn string_header_is_valid() {
+        let result = lint(json!({ "Content-Type": "text/plain" }));
+        assert_eq!(result.errors, 0);
     }
 }

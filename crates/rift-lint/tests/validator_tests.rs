@@ -367,8 +367,17 @@ fn e017_empty_header_name() {
 }
 
 #[test]
-fn e018_header_value_is_array() {
-    let is_resp = json!({ "headers": { "X-Custom": ["a", "b"] } });
+fn e018_not_fired_for_string_array() {
+    // Multi-value headers (array of strings) are valid since #238.
+    let is_resp = json!({ "headers": { "Set-Cookie": ["a=1", "b=2"] } });
+    let mut r = LintResult::new();
+    validate_is_response(path(), &is_resp, "loc", &mut r);
+    assert!(!has_code(&r, "E018"));
+}
+
+#[test]
+fn e018_header_array_with_non_string() {
+    let is_resp = json!({ "headers": { "X-Custom": ["a", 2] } });
     let mut r = LintResult::new();
     validate_is_response(path(), &is_resp, "loc", &mut r);
     assert!(has_code(&r, "E018"));
