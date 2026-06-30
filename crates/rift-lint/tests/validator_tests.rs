@@ -575,7 +575,9 @@ fn w008_not_fired_for_safe_command() {
 
 #[test]
 fn w009_js_behavior_not_function_expression() {
-    let behavior = json!({ "decorate": "console.log('hi')" });
+    // W009 ("should be a function expression") applies to JS-only behaviors. `decorate` also
+    // accepts Rhai (issue #257), so the check is scoped to `wait` here.
+    let behavior = json!({ "wait": "console.log('hi')" });
     let mut r = LintResult::new();
     validate_behavior(path(), &behavior, "loc", &mut r, &opts());
     assert!(has_code(&r, "W009"));
@@ -910,4 +912,27 @@ fn single_imposter_still_validates() {
         "single imposter must still validate cleanly, got {:?}",
         codes(&r)
     );
+}
+
+// ─── Issue #257: W009 must not fire on Rhai decorate (wiring through validate_behavior) ──────
+
+#[test]
+fn w009_not_fired_for_rhai_decorate_through_behavior() {
+    let behavior = json!({ "decorate": "response.body = \"rhai-\" + request.path;" });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &behavior, "loc", &mut r, &opts());
+    assert!(
+        !has_code(&r, "W009"),
+        "Rhai decorate must not warn W009: {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn w009_still_fired_for_non_function_wait_through_behavior() {
+    // wait is JS-only — a non-function wait script still warns (regression guard).
+    let behavior = json!({ "wait": "response.body = 'x';" });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &behavior, "loc", &mut r, &opts());
+    assert!(has_code(&r, "W009"), "non-function wait should warn W009");
 }
