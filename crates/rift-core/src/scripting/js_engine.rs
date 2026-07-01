@@ -124,7 +124,7 @@ pub struct JsEngine {
 }
 
 impl JsEngine {
-    pub fn new(script: &str, rule_id: String) -> Result<Self> {
+    pub fn new(script: &str, rule_id: &str) -> Result<Self> {
         // Validate script compiles by evaluating it
         let mut context = Context::default();
         context
@@ -143,7 +143,7 @@ impl JsEngine {
 
         Ok(Self {
             script: script.to_string(),
-            rule_id,
+            rule_id: rule_id.to_string(),
         })
     }
 
@@ -1261,7 +1261,7 @@ function should_inject(request, flow_store) {
 }
 "#;
 
-        let engine = JsEngine::new(script, "test-rule".to_string());
+        let engine = JsEngine::new(script, "test-rule");
         assert!(engine.is_ok());
     }
 
@@ -1273,7 +1273,7 @@ function some_other_function() {
 }
 "#;
 
-        let engine = JsEngine::new(script, "test-rule".to_string());
+        let engine = JsEngine::new(script, "test-rule");
         assert!(engine.is_err());
         assert!(engine.unwrap_err().to_string().contains("should_inject"));
     }
@@ -1294,7 +1294,7 @@ function should_inject(request, flow_store) {
 }
 "#;
 
-        let engine = JsEngine::new(script, "test-rule".to_string()).unwrap();
+        let engine = JsEngine::new(script, "test-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let mut headers = HashMap::new();
@@ -1332,7 +1332,7 @@ function should_inject(request, flow_store) {
 }
 "#;
 
-        let engine = JsEngine::new(script, "test-rule".to_string()).unwrap();
+        let engine = JsEngine::new(script, "test-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let request = ScriptRequest {
@@ -1378,7 +1378,7 @@ function should_inject(request, flow_store) {
 }
 "#;
 
-        let engine = JsEngine::new(script, "test-rule".to_string()).unwrap();
+        let engine = JsEngine::new(script, "test-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let mut headers = HashMap::new();
@@ -1435,7 +1435,7 @@ function should_inject(request, flow_store) {
 }
 "#;
 
-        let engine = JsEngine::new(script, "test-rule".to_string()).unwrap();
+        let engine = JsEngine::new(script, "test-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let mut headers = HashMap::new();
@@ -1552,7 +1552,7 @@ function should_inject(request, flow_store) {
 }
 "#;
 
-        let engine = JsEngine::new(script, "test-rule".to_string()).unwrap();
+        let engine = JsEngine::new(script, "test-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         // Test with high value
@@ -1618,7 +1618,7 @@ function should_inject(request, flow_store) {
 }
 "#;
 
-        let engine = JsEngine::new(script, "test-rule".to_string()).unwrap();
+        let engine = JsEngine::new(script, "test-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let request = ScriptRequest {
@@ -1666,7 +1666,7 @@ function should_inject(request, flow_store) {
 }
 "#;
 
-        let engine = JsEngine::new(script, "test-rule".to_string()).unwrap();
+        let engine = JsEngine::new(script, "test-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let mut query = HashMap::new();
@@ -1712,7 +1712,7 @@ function should_inject(request, flow_store) {
 }
 "#;
 
-        let engine = JsEngine::new(script, "test-rule".to_string()).unwrap();
+        let engine = JsEngine::new(script, "test-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let mut path_params = HashMap::new();

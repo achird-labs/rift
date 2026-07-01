@@ -136,7 +136,7 @@ impl ProxyServer {
                 // Compile script to appropriate format
                 let compiled = match engine_type {
                     "rhai" => {
-                        let engine = RhaiEngine::new(&script_rule.script, script_rule.id.clone())?;
+                        let engine = RhaiEngine::new(&script_rule.script, &script_rule.id)?;
                         CompiledScript::Rhai {
                             ast: engine.ast().clone(),
                             rule_id: script_rule.id.clone(),

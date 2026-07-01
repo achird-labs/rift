@@ -130,7 +130,7 @@ pub struct RhaiEngine {
 }
 
 impl RhaiEngine {
-    pub fn new(script: &str, rule_id: String) -> Result<Self> {
+    pub fn new(script: &str, rule_id: &str) -> Result<Self> {
         let engine = Self::create_engine();
         let ast = engine
             .compile(script)
@@ -138,7 +138,7 @@ impl RhaiEngine {
 
         Ok(Self {
             ast: Arc::new(ast), // Wrap AST in Arc for sharing
-            rule_id,
+            rule_id: rule_id.to_string(),
         })
     }
 
@@ -553,7 +553,7 @@ mod tests {
             }
         "#;
 
-        let engine = RhaiEngine::new(script, "test-rule".to_string()).unwrap();
+        let engine = RhaiEngine::new(script, "test-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let request = ScriptRequest {
@@ -595,7 +595,7 @@ mod tests {
             }
         "#;
 
-        let engine = RhaiEngine::new(script, "latency-rule".to_string()).unwrap();
+        let engine = RhaiEngine::new(script, "latency-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let request = ScriptRequest {
@@ -641,7 +641,7 @@ mod tests {
             }
         "#;
 
-        let engine = RhaiEngine::new(script, "retry-rule".to_string()).unwrap();
+        let engine = RhaiEngine::new(script, "retry-rule").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let mut headers = HashMap::new();
@@ -691,7 +691,7 @@ mod tests {
             }
         "#;
 
-        let engine = RhaiEngine::new(script, "beta-users".to_string()).unwrap();
+        let engine = RhaiEngine::new(script, "beta-users").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         // Beta user - should inject
@@ -747,7 +747,7 @@ mod tests {
             }
         "#;
 
-        let engine = RhaiEngine::new(script, "cache-test".to_string()).unwrap();
+        let engine = RhaiEngine::new(script, "cache-test").unwrap();
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         // Get AST reference (Arc) - this is what script pool will use

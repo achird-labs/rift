@@ -96,7 +96,7 @@ pub enum ScriptEngine {
 
 impl ScriptEngine {
     /// Create a new script engine based on the engine type
-    pub fn new(engine_type: &str, script: &str, rule_id: String) -> Result<Self> {
+    pub fn new(engine_type: &str, script: &str, rule_id: &str) -> Result<Self> {
         match engine_type {
             "rhai" => Ok(ScriptEngine::Rhai(RhaiEngine::new(script, rule_id)?)),
             #[cfg(feature = "lua")]
@@ -472,14 +472,14 @@ mod tests {
                 #{ inject: false }
             }
         "#;
-        let engine = ScriptEngine::new("rhai", script, "test-rule".to_string());
+        let engine = ScriptEngine::new("rhai", script, "test-rule");
         assert!(engine.is_ok());
     }
 
     #[test]
     fn test_script_engine_new_invalid_type() {
         let script = "return false";
-        let engine = ScriptEngine::new("invalid_engine", script, "test-rule".to_string());
+        let engine = ScriptEngine::new("invalid_engine", script, "test-rule");
         assert!(engine.is_err());
         let err_msg = engine.err().unwrap().to_string();
         assert!(err_msg.contains("Unknown script engine type"));
@@ -492,7 +492,7 @@ mod tests {
                 #{ inject: false }
             }
         "#;
-        let engine = ScriptEngine::new("rhai", script, "test-rule".to_string()).unwrap();
+        let engine = ScriptEngine::new("rhai", script, "test-rule").unwrap();
 
         let request = ScriptRequest {
             method: "GET".to_string(),
@@ -519,7 +519,7 @@ mod tests {
                 #{ inject: false }
             }
         "#;
-        let engine = RhaiEngine::new(script, "valid-rule".to_string());
+        let engine = RhaiEngine::new(script, "valid-rule");
         assert!(engine.is_ok());
     }
 
@@ -530,7 +530,7 @@ mod tests {
                 return false;
             }
         "#;
-        let engine = RhaiEngine::new(script, "invalid-rule".to_string());
+        let engine = RhaiEngine::new(script, "invalid-rule");
         assert!(engine.is_err());
     }
 
@@ -541,7 +541,7 @@ mod tests {
                 #{ inject: false }
             }
         "#;
-        let engine = RhaiEngine::new(script, "test-rule".to_string()).unwrap();
+        let engine = RhaiEngine::new(script, "test-rule").unwrap();
         let ast = engine.ast();
         assert!(std::mem::size_of_val(ast) > 0);
     }
@@ -561,7 +561,7 @@ mod tests {
                     return { inject = false }
                 end
             "#;
-            let engine = ScriptEngine::new("lua", script, "lua-rule".to_string());
+            let engine = ScriptEngine::new("lua", script, "lua-rule");
             assert!(
                 engine.is_ok(),
                 "Lua engine creation failed: {:?}",
@@ -592,7 +592,7 @@ mod tests {
                     return { inject: false };
                 }
             "#;
-            let engine = ScriptEngine::new("javascript", script, "js-rule".to_string());
+            let engine = ScriptEngine::new("javascript", script, "js-rule");
             assert!(
                 engine.is_ok(),
                 "JS engine creation failed: {:?}",
@@ -607,7 +607,7 @@ mod tests {
                     return { inject: false };
                 }
             "#;
-            let engine = ScriptEngine::new("js", script, "js-rule".to_string());
+            let engine = ScriptEngine::new("js", script, "js-rule");
             assert!(
                 engine.is_ok(),
                 "JS engine creation failed: {:?}",
@@ -634,7 +634,7 @@ mod tests {
     #[cfg(not(feature = "lua"))]
     #[test]
     fn test_lua_engine_disabled() {
-        let engine = ScriptEngine::new("lua", "return false", "test".to_string());
+        let engine = ScriptEngine::new("lua", "return false", "test");
         assert!(engine.is_err());
         let err_msg = engine.err().unwrap().to_string();
         assert!(err_msg.contains("not enabled") || err_msg.contains("feature"));
@@ -643,7 +643,7 @@ mod tests {
     #[cfg(not(feature = "javascript"))]
     #[test]
     fn test_javascript_engine_disabled() {
-        let engine = ScriptEngine::new("javascript", "return false", "test".to_string());
+        let engine = ScriptEngine::new("javascript", "return false", "test");
         assert!(engine.is_err());
         let err_msg = engine.err().unwrap().to_string();
         assert!(err_msg.contains("not enabled") || err_msg.contains("feature"));

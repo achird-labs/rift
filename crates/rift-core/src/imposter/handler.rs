@@ -365,7 +365,7 @@ async fn handle_request_inner(
             match ScriptEngine::new(
                 &script_config.engine,
                 &script_config.code,
-                format!("rift_script_{stub_index}"),
+                &format!("rift_script_{stub_index}"),
             ) {
                 Ok(engine) => {
                     let flow_store = imposter.flow_store.clone();
