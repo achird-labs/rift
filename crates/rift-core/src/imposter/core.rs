@@ -313,7 +313,18 @@ impl Imposter {
                 form.as_ref(),
                 imposter_port,
             ) {
-                // TODO(perf): It's unfortunate that we end up deep cloning the whole stub here
+                // PERF NOTE: this deep-clones the matched `Stub` on every request. The clone is
+                // load-bearing, not accidental: the caller (`handler.rs`) holds the returned
+                // `StubState` across `.await` points (async proxying / response building), so the
+                // `parking_lot` read guard held here MUST be released before returning — a guard
+                // cannot be held across an await without blocking all writers for the request's
+                // lifetime. Returning only `index` would force the caller to re-lock (racy against
+                // concurrent `replace_stub`) or hold the guard across await. The response-cycling
+                // state is already shared cheaply: `StubState.cycler` is an `Arc`, so advancing the
+                // cycler on this clone is visible through the stored stub. Eliminating the `Stub`
+                // clone cleanly would mean making `StubState.stub` an `Arc<Stub>` — a broader field
+                // retype across every `.stub` access/mutation site, deferred out of this
+                // behavior-preserving pass.
                 return Some((stub_state.clone(), index));
             }
         }
