@@ -16,6 +16,7 @@
 // Allow unused fields that may be used in future versions or for debugging
 #![allow(dead_code)]
 
+use base64::Engine;
 use clap::Parser;
 use reqwest::Client;
 use serde::Deserialize;
@@ -970,6 +971,10 @@ fn is_transport_reset_error(err: &str) -> bool {
         || e.contains("connection aborted")
         || e.contains("broken pipe")
         || e.contains("incomplete message")
+        // `RANDOM_DATA_THEN_CLOSE` (issue #273) writes garbage then closes, so the client fails to
+        // parse the bytes as HTTP. The control-request health check upstream guards against a sick
+        // imposter being mistaken for this fault.
+        || e.contains("invalid http version")
 }
 
 /// A `_rift.fault.tcp` stub passes when (and only when) the request fails with a connection-level
@@ -1014,6 +1019,22 @@ fn flow_id_header_name(flow_id_source: &str) -> Option<String> {
 /// unavailable, so a global override never clobbers a correctly-detected, differently-named imposter.
 fn resolve_flow_header(detected: Option<String>, fallback: Option<&str>) -> Option<String> {
     detected.or_else(|| fallback.map(str::to_string))
+}
+
+/// Decode a base64 `_mode:binary` body to the served UTF-8 string (issue #273). A non-string body,
+/// invalid base64, or non-UTF-8 bytes are left as-is — the engine itself falls back to the raw body.
+/// A genuinely non-UTF-8 binary body therefore reports a body mismatch (it can't be string-compared),
+/// which is the safe direction for a verifier — a loud failure, never a false pass.
+fn decode_binary_body(body: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    match body {
+        Some(serde_json::Value::String(b64)) => base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .map(serde_json::Value::String)
+            .or(Some(serde_json::Value::String(b64))),
+        other => other,
+    }
 }
 
 fn extract_expected_response(
@@ -1076,7 +1097,14 @@ fn extract_expected_response(
             })
             .unwrap_or_default();
 
+        // `_mode:binary` declares a base64 body but the engine serves the decoded bytes, so decode
+        // the expected body to match what is served (issue #273).
         let body = is_response.get("body").cloned();
+        let body = if is_response.get("_mode").and_then(|v| v.as_str()) == Some("binary") {
+            decode_binary_body(body)
+        } else {
+            body
+        };
 
         return (status, headers, body);
     }
@@ -1206,6 +1234,15 @@ fn parse_predicates(
                 for (name, should_exist) in hdrs {
                     if should_exist.as_bool().unwrap_or(true) {
                         headers.insert(name.clone(), "test-value".to_string());
+                    }
+                }
+            }
+            // Synthesize the query param so the request matches (issue #273); `exists` matches on
+            // presence regardless of value.
+            if let Some(q) = exists.get("query").and_then(|v| v.as_object()) {
+                for (name, should_exist) in q {
+                    if should_exist.as_bool().unwrap_or(true) {
+                        query_params.insert(name.clone(), "exists".to_string());
                     }
                 }
             }
@@ -1609,9 +1646,25 @@ fn parse_contains_predicate(
     }
 }
 
+/// Strip a leading inline-flag group like `(?i)` / `(?ims)` (issue #273) so the remaining pattern
+/// can be sampled into a literal — the global flags don't change the generated sample. A scoped
+/// group such as `(?:...)` or `(?i:...)` (flags followed by `:`) is left intact.
+fn strip_leading_inline_flags(pattern: &str) -> &str {
+    if let Some(rest) = pattern.strip_prefix("(?") {
+        if let Some(close) = rest.find(')') {
+            let flags = &rest[..close];
+            if !flags.is_empty() && flags.chars().all(|c| c.is_ascii_alphabetic()) {
+                return &rest[close + 1..];
+            }
+        }
+    }
+    pattern
+}
+
 fn generate_sample_from_regex(pattern: &str) -> String {
     // Simple heuristic to generate a sample that might match common patterns
     // This is a best-effort approach for common regex patterns
+    let pattern = strip_leading_inline_flags(pattern);
 
     // /api/v\d+/users -> /api/v1/users
     // Important: Replace character class patterns BEFORE stripping anchors,
@@ -2491,6 +2544,77 @@ mod verify_tests {
         let refused = "error sending request for url (http://127.0.0.1:1/x): \
                        tcp connect error: connection refused (os error 61)";
         assert!(!is_transport_reset_error(refused));
+    }
+
+    // ── #273: dynamic-harness coverage gaps ─────────────────────────────────
+    #[test]
+    fn is_transport_reset_error_matches_random_data_garbage() {
+        // RANDOM_DATA_THEN_CLOSE sends garbage then closes, so the client cannot parse HTTP.
+        assert!(is_transport_reset_error(
+            "error sending request for url (http://127.0.0.1:1/x): \
+             client error (SendRequest): invalid HTTP version parsed"
+        ));
+    }
+
+    #[test]
+    fn generate_sample_from_regex_strips_inline_flags() {
+        // A leading inline-flag group `(?i)` must not leak into the synthesized path.
+        assert_eq!(generate_sample_from_regex("(?i)^/case$"), "/case");
+        // Existing behavior preserved.
+        assert_eq!(generate_sample_from_regex("^/id/[0-9]+$"), "/id/123");
+    }
+
+    #[test]
+    fn parse_predicates_synthesizes_exists_query() {
+        let preds = vec![serde_json::json!({"exists": {"query": {"flag": true}}})];
+        let (_method, _path, _headers, query, _body) = parse_predicates(&preds);
+        assert!(
+            query.contains_key("flag"),
+            "exists-query must synthesize the param: {query:?}"
+        );
+    }
+
+    #[test]
+    fn extract_expected_response_decodes_binary_mode() {
+        // `_mode:binary` declares a base64 body; decode it so it matches the served bytes.
+        let responses = vec![
+            serde_json::json!({"is": {"statusCode": 200, "body": "aGVsbG8=", "_mode": "binary"}}),
+        ];
+        let (status, _headers, body) = extract_expected_response(&responses);
+        assert_eq!(status, 200);
+        assert_eq!(body, Some(serde_json::Value::String("hello".to_string())));
+    }
+
+    #[test]
+    fn extract_expected_response_binary_invalid_base64_keeps_raw() {
+        // Invalid base64 falls back to the raw string (mirrors the engine's decode-or-raw).
+        let responses = vec![
+            serde_json::json!({"is": {"statusCode": 200, "body": "!!!notbase64", "_mode": "binary"}}),
+        ];
+        let (_status, _headers, body) = extract_expected_response(&responses);
+        assert_eq!(
+            body,
+            Some(serde_json::Value::String("!!!notbase64".to_string()))
+        );
+    }
+
+    #[test]
+    fn strip_leading_inline_flags_leaves_scoped_groups_intact() {
+        // Only a global flag group like `(?i)` is stripped; non-capturing/scoped/lookaround
+        // constructs must be preserved (issue #273).
+        assert_eq!(generate_sample_from_regex("(?:abc)"), "(?:abc)");
+        assert_eq!(generate_sample_from_regex("(?i:case)"), "(?i:case)");
+        assert!(generate_sample_from_regex("(?=/x)/y").starts_with("(?="));
+    }
+
+    #[test]
+    fn parse_predicates_exists_query_false_omits_param() {
+        let preds = vec![serde_json::json!({"exists": {"query": {"flag": false}}})];
+        let (_method, _path, _headers, query, _body) = parse_predicates(&preds);
+        assert!(
+            !query.contains_key("flag"),
+            "exists:false must not synthesize the param: {query:?}"
+        );
     }
 
     // ── #259: date-template bodies are not asserted literally ───────────────
