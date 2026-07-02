@@ -93,7 +93,8 @@ pub async fn route_request(
 
 /// Dispatch a `/__rift/:port/<path>` gateway request to the imposter on `:port` (issue #212),
 /// rewriting the URI to the imposter-relative `/<path>` (+ query) so its predicates and handler
-/// behave exactly as if the request had arrived on the imposter's own port.
+/// behave exactly as if the request had arrived on the imposter's own port. The dispatch core
+/// is the library-public `gateway::dispatch_to_port` (issue #317).
 async fn handle_gateway(
     rest: &str,
     query: Option<&str>,
@@ -110,12 +111,15 @@ async fn handle_gateway(
             &format!("invalid gateway target '{port_str}' (expected /__rift/<port>/<path>)"),
         );
     };
-    let Ok(imposter) = manager.get_imposter(port) else {
+    // Check existence before the URI rewrite so a missing imposter stays a 404 even if the
+    // rewritten URI would be rejected — the pre-#317 response precedence. dispatch_to_port
+    // re-checks as its own defensive 404 for other callers.
+    if manager.get_imposter(port).is_err() {
         return error_response(
             StatusCode::NOT_FOUND,
             &format!("no imposter on port {port}"),
         );
-    };
+    }
 
     let target = match query {
         Some(q) => format!("{sub_path}?{q}"),
@@ -127,18 +131,7 @@ async fn handle_gateway(
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid gateway path"),
     };
 
-    // The gateway is the imposter's client; recorded `request_from` reflects the loopback gateway.
-    let gateway_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
-    match crate::imposter::handle_imposter_request(
-        Request::from_parts(parts, body),
-        imposter,
-        gateway_addr,
-    )
-    .await
-    {
-        Ok(resp) => resp,
-        Err(e) => match e {}, // handle_imposter_request is Infallible
-    }
+    crate::gateway::dispatch_to_port(&manager, port, Request::from_parts(parts, body)).await
 }
 
 /// Route based on path

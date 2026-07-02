@@ -15,3 +15,9 @@ pub mod admin_api;
 
 // Imposter config loading (--configfile / --datadir), shared with hot-reload (issue #197)
 pub mod config_loader;
+
+// ===== Embeddable server composition (issue #317) =====
+// Gateway dispatch (issue #212) callable from any listener
+pub mod gateway;
+// CLI surface + ServerBuilder + metrics server; the `rift` binary is a thin caller
+pub mod server;
