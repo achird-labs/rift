@@ -42,6 +42,9 @@ pub use types::{
 
 // Re-export core imposter
 #[allow(unused_imports)]
+pub mod journal;
+pub use journal::{JournalRead, LocalJournal, RequestJournal};
+
 pub use core::Imposter;
 
 // Re-export the imposter request handler (single-port gateway dispatch, issue #212)

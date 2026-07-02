@@ -291,10 +291,7 @@ impl Imposter {
         self.stubs
             .write()
             .retain(|s| s.stub.space.as_deref() != Some(space));
-        let source = self.flow_id_source();
-        self.recorded_requests.write().retain(|r| {
-            Self::flow_id_for(&source, &r.headers, self.config.port.unwrap_or(0)) != space
-        });
+        self.journal.clear_flow(self.journal_port(), space);
         // Best-effort across scenarios so one bad key doesn't leave later scenarios stale,
         // but the first failure still surfaces (issue #318) — never report a clean teardown
         // while stale scenario state persists in the backend.
