@@ -1,4 +1,4 @@
-use crate::extensions::flow_state::FlowStore;
+use crate::extensions::flow_state::{FlowStore, log_flow_err};
 use anyhow::{Result, anyhow};
 use rhai::Dynamic;
 use serde_json::Value;
@@ -160,36 +160,48 @@ impl ScriptFlowStore {
 
     /// Get a value from flow state
     pub fn get(&mut self, flow_id: String, key: String) -> Dynamic {
-        match self.store.get(&flow_id, &key) {
-            Ok(Some(val)) => rhai_engine::json_to_dynamic(val),
-            _ => Dynamic::UNIT,
+        match log_flow_err("get", None, self.store.get(&flow_id, &key)) {
+            Some(val) => rhai_engine::json_to_dynamic(val),
+            None => Dynamic::UNIT,
         }
     }
 
     /// Set a value in flow state
     pub fn set(&mut self, flow_id: String, key: String, value: Dynamic) -> bool {
         let json_val = rhai_engine::dynamic_to_json(value);
-        self.store.set(&flow_id, &key, json_val).is_ok()
+        log_flow_err(
+            "set",
+            false,
+            self.store.set(&flow_id, &key, json_val).map(|()| true),
+        )
     }
 
     /// Check if a key exists
     pub fn exists(&mut self, flow_id: String, key: String) -> bool {
-        self.store.exists(&flow_id, &key).unwrap_or(false)
+        log_flow_err("exists", false, self.store.exists(&flow_id, &key))
     }
 
     /// Delete a key
     pub fn delete(&mut self, flow_id: String, key: String) -> bool {
-        self.store.delete(&flow_id, &key).is_ok()
+        log_flow_err(
+            "delete",
+            false,
+            self.store.delete(&flow_id, &key).map(|()| true),
+        )
     }
 
     /// Increment a counter
     pub fn increment(&mut self, flow_id: String, key: String) -> i64 {
-        self.store.increment(&flow_id, &key).unwrap_or(0)
+        log_flow_err("increment", 0, self.store.increment(&flow_id, &key))
     }
 
     /// Set TTL for a flow
     pub fn set_ttl(&mut self, flow_id: String, ttl_seconds: i64) -> bool {
-        self.store.set_ttl(&flow_id, ttl_seconds).is_ok()
+        log_flow_err(
+            "setTtl",
+            false,
+            self.store.set_ttl(&flow_id, ttl_seconds).map(|()| true),
+        )
     }
 }
 

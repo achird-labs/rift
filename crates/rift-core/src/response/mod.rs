@@ -72,6 +72,7 @@ impl From<ImposterError> for Response<Full<Bytes>> {
                 StatusCode::BAD_REQUEST,
                 &format!("TLS configuration error: {msg}"),
             ),
+            ImposterError::Backend(e) => crate::extensions::decorate::backend_error_response(&e),
         }
     }
 }

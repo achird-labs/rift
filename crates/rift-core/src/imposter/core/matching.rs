@@ -5,7 +5,9 @@
 use super::*;
 
 impl Imposter {
-    /// Find a matching stub for a request and return a cloned copy with its index
+    /// Find a matching stub for a request and return a cloned copy with its index.
+    /// `Err` means a backend consulted during matching failed (issue #318) — the caller
+    /// must surface it, never treat it as "no match".
     pub fn find_matching_stub(
         &self,
         method: &str,
@@ -13,7 +15,7 @@ impl Imposter {
         headers: &hyper::HeaderMap,
         query: Option<&str>,
         body: Option<&str>,
-    ) -> Option<(StubState, usize)> {
+    ) -> anyhow::Result<Option<(StubState, usize)>> {
         // Call the extended version with no client info (backward compatible)
         self.find_matching_stub_with_client(method, path, headers, query, body, None, None)
     }
@@ -29,7 +31,7 @@ impl Imposter {
         body: Option<&str>,
         request_from: Option<&str>,
         client_ip: Option<&str>,
-    ) -> Option<(StubState, usize)> {
+    ) -> anyhow::Result<Option<(StubState, usize)>> {
         let stubs = self.stubs.read();
         let headers_map = Self::header_map_to_hashmap(headers);
         // Parse form data if Content-Type is application/x-www-form-urlencoded
@@ -52,7 +54,7 @@ impl Imposter {
             // (flow_id, scenario) state equals it.
             if let Some(required) = &stub.required_scenario_state {
                 let scenario = stub.scenario_name.as_deref().unwrap_or("");
-                if self.scenario_state(&flow_id, scenario) != *required {
+                if self.scenario_state(&flow_id, scenario)? != *required {
                     continue;
                 }
             }
@@ -80,10 +82,10 @@ impl Imposter {
                 // clone cleanly would mean making `StubState.stub` an `Arc<Stub>` — a broader field
                 // retype across every `.stub` access/mutation site, deferred out of this
                 // behavior-preserving pass.
-                return Some((stub_state.clone(), index));
+                return Ok(Some((stub_state.clone(), index)));
             }
         }
-        None
+        Ok(None)
     }
 
     /// The configured `flow_id_source` (`"imposter_port"` or `"header:<Name>"`),
@@ -137,18 +139,19 @@ impl Imposter {
     }
 
     /// Current scenario state for `(flow_id, scenario)`, or the initial state if absent.
-    /// A backend read error degrades to the initial state but is logged — it must not be
-    /// silently mistaken for "no state yet", which would mis-gate matching.
-    pub fn scenario_state(&self, flow_id: &str, scenario: &str) -> String {
-        match self.flow_store.get(flow_id, scenario) {
-            Ok(Some(v)) => v.as_str().unwrap_or(INITIAL_SCENARIO_STATE).to_string(),
-            Ok(None) => INITIAL_SCENARIO_STATE.to_string(),
-            Err(e) => {
-                warn!(
-                    "scenario state read failed ({flow_id}/{scenario}); using initial '{INITIAL_SCENARIO_STATE}': {e}"
-                );
-                INITIAL_SCENARIO_STATE.to_string()
-            }
+    /// A backend read error propagates (issue #318): defaulting to the initial state on a
+    /// failing store would mis-gate matching into a silent wrong match.
+    pub fn scenario_state(&self, flow_id: &str, scenario: &str) -> anyhow::Result<String> {
+        match self.flow_store.get(flow_id, scenario)? {
+            // A non-string here means the key was overwritten out-of-band (raw flow-state
+            // PUT): coercing it to the initial state would silently mis-gate matching.
+            Some(v) => match v.as_str() {
+                Some(state) => Ok(state.to_string()),
+                None => {
+                    anyhow::bail!("scenario state for {flow_id}/{scenario} is not a string: {v}")
+                }
+            },
+            None => Ok(INITIAL_SCENARIO_STATE.to_string()),
         }
     }
 
@@ -171,14 +174,15 @@ impl Imposter {
         self.flow_store.delete(flow_id, scenario)
     }
 
-    /// Apply a matched stub's `newScenarioState` transition after it responds (no-op if unset).
-    pub fn apply_scenario_transition(&self, flow_id: &str, stub: &Stub) {
+    /// Apply a matched stub's `newScenarioState` transition (no-op if unset). A backend
+    /// write error propagates (issue #318): a lost transition would silently desync the
+    /// FSM, so the request must fail loudly instead.
+    pub fn apply_scenario_transition(&self, flow_id: &str, stub: &Stub) -> anyhow::Result<()> {
         if let Some(next) = &stub.new_scenario_state {
             let scenario = stub.scenario_name.as_deref().unwrap_or("");
-            if let Err(e) = self.set_scenario_state(flow_id, scenario, next) {
-                warn!("scenario transition failed ({flow_id}/{scenario} -> {next}): {e}");
-            }
+            self.set_scenario_state(flow_id, scenario, next)?;
         }
+        Ok(())
     }
 
     /// Read a raw flow-state value (admin flow-state inspection).
@@ -226,7 +230,7 @@ impl Imposter {
 
     /// Tear down a correlation space (issue #223): remove its scoped stubs, drop its recorded
     /// requests, and reset its named scenario states. Other spaces and the port are untouched.
-    pub fn teardown_space(&self, space: &str) {
+    pub fn teardown_space(&self, space: &str) -> anyhow::Result<()> {
         // Snapshot scenario names BEFORE pruning stubs: a scenario declared only on this space's
         // stubs would otherwise vanish from scenario_names() and its state would never be reset.
         let scenarios = self.scenario_names();
@@ -237,10 +241,19 @@ impl Imposter {
         self.recorded_requests.write().retain(|r| {
             Self::flow_id_for(&source, &r.headers, self.config.port.unwrap_or(0)) != space
         });
+        // Best-effort across scenarios so one bad key doesn't leave later scenarios stale,
+        // but the first failure still surfaces (issue #318) — never report a clean teardown
+        // while stale scenario state persists in the backend.
+        let mut first_err = None;
         for scenario in scenarios {
             if let Err(e) = self.delete_scenario_state(space, &scenario) {
                 warn!("space teardown: failed to reset scenario '{scenario}' for '{space}': {e}");
+                first_err.get_or_insert(e);
             }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 

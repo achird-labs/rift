@@ -1,4 +1,4 @@
-use crate::extensions::flow_state::FlowStore;
+use crate::extensions::flow_state::{FlowStore, log_flow_err};
 use crate::scripting::{FaultDecision, ScriptRequest};
 use anyhow::{Result, anyhow};
 use mlua::prelude::*;
@@ -611,9 +611,9 @@ impl LuaFlowStore {
         let store = Arc::clone(&self.store);
 
         // Direct synchronous call - no async bridging needed
-        match store.get(&flow_id, &key) {
-            Ok(Some(value)) => json_to_lua(lua, &value),
-            _ => Ok(LuaValue::Nil),
+        match log_flow_err("get", None, store.get(&flow_id, &key)) {
+            Some(value) => json_to_lua(lua, &value),
+            None => Ok(LuaValue::Nil),
         }
     }
 
@@ -624,47 +624,45 @@ impl LuaFlowStore {
 
         let store = Arc::clone(&self.store);
 
-        let result = store.set(&flow_id, &key, json_value);
+        let result = store.set(&flow_id, &key, json_value).map(|()| true);
 
-        Ok(result.is_ok())
+        Ok(log_flow_err("set", false, result))
     }
 
     /// Check if a key exists
     fn exists(&self, flow_id: String, key: String) -> LuaResult<bool> {
         let store = Arc::clone(&self.store);
 
-        match store.exists(&flow_id, &key) {
-            Ok(exists) => Ok(exists),
-            Err(_) => Ok(false),
-        }
+        Ok(log_flow_err("exists", false, store.exists(&flow_id, &key)))
     }
 
     /// Delete a key
     fn delete(&self, flow_id: String, key: String) -> LuaResult<bool> {
         let store = Arc::clone(&self.store);
 
-        let result = store.delete(&flow_id, &key);
+        let result = store.delete(&flow_id, &key).map(|()| true);
 
-        Ok(result.is_ok())
+        Ok(log_flow_err("delete", false, result))
     }
 
     /// Increment a counter
     fn increment(&self, flow_id: String, key: String) -> LuaResult<i64> {
         let store = Arc::clone(&self.store);
 
-        match store.increment(&flow_id, &key) {
-            Ok(value) => Ok(value),
-            Err(_) => Ok(0),
-        }
+        Ok(log_flow_err(
+            "increment",
+            0,
+            store.increment(&flow_id, &key),
+        ))
     }
 
     /// Set TTL for a flow
     fn set_ttl(&self, flow_id: String, ttl_seconds: i64) -> LuaResult<bool> {
         let store = Arc::clone(&self.store);
 
-        let result = store.set_ttl(&flow_id, ttl_seconds);
+        let result = store.set_ttl(&flow_id, ttl_seconds).map(|()| true);
 
-        Ok(result.is_ok())
+        Ok(log_flow_err("setTtl", false, result))
     }
 }
 

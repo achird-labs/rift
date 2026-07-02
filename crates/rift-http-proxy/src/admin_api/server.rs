@@ -2,6 +2,7 @@
 
 use crate::admin_api::router::route_request;
 use crate::config_loader::ConfigSource;
+use crate::extensions::decorate::{ResponsePhase, with_annotation_scope};
 use crate::imposter::ImposterManager;
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -66,25 +67,42 @@ impl AdminApiServer {
                     let api_key = api_key.clone();
                     let config_source = config_source.clone();
                     async move {
-                        // The single-port gateway (`/__rift/...`, issue #212) is data-plane
-                        // imposter traffic, not the admin control plane — it mirrors direct
-                        // per-imposter-port access and so is NOT gated by the admin `--apikey`
-                        // (which would otherwise force app-under-test traffic to carry the admin
-                        // key and would leak that Authorization header into imposter predicates).
-                        let is_gateway = req.uri().path().starts_with("/__rift/");
-                        if let Some(ref key) = api_key
-                            && !is_gateway
-                        {
-                            let auth = req
-                                .headers()
-                                .get("authorization")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("");
-                            if auth != key.as_str() {
-                                return Ok::<_, hyper::Error>(unauthorized_response());
+                        // Per-request annotation scope + response decorator (issue #318):
+                        // every response through this listener — including the `/__rift/`
+                        // gateway — is decorated with phase `Admin`.
+                        let decorator = manager.response_decorator();
+                        let (result, annotations) = with_annotation_scope(async move {
+                            // The single-port gateway (`/__rift/...`, issue #212) is data-plane
+                            // imposter traffic, not the admin control plane — it mirrors direct
+                            // per-imposter-port access and so is NOT gated by the admin `--apikey`
+                            // (which would otherwise force app-under-test traffic to carry the admin
+                            // key and would leak that Authorization header into imposter predicates).
+                            let is_gateway = req.uri().path().starts_with("/__rift/");
+                            if let Some(ref key) = api_key
+                                && !is_gateway
+                            {
+                                let auth = req
+                                    .headers()
+                                    .get("authorization")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or("");
+                                if auth != key.as_str() {
+                                    return Ok::<_, hyper::Error>(unauthorized_response());
+                                }
                             }
+                            route_request(req, manager, config_source).await
+                        })
+                        .await;
+                        let mut response = result?;
+                        if let Some(decorator) = decorator {
+                            decorator.decorate(
+                                ResponsePhase::Admin,
+                                None,
+                                &annotations,
+                                response.headers_mut(),
+                            );
                         }
-                        route_request(req, manager, config_source).await
+                        Ok::<_, hyper::Error>(response)
                     }
                 });
 

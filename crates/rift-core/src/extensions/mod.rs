@@ -13,6 +13,7 @@
 //! - **Template** (`template`): Response body templating with request data
 //! - **Routing** (`routing`): Multi-upstream routing for reverse proxy mode
 
+pub mod decorate;
 pub mod fault;
 pub mod flow_state;
 pub mod matcher;

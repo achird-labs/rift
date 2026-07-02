@@ -1023,6 +1023,8 @@ pub enum ImposterError {
     PersistError(String),
     #[error("TLS configuration error: {0}")]
     Tls(String),
+    #[error("backend error: {0:#}")]
+    Backend(anyhow::Error),
 }
 
 #[cfg(test)]
