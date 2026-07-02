@@ -115,8 +115,17 @@ pub struct Imposter {
 }
 
 impl Imposter {
-    /// Create a new imposter from config
+    /// Create a new imposter from config (no custom flow-store provider).
     pub fn new(config: ImposterConfig) -> Self {
+        Self::new_with_provider(config, None)
+    }
+
+    /// Create a new imposter, consulting `provider` for its flow store before the built-in
+    /// `_rift.flowState` selection (issue #312).
+    pub fn new_with_provider(
+        config: ImposterConfig,
+        provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
+    ) -> Self {
         let stubs: Vec<StubState> = config
             .stubs
             .iter()
@@ -126,8 +135,9 @@ impl Imposter {
         // Extract proxy mode from stubs (use first proxy response's mode)
         let proxy_mode = Self::extract_proxy_mode(&config.stubs);
 
-        // Initialize flow store based on _rift.flowState configuration
-        let flow_store = Self::create_flow_store(&config);
+        // Initialize flow store: a registered provider wins; otherwise the built-in
+        // `_rift.flowState` selection.
+        let flow_store = Self::create_flow_store(&config, provider);
 
         Self {
             config,
@@ -156,8 +166,31 @@ impl Imposter {
     /// Note: the store is chosen at construction. Scenario stubs added later via an in-place
     /// `PUT /imposters/:port/stubs` to an imposter that started with no scenario stubs (and no
     /// `_rift.flowState`) will hit the NoOp store and not advance — declare scenario stubs at
-    /// creation, configure `_rift.flowState`, or use `PUT /imposters` (which recreates).
-    fn create_flow_store(config: &ImposterConfig) -> Arc<dyn FlowStore> {
+    /// creation, configure `_rift.flowState`, use `PUT /imposters` (which recreates), or set a
+    /// manager-scoped `FlowStoreProvider` returning a shared store (issue #312).
+    fn create_flow_store(
+        config: &ImposterConfig,
+        provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
+    ) -> Arc<dyn FlowStore> {
+        if let Some(provider) = provider
+            && let Some(store) = provider.provide(config)
+        {
+            // A provider store wins over any built-in selection, including an explicit
+            // `_rift.flowState` — log it so an operator whose config was overridden can see why.
+            if config
+                .rift
+                .as_ref()
+                .and_then(|r| r.flow_state.as_ref())
+                .is_some()
+            {
+                debug!(
+                    "FlowStoreProvider supplied a store, overriding the imposter's _rift.flowState"
+                );
+            } else {
+                debug!("FlowStoreProvider supplied the imposter flow store");
+            }
+            return store;
+        }
         if let Some(flow_state_config) = config.rift.as_ref().and_then(|r| r.flow_state.as_ref()) {
             return match flow_state_config.backend.as_str() {
                 "inmemory" => {

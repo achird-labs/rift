@@ -47,6 +47,9 @@ pub use core::Imposter;
 // Re-export the imposter request handler (single-port gateway dispatch, issue #212)
 pub use handler::{handle_imposter_request, handle_imposter_request_decorated};
 
+// Re-export the embedder flow-store provider hook (issue #312)
+pub use crate::extensions::flow_state::FlowStoreProvider;
+
 // Re-export manager
 pub use manager::{ImposterManager, TlsDefaults};
 

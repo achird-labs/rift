@@ -27,7 +27,7 @@ pub mod template;
 #[allow(unused_imports)]
 pub use fault::{FaultDecision, create_error_response, decide_fault};
 #[allow(unused_imports)]
-pub use flow_state::{CasOutcome, FlowStore, NoOpFlowStore, create_flow_store};
+pub use flow_state::{CasOutcome, FlowStore, FlowStoreProvider, NoOpFlowStore, create_flow_store};
 #[allow(unused_imports)]
 pub use matcher::{CompiledMatch, CompiledRule};
 #[allow(unused_imports)]

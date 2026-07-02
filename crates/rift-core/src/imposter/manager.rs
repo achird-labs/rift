@@ -9,6 +9,7 @@ use super::handler::handle_imposter_request_decorated;
 use super::reconcile::{ApplyReport, ImposterEvent, ImposterEventListener, StubReconcile};
 use super::types::{ImposterConfig, ImposterError, Stub};
 use crate::extensions::decorate::ResponseDecorator;
+use crate::extensions::flow_state::FlowStoreProvider;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -101,6 +102,8 @@ pub struct ImposterManager {
     event_listener: Option<Arc<dyn ImposterEventListener>>,
     /// Outgoing-response hook for imposter traffic (issue #318)
     response_decorator: Option<Arc<dyn ResponseDecorator>>,
+    /// Embedder hook to supply a custom flow store per imposter (issue #312)
+    flow_store_provider: Option<Arc<dyn FlowStoreProvider>>,
 }
 
 impl ImposterManager {
@@ -119,6 +122,7 @@ impl ImposterManager {
             tls_defaults: TlsDefaults::default(),
             event_listener: None,
             response_decorator: None,
+            flow_store_provider: None,
         }
     }
 
@@ -152,6 +156,16 @@ impl ImposterManager {
     /// apply the same hook to their own responses.
     pub fn response_decorator(&self) -> Option<Arc<dyn ResponseDecorator>> {
         self.response_decorator.clone()
+    }
+
+    /// Register a provider that supplies a custom [`FlowStore`](crate::flow_state::FlowStore)
+    /// per imposter (issue #312), consulted before the built-in `_rift.flowState` selection.
+    /// A provider that always returns a shared store also fixes the construction-time NoOp
+    /// caveat for scenario stubs added after an imposter is created.
+    #[must_use]
+    pub fn with_flow_store_provider(mut self, provider: Arc<dyn FlowStoreProvider>) -> Self {
+        self.flow_store_provider = Some(provider);
+        self
     }
 
     fn emit(&self, event: ImposterEvent) {
@@ -259,7 +273,7 @@ impl ImposterManager {
 
         info!("Imposter bound to {}:{}", bind_host, port);
         // Create imposter
-        let mut imposter = Imposter::new(config);
+        let mut imposter = Imposter::new_with_provider(config, self.flow_store_provider.as_ref());
 
         // Create shutdown channel for this imposter
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -1536,5 +1550,286 @@ mod tests {
         ));
 
         manager.delete_all().await;
+    }
+
+    // =========================================================================
+    // Issue #312: custom flow-store providers for embedders
+    // =========================================================================
+    mod flow_store_provider {
+        use super::*;
+        use crate::backends::InMemoryFlowStore;
+        use crate::extensions::flow_state::{FlowStore, FlowStoreProvider};
+
+        /// A provider returning a fixed store (`None` defers to the built-ins); records how
+        /// many times it was consulted.
+        struct FixedProvider {
+            store: Option<Arc<dyn FlowStore>>,
+            calls: Arc<Mutex<usize>>,
+        }
+
+        impl FlowStoreProvider for FixedProvider {
+            fn provide(&self, _config: &ImposterConfig) -> Option<Arc<dyn FlowStore>> {
+                *self.calls.lock() += 1;
+                self.store.clone()
+            }
+        }
+
+        fn gated_stub() -> serde_json::Value {
+            json!({
+                "scenarioName": "order",
+                "requiredScenarioState": "Started",
+                "newScenarioState": "paid",
+                "predicates": [{"equals": {"path": "/pay"}}],
+                "responses": [{"is": {"statusCode": 200}}]
+            })
+        }
+
+        // AC1: a provider returning a store is used by new imposters — a write through the
+        // provider's own store handle is visible via the imposter's flow store.
+        #[tokio::test]
+        async fn provider_store_is_used_for_new_imposters() {
+            let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
+            let calls = Arc::new(Mutex::new(0));
+            let provider = Arc::new(FixedProvider {
+                store: Some(Arc::clone(&store)),
+                calls: Arc::clone(&calls),
+            });
+            let manager = ImposterManager::new()
+                .with_flow_store_provider(provider as Arc<dyn FlowStoreProvider>);
+
+            manager
+                .create_imposter(imposter_cfg(
+                    json!({"protocol": "http", "port": 19510, "stubs": []}),
+                ))
+                .await
+                .expect("create");
+
+            assert_eq!(*calls.lock(), 1, "provider consulted at construction");
+            // Write through the provider's store handle, read via the imposter.
+            store.set("f", "k", json!("v")).expect("set");
+            let imposter = manager.get_imposter(19510).unwrap();
+            assert_eq!(
+                imposter.flow_get("f", "k").expect("get"),
+                Some(json!("v")),
+                "imposter must use the provider-supplied store"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC2: a None-returning provider falls through to the built-ins — a scenario config
+        // still gets a working (non-NoOp) in-memory store.
+        #[tokio::test]
+        async fn none_returning_provider_falls_through_to_builtin() {
+            let calls = Arc::new(Mutex::new(0));
+            let provider = Arc::new(FixedProvider {
+                store: None,
+                calls: Arc::clone(&calls),
+            });
+            let manager = ImposterManager::new()
+                .with_flow_store_provider(provider as Arc<dyn FlowStoreProvider>);
+
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19511,
+                    "stubs": [gated_stub()]
+                })))
+                .await
+                .expect("create");
+
+            assert_eq!(*calls.lock(), 1, "provider was consulted");
+            // Built-in default for scenario-declaring stubs is a real in-memory store.
+            let imposter = manager.get_imposter(19511).unwrap();
+            imposter.flow_set("f", "order", json!("paid")).expect("set");
+            assert_eq!(
+                imposter.scenario_state("f", "order").expect("state"),
+                "paid",
+                "fell through to a working built-in store, not NoOp"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC3 (regression): a manager-scoped shared provider fixes the construction-time
+        // NoOp caveat — an imposter created with NO scenario stubs still advances a
+        // scenario stub added later, because it got the shared real store up front.
+        #[tokio::test]
+        async fn late_added_scenario_stub_advances_with_provider() {
+            let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
+            let provider = Arc::new(FixedProvider {
+                store: Some(store),
+                calls: Arc::new(Mutex::new(0)),
+            });
+            let manager = ImposterManager::new()
+                .with_flow_store_provider(provider as Arc<dyn FlowStoreProvider>);
+
+            // No scenario stubs, no _rift.flowState → would be NoOp without the provider.
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19512,
+                    "stubs": [{
+                        "predicates": [{"equals": {"path": "/plain"}}],
+                        "responses": [{"is": {"statusCode": 200}}]
+                    }]
+                })))
+                .await
+                .expect("create");
+
+            let stub: Stub = serde_json::from_value(gated_stub()).expect("stub");
+            manager
+                .add_stub(19512, stub.clone(), None)
+                .await
+                .expect("add");
+
+            let imposter = manager.get_imposter(19512).unwrap();
+            imposter
+                .apply_scenario_transition("f", &stub)
+                .expect("transition");
+            assert_eq!(
+                imposter.scenario_state("f", "order").expect("state"),
+                "paid",
+                "late-added scenario advances on the provider store (NoOp would stay Started)"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC4: with no provider, a NoOp-eligible plain imposter is still NoOp — the caveat
+        // stands without a provider, i.e. behavior is byte-for-byte unchanged.
+        #[tokio::test]
+        async fn no_provider_leaves_late_added_scenario_stuck() {
+            let manager = ImposterManager::new();
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19513,
+                    "stubs": [{
+                        "predicates": [{"equals": {"path": "/plain"}}],
+                        "responses": [{"is": {"statusCode": 200}}]
+                    }]
+                })))
+                .await
+                .expect("create");
+
+            let stub: Stub = serde_json::from_value(gated_stub()).expect("stub");
+            manager
+                .add_stub(19513, stub.clone(), None)
+                .await
+                .expect("add");
+
+            let imposter = manager.get_imposter(19513).unwrap();
+            imposter
+                .apply_scenario_transition("f", &stub)
+                .expect("transition");
+            assert_eq!(
+                imposter.scenario_state("f", "order").expect("state"),
+                "Started",
+                "without a provider the NoOp caveat is preserved (unchanged behavior)"
+            );
+
+            manager.delete_all().await;
+        }
+
+        /// Captures the config it was handed so a test can assert `provide` sees the real one.
+        struct CapturingProvider {
+            seen_port: Arc<Mutex<Option<u16>>>,
+        }
+
+        impl FlowStoreProvider for CapturingProvider {
+            fn provide(&self, config: &ImposterConfig) -> Option<Arc<dyn FlowStore>> {
+                *self.seen_port.lock() = config.port;
+                Some(Arc::new(InMemoryFlowStore::new(300)))
+            }
+        }
+
+        // The provider receives the real ImposterConfig (per-imposter dispatch depends on it).
+        #[tokio::test]
+        async fn provider_receives_the_real_config() {
+            let seen_port = Arc::new(Mutex::new(None));
+            let provider = Arc::new(CapturingProvider {
+                seen_port: Arc::clone(&seen_port),
+            });
+            let manager = ImposterManager::new()
+                .with_flow_store_provider(provider as Arc<dyn FlowStoreProvider>);
+
+            manager
+                .create_imposter(imposter_cfg(
+                    json!({"protocol": "http", "port": 19514, "stubs": []}),
+                ))
+                .await
+                .expect("create");
+
+            assert_eq!(
+                *seen_port.lock(),
+                Some(19514),
+                "provider must receive the imposter's real config"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // Precedence contract: a provider that returns Some wins even over an explicit
+        // `_rift.flowState` config (a refactor reversing the order must fail here).
+        #[tokio::test]
+        async fn provider_wins_over_explicit_flowstate_config() {
+            let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
+            let provider = Arc::new(FixedProvider {
+                store: Some(Arc::clone(&store)),
+                calls: Arc::new(Mutex::new(0)),
+            });
+            let manager = ImposterManager::new()
+                .with_flow_store_provider(provider as Arc<dyn FlowStoreProvider>);
+
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19515,
+                    "_rift": {"flowState": {"backend": "inmemory", "ttlSeconds": 60}},
+                    "stubs": []
+                })))
+                .await
+                .expect("create");
+
+            // The provider's own store handle observes the imposter's writes → the provider
+            // store is in use, not the built-in one the explicit flowState would have made.
+            store.set("f", "k", json!("provider")).expect("set");
+            let imposter = manager.get_imposter(19515).unwrap();
+            assert_eq!(
+                imposter.flow_get("f", "k").expect("get"),
+                Some(json!("provider")),
+                "provider store must win over an explicit _rift.flowState config"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // A None-returning provider with an explicit flowState config falls through to that
+        // configured store (not NoOp).
+        #[tokio::test]
+        async fn none_provider_falls_through_to_configured_flowstate() {
+            let provider = Arc::new(FixedProvider {
+                store: None,
+                calls: Arc::new(Mutex::new(0)),
+            });
+            let manager = ImposterManager::new()
+                .with_flow_store_provider(provider as Arc<dyn FlowStoreProvider>);
+
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19516,
+                    "_rift": {"flowState": {"backend": "inmemory", "ttlSeconds": 60}},
+                    "stubs": []
+                })))
+                .await
+                .expect("create");
+
+            let imposter = manager.get_imposter(19516).unwrap();
+            imposter.flow_set("f", "k", json!("v")).expect("set");
+            assert_eq!(
+                imposter.flow_get("f", "k").expect("get"),
+                Some(json!("v")),
+                "None provider must fall through to the configured flowState store, not NoOp"
+            );
+
+            manager.delete_all().await;
+        }
     }
 }
