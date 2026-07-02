@@ -2799,6 +2799,7 @@ mod scenario_fsm_tests {
         // Started ⇒ first eligible (index 0)
         let (_, idx) = imp
             .find_matching_stub("GET", "/s", &hdrs, None, None)
+            .expect("store is infallible")
             .expect("match in Started");
         assert_eq!(idx, 0);
 
@@ -2806,6 +2807,7 @@ mod scenario_fsm_tests {
         imp.set_scenario_state("7001", "order", "paid").unwrap();
         let (_, idx) = imp
             .find_matching_stub("GET", "/s", &hdrs, None, None)
+            .expect("store is infallible")
             .expect("match in paid");
         assert_eq!(idx, 1);
     }
@@ -3340,5 +3342,257 @@ mod id_addressed_stub_tests {
             assert_eq!(present, i % 2 == 1, "only odd ids survive ({i})");
         }
         let _ = manager.delete_imposter(19813).await;
+    }
+}
+
+// =========================================================================
+// Issue #318: backend error propagation + per-request annotations + decorator
+// =========================================================================
+mod backend_errors {
+    use super::*;
+    use crate::extensions::decorate::{
+        BackendUnavailable, ResponseDecorator, ResponsePhase, annotate,
+    };
+    use crate::extensions::flow_state::FlowStore;
+    use crate::imposter::core::Imposter;
+    use crate::imposter::handler::handle_imposter_request_decorated;
+    use parking_lot::Mutex;
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+
+    /// A backend whose reads and writes fail with `BackendUnavailable`, annotating each op.
+    struct FailingStore;
+
+    impl FlowStore for FailingStore {
+        fn get(&self, _flow_id: &str, _key: &str) -> anyhow::Result<Option<Value>> {
+            annotate("flowStore.get", "induced-failure".to_string());
+            Err(anyhow::Error::new(BackendUnavailable {
+                feature: "flowState",
+                detail: "induced get failure".to_string(),
+            }))
+        }
+        fn set(&self, _flow_id: &str, _key: &str, _value: Value) -> anyhow::Result<()> {
+            annotate("flowStore.set", "induced-failure".to_string());
+            Err(anyhow::Error::new(BackendUnavailable {
+                feature: "flowState",
+                detail: "induced set failure".to_string(),
+            }))
+        }
+        fn exists(&self, _flow_id: &str, _key: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn delete(&self, _flow_id: &str, _key: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn increment(&self, _flow_id: &str, _key: &str) -> anyhow::Result<i64> {
+            Ok(1)
+        }
+        fn set_ttl(&self, _flow_id: &str, _ttl_seconds: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn gated_imposter() -> Arc<Imposter> {
+        let config: ImposterConfig = serde_json::from_value(json!({
+            "protocol": "http", "port": 19490,
+            "stubs": [{
+                "scenarioName": "order",
+                "requiredScenarioState": "Started",
+                "predicates": [{"equals": {"path": "/gated"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "ok"}}]
+            }]
+        }))
+        .expect("config");
+        let mut imposter = Imposter::new(config);
+        imposter.flow_store = Arc::new(FailingStore);
+        Arc::new(imposter)
+    }
+
+    // AC3 (propagation): the scenario eligibility gate no longer swallows store errors.
+    #[test]
+    fn scenario_gate_propagates_store_error() {
+        let imposter = gated_imposter();
+        let err = imposter
+            .find_matching_stub("GET", "/gated", &hyper::HeaderMap::new(), None, None)
+            .expect_err("store failure must propagate, not default to initial state");
+        assert!(
+            err.downcast_ref::<BackendUnavailable>().is_some(),
+            "typed error must survive: {err:?}"
+        );
+    }
+
+    // A non-string value stored on a scenario key (out-of-band raw flow-state PUT) is an
+    // error, never silently coerced to the initial state.
+    #[test]
+    fn scenario_state_non_string_value_errors() {
+        let config: ImposterConfig = serde_json::from_value(json!({
+            "protocol": "http", "port": 19492,
+            "stubs": [{
+                "scenarioName": "order",
+                "requiredScenarioState": "Started",
+                "predicates": [{"equals": {"path": "/gated"}}],
+                "responses": [{"is": {"statusCode": 200}}]
+            }]
+        }))
+        .expect("config");
+        let imposter = Imposter::new(config);
+        imposter
+            .flow_set("f", "order", json!(42))
+            .expect("in-memory set");
+        let err = imposter
+            .scenario_state("f", "order")
+            .expect_err("non-string state must error");
+        assert!(err.to_string().contains("not a string"), "got: {err}");
+    }
+
+    // AC3 (propagation): a failed newScenarioState write propagates too.
+    #[test]
+    fn scenario_transition_error_propagates() {
+        let imposter = gated_imposter();
+        let stub: Stub = serde_json::from_value(json!({
+            "scenarioName": "order",
+            "newScenarioState": "paid",
+            "predicates": [],
+            "responses": [{"is": {"statusCode": 200}}]
+        }))
+        .expect("stub");
+        let err = imposter
+            .apply_scenario_transition("flow", &stub)
+            .expect_err("transition write failure must propagate");
+        assert!(err.downcast_ref::<BackendUnavailable>().is_some());
+    }
+
+    type DecoratorCall = (ResponsePhase, Option<u16>, Vec<(&'static str, String)>);
+
+    #[derive(Default)]
+    struct RecordingDecorator {
+        calls: Mutex<Vec<DecoratorCall>>,
+    }
+
+    impl ResponseDecorator for RecordingDecorator {
+        fn decorate(
+            &self,
+            phase: ResponsePhase,
+            req_port: Option<u16>,
+            annotations: &[(&'static str, String)],
+            headers: &mut hyper::HeaderMap,
+        ) {
+            self.calls
+                .lock()
+                .push((phase, req_port, annotations.to_vec()));
+            headers.insert("x-test-decorated", "1".parse().expect("header"));
+        }
+    }
+
+    // AC2 + AC3 end-to-end on the data plane: a bare listener serving the decorated
+    // entrypoint returns the structured 503, and the decorator sees the phase, the
+    // imposter port, and the annotations the failing backend attached.
+    #[tokio::test]
+    async fn decorated_data_plane_serves_503_and_annotations() {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+
+        let imposter = gated_imposter();
+        let recorder = Arc::new(RecordingDecorator::default());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:12617")
+            .await
+            .expect("bind");
+        let imp = imposter.clone();
+        let rec = recorder.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, addr)) = listener.accept().await else {
+                    break;
+                };
+                let imp = imp.clone();
+                let rec = rec.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req| {
+                        let imp = imp.clone();
+                        let rec = rec.clone();
+                        async move {
+                            handle_imposter_request_decorated(
+                                req,
+                                imp,
+                                addr,
+                                19490,
+                                Some(rec as Arc<dyn ResponseDecorator>),
+                            )
+                            .await
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let resp = reqwest::get("http://127.0.0.1:12617/gated")
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), 503, "backend failure is a structured 503");
+        assert_eq!(
+            resp.headers()
+                .get("x-test-decorated")
+                .and_then(|v| v.to_str().ok()),
+            Some("1"),
+            "decorator header must land on the wire"
+        );
+        let body: serde_json::Value = resp.json().await.expect("json");
+        assert_eq!(body["error"], "backendUnavailable");
+        assert_eq!(body["feature"], "flowState");
+
+        let calls = recorder.calls.lock().clone();
+        assert_eq!(calls.len(), 1);
+        let (phase, port, annotations) = &calls[0];
+        assert_eq!(*phase, ResponsePhase::DataPlane);
+        assert_eq!(*port, Some(19490));
+        assert!(
+            annotations
+                .iter()
+                .any(|(k, v)| *k == "flowStore.get" && v == "induced-failure"),
+            "backend annotation must reach the decorator: {annotations:?}"
+        );
+    }
+
+    // AC2: the manager's builder wires the decorator into the real serve loop.
+    #[tokio::test]
+    async fn manager_with_decorator_decorates_normal_response() {
+        let recorder = Arc::new(RecordingDecorator::default());
+        let manager = ImposterManager::new()
+            .with_response_decorator(recorder.clone() as Arc<dyn ResponseDecorator>);
+        let config: ImposterConfig = serde_json::from_value(json!({
+            "protocol": "http", "port": 19491,
+            "stubs": [{
+                "predicates": [{"equals": {"path": "/ping"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "pong"}}]
+            }]
+        }))
+        .expect("config");
+        manager.create_imposter(config).await.expect("create");
+
+        let resp = reqwest::get("http://127.0.0.1:19491/ping")
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("x-test-decorated")
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+
+        let calls = recorder.calls.lock().clone();
+        assert_eq!(calls.len(), 1);
+        let (phase, port, annotations) = &calls[0];
+        assert_eq!(*phase, ResponsePhase::DataPlane);
+        assert_eq!(*port, Some(19491));
+        assert!(annotations.is_empty(), "plain stub produces no annotations");
+
+        manager.delete_all().await;
     }
 }

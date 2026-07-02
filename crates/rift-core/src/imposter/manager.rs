@@ -5,9 +5,10 @@
 
 use super::core::Imposter;
 use super::fault_io::{FaultCell, FaultIo, TcpFaultKind};
-use super::handler::handle_imposter_request;
+use super::handler::handle_imposter_request_decorated;
 use super::reconcile::{ApplyReport, ImposterEvent, ImposterEventListener, StubReconcile};
 use super::types::{ImposterConfig, ImposterError, Stub};
+use crate::extensions::decorate::ResponseDecorator;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -50,14 +51,17 @@ async fn run_http1<I>(
     fault_cell: FaultCell,
     mut conn_shutdown_rx: broadcast::Receiver<()>,
     port: u16,
+    decorator: Option<Arc<dyn ResponseDecorator>>,
 ) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
     let service = service_fn(move |req| {
         let imposter = Arc::clone(&imposter);
         let fault_cell = Arc::clone(&fault_cell);
+        let decorator = decorator.clone();
         async move {
-            let response = handle_imposter_request(req, imposter, addr).await?;
+            let response =
+                handle_imposter_request_decorated(req, imposter, addr, port, decorator).await?;
             if let Some(kind) = response.extensions().get::<TcpFaultKind>().copied() {
                 *fault_cell.lock() = Some(kind);
             }
@@ -95,6 +99,8 @@ pub struct ImposterManager {
     tls_defaults: TlsDefaults,
     /// Observer for config mutations (issue #316)
     event_listener: Option<Arc<dyn ImposterEventListener>>,
+    /// Outgoing-response hook for imposter traffic (issue #318)
+    response_decorator: Option<Arc<dyn ResponseDecorator>>,
 }
 
 impl ImposterManager {
@@ -112,6 +118,7 @@ impl ImposterManager {
             datadir: datadir.map(Arc::new),
             tls_defaults: TlsDefaults::default(),
             event_listener: None,
+            response_decorator: None,
         }
     }
 
@@ -129,6 +136,22 @@ impl ImposterManager {
     pub fn with_event_listener(mut self, listener: Arc<dyn ImposterEventListener>) -> Self {
         self.event_listener = Some(listener);
         self
+    }
+
+    /// Register an outgoing-response decorator (issue #318). Invoked for every response an
+    /// imposter serves (phase `DataPlane`, the imposter's port), with the annotations
+    /// collected during the request. The admin server applies the same decorator with
+    /// phase `Admin` via [`Self::response_decorator`].
+    #[must_use]
+    pub fn with_response_decorator(mut self, decorator: Arc<dyn ResponseDecorator>) -> Self {
+        self.response_decorator = Some(decorator);
+        self
+    }
+
+    /// The configured response decorator, if any — public so admin/embedder listeners can
+    /// apply the same hook to their own responses.
+    pub fn response_decorator(&self) -> Option<Arc<dyn ResponseDecorator>> {
+        self.response_decorator.clone()
     }
 
     fn emit(&self, event: ImposterEvent) {
@@ -248,6 +271,7 @@ impl ImposterManager {
         let imposter_clone = Arc::clone(&imposter);
         let conn_shutdown_tx = shutdown_tx.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let response_decorator = self.response_decorator.clone();
 
         let _handle = tokio::spawn(async move {
             loop {
@@ -262,6 +286,7 @@ impl ImposterManager {
                                 let conn_shutdown_rx = conn_shutdown_tx.subscribe();
                                 // Per-imposter TLS acceptor is cheap to clone (Arc-backed).
                                 let tls_acceptor = tls_acceptor.clone();
+                                let decorator = response_decorator.clone();
                                 tokio::spawn(async move {
                                     // Per-connection slot for a real transport fault (issue #239);
                                     // armed by the handler, applied by FaultIo on the response write.
@@ -286,6 +311,7 @@ impl ImposterManager {
                                                     fault_cell,
                                                     conn_shutdown_rx,
                                                     port,
+                                                    decorator,
                                                 )
                                                 .await
                                             }
@@ -304,6 +330,7 @@ impl ImposterManager {
                                                 fault_cell,
                                                 conn_shutdown_rx,
                                                 port,
+                                                decorator,
                                             )
                                             .await
                                         }
@@ -671,7 +698,9 @@ impl ImposterManager {
     /// and scenario state, then persist the updated stub set.
     pub async fn teardown_space(&self, port: u16, space: &str) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
-        imposter.teardown_space(space);
+        imposter
+            .teardown_space(space)
+            .map_err(ImposterError::Backend)?;
         self.persist_imposter_checked(&imposter).await
     }
 

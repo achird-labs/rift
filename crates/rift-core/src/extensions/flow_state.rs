@@ -361,3 +361,56 @@ mod tests {
         assert!(store.set(flow_id, key, json!("データ")).is_ok());
     }
 }
+
+/// Log-and-fallback for the script-facing flow-store wrappers: scripts keep their legacy
+/// fallback values on a backend failure (changing that is a breaking script contract),
+/// but the dropped error is no longer invisible (issue #318).
+pub fn log_flow_err<T>(op: &str, fallback: T, result: Result<T>) -> T {
+    result.unwrap_or_else(|e| {
+        tracing::warn!("script flow_store.{op} failed; returning fallback: {e:#}");
+        fallback
+    })
+}
+
+/// A deliberately failing flow store (feature `test-backend`): every operation annotates
+/// the op via `decorate::annotate`, then fails with a `BackendUnavailable` source —
+/// selected with `_rift.flowState.backend = "failing"` to exercise backend-outage paths
+/// (issue #318) without a real unreachable backend.
+#[cfg(feature = "test-backend")]
+#[derive(Debug)]
+pub struct FailingFlowStore;
+
+#[cfg(feature = "test-backend")]
+impl FailingFlowStore {
+    fn fail<T>(&self, op: &'static str, flow_id: &str, key: &str) -> Result<T> {
+        crate::extensions::decorate::annotate(op, format!("{flow_id}/{key}"));
+        Err(anyhow::Error::new(
+            crate::extensions::decorate::BackendUnavailable {
+                feature: "flowState",
+                detail: format!("failing test backend: {op} {flow_id}/{key}"),
+            },
+        ))
+    }
+}
+
+#[cfg(feature = "test-backend")]
+impl FlowStore for FailingFlowStore {
+    fn get(&self, flow_id: &str, key: &str) -> Result<Option<Value>> {
+        self.fail("flowStore.get", flow_id, key)
+    }
+    fn set(&self, flow_id: &str, key: &str, _value: Value) -> Result<()> {
+        self.fail("flowStore.set", flow_id, key)
+    }
+    fn exists(&self, flow_id: &str, key: &str) -> Result<bool> {
+        self.fail("flowStore.exists", flow_id, key)
+    }
+    fn delete(&self, flow_id: &str, key: &str) -> Result<()> {
+        self.fail("flowStore.delete", flow_id, key)
+    }
+    fn increment(&self, flow_id: &str, key: &str) -> Result<i64> {
+        self.fail("flowStore.increment", flow_id, key)
+    }
+    fn set_ttl(&self, flow_id: &str, _ttl_seconds: i64) -> Result<()> {
+        self.fail("flowStore.setTtl", flow_id, "")
+    }
+}

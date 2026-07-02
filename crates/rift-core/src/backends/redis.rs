@@ -101,19 +101,30 @@ impl RedisFlowStore {
     }
 }
 
+/// Wrap a Redis op failure so response boundaries map it to a structured 503 (issue
+/// #318): annotate the failed op, then attach `BackendUnavailable`. Serde failures are
+/// NOT wrapped — malformed stored data is corruption, not backend unavailability.
+fn backend_err(op: &'static str, err: impl std::fmt::Display) -> anyhow::Error {
+    crate::extensions::decorate::annotate(op, err.to_string());
+    anyhow::Error::new(crate::extensions::decorate::BackendUnavailable {
+        feature: "flowState",
+        detail: format!("{op}: {err}"),
+    })
+}
+
 impl FlowStore for RedisFlowStore {
     fn get(&self, flow_id: &str, key: &str) -> Result<Option<Value>> {
         let key_str = self.make_key(flow_id, key);
         let conn = self
             .pool
             .get()
-            .context("Failed to get Redis connection from pool")?;
+            .map_err(|e| backend_err("flowStore.pool", e))?;
 
         let value: Option<String> = conn
             .lock()
             .unwrap()
             .get(&key_str)
-            .context("Redis GET failed")?;
+            .map_err(|e| backend_err("flowStore.get", e))?;
 
         if let Some(json_str) = value {
             let val = serde_json::from_str(&json_str).context("Failed to parse JSON from Redis")?;
@@ -131,7 +142,7 @@ impl FlowStore for RedisFlowStore {
         let conn = self
             .pool
             .get()
-            .context("Failed to get Redis connection from pool")?;
+            .map_err(|e| backend_err("flowStore.pool", e))?;
 
         // SET with TTL using SETEX
         let _: () = redis::cmd("SETEX")
@@ -139,7 +150,7 @@ impl FlowStore for RedisFlowStore {
             .arg(self.default_ttl_seconds)
             .arg(json_str)
             .query(&mut *conn.lock().unwrap())
-            .context("Redis SETEX failed")?;
+            .map_err(|e| backend_err("flowStore.set", e))?;
 
         Ok(())
     }
@@ -149,13 +160,13 @@ impl FlowStore for RedisFlowStore {
         let conn = self
             .pool
             .get()
-            .context("Failed to get Redis connection from pool")?;
+            .map_err(|e| backend_err("flowStore.pool", e))?;
 
         let count: i64 = conn
             .lock()
             .unwrap()
             .exists(&key_str)
-            .context("Redis EXISTS failed")?;
+            .map_err(|e| backend_err("flowStore.exists", e))?;
 
         Ok(count > 0)
     }
@@ -165,13 +176,13 @@ impl FlowStore for RedisFlowStore {
         let conn = self
             .pool
             .get()
-            .context("Failed to get Redis connection from pool")?;
+            .map_err(|e| backend_err("flowStore.pool", e))?;
 
         let _: () = conn
             .lock()
             .unwrap()
             .del(&key_str)
-            .context("Redis DEL failed")?;
+            .map_err(|e| backend_err("flowStore.delete", e))?;
 
         Ok(())
     }
@@ -181,18 +192,20 @@ impl FlowStore for RedisFlowStore {
         let conn = self
             .pool
             .get()
-            .context("Failed to get Redis connection from pool")?;
+            .map_err(|e| backend_err("flowStore.pool", e))?;
         let mut conn_guard = conn.lock().unwrap();
 
         // INCR returns the new value
-        let new_value: i64 = conn_guard.incr(&key_str, 1).context("Redis INCR failed")?;
+        let new_value: i64 = conn_guard
+            .incr(&key_str, 1)
+            .map_err(|e| backend_err("flowStore.increment", e))?;
 
         // Set TTL on the key (INCR doesn't reset TTL)
         let _: () = redis::cmd("EXPIRE")
             .arg(&key_str)
             .arg(self.default_ttl_seconds)
             .query(&mut *conn_guard)
-            .context("Redis EXPIRE failed")?;
+            .map_err(|e| backend_err("flowStore.expire", e))?;
 
         Ok(new_value)
     }
@@ -224,5 +237,23 @@ pub(crate) fn health_check(pool: &r2d2::Pool<RedisConnectionManager>) -> Result<
             tracing::warn!("Redis health check failed: {}", e);
             Ok(false)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Every Redis op failure funnels through backend_err, so this pins the whole file's
+    // error shape: typed, downcastable, structured-503-able (issue #318).
+    #[test]
+    fn backend_err_is_downcastable_to_backend_unavailable() {
+        let err = backend_err("flowStore.get", "connection refused");
+        let unavailable = err
+            .downcast_ref::<crate::extensions::decorate::BackendUnavailable>()
+            .expect("typed error");
+        assert_eq!(unavailable.feature, "flowState");
+        assert!(unavailable.detail.contains("flowStore.get"));
+        assert!(unavailable.detail.contains("connection refused"));
     }
 }

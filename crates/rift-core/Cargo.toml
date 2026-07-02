@@ -92,3 +92,5 @@ default = ["redis-backend", "lua", "javascript"]
 redis-backend = ["redis", "r2d2"]
 lua = ["mlua"]
 javascript = ["boa_engine"]
+# Deliberately failing flow-store backend for backend-outage tests (issue #318)
+test-backend = []

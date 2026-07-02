@@ -13,6 +13,9 @@ use crate::behaviors::{
     CsvCache, RequestContext, ResponseBehaviors, apply_copy_behaviors, apply_lookup_behaviors,
     apply_shell_transform, header_to_title_case,
 };
+use crate::extensions::decorate::{
+    ResponseDecorator, ResponsePhase, backend_error_response, with_annotation_scope,
+};
 use crate::extensions::template::{RequestData, has_template_variables, process_template};
 use crate::scripting::{FaultDecision, ScriptEngine, ScriptRequest};
 #[cfg(feature = "javascript")]
@@ -40,6 +43,32 @@ const MAX_REQUEST_BODY_SIZE: usize = 10 * 1024 * 1024;
 fn csv_cache() -> &'static CsvCache {
     static CSV_CACHE: std::sync::OnceLock<CsvCache> = std::sync::OnceLock::new();
     CSV_CACHE.get_or_init(CsvCache::new)
+}
+
+/// [`handle_imposter_request`] inside a per-request annotation scope, with the configured
+/// [`ResponseDecorator`](crate::extensions::decorate::ResponseDecorator) applied (phase
+/// `DataPlane`, the imposter's `port`) before the response is written (issue #318). This
+/// is the serve-loop wrapper; it is public so custom listeners can reuse the exact
+/// production wiring.
+pub async fn handle_imposter_request_decorated(
+    req: Request<Incoming>,
+    imposter: Arc<Imposter>,
+    client_addr: SocketAddr,
+    port: u16,
+    decorator: Option<Arc<dyn ResponseDecorator>>,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    let (response, annotations) =
+        with_annotation_scope(handle_imposter_request(req, imposter, client_addr)).await;
+    let mut response = response?;
+    if let Some(decorator) = decorator {
+        decorator.decorate(
+            ResponsePhase::DataPlane,
+            Some(port),
+            &annotations,
+            response.headers_mut(),
+        );
+    }
+    Ok(response)
 }
 
 /// Handle a request to an imposter
@@ -215,7 +244,7 @@ async fn handle_request_inner(
     // Get client address info for requestFrom, ip predicates
     let request_from = client_addr.to_string();
     let client_ip = client_addr.ip().to_string();
-    if let Some((stub_state, stub_index)) = imposter.find_matching_stub_with_client(
+    let matched = match imposter.find_matching_stub_with_client(
         method_str,
         path_str,
         &headers_for_context,
@@ -224,12 +253,20 @@ async fn handle_request_inner(
         Some(&request_from),
         Some(&client_ip),
     ) {
+        Ok(matched) => matched,
+        // A backend consulted during matching failed (issue #318): surface it, never
+        // fall through to "no match" (which would serve the wrong response).
+        Err(e) => return Ok(backend_error_response(&e)),
+    };
+    if let Some((stub_state, stub_index)) = matched {
         // Scenario FSM: apply the matched stub's newScenarioState transition (no-op unless set).
         // Resolve flow_id from the same header map the eligibility gate used (headers_for_context)
         // so the transition writes the exact key the gate read.
         let scenario_flow_id =
             imposter.resolve_flow_id(&Imposter::header_map_to_hashmap(&headers_for_context));
-        imposter.apply_scenario_transition(&scenario_flow_id, &stub_state.stub);
+        if let Err(e) = imposter.apply_scenario_transition(&scenario_flow_id, &stub_state.stub) {
+            return Ok(backend_error_response(&e));
+        }
 
         // Check if this is a proxy response
         if let Some(proxy_config) = imposter.get_proxy_response(&stub_state) {
@@ -781,16 +818,19 @@ fn handle_debug_request(
         Some(query_str)
     };
 
-    let match_result = if let Some((stub_state, stub_index)) = imposter
-        .find_matching_stub_with_client(
-            method,
-            path,
-            headers_for_context,
-            query_opt,
-            body_string.as_deref(),
-            Some(&request_from),
-            Some(&client_ip),
-        ) {
+    let matched = match imposter.find_matching_stub_with_client(
+        method,
+        path,
+        headers_for_context,
+        query_opt,
+        body_string.as_deref(),
+        Some(&request_from),
+        Some(&client_ip),
+    ) {
+        Ok(matched) => matched,
+        Err(e) => return Ok(backend_error_response(&e)),
+    };
+    let match_result = if let Some((stub_state, stub_index)) = matched {
         // Match found
         let response_preview = imposter.get_response_preview(&stub_state);
         DebugMatchResult {

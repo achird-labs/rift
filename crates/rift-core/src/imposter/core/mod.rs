@@ -168,6 +168,11 @@ impl Imposter {
                     Arc::new(InMemoryFlowStore::new(flow_state_config.ttl_seconds as u64))
                 }
                 "redis" => Self::create_redis_flow_store(flow_state_config),
+                #[cfg(feature = "test-backend")]
+                "failing" => {
+                    info!("Creating deliberately failing FlowStore (test-backend feature)");
+                    Arc::new(crate::extensions::flow_state::FailingFlowStore)
+                }
                 other => {
                     warn!("Unknown flow state backend '{}', using NoOp", other);
                     Arc::new(NoOpFlowStore)

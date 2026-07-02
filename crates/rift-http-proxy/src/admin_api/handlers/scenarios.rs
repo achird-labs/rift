@@ -5,6 +5,7 @@
 //! flow (`resolve_flow_id` with no headers ⇒ the `imposter_port` flow) is used.
 
 use crate::admin_api::types::{collect_body, error_response, json_response};
+use crate::extensions::decorate::backend_error_response;
 use crate::imposter::{Imposter, ImposterManager, Stub};
 use bytes::Bytes;
 use http_body_util::Full;
@@ -49,14 +50,15 @@ pub async fn handle_list_scenarios(
     match manager.get_imposter(port) {
         Ok(imposter) => {
             let flow_id = flow_id_from_query(query).unwrap_or_else(|| default_flow_id(&imposter));
-            let scenarios: Vec<_> = imposter
-                .scenario_names()
-                .into_iter()
-                .map(|name| {
-                    let state = imposter.scenario_state(&flow_id, &name);
-                    serde_json::json!({ "name": name, "state": state })
-                })
-                .collect();
+            let mut scenarios = Vec::new();
+            for name in imposter.scenario_names() {
+                match imposter.scenario_state(&flow_id, &name) {
+                    Ok(state) => {
+                        scenarios.push(serde_json::json!({ "name": name, "state": state }))
+                    }
+                    Err(e) => return backend_error_response(&e),
+                }
+            }
             json_response(
                 StatusCode::OK,
                 &serde_json::json!({ "flowId": flow_id, "scenarios": scenarios }),
@@ -92,7 +94,7 @@ pub async fn handle_set_scenario_state(
                     StatusCode::OK,
                     &serde_json::json!({ "flowId": flow_id, "name": name, "state": state }),
                 ),
-                Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                Err(e) => backend_error_response(&e),
             }
         }
         Err(e) => e.into(),
@@ -124,7 +126,7 @@ pub async fn handle_reset_scenarios(
             let flow_id = flow_id_opt.unwrap_or_else(|| default_flow_id(&imposter));
             for name in imposter.scenario_names() {
                 if let Err(e) = imposter.delete_scenario_state(&flow_id, &name) {
-                    return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+                    return backend_error_response(&e);
                 }
             }
             json_response(
@@ -150,7 +152,7 @@ pub async fn handle_get_flow_state(
                 &serde_json::json!({ "flowId": flow_id, "key": key, "value": value }),
             ),
             Ok(None) => error_response(StatusCode::NOT_FOUND, "flow-state key not found"),
-            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            Err(e) => backend_error_response(&e),
         },
         Err(e) => e.into(),
     }
@@ -177,7 +179,7 @@ pub async fn handle_put_flow_state(
                 StatusCode::OK,
                 &serde_json::json!({ "flowId": flow_id, "key": key, "value": value }),
             ),
-            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            Err(e) => backend_error_response(&e),
         },
         Err(e) => e.into(),
     }
@@ -196,7 +198,7 @@ pub async fn handle_delete_flow_state(
                 StatusCode::OK,
                 &serde_json::json!({ "flowId": flow_id, "key": key, "deleted": true }),
             ),
-            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            Err(e) => backend_error_response(&e),
         },
         Err(e) => e.into(),
     }
@@ -256,14 +258,15 @@ pub async fn handle_get_space(
 ) -> Response<Full<Bytes>> {
     match manager.get_imposter(port) {
         Ok(imposter) => {
-            let scenarios: Vec<_> = imposter
-                .scenario_names()
-                .into_iter()
-                .map(|name| {
-                    let state = imposter.scenario_state(flow_id, &name);
-                    serde_json::json!({ "name": name, "state": state })
-                })
-                .collect();
+            let mut scenarios = Vec::new();
+            for name in imposter.scenario_names() {
+                match imposter.scenario_state(flow_id, &name) {
+                    Ok(state) => {
+                        scenarios.push(serde_json::json!({ "name": name, "state": state }))
+                    }
+                    Err(e) => return backend_error_response(&e),
+                }
+            }
             let number_of_requests = imposter
                 .get_recorded_requests()
                 .iter()
