@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow};
 use mlua::prelude::*;
 use serde_json::Value;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Lua script engine for fault injection
 ///
@@ -769,6 +770,42 @@ fn lua_to_json(_lua: &Lua, value: LuaValue) -> LuaResult<Value> {
         }
         _ => Ok(Value::Null),
     }
+}
+
+/// Run a Lua `should_inject` with a wall-clock interrupt hook (issue #308). An instruction
+/// hook checks the `abort` flag periodically; when the caller's deadline sets it, the hook
+/// returns an error, aborting the VM — the Lua analogue of Rhai's `on_progress` (#172).
+pub fn run_should_inject_with_abort_lua(
+    code: &str,
+    rule_id: &str,
+    request: &ScriptRequest,
+    flow_store: Arc<dyn FlowStore>,
+    abort: &Arc<AtomicBool>,
+) -> Result<FaultDecision> {
+    let lua = Lua::new();
+    // Disable JIT: LuaJIT trace-compiles hot loops (e.g. `while true do end`) into machine
+    // code that bypasses the instruction hook, so a runaway script would never be
+    // interrupted. Running the bytecode interpreter keeps the count hook firing (#308).
+    if let Err(e) = lua.load("if jit then jit.off() end").exec() {
+        // The whole interrupt mechanism relies on JIT being off; if this ever fails the
+        // instruction hook may be bypassed, so make the degradation visible (issue #308).
+        tracing::warn!("failed to disable LuaJIT for script interruption: {e}");
+    }
+    let flag = Arc::clone(abort);
+    lua.set_hook(
+        mlua::HookTriggers::new().every_nth_instruction(2048),
+        move |_lua, _debug| {
+            if flag.load(Ordering::Relaxed) {
+                Err(mlua::Error::runtime(
+                    "script interrupted: execution timeout",
+                ))
+            } else {
+                Ok(mlua::VmState::Continue)
+            }
+        },
+    );
+    let bytecode = compile_to_bytecode(code)?;
+    execute_lua_bytecode(&lua, &bytecode, request, flow_store, rule_id)
 }
 
 #[cfg(test)]

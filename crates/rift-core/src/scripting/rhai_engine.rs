@@ -3,6 +3,7 @@ use anyhow::{Result, anyhow};
 use rhai::{AST, Dynamic, Engine, Map, Scope};
 use serde_json::Value;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{FaultDecision, ScriptFlowStore, ScriptRequest};
 
@@ -541,6 +542,30 @@ pub(super) fn dynamic_to_json(value: Dynamic) -> Value {
             },
         }
     }
+}
+
+/// Run a Rhai `should_inject` with a wall-clock interrupt hook (issue #308). While the AST
+/// evaluates, Rhai calls the registered `on_progress` callback periodically; when `abort`
+/// is set (by the caller's deadline), it returns `Some(_)`, terminating execution with an
+/// error — the same mechanism the pooled path uses (#172).
+pub fn run_should_inject_with_abort_rhai(
+    code: &str,
+    rule_id: &str,
+    request: &ScriptRequest,
+    flow_store: Arc<dyn FlowStore>,
+    abort: &Arc<AtomicBool>,
+) -> Result<FaultDecision> {
+    let compiled = RhaiEngine::new(code, rule_id)?;
+    let mut engine = RhaiEngine::create_engine();
+    let flag = Arc::clone(abort);
+    engine.on_progress(move |_ops| {
+        if flag.load(Ordering::Relaxed) {
+            Some(Dynamic::TRUE)
+        } else {
+            None
+        }
+    });
+    execute_rhai_with_engine(&engine, compiled.ast(), request, flow_store, rule_id)
 }
 
 #[cfg(test)]

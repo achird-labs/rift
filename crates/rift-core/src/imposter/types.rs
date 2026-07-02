@@ -913,7 +913,8 @@ fn default_script_engine() -> String {
 }
 
 fn default_script_timeout() -> u64 {
-    5000
+    // Single source of truth with the handler's fallback (issue #308).
+    crate::scripting::DEFAULT_SCRIPT_TIMEOUT_MS
 }
 
 /// Rift response extensions (added to stub responses)

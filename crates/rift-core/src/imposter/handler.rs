@@ -17,7 +17,9 @@ use crate::extensions::decorate::{
     ResponseDecorator, ResponsePhase, backend_error_response, with_annotation_scope,
 };
 use crate::extensions::template::{RequestData, has_template_variables, process_template};
-use crate::scripting::{FaultDecision, ScriptEngine, ScriptRequest};
+use crate::scripting::{
+    FaultDecision, ScriptRequest, resolve_script_timeout_ms, should_inject_bounded,
+};
 #[cfg(feature = "javascript")]
 use crate::scripting::{MountebankRequest, execute_mountebank_inject};
 use crate::util::{build_response, build_response_with_headers};
@@ -397,83 +399,79 @@ async fn handle_request_inner(
                 path_params: HashMap::new(),
             };
 
-            // Create script engine and execute
-            match ScriptEngine::new(
-                &script_config.engine,
-                &script_config.code,
-                &format!("rift_script_{stub_index}"),
-            ) {
-                Ok(engine) => {
-                    let flow_store = imposter.flow_store.clone();
-                    match engine.should_inject_fault(&script_request, flow_store) {
-                        Ok(FaultDecision::Error {
-                            status,
-                            body,
-                            headers,
-                            ..
-                        }) => {
-                            imposter.advance_cycler_for_rift_script(&stub_state);
+            // Execute the script off the async worker under a wall-clock deadline (issue
+            // #308): a runaway script is interrupted at `_rift.scriptEngine.timeoutMs`
+            // (default 5s) instead of wedging the whole engine.
+            let timeout_ms = resolve_script_timeout_ms(&imposter.config);
+            let flow_store = imposter.flow_store.clone();
+            match should_inject_bounded(
+                script_config.engine.clone(),
+                script_config.code.clone(),
+                format!("rift_script_{stub_index}"),
+                script_request,
+                flow_store,
+                Duration::from_millis(timeout_ms),
+            )
+            .await
+            {
+                Ok(FaultDecision::Error {
+                    status,
+                    body,
+                    headers,
+                    ..
+                }) => {
+                    imposter.advance_cycler_for_rift_script(&stub_state);
 
-                            let mut response = Response::builder().status(status);
-                            for (k, v) in &headers {
-                                response = response.header(k, v);
-                            }
-                            response = response.header("x-rift-imposter", "true");
-                            response = response.header("x-rift-script", &script_config.engine);
-
-                            return Ok(response.body(Full::new(Bytes::from(body))).unwrap_or_else(
-                                |_| {
-                                    build_response(
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        "Response build error",
-                                    )
-                                },
-                            ));
-                        }
-                        Ok(FaultDecision::Latency { duration_ms, .. }) => {
-                            // Apply latency then return 200 OK
-                            tokio::time::sleep(Duration::from_millis(duration_ms)).await;
-                            imposter.advance_cycler_for_rift_script(&stub_state);
-
-                            return Ok(build_response_with_headers(
-                                StatusCode::OK,
-                                [
-                                    ("x-rift-imposter", "true"),
-                                    ("x-rift-script", &script_config.engine),
-                                    ("x-rift-latency-ms", &duration_ms.to_string()),
-                                ],
-                                Bytes::new(),
-                            ));
-                        }
-                        Ok(FaultDecision::None) => {
-                            // Script says no fault - return 200 OK
-                            imposter.advance_cycler_for_rift_script(&stub_state);
-
-                            return Ok(build_response_with_headers(
-                                StatusCode::OK,
-                                [
-                                    ("x-rift-imposter", "true"),
-                                    ("x-rift-script", script_config.engine.as_str()),
-                                ],
-                                Bytes::new(),
-                            ));
-                        }
-                        Err(e) => {
-                            warn!("Rift script execution failed: {}", e);
-                            return Ok(build_response_with_headers(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                [("x-rift-imposter", "true"), ("x-rift-script-error", "true")],
-                                format!(r#"{{"error": "Script error: {e}"}}"#),
-                            ));
-                        }
+                    let mut response = Response::builder().status(status);
+                    for (k, v) in &headers {
+                        response = response.header(k, v);
                     }
+                    response = response.header("x-rift-imposter", "true");
+                    response = response.header("x-rift-script", &script_config.engine);
+
+                    return Ok(response
+                        .body(Full::new(Bytes::from(body)))
+                        .unwrap_or_else(|_| {
+                            build_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "Response build error",
+                            )
+                        }));
+                }
+                Ok(FaultDecision::Latency { duration_ms, .. }) => {
+                    // Apply latency then return 200 OK
+                    tokio::time::sleep(Duration::from_millis(duration_ms)).await;
+                    imposter.advance_cycler_for_rift_script(&stub_state);
+
+                    return Ok(build_response_with_headers(
+                        StatusCode::OK,
+                        [
+                            ("x-rift-imposter", "true"),
+                            ("x-rift-script", &script_config.engine),
+                            ("x-rift-latency-ms", &duration_ms.to_string()),
+                        ],
+                        Bytes::new(),
+                    ));
+                }
+                Ok(FaultDecision::None) => {
+                    // Script says no fault - return 200 OK
+                    imposter.advance_cycler_for_rift_script(&stub_state);
+
+                    return Ok(build_response_with_headers(
+                        StatusCode::OK,
+                        [
+                            ("x-rift-imposter", "true"),
+                            ("x-rift-script", script_config.engine.as_str()),
+                        ],
+                        Bytes::new(),
+                    ));
                 }
                 Err(e) => {
-                    warn!("Failed to create script engine: {}", e);
+                    warn!("Rift script execution failed: {}", e);
                     return Ok(build_response_with_headers(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         [("x-rift-imposter", "true"), ("x-rift-script-error", "true")],
-                        format!(r#"{{"error": "Script engine error: {e}"}}"#),
+                        format!(r#"{{"error": "Script error: {e}"}}"#),
                     ));
                 }
             }
