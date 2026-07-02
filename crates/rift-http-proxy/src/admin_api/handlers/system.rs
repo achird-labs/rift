@@ -116,11 +116,12 @@ pub fn handle_logs(query: Option<&str>) -> Response<Full<Bytes>> {
     json_response(StatusCode::OK, &logs)
 }
 
-/// POST /admin/reload - re-read the startup config source and replace all imposters (issue #197,
-/// Rift extension). No-op (200) when no `--configfile`/`--datadir` was given. The new set is
-/// validated before the running imposters are touched, so a parse or semantic error (bad
-/// protocol, duplicate port) returns 500 with the running imposters left unchanged. Reload resets
-/// all imposter state (recorded requests, scenario state, response cyclers).
+/// POST /admin/reload - re-read the startup config source and reconcile the running imposters
+/// toward it incrementally (issues #197/#316, Rift extension). No-op (200) when no
+/// `--configfile`/`--datadir` was given. The new set is validated before the running imposters
+/// are touched, so a parse or semantic error (bad protocol, duplicate port) returns 500 with the
+/// running imposters left unchanged. Unchanged imposters keep all runtime state (recorded
+/// requests, scenario state, response cyclers); only changed ports are patched or replaced.
 pub async fn handle_reload(
     manager: Arc<ImposterManager>,
     config_source: Option<Arc<crate::config_loader::ConfigSource>>,
@@ -144,17 +145,51 @@ pub async fn handle_reload(
     };
 
     let count = configs.len();
-    match manager.reload(configs).await {
-        Ok(()) => json_response(
+    match manager.apply_config(configs).await {
+        Ok(report) if report.failed.is_empty() => json_response(
             StatusCode::OK,
-            &serde_json::json!({ "message": format!("Reloaded {count} imposter(s)") }),
+            &serde_json::json!({
+                "message": format!("Reloaded {count} imposter(s)"),
+                "created": report.created,
+                "replaced": report.replaced,
+                "stubPatched": report.stub_patched,
+                "deleted": report.deleted,
+            }),
         ),
         // A reload failure is a server-side config problem, not a bad client request — report 5xx.
-        // Protocol/duplicate-port errors are caught before teardown (running imposters intact); a
-        // residual error here is a post-teardown bind failure.
+        // Validation errors are caught before anything mutates (running imposters intact, Err
+        // below); per-port failures here are residual apply errors (e.g. a bind failure on a
+        // freed port) with the other ports already reconciled — so the body carries the full
+        // report: a partial failure is exactly when the client needs to know what did apply.
+        Ok(report) => {
+            let failures: Vec<String> = report
+                .failed
+                .iter()
+                .map(|(port, e)| match port {
+                    // Port 0 is the ApplyReport sentinel for auto-assigned (port-less) configs.
+                    0 => format!("auto-assign: {e}"),
+                    port => format!("{port}: {e}"),
+                })
+                .collect();
+            // Mountebank error envelope (like `error_response`) plus the apply report.
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &serde_json::json!({
+                    "errors": [{
+                        "code": "500",
+                        "message": format!("Reload partially failed: {}", failures.join("; ")),
+                    }],
+                    "failed": failures,
+                    "created": report.created,
+                    "replaced": report.replaced,
+                    "stubPatched": report.stub_patched,
+                    "deleted": report.deleted,
+                }),
+            )
+        }
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Reload failed: {e}"),
+            &format!("Reload failed (imposters unchanged): {e}"),
         ),
     }
 }
@@ -186,6 +221,51 @@ mod tests {
         let manager = Arc::new(ImposterManager::new());
         let resp = handle_reload(manager, None).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Issue #316: a partial apply failure returns 500 with the full report, so the client
+    // can tell what state the server is now in.
+    #[tokio::test]
+    async fn test_handle_reload_partial_failure_returns_report() {
+        use http_body_util::BodyExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        std::fs::write(
+            &path,
+            r#"{"imposters":[
+                {"port":19477,"protocol":"http","stubs":[]},
+                {"port":19478,"protocol":"https","cert":"not a pem","key":"not a pem","stubs":[]}
+            ]}"#,
+        )
+        .expect("write config");
+        let source = Arc::new(crate::config_loader::ConfigSource::File {
+            path,
+            no_parse: false,
+        });
+
+        let manager = Arc::new(ImposterManager::new());
+        let resp = handle_reload(manager.clone(), Some(source)).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert!(
+            body["errors"][0]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("Reload partially failed: 19478:"),
+            "got: {body}"
+        );
+        assert_eq!(
+            body["created"],
+            serde_json::json!([19477]),
+            "sibling applied"
+        );
+        assert!(manager.get_imposter(19477).is_ok());
+        assert!(manager.get_imposter(19478).is_err());
+
+        manager.delete_all().await;
     }
 
     #[test]

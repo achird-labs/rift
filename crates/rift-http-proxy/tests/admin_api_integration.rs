@@ -961,6 +961,9 @@ mod multi_value_headers {
 }
 
 // Issue #197: POST /admin/reload re-reads the config source and replaces imposters.
+// Several tests still seed state through the deprecated `reload()` on purpose — it is
+// kept working alongside `apply_config` (issue #316).
+#[allow(deprecated)]
 mod reload {
     use super::*;
     use rift_http_proxy::config_loader::{ConfigSource, load_configs};
@@ -1109,6 +1112,84 @@ mod reload {
         );
 
         let _ = manager.delete_imposter(19791).await;
+    }
+
+    fn two_imposter_cfg(keep_body: &str, sibling_body: &str) -> String {
+        format!(
+            r#"{{"imposters":[
+                {{"port":19475,"protocol":"http","recordRequests":true,"stubs":[
+                    {{"predicates":[{{"equals":{{"path":"/p"}}}}],
+                     "responses":[{{"is":{{"statusCode":200,"body":"{keep_body}"}}}}]}}]}},
+                {{"port":19476,"protocol":"http","stubs":[
+                    {{"predicates":[{{"equals":{{"path":"/p"}}}}],
+                     "responses":[{{"is":{{"statusCode":200,"body":"{sibling_body}"}}}}]}}]}}]}}"#
+        )
+    }
+
+    // Issue #316: reload reconciles incrementally — an untouched imposter keeps its
+    // runtime state (recorded requests, listener) while a sibling is modified.
+    #[tokio::test]
+    async fn reload_preserves_untouched_imposter_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("imposters.json");
+        std::fs::write(&path, two_imposter_cfg("keep", "v1")).unwrap();
+        let source = ConfigSource::File {
+            path: path.clone(),
+            no_parse: false,
+        };
+
+        let manager = start(12601, Some(source.clone())).await;
+        manager
+            .apply_config(load_configs(&source).unwrap())
+            .await
+            .unwrap();
+
+        // Drive the untouched imposter so it accrues runtime state.
+        let served = reqwest::get("http://127.0.0.1:19475/p")
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(served, "keep");
+        let before = manager.get_imposter(19475).unwrap();
+        assert_eq!(before.get_recorded_requests().len(), 1);
+
+        // Change only the sibling on disk, then reload via the admin endpoint.
+        std::fs::write(&path, two_imposter_cfg("keep", "v2")).unwrap();
+        let resp = reqwest::Client::new()
+            .post("http://127.0.0.1:12601/admin/reload")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("Reloaded"),
+            "message stays backward-compatible, got: {body}"
+        );
+        assert_eq!(
+            body["replaced"],
+            serde_json::json!([19476]),
+            "single-stub rewrite is a degenerate patch, so the sibling is replaced wholesale"
+        );
+
+        let after = manager.get_imposter(19475).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&before, &after),
+            "reload must not recreate an unchanged imposter"
+        );
+        assert_eq!(
+            after.get_recorded_requests().len(),
+            1,
+            "reload must not reset an unchanged imposter's recorded requests"
+        );
+        assert_eq!(stub_body(&manager, 19476), "v2");
+
+        manager.delete_all().await;
     }
 
     #[tokio::test]

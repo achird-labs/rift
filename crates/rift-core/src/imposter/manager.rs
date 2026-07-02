@@ -6,6 +6,7 @@
 use super::core::Imposter;
 use super::fault_io::{FaultCell, FaultIo, TcpFaultKind};
 use super::handler::handle_imposter_request;
+use super::reconcile::{ApplyReport, ImposterEvent, ImposterEventListener, StubReconcile};
 use super::types::{ImposterConfig, ImposterError, Stub};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -92,6 +93,8 @@ pub struct ImposterManager {
     datadir: Option<Arc<PathBuf>>,
     /// TLS defaults for HTTPS imposters (issue #206)
     tls_defaults: TlsDefaults,
+    /// Observer for config mutations (issue #316)
+    event_listener: Option<Arc<dyn ImposterEventListener>>,
 }
 
 impl ImposterManager {
@@ -108,6 +111,7 @@ impl ImposterManager {
             shutdown_tx,
             datadir: datadir.map(Arc::new),
             tls_defaults: TlsDefaults::default(),
+            event_listener: None,
         }
     }
 
@@ -116,6 +120,21 @@ impl ImposterManager {
     pub fn with_tls_defaults(mut self, tls_defaults: TlsDefaults) -> Self {
         self.tls_defaults = tls_defaults;
         self
+    }
+
+    /// Register an observer for config mutations (issue #316). Events are delivered
+    /// synchronously on the mutating call; the in-memory change has already been applied
+    /// when the listener runs (persistence may still be pending or fail afterwards).
+    #[must_use]
+    pub fn with_event_listener(mut self, listener: Arc<dyn ImposterEventListener>) -> Self {
+        self.event_listener = Some(listener);
+        self
+    }
+
+    fn emit(&self, event: ImposterEvent) {
+        if let Some(listener) = &self.event_listener {
+            listener.on_event(&event);
+        }
     }
 
     /// Resolve the TLS acceptor for an HTTPS imposter by precedence: inline imposter cert/key →
@@ -163,7 +182,18 @@ impl ImposterManager {
 
     /// Create and start an imposter
     /// Returns the assigned port (which may have been auto-assigned if not specified)
-    pub async fn create_imposter(&self, mut config: ImposterConfig) -> Result<u16, ImposterError> {
+    pub async fn create_imposter(&self, config: ImposterConfig) -> Result<u16, ImposterError> {
+        let port = self.create_imposter_inner(config).await?;
+        self.emit(ImposterEvent::Created(port));
+        Ok(port)
+    }
+
+    /// Create without emitting an event, so composite operations (wholesale replace in
+    /// `apply_config`) can report a single higher-level event instead of Deleted+Created.
+    async fn create_imposter_inner(
+        &self,
+        mut config: ImposterConfig,
+    ) -> Result<u16, ImposterError> {
         // Validate protocol first
         match config.protocol.as_str() {
             "http" | "https" => {}
@@ -345,6 +375,13 @@ impl ImposterManager {
 
     /// Delete an imposter
     pub async fn delete_imposter(&self, port: u16) -> Result<ImposterConfig, ImposterError> {
+        let config = self.delete_imposter_inner(port).await?;
+        self.emit(ImposterEvent::Deleted(port));
+        Ok(config)
+    }
+
+    /// Delete without emitting an event (see `create_imposter_inner`).
+    async fn delete_imposter_inner(&self, port: u16) -> Result<ImposterConfig, ImposterError> {
         let imposter = {
             let mut imposters = self.imposters.write();
             imposters
@@ -381,7 +418,8 @@ impl ImposterManager {
         imposters.values().cloned().collect()
     }
 
-    /// Delete all imposters
+    /// Delete all imposters. Emits a single `AllDeleted` event rather than one `Deleted`
+    /// per port.
     pub async fn delete_all(&self) -> Vec<ImposterConfig> {
         let ports: Vec<u16> = {
             let imposters = self.imposters.read();
@@ -390,11 +428,14 @@ impl ImposterManager {
 
         let mut configs = Vec::new();
         for port in ports {
-            if let Ok(config) = self.delete_imposter(port).await {
-                configs.push(config);
+            match self.delete_imposter_inner(port).await {
+                Ok(config) => configs.push(config),
+                // Only realizable as a concurrent-delete race (NotFound) — already gone.
+                Err(e) => debug!("delete_all: imposter on port {} not deleted: {}", port, e),
             }
         }
 
+        self.emit(ImposterEvent::AllDeleted);
         configs
     }
 
@@ -407,9 +448,26 @@ impl ImposterManager {
     /// after teardown (e.g. a port grabbed by an external process) is returned and may leave a
     /// partial set — the caller surfaces it as a 5xx. Reload resets all imposter state (recorded
     /// requests, scenario state, response cyclers).
+    #[deprecated(
+        note = "use `apply_config`, which reconciles incrementally and preserves unchanged imposters' runtime state"
+    )]
     pub async fn reload(&self, configs: Vec<ImposterConfig>) -> Result<(), ImposterError> {
+        Self::validate_config_set(&configs)?;
+
+        self.delete_all().await;
+        for config in configs {
+            self.create_imposter(config).await?;
+        }
+        Ok(())
+    }
+
+    /// Full-set validation shared by `reload` and `apply_config`: protocol validity, no
+    /// duplicate explicit ports, and no duplicate explicit stub ids within an imposter
+    /// (the invariant `add_stub_unique` enforces incrementally, issue #202 — duplicate ids
+    /// would silently corrupt the stub-key diff). Runs before anything mutates.
+    fn validate_config_set(configs: &[ImposterConfig]) -> Result<(), ImposterError> {
         let mut seen = std::collections::HashSet::new();
-        for config in &configs {
+        for config in configs {
             match config.protocol.as_str() {
                 "http" | "https" => {}
                 other => return Err(ImposterError::InvalidProtocol(other.to_string())),
@@ -419,13 +477,139 @@ impl ImposterManager {
             {
                 return Err(ImposterError::PortInUse(port));
             }
-        }
-
-        self.delete_all().await;
-        for config in configs {
-            self.create_imposter(config).await?;
+            let mut ids = std::collections::HashSet::new();
+            for stub in &config.stubs {
+                if let Some(id) = stub.id.as_deref()
+                    && !ids.insert(id)
+                {
+                    return Err(ImposterError::StubIdConflict(id.to_string()));
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Reconcile the running imposters toward `desired` incrementally (issue #316): per-port
+    /// diff, then an order-aware per-stub edit (stub identity = explicit id or content key,
+    /// see [`super::stub_key`]) applied in place. Unlike [`reload`](Self::reload), untouched
+    /// imposters keep all runtime state (recorded requests, scenario state, response cyclers)
+    /// and their listeners are never torn down.
+    ///
+    /// Semantics per desired port: new port → create; missing port → delete; identical
+    /// config → untouched; imposter-level field change or a degenerate stub diff (> 50 % of
+    /// stubs changing) → wholesale replace (PUT semantics, state resets); otherwise the stub
+    /// set is patched in place and untouched slots keep their cycling state.
+    ///
+    /// The whole set is validated up front — `Err` means nothing was mutated. Per-port apply
+    /// failures after that (e.g. a bind failure on a freed port) land in
+    /// [`ApplyReport::failed`] while the remaining ports are still applied. Configs without
+    /// an explicit port are never reconciled — each apply creates them fresh on an
+    /// auto-assigned port (and reports their failures under port `0`).
+    pub async fn apply_config(
+        &self,
+        desired: Vec<ImposterConfig>,
+    ) -> Result<ApplyReport, ImposterError> {
+        Self::validate_config_set(&desired)?;
+
+        let mut report = ApplyReport::default();
+
+        // Deletes first, so ports freed here can be re-bound by creates below.
+        let desired_ports: std::collections::HashSet<u16> =
+            desired.iter().filter_map(|c| c.port).collect();
+        let removed_ports: Vec<u16> = {
+            let imposters = self.imposters.read();
+            let mut ports: Vec<u16> = imposters
+                .keys()
+                .copied()
+                .filter(|port| !desired_ports.contains(port))
+                .collect();
+            ports.sort_unstable();
+            ports
+        };
+        for port in removed_ports {
+            match self.delete_imposter_inner(port).await {
+                Ok(_) => {
+                    report.deleted.push(port);
+                    self.emit(ImposterEvent::Deleted(port));
+                }
+                Err(e) => report.failed.push((port, e)),
+            }
+        }
+
+        for config in desired {
+            let Some(port) = config.port else {
+                // No explicit port → nothing to reconcile against; always an auto-assigned create.
+                self.create_for_apply(config, 0, &mut report).await;
+                continue;
+            };
+
+            let Ok(existing) = self.get_imposter(port) else {
+                self.create_for_apply(config, port, &mut report).await;
+                continue;
+            };
+
+            if imposter_level_differs(&existing.config, &config) {
+                self.replace_imposter(port, config, &mut report).await;
+                continue;
+            }
+
+            match existing.reconcile_stubs(config.stubs.clone()) {
+                StubReconcile::Unchanged => {}
+                StubReconcile::Patched => {
+                    report.stub_patched.push(port);
+                    self.emit(ImposterEvent::StubsChanged(port));
+                    // The in-memory patch stands either way; a datadir write failure must
+                    // still be observable (issue #173), not silently lost until restart.
+                    if let Err(e) = self.persist_imposter_checked(&existing).await {
+                        report.failed.push((port, e));
+                    }
+                }
+                StubReconcile::Degenerate => {
+                    self.replace_imposter(port, config, &mut report).await;
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
+    /// Create for `apply_config`: record the assigned port + Created event, or a failure
+    /// under `fail_port` (the sentinel `0` for port-less, auto-assigned configs).
+    async fn create_for_apply(
+        &self,
+        config: ImposterConfig,
+        fail_port: u16,
+        report: &mut ApplyReport,
+    ) {
+        match self.create_imposter_inner(config).await {
+            Ok(assigned) => {
+                report.created.push(assigned);
+                self.emit(ImposterEvent::Created(assigned));
+            }
+            Err(e) => report.failed.push((fail_port, e)),
+        }
+    }
+
+    /// Wholesale replace (PUT semantics): tear down, then recreate; all runtime state resets.
+    /// When the recreate fails after a successful teardown, the imposter is genuinely gone —
+    /// that is reported as deleted (list + event) alongside the failure, so listeners and the
+    /// report never track a phantom imposter.
+    async fn replace_imposter(&self, port: u16, config: ImposterConfig, report: &mut ApplyReport) {
+        if let Err(e) = self.delete_imposter_inner(port).await {
+            report.failed.push((port, e));
+            return;
+        }
+        match self.create_imposter_inner(config).await {
+            Ok(_) => {
+                report.replaced.push(port);
+                self.emit(ImposterEvent::Replaced(port));
+            }
+            Err(e) => {
+                report.deleted.push(port);
+                self.emit(ImposterEvent::Deleted(port));
+                report.failed.push((port, e));
+            }
+        }
     }
 
     /// Get imposter count (for future metrics)
@@ -446,6 +630,7 @@ impl ImposterManager {
         if !imposter.add_stub_unique(stub, index) {
             return Err(ImposterError::StubIdConflict(id.unwrap_or_default()));
         }
+        self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
     }
 
@@ -460,6 +645,7 @@ impl ImposterManager {
         if !imposter.replace_stub_by_id(id, stub) {
             return Err(ImposterError::StubNotFound(id.to_string()));
         }
+        self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
     }
 
@@ -469,6 +655,7 @@ impl ImposterManager {
         if !imposter.delete_stub_by_id(id) {
             return Err(ImposterError::StubNotFound(id.to_string()));
         }
+        self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
     }
 
@@ -497,6 +684,7 @@ impl ImposterManager {
     ) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
         imposter.replace_stub(index, stub)?;
+        self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
     }
 
@@ -504,6 +692,7 @@ impl ImposterManager {
     pub async fn delete_stub(&self, port: u16, index: usize) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
         imposter.delete_stub(index)?;
+        self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
     }
 
@@ -511,6 +700,16 @@ impl ImposterManager {
     pub async fn replace_stubs(&self, port: u16, stubs: Vec<Stub>) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
         imposter.replace_stubs(stubs);
+        self.emit(ImposterEvent::StubsChanged(port));
+        self.persist_imposter_checked(&imposter).await
+    }
+
+    /// Move the stub at `from` to position `to` (issue #316), preserving the slot's
+    /// cycling state. Stub order is match priority.
+    pub async fn move_stub(&self, port: u16, from: usize, to: usize) -> Result<(), ImposterError> {
+        let imposter = self.get_imposter(port)?;
+        imposter.move_stub(from, to)?;
+        self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
     }
 
@@ -600,6 +799,29 @@ impl ImposterManager {
 impl Default for ImposterManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Imposter-level diff for `apply_config`, comparing the configs with stubs stripped: any
+/// difference (protocol, TLS, recordRequests, name, …) replaces wholesale. A serialization
+/// failure on either side counts as "differs" — the conservative direction (worst case an
+/// unnecessary replace, never a silently skipped change).
+fn imposter_level_differs(a: &ImposterConfig, b: &ImposterConfig) -> bool {
+    let flatten = |config: &ImposterConfig| {
+        let mut flat = config.clone();
+        flat.stubs = Vec::new();
+        serde_json::to_value(&flat)
+    };
+    match (flatten(a), flatten(b)) {
+        (Ok(va), Ok(vb)) => va != vb,
+        (ra, rb) => {
+            error!(
+                "imposter config serialization failed during reconcile; treating as changed: {:?} {:?}",
+                ra.err(),
+                rb.err()
+            );
+            true
+        }
     }
 }
 
@@ -833,5 +1055,457 @@ mod tests {
                 );
             }
         }
+    }
+
+    // =========================================================================
+    // Issue #316: incremental apply_config, move_stub, and imposter change events
+    // =========================================================================
+
+    use super::super::core::StubState;
+    use super::super::reconcile::{ImposterEvent, ImposterEventListener};
+    use super::super::types::RecordedRequest;
+    use serde_json::json;
+
+    fn imposter_cfg(v: serde_json::Value) -> ImposterConfig {
+        serde_json::from_value(v).expect("test imposter config")
+    }
+
+    fn stub_json(body: &str) -> serde_json::Value {
+        json!({
+            "predicates": [{"equals": {"path": format!("/{body}")}}],
+            "responses": [{"is": {"statusCode": 200, "body": body}}]
+        })
+    }
+
+    fn cycled_stub_json(first: &str, second: &str) -> serde_json::Value {
+        json!({
+            "predicates": [{"equals": {"path": "/cycled"}}],
+            "responses": [
+                {"is": {"statusCode": 200, "body": first}},
+                {"is": {"statusCode": 200, "body": second}}
+            ]
+        })
+    }
+
+    /// Serve the state's next response and return its body (advances the cycler).
+    fn next_body(state: &StubState) -> String {
+        let resp = state.get_next_response().expect("stub has responses");
+        serde_json::to_value(resp).expect("serialize response")["is"]["body"]
+            .as_str()
+            .expect("string body")
+            .to_string()
+    }
+
+    fn recorded(path: &str) -> RecordedRequest {
+        RecordedRequest {
+            request_from: "127.0.0.1".to_string(),
+            method: "GET".to_string(),
+            path: path.to_string(),
+            query: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            body: None,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    // AC1: an unchanged imposter keeps recorded requests and cycler position
+    // while a sibling port is modified.
+    #[tokio::test]
+    async fn apply_config_preserves_untouched_imposter_state() {
+        let manager = ImposterManager::new();
+        let p1 = imposter_cfg(json!({
+            "protocol": "http", "port": 19410, "recordRequests": true,
+            "stubs": [cycled_stub_json("a1", "a2"), stub_json("b"), stub_json("c")]
+        }));
+        let p2 = imposter_cfg(json!({
+            "protocol": "http", "port": 19411,
+            "stubs": [stub_json("x"), stub_json("y"), stub_json("z")]
+        }));
+        let report = manager
+            .apply_config(vec![p1.clone(), p2])
+            .await
+            .expect("initial apply");
+        assert_eq!(report.created, vec![19410, 19411]);
+        assert!(report.failed.is_empty());
+
+        let untouched = manager.get_imposter(19410).unwrap();
+        untouched.record_request(&recorded("/cycled"));
+        assert_eq!(next_body(&untouched.stubs.read()[0]), "a1");
+
+        let p2_changed = imposter_cfg(json!({
+            "protocol": "http", "port": 19411,
+            "stubs": [stub_json("x"), stub_json("y"), stub_json("z2")]
+        }));
+        let report = manager
+            .apply_config(vec![p1, p2_changed])
+            .await
+            .expect("second apply");
+        assert!(report.created.is_empty());
+        assert!(report.deleted.is_empty());
+        assert!(report.replaced.is_empty());
+        assert_eq!(report.stub_patched, vec![19411]);
+
+        let after = manager.get_imposter(19410).unwrap();
+        assert!(
+            Arc::ptr_eq(&untouched, &after),
+            "untouched imposter must not be recreated"
+        );
+        assert_eq!(after.get_recorded_requests().len(), 1);
+        assert_eq!(
+            next_body(&after.stubs.read()[0]),
+            "a2",
+            "cycler position survives a sibling patch"
+        );
+
+        let patched = manager.get_imposter(19411).unwrap();
+        let stubs = patched.get_stubs();
+        let last = serde_json::to_value(&stubs[2]).unwrap();
+        assert_eq!(last["responses"][0]["is"]["body"], "z2");
+
+        manager.delete_all().await;
+    }
+
+    // AC2d: imposter-level field changes always replace wholesale.
+    #[tokio::test]
+    async fn apply_config_imposter_level_change_replaces_wholesale() {
+        let manager = ImposterManager::new();
+        let initial = imposter_cfg(json!({
+            "protocol": "http", "port": 19420, "recordRequests": true,
+            "stubs": [stub_json("a")]
+        }));
+        manager.apply_config(vec![initial]).await.expect("create");
+        let before = manager.get_imposter(19420).unwrap();
+        before.record_request(&recorded("/a"));
+
+        let renamed = imposter_cfg(json!({
+            "protocol": "http", "port": 19420, "recordRequests": true, "name": "renamed",
+            "stubs": [stub_json("a")]
+        }));
+        let report = manager.apply_config(vec![renamed]).await.expect("apply");
+        assert_eq!(report.replaced, vec![19420]);
+        assert!(report.stub_patched.is_empty());
+
+        let after = manager.get_imposter(19420).unwrap();
+        assert!(
+            !Arc::ptr_eq(&before, &after),
+            "imposter-level change recreates the imposter"
+        );
+        assert_eq!(after.config.name.as_deref(), Some("renamed"));
+        assert!(
+            after.get_recorded_requests().is_empty(),
+            "wholesale replace resets runtime state"
+        );
+
+        manager.delete_all().await;
+    }
+
+    // AC2c: > 50 % of stubs changing falls back to whole-imposter replace.
+    #[tokio::test]
+    async fn apply_config_degenerate_stub_change_replaces_imposter() {
+        let manager = ImposterManager::new();
+        let initial = imposter_cfg(json!({
+            "protocol": "http", "port": 19421,
+            "stubs": [stub_json("a"), stub_json("b")]
+        }));
+        manager.apply_config(vec![initial]).await.expect("create");
+        let before = manager.get_imposter(19421).unwrap();
+
+        let rewritten = imposter_cfg(json!({
+            "protocol": "http", "port": 19421,
+            "stubs": [stub_json("x"), stub_json("y")]
+        }));
+        let report = manager.apply_config(vec![rewritten]).await.expect("apply");
+        assert_eq!(report.replaced, vec![19421]);
+        assert!(report.stub_patched.is_empty());
+        let after = manager.get_imposter(19421).unwrap();
+        assert!(!Arc::ptr_eq(&before, &after));
+
+        manager.delete_all().await;
+    }
+
+    // AC6: full-set validation up front — nothing mutates on validation failure.
+    #[tokio::test]
+    async fn apply_config_validation_failure_mutates_nothing() {
+        let manager = ImposterManager::new();
+        let initial = imposter_cfg(json!({
+            "protocol": "http", "port": 19422,
+            "stubs": [stub_json("a")]
+        }));
+        manager.apply_config(vec![initial]).await.expect("create");
+        let before = manager.get_imposter(19422).unwrap();
+
+        let would_change = imposter_cfg(json!({
+            "protocol": "http", "port": 19422,
+            "stubs": [stub_json("x")]
+        }));
+        let invalid = imposter_cfg(json!({
+            "protocol": "tcp", "port": 19423,
+            "stubs": []
+        }));
+        let result = manager.apply_config(vec![would_change, invalid]).await;
+        assert!(
+            matches!(result, Err(ImposterError::InvalidProtocol(ref p)) if p == "tcp"),
+            "got: {result:?}"
+        );
+        let after = manager.get_imposter(19422).unwrap();
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "validation failure must not touch any imposter"
+        );
+        let stubs = after.get_stubs();
+        assert_eq!(
+            serde_json::to_value(&stubs[0]).unwrap()["responses"][0]["is"]["body"],
+            "a"
+        );
+        assert!(manager.get_imposter(19423).is_err());
+
+        let dup_a = imposter_cfg(json!({"protocol": "http", "port": 19424, "stubs": []}));
+        let dup_b = imposter_cfg(json!({"protocol": "http", "port": 19424, "stubs": []}));
+        let result = manager.apply_config(vec![dup_a, dup_b]).await;
+        assert!(matches!(result, Err(ImposterError::PortInUse(19424))));
+        assert!(manager.get_imposter(19424).is_err());
+
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn apply_config_creates_new_and_deletes_missing_ports() {
+        let manager = ImposterManager::new();
+        let first = imposter_cfg(json!({"protocol": "http", "port": 19425, "stubs": []}));
+        let report = manager.apply_config(vec![first]).await.expect("apply");
+        assert_eq!(report.created, vec![19425]);
+
+        let second = imposter_cfg(json!({"protocol": "http", "port": 19426, "stubs": []}));
+        let report = manager.apply_config(vec![second]).await.expect("apply");
+        assert_eq!(report.created, vec![19426]);
+        assert_eq!(report.deleted, vec![19425]);
+        assert!(manager.get_imposter(19425).is_err());
+        assert!(manager.get_imposter(19426).is_ok());
+
+        manager.delete_all().await;
+    }
+
+    #[derive(Default)]
+    struct RecordingListener(Mutex<Vec<ImposterEvent>>);
+
+    impl ImposterEventListener for RecordingListener {
+        fn on_event(&self, event: &ImposterEvent) {
+            self.0.lock().push(event.clone());
+        }
+    }
+
+    // AC4: events fired per mutation kind.
+    #[tokio::test]
+    async fn events_fired_per_mutation_kind() {
+        let listener = Arc::new(RecordingListener::default());
+        let manager = ImposterManager::new().with_event_listener(listener.clone());
+
+        manager
+            .create_imposter(imposter_cfg(json!({
+                "protocol": "http", "port": 19430,
+                "stubs": [stub_json("a"), stub_json("b"), stub_json("c")]
+            })))
+            .await
+            .expect("create");
+        let stub_d: Stub = serde_json::from_value(stub_json("d")).unwrap();
+        manager.add_stub(19430, stub_d, None).await.expect("add");
+        manager.move_stub(19430, 0, 1).await.expect("move");
+        // live stubs now [b, a, c, d]; patch one of four (below the degenerate threshold)
+        // and create a sibling in the same apply.
+        let patched_cfg = imposter_cfg(json!({
+            "protocol": "http", "port": 19430,
+            "stubs": [stub_json("b"), stub_json("a"), stub_json("c"), stub_json("e")]
+        }));
+        let sibling = imposter_cfg(json!({"protocol": "http", "port": 19431, "stubs": []}));
+        manager
+            .apply_config(vec![patched_cfg, sibling.clone()])
+            .await
+            .expect("apply patch+create");
+        // drop 19430, keep 19431 unchanged
+        manager
+            .apply_config(vec![sibling])
+            .await
+            .expect("apply delete");
+        // imposter-level change on 19431
+        let renamed = imposter_cfg(json!({
+            "protocol": "http", "port": 19431, "name": "renamed", "stubs": []
+        }));
+        manager
+            .apply_config(vec![renamed])
+            .await
+            .expect("apply replace");
+        manager.delete_imposter(19431).await.expect("delete");
+        manager.delete_all().await;
+
+        let events = listener.0.lock().clone();
+        assert_eq!(
+            events,
+            vec![
+                ImposterEvent::Created(19430),
+                ImposterEvent::StubsChanged(19430), // add_stub
+                ImposterEvent::StubsChanged(19430), // move_stub
+                ImposterEvent::StubsChanged(19430), // apply_config stub patch
+                ImposterEvent::Created(19431),      // apply_config create
+                ImposterEvent::Deleted(19430),      // apply_config delete
+                ImposterEvent::Replaced(19431),     // apply_config imposter-level change
+                ImposterEvent::Deleted(19431),      // delete_imposter
+                ImposterEvent::AllDeleted,          // delete_all
+            ]
+        );
+    }
+
+    // Per-port apply failures land in `failed` while sibling ports still apply.
+    #[tokio::test]
+    async fn apply_config_partial_failure_reports_failed_port() {
+        let manager = ImposterManager::new();
+        let good = imposter_cfg(json!({"protocol": "http", "port": 19450, "stubs": []}));
+        let bad_tls = imposter_cfg(json!({
+            "protocol": "https", "port": 19451,
+            "cert": "not a pem", "key": "not a pem",
+            "stubs": []
+        }));
+        let report = manager
+            .apply_config(vec![good, bad_tls])
+            .await
+            .expect("apply");
+        assert_eq!(report.created, vec![19450], "sibling still applied");
+        assert_eq!(report.failed.len(), 1);
+        assert!(
+            matches!(report.failed[0], (19451, ImposterError::Tls(_))),
+            "got: {:?}",
+            report.failed
+        );
+        assert!(manager.get_imposter(19450).is_ok());
+        assert!(manager.get_imposter(19451).is_err());
+
+        manager.delete_all().await;
+    }
+
+    // A replace whose recreate fails after teardown is honestly reported: the port lands in
+    // both `deleted` and `failed`, and a Deleted event fires so listeners don't track a
+    // phantom imposter.
+    #[tokio::test]
+    async fn apply_config_failed_replace_reports_deletion_and_event() {
+        let listener = Arc::new(RecordingListener::default());
+        let manager = ImposterManager::new().with_event_listener(listener.clone());
+        manager
+            .create_imposter(imposter_cfg(json!({
+                "protocol": "http", "port": 19452, "stubs": [stub_json("a")]
+            })))
+            .await
+            .expect("create");
+
+        // Imposter-level change (protocol + TLS) whose create fails: bad PEM material.
+        let bad_tls = imposter_cfg(json!({
+            "protocol": "https", "port": 19452,
+            "cert": "not a pem", "key": "not a pem",
+            "stubs": [stub_json("a")]
+        }));
+        let report = manager.apply_config(vec![bad_tls]).await.expect("apply");
+        assert!(report.replaced.is_empty());
+        assert_eq!(report.deleted, vec![19452], "teardown really happened");
+        assert!(matches!(report.failed[0], (19452, ImposterError::Tls(_))));
+        assert!(manager.get_imposter(19452).is_err());
+        assert_eq!(
+            listener.0.lock().clone(),
+            vec![ImposterEvent::Created(19452), ImposterEvent::Deleted(19452),],
+            "listener must learn the imposter is gone"
+        );
+    }
+
+    // Duplicate explicit stub ids are rejected up front (issue #202 invariant) — they would
+    // otherwise silently corrupt the stub-key diff.
+    #[tokio::test]
+    async fn apply_config_rejects_duplicate_stub_ids() {
+        let manager = ImposterManager::new();
+        let mut stub_a = stub_json("a");
+        stub_a["id"] = json!("dup");
+        let mut stub_b = stub_json("b");
+        stub_b["id"] = json!("dup");
+        let config = imposter_cfg(json!({
+            "protocol": "http", "port": 19454, "stubs": [stub_a, stub_b]
+        }));
+        let result = manager.apply_config(vec![config]).await;
+        assert!(
+            matches!(result, Err(ImposterError::StubIdConflict(ref id)) if id == "dup"),
+            "got: {result:?}"
+        );
+        assert_eq!(manager.count(), 0, "nothing mutated");
+    }
+
+    // A datadir write failure on the patched path is observable in `failed` (issue #173),
+    // while the in-memory patch stands.
+    #[tokio::test]
+    async fn apply_config_patch_persist_failure_lands_in_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().join("does_not_exist_subdir")));
+        manager
+            .create_imposter(imposter_cfg(json!({
+                "protocol": "http", "port": 19453,
+                "stubs": [stub_json("a"), stub_json("b"), stub_json("c")]
+            })))
+            .await
+            .expect("create succeeds in memory");
+
+        let patched = imposter_cfg(json!({
+            "protocol": "http", "port": 19453,
+            "stubs": [stub_json("a"), stub_json("b"), stub_json("c2")]
+        }));
+        let report = manager.apply_config(vec![patched]).await.expect("apply");
+        assert_eq!(report.stub_patched, vec![19453], "in-memory patch applied");
+        assert!(
+            matches!(report.failed[0], (19453, ImposterError::PersistError(_))),
+            "persist failure must be observable, got: {:?}",
+            report.failed
+        );
+        let stubs = manager.get_imposter(19453).unwrap().get_stubs();
+        assert_eq!(
+            serde_json::to_value(&stubs[2]).unwrap()["responses"][0]["is"]["body"],
+            "c2"
+        );
+
+        manager.delete_all().await;
+    }
+
+    // move_stub is a positional move that preserves the moved slot's cycling state.
+    #[tokio::test]
+    async fn move_stub_repositions_and_preserves_cursor() {
+        let manager = ImposterManager::new();
+        manager
+            .create_imposter(imposter_cfg(json!({
+                "protocol": "http", "port": 19440,
+                "stubs": [cycled_stub_json("a1", "a2"), stub_json("b"), stub_json("c")]
+            })))
+            .await
+            .expect("create");
+        let imposter = manager.get_imposter(19440).unwrap();
+        assert_eq!(next_body(&imposter.stubs.read()[0]), "a1");
+
+        manager.move_stub(19440, 0, 2).await.expect("move");
+        {
+            let stubs = imposter.stubs.read();
+            let first = serde_json::to_value(&stubs[0].stub).unwrap();
+            assert_eq!(first["responses"][0]["is"]["body"], "b");
+            assert_eq!(
+                next_body(&stubs[2]),
+                "a2",
+                "moved stub keeps its cycling position"
+            );
+        }
+
+        assert!(matches!(
+            manager.move_stub(19440, 5, 0).await,
+            Err(ImposterError::StubIndexOutOfBounds(5))
+        ));
+        assert!(matches!(
+            manager.move_stub(19440, 0, 5).await,
+            Err(ImposterError::StubIndexOutOfBounds(5))
+        ));
+        assert!(matches!(
+            manager.move_stub(19441, 0, 0).await,
+            Err(ImposterError::NotFound(19441))
+        ));
+
+        manager.delete_all().await;
     }
 }

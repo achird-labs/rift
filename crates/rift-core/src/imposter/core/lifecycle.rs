@@ -3,8 +3,29 @@
 //! Part of the `Imposter` implementation; see `core/mod.rs` for the struct definition.
 
 use super::*;
+use crate::imposter::reconcile::{StubReconcile, reconcile_stub_states};
 
 impl Imposter {
+    /// Move the stub at `from` to position `to`, carrying its cycling state with it
+    /// (issue #316). Stub order is match priority, so this changes matching precedence.
+    pub fn move_stub(&self, from: usize, to: usize) -> Result<(), ImposterError> {
+        let mut stubs = self.stubs.write();
+        if from >= stubs.len() {
+            return Err(ImposterError::StubIndexOutOfBounds(from));
+        }
+        if to >= stubs.len() {
+            return Err(ImposterError::StubIndexOutOfBounds(to));
+        }
+        let state = stubs.remove(from);
+        stubs.insert(to, state);
+        Ok(())
+    }
+
+    /// Reconcile live stubs toward `desired` under one write lock (issue #316).
+    pub(crate) fn reconcile_stubs(&self, desired: Vec<Stub>) -> StubReconcile {
+        reconcile_stub_states(&mut self.stubs.write(), desired)
+    }
+
     /// Add a stub at a specific index
     pub fn add_stub(&self, stub: Stub, index: Option<usize>) {
         let mut stubs = self.stubs.write();

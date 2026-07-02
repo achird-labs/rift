@@ -21,6 +21,7 @@ mod fault_io;
 mod handler;
 mod manager;
 mod predicates;
+mod reconcile;
 mod response;
 mod types;
 
@@ -48,6 +49,9 @@ pub use handler::handle_imposter_request;
 
 // Re-export manager
 pub use manager::{ImposterManager, TlsDefaults};
+
+// Re-export incremental reconciliation types (issue #316)
+pub use reconcile::{ApplyReport, ImposterEvent, ImposterEventListener, stub_key};
 
 // Re-export predicate utilities (used in tests and for external consumers)
 #[allow(unused_imports)]
