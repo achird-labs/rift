@@ -705,11 +705,11 @@ pub struct MountebankInjectResponse {
 
 /// Per-imposter state storage for inject functions
 /// This is used to share state between inject function calls
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
-static IMPOSTER_STATE: Lazy<Mutex<std::collections::HashMap<u16, serde_json::Map<String, Value>>>> =
-    Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+static IMPOSTER_STATE: LazyLock<
+    Mutex<std::collections::HashMap<u16, serde_json::Map<String, Value>>>,
+> = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// Get or create state for an imposter
 fn get_imposter_state(port: u16) -> serde_json::Map<String, Value> {

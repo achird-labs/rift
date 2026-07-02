@@ -32,21 +32,21 @@ arboard = "3.4"
 dirs = "5.0"
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
 # HTTP client for Admin API
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest.workspace = true
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde.workspace = true
+serde_json.workspace = true
 
 # CLI argument parsing
-clap = { version = "4", features = ["derive", "env"] }
+clap = { workspace = true, features = ["env"] }
 
 # Error handling
-anyhow = "1.0"
-thiserror = "1.0"
+anyhow.workspace = true
+thiserror.workspace = true
 
 # Validation
 rift-lint = { path = "../rift-lint", default-features = false }

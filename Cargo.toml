@@ -32,8 +32,8 @@ rust-version = "1.92"
 all = "warn"
 
 [workspace.dependencies]
-# Async runtime
-tokio = { version = "1.35", features = ["full"] }
+# Async runtime — version pinned here; each crate selects its own tokio features
+tokio = { version = "1.41" }
 tokio-util = "0.7"
 
 # Serialization
@@ -41,25 +41,22 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 
-# Scripting
-rhai = { version = "1.16", features = ["sync", "serde", "no_optimize"] }
+# Scripting — pinned to =1.21.0 to match rift-core's deliberate exact pin
+rhai = { version = "=1.21.0", features = ["sync", "serde"] }
 
 # Faker
 fake = { version = "2.9", features = ["derive", "uuid", "http", "chrono"] }
 
-# CLI
-clap = { version = "4.4", features = ["derive", "cargo", "env"] }
-clap_complete = "4.4"
+# CLI — base features; crates add `env` where needed
+clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
 
-# HTTP/gRPC
-reqwest = { version = "0.11", features = ["json"] }
-tonic = "0.11"
-tonic-build = "0.11"
-prost = "0.12"
+# HTTP client — rustls everywhere (the project pins the ring crypto provider)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 
 # Logging
 tracing = "0.1"
@@ -69,10 +66,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Misc utilities
-once_cell = "1.19"
 futures = "0.3"
-bytes = "1.5"
-uuid = { version = "1.6", features = ["v4", "serde"] }
+bytes = "1.7"
+uuid = { version = "1.8", features = ["v4", "serde"] }
 rand = "0.8"
 
 # Testing

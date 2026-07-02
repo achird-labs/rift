@@ -23,14 +23,14 @@ workspace = true
 # Features are forwarded (not hard-coded) so the per-platform cdylib build can drop engines that
 # can't cross-compile for a given target (e.g. LuaJIT for x86_64-apple-darwin) — issue #205.
 rift-core = { path = "../rift-core", default-features = false }
-tokio = { version = "1.41", features = ["rt-multi-thread"] }
-serde_json = "1.0"
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+serde_json.workspace = true
 # Emit a diagnostic before collapsing a typed error into a C sentinel; the embedding host
 # installs the subscriber (no-op if none is set).
-tracing = "0.1"
+tracing.workspace = true
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest.workspace = true
 
 [features]
 default = ["redis-backend", "lua", "javascript"]
