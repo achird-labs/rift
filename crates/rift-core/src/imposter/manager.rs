@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Server-level TLS defaults for HTTPS imposters that don't carry their own cert/key (issue #206).
 #[derive(Debug, Clone)]
@@ -509,7 +509,11 @@ impl ImposterManager {
             sequencer.reset_scope(port, None);
         }
         if let Some(journal) = &self.request_journal {
-            journal.clear(port);
+            // GC clear is best-effort: a failed backend clear must not fail the delete, but it
+            // is logged rather than dropped (issue #330).
+            if let Err(e) = journal.clear(port) {
+                warn!("failed to clear request journal for deleted imposter on port {port}: {e}");
+            }
         }
         // Reclaim the shared proxy store's port slice so a later imposter reusing the port
         // doesn't inherit stale recordings (issue #315). The private default dies with the
@@ -2378,17 +2382,17 @@ mod tests {
             fn read(&self, port: u16) -> JournalRead {
                 self.inner.read(port)
             }
-            fn clear(&self, port: u16) {
+            fn clear(&self, port: u16) -> anyhow::Result<()> {
                 self.clears.lock().push(port);
-                self.inner.clear(port);
+                self.inner.clear(port)
             }
             fn retain(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) {
                 self.retains.lock().push(port);
                 self.inner.retain(port, keep);
             }
-            fn clear_flow(&self, port: u16, flow_id: &str) {
+            fn clear_flow(&self, port: u16, flow_id: &str) -> anyhow::Result<()> {
                 self.flow_clears.lock().push((port, flow_id.to_string()));
-                self.inner.clear_flow(port, flow_id);
+                self.inner.clear_flow(port, flow_id)
             }
             fn count(&self, port: u16) -> u64 {
                 self.inner.count(port)
@@ -2410,14 +2414,14 @@ mod tests {
                     ..self.0.read(port)
                 }
             }
-            fn clear(&self, port: u16) {
-                self.0.clear(port);
+            fn clear(&self, port: u16) -> anyhow::Result<()> {
+                self.0.clear(port)
             }
             fn retain(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) {
                 self.0.retain(port, keep);
             }
-            fn clear_flow(&self, port: u16, flow_id: &str) {
-                self.0.clear_flow(port, flow_id);
+            fn clear_flow(&self, port: u16, flow_id: &str) -> anyhow::Result<()> {
+                self.0.clear_flow(port, flow_id)
             }
             fn count(&self, port: u16) -> u64 {
                 self.0.count(port)
@@ -2520,7 +2524,7 @@ mod tests {
             assert!(imposter.get_recorded_requests().is_empty());
             assert_eq!(imposter.get_request_count(), 1, "retain keeps the count");
 
-            imposter.clear_recorded_requests();
+            imposter.clear_recorded_requests().expect("clear");
             assert!(journal.clears.lock().contains(&19532));
             assert_eq!(imposter.get_request_count(), 0, "clear resets the count");
 
@@ -2608,7 +2612,7 @@ mod tests {
 
             let a = manager.get_imposter(19536).unwrap();
             let b = manager.get_imposter(19537).unwrap();
-            a.clear_recorded_requests();
+            a.clear_recorded_requests().expect("clear");
 
             assert!(a.get_recorded_requests().is_empty());
             assert_eq!(a.get_request_count(), 0);
@@ -2649,6 +2653,119 @@ mod tests {
             );
 
             manager.delete_all().await;
+        }
+
+        /// A journal whose two clear operations fail like an unreachable remote backend
+        /// (issue #330); everything else delegates to a working LocalJournal so imposters
+        /// still record and read normally.
+        #[derive(Default)]
+        struct FailingClearJournal(LocalJournal);
+        impl FailingClearJournal {
+            fn unavailable() -> anyhow::Error {
+                anyhow::Error::new(crate::extensions::decorate::BackendUnavailable {
+                    feature: "requestJournal",
+                    detail: "clear failed".to_string(),
+                })
+            }
+        }
+        impl RequestJournal for FailingClearJournal {
+            fn note_request(&self, port: u16) {
+                self.0.note_request(port);
+            }
+            fn record(&self, port: u16, flow_id: &str, req: RecordedRequest) {
+                self.0.record(port, flow_id, req);
+            }
+            fn read(&self, port: u16) -> JournalRead {
+                self.0.read(port)
+            }
+            fn clear(&self, _port: u16) -> anyhow::Result<()> {
+                Err(Self::unavailable())
+            }
+            fn retain(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) {
+                self.0.retain(port, keep);
+            }
+            fn clear_flow(&self, _port: u16, _flow_id: &str) -> anyhow::Result<()> {
+                Err(Self::unavailable())
+            }
+            fn count(&self, port: u16) -> u64 {
+                self.0.count(port)
+            }
+        }
+
+        // AC5 (#330): a failed backend clear propagates out of clear_recorded_requests
+        // instead of being reported as a clean clear.
+        #[tokio::test]
+        async fn clear_recorded_requests_propagates_error() {
+            let manager = ImposterManager::new()
+                .with_request_journal(
+                    Arc::new(FailingClearJournal::default()) as Arc<dyn RequestJournal>
+                );
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19538, "recordRequests": true,
+                    "stubs": [stub_json("ok")]
+                })))
+                .await
+                .expect("create");
+            let imposter = manager.get_imposter(19538).unwrap();
+            let err = imposter
+                .clear_recorded_requests()
+                .expect_err("a failed backend clear must surface");
+            assert!(
+                err.downcast_ref::<crate::extensions::decorate::BackendUnavailable>()
+                    .is_some(),
+                "the backend error is preserved for 503 mapping"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC2 (#330): teardown_space folds a clear_flow failure into its first-error report.
+        #[tokio::test]
+        async fn teardown_space_surfaces_journal_clear_failure() {
+            let manager = ImposterManager::new()
+                .with_request_journal(
+                    Arc::new(FailingClearJournal::default()) as Arc<dyn RequestJournal>
+                );
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19539, "recordRequests": true,
+                    "stubs": [stub_json("ok")]
+                })))
+                .await
+                .expect("create");
+            let imposter = manager.get_imposter(19539).unwrap();
+            let err = imposter
+                .teardown_space("sp-1")
+                .expect_err("a failed scoped clear must surface, not report a clean teardown");
+            assert!(
+                err.downcast_ref::<crate::extensions::decorate::BackendUnavailable>()
+                    .is_some(),
+                "the backend error is preserved"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC4 (#330): the delete-time GC clear is best-effort — a failed clear is logged but
+        // must not fail the delete.
+        #[tokio::test]
+        async fn delete_imposter_survives_journal_clear_failure() {
+            let manager = ImposterManager::new()
+                .with_request_journal(
+                    Arc::new(FailingClearJournal::default()) as Arc<dyn RequestJournal>
+                );
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19540, "recordRequests": true,
+                    "stubs": [stub_json("ok")]
+                })))
+                .await
+                .expect("create");
+            manager
+                .delete_imposter(19540)
+                .await
+                .expect("delete succeeds despite a failed GC clear");
         }
     }
 

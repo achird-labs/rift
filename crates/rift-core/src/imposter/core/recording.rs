@@ -42,8 +42,10 @@ impl Imposter {
     }
 
     /// Clear recorded requests. Also resets the request count to match Mountebank behavior.
-    pub fn clear_recorded_requests(&self) {
-        self.journal.clear(self.journal_port());
+    /// Propagates a backend clear failure (issue #330) so callers never report a clean clear
+    /// over stale recorded state.
+    pub fn clear_recorded_requests(&self) -> anyhow::Result<()> {
+        self.journal.clear(self.journal_port())
     }
 
     /// Retain only the recorded requests for which `keep` returns true.

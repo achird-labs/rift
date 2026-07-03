@@ -39,16 +39,16 @@ pub trait RequestJournal: Send + Sync {
     fn read(&self, port: u16) -> JournalRead;
     /// Clears entries AND resets the request count (documented contract, as today).
     ///
-    /// Infallible by design: callers treat return as success, so an implementation whose
-    /// backend fails must resolve the failure internally (retry/queue) and log it — never
-    /// silently drop a failed clear.
-    fn clear(&self, port: u16);
+    /// Fallible: clearing is a correctness operation whose postcondition ("the data is gone")
+    /// callers rely on (issue #330). A backend that cannot delete must return `Err` so callers
+    /// surface the degradation rather than reporting a clean clear over stale state.
+    fn clear(&self, port: u16) -> anyhow::Result<()>;
     /// Targeted deletion; does NOT reset the count (documented contract, as today).
     fn retain(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool);
     /// Declarative scoped clear (one correlated slice, #223) — expressible by any
-    /// backend, unlike the closure-based `retain`. Same failure contract as [`Self::clear`]:
-    /// callers treat return as success.
-    fn clear_flow(&self, port: u16, flow_id: &str);
+    /// backend, unlike the closure-based `retain`. Fallible for the same reason as
+    /// [`Self::clear`]: a failed delete must surface, not be reported as success.
+    fn clear_flow(&self, port: u16, flow_id: &str) -> anyhow::Result<()>;
     fn count(&self, port: u16) -> u64;
 }
 
@@ -107,21 +107,23 @@ impl RequestJournal for LocalJournal {
         }
     }
 
-    fn clear(&self, port: u16) {
+    fn clear(&self, port: u16) -> anyhow::Result<()> {
         let slot = self.slot(port);
         slot.entries.write().clear();
         slot.count.store(0, Ordering::SeqCst);
+        Ok(())
     }
 
     fn retain(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) {
         self.slot(port).entries.write().retain(|(_, req)| keep(req));
     }
 
-    fn clear_flow(&self, port: u16, flow_id: &str) {
+    fn clear_flow(&self, port: u16, flow_id: &str) -> anyhow::Result<()> {
         self.slot(port)
             .entries
             .write()
             .retain(|(flow, _)| flow != flow_id);
+        Ok(())
     }
 
     fn count(&self, port: u16) -> u64 {
@@ -174,7 +176,7 @@ mod tests {
         let j = LocalJournal::default();
         j.note_request(1);
         j.record(1, "f", req("/a"));
-        j.clear(1);
+        j.clear(1).expect("local clear is infallible");
         assert_eq!(j.count(1), 0);
         assert!(j.read(1).entries.is_empty());
     }
@@ -199,11 +201,21 @@ mod tests {
         j.note_request(1);
         j.record(1, "flow-a", req("/a"));
         j.record(1, "flow-b", req("/b"));
-        j.clear_flow(1, "flow-a");
+        j.clear_flow(1, "flow-a")
+            .expect("local clear_flow is infallible");
         let read = j.read(1);
         assert_eq!(read.entries.len(), 1);
         assert_eq!(read.entries[0].path, "/b");
         assert_eq!(j.count(1), 1, "scoped clear keeps the total count");
+    }
+
+    // AC1 (#330): the local backend never fails a clear — both clear ops return Ok.
+    #[test]
+    fn local_clear_and_clear_flow_are_ok() {
+        let j = LocalJournal::default();
+        j.record(1, "flow-a", req("/a"));
+        assert!(j.clear_flow(1, "flow-a").is_ok());
+        assert!(j.clear(1).is_ok());
     }
 
     // Ports are isolated slices of the journal.
