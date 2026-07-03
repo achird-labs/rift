@@ -635,3 +635,126 @@ fn ffi_build_info_commit_matches_git_head() {
         );
     }
 }
+
+// Issue #350: a configFile whose N-th imposter can't bind must NOT leave partial state behind a
+// NULL return. Routed through apply_config, serve_admin succeeds (non-NULL), loads the bindable
+// imposters, and reports the unbindable one as a per-port failure instead of a half-applied loop.
+#[test]
+fn ffi_serve_admin_config_file_partial_failure_does_not_leak() {
+    unsafe {
+        // Occupy the wildcard port an imposter would bind, so one config in the file cannot bind.
+        let occupied = std::net::TcpListener::bind("0.0.0.0:0").expect("occupy port");
+        let busy = occupied.local_addr().expect("addr").port();
+
+        let path =
+            std::env::temp_dir().join(format!("rift_ffi_partial_{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"imposters":[{{"port":19970,"protocol":"http","stubs":[]}},{{"port":{busy},"protocol":"http","stubs":[]}}]}}"#
+            ),
+        )
+        .expect("write config file");
+
+        let h = rift_start();
+        let opts = format!(
+            r#"{{"configFile":{}}}"#,
+            serde_json::json!(path.to_str().unwrap())
+        );
+        // serve_admin() asserts non-NULL — the crux of the fix (the old create-loop returned NULL
+        // here after already creating 19970).
+        let info = serve_admin(h, &opts);
+        let admin_url = info["adminUrl"].as_str().expect("adminUrl").to_string();
+
+        rt().block_on(async {
+            let imps: serde_json::Value = reqwest::get(format!("{admin_url}/imposters"))
+                .await
+                .expect("reachable")
+                .json()
+                .await
+                .expect("json");
+            let ports: Vec<u64> = imps["imposters"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .filter_map(|i| i["port"].as_u64())
+                .collect();
+            assert!(ports.contains(&19970), "the bindable imposter loaded");
+            assert!(
+                !ports.contains(&u64::from(busy)),
+                "the occupied port did not bind and was not partially left behind"
+            );
+        });
+
+        rift_stop(h);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+// Issue #350 (second-order): a retry after a partial serve_admin failure is idempotent. The first
+// attempt applies the configFile imposter, then fails at the metrics bind (NULL, admin slot unset).
+// The old create-loop's retry would hit PortInUse re-creating that imposter; apply_config's
+// reconcile treats the unchanged imposter as a no-op, so the retry succeeds with no duplicate.
+#[test]
+fn ffi_serve_admin_retry_after_partial_failure_is_idempotent() {
+    unsafe {
+        // Occupy the loopback metrics port (serve_admin binds metrics on 127.0.0.1 by default) so
+        // the FIRST serve_admin fails at the metrics bind, AFTER the configFile imposter is applied.
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy port");
+        let busy_metrics = occupied.local_addr().expect("addr").port();
+
+        let path = std::env::temp_dir().join(format!("rift_ffi_retry_{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"imposters":[{"port":19971,"protocol":"http","stubs":[]}]}"#,
+        )
+        .expect("write config file");
+        let cf = serde_json::json!(path.to_str().unwrap());
+
+        let h = rift_start();
+
+        // First attempt: configFile applies (creates 19971), then the metrics bind fails → NULL.
+        let first = rift_serve_admin(
+            h,
+            cstr(&format!(
+                r#"{{"configFile":{cf},"metricsPort":{busy_metrics}}}"#
+            ))
+            .as_ptr(),
+        );
+        assert!(
+            first.is_null(),
+            "first serve_admin fails at the occupied metrics port"
+        );
+        let err = rift_last_error();
+        assert!(!err.is_null(), "the failure records last_error");
+        rift_free(err);
+
+        drop(occupied);
+
+        // Retry with an ephemeral metrics port: apply_config sees 19971 unchanged (reconcile no-op),
+        // so this succeeds instead of hitting PortInUse.
+        let info = serve_admin(h, &format!(r#"{{"configFile":{cf},"metricsPort":0}}"#));
+        let admin_url = info["adminUrl"].as_str().expect("adminUrl").to_string();
+        rt().block_on(async {
+            let imps: serde_json::Value = reqwest::get(format!("{admin_url}/imposters"))
+                .await
+                .expect("reachable")
+                .json()
+                .await
+                .expect("json");
+            let count = imps["imposters"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .filter(|i| i["port"].as_u64() == Some(19971))
+                .count();
+            assert_eq!(
+                count, 1,
+                "imposter present exactly once after retry — no duplicate/conflict"
+            );
+        });
+
+        rift_stop(h);
+        let _ = std::fs::remove_file(&path);
+    }
+}
