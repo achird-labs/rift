@@ -77,9 +77,9 @@ char *rift_recorded(RiftHandle *h, uint16_t port);
  * `options_json` (null or `{}` uses all defaults; every field optional):
  * `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"config":null}`.
  * `configFile` is loaded and wired as the reload source (like `--configfile`); `config` is an
- * inline `{"imposters":[...]}` applied via `apply_config`. They don't compose: `config` is a
- * reconcile, so passing both deletes the `configFile` (and any pre-existing) imposters not in the
- * inline set — pass one or the other.
+ * inline `{"imposters":[...]}`. Both are applied via `apply_config` (a reconcile, so a per-port
+ * bind failure is reported in the apply report rather than aborting mid-load). They don't
+ * compose: passing both leaves only the inline set (its reconcile deletes the rest) — pass one.
  *
  * Returns (caller frees) `{"adminPort":49321,"adminUrl":"http://127.0.0.1:49321","metricsPort":null}`,
  * or null on error (bad JSON, bind failure, or already serving — one admin plane per handle).

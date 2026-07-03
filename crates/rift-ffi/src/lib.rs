@@ -28,7 +28,7 @@
 //! rather than crossing the boundary (defined behaviour). A failed downcall returns its sentinel,
 //! records the reason in [`rift_last_error`], and emits a `tracing` event.
 
-use rift_core::imposter::{ImposterConfig, ImposterManager, Stub};
+use rift_core::imposter::{ApplyReport, ImposterConfig, ImposterManager, Stub};
 use rift_http_proxy::admin_api::{AdminApiServer, RunningAdminApi};
 use rift_http_proxy::config_loader::{self, ConfigSource};
 use rift_http_proxy::server::{RunningMetrics, bind_metrics_server};
@@ -306,9 +306,9 @@ pub unsafe extern "C" fn rift_recorded(h: *mut RiftHandle, port: u16) -> *mut c_
 /// `options_json` (null or `{}` uses all defaults; every field optional):
 /// `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"config":null}`.
 /// `configFile` is loaded and wired as the reload source (like `--configfile`); `config` is an
-/// inline `{"imposters":[...]}` applied via `apply_config`. They don't compose: `config` is a
-/// reconcile, so passing both deletes the `configFile` (and any pre-existing) imposters not in the
-/// inline set — pass one or the other.
+/// inline `{"imposters":[...]}`. Both are applied via `apply_config` (a reconcile, so a per-port
+/// bind failure is reported in the apply report rather than aborting mid-load). They don't
+/// compose: passing both leaves only the inline set (its reconcile deletes the rest) — pass one.
 ///
 /// Returns (caller frees) `{"adminPort":49321,"adminUrl":"http://127.0.0.1:49321","metricsPort":null}`,
 /// or null on error (bad JSON, bind failure, or already serving — one admin plane per handle).
@@ -369,6 +369,20 @@ pub unsafe extern "C" fn rift_serve_admin(
     }
 }
 
+/// Log each imposter an `apply_config` left in `report.failed` (e.g. a port that couldn't bind), so
+/// a partial apply from serve_admin's configFile/inline config is visible rather than silently
+/// dropped — the whole set otherwise applies and serve_admin still succeeds (issue #350).
+fn warn_failed(report: &ApplyReport, source: &str) {
+    for (port, error) in &report.failed {
+        warn!(
+            port,
+            %error,
+            source,
+            "rift_serve_admin: config imposter failed to apply (skipped)"
+        );
+    }
+}
+
 /// Bind the admin (and optional metrics) plane per `opts`, returning the plane plus the JSON
 /// response body. Errors are `String`s (mapped to `last_error` by the caller).
 async fn build_admin_plane(
@@ -392,8 +406,11 @@ async fn build_admin_plane(
         None => None,
     };
 
-    // configFile: load and create imposters additively (does not reconcile away imposters the
-    // host already created), and remember the source so POST /admin/reload can re-read it.
+    // configFile: apply the loaded set via apply_config, mirroring the inline `config` path and
+    // POST /admin/reload. apply_config validates the whole set up front (Err => nothing mutated)
+    // and reports per-port failures in its report rather than a half-applied create loop that
+    // would return NULL while leaving the already-created imposters behind (issue #350). The
+    // source is remembered so POST /admin/reload can re-read it.
     let config_source = match opts.config_file.as_deref() {
         Some(path) => {
             let source = ConfigSource::File {
@@ -402,13 +419,12 @@ async fn build_admin_plane(
             };
             let configs = config_loader::load_configs(&source)
                 .map_err(|e| format!("configFile load: {e}"))?;
-            for config in configs {
-                handle
-                    .manager
-                    .create_imposter(config)
-                    .await
-                    .map_err(|e| format!("configFile imposter: {e}"))?;
-            }
+            let report = handle
+                .manager
+                .apply_config(configs)
+                .await
+                .map_err(|e| format!("configFile apply: {e}"))?;
+            warn_failed(&report, "configFile");
             Some(source)
         }
         None => None,
@@ -417,11 +433,12 @@ async fn build_admin_plane(
     // Inline config is the desired state applied via apply_config (reconcile), mirroring reload.
     if let Some(cfg) = opts.config.as_ref().filter(|v| !v.is_null()) {
         let configs = parse_imposter_configs(cfg)?;
-        handle
+        let report = handle
             .manager
             .apply_config(configs)
             .await
             .map_err(|e| format!("inline config apply: {e}"))?;
+        warn_failed(&report, "inline config");
     }
 
     // Bind metrics first (optional), then admin — so if the second bind fails, the first
