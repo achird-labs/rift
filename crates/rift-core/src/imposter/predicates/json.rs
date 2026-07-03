@@ -184,6 +184,11 @@ pub(crate) fn check_exists_predicate(
 /// `key_case_sensitive` controls whether JSON object key lookups are case-sensitive.
 /// `apply_except` is applied to leaf values (not raw JSON strings) to avoid breaking
 /// JSON structure before parsing.
+///
+/// `pre_parsed` is the request body already parsed into a `serde_json::Value` once per request
+/// (issue #290). When `Some`, it is used at this top level instead of re-parsing `actual_str` —
+/// it is exactly `serde_json::from_str(actual_str)` on the same bytes, so the result is identical.
+/// Recursive calls over nested (re-stringified) values always pass `None`.
 pub(crate) fn compare_json_recursive<F>(
     expected: &serde_json::Value,
     actual_str: &str,
@@ -191,15 +196,23 @@ pub(crate) fn compare_json_recursive<F>(
     deep_equals: bool,
     key_case_sensitive: bool,
     apply_except: &dyn Fn(&str) -> String,
+    pre_parsed: Option<&serde_json::Value>,
 ) -> bool
 where
     F: Fn(&str, &str) -> bool,
 {
     match expected {
         serde_json::Value::Object(expected_obj) => {
-            let actual_json: serde_json::Value = match serde_json::from_str(actual_str) {
-                Ok(v) => v,
-                Err(_) => return false,
+            let parsed_owned;
+            let actual_json: &serde_json::Value = match pre_parsed {
+                Some(v) => v,
+                None => match serde_json::from_str(actual_str) {
+                    Ok(v) => {
+                        parsed_owned = v;
+                        &parsed_owned
+                    }
+                    Err(_) => return false,
+                },
             };
 
             let Some(actual_obj) = actual_json.as_object() else {
@@ -233,6 +246,7 @@ where
                     deep_equals,
                     key_case_sensitive,
                     apply_except,
+                    None,
                 ) {
                     return false;
                 }
@@ -240,9 +254,16 @@ where
             true
         }
         serde_json::Value::Array(expected_arr) => {
-            let actual_json: serde_json::Value = match serde_json::from_str(actual_str) {
-                Ok(v) => v,
-                Err(_) => return false,
+            let parsed_owned;
+            let actual_json: &serde_json::Value = match pre_parsed {
+                Some(v) => v,
+                None => match serde_json::from_str(actual_str) {
+                    Ok(v) => {
+                        parsed_owned = v;
+                        &parsed_owned
+                    }
+                    Err(_) => return false,
+                },
             };
 
             let Some(actual_arr) = actual_json.as_array() else {
@@ -262,6 +283,7 @@ where
                     deep_equals,
                     key_case_sensitive,
                     apply_except,
+                    None,
                 ) {
                     return false;
                 }

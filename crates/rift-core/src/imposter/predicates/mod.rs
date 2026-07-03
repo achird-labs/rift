@@ -21,6 +21,40 @@ pub fn stub_matches(
     form: Option<&HashMap<String, String>>,
     imposter_port: u16,
 ) -> bool {
+    // Parse the body once for standalone callers; the request hot path parses once per request
+    // (before the stub scan) and calls `stub_matches_inner` directly (issue #290).
+    let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
+    stub_matches_inner(
+        predicates,
+        method,
+        path,
+        query,
+        headers,
+        body,
+        request_from,
+        client_ip,
+        form,
+        imposter_port,
+        body_json.as_ref(),
+    )
+}
+
+/// Body of [`stub_matches`] taking the once-parsed request body so every predicate reuses one
+/// parse rather than re-parsing the body per predicate and per stub (issue #290).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stub_matches_inner(
+    predicates: &[Predicate],
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+    headers: &HashMap<String, String>,
+    body: Option<&str>,
+    request_from: Option<&str>,
+    client_ip: Option<&str>,
+    form: Option<&HashMap<String, String>>,
+    imposter_port: u16,
+    body_json: Option<&serde_json::Value>,
+) -> bool {
     // If no predicates, match everything
     if predicates.is_empty() {
         return true;
@@ -28,7 +62,7 @@ pub fn stub_matches(
 
     // All predicates must match (implicit AND)
     for predicate in predicates {
-        if !predicate_matches(
+        if !predicate_matches_inner(
             predicate,
             method,
             path,
@@ -39,6 +73,7 @@ pub fn stub_matches(
             client_ip,
             form,
             imposter_port,
+            body_json,
         ) {
             return false;
         }
@@ -66,6 +101,41 @@ pub fn predicate_matches(
     client_ip: Option<&str>,
     form: Option<&HashMap<String, String>>,
     imposter_port: u16,
+) -> bool {
+    // Standalone callers parse the body here; the request hot path parses once per request and
+    // calls `predicate_matches_inner` directly with the shared parse (issue #290).
+    let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
+    predicate_matches_inner(
+        predicate,
+        method,
+        path,
+        query,
+        headers,
+        body,
+        request_from,
+        client_ip,
+        form,
+        imposter_port,
+        body_json.as_ref(),
+    )
+}
+
+/// Body of [`predicate_matches`] taking the once-parsed request body (`body_json`) so it is not
+/// re-parsed per predicate/stub. `body_json` is the parse of the raw request body; it is only
+/// used for a no-selector predicate's `body` field (a selector makes the effective body differ).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn predicate_matches_inner(
+    predicate: &Predicate,
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+    headers: &HashMap<String, String>,
+    body: Option<&str>,
+    request_from: Option<&str>,
+    client_ip: Option<&str>,
+    form: Option<&HashMap<String, String>>,
+    imposter_port: u16,
+    body_json: Option<&serde_json::Value>,
 ) -> bool {
     // Get predicate options
     let case_sensitive = predicate.parameters.case_sensitive.unwrap_or(false);
@@ -145,6 +215,14 @@ pub fn predicate_matches(
         None => body_str,
     };
 
+    // The once-parsed body corresponds to `effective_body` only when there is no selector; with a
+    // jsonpath/xpath selector the effective body is a different string, so don't reuse the parse.
+    let field_body_json = if predicate.parameters.selector.is_none() {
+        body_json
+    } else {
+        None
+    };
+
     match &predicate.operation {
         PredicateOperation::Equals(fields) => {
             check_predicate_fields(
@@ -161,6 +239,7 @@ pub fn predicate_matches(
                 client_ip,
                 form,
                 key_case_sensitive,
+                field_body_json,
             )
         }
         PredicateOperation::DeepEquals(fields) => {
@@ -178,6 +257,7 @@ pub fn predicate_matches(
                 client_ip,
                 form,
                 key_case_sensitive,
+                field_body_json,
             )
         }
         PredicateOperation::Contains(fields) => check_predicate_fields(
@@ -194,6 +274,7 @@ pub fn predicate_matches(
             client_ip,
             form,
             key_case_sensitive,
+            field_body_json,
         ),
         PredicateOperation::StartsWith(fields) => check_predicate_fields(
             fields,
@@ -209,6 +290,7 @@ pub fn predicate_matches(
             client_ip,
             form,
             key_case_sensitive,
+            field_body_json,
         ),
         PredicateOperation::EndsWith(fields) => check_predicate_fields(
             fields,
@@ -224,6 +306,7 @@ pub fn predicate_matches(
             client_ip,
             form,
             key_case_sensitive,
+            field_body_json,
         ),
         PredicateOperation::Matches(fields) => check_predicate_fields_regex(
             fields,
@@ -238,6 +321,7 @@ pub fn predicate_matches(
             client_ip,
             form,
             key_case_sensitive,
+            field_body_json,
         ),
         PredicateOperation::Exists(fields) => check_exists_predicate(
             fields,
@@ -251,7 +335,7 @@ pub fn predicate_matches(
             form,
             key_case_sensitive,
         ),
-        PredicateOperation::Not(inner) => !predicate_matches(
+        PredicateOperation::Not(inner) => !predicate_matches_inner(
             inner,
             method,
             path,
@@ -262,9 +346,10 @@ pub fn predicate_matches(
             client_ip,
             form,
             imposter_port,
+            body_json,
         ),
         PredicateOperation::Or(children) => children.iter().any(|p| {
-            predicate_matches(
+            predicate_matches_inner(
                 p,
                 method,
                 path,
@@ -275,10 +360,11 @@ pub fn predicate_matches(
                 client_ip,
                 form,
                 imposter_port,
+                body_json,
             )
         }),
         PredicateOperation::And(children) => children.iter().all(|p| {
-            predicate_matches(
+            predicate_matches_inner(
                 p,
                 method,
                 path,
@@ -289,6 +375,7 @@ pub fn predicate_matches(
                 client_ip,
                 form,
                 imposter_port,
+                body_json,
             )
         }),
         PredicateOperation::Inject(inject_fn) => {
@@ -510,6 +597,100 @@ mod tests {
         assert!(
             result,
             "deepEquals should match JSON bodies regardless of key order"
+        );
+    }
+
+    #[test]
+    fn stub_with_two_json_body_predicates_shares_one_parse() {
+        // Gate for #290: two predicates over the same JSON body in one stub (implicit AND) —
+        // the body is parsed once and reused, and deepEquals + contains semantics are unchanged.
+        let deep: HashMap<String, serde_json::Value> =
+            [("body".to_string(), json!({"a": 1, "b": 2}))]
+                .into_iter()
+                .collect();
+        let contains_fields: HashMap<String, serde_json::Value> =
+            [("body".to_string(), json!({"a": 1}))]
+                .into_iter()
+                .collect();
+        let predicates = vec![
+            make_predicate(PredicateOperation::DeepEquals(deep)),
+            make_predicate(PredicateOperation::Contains(contains_fields)),
+        ];
+
+        // Matching body satisfies both predicates.
+        assert!(stub_matches(
+            &predicates,
+            "POST",
+            "/x",
+            None,
+            &empty_headers(),
+            Some(r#"{"b":2,"a":1}"#),
+            None,
+            None,
+            None,
+            0,
+        ));
+        // A body that breaks deepEquals (extra key) must fail the AND.
+        assert!(!stub_matches(
+            &predicates,
+            "POST",
+            "/x",
+            None,
+            &empty_headers(),
+            Some(r#"{"a":1,"b":2,"c":3}"#),
+            None,
+            None,
+            None,
+            0,
+        ));
+        // Non-JSON body must not match a JSON-object predicate.
+        assert!(!stub_matches(
+            &predicates,
+            "POST",
+            "/x",
+            None,
+            &empty_headers(),
+            Some("not json"),
+            None,
+            None,
+            None,
+            0,
+        ));
+    }
+
+    #[test]
+    fn deep_equals_with_jsonpath_selector_uses_extracted_body_not_raw_parse() {
+        // Gate for #290: a selector predicate must compare against the EXTRACTED effective body,
+        // never the once-parsed raw body. With `$.data` extracting `{"a":1,"b":2}`, deepEquals
+        // matches only if the extracted object (not the whole raw body, which also has `other`)
+        // is what gets compared — so this asserts the `selector.is_none()` guard holds.
+        let fields: HashMap<String, serde_json::Value> =
+            [("body".to_string(), json!({"a": 1, "b": 2}))]
+                .into_iter()
+                .collect();
+        let params = PredicateParameters {
+            selector: Some(PredicateSelector::JsonPath {
+                selector: "$.data".to_string(),
+            }),
+            ..PredicateParameters::default()
+        };
+        let pred = make_predicate_with_params(PredicateOperation::DeepEquals(fields), params);
+
+        assert!(
+            predicate_matches(
+                &pred,
+                "POST",
+                "/x",
+                None,
+                &empty_headers(),
+                Some(r#"{"data":{"a":1,"b":2},"other":"x"}"#),
+                None,
+                None,
+                None,
+                0,
+            ),
+            "deepEquals over the jsonpath-extracted object must match; reusing the raw-body parse \
+             (which also has `other`) would wrongly fail"
         );
     }
 

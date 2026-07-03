@@ -6,7 +6,7 @@
 /// Default scenario state when a `(flow_id, scenario)` entry is absent (WireMock parity).
 pub const INITIAL_SCENARIO_STATE: &str = "Started";
 
-use super::predicates::stub_matches;
+use super::predicates::stub_matches_inner;
 use super::response::{
     create_response_preview, create_stub_from_proxy_response, execute_stub_response_with_rift,
     get_rift_script_config,

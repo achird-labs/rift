@@ -43,6 +43,9 @@ impl Imposter {
 
         let imposter_port = self.config.port.unwrap_or(0);
         let flow_id = self.resolve_flow_id(headers_map);
+        // Parse the request body as JSON once per request and reuse it across every stub's
+        // predicates, instead of re-parsing per predicate per stub (issue #290).
+        let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
         for (index, stub_state) in stubs.iter().enumerate() {
             let stub = &stub_state.stub;
             // Correlated-isolation gate (issue #223, runs first): a space-scoped stub only
@@ -62,7 +65,7 @@ impl Imposter {
                     continue;
                 }
             }
-            if stub_matches(
+            if stub_matches_inner(
                 &stub.predicates,
                 method,
                 path,
@@ -73,6 +76,7 @@ impl Imposter {
                 client_ip,
                 form.as_ref(),
                 imposter_port,
+                body_json.as_ref(),
             ) {
                 // PERF NOTE: this deep-clones the matched `Stub` on every request. The clone is
                 // load-bearing, not accidental: the caller (`handler.rs`) holds the returned
