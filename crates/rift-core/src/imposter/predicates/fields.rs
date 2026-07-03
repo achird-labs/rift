@@ -2,6 +2,7 @@
 //! that compare a request's extracted fields against predicate values.
 
 use super::json::compare_json_recursive;
+use super::regex_cache::cached_regex;
 use std::collections::HashMap;
 
 /// Check predicate fields against request values
@@ -201,15 +202,10 @@ pub(crate) fn check_predicate_fields_regex(
     form: Option<&HashMap<String, String>>,
     key_case_sensitive: bool,
 ) -> bool {
-    let build_regex = |pattern: &str| -> Result<regex::Regex, regex::Error> {
-        if case_sensitive {
-            regex::Regex::new(pattern)
-        } else {
-            regex::RegexBuilder::new(pattern)
-                .case_insensitive(true)
-                .build()
-        }
-    };
+    // Compile-once, cached regex keyed on (pattern, case_insensitive). Returns `None` for an
+    // unparseable pattern, which callers treat as "no match" — same as the previous per-request
+    // `Regex::new` returning `Err`.
+    let build_regex = |pattern: &str| cached_regex(pattern, !case_sensitive);
 
     // Helper for key comparison based on keyCaseSensitive
     let key_matches = |expected_key: &str, actual_key: &str| -> bool {
@@ -228,8 +224,8 @@ pub(crate) fn check_predicate_fields_regex(
             serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
                 let regex_compare = |pattern: &str, actual: &str| -> bool {
                     match build_regex(pattern) {
-                        Ok(re) => re.is_match(actual),
-                        Err(_) => false,
+                        Some(re) => re.is_match(actual),
+                        None => false,
                     }
                 };
                 compare_json_recursive(
@@ -247,11 +243,11 @@ pub(crate) fn check_predicate_fields_regex(
                     _ => expected.to_string(),
                 };
                 match build_regex(&pattern) {
-                    Ok(re) => {
+                    Some(re) => {
                         let actual = apply_except(actual);
                         re.is_match(&actual)
                     }
-                    Err(_) => false,
+                    None => false,
                 }
             }
         }

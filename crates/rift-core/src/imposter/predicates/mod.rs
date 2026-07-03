@@ -77,12 +77,14 @@ pub fn predicate_matches(
         .unwrap_or(case_sensitive);
 
     let except_pattern = Some(predicate.parameters.except.as_str()).filter(|s| !s.is_empty());
+    // Compile the except pattern once (cached across requests) and reuse it for every field,
+    // instead of recompiling per field per request. An invalid pattern yields `None`, which
+    // preserves the previous fall-through-to-unchanged behavior.
+    let except_regex = except_pattern.and_then(|pattern| cached_regex(pattern, false));
 
     // Helper to apply except pattern
     let apply_except = |value: &str| -> String {
-        if let Some(pattern) = except_pattern
-            && let Ok(re) = regex::Regex::new(pattern)
-        {
+        if let Some(re) = &except_regex {
             return re.replace_all(value, "").to_string();
         }
         value.to_string()
@@ -317,8 +319,10 @@ pub fn predicate_matches(
 
 mod fields;
 mod json;
+mod regex_cache;
 use fields::{check_predicate_fields, check_predicate_fields_regex};
 use json::check_exists_predicate;
+use regex_cache::cached_regex;
 
 /// Parse query string into HashMap (public helper)
 /// URL-decodes both keys and values to properly handle encoded characters.
@@ -914,6 +918,50 @@ mod tests {
             &pred,
             "GET",
             "/api/users/abc",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        ));
+    }
+
+    #[test]
+    fn test_matches_regex_honors_case_sensitivity() {
+        let fields: HashMap<String, serde_json::Value> = [("path".to_string(), json!("^/API/"))]
+            .into_iter()
+            .collect();
+
+        // Default (caseSensitive unset → false): the cached regex is case-insensitive, so an
+        // uppercase pattern matches a lowercase path.
+        let insensitive = make_predicate(PredicateOperation::Matches(fields.clone()));
+        assert!(predicate_matches(
+            &insensitive,
+            "GET",
+            "/api/users",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        ));
+
+        // caseSensitive: true → the cached regex is case-sensitive and must NOT match.
+        let sensitive = make_predicate_with_params(
+            PredicateOperation::Matches(fields),
+            PredicateParameters {
+                case_sensitive: Some(true),
+                ..PredicateParameters::default()
+            },
+        );
+        assert!(!predicate_matches(
+            &sensitive,
+            "GET",
+            "/api/users",
             None,
             &empty_headers(),
             None,
