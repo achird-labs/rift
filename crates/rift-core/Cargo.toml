@@ -86,6 +86,11 @@ reqwest.workspace = true
 tokio-test = "0.4"
 uuid.workspace = true
 serial_test = "3.0"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "imposter_matcher_bench"
+harness = false
 
 [features]
 default = ["redis-backend", "lua", "javascript"]

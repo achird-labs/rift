@@ -3153,6 +3153,7 @@ dependencies = [
  "boa_engine",
  "bytes",
  "chrono",
+ "criterion",
  "crossbeam",
  "futures",
  "http-body-util",

@@ -35,6 +35,7 @@ COPY crates/rift-ffi/Cargo.toml ./crates/rift-ffi/
 
 # Create dummy source files to build dependencies
 RUN mkdir -p crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches \
+             crates/rift-core/benches \
              crates/rift-lint/src crates/rift-tui/src crates/rift-types/src crates/rift-core/src crates/rift-ffi/src && \
     echo "" > crates/rift-types/src/lib.rs && \
     echo "" > crates/rift-core/src/lib.rs && \
@@ -42,6 +43,7 @@ RUN mkdir -p crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches \
     echo "fn main() {}" > crates/rift-http-proxy/src/main.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/src/bin/verify.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/benches/matcher_bench.rs && \
+    echo "fn main() {}" > crates/rift-core/benches/imposter_matcher_bench.rs && \
     echo "pub fn lint() {}" > crates/rift-lint/src/lib.rs && \
     echo "fn main() {}" > crates/rift-lint/src/main.rs && \
     echo "fn main() {}" > crates/rift-tui/src/main.rs && \
