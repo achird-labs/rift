@@ -18,6 +18,13 @@
 //! The server composition itself (CLI surface, bootstrap, metrics, gateway dispatch) lives
 //! in the `rift_http_proxy` library (issue #317); this binary is a thin caller.
 
+// Route the server binary's allocations through mimalloc (issue #293). Gated by
+// the default-on `mimalloc` feature so FFI/cross-compile builds can drop it; the
+// allocator is set only here in the binary, never in the rift-core/rift-ffi libs.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use clap::Parser;
 use rift_http_proxy::admin_api::DEFAULT_ADMIN_PORT;
 use rift_http_proxy::server::{Cli, Commands, ServerBuilder};
