@@ -904,29 +904,28 @@ fn handle_debug_request(
     ))
 }
 
-/// Handle fault response types
+/// Handle a top-level `fault` response type. A Mountebank `fault` is a transport-level event, so
+/// it reuses the real `_rift.fault.tcp` path (issue #309): the parsed [`TcpFaultKind`] is attached
+/// as a response extension that the serve loop's `FaultIo` applies as a real reset/close/etc.,
+/// instead of framing a clean HTTP 502 (which a migrated Mountebank config would not expect).
 fn handle_fault_response(fault_type: &str) -> Result<Response<Full<Bytes>>, Infallible> {
-    match fault_type {
-        "CONNECTION_RESET_BY_PEER" => {
-            // Return empty response to simulate connection reset
-            // In real Mountebank, this would actually reset the TCP connection
-            Ok(build_response_with_headers(
-                StatusCode::BAD_GATEWAY,
-                [("x-rift-fault", "CONNECTION_RESET_BY_PEER")],
-                Bytes::new(),
-            ))
-        }
-        "RANDOM_DATA_THEN_CLOSE" => Ok(build_response_with_headers(
+    if let Some(kind) = super::fault_io::TcpFaultKind::parse(fault_type) {
+        // Carrier response: `FaultIo` aborts the connection before this is sent, so the
+        // status/body here are never observed by the client (mirrors the `_rift.fault.tcp` path).
+        let mut response = build_response_with_headers(
             StatusCode::BAD_GATEWAY,
-            [("x-rift-fault", "RANDOM_DATA_THEN_CLOSE")],
-            Bytes::from_static(b"\x00\xff\xfe\xfd"),
-        )),
-        _ => Ok(build_response_with_headers(
-            StatusCode::INTERNAL_SERVER_ERROR,
             [("x-rift-fault", fault_type)],
-            format!("Unknown fault: {fault_type}"),
-        )),
+            Bytes::new(),
+        );
+        response.extensions_mut().insert(kind);
+        return Ok(response);
     }
+    // Unrecognized fault type: a defined error, never a silent connection drop.
+    Ok(build_response_with_headers(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [("x-rift-fault", fault_type)],
+        format!("Unknown fault: {fault_type}"),
+    ))
 }
 
 /// Apply Rift fault configuration (probabilistic faults)
@@ -1026,8 +1025,45 @@ async fn apply_rift_fault(
 mod fault_precedence_tests {
     use super::super::fault_io::TcpFaultKind;
     use super::super::types::{RiftErrorFault, RiftFaultConfig, RiftLatencyFault};
-    use super::{Bytes, Full, Response, apply_rift_fault};
+    use super::{Bytes, Full, Response, apply_rift_fault, handle_fault_response};
     use std::time::Instant;
+
+    // Issue #309: a top-level `fault` response must reset/close the connection (via the same
+    // TcpFaultKind extension the serve loop's FaultIo reads for `_rift.fault.tcp`), not return a
+    // framed HTTP 502. Before the fix `handle_fault_response` attached no extension.
+    #[test]
+    fn top_level_fault_carries_real_tcp_fault_extension() {
+        let reset = handle_fault_response("CONNECTION_RESET_BY_PEER").expect("infallible");
+        assert_eq!(
+            reset.extensions().get::<TcpFaultKind>().copied(),
+            Some(TcpFaultKind::Reset),
+            "CONNECTION_RESET_BY_PEER must carry a real TCP-reset fault, not a plain 502"
+        );
+
+        let random = handle_fault_response("RANDOM_DATA_THEN_CLOSE").expect("infallible");
+        assert_eq!(
+            random.extensions().get::<TcpFaultKind>().copied(),
+            Some(TcpFaultKind::RandomData),
+            "RANDOM_DATA_THEN_CLOSE must carry a real random-data-then-close fault"
+        );
+
+        // The two remaining WireMock kinds also route to a real transport fault (unified on the
+        // same parser as `_rift.fault.tcp`), no longer falling into the 500 "Unknown fault" branch.
+        let empty = handle_fault_response("EMPTY_RESPONSE").expect("infallible");
+        assert_eq!(
+            empty.extensions().get::<TcpFaultKind>().copied(),
+            Some(TcpFaultKind::Empty)
+        );
+        let malformed = handle_fault_response("MALFORMED_RESPONSE_CHUNK").expect("infallible");
+        assert_eq!(
+            malformed.extensions().get::<TcpFaultKind>().copied(),
+            Some(TcpFaultKind::MalformedChunk)
+        );
+
+        // An unrecognized fault type stays a defined error, not a silent transport fault.
+        let unknown = handle_fault_response("NOT_A_FAULT").expect("infallible");
+        assert!(unknown.extensions().get::<TcpFaultKind>().is_none());
+    }
 
     fn error_fault(status: u16) -> RiftErrorFault {
         RiftErrorFault {
