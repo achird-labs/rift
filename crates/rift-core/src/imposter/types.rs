@@ -385,6 +385,17 @@ pub(crate) struct StubResponseRaw {
     /// Rift extensions for advanced features
     #[serde(rename = "_rift", skip_serializing_if = "Option::is_none")]
     pub rift: Option<RiftResponseExtension>,
+    /// Flat / recorded response form (issue #304): `statusCode`/`headers`/`body`/`_mode` at the
+    /// top level with no `is` wrapper (the shape emitted by recorded/Mimeo-solo mocks). Mountebank
+    /// renders these exactly like `is: { … }`. `is` still takes precedence when both are present.
+    #[serde(default, deserialize_with = "deserialize_optional_status_code")]
+    pub status_code: Option<u16>,
+    #[serde(default, deserialize_with = "multi_value_headers::deserialize")]
+    pub headers: HashMap<String, Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<serde_json::Value>,
+    #[serde(rename = "_mode", default)]
+    pub mode: ResponseMode,
 }
 
 /// Serialization type for stub responses - outputs Mountebank-compatible format
@@ -457,22 +468,40 @@ pub(crate) fn default_status_code() -> u16 {
     200
 }
 
+/// Parse a JSON `statusCode` value that may be a number or a (numeric) string.
+fn parse_status_code_value<E: serde::de::Error>(value: serde_json::Value) -> Result<u16, E> {
+    match value {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .ok_or_else(|| E::custom("invalid status code number")),
+        serde_json::Value::String(s) => s
+            .parse::<u16>()
+            .map_err(|_| E::custom(format!("invalid status code string: {s}"))),
+        _ => Err(E::custom("statusCode must be a number or string")),
+    }
+}
+
 /// Deserialize statusCode from either a number or a string
 pub(crate) fn deserialize_status_code<'de, D>(deserializer: D) -> Result<u16, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::Error;
-    let value = serde_json::Value::deserialize(deserializer)?;
-    match value {
-        serde_json::Value::Number(n) => n
-            .as_u64()
-            .and_then(|n| u16::try_from(n).ok())
-            .ok_or_else(|| D::Error::custom("invalid status code number")),
-        serde_json::Value::String(s) => s
-            .parse::<u16>()
-            .map_err(|_| D::Error::custom(format!("invalid status code string: {s}"))),
-        _ => Err(D::Error::custom("statusCode must be a number or string")),
+    parse_status_code_value(serde_json::Value::deserialize(deserializer)?)
+}
+
+/// Deserialize an optional top-level `statusCode` (flat response form, issue #304), reusing the
+/// number-or-string parsing. Only invoked when the field is present; a `null` is treated as
+/// absent (`None`) so a stray null on a non-flat response stays accepted as before.
+pub(crate) fn deserialize_optional_status_code<'de, D>(
+    deserializer: D,
+) -> Result<Option<u16>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Null => Ok(None),
+        value => parse_status_code_value(value).map(Some),
     }
 }
 
@@ -504,6 +533,22 @@ impl From<StubResponseRaw> for StubResponse {
         } else if let Some(rift) = raw.rift {
             // Rift-only response (script generates the response)
             StubResponse::RiftScript { rift }
+        } else if raw.status_code.is_some() || raw.body.is_some() || !raw.headers.is_empty() {
+            // Flat / recorded response form (issue #304): top-level statusCode/headers/body with
+            // no `is` wrapper is rendered exactly like `is: { … }`. statusCode defaults to 200.
+            let behaviors = raw
+                .underscore_behaviors
+                .or_else(|| raw.behaviors.and_then(normalize_behaviors));
+            StubResponse::Is {
+                is: IsResponse {
+                    status_code: raw.status_code.unwrap_or_else(default_status_code),
+                    headers: raw.headers,
+                    body: raw.body,
+                    mode: raw.mode,
+                },
+                behaviors,
+                rift: None,
+            }
         } else {
             // Default to empty Is response
             StubResponse::Is {
@@ -1122,6 +1167,77 @@ mod tests {
     }
 
     // Fix #107: Stub.responses now has #[serde(default)]
+    #[test]
+    fn flat_response_without_is_wrapper_parses_as_is_string_body() {
+        // Issue #304: a flat/recorded response (statusCode/headers/body at top level, no `is`)
+        // must be served like `is: { … }`, not as an empty response.
+        let r: StubResponse = serde_json::from_value(json!({
+            "statusCode": 200,
+            "headers": { "Content-Type": "application/json" },
+            "body": "FLAT-BODY"
+        }))
+        .unwrap();
+        match r {
+            StubResponse::Is { is, .. } => {
+                assert_eq!(is.status_code, 200);
+                assert_eq!(is.body, Some(json!("FLAT-BODY")));
+                assert_eq!(
+                    is.headers.get("Content-Type"),
+                    Some(&vec!["application/json".to_string()])
+                );
+            }
+            other => panic!("expected Is, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flat_response_object_body_parses_as_is() {
+        let r: StubResponse = serde_json::from_value(json!({
+            "statusCode": 200,
+            "body": { "k": "objbody" }
+        }))
+        .unwrap();
+        match r {
+            StubResponse::Is { is, .. } => {
+                assert_eq!(is.status_code, 200);
+                assert_eq!(is.body, Some(json!({ "k": "objbody" })));
+            }
+            other => panic!("expected Is, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flat_response_status_code_as_string_and_body_only() {
+        let r: StubResponse =
+            serde_json::from_value(json!({ "statusCode": "201", "body": "x" })).unwrap();
+        match r {
+            StubResponse::Is { is, .. } => assert_eq!(is.status_code, 201),
+            other => panic!("expected Is, got {other:?}"),
+        }
+        // Body-only flat response defaults the status to 200.
+        let r: StubResponse = serde_json::from_value(json!({ "body": "just-body" })).unwrap();
+        match r {
+            StubResponse::Is { is, .. } => {
+                assert_eq!(is.status_code, 200);
+                assert_eq!(is.body, Some(json!("just-body")));
+            }
+            other => panic!("expected Is, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_response_object_still_defaults_to_empty_is() {
+        // Regression guard: a genuinely-empty `{}` response must remain a 200 empty Is.
+        let r: StubResponse = serde_json::from_value(json!({})).unwrap();
+        match r {
+            StubResponse::Is { is, .. } => {
+                assert_eq!(is.status_code, 200);
+                assert_eq!(is.body, None);
+            }
+            other => panic!("expected Is, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_stub_deserialize_without_responses_field() {
         let stub_json = json!({
