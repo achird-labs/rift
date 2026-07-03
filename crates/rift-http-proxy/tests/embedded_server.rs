@@ -3,10 +3,13 @@
 //! `ImposterManager`.
 
 use clap::Parser;
+use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::gateway::dispatch_to_port;
 use rift_http_proxy::imposter::{ImposterConfig, ImposterManager};
-use rift_http_proxy::server::{Cli, ServerBuilder, run_metrics_server};
+use rift_http_proxy::server::{Cli, ServerBuilder, bind_metrics_server, run_metrics_server};
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 fn imposter_cfg(port: u16, body: &str) -> ImposterConfig {
     serde_json::from_value(serde_json::json!({
@@ -262,4 +265,250 @@ async fn dispatch_to_port_routes_in_process() {
     assert_eq!(resp.status(), 404, "no imposter on the target port");
 
     manager.delete_all().await;
+}
+
+// ===========================================================================
+// Issue #342: bindable admin/metrics servers — bound-addr reporting + shutdown
+// ===========================================================================
+
+/// True once `addr` refuses TCP connections (listener gone), polled up to ~2s.
+async fn connect_refused(addr: SocketAddr) -> bool {
+    for _ in 0..40 {
+        match tokio::time::timeout(
+            Duration::from_millis(200),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        {
+            Ok(Err(_)) => return true, // connection refused — listener is down
+            _ => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    false
+}
+
+// AC1: bind on 127.0.0.1:0 → local_addr() reports the OS-assigned (nonzero) port and the
+// server serves /health there. Fixes the #317 "a :0 bind gives the caller no way to learn
+// the assigned port" gap.
+#[tokio::test]
+async fn admin_bind_zero_port_reports_addr_and_serves_health() {
+    let manager = Arc::new(ImposterManager::new());
+    let running = AdminApiServer::new("127.0.0.1:0".parse().unwrap(), manager, None)
+        .bind()
+        .await
+        .expect("bind admin on :0");
+
+    let addr = running.local_addr();
+    assert_ne!(addr.port(), 0, "local_addr must report the assigned port");
+
+    wait_for_http(&format!("http://{addr}/health")).await;
+    let resp = reqwest::get(format!("http://{addr}/health"))
+        .await
+        .expect("health reachable");
+    assert_eq!(resp.status(), 200);
+
+    running.shutdown().await;
+}
+
+// AC2: shutdown() stops accepting (subsequent connect refused) and returns within the grace
+// bound; a second shutdown() is a no-op (idempotent).
+#[tokio::test]
+async fn admin_shutdown_stops_accepting_and_is_idempotent() {
+    let manager = Arc::new(ImposterManager::new());
+    let running = AdminApiServer::new("127.0.0.1:0".parse().unwrap(), manager, None)
+        .bind()
+        .await
+        .expect("bind admin on :0");
+    let addr = running.local_addr();
+    wait_for_http(&format!("http://{addr}/health")).await;
+
+    // shutdown returns within a bounded grace (the API promises ~500ms; allow slack).
+    tokio::time::timeout(Duration::from_secs(2), running.shutdown())
+        .await
+        .expect("shutdown returns within the grace bound");
+
+    assert!(
+        connect_refused(addr).await,
+        "after shutdown the admin port must refuse connections"
+    );
+
+    // Double shutdown is a no-op — must not panic or hang.
+    tokio::time::timeout(Duration::from_secs(2), running.shutdown())
+        .await
+        .expect("second shutdown is a no-op");
+}
+
+// AC3: join() returns once the accept loop has exited (driven here by a prior shutdown).
+#[tokio::test]
+async fn admin_join_returns_after_accept_loop_exits() {
+    let manager = Arc::new(ImposterManager::new());
+    let running = AdminApiServer::new("127.0.0.1:0".parse().unwrap(), manager, None)
+        .bind()
+        .await
+        .expect("bind admin on :0");
+    let addr = running.local_addr();
+    wait_for_http(&format!("http://{addr}/health")).await;
+
+    running.shutdown().await; // stops the accept loop
+    let joined = tokio::time::timeout(Duration::from_secs(2), running.join())
+        .await
+        .expect("join returns after the accept loop has exited");
+    assert!(joined.is_ok(), "join reports the accept loop's Ok result");
+}
+
+// AC4: bind_metrics_server on :0 serves /metrics at the reported addr; shutdown stops it.
+#[tokio::test]
+async fn metrics_bind_zero_port_serves_and_shuts_down() {
+    let running = bind_metrics_server("127.0.0.1:0".parse().unwrap())
+        .await
+        .expect("bind metrics on :0");
+    let addr = running.local_addr();
+    assert_ne!(
+        addr.port(),
+        0,
+        "metrics local_addr must report the assigned port"
+    );
+
+    wait_for_http(&format!("http://{addr}/metrics")).await;
+    // AC4 is "serves /metrics at the reported addr" — assert the HTTP contract (200 at the
+    // :0-assigned port). Metric *content* ("rift_") depends on global-registry state and is
+    // covered by `run_metrics_server_serves_metrics`.
+    let resp = reqwest::get(format!("http://{addr}/metrics"))
+        .await
+        .expect("metrics reachable at the :0-assigned port");
+    assert_eq!(resp.status(), 200);
+
+    tokio::time::timeout(Duration::from_secs(2), running.shutdown())
+        .await
+        .expect("metrics shutdown within grace");
+    assert!(
+        connect_refused(addr).await,
+        "after shutdown the metrics port must refuse connections"
+    );
+}
+
+// AC5: ServerBuilder::start() returns once bound, reports both addrs (nonzero via :0), and
+// its shutdown() stops BOTH listeners.
+#[tokio::test]
+async fn server_builder_start_reports_addrs_and_shuts_down_both() {
+    let cli = Cli::try_parse_from([
+        "rift",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+        "--metrics-port",
+        "0",
+    ])
+    .expect("cli parse");
+
+    let running = ServerBuilder::from_cli(cli)
+        .start()
+        .await
+        .expect("start returns once bound");
+
+    let admin_addr = running.admin_addr();
+    // Metrics binds 0.0.0.0; reach it over loopback for a portable client connection.
+    let metrics_addr = SocketAddr::new(
+        "127.0.0.1".parse().unwrap(),
+        running.metrics_addr().expect("metrics addr present").port(),
+    );
+    assert_ne!(admin_addr.port(), 0);
+    assert_ne!(metrics_addr.port(), 0);
+
+    wait_for_http(&format!("http://{admin_addr}/health")).await;
+    wait_for_http(&format!("http://{metrics_addr}/metrics")).await;
+
+    tokio::time::timeout(Duration::from_secs(3), running.shutdown())
+        .await
+        .expect("shutdown both within grace");
+
+    assert!(connect_refused(admin_addr).await, "admin listener stopped");
+    assert!(
+        connect_refused(metrics_addr).await,
+        "metrics listener stopped"
+    );
+}
+
+// AC7 end-to-end: `--allow-injection` must survive the whole thread (ServerBuilder::start →
+// with_allow_injection → accept_loop → route_request → route_by_path → handle_config) and be
+// reported by GET /config. A hardcoded flag anywhere on that path would fail here while the
+// unit test still passed.
+#[tokio::test]
+async fn server_builder_start_threads_allow_injection_to_config() {
+    async fn allow_injection_reported(extra: &[&str]) -> bool {
+        let mut args = vec![
+            "rift",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--metrics-port",
+            "0",
+        ];
+        args.extend_from_slice(extra);
+        let cli = Cli::try_parse_from(args).expect("cli parse");
+        let running = ServerBuilder::from_cli(cli).start().await.expect("start");
+        let admin = running.admin_addr();
+        wait_for_http(&format!("http://{admin}/health")).await;
+        let cfg: serde_json::Value = reqwest::get(format!("http://{admin}/config"))
+            .await
+            .expect("config reachable")
+            .json()
+            .await
+            .expect("json");
+        running.shutdown().await;
+        cfg["options"]["allowInjection"]
+            .as_bool()
+            .expect("allowInjection bool")
+    }
+
+    assert!(
+        allow_injection_reported(&["--allow-injection"]).await,
+        "--allow-injection must reach GET /config"
+    );
+    assert!(
+        !allow_injection_reported(&[]).await,
+        "without the flag, /config must report allowInjection=false"
+    );
+}
+
+// AC5 degradation: a metrics-port bind failure is non-fatal — the admin plane still comes up,
+// metrics_addr() is None, and shutdown() handles the None branch without panicking.
+#[tokio::test]
+async fn server_builder_start_survives_metrics_bind_failure() {
+    // Occupy 0.0.0.0:<port> — the same wildcard address the metrics server binds — so the
+    // metrics bind deterministically collides (EADDRINUSE) on every platform.
+    let occupied = tokio::net::TcpListener::bind("0.0.0.0:0")
+        .await
+        .expect("occupy a port");
+    let busy_port = occupied.local_addr().expect("addr").port();
+
+    let cli = Cli::try_parse_from([
+        "rift",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+        "--metrics-port",
+        &busy_port.to_string(),
+    ])
+    .expect("cli parse");
+
+    let running = ServerBuilder::from_cli(cli)
+        .start()
+        .await
+        .expect("admin plane still starts despite a metrics bind failure");
+
+    assert_ne!(running.admin_addr().port(), 0);
+    assert!(
+        running.metrics_addr().is_none(),
+        "a failed metrics bind degrades to None, not a hard error"
+    );
+    wait_for_http(&format!("http://{}/health", running.admin_addr())).await;
+
+    // shutdown must not panic on the None metrics branch.
+    tokio::time::timeout(Duration::from_secs(2), running.shutdown())
+        .await
+        .expect("shutdown handles the None metrics branch");
 }

@@ -4,15 +4,23 @@
 //! config loading, and metrics around their own `ImposterManager` without forking the
 //! binary.
 
-use crate::admin_api::{AdminApiServer, DEFAULT_ADMIN_PORT};
+use crate::admin_api::{AdminApiServer, DEFAULT_ADMIN_PORT, RunningAdminApi};
 use crate::config_loader::{self, ConfigSource};
 use crate::extensions::metrics;
 use crate::imposter::{ImposterConfig, ImposterManager, TlsDefaults};
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tracing::{error, info, warn};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
+use tracing::{debug, error, info, warn};
+
+/// Bounded grace given to in-flight metrics connections on `shutdown()` (issue #342).
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 /// Rift - A Mountebank-compatible HTTP chaos engineering proxy
 ///
@@ -185,6 +193,13 @@ impl ServerBuilder {
     /// Load configs, spawn the metrics server, and run the admin API server — the
     /// binary's Mountebank-mode behavior. Runs until the admin server stops or fails.
     pub async fn run(self) -> anyhow::Result<()> {
+        self.start().await?.join().await
+    }
+
+    /// Everything [`run`](Self::run) does, but returns a [`RunningServer`] once both listeners
+    /// are bound instead of serving forever (issue #342) — the embedding seam for a host that
+    /// needs the bound addresses (`:0` support) and a graceful shutdown.
+    pub async fn start(self) -> anyhow::Result<RunningServer> {
         let cli = self.cli;
         let manager = match self.manager {
             Some(manager) => manager,
@@ -221,12 +236,17 @@ impl ServerBuilder {
             load_imposters_from_datadir(&manager, datadir).await?;
         }
 
+        // Bind the metrics server now so a `:0` request can report its port. A bind failure
+        // stays non-fatal and only logs — matching the binary, which spawned the metrics
+        // server and kept the admin plane up regardless.
         let metrics_addr = SocketAddr::from(([0, 0, 0, 0], cli.metrics_port));
-        tokio::spawn(async move {
-            if let Err(e) = run_metrics_server(metrics_addr).await {
+        let metrics = match bind_metrics_server(metrics_addr).await {
+            Ok(running) => Some(running),
+            Err(e) => {
                 error!("Metrics server error: {}", e);
+                None
             }
-        });
+        };
 
         let host = if cli.local_only {
             "127.0.0.1"
@@ -256,7 +276,9 @@ impl ServerBuilder {
         }
 
         // Retain the config source so POST /admin/reload can re-read it (issue #197).
-        let mut server = AdminApiServer::new(addr, manager, cli.api_key);
+        // Injection gating is threaded explicitly (issue #342) rather than read from env.
+        let mut server = AdminApiServer::new(addr, manager, cli.api_key)
+            .with_allow_injection(cli.allow_injection);
         if let Some(configfile) = cli.configfile {
             server = server.with_config_source(ConfigSource::File {
                 path: configfile,
@@ -265,28 +287,157 @@ impl ServerBuilder {
         } else if let Some(datadir) = cli.datadir {
             server = server.with_config_source(ConfigSource::Dir(datadir));
         }
-        server.run().await
+        let admin = server.bind().await?;
+        Ok(RunningServer { admin, metrics })
+    }
+}
+
+/// A bound, running Rift server (issue #342): the admin API plus an optional metrics server.
+/// Reports both bound addresses and shuts both down gracefully.
+pub struct RunningServer {
+    admin: RunningAdminApi,
+    metrics: Option<RunningMetrics>,
+}
+
+impl RunningServer {
+    /// The bound admin API address (resolves a `:0` request to the assigned port).
+    pub fn admin_addr(&self) -> SocketAddr {
+        self.admin.local_addr()
+    }
+
+    /// The bound metrics address, if the metrics server bound successfully.
+    pub fn metrics_addr(&self) -> Option<SocketAddr> {
+        self.metrics.as_ref().map(RunningMetrics::local_addr)
+    }
+
+    /// Run until the admin API accept loop exits — the binary's `run()` behavior. The metrics
+    /// server keeps serving in the background, as it did under the previous `tokio::spawn`.
+    pub async fn join(self) -> anyhow::Result<()> {
+        self.admin.join().await
+    }
+
+    /// Stop accepting on both listeners, giving in-flight connections a bounded grace.
+    pub async fn shutdown(self) {
+        self.admin.shutdown().await;
+        if let Some(metrics) = self.metrics {
+            metrics.shutdown().await;
+        }
     }
 }
 
 /// Serve Prometheus metrics at `GET /metrics` on `addr` (anything else is a 404).
-/// Runs until the listener fails; callers normally `tokio::spawn` it.
+/// Runs until the listener fails; callers normally `tokio::spawn` it. Delegates to
+/// [`bind_metrics_server`] + [`RunningMetrics::join`] so the binary path is unchanged.
 pub async fn run_metrics_server(addr: SocketAddr) -> anyhow::Result<()> {
+    bind_metrics_server(addr).await?.join().await
+}
+
+/// Bind the metrics listener (`:0` is fine) and start serving, returning a handle that reports
+/// the bound address and can be shut down gracefully (issue #342).
+pub async fn bind_metrics_server(addr: SocketAddr) -> anyhow::Result<RunningMetrics> {
+    let listener = TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
+    info!("Metrics server listening on http://{}/metrics", local_addr);
+
+    let cancel = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let (loop_cancel, loop_tracker) = (cancel.clone(), tracker.clone());
+    let task = tokio::spawn(async move {
+        let result = metrics_accept_loop(listener, loop_cancel, loop_tracker).await;
+        // Preserve the pre-#342 behavior: an accept-loop failure is logged. Otherwise it would
+        // only surface via join(), which RunningServer does not call for the metrics task.
+        if let Err(ref e) = result {
+            error!("Metrics server error: {}", e);
+        }
+        result
+    });
+
+    Ok(RunningMetrics {
+        local_addr,
+        cancel,
+        tracker,
+        task: Mutex::new(Some(task)),
+    })
+}
+
+/// A bound, running metrics server (issue #342).
+pub struct RunningMetrics {
+    local_addr: SocketAddr,
+    cancel: CancellationToken,
+    tracker: TaskTracker,
+    task: Mutex<Option<JoinHandle<anyhow::Result<()>>>>,
+}
+
+impl RunningMetrics {
+    /// The actual bound address (a `:0` request resolves to the OS-assigned port here).
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    /// Stop accepting new connections, give in-flight connections a bounded grace, then return.
+    /// Idempotent.
+    pub async fn shutdown(&self) {
+        self.cancel.cancel();
+        // Bind the taken handle to a local so the MutexGuard drops before any `.await`.
+        let task = self
+            .task
+            .lock()
+            .expect("metrics task mutex poisoned")
+            .take();
+        if let Some(task) = task {
+            let abort = task.abort_handle();
+            if tokio::time::timeout(SHUTDOWN_GRACE, task).await.is_err() {
+                abort.abort();
+            }
+        }
+        self.tracker.close();
+        if tokio::time::timeout(SHUTDOWN_GRACE, self.tracker.wait())
+            .await
+            .is_err()
+        {
+            debug!(
+                "Metrics server shutdown: in-flight connections did not drain within the grace period"
+            );
+        }
+    }
+
+    /// Run until the accept loop exits (returns immediately if already shut down).
+    pub async fn join(self) -> anyhow::Result<()> {
+        let task = self
+            .task
+            .lock()
+            .expect("metrics task mutex poisoned")
+            .take();
+        match task {
+            Some(task) => match task.await {
+                Ok(result) => result,
+                Err(join_err) => Err(anyhow::anyhow!("metrics server task failed: {join_err}")),
+            },
+            None => Ok(()),
+        }
+    }
+}
+
+async fn metrics_accept_loop(
+    listener: TcpListener,
+    cancel: CancellationToken,
+    tracker: TaskTracker,
+) -> anyhow::Result<()> {
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper::{Request, Response, body::Incoming};
     use hyper_util::rt::TokioIo;
     use std::convert::Infallible;
-    use tokio::net::TcpListener;
-
-    let listener = TcpListener::bind(addr).await?;
-    info!("Metrics server listening on http://{}/metrics", addr);
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, _) = tokio::select! {
+            _ = cancel.cancelled() => break,
+            accepted = listener.accept() => accepted?,
+        };
         let io = TokioIo::new(stream);
+        let conn_cancel = cancel.clone();
 
-        tokio::spawn(async move {
+        tracker.spawn(async move {
             let service = service_fn(move |req: Request<Incoming>| async move {
                 if req.uri().path() == "/metrics" {
                     let metrics = metrics::collect_metrics();
@@ -301,11 +452,22 @@ pub async fn run_metrics_server(addr: SocketAddr) -> anyhow::Result<()> {
                 }
             });
 
-            if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
-                error!("Metrics server connection error: {}", err);
+            let conn = http1::Builder::new().serve_connection(io, service);
+            tokio::pin!(conn);
+            tokio::select! {
+                res = conn.as_mut() => {
+                    if let Err(err) = res {
+                        error!("Metrics server connection error: {}", err);
+                    }
+                }
+                _ = conn_cancel.cancelled() => {
+                    conn.as_mut().graceful_shutdown();
+                    let _ = conn.await;
+                }
             }
         });
     }
+    Ok(())
 }
 
 /// Load imposters from a JSON config file

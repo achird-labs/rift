@@ -53,14 +53,15 @@ pub async fn handle_metrics(manager: Arc<ImposterManager>) -> Response<Full<Byte
 }
 
 /// GET /config - Mountebank-compatible config endpoint
-pub fn handle_config() -> Response<Full<Bytes>> {
+///
+/// `allow_injection` is threaded in explicitly (issue #342) rather than read from
+/// `MB_ALLOW_INJECTION`, so an embedded host can set it without mutating process env.
+pub fn handle_config(allow_injection: bool) -> Response<Full<Bytes>> {
     let config = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "options": {
             "port": crate::admin_api::DEFAULT_ADMIN_PORT,
-            "allowInjection": std::env::var("MB_ALLOW_INJECTION")
-                .map(|v| v == "true")
-                .unwrap_or(false),
+            "allowInjection": allow_injection,
             "localOnly": false,
             "ipWhitelist": ["*"]
         },
@@ -212,8 +213,27 @@ mod tests {
 
     #[test]
     fn test_handle_config() {
-        let resp = handle_config();
+        let resp = handle_config(false);
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // AC7 (#342): the injection flag is threaded explicitly, not read from process env —
+    // an embedder sets it without mutating the environment.
+    #[test]
+    fn handle_config_reports_explicit_injection_flag() {
+        use http_body_util::BodyExt;
+        let read_flag = |allow: bool| {
+            let resp = handle_config(allow);
+            let bytes = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(resp.into_body().collect())
+                .unwrap()
+                .to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            json["options"]["allowInjection"].as_bool().unwrap()
+        };
+        assert!(read_flag(true), "explicit true must be reported");
+        assert!(!read_flag(false), "explicit false must be reported");
     }
 
     #[tokio::test]

@@ -3277,6 +3277,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-test",
+ "tokio-util",
  "tower",
  "tracing",
  "tracing-appender",
@@ -4324,6 +4325,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

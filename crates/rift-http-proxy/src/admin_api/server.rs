@@ -11,9 +11,16 @@ use hyper::service::service_fn;
 use hyper::{Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, info};
+
+/// Bounded grace given to in-flight connections on `shutdown()` before the wait is abandoned.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 /// Admin API server for Rift
 pub struct AdminApiServer {
@@ -21,6 +28,7 @@ pub struct AdminApiServer {
     manager: Arc<ImposterManager>,
     api_key: Option<Arc<String>>,
     config_source: Option<Arc<ConfigSource>>,
+    allow_injection: bool,
 }
 
 impl AdminApiServer {
@@ -31,6 +39,7 @@ impl AdminApiServer {
             manager,
             api_key: api_key.map(Arc::new),
             config_source: None,
+            allow_injection: false,
         }
     }
 
@@ -42,76 +51,206 @@ impl AdminApiServer {
         self
     }
 
-    /// Run the admin API server
-    pub async fn run(self) -> Result<(), anyhow::Error> {
+    /// Set whether JS injection is allowed, reported by `GET /config` (issue #342). Threaded
+    /// explicitly so an embedder can set it without mutating the process environment.
+    #[must_use]
+    pub fn with_allow_injection(mut self, allow: bool) -> Self {
+        self.allow_injection = allow;
+        self
+    }
+
+    /// Bind the listener (`:0` is fine) and start serving on the current runtime, returning a
+    /// handle that reports the bound address and can be shut down gracefully (issue #342).
+    pub async fn bind(self) -> anyhow::Result<RunningAdminApi> {
         let listener = TcpListener::bind(self.addr).await?;
+        let local_addr = listener.local_addr()?;
         info!(
             "Rift Admin API (Mountebank-compatible) listening on http://{}",
-            self.addr
+            local_addr
         );
 
         if self.api_key.is_some() {
             info!("Admin API authentication enabled (--apikey)");
         }
 
-        loop {
-            let (stream, _) = listener.accept().await?;
-            let io = TokioIo::new(stream);
-            let manager = Arc::clone(&self.manager);
-            let api_key = self.api_key.clone();
-            let config_source = self.config_source.clone();
+        let cancel = CancellationToken::new();
+        let tracker = TaskTracker::new();
+        let (loop_cancel, loop_tracker) = (cancel.clone(), tracker.clone());
+        let task = tokio::spawn(async move {
+            let result = accept_loop(
+                listener,
+                self.manager,
+                self.api_key,
+                self.config_source,
+                self.allow_injection,
+                loop_cancel,
+                loop_tracker,
+            )
+            .await;
+            // Log an accept-loop failure so it is observable even for an embedder that holds
+            // the handle and never calls join() (join() still returns it for run()/RunningServer).
+            if let Err(ref e) = result {
+                tracing::error!("Admin API server error: {}", e);
+            }
+            result
+        });
 
-            tokio::spawn(async move {
-                let service = service_fn(move |req| {
-                    let manager = Arc::clone(&manager);
-                    let api_key = api_key.clone();
-                    let config_source = config_source.clone();
-                    async move {
-                        // Per-request annotation scope + response decorator (issue #318):
-                        // every response through this listener — including the `/__rift/`
-                        // gateway — is decorated with phase `Admin`.
-                        let decorator = manager.response_decorator();
-                        let (result, annotations) = with_annotation_scope(async move {
-                            // The single-port gateway (`/__rift/...`, issue #212) is data-plane
-                            // imposter traffic, not the admin control plane — it mirrors direct
-                            // per-imposter-port access and so is NOT gated by the admin `--apikey`
-                            // (which would otherwise force app-under-test traffic to carry the admin
-                            // key and would leak that Authorization header into imposter predicates).
-                            let is_gateway = req.uri().path().starts_with("/__rift/");
-                            if let Some(ref key) = api_key
-                                && !is_gateway
-                            {
-                                let auth = req
-                                    .headers()
-                                    .get("authorization")
-                                    .and_then(|v| v.to_str().ok())
-                                    .unwrap_or("");
-                                if auth != key.as_str() {
-                                    return Ok::<_, hyper::Error>(unauthorized_response());
-                                }
-                            }
-                            route_request(req, manager, config_source).await
-                        })
-                        .await;
-                        let mut response = result?;
-                        if let Some(decorator) = decorator {
-                            decorator.decorate(
-                                ResponsePhase::Admin,
-                                None,
-                                &annotations,
-                                response.headers_mut(),
-                            );
-                        }
-                        Ok::<_, hyper::Error>(response)
-                    }
-                });
+        Ok(RunningAdminApi {
+            local_addr,
+            cancel,
+            tracker,
+            task: Mutex::new(Some(task)),
+        })
+    }
 
-                if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
-                    debug!("Admin API connection error: {}", e);
-                }
-            });
+    /// Run the admin API server until the accept loop exits. Delegates to `bind` + `join`
+    /// so the binary path is byte-identical to binding then serving forever.
+    pub async fn run(self) -> Result<(), anyhow::Error> {
+        self.bind().await?.join().await
+    }
+}
+
+/// A bound, running admin API server (issue #342). Reports its listening address and offers a
+/// graceful shutdown that does not require dropping the runtime.
+pub struct RunningAdminApi {
+    local_addr: SocketAddr,
+    cancel: CancellationToken,
+    tracker: TaskTracker,
+    task: Mutex<Option<JoinHandle<anyhow::Result<()>>>>,
+}
+
+impl RunningAdminApi {
+    /// The actual bound address (a `:0` request resolves to the OS-assigned port here).
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    /// Stop accepting new connections, give in-flight connections a bounded grace, then return.
+    /// Idempotent: a second call is a no-op.
+    pub async fn shutdown(&self) {
+        // Signals both the accept loop (stop accepting) and each live connection (which then
+        // performs a hyper graceful shutdown).
+        self.cancel.cancel();
+
+        if let Some(task) = take_task(&self.task) {
+            let abort = task.abort_handle();
+            if tokio::time::timeout(SHUTDOWN_GRACE, task).await.is_err() {
+                abort.abort();
+            }
+        }
+
+        // Wait for in-flight connections to finish within the grace bound. They observe the
+        // cancellation above and drain; the timeout bounds a pathologically slow one.
+        self.tracker.close();
+        if tokio::time::timeout(SHUTDOWN_GRACE, self.tracker.wait())
+            .await
+            .is_err()
+        {
+            debug!(
+                "Admin API shutdown: in-flight connections did not drain within the grace period"
+            );
         }
     }
+
+    /// Run until the accept loop exits (returns immediately if already shut down).
+    pub async fn join(self) -> anyhow::Result<()> {
+        match take_task(&self.task) {
+            Some(task) => match task.await {
+                Ok(result) => result,
+                Err(join_err) => Err(anyhow::anyhow!("admin API task failed: {join_err}")),
+            },
+            None => Ok(()),
+        }
+    }
+}
+
+fn take_task<T>(slot: &Mutex<Option<JoinHandle<T>>>) -> Option<JoinHandle<T>> {
+    slot.lock().expect("admin API task mutex poisoned").take()
+}
+
+/// Accept connections until `cancel` fires or the listener errors. Each connection is tracked
+/// so `shutdown` can wait for in-flight requests to drain.
+async fn accept_loop(
+    listener: TcpListener,
+    manager: Arc<ImposterManager>,
+    api_key: Option<Arc<String>>,
+    config_source: Option<Arc<ConfigSource>>,
+    allow_injection: bool,
+    cancel: CancellationToken,
+    tracker: TaskTracker,
+) -> anyhow::Result<()> {
+    loop {
+        let (stream, _) = tokio::select! {
+            _ = cancel.cancelled() => break,
+            accepted = listener.accept() => accepted?,
+        };
+        let io = TokioIo::new(stream);
+        let manager = Arc::clone(&manager);
+        let api_key = api_key.clone();
+        let config_source = config_source.clone();
+        let conn_cancel = cancel.clone();
+
+        tracker.spawn(async move {
+            let service = service_fn(move |req| {
+                let manager = Arc::clone(&manager);
+                let api_key = api_key.clone();
+                let config_source = config_source.clone();
+                async move {
+                    // Per-request annotation scope + response decorator (issue #318):
+                    // every response through this listener — including the `/__rift/`
+                    // gateway — is decorated with phase `Admin`.
+                    let decorator = manager.response_decorator();
+                    let (result, annotations) = with_annotation_scope(async move {
+                        // The single-port gateway (`/__rift/...`, issue #212) is data-plane
+                        // imposter traffic, not the admin control plane — it mirrors direct
+                        // per-imposter-port access and so is NOT gated by the admin `--apikey`
+                        // (which would otherwise force app-under-test traffic to carry the admin
+                        // key and would leak that Authorization header into imposter predicates).
+                        let is_gateway = req.uri().path().starts_with("/__rift/");
+                        if let Some(ref key) = api_key
+                            && !is_gateway
+                        {
+                            let auth = req
+                                .headers()
+                                .get("authorization")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("");
+                            if auth != key.as_str() {
+                                return Ok::<_, hyper::Error>(unauthorized_response());
+                            }
+                        }
+                        route_request(req, manager, config_source, allow_injection).await
+                    })
+                    .await;
+                    let mut response = result?;
+                    if let Some(decorator) = decorator {
+                        decorator.decorate(
+                            ResponsePhase::Admin,
+                            None,
+                            &annotations,
+                            response.headers_mut(),
+                        );
+                    }
+                    Ok::<_, hyper::Error>(response)
+                }
+            });
+
+            let conn = http1::Builder::new().serve_connection(io, service);
+            tokio::pin!(conn);
+            tokio::select! {
+                res = conn.as_mut() => {
+                    if let Err(e) = res {
+                        debug!("Admin API connection error: {}", e);
+                    }
+                }
+                _ = conn_cancel.cancelled() => {
+                    conn.as_mut().graceful_shutdown();
+                    let _ = conn.await;
+                }
+            }
+        });
+    }
+    Ok(())
 }
 
 fn unauthorized_response() -> Response<Full<Bytes>> {

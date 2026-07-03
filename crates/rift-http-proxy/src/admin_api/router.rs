@@ -70,6 +70,7 @@ pub async fn route_request(
     req: Request<Incoming>,
     manager: Arc<ImposterManager>,
     config_source: Option<Arc<ConfigSource>>,
+    allow_injection: bool,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -86,6 +87,7 @@ pub async fn route_request(
         &base_url,
         manager,
         config_source,
+        allow_injection,
     )
     .await;
     Ok(response)
@@ -144,6 +146,7 @@ async fn route_by_path(
     base_url: &str,
     manager: Arc<ImposterManager>,
     config_source: Option<Arc<ConfigSource>>,
+    allow_injection: bool,
 ) -> Response<Full<Bytes>> {
     // Single-port gateway (issue #212): `/__rift/:port/<path>` dispatches to that imposter,
     // so a containerized Rift only needs the one admin port published.
@@ -155,7 +158,7 @@ async fn route_by_path(
     match (method, path) {
         (&Method::GET, "/") => return system::handle_root(base_url),
         (&Method::GET, "/health") => return system::handle_health(),
-        (&Method::GET, "/config") => return system::handle_config(),
+        (&Method::GET, "/config") => return system::handle_config(allow_injection),
         (&Method::GET, "/logs") => return system::handle_logs(query),
         (&Method::POST, "/admin/reload") => {
             return system::handle_reload(manager, config_source).await;

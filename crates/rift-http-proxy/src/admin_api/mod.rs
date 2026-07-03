@@ -14,7 +14,7 @@ mod router;
 mod server;
 pub mod types;
 
-pub use server::AdminApiServer;
+pub use server::{AdminApiServer, RunningAdminApi};
 
 /// Default port for the Mountebank-compatible admin API.
 pub const DEFAULT_ADMIN_PORT: u16 = 2525;

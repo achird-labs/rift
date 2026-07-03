@@ -20,6 +20,8 @@ workspace = true
 [dependencies]
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
+# CancellationToken + TaskTracker for graceful, bindable server shutdown (issue #342)
+tokio-util = { workspace = true, features = ["rt"] }
 futures.workspace = true
 
 # HTTP
