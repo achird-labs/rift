@@ -11,7 +11,7 @@
 
 use super::types::RecordedRequest;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -55,8 +55,9 @@ pub trait RequestJournal: Send + Sync {
 #[derive(Default)]
 struct PortSlot {
     /// Entries paired with the flow id resolved at record time (issue #314: scoped clears
-    /// must not re-derive flows from stored headers).
-    entries: RwLock<Vec<(String, RecordedRequest)>>,
+    /// must not re-derive flows from stored headers). A `VecDeque` so the oldest-first cap
+    /// eviction is O(1) `pop_front` instead of an O(n) `Vec::remove(0)` shift (issue #289).
+    entries: RwLock<VecDeque<(String, RecordedRequest)>>,
     count: AtomicU64,
 }
 
@@ -89,9 +90,9 @@ impl RequestJournal for LocalJournal {
                 max = MAX_RECORDED_REQUESTS,
                 "Recorded requests cap reached; oldest entry evicted"
             );
-            entries.remove(0);
+            entries.pop_front();
         }
-        entries.push((flow_id.to_string(), req));
+        entries.push_back((flow_id.to_string(), req));
     }
 
     fn read(&self, port: u16) -> JournalRead {
