@@ -291,11 +291,14 @@ impl Imposter {
         self.stubs
             .write()
             .retain(|s| s.stub.space.as_deref() != Some(space));
-        self.journal.clear_flow(self.journal_port(), space);
-        // Best-effort across scenarios so one bad key doesn't leave later scenarios stale,
-        // but the first failure still surfaces (issue #318) — never report a clean teardown
-        // while stale scenario state persists in the backend.
+        // Best-effort across the slice's clears so one failure doesn't leave later scenarios
+        // stale, but the first failure still surfaces (issues #318, #330) — never report a
+        // clean teardown while stale recorded requests or scenario state persist in the backend.
         let mut first_err = None;
+        if let Err(e) = self.journal.clear_flow(self.journal_port(), space) {
+            warn!("space teardown: failed to clear recorded requests for '{space}': {e}");
+            first_err.get_or_insert(e);
+        }
         for scenario in scenarios {
             if let Err(e) = self.delete_scenario_state(space, &scenario) {
                 warn!("space teardown: failed to reset scenario '{scenario}' for '{space}': {e}");

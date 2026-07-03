@@ -613,7 +613,7 @@ mod tests {
             "targeted retain must not reset the request count"
         );
 
-        imposter.clear_recorded_requests();
+        imposter.clear_recorded_requests().expect("clear");
         assert_eq!(imposter.get_recorded_requests().len(), 0);
         assert_eq!(
             imposter.get_request_count(),

@@ -6,6 +6,7 @@ use crate::admin_api::types::{
     RiftImposterExtensions, StubWithLinks, collect_body, error_response, json_response,
     make_imposter_links, make_stub_links,
 };
+use crate::extensions::decorate::backend_error_response;
 use crate::extensions::stub_analysis::analyze_stubs;
 use crate::imposter::{
     Imposter, ImposterConfig, ImposterError, ImposterManager, RecordedRequest, StubResponse,
@@ -390,7 +391,9 @@ pub async fn handle_clear_requests(
     match manager.get_imposter(port) {
         Ok(imposter) => {
             if clauses.is_empty() {
-                imposter.clear_recorded_requests();
+                if let Err(e) = imposter.clear_recorded_requests() {
+                    return backend_error_response(&e);
+                }
             } else {
                 let source = flow_id_source(&imposter);
                 imposter.retain_recorded_requests(|r| !request_matches(r, &clauses, &source, port));
@@ -677,6 +680,61 @@ mod requests_filter_tests {
         let remaining = requests(handle_get_requests(19740, None, m.clone()).await).await;
         assert!(remaining.is_empty());
         let _ = m.delete_imposter(19740).await;
+    }
+
+    // A journal whose full clear fails like an unreachable remote backend (issue #330);
+    // record/read delegate to a working LocalJournal so the imposter is otherwise normal.
+    #[derive(Default)]
+    struct FailingClearJournal(crate::imposter::LocalJournal);
+    impl crate::imposter::RequestJournal for FailingClearJournal {
+        fn note_request(&self, port: u16) {
+            self.0.note_request(port);
+        }
+        fn record(&self, port: u16, flow_id: &str, req: RecordedRequest) {
+            self.0.record(port, flow_id, req);
+        }
+        fn read(&self, port: u16) -> crate::imposter::JournalRead {
+            self.0.read(port)
+        }
+        fn clear(&self, _port: u16) -> anyhow::Result<()> {
+            Err(anyhow::Error::new(
+                crate::extensions::decorate::BackendUnavailable {
+                    feature: "requestJournal",
+                    detail: "clear failed".to_string(),
+                },
+            ))
+        }
+        fn retain(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) {
+            self.0.retain(port, keep);
+        }
+        fn clear_flow(&self, _port: u16, _flow_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn count(&self, port: u16) -> u64 {
+            self.0.count(port)
+        }
+    }
+
+    // AC3 (#330): an unclearable backend makes DELETE savedRequests return a structured 503
+    // rather than an unconditional 200 over stale data.
+    #[tokio::test]
+    async fn delete_requests_backend_clear_failure_maps_to_503() {
+        let manager = Arc::new(
+            ImposterManager::new().with_request_journal(Arc::new(FailingClearJournal::default())
+                as Arc<dyn crate::imposter::RequestJournal>),
+        );
+        let cfg = serde_json::from_value(serde_json::json!({
+            "port": 19742, "protocol": "http", "recordRequests": true, "stubs": []
+        }))
+        .expect("config");
+        manager.create_imposter(cfg).await.expect("create");
+        let base = "http://localhost:2525";
+        let resp = handle_clear_requests(19742, None, base, manager.clone()).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(json["error"], "backendUnavailable");
+        let _ = manager.delete_imposter(19742).await;
     }
 
     #[tokio::test]
