@@ -112,6 +112,20 @@ fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Runtime::new().expect("tokio runtime")
 }
 
+/// The commit build.rs would stamp: the RIFT_COMMIT override if set (CI), else `git rev-parse HEAD`.
+fn expected_commit() -> String {
+    std::env::var("RIFT_COMMIT").unwrap_or_else(|_| {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git rev-parse");
+        String::from_utf8(out.stdout)
+            .expect("utf8")
+            .trim()
+            .to_owned()
+    })
+}
+
 /// Call `rift_serve_admin`, assert it succeeded, and parse the JSON (frees the buffer).
 unsafe fn serve_admin(h: *mut RiftHandle, opts: &str) -> serde_json::Value {
     unsafe {
@@ -593,5 +607,31 @@ fn ffi_apply_config_reports_per_port_failure() {
             "failed entry carries a non-empty error string"
         );
         rift_stop(h);
+    }
+}
+
+// AC1 (#344): build.rs stamps the commit, so rift_build_info's `commit` equals `git rev-parse
+// HEAD` in a git checkout (and `builtAt` is now a real timestamp, not null).
+#[test]
+fn ffi_build_info_commit_matches_git_head() {
+    unsafe {
+        let s = CStr::from_ptr(rift_build_info())
+            .to_str()
+            .expect("utf8")
+            .to_owned();
+        let v: serde_json::Value = serde_json::from_str(&s).expect("build_info json");
+
+        // Mirror build.rs's own resolution: an explicit RIFT_COMMIT override wins (as it would in
+        // CI), else `git rev-parse HEAD`. build.rs reruns on HEAD moves, so this stays equal.
+        let expected = expected_commit();
+        assert_eq!(
+            v["commit"].as_str(),
+            Some(expected.as_str()),
+            "build.rs stamps RIFT_COMMIT with the current HEAD (or the env override)"
+        );
+        assert!(
+            v["builtAt"].as_str().is_some(),
+            "build.rs stamps RIFT_BUILT_AT"
+        );
     }
 }

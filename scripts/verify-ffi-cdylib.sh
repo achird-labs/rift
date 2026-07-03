@@ -6,6 +6,7 @@
 set -euo pipefail
 
 SYMBOLS=(
+  # v1 (issue #204)
   rift_start
   rift_create_imposter
   rift_replace_stubs
@@ -13,7 +14,30 @@ SYMBOLS=(
   rift_recorded
   rift_free
   rift_stop
+  # v2 (issue #343)
+  rift_serve_admin
+  rift_apply_config
+  rift_delete_imposter
+  rift_build_info
+  rift_last_error
 )
+
+# Issue #344: the checked-in C header is the ABI's source of truth — assert it matches a fresh
+# cbindgen run so it can never drift from the code. CI installs cbindgen; skip if absent locally.
+HEADER="crates/rift-ffi/include/rift_ffi.h"
+if command -v cbindgen >/dev/null 2>&1; then
+  echo "[info] verifying $HEADER matches a fresh cbindgen run"
+  tmp_header="$(mktemp)"
+  trap 'rm -f "$tmp_header"' EXIT
+  cbindgen --quiet --config crates/rift-ffi/cbindgen.toml --crate rift-ffi --output "$tmp_header" crates/rift-ffi
+  if ! diff -u "$HEADER" "$tmp_header"; then
+    echo "[fail] $HEADER is stale — regenerate: cbindgen --config crates/rift-ffi/cbindgen.toml --crate rift-ffi --output $HEADER crates/rift-ffi" >&2
+    exit 1
+  fi
+  echo "[ok] $HEADER is up to date"
+else
+  echo "[warn] cbindgen not installed — skipping header diff (install: cargo install cbindgen)"
+fi
 
 echo "[info] building librift_ffi cdylib (release)..."
 cargo build -p rift-ffi --release "$@"

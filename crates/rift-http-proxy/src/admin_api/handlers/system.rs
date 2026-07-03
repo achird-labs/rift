@@ -59,6 +59,9 @@ pub async fn handle_metrics(manager: Arc<ImposterManager>) -> Response<Full<Byte
 pub fn handle_config(allow_injection: bool) -> Response<Full<Bytes>> {
     let config = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
+        // Build identity (issue #344), stamped by build.rs — the same value rift_build_info
+        // reports over FFI, so one version-coherence preflight works for process and FFI modes.
+        "commit": option_env!("RIFT_COMMIT"),
         "options": {
             "port": crate::admin_api::DEFAULT_ADMIN_PORT,
             "allowInjection": allow_injection,
@@ -215,6 +218,38 @@ mod tests {
     fn test_handle_config() {
         let resp = handle_config(false);
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // AC2 (#344): GET /config exposes a `commit` build-identity field (present even when unstamped,
+    // i.e. JSON null); in a git checkout build.rs stamps it to HEAD, matching rift_build_info.
+    #[test]
+    fn handle_config_reports_commit() {
+        use http_body_util::BodyExt;
+        let resp = handle_config(false);
+        let bytes = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(resp.into_body().collect())
+            .unwrap()
+            .to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            json.get("commit").is_some(),
+            "GET /config exposes a commit field (string or null)"
+        );
+        if let Some(commit) = json["commit"].as_str() {
+            // Mirror build.rs: the RIFT_COMMIT override wins (CI), else `git rev-parse HEAD`.
+            let expected = std::env::var("RIFT_COMMIT").unwrap_or_else(|_| {
+                let out = std::process::Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+                    .expect("git rev-parse");
+                String::from_utf8(out.stdout).unwrap().trim().to_owned()
+            });
+            assert_eq!(
+                commit, expected,
+                "stamped commit matches HEAD (or the env override)"
+            );
+        }
     }
 
     // AC7 (#342): the injection flag is threaded explicitly, not read from process env —

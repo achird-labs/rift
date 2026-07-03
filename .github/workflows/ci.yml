@@ -55,8 +55,14 @@ jobs:
       - name: Run unit tests
         run: cargo test --workspace --all-features --lib
 
-      # Issue #205: prove the librift_ffi cdylib builds and exports the full C-ABI before the
-      # per-platform release matrix relies on it.
+      # Issue #344: a pinned cbindgen so the header regenerate-diff in the smoke test is
+      # deterministic (cbindgen output varies across versions) and actually runs (the step
+      # skips the diff when cbindgen is absent). Keep the version in sync with the header's.
+      - name: Install cbindgen (pinned)
+        run: cargo install cbindgen --version 0.29.4 --locked
+
+      # Issue #205/#343: prove the librift_ffi cdylib builds and exports the full C-ABI (v1+v2),
+      # and that the checked-in header matches, before the per-platform release matrix relies on it.
       - name: rift-ffi C-ABI smoke test
         run: ./scripts/verify-ffi-cdylib.sh
 
