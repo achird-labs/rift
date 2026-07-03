@@ -238,7 +238,6 @@ async fn handle_request_inner(
             &query_str,
             &headers_clone,
             &body_string,
-            &headers_for_context,
             client_addr,
         );
     }
@@ -249,7 +248,7 @@ async fn handle_request_inner(
     let matched = match imposter.find_matching_stub_with_client(
         method_str,
         path_str,
-        &headers_for_context,
+        &headers_clone,
         query_opt,
         body_string.as_deref(),
         Some(&request_from),
@@ -262,10 +261,9 @@ async fn handle_request_inner(
     };
     if let Some((stub_state, stub_index)) = matched {
         // Scenario FSM: apply the matched stub's newScenarioState transition (no-op unless set).
-        // Resolve flow_id from the same header map the eligibility gate used (headers_for_context)
+        // Resolve flow_id from the same single-value header map the matcher used (headers_clone)
         // so the transition writes the exact key the gate read.
-        let scenario_flow_id =
-            imposter.resolve_flow_id(&Imposter::header_map_to_hashmap(&headers_for_context));
+        let scenario_flow_id = imposter.resolve_flow_id(&headers_clone);
         if let Err(e) = imposter.apply_scenario_transition(&scenario_flow_id, &stub_state.stub) {
             return Ok(backend_error_response(&e));
         }
@@ -807,7 +805,6 @@ fn handle_debug_request(
     query_str: &str,
     headers_clone: &HashMap<String, String>,
     body_string: &Option<String>,
-    headers_for_context: &hyper::HeaderMap,
     client_addr: SocketAddr,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     debug!("Debug mode enabled for request {} {}", method, path);
@@ -844,7 +841,7 @@ fn handle_debug_request(
     let matched = match imposter.find_matching_stub_with_client(
         method,
         path,
-        headers_for_context,
+        headers_clone,
         query_opt,
         body_string.as_deref(),
         Some(&request_from),

@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use hyper::HeaderMap;
 use rift_core::imposter::{Imposter, ImposterConfig, Predicate, stub_matches};
 use serde_json::json;
 
@@ -111,7 +110,7 @@ fn imposter_with_stubs(count: usize) -> Imposter {
 /// stub so the whole list is scanned (worst case for the current O(n) matcher).
 fn bench_find_matching_stub(c: &mut Criterion) {
     let mut group = c.benchmark_group("find_matching_stub");
-    let headers = HeaderMap::new();
+    let headers: HashMap<String, String> = HashMap::new();
 
     for count in [10usize, 100, 1000] {
         let imposter = imposter_with_stubs(count);

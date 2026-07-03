@@ -349,10 +349,12 @@ mod tests {
     // Fix #95: Multi-valued form fields are now comma-joined instead of overwritten
     #[test]
     fn test_parse_form_data_multi_valued_fields() {
-        let mut headers = hyper::HeaderMap::new();
+        // parse_form_data now reads the pre-built header map (Title-Case keys); the Content-Type
+        // lookup must remain case-insensitive.
+        let mut headers: HashMap<String, String> = HashMap::new();
         headers.insert(
-            hyper::header::CONTENT_TYPE,
-            "application/x-www-form-urlencoded".parse().unwrap(),
+            "Content-Type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
         );
 
         let result = Imposter::parse_form_data(&headers, Some("checkbox=A&checkbox=B&checkbox=C"));
@@ -361,6 +363,51 @@ mod tests {
             form.get("checkbox").unwrap(),
             "A,B,C",
             "Multi-valued form fields should be comma-joined"
+        );
+
+        // Content-Type lookup must be case-insensitive over the map (a lower-cased key must
+        // still be recognized), matching the old case-insensitive HeaderMap::get.
+        let mut lower: HashMap<String, String> = HashMap::new();
+        lower.insert(
+            "content-type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        );
+        assert!(
+            Imposter::parse_form_data(&lower, Some("a=1")).is_some(),
+            "a differently-cased content-type key must still be recognized"
+        );
+    }
+
+    #[test]
+    fn find_matching_stub_with_client_matches_on_prebuilt_header_map() {
+        // Gate for #288: the matcher takes the already-built header HashMap (no re-conversion
+        // from HeaderMap) and header predicates still match against it correctly.
+        let cfg = serde_json::from_value(json!({
+            "port": 0,
+            "protocol": "http",
+            "stubs": [
+                { "predicates": [{ "equals": { "headers": { "X-Api-Key": "secret" } } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "ok" } }] }
+            ]
+        }))
+        .unwrap();
+        let imp = Imposter::new(cfg);
+
+        let mut headers: HashMap<String, String> = HashMap::new();
+        headers.insert("X-Api-Key".to_string(), "secret".to_string());
+        let matched = imp
+            .find_matching_stub_with_client("GET", "/", &headers, None, None, None, None)
+            .expect("store is infallible");
+        assert!(matched.is_some(), "request with matching header must match");
+
+        let mut wrong: HashMap<String, String> = HashMap::new();
+        wrong.insert("X-Api-Key".to_string(), "nope".to_string());
+        let unmatched = imp
+            .find_matching_stub_with_client("GET", "/", &wrong, None, None, None, None)
+            .expect("store is infallible");
+        assert!(
+            unmatched.is_none(),
+            "request with non-matching header must not match"
         );
     }
 
