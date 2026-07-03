@@ -10,6 +10,15 @@ pub use rift_core::{
     proxy, recording, response, routing, rule_index, scripting, stub_analysis, template, util,
 };
 
+/// Install the process-wide rustls `ring` crypto provider, idempotently (issue #343).
+///
+/// The binary does this in `main.rs`; an embedded host (the FFI `rift_start`) must too, or an
+/// HTTPS imposter hits the missing-provider path. Safe to call more than once — a provider is
+/// already-installed error is ignored, so this composes with a host that installed its own.
+pub fn install_default_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 // ===== Admin HTTP server (control plane — server crate only) =====
 pub mod admin_api;
 

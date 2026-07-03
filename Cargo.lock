@@ -3222,6 +3222,8 @@ version = "0.1.0"
 dependencies = [
  "reqwest",
  "rift-core",
+ "rift-http-proxy",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
