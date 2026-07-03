@@ -11,6 +11,7 @@ use super::types::{ImposterConfig, ImposterError, Stub};
 use crate::behaviors::ResponseSequencer;
 use crate::extensions::decorate::ResponseDecorator;
 use crate::extensions::flow_state::FlowStoreProvider;
+use crate::imposter::journal::RequestJournal;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -107,6 +108,8 @@ pub struct ImposterManager {
     flow_store_provider: Option<Arc<dyn FlowStoreProvider>>,
     /// Pluggable response-cursor backend (issue #313); None = embedded per-stub cycler.
     sequencer: Option<Arc<dyn ResponseSequencer>>,
+    /// Pluggable recorded-request backend (issue #314); None = per-imposter LocalJournal.
+    request_journal: Option<Arc<dyn RequestJournal>>,
 }
 
 impl ImposterManager {
@@ -127,6 +130,7 @@ impl ImposterManager {
             response_decorator: None,
             flow_store_provider: None,
             sequencer: None,
+            request_journal: None,
         }
     }
 
@@ -183,6 +187,20 @@ impl ImposterManager {
     #[must_use]
     pub fn with_sequencer(mut self, sequencer: Arc<dyn ResponseSequencer>) -> Self {
         self.sequencer = Some(sequencer);
+        self
+    }
+
+    /// Register a pluggable recorded-request backend (issue #314), shared across imposters
+    /// and keyed by port. Without one, each imposter keeps a private in-memory journal with
+    /// the historical semantics (10k cap, clear-resets-count). Imposter deletion clears the
+    /// port's slice so stale entries never resurrect on a later imposter reusing the port.
+    ///
+    /// Caveat: deletion lets in-flight requests drain naturally, so a request completing
+    /// after the port clear can write one late entry into the shared journal (the private
+    /// default is immune — its storage dies with the imposter).
+    #[must_use]
+    pub fn with_request_journal(mut self, journal: Arc<dyn RequestJournal>) -> Self {
+        self.request_journal = Some(journal);
         self
     }
 
@@ -291,10 +309,11 @@ impl ImposterManager {
 
         info!("Imposter bound to {}:{}", bind_host, port);
         // Create imposter
-        let mut imposter = Imposter::new_with_hooks(
+        let mut imposter = Imposter::new_with_hooks_and_journal(
             config,
             self.flow_store_provider.as_ref(),
             self.sequencer.clone(),
+            self.request_journal.clone(),
         );
 
         // Create shutdown channel for this imposter
@@ -463,6 +482,9 @@ impl ImposterManager {
 
         if let Some(sequencer) = &self.sequencer {
             sequencer.reset_scope(port, None);
+        }
+        if let Some(journal) = &self.request_journal {
+            journal.clear(port);
         }
 
         info!("Imposter on port {} deleted", port);
@@ -2286,6 +2308,313 @@ mod tests {
             assert_eq!(
                 slot_before, slot_after,
                 "an untouched sibling keeps its slot across an apply_config patch"
+            );
+
+            manager.delete_all().await;
+        }
+    }
+
+    // =========================================================================
+    // Issue #314: pluggable RequestJournal
+    // =========================================================================
+    mod request_journal {
+        use super::*;
+        use crate::imposter::journal::{JournalRead, LocalJournal, RequestJournal};
+        use crate::imposter::types::RecordedRequest;
+
+        /// Delegates to LocalJournal while recording every trait call.
+        #[derive(Default)]
+        struct RecordingJournal {
+            inner: LocalJournal,
+            notes: Mutex<Vec<u16>>,
+            records: Mutex<Vec<(u16, String, String)>>,
+            clears: Mutex<Vec<u16>>,
+            flow_clears: Mutex<Vec<(u16, String)>>,
+            retains: Mutex<Vec<u16>>,
+        }
+
+        impl RequestJournal for RecordingJournal {
+            fn note_request(&self, port: u16) {
+                self.notes.lock().push(port);
+                self.inner.note_request(port);
+            }
+            fn record(&self, port: u16, flow_id: &str, req: RecordedRequest) {
+                self.records
+                    .lock()
+                    .push((port, flow_id.to_string(), req.path.clone()));
+                self.inner.record(port, flow_id, req);
+            }
+            fn read(&self, port: u16) -> JournalRead {
+                self.inner.read(port)
+            }
+            fn clear(&self, port: u16) {
+                self.clears.lock().push(port);
+                self.inner.clear(port);
+            }
+            fn retain(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) {
+                self.retains.lock().push(port);
+                self.inner.retain(port, keep);
+            }
+            fn clear_flow(&self, port: u16, flow_id: &str) {
+                self.flow_clears.lock().push((port, flow_id.to_string()));
+                self.inner.clear_flow(port, flow_id);
+            }
+            fn count(&self, port: u16) -> u64 {
+                self.inner.count(port)
+            }
+        }
+
+        /// A journal whose reads are flagged incomplete (backend partially unreachable).
+        struct IncompleteJournal(LocalJournal);
+        impl RequestJournal for IncompleteJournal {
+            fn note_request(&self, port: u16) {
+                self.0.note_request(port);
+            }
+            fn record(&self, port: u16, flow_id: &str, req: RecordedRequest) {
+                self.0.record(port, flow_id, req);
+            }
+            fn read(&self, port: u16) -> JournalRead {
+                JournalRead {
+                    complete: false,
+                    ..self.0.read(port)
+                }
+            }
+            fn clear(&self, port: u16) {
+                self.0.clear(port);
+            }
+            fn retain(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) {
+                self.0.retain(port, keep);
+            }
+            fn clear_flow(&self, port: u16, flow_id: &str) {
+                self.0.clear_flow(port, flow_id);
+            }
+            fn count(&self, port: u16) -> u64 {
+                self.0.count(port)
+            }
+        }
+
+        fn manager_with_journal() -> (Arc<RecordingJournal>, ImposterManager) {
+            let journal = Arc::new(RecordingJournal::default());
+            let manager = ImposterManager::new()
+                .with_request_journal(journal.clone() as Arc<dyn RequestJournal>);
+            (journal, manager)
+        }
+
+        // AC2: note_request fires for EVERY request even with recording off, backing
+        // numberOfRequests; nothing is recorded.
+        #[tokio::test]
+        async fn note_request_counts_even_when_recording_off() {
+            let (journal, manager) = manager_with_journal();
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19530, "recordRequests": false,
+                    "stubs": [stub_json("ok")]
+                })))
+                .await
+                .expect("create");
+
+            let _ = reqwest::get("http://127.0.0.1:19530/x")
+                .await
+                .expect("request");
+            assert_eq!(*journal.notes.lock(), vec![19530]);
+            assert!(journal.records.lock().is_empty(), "recording is off");
+            let imposter = manager.get_imposter(19530).unwrap();
+            assert_eq!(
+                imposter.get_request_count(),
+                1,
+                "numberOfRequests backed by journal"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC2: record carries the request's resolved flow id (per flowIdSource).
+        #[tokio::test]
+        async fn record_carries_resolved_flow_id() {
+            let (journal, manager) = manager_with_journal();
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19531, "recordRequests": true,
+                    "_rift": { "flowState": { "flowIdSource": "header:X-Flow-Id" } },
+                    "stubs": [stub_json("ok")]
+                })))
+                .await
+                .expect("create");
+
+            let client = reqwest::Client::new();
+            let _ = client
+                .get("http://127.0.0.1:19531/x")
+                .header("X-Flow-Id", "flow-42")
+                .send()
+                .await
+                .expect("request");
+            let records = journal.records.lock().clone();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].0, 19531);
+            assert_eq!(records[0].1, "flow-42", "flow id resolved per flowIdSource");
+
+            // No header → falls back to the imposter port, matching resolve semantics.
+            let _ = client
+                .get("http://127.0.0.1:19531/y")
+                .send()
+                .await
+                .expect("request");
+            assert_eq!(journal.records.lock().last().expect("recorded").1, "19531");
+
+            manager.delete_all().await;
+        }
+
+        // AC2: admin-facing imposter methods route through the injected journal.
+        #[tokio::test]
+        async fn admin_paths_route_through_journal() {
+            let (journal, manager) = manager_with_journal();
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19532, "recordRequests": true,
+                    "stubs": [stub_json("ok")]
+                })))
+                .await
+                .expect("create");
+
+            let _ = reqwest::get("http://127.0.0.1:19532/seen")
+                .await
+                .expect("request");
+            let imposter = manager.get_imposter(19532).unwrap();
+            let recorded = imposter.get_recorded_requests();
+            assert_eq!(recorded.len(), 1, "GET requests reads via the journal");
+            assert_eq!(recorded[0].path, "/seen");
+
+            imposter.retain_recorded_requests(|r| r.path != "/seen");
+            assert_eq!(*journal.retains.lock(), vec![19532]);
+            assert!(imposter.get_recorded_requests().is_empty());
+            assert_eq!(imposter.get_request_count(), 1, "retain keeps the count");
+
+            imposter.clear_recorded_requests();
+            assert!(journal.clears.lock().contains(&19532));
+            assert_eq!(imposter.get_request_count(), 0, "clear resets the count");
+
+            manager.delete_all().await;
+        }
+
+        // AC1/AC2: teardown_space clears exactly one correlated slice via clear_flow.
+        #[tokio::test]
+        async fn teardown_space_uses_clear_flow() {
+            let (journal, manager) = manager_with_journal();
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19533, "recordRequests": true,
+                    "_rift": { "flowState": { "flowIdSource": "header:X-Flow-Id" } },
+                    "stubs": [stub_json("ok")]
+                })))
+                .await
+                .expect("create");
+
+            let client = reqwest::Client::new();
+            for flow in ["sp-1", "sp-2"] {
+                let _ = client
+                    .get("http://127.0.0.1:19533/x")
+                    .header("X-Flow-Id", flow)
+                    .send()
+                    .await
+                    .expect("request");
+            }
+
+            let imposter = manager.get_imposter(19533).unwrap();
+            imposter.teardown_space("sp-1").expect("teardown");
+            assert!(
+                journal
+                    .flow_clears
+                    .lock()
+                    .contains(&(19533, "sp-1".to_string())),
+                "teardown routes through clear_flow: {:?}",
+                journal.flow_clears.lock()
+            );
+            let remaining = imposter.get_recorded_requests();
+            assert_eq!(remaining.len(), 1, "only the torn-down slice is dropped");
+
+            manager.delete_all().await;
+        }
+
+        // Imposter deletion is the port-wide GC hook for a shared backend: stale entries
+        // must not resurrect on a later imposter reusing the port.
+        #[tokio::test]
+        async fn delete_imposter_clears_the_port() {
+            let (journal, manager) = manager_with_journal();
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19534, "recordRequests": true,
+                    "stubs": [stub_json("ok")]
+                })))
+                .await
+                .expect("create");
+            let _ = reqwest::get("http://127.0.0.1:19534/x")
+                .await
+                .expect("request");
+
+            manager.delete_imposter(19534).await.expect("delete");
+            assert!(journal.clears.lock().contains(&19534));
+            assert_eq!(journal.inner.count(19534), 0);
+            assert!(journal.inner.read(19534).entries.is_empty());
+        }
+
+        // Two live imposters sharing one injected journal stay isolated through the
+        // imposter wrappers: clear on port A leaves port B's entries and count intact.
+        #[tokio::test]
+        async fn shared_journal_isolates_ports_through_wrappers() {
+            let (_journal, manager) = manager_with_journal();
+            for port in [19536u16, 19537] {
+                manager
+                    .create_imposter(imposter_cfg(json!({
+                        "protocol": "http", "port": port, "recordRequests": true,
+                        "stubs": [stub_json("ok")]
+                    })))
+                    .await
+                    .expect("create");
+                let _ = reqwest::get(format!("http://127.0.0.1:{port}/x"))
+                    .await
+                    .expect("request");
+            }
+
+            let a = manager.get_imposter(19536).unwrap();
+            let b = manager.get_imposter(19537).unwrap();
+            a.clear_recorded_requests();
+
+            assert!(a.get_recorded_requests().is_empty());
+            assert_eq!(a.get_request_count(), 0);
+            assert_eq!(b.get_recorded_requests().len(), 1, "sibling port untouched");
+            assert_eq!(b.get_request_count(), 1);
+
+            manager.delete_all().await;
+        }
+
+        // An incomplete read (backend partially unreachable) still serves what it got.
+        #[tokio::test]
+        async fn incomplete_read_still_serves_entries() {
+            let manager = ImposterManager::new()
+                .with_request_journal(
+                    Arc::new(IncompleteJournal(LocalJournal::default())) as Arc<dyn RequestJournal>
+                );
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19535, "recordRequests": true,
+                    "stubs": [stub_json("ok")]
+                })))
+                .await
+                .expect("create");
+
+            let _ = reqwest::get("http://127.0.0.1:19535/x")
+                .await
+                .expect("request");
+            let imposter = manager.get_imposter(19535).unwrap();
+            assert_eq!(
+                imposter.get_recorded_requests().len(),
+                1,
+                "partial data is served, not dropped"
+            );
+            let read = imposter.read_recorded_requests();
+            assert!(
+                !read.complete && read.entries.len() == 1,
+                "the completeness flag is observable at the core API"
             );
 
             manager.delete_all().await;

@@ -1,36 +1,49 @@
 //! Recorded-request storage: capture, retrieval, retention, and request counters.
 //!
-//! Part of the `Imposter` implementation; see `core/mod.rs` for the struct definition.
+//! Thin wrappers over the imposter's `RequestJournal` (issue #314) — the public method
+//! signatures are unchanged so the admin API and embedders are untouched.
 
 use super::*;
+use crate::imposter::journal::JournalRead;
 
 impl Imposter {
-    /// Record a request. Evicts the oldest entry when the cap is reached.
+    pub(super) fn journal_port(&self) -> u16 {
+        self.config.port.unwrap_or(0)
+    }
+
+    /// Record a request (when body recording is enabled), tagged with its resolved flow id.
     pub fn record_request(&self, req: &RecordedRequest) {
         if self.config.record_requests {
-            let mut requests = self.recorded_requests.write();
-            if requests.len() >= MAX_RECORDED_REQUESTS {
-                tracing::warn!(
-                    port = self.config.port,
-                    max = MAX_RECORDED_REQUESTS,
-                    "Recorded requests cap reached; oldest entry evicted"
-                );
-                requests.remove(0);
-            }
-            requests.push(req.clone());
+            let flow_id = self.resolve_flow_id_recorded(&req.headers);
+            self.journal
+                .record(self.journal_port(), &flow_id, req.clone());
         }
     }
 
-    /// Get recorded requests
-    pub fn get_recorded_requests(&self) -> Vec<RecordedRequest> {
-        self.recorded_requests.read().clone()
+    /// Read recorded requests with the backend's completeness flag intact, so embedders
+    /// can observe a degraded read programmatically (issue #314).
+    pub fn read_recorded_requests(&self) -> JournalRead {
+        self.journal.read(self.journal_port())
     }
 
-    /// Clear recorded requests
+    /// Get recorded requests. An incomplete read (backend partially unreachable) serves
+    /// the partial entries and surfaces the degradation in the log; callers that need to
+    /// react to it programmatically use [`Self::read_recorded_requests`].
+    pub fn get_recorded_requests(&self) -> Vec<RecordedRequest> {
+        let read = self.read_recorded_requests();
+        if !read.complete {
+            tracing::warn!(
+                port = self.journal_port(),
+                entries_served = read.entries.len(),
+                "request journal returned an incomplete read; serving partial results"
+            );
+        }
+        read.entries
+    }
+
+    /// Clear recorded requests. Also resets the request count to match Mountebank behavior.
     pub fn clear_recorded_requests(&self) {
-        self.recorded_requests.write().clear();
-        // Reset request count to match Mountebank behavior
-        self.request_count.store(0, Ordering::SeqCst);
+        self.journal.clear(self.journal_port());
     }
 
     /// Retain only the recorded requests for which `keep` returns true.
@@ -38,7 +51,7 @@ impl Imposter {
     /// `clear_recorded_requests` it does not reset the total request count,
     /// since other slices' requests remain.
     pub fn retain_recorded_requests<F: Fn(&RecordedRequest) -> bool>(&self, keep: F) {
-        self.recorded_requests.write().retain(|r| keep(r));
+        self.journal.retain(self.journal_port(), &keep);
     }
 
     /// Clear saved proxy responses
@@ -46,13 +59,13 @@ impl Imposter {
         self.recording_store.clear();
     }
 
-    /// Increment request count
-    pub fn increment_request_count(&self) -> u64 {
-        self.request_count.fetch_add(1, Ordering::SeqCst)
+    /// Count this request toward `numberOfRequests` (fires even when recording is off).
+    pub fn increment_request_count(&self) {
+        self.journal.note_request(self.journal_port());
     }
 
     /// Get request count
     pub fn get_request_count(&self) -> u64 {
-        self.request_count.load(Ordering::SeqCst)
+        self.journal.count(self.journal_port())
     }
 }

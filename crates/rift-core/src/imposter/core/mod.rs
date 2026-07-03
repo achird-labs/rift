@@ -3,10 +3,6 @@
 //! This module contains the Imposter struct which represents a single
 //! running imposter instance with its configuration, stubs, and state.
 
-/// Maximum number of requests retained in memory per imposter when recording is enabled.
-/// Once the cap is reached, the oldest entry is evicted (ring-buffer semantics).
-const MAX_RECORDED_REQUESTS: usize = 10_000;
-
 /// Default scenario state when a `(flow_id, scenario)` entry is absent (WireMock parity).
 pub const INITIAL_SCENARIO_STATE: &str = "Started";
 
@@ -108,10 +104,9 @@ pub struct Imposter {
     pub stubs: RwLock<Vec<StubState>>,
     /// Recording store for proxy responses (for future proxy mode support)
     pub recording_store: Arc<RecordingStore>,
-    /// Recorded requests (if record_requests is true)
-    pub recorded_requests: RwLock<Vec<RecordedRequest>>,
-    /// Request count
-    pub request_count: AtomicU64,
+    /// Recorded-request storage (issue #314); defaults to a private LocalJournal,
+    /// or the embedder's shared journal injected via the manager.
+    pub(crate) journal: Arc<dyn crate::imposter::journal::RequestJournal>,
     /// Whether imposter is enabled
     pub enabled: AtomicBool,
     /// Creation timestamp (for future metrics/admin display)
@@ -146,6 +141,19 @@ impl Imposter {
         provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
         sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
     ) -> Self {
+        Self::new_with_hooks_and_journal(config, provider, sequencer, None)
+    }
+
+    /// Create a new imposter with all embedder hooks, including the request journal (#314).
+    ///
+    /// `config.port` must be resolved (Some) before the imposter serves requests: a shared
+    /// journal keys by port, and unresolved ports would silently multiplex onto slot 0.
+    pub fn new_with_hooks_and_journal(
+        config: ImposterConfig,
+        provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
+        sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
+        journal: Option<Arc<dyn crate::imposter::journal::RequestJournal>>,
+    ) -> Self {
         let stubs: Vec<StubState> = config
             .stubs
             .iter()
@@ -163,8 +171,8 @@ impl Imposter {
             config,
             stubs: RwLock::new(stubs),
             recording_store: Arc::new(RecordingStore::new(proxy_mode)),
-            recorded_requests: RwLock::new(Vec::new()),
-            request_count: AtomicU64::new(0),
+            journal: journal
+                .unwrap_or_else(|| Arc::new(crate::imposter::journal::LocalJournal::default())),
             enabled: AtomicBool::new(true),
             created_at: chrono::Utc::now(),
             shutdown_tx: None,
@@ -541,11 +549,12 @@ mod tests {
             timestamp: "2026-01-01T00:00:00Z".to_string(),
         };
 
+        use crate::imposter::journal::MAX_RECORDED_REQUESTS;
         for _ in 0..MAX_RECORDED_REQUESTS + 10 {
             imposter.record_request(&req);
         }
 
-        let recorded = imposter.recorded_requests.read();
+        let recorded = imposter.get_recorded_requests();
         assert_eq!(
             recorded.len(),
             MAX_RECORDED_REQUESTS,
