@@ -15,7 +15,7 @@ pub(crate) fn check_predicate_fields<F>(
     query: &HashMap<String, String>,
     headers: &HashMap<String, String>,
     body: &str,
-    apply_except: &impl Fn(&str) -> String,
+    apply_except: &impl for<'a> Fn(&'a str) -> std::borrow::Cow<'a, str>,
     compare: F,
     deep_equals: bool,
     request_from: Option<&str>,
@@ -202,7 +202,7 @@ pub(crate) fn check_predicate_fields_regex(
     query: &HashMap<String, String>,
     headers: &HashMap<String, String>,
     body: &str,
-    apply_except: &impl Fn(&str) -> String,
+    apply_except: &impl for<'a> Fn(&'a str) -> std::borrow::Cow<'a, str>,
     case_sensitive: bool,
     request_from: Option<&str>,
     client_ip: Option<&str>,
@@ -251,9 +251,11 @@ pub(crate) fn check_predicate_fields_regex(
                 )
             }
             _ => {
-                let pattern = match expected {
-                    serde_json::Value::String(s) => s.as_str().to_string(),
-                    _ => expected.to_string(),
+                // Borrow a String value's pattern directly; only a non-string value needs an owned
+                // render (issue #294). The regex itself is compiled-once via `cached_regex`.
+                let pattern: std::borrow::Cow<str> = match expected {
+                    serde_json::Value::String(s) => std::borrow::Cow::Borrowed(s.as_str()),
+                    _ => std::borrow::Cow::Owned(expected.to_string()),
                 };
                 match build_regex(&pattern) {
                     Some(re) => {

@@ -195,7 +195,7 @@ pub(crate) fn compare_json_recursive<F>(
     compare: &F,
     deep_equals: bool,
     key_case_sensitive: bool,
-    apply_except: &dyn Fn(&str) -> String,
+    apply_except: &dyn for<'a> Fn(&'a str) -> std::borrow::Cow<'a, str>,
     pre_parsed: Option<&serde_json::Value>,
 ) -> bool
 where

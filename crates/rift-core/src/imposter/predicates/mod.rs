@@ -152,13 +152,18 @@ pub(crate) fn predicate_matches_inner(
     // preserves the previous fall-through-to-unchanged behavior.
     let except_regex = except_pattern.and_then(|pattern| cached_regex(pattern, false));
 
-    // Helper to apply except pattern
-    let apply_except = |value: &str| -> String {
-        if let Some(re) = &except_regex {
-            return re.replace_all(value, "").to_string();
-        }
-        value.to_string()
-    };
+    // Helper to apply the except pattern. Borrows the input when no `except` is configured (the
+    // common case) so a field comparison doesn't allocate a String per predicate (issue #294);
+    // the except branch reuses `replace_all`'s native `Cow` instead of forcing an owned `String`.
+    // Pin the higher-ranked bound so the closure infers `for<'a> Fn(&'a str) -> Cow<'a, str>`
+    // (closures don't infer a borrowed return lifetime on their own).
+    fn as_except_fn<F: for<'a> Fn(&'a str) -> std::borrow::Cow<'a, str>>(f: F) -> F {
+        f
+    }
+    let apply_except = as_except_fn(|value| match &except_regex {
+        Some(re) => re.replace_all(value, ""),
+        None => std::borrow::Cow::Borrowed(value),
+    });
 
     // Helper for string comparison with case sensitivity
     let str_equals = |expected: &str, actual: &str| -> bool {
