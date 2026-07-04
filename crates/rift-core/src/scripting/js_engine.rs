@@ -204,13 +204,34 @@ fn execute_js_script(
     result
 }
 
+/// Loop-iteration cap for a `should_inject` Boa context (issue #327). Boa exposes no
+/// per-instruction interrupt, so a runaway loop (`while(true){}`) can't observe the deadline abort
+/// flag and would run its `spawn_blocking` thread forever. This fixed cap bounds it: Boa throws
+/// once the limit is hit, the execution returns `Err`, and the thread is freed. Generous enough
+/// that no realistic boolean fault-decision script approaches it.
+const JS_SCRIPT_LOOP_ITERATION_LIMIT: u64 = 10_000_000;
+
 /// Inner function that does the actual JavaScript execution
 fn execute_js_script_inner(
     script: &str,
     request: &ScriptRequest,
     rule_id: &str,
 ) -> Result<FaultDecision> {
+    execute_js_script_inner_bounded(script, request, rule_id, JS_SCRIPT_LOOP_ITERATION_LIMIT)
+}
+
+/// As [`execute_js_script_inner`], but with an explicit loop-iteration cap so tests can bound a
+/// runaway cheaply (issue #327).
+fn execute_js_script_inner_bounded(
+    script: &str,
+    request: &ScriptRequest,
+    rule_id: &str,
+    loop_iteration_limit: u64,
+) -> Result<FaultDecision> {
     let mut context = Context::default();
+    context
+        .runtime_limits_mut()
+        .set_loop_iteration_limit(loop_iteration_limit);
 
     // Create request object
     let request_obj = create_request_object(&mut context, request)?;
@@ -1628,6 +1649,50 @@ function should_inject(request, flow_store) {
             }
             _ => panic!("Expected error fault decision"),
         }
+    }
+
+    // Issue #327: the JS should_inject Boa context caps loop iterations so a runaway script
+    // terminates (Boa throws) instead of leaking its spawn_blocking thread forever. A small
+    // injected limit keeps these tests fast and guarantees they can never hang.
+    #[test]
+    fn js_should_inject_loop_limit_terminates() {
+        set_current_flow_store(Arc::new(InMemoryFlowStore::new(300)));
+        let request = ScriptRequest {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            headers: HashMap::new(),
+            body: json!({}),
+            query: HashMap::new(),
+            path_params: HashMap::new(),
+        };
+        let script = "function should_inject(request, flow_store) { while (true) {} }";
+        let result = execute_js_script_inner_bounded(script, &request, "rule", 100_000);
+        clear_current_flow_store();
+        assert!(
+            result.is_err(),
+            "a runaway JS loop must hit the iteration cap and return Err, not run unbounded"
+        );
+    }
+
+    #[test]
+    fn js_should_inject_under_limit_runs() {
+        set_current_flow_store(Arc::new(InMemoryFlowStore::new(300)));
+        let request = ScriptRequest {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            headers: HashMap::new(),
+            body: json!({}),
+            query: HashMap::new(),
+            path_params: HashMap::new(),
+        };
+        let script = "function should_inject(request, flow_store) { let n = 0; for (let i = 0; i < 100; i++) { n++; } return { inject: n === 100, fault: 'latency', duration_ms: 1 }; }";
+        let result = execute_js_script_inner_bounded(script, &request, "rule", 100_000);
+        clear_current_flow_store();
+        assert!(
+            result.is_ok(),
+            "a small-loop script under the cap must run fine: {:?}",
+            result.err()
+        );
     }
 
     #[test]

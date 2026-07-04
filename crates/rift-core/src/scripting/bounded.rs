@@ -33,9 +33,10 @@ pub fn resolve_script_timeout_ms(config: &ImposterConfig) -> u64 {
 /// (issue #308). Execution happens in `spawn_blocking` so a non-yielding script cannot
 /// starve the Tokio runtime, and at `timeout` the abort flag is set so the script self-
 /// interrupts. Rhai (`on_progress`) and Lua (instruction hook) are truly interrupted and
-/// free their thread promptly; other engines (JavaScript) are NOT interpreter-interruptible,
-/// so a runaway there still returns `Err` at the deadline but its blocking thread runs until
-/// the script finishes on its own. Returns `Err` on timeout, a compile/exec error, or a panic.
+/// free their thread promptly. JavaScript can't observe the deadline flag mid-run (Boa has no
+/// per-instruction interrupt), but its context caps loop iterations (issue #327), so a runaway
+/// loop terminates by throwing instead of leaking its blocking thread forever. Returns `Err` on
+/// timeout, a compile/exec error, or a panic.
 pub async fn should_inject_bounded(
     engine_type: String,
     code: String,
