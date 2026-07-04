@@ -7,125 +7,87 @@ nav_order: 4
 
 # Prometheus Metrics
 
-Rift exposes metrics in Prometheus format for monitoring and alerting.
+Rift exposes two metrics surfaces:
+
+1. A **Prometheus endpoint** (`GET /metrics` on the metrics port, default `9090`) with the full
+   instrumentation described below.
+2. A small **plain-text counter set** on the admin API's own `GET /metrics` (admin port, default
+   `2525`) — imposter counts and per-imposter request totals.
+
+Every metric name and label on this page is taken from the source; if a metric isn't listed here, it
+isn't emitted.
 
 ---
 
-## Enabling Metrics
+## Enabling & scraping
 
-### Default Configuration
-
-Metrics are enabled by default on port 9090:
+The metrics server starts alongside the admin server. Point Prometheus at the metrics port:
 
 ```bash
 curl http://localhost:9090/metrics
 ```
 
-### Custom Port
+Change the port with `--metrics-port` or `RIFT_METRICS_PORT`:
 
 ```bash
-# Environment variable
+rift-http-proxy --metrics-port 8090
+# or
 RIFT_METRICS_PORT=8090 rift-http-proxy
-
-# Docker
-docker run -e RIFT_METRICS_PORT=8090 -p 8090:8090 zainalpour/rift-proxy:latest
 ```
 
-### Disable Metrics
-
-```bash
-RIFT_METRICS_ENABLED=false rift-http-proxy
-```
+There is no environment variable to disable the metrics server; if you don't scrape it, it sits
+idle. (An imposter's `_rift.metrics` block controls per-imposter metric emission — see
+[Rift Extensions]({{ site.baseurl }}/configuration/native/).)
 
 ---
 
-## Available Metrics
+## Prometheus endpoint metrics (port 9090)
 
-### Request Metrics
+Histogram metrics expand into the usual `_bucket{le="…"}`, `_sum`, and `_count` series.
+
+| Metric | Type | Labels | Meaning |
+|:-------|:-----|:-------|:--------|
+| `rift_requests_total` | counter | `method`, `status` | Requests served, by method and response status. |
+| `rift_faults_injected_total` | counter | `type`, `rule_id`, `source` | Faults injected (`type` = latency/error/tcp). |
+| `rift_latency_injected_ms` | histogram | `rule_id` | Injected latency, in milliseconds. |
+| `rift_error_status_total` | counter | `status`, `rule_id` | Error-fault responses, by status. |
+| `rift_script_execution_duration_ms` | histogram | `rule_id`, `result` | Script execution time, in milliseconds. |
+| `rift_script_errors_total` | counter | `rule_id`, `error_type` | Script failures, by error type. |
+| `rift_flow_state_ops_total` | counter | `operation`, `result` | Flow-store operations (get/set/…), by result. |
+| `rift_active_flows` | gauge | `backend` | Currently-tracked flows, by backend. |
+| `rift_proxy_request_duration_ms` | histogram | `method`, `fault_applied` | Proxy handling time, in milliseconds. |
+| `rift_upstream_request_duration_ms` | histogram | `method`, `status` | Upstream (proxied) request time, in milliseconds. |
+
+Example scrape output:
 
 ```prometheus
-# Total requests processed
-rift_http_requests_total{method="GET", path="/api/users", status="200"} 1234
-
-# Request duration histogram
-rift_http_request_duration_seconds_bucket{le="0.001"} 100
-rift_http_request_duration_seconds_bucket{le="0.01"} 500
-rift_http_request_duration_seconds_bucket{le="0.1"} 900
-rift_http_request_duration_seconds_bucket{le="1"} 1000
-rift_http_request_duration_seconds_sum 45.67
-rift_http_request_duration_seconds_count 1000
+rift_requests_total{method="GET",status="200"} 1234
+rift_faults_injected_total{type="latency",rule_id="api-latency",source="rift"} 300
+rift_latency_injected_ms_bucket{rule_id="api-latency",le="100"} 120
+rift_latency_injected_ms_sum{rule_id="api-latency"} 45670
+rift_latency_injected_ms_count{rule_id="api-latency"} 300
+rift_flow_state_ops_total{operation="get",result="ok"} 5000
+rift_active_flows{backend="inmemory"} 12
 ```
 
-### Fault Injection Metrics
+## Admin `GET /metrics` (port 2525)
+
+The admin API serves a minimal hand-written counter set (`Content-Type: text/plain; version=0.0.4`):
+
+| Metric | Type | Labels | Meaning |
+|:-------|:-----|:-------|:--------|
+| `rift_imposters_total` | gauge | — | Number of imposters currently registered. |
+| `rift_imposter_requests_total` | counter | `port` | Requests per imposter (one line per port). |
 
 ```prometheus
-# Faults injected
-rift_faults_injected_total{type="latency", rule="api-latency"} 300
-rift_faults_injected_total{type="error", rule="api-errors"} 50
-
-# Injected latency histogram
-rift_injected_latency_seconds_bucket{le="0.1"} 100
-rift_injected_latency_seconds_bucket{le="0.5"} 250
-rift_injected_latency_seconds_bucket{le="1"} 300
-```
-
-### Imposter Metrics (Mountebank Mode)
-
-```prometheus
-# Imposters count
 rift_imposters_total 5
-
-# Stubs per imposter
-rift_stubs_total{port="4545"} 10
-rift_stubs_total{port="4546"} 25
-
-# Requests per imposter
-rift_imposter_requests_total{port="4545", matched="true"} 500
-rift_imposter_requests_total{port="4545", matched="false"} 12
-```
-
-### Script Execution Metrics
-
-```prometheus
-# Script execution time
-rift_script_execution_seconds_bucket{engine="rhai", le="0.001"} 950
-rift_script_execution_seconds_bucket{engine="rhai", le="0.01"} 999
-rift_script_execution_seconds_sum{engine="rhai"} 2.5
-rift_script_execution_seconds_count{engine="rhai"} 1000
-
-# Script errors
-rift_script_errors_total{engine="rhai"} 5
-```
-
-### Flow State Metrics
-
-```prometheus
-# Flow state operations
-rift_flow_state_operations_total{operation="get"} 5000
-rift_flow_state_operations_total{operation="set"} 2000
-rift_flow_state_operations_total{operation="delete"} 100
-
-# Flow state operation latency
-rift_flow_state_operation_seconds_bucket{operation="get", le="0.0001"} 4900
-rift_flow_state_operation_seconds_bucket{operation="get", le="0.001"} 5000
-```
-
-### Connection Metrics
-
-```prometheus
-# Active connections
-rift_active_connections 25
-
-# Connection pool stats
-rift_connection_pool_size{upstream="backend"} 10
-rift_connection_pool_available{upstream="backend"} 7
+rift_imposter_requests_total{port="4545"} 500
+rift_imposter_requests_total{port="4546"} 128
 ```
 
 ---
 
-## Prometheus Configuration
-
-### Basic Scrape Config
+## Prometheus configuration
 
 ```yaml
 # prometheus.yml
@@ -136,7 +98,7 @@ scrape_configs:
     scrape_interval: 15s
 ```
 
-### Kubernetes Service Discovery
+### Kubernetes service discovery
 
 ```yaml
 scrape_configs:
@@ -147,83 +109,42 @@ scrape_configs:
       - source_labels: [__meta_kubernetes_pod_label_app]
         regex: rift
         action: keep
-      - source_labels: [__meta_kubernetes_pod_container_port_number]
-        regex: "9090"
-        action: keep
 ```
 
 ---
 
-## Grafana Dashboard
+## Useful queries
 
-### Import Dashboard
-
-1. Go to Grafana → Dashboards → Import
-2. Upload the dashboard JSON or paste the ID
-3. Select your Prometheus data source
-
-### Key Panels
-
-**Request Rate:**
+**Request rate by status:**
 ```promql
-rate(rift_http_requests_total[5m])
+sum(rate(rift_requests_total[5m])) by (status)
 ```
 
-**Error Rate:**
+**5xx error ratio:**
 ```promql
-sum(rate(rift_http_requests_total{status=~"5.."}[5m]))
+sum(rate(rift_requests_total{status=~"5.."}[5m]))
 /
-sum(rate(rift_http_requests_total[5m])) * 100
+sum(rate(rift_requests_total[5m]))
 ```
 
-**P99 Latency:**
-```promql
-histogram_quantile(0.99, rate(rift_http_request_duration_seconds_bucket[5m]))
-```
-
-**Fault Injection Rate:**
+**Fault injection rate by type:**
 ```promql
 sum(rate(rift_faults_injected_total[5m])) by (type)
 ```
 
-### Sample Dashboard JSON
+**P99 upstream latency (proxy mode):**
+```promql
+histogram_quantile(0.99, sum(rate(rift_upstream_request_duration_ms_bucket[5m])) by (le))
+```
 
-```json
-{
-  "title": "Rift Metrics",
-  "panels": [
-    {
-      "title": "Request Rate",
-      "type": "graph",
-      "targets": [{
-        "expr": "sum(rate(rift_http_requests_total[5m])) by (status)"
-      }]
-    },
-    {
-      "title": "Latency Percentiles",
-      "type": "graph",
-      "targets": [
-        { "expr": "histogram_quantile(0.50, rate(rift_http_request_duration_seconds_bucket[5m]))", "legendFormat": "p50" },
-        { "expr": "histogram_quantile(0.95, rate(rift_http_request_duration_seconds_bucket[5m]))", "legendFormat": "p95" },
-        { "expr": "histogram_quantile(0.99, rate(rift_http_request_duration_seconds_bucket[5m]))", "legendFormat": "p99" }
-      ]
-    },
-    {
-      "title": "Fault Injection",
-      "type": "graph",
-      "targets": [{
-        "expr": "sum(rate(rift_faults_injected_total[5m])) by (type)"
-      }]
-    }
-  ]
-}
+**Script error rate:**
+```promql
+sum(rate(rift_script_errors_total[5m])) by (error_type)
 ```
 
 ---
 
-## Alerting Rules
-
-### High Error Rate
+## Alerting rules
 
 ```yaml
 groups:
@@ -231,50 +152,28 @@ groups:
     rules:
       - alert: RiftHighErrorRate
         expr: |
-          sum(rate(rift_http_requests_total{status=~"5.."}[5m]))
+          sum(rate(rift_requests_total{status=~"5.."}[5m]))
           /
-          sum(rate(rift_http_requests_total[5m])) > 0.05
+          sum(rate(rift_requests_total[5m])) > 0.05
         for: 5m
-        labels:
-          severity: warning
+        labels: { severity: warning }
         annotations:
-          summary: "High error rate in Rift"
-          description: "Error rate is {{ $value | humanizePercentage }}"
-```
+          summary: "High 5xx rate in Rift"
 
-### High Latency
-
-```yaml
-      - alert: RiftHighLatency
-        expr: |
-          histogram_quantile(0.99, rate(rift_http_request_duration_seconds_bucket[5m])) > 1
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "High latency in Rift"
-          description: "P99 latency is {{ $value | humanizeDuration }}"
-```
-
-### Script Errors
-
-```yaml
       - alert: RiftScriptErrors
         expr: rate(rift_script_errors_total[5m]) > 0
         for: 1m
-        labels:
-          severity: critical
+        labels: { severity: critical }
         annotations:
           summary: "Script errors in Rift"
-          description: "Script engine {{ $labels.engine }} has errors"
+          description: "error_type={{ $labels.error_type }}"
 ```
 
 ---
 
-## Best Practices
+## Best practices
 
-1. **Set reasonable scrape intervals** - 15-30 seconds is typical
-2. **Use recording rules** - Pre-compute expensive queries
-3. **Set up alerting** - Monitor error rates and latency
-4. **Retain metrics** - Keep enough history for analysis
-5. **Label cardinality** - Avoid high-cardinality labels (like request IDs)
+1. **Reasonable scrape intervals** — 15–30s is typical.
+2. **Use recording rules** for expensive dashboard queries.
+3. **Alert on error ratio and fault rate**, not raw counts.
+4. **Mind label cardinality** — `rule_id` is bounded by your config; avoid adding unbounded labels.

@@ -199,6 +199,45 @@ Transform responses using JavaScript. The function receives request and response
 
 ---
 
+## shellTransform
+
+Pipe the response through one or more external shell commands. Useful for transforming a response
+body with an existing script or CLI tool.
+
+`shellTransform` accepts a single command string, or an array of commands that are **chained in
+sequence** (each command's output feeds the next):
+
+```json
+{
+  "is": { "statusCode": 200, "body": "hello" },
+  "_behaviors": {
+    "shellTransform": "tr a-z A-Z"
+  }
+}
+```
+
+```json
+{
+  "_behaviors": {
+    "shellTransform": ["./add-header.sh", "./rewrite-body.sh"]
+  }
+}
+```
+
+Each command runs via `sh -c "<command>"` and receives two environment variables:
+
+| Variable | JSON shape |
+|:---------|:-----------|
+| `MB_REQUEST` | `{ "method", "path", "query", "headers", "body" }` |
+| `MB_RESPONSE` | `{ "statusCode", "body" }` |
+
+The command's **stdout becomes the new response body**. A non-zero exit is a failure: by default it
+is lenient (the original body is served and an `x-rift-shelltransform-error: true` header is added);
+with `strictBehaviors` / `RIFT_STRICT_BEHAVIORS` it returns `500` (see
+[Error Semantics](#error-semantics)).
+
+---
+
 ## copy
 
 Copy values from the request to the response. Useful for echoing request data.

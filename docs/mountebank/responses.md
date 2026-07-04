@@ -134,6 +134,43 @@ Status codes can also be specified as strings for compatibility with some tools:
 }
 ```
 
+The `body` is standard base64 (with padding); `_mode: "binary"` tells Rift to decode it before
+serving. Omit `_mode` (or set `"text"`) for a normal text/JSON body.
+
+---
+
+## Request Interpolation
+
+Static (`is`) responses can echo values from the incoming request using `${request.…}` tokens. Rift
+substitutes them into the response **body** and **header values** before any behaviors run:
+
+| Token | Resolves to |
+|:------|:------------|
+| `${request.path}` | Request path |
+| `${request.method}` | HTTP method |
+| `${request.body}` | Raw request body |
+| `${request.query.<name>}` | Query parameter `<name>` |
+| `${request.headers.<name>}` | Request header `<name>` (case-insensitive) |
+| `${request.pathParams.<name>}` | Path parameter `<name>` |
+
+```json
+{
+  "is": {
+    "statusCode": 200,
+    "headers": { "X-Echo-Path": "${request.path}" },
+    "body": "You called ${request.method} ${request.path} with q=${request.query.q}"
+  }
+}
+```
+
+A request `GET /search?q=rust` returns `You called GET /search with q=rust` and an
+`X-Echo-Path: /search` header.
+
+These `${request.…}` tokens are distinct from the free-form `${name}` placeholders that the
+[`copy` and `lookup` behaviors]({{ site.baseurl }}/mountebank/behaviors/#copy) fill in — the two do
+not collide, because only tokens beginning with `request.` are treated as request interpolation. On
+the proxy path, only the body is interpolated (not headers).
+
 ---
 
 ## Response Cycling

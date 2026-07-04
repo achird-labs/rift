@@ -130,6 +130,63 @@ rift-http-proxy --configfile imposters.json
 
 ---
 
+## Imposter Settings
+
+Besides `flowState`, the imposter-level `_rift` block accepts these settings:
+
+### `metrics`
+
+Per-imposter metric emission.
+
+```json
+"_rift": {
+  "metrics": { "enabled": false, "port": 9090 }
+}
+```
+
+| Field | Type | Default |
+|:------|:-----|:--------|
+| `enabled` | boolean | `false` |
+| `port` | integer | `9090` |
+
+### `proxy`
+
+Upstream target and connection-pool tuning for proxy responses.
+
+```json
+"_rift": {
+  "proxy": {
+    "upstream": { "host": "api.example.com", "port": 443, "protocol": "https" },
+    "connectionPool": { "maxIdlePerHost": 100, "idleTimeoutSecs": 90 }
+  }
+}
+```
+
+| Field | Type | Default |
+|:------|:-----|:--------|
+| `upstream.host` | string | — |
+| `upstream.port` | integer | — |
+| `upstream.protocol` | string | `"http"` |
+| `connectionPool.maxIdlePerHost` | integer | `100` |
+| `connectionPool.idleTimeoutSecs` | integer | `90` |
+
+### `scriptEngine`
+
+Defaults for `_rift.script` execution.
+
+```json
+"_rift": {
+  "scriptEngine": { "defaultEngine": "rhai", "timeoutMs": 5000 }
+}
+```
+
+| Field | Type | Default | Notes |
+|:------|:-----|:--------|:------|
+| `defaultEngine` | string | `"rhai"` | Engine used when a script omits `engine`. |
+| `timeoutMs` | integer | `5000` | Per-script wall-clock timeout. |
+
+---
+
 ## Fault Injection
 
 Add probabilistic fault injection to responses:
@@ -186,66 +243,59 @@ Or with fixed delay:
 
 ### TCP Faults
 
+`tcp` is a **string** naming a connection-level fault (not an object). When it fires, the connection
+is disrupted at the transport level instead of an HTTP response being sent:
+
 ```json
 "_rift": {
   "fault": {
-    "tcp": {
-      "probability": 0.05,
-      "type": "reset"
-    }
+    "tcp": "CONNECTION_RESET_BY_PEER"
   }
 }
 ```
 
-TCP fault types:
-- `reset`: RST packet (connection reset)
-- `timeout`: Connection timeout
-- `close`: Close connection without response
+TCP fault types (canonical name or short alias):
+
+| Value | Aliases | Effect |
+|:------|:--------|:-------|
+| `CONNECTION_RESET_BY_PEER` | `reset` | Real TCP reset (RST) |
+| `EMPTY_RESPONSE` | `empty` | Close with no bytes sent |
+| `RANDOM_DATA_THEN_CLOSE` | `random`, `garbage` | Write random bytes, then close |
+| `MALFORMED_RESPONSE_CHUNK` | `malformed` | Status line + malformed chunked body, then close |
+
+When `latency`, `tcp`, and `error` are combined in one `fault` block, `tcp` takes precedence over
+`error`. See [Fault Injection]({{ site.baseurl }}/features/fault-injection/) for precedence, the
+top-level `fault` response form, and scripted faults.
 
 ---
 
 ## Scripting
 
-Use multi-engine scripting for complex response logic:
-
-### Rhai (Built-in)
+`_rift.script` runs a script (engine `rhai`, `lua`, or `javascript`) that decides whether to inject a
+response. The script defines `should_inject(request, flow_store)` and returns a map with an `inject`
+flag; when `inject` is true it also carries `fault`/`status`/`body`/`headers`. The `flow_store` handle
+is keyed by `(flow_id, key)`.
 
 ```json
 {
   "_rift": {
+    "flowState": { "backend": "inmemory", "ttlSeconds": 300 },
     "script": {
       "engine": "rhai",
-      "code": "let count = flow.get('count').unwrap_or(0); flow.set('count', count + 1); #{ statusCode: 200, body: `Count: ${count + 1}` }"
+      "code": "fn should_inject(request, flow_store) { let n = flow_store.increment(\"demo\", \"count\"); #{ inject: true, fault: \"error\", status: 200, body: `count ${n}` } }"
     }
   }
 }
 ```
 
-### Lua (requires `--features lua`)
+- `rhai` is built in; `lua` requires the `lua` feature; `javascript` requires the `javascript`
+  feature. JavaScript can also use the Mountebank `inject` response format directly.
+- Scripts require `--allow-injection` and are bounded by a wall-clock timeout
+  (`_rift.scriptEngine.timeoutMs`, default 5000 ms).
 
-```json
-{
-  "_rift": {
-    "script": {
-      "engine": "lua",
-      "code": "local count = flow:get('count') or 0; flow:set('count', count + 1); return { statusCode = 200, body = 'Count: ' .. (count + 1) }"
-    }
-  }
-}
-```
-
-### JavaScript (requires `--features javascript`)
-
-```json
-{
-  "_rift": {
-    "script": {
-      "engine": "javascript",
-      "code": "const count = flow.get('count') || 0; flow.set('count', count + 1); return { statusCode: 200, body: `Count: ${count + 1}` };"
-    }
-  }
-}
-```
+See [Scripting]({{ site.baseurl }}/features/scripting/) for the full API (request object, `flow_store`
+methods, `last_error()`, return values) and [Flow State]({{ site.baseurl }}/features/flow-state/) for
+the state model.
 
 ---
 

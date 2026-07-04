@@ -27,8 +27,8 @@ Rift maintains full compatibility with Mountebank's HTTP/HTTPS protocol support:
 | Behaviors | Yes | Yes | wait, decorate, copy, lookup |
 | Proxy Mode | Yes | Yes | Record and replay |
 | Injection | Yes | Yes | JavaScript functions |
-| TCP Protocol | Yes | Planned | Coming soon |
-| SMTP Protocol | Yes | Planned | Coming soon |
+| TCP Protocol | Yes | No | `protocol` must be `http`/`https`; a `tcp` imposter is rejected |
+| SMTP Protocol | Yes | No | Not supported; an `smtp` imposter is rejected |
 
 ---
 
@@ -213,9 +213,15 @@ docker run -e MB_ALLOW_INJECTION=true zainalpour/rift-proxy:latest
 
 Rift may format JSON responses differently (but equivalently). If your tests compare exact string output, consider comparing parsed JSON instead.
 
-### Missing TCP/SMTP Protocol
+### TCP/SMTP Protocol Imposters
 
-These protocols are planned but not yet implemented. For now, continue using Mountebank for TCP/SMTP mocking.
+Rift imposters are **HTTP/HTTPS only** — a config whose `protocol` is `tcp` or `smtp` (or anything
+other than `http`/`https`) is rejected with an `Invalid protocol` error. For non-HTTP protocol
+mocking, continue using Mountebank.
+
+Note this is separate from **TCP fault injection**: HTTP(S) imposters *can* simulate transport-level
+failures (connection reset, etc.) via `_rift.fault.tcp` or a top-level `fault` response — see
+[Fault Injection]({{ site.baseurl }}/features/fault-injection/).
 
 ---
 
