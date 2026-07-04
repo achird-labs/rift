@@ -1,0 +1,11 @@
+# Docs sync marker — the code revision these docs were last reconciled against.
+#
+# Starting a docs-update pass (see issue #280):
+#   1. Enumerate user-facing changes since the marker:
+#        git log --oneline --merges <commit>..origin/master
+#   2. Update the affected pages.
+#   3. Bump this file AND the version in _config.yml footer_content in the same PR.
+release: v0.8.0
+commit: 54eb2dfebdc3778edf358d6c28ca6a29697d0569
+date: 2026-07-01
+tracking_issue: 280
