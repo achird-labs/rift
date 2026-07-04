@@ -206,6 +206,15 @@ impl ScriptFlowStore {
             self.store.set_ttl(&flow_id, ttl_seconds).map(|()| true),
         )
     }
+
+    /// Take (read and clear) the last flow-store op error for this thread, or unit if the
+    /// last op succeeded (issue #322).
+    pub fn last_error(&mut self) -> Dynamic {
+        match crate::extensions::flow_state::take_last_flow_error() {
+            Some(msg) => Dynamic::from(msg),
+            None => Dynamic::UNIT,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -213,6 +222,30 @@ mod tests {
     use super::*;
     use crate::extensions::flow_state::NoOpFlowStore;
     use std::collections::HashMap;
+
+    // AC2 (issue #322): the Rhai flow_store.last_error() accessor surfaces the last recorded
+    // backend error (then leaves the slot taken so a following op reflects its own status).
+    #[test]
+    fn rhai_flow_store_last_error_surfaces() {
+        use crate::extensions::flow_state::{log_flow_err, take_last_flow_error};
+        let _ = take_last_flow_error();
+        let mut s = ScriptFlowStore::new(Arc::new(NoOpFlowStore));
+        // Simulate a failed op recording an error through the shared seam.
+        let _ = log_flow_err(
+            "increment",
+            0i64,
+            Err::<i64, _>(anyhow::anyhow!("backend down")),
+        );
+        let err = s.last_error();
+        assert!(
+            err.into_string()
+                .map(|x| x.contains("backend down"))
+                .unwrap_or(false),
+            "last_error() must surface the recorded backend error"
+        );
+        // last_error() took the value: a subsequent call with no new failure returns unit.
+        assert!(s.last_error().is_unit());
+    }
 
     // ============================================
     // Tests for FaultDecision enum

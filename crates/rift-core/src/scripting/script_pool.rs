@@ -118,6 +118,10 @@ impl ScriptWorker {
 
                             // Reset the abort flag before each task.
                             abort_flag.store(false, Ordering::Relaxed);
+                            // Reset the last-flow-error slot too: pool workers are long-lived and
+                            // reused across requests, so without this a script could observe a
+                            // previous request's flow_store error via last_error() (issue #322).
+                            crate::extensions::flow_state::clear_last_flow_error();
 
                             // Start a watchdog thread: sets the abort flag after
                             // `timeout`, causing Rhai to self-interrupt via on_progress.

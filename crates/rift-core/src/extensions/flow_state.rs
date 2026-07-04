@@ -406,14 +406,41 @@ mod tests {
     }
 }
 
-/// Log-and-fallback for the script-facing flow-store wrappers: scripts keep their legacy
-/// fallback values on a backend failure (changing that is a breaking script contract),
-/// but the dropped error is no longer invisible (issue #318).
+// The last script flow-store op's error for the current thread, or `None` if the last op
+// succeeded. Set/cleared by `log_flow_err` on every op so a script can observe a backend failure
+// via `flow_store.last_error()` instead of only getting a silent fallback value (issue #322).
+thread_local! {
+    static LAST_FLOW_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Take (read and clear) the last script flow-store error for the current thread. Backs the
+/// per-engine `flow_store.last_error()` accessors (issue #322).
+pub fn take_last_flow_error() -> Option<String> {
+    LAST_FLOW_ERROR.with(|e| e.borrow_mut().take())
+}
+
+/// Reset the last flow-store error at the start of a script execution, so `last_error()` reflects
+/// only ops from THIS execution — never a stale value left on a reused (pooled) worker thread
+/// (issue #322).
+pub fn clear_last_flow_error() {
+    LAST_FLOW_ERROR.with(|e| *e.borrow_mut() = None);
+}
+
+/// Route a script flow-store op result through the shared error seam: log a failure, record it so
+/// `flow_store.last_error()` can surface it (issue #322), and return the fallback; a success clears
+/// the slot so `last_error()` reflects only the most recent op.
 pub fn log_flow_err<T>(op: &str, fallback: T, result: Result<T>) -> T {
-    result.unwrap_or_else(|e| {
-        tracing::warn!("script flow_store.{op} failed; returning fallback: {e:#}");
-        fallback
-    })
+    match result {
+        Ok(value) => {
+            LAST_FLOW_ERROR.with(|e| *e.borrow_mut() = None);
+            value
+        }
+        Err(e) => {
+            tracing::warn!("script flow_store.{op} failed; returning fallback: {e:#}");
+            LAST_FLOW_ERROR.with(|slot| *slot.borrow_mut() = Some(format!("{op}: {e:#}")));
+            fallback
+        }
+    }
 }
 
 /// A deliberately failing flow store (feature `test-backend`): every operation annotates
@@ -456,6 +483,38 @@ impl FlowStore for FailingFlowStore {
     }
     fn set_ttl(&self, flow_id: &str, _ttl_seconds: i64) -> Result<()> {
         self.fail("flowStore.setTtl", flow_id, "")
+    }
+}
+
+#[cfg(test)]
+mod last_flow_error_tests {
+    use super::*;
+
+    // AC1 (issue #322): log_flow_err records a failure so last_error can surface it, and a
+    // subsequent success clears it — so last_error reflects only the most recent op.
+    #[test]
+    fn log_flow_err_records_error_and_clears_on_ok() {
+        let _ = take_last_flow_error(); // start clean on this thread
+        let out = log_flow_err("get", None::<i32>, Err(anyhow::anyhow!("redis down")));
+        assert_eq!(out, None);
+        let recorded = take_last_flow_error();
+        assert!(
+            recorded
+                .as_deref()
+                .is_some_and(|s| s.contains("get") && s.contains("redis down")),
+            "a failed op must record its error, got {recorded:?}"
+        );
+        // take() cleared it
+        assert_eq!(take_last_flow_error(), None);
+        // a success clears the slot
+        LAST_FLOW_ERROR.with(|e| *e.borrow_mut() = Some("stale".to_string()));
+        let v = log_flow_err("set", false, Ok::<bool, anyhow::Error>(true));
+        assert!(v);
+        assert_eq!(
+            take_last_flow_error(),
+            None,
+            "a successful op clears last_error"
+        );
     }
 }
 

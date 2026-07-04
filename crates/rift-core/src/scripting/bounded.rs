@@ -89,6 +89,9 @@ fn run_should_inject_with_abort(
     flow_store: Arc<dyn FlowStore>,
     abort: &Arc<AtomicBool>,
 ) -> Result<FaultDecision> {
+    // Start each execution with a clean last-flow-error slot so `flow_store.last_error()` can't
+    // observe a stale error left by a previous script on this reused worker thread (issue #322).
+    crate::extensions::flow_state::clear_last_flow_error();
     match engine_type {
         "rhai" => super::rhai_engine::run_should_inject_with_abort_rhai(
             code, rule_id, request, flow_store, abort,

@@ -77,6 +77,7 @@ fn create_request_map(request: &ScriptRequest) -> Map {
 /// - `flow_store.delete(flow_id, key)` - Delete a key (returns bool)
 /// - `flow_store.increment(flow_id, key)` - Increment counter (returns i64)
 /// - `flow_store.set_ttl(flow_id, ttl_seconds)` - Set flow expiration (returns bool)
+/// - `flow_store.last_error()` - Take the last flow-store op's error (returns unit if none)
 ///
 /// ## Return Value
 ///
@@ -164,7 +165,8 @@ impl RhaiEngine {
             .register_fn("exists", ScriptFlowStore::exists)
             .register_fn("delete", ScriptFlowStore::delete)
             .register_fn("increment", ScriptFlowStore::increment)
-            .register_fn("set_ttl", ScriptFlowStore::set_ttl);
+            .register_fn("set_ttl", ScriptFlowStore::set_ttl)
+            .register_fn("last_error", ScriptFlowStore::last_error);
 
         // Register helper function for RFC 1123 timestamps
         engine.register_fn("timestamp_header", || -> String {

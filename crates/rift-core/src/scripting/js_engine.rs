@@ -71,6 +71,7 @@ fn with_current_flow_store<T>(f: impl FnOnce(&Arc<dyn FlowStore>) -> T) -> Optio
 /// - `flow_store.delete(flow_id, key)` - Delete a key (returns boolean)
 /// - `flow_store.increment(flow_id, key)` - Increment counter (returns number)
 /// - `flow_store.set_ttl(flow_id, ttl_seconds)` - Set flow expiration (returns boolean)
+/// - `flow_store.last_error()` - Take the last flow-store op's error (returns null if none)
 ///
 /// ## Return Value
 ///
@@ -498,6 +499,19 @@ fn flow_store_set_ttl(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> 
     Ok(JsValue::from(result))
 }
 
+fn flow_store_last_error(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _ctx: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(
+        match crate::extensions::flow_state::take_last_flow_error() {
+            Some(msg) => JsValue::from(js_string!(msg)),
+            None => JsValue::null(),
+        },
+    )
+}
+
 /// Register a native function method on a JS object.
 fn register_method(
     obj: &JsObject,
@@ -525,6 +539,7 @@ fn create_flow_store_object(context: &mut Context) -> Result<JsValue> {
     register_method(&obj, "delete", flow_store_delete, context)?;
     register_method(&obj, "increment", flow_store_increment, context)?;
     register_method(&obj, "set_ttl", flow_store_set_ttl, context)?;
+    register_method(&obj, "last_error", flow_store_last_error, context)?;
 
     Ok(obj.into())
 }
@@ -1693,6 +1708,39 @@ function should_inject(request, flow_store) {
             "a small-loop script under the cap must run fine: {:?}",
             result.err()
         );
+    }
+
+    // AC3 (issue #322): a JS script can observe a backend flow-store failure via
+    // flow_store.last_error() instead of only seeing a silent fallback value.
+    #[test]
+    fn js_flow_store_last_error_surfaces() {
+        use crate::extensions::flow_state::{log_flow_err, take_last_flow_error};
+        let _ = take_last_flow_error();
+        set_current_flow_store(Arc::new(InMemoryFlowStore::new(300)));
+        let request = ScriptRequest {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            headers: HashMap::new(),
+            body: json!({}),
+            query: HashMap::new(),
+            path_params: HashMap::new(),
+        };
+        // Record a failure through the shared seam, then let the script observe it.
+        let _ = log_flow_err(
+            "get",
+            None::<i32>,
+            Err::<Option<i32>, _>(anyhow::anyhow!("js backend down")),
+        );
+        let script = "function should_inject(request, flow_store) { var e = flow_store.last_error(); return { inject: true, fault: 'latency', duration_ms: (e && e.indexOf('js backend down') >= 0) ? 999 : 1 }; }";
+        let result = execute_js_script_inner_bounded(script, &request, "rule", 100_000);
+        clear_current_flow_store();
+        match result {
+            Ok(FaultDecision::Latency { duration_ms, .. }) => assert_eq!(
+                duration_ms, 999,
+                "flow_store.last_error() must surface the recorded backend error to JS"
+            ),
+            other => panic!("expected Latency decision surfacing last_error, got {other:?}"),
+        }
     }
 
     #[test]

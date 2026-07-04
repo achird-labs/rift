@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// - `flow_store:delete(flow_id, key)` - Delete a key (returns bool)
 /// - `flow_store:increment(flow_id, key)` - Increment counter (returns number)
 /// - `flow_store:set_ttl(flow_id, ttl_seconds)` - Set flow expiration (returns bool)
+/// - `flow_store:last_error()` - Take the last flow-store op's error (returns nil if none)
 ///
 /// ## Return Value
 ///
@@ -665,6 +666,12 @@ impl LuaFlowStore {
 
         Ok(log_flow_err("setTtl", false, result))
     }
+
+    /// Take (read and clear) the last flow-store op error for this thread, or nil if the
+    /// last op succeeded (issue #322).
+    fn last_error(&self) -> LuaResult<Option<String>> {
+        Ok(crate::extensions::flow_state::take_last_flow_error())
+    }
 }
 
 impl LuaUserData for LuaFlowStore {
@@ -697,6 +704,8 @@ impl LuaUserData for LuaFlowStore {
             "set_ttl",
             |_lua, this, (flow_id, ttl_seconds): (String, i64)| this.set_ttl(flow_id, ttl_seconds),
         );
+
+        methods.add_method("last_error", |_lua, this, ()| this.last_error());
     }
 }
 
@@ -966,6 +975,71 @@ end
         // Third attempt should not inject fault
         let result3 = engine.should_inject(&request, Arc::clone(&store)).unwrap();
         assert!(matches!(result3, FaultDecision::None));
+    }
+
+    /// A flow store whose `get` always fails, used to exercise `flow_store:last_error()`
+    /// (issue #322). `should_inject` runs the script on its own spawned thread, so the
+    /// failure must be recorded by the script itself (via a real failing op) rather than
+    /// injected from the test thread's thread-local.
+    #[derive(Debug)]
+    struct FailingGetFlowStore;
+
+    impl FlowStore for FailingGetFlowStore {
+        fn get(&self, _flow_id: &str, _key: &str) -> anyhow::Result<Option<Value>> {
+            Err(anyhow::anyhow!("lua backend down"))
+        }
+        fn set(&self, _flow_id: &str, _key: &str, _value: Value) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn exists(&self, _flow_id: &str, _key: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn delete(&self, _flow_id: &str, _key: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn increment(&self, _flow_id: &str, _key: &str) -> anyhow::Result<i64> {
+            Ok(0)
+        }
+        fn set_ttl(&self, _flow_id: &str, _ttl_seconds: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    // AC4 (issue #322): a Lua script can observe a backend flow-store failure via
+    // flow_store:last_error() instead of only seeing a silent fallback value.
+    #[tokio::test]
+    async fn lua_flow_store_last_error_surfaces() {
+        let script = r#"
+function should_inject(request, flow_store)
+    flow_store:get("flow-1", "key")
+    local err = flow_store:last_error()
+    if err and string.find(err, "lua backend down", 1, true) then
+        return { inject = true, fault = "latency", duration_ms = 999 }
+    end
+    return { inject = true, fault = "latency", duration_ms = 1 }
+end
+"#;
+
+        let engine = LuaEngine::new(script, "test-rule").unwrap();
+        let store: Arc<dyn FlowStore> = Arc::new(FailingGetFlowStore);
+
+        let request = ScriptRequest {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            headers: HashMap::new(),
+            body: json!({}),
+            query: HashMap::new(),
+            path_params: HashMap::new(),
+        };
+
+        let result = engine.should_inject(&request, store).unwrap();
+        match result {
+            FaultDecision::Latency { duration_ms, .. } => assert_eq!(
+                duration_ms, 999,
+                "flow_store:last_error() must surface the recorded backend error to Lua"
+            ),
+            other => panic!("expected Latency decision surfacing last_error, got {other:?}"),
+        }
     }
 
     #[tokio::test]
