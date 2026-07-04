@@ -205,6 +205,8 @@ jobs:
           chmod +x "$ARCHIVE_NAME/bin/rift-lint"
           cp rift-tui "$ARCHIVE_NAME/bin/rift-tui"
           chmod +x "$ARCHIVE_NAME/bin/rift-tui"
+          cp rift-verify "$ARCHIVE_NAME/bin/rift-verify"
+          chmod +x "$ARCHIVE_NAME/bin/rift-verify"
 
           # Copy docs
           cp ../../../README.md "$ARCHIVE_NAME/" 2>/dev/null || true
@@ -249,6 +251,7 @@ jobs:
           # Copy additional binaries
           Copy-Item "rift-lint.exe" "$ARCHIVE_NAME/bin/rift-lint.exe"
           Copy-Item "rift-tui.exe" "$ARCHIVE_NAME/bin/rift-tui.exe"
+          Copy-Item "rift-verify.exe" "$ARCHIVE_NAME/bin/rift-verify.exe"
 
           # Copy docs
           if (Test-Path "../../../README.md") { Copy-Item "../../../README.md" "$ARCHIVE_NAME/" }
@@ -416,6 +419,7 @@ jobs:
           - `rift` - HTTP proxy server (Mountebank-compatible)
           - `rift-lint` - Imposter configuration validator
           - `rift-tui` - Terminal UI for managing imposters
+          - `rift-verify` - Stub verifier (checks imposters against a running engine)
 
           ### Available Platforms
 

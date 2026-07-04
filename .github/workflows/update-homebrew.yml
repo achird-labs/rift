@@ -123,6 +123,7 @@ jobs:
               bin.install "bin/rift"
               bin.install "bin/rift-lint"
               bin.install "bin/rift-tui"
+              bin.install "bin/rift-verify"
             end
 
             def caveats
@@ -131,6 +132,7 @@ jobs:
                   - rift: Main HTTP proxy server (Mountebank-compatible)
                   - rift-lint: Imposter configuration validator
                   - rift-tui: Terminal UI for managing imposters
+                  - rift-verify: Stub verifier (checks imposters against a running engine)
 
                 To start the server:
                   rift --port 2525
@@ -143,6 +145,7 @@ jobs:
             test do
               assert_match "rift", shell_output("#{bin}/rift --version")
               assert_match "rift-lint", shell_output("#{bin}/rift-lint --version")
+              assert_match "rift-verify", shell_output("#{bin}/rift-verify --version")
             end
           end
           FORMULA_EOF
