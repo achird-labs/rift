@@ -27,7 +27,6 @@ use crate::scripting::{
 use anyhow::Context;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Bytes;
-use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
@@ -321,9 +320,10 @@ impl ProxyServer {
                                     async move { server.handle_request_internal(req).await }
                                 });
 
-                                if let Err(err) =
-                                    http1::Builder::new().serve_connection(io, service).await
-                                {
+                                let builder = hyper_util::server::conn::auto::Builder::new(
+                                    hyper_util::rt::TokioExecutor::new(),
+                                );
+                                if let Err(err) = builder.serve_connection(io, service).await {
                                     error!(
                                         "Error serving HTTPS connection from {}: {}",
                                         remote_addr, err
@@ -343,8 +343,10 @@ impl ProxyServer {
                             async move { server.handle_request_internal(req).await }
                         });
 
-                        if let Err(err) = http1::Builder::new().serve_connection(io, service).await
-                        {
+                        let builder = hyper_util::server::conn::auto::Builder::new(
+                            hyper_util::rt::TokioExecutor::new(),
+                        );
+                        if let Err(err) = builder.serve_connection(io, service).await {
                             error!(
                                 "Error serving HTTP connection from {}: {}",
                                 remote_addr, err

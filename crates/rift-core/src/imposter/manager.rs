@@ -13,7 +13,6 @@ use crate::extensions::decorate::ResponseDecorator;
 use crate::extensions::flow_state::FlowStoreProvider;
 use crate::imposter::journal::RequestJournal;
 use crate::recording::ProxyRecordingStore;
-use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use parking_lot::{Mutex, RwLock};
@@ -46,8 +45,10 @@ impl Default for TlsDefaults {
     }
 }
 
-/// Serve one HTTP/1 connection (over plaintext or an already-handshaked TLS stream) until it
-/// completes or the imposter is torn down. Shared by the plain and HTTPS serve paths (issue #206).
+/// Serve one imposter connection (over plaintext or an already-handshaked TLS stream) until it
+/// completes or the imposter is torn down. Auto-negotiates HTTP/1 and HTTP/2 (issue #295), except
+/// for imposters that can fire a connection-level TCP fault, which are served HTTP/1-only. Shared
+/// by the plain and HTTPS serve paths (issue #206). (Name kept for history.)
 async fn run_http1<I>(
     io: I,
     imposter: Arc<Imposter>,
@@ -59,6 +60,11 @@ async fn run_http1<I>(
 ) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
+    // A TCP fault (#239) aborts the whole socket, which is meaningless under HTTP/2 stream
+    // multiplexing (one stream's fault would tear down every concurrent stream, and the raw
+    // HTTP/1 fault bytes are nonsense to an h2 client). So an imposter that can fire a TCP fault
+    // is served HTTP/1-only; everything else auto-negotiates HTTP/1 and HTTP/2 (issue #295).
+    let http1_only = imposter.uses_tcp_faults();
     let service = service_fn(move |req| {
         let imposter = Arc::clone(&imposter);
         let fault_cell = Arc::clone(&fault_cell);
@@ -72,22 +78,37 @@ async fn run_http1<I>(
             Ok::<_, std::convert::Infallible>(response)
         }
     });
-    let conn = http1::Builder::new().serve_connection(io, service);
-    tokio::pin!(conn);
-    tokio::select! {
-        res = conn.as_mut() => {
-            if let Err(e) = res {
-                debug!("Connection error on port {}: {}", port, e);
+
+    // Both builders yield a Connection with the same drive/graceful-shutdown shape; only the
+    // protocol negotiation differs.
+    macro_rules! drive_conn {
+        ($conn:expr) => {{
+            let conn = $conn;
+            tokio::pin!(conn);
+            tokio::select! {
+                res = conn.as_mut() => {
+                    if let Err(e) = res {
+                        debug!("Connection error on port {}: {}", port, e);
+                    }
+                }
+                _ = conn_shutdown_rx.recv() => {
+                    // Stop accepting new requests on this connection and close it once any in-flight
+                    // request completes (issue #207).
+                    conn.as_mut().graceful_shutdown();
+                    if let Err(e) = conn.as_mut().await {
+                        debug!("Connection error on port {} during shutdown: {}", port, e);
+                    }
+                }
             }
-        }
-        _ = conn_shutdown_rx.recv() => {
-            // Stop accepting new requests on this connection and close it once any in-flight
-            // request completes (issue #207).
-            conn.as_mut().graceful_shutdown();
-            if let Err(e) = conn.as_mut().await {
-                debug!("Connection error on port {} during shutdown: {}", port, e);
-            }
-        }
+        }};
+    }
+
+    if http1_only {
+        drive_conn!(hyper::server::conn::http1::Builder::new().serve_connection(io, service));
+    } else {
+        let builder =
+            hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+        drive_conn!(builder.serve_connection(io, service));
     }
 }
 

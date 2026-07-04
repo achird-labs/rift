@@ -101,7 +101,7 @@ rcgen = "0.13"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 # Integration testing
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["http2"] }
 tokio-test = "0.4"
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["redis"] }

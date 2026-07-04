@@ -6,7 +6,6 @@ use crate::extensions::decorate::{ResponsePhase, with_annotation_scope};
 use crate::imposter::ImposterManager;
 use http_body_util::Full;
 use hyper::body::Bytes;
-use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Response, StatusCode};
 use hyper_util::rt::TokioIo;
@@ -235,7 +234,9 @@ async fn accept_loop(
                 }
             });
 
-            let conn = http1::Builder::new().serve_connection(io, service);
+            let builder =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+            let conn = builder.serve_connection(io, service);
             tokio::pin!(conn);
             tokio::select! {
                 res = conn.as_mut() => {

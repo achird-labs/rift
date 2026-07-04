@@ -83,12 +83,14 @@ pub fn tls_acceptor_from_pem(
         .map_err(|e| anyhow::anyhow!("Failed to parse private key PEM: {e}"))?
         .ok_or_else(|| anyhow::anyhow!("No private key found in key PEM"))?;
 
-    let config = rustls::ServerConfig::builder()
+    let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| {
             anyhow::anyhow!("Failed to build TLS configuration (cert/key mismatch?): {e}")
         })?;
+    // Advertise HTTP/2 and HTTP/1.1 via ALPN so TLS clients can negotiate h2 (issue #295).
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(TlsAcceptor::from(Arc::new(config)))
 }

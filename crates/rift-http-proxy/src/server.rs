@@ -423,7 +423,6 @@ async fn metrics_accept_loop(
     cancel: CancellationToken,
     tracker: TaskTracker,
 ) -> anyhow::Result<()> {
-    use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper::{Request, Response, body::Incoming};
     use hyper_util::rt::TokioIo;
@@ -452,7 +451,9 @@ async fn metrics_accept_loop(
                 }
             });
 
-            let conn = http1::Builder::new().serve_connection(io, service);
+            let builder =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+            let conn = builder.serve_connection(io, service);
             tokio::pin!(conn);
             tokio::select! {
                 res = conn.as_mut() => {

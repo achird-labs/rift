@@ -325,6 +325,29 @@ impl Imposter {
             .any(|s| s.required_scenario_state.is_some() || s.new_scenario_state.is_some())
     }
 
+    /// Whether any current stub can trigger a connection-level TCP fault (`_rift.fault.tcp`, or a
+    /// Mountebank `fault` that maps to one). Such imposters must be served HTTP/1-only: a TCP fault
+    /// aborts the whole socket, which is incompatible with HTTP/2 stream multiplexing (issue #295).
+    pub(crate) fn uses_tcp_faults(&self) -> bool {
+        use crate::imposter::fault_io::TcpFaultKind;
+        let rift_has_tcp = |rift: &RiftResponseExtension| {
+            rift.fault
+                .as_ref()
+                .and_then(|f| f.tcp.as_ref())
+                .is_some_and(|t| TcpFaultKind::parse(t).is_some())
+        };
+        self.stubs
+            .load()
+            .iter()
+            .flat_map(|s| &s.stub.responses)
+            .any(|resp| match resp {
+                StubResponse::Fault { fault } => TcpFaultKind::parse(fault).is_some(),
+                StubResponse::Is { rift: Some(r), .. } => rift_has_tcp(r),
+                StubResponse::RiftScript { rift } => rift_has_tcp(rift),
+                _ => false,
+            })
+    }
+
     /// Create Redis flow store if configured and available.
     ///
     /// An explicitly-requested `"redis"` backend that cannot be built must fail imposter
