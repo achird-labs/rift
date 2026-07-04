@@ -155,7 +155,7 @@ mod tests {
         let config: ImposterConfig =
             serde_json::from_value(json!({ "port": 9999, "protocol": "http", "stubs": stubs }))
                 .expect("valid imposter config");
-        Imposter::new(config)
+        Imposter::new(config).expect("test imposter")
     }
 
     /// A diverse corpus exercising every anchor category AND every fallback category, in an order

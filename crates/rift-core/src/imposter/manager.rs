@@ -333,7 +333,8 @@ impl ImposterManager {
             self.flow_store_provider.as_ref(),
             self.sequencer.clone(),
             self.request_journal.clone(),
-        );
+        )
+        .map_err(|e| ImposterError::FlowStoreConfig(format!("{e:#}")))?;
 
         // Inject the shared proxy-recording store, if one is registered (issue #315);
         // otherwise the imposter keeps its private per-mode LocalProxyStore.
