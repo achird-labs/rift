@@ -1069,6 +1069,8 @@ pub enum ImposterError {
     PersistError(String),
     #[error("TLS configuration error: {0}")]
     Tls(String),
+    #[error("flow store configuration error: {0}")]
+    FlowStoreConfig(String),
     #[error("backend error: {0:#}")]
     Backend(anyhow::Error),
 }

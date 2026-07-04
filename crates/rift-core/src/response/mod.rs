@@ -72,6 +72,12 @@ impl From<ImposterError> for Response<Full<Bytes>> {
                 StatusCode::BAD_REQUEST,
                 &format!("TLS configuration error: {msg}"),
             ),
+            // A misconfigured/unavailable explicitly-requested flow-store backend is an operator
+            // config error (issue #325), mirroring the TLS case → 400, not a 500.
+            ImposterError::FlowStoreConfig(msg) => error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Flow store configuration error: {msg}"),
+            ),
             ImposterError::Backend(e) => crate::extensions::decorate::backend_error_response(&e),
         }
     }

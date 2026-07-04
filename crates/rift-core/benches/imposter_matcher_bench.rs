@@ -103,7 +103,7 @@ fn imposter_with_stubs(count: usize) -> Imposter {
         "stubs": stubs,
     }))
     .expect("valid imposter config");
-    Imposter::new(config)
+    Imposter::new(config).expect("test imposter")
 }
 
 /// End-to-end per-request stub scan, scaled 10 → 100 → 1000 stubs. The request targets the last

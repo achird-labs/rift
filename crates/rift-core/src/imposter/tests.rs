@@ -134,7 +134,7 @@ fn test_execute_stub() {
         rift: None,
         ..Default::default()
     };
-    let imposter = Imposter::new(config);
+    let imposter = Imposter::new(config).expect("test imposter");
 
     let stub = Stub {
         id: None,
@@ -2762,7 +2762,7 @@ mod scenario_fsm_tests {
             "_rift": { "flowState": flow_state }, "stubs": []
         }))
         .unwrap();
-        Imposter::new(cfg)
+        Imposter::new(cfg).expect("test imposter")
     }
 
     #[test]
@@ -2794,7 +2794,7 @@ mod scenario_fsm_tests {
             ]
         }))
         .unwrap();
-        let imp = Imposter::new(cfg);
+        let imp = Imposter::new(cfg).expect("test imposter");
         let hdrs = hyper::HeaderMap::new();
 
         // Started ⇒ first eligible (index 0)
@@ -3404,7 +3404,7 @@ mod backend_errors {
             }]
         }))
         .expect("config");
-        let mut imposter = Imposter::new(config);
+        let mut imposter = Imposter::new(config).expect("test imposter");
         imposter.flow_store = Arc::new(FailingStore);
         Arc::new(imposter)
     }
@@ -3436,7 +3436,7 @@ mod backend_errors {
             }]
         }))
         .expect("config");
-        let imposter = Imposter::new(config);
+        let imposter = Imposter::new(config).expect("test imposter");
         imposter
             .flow_set("f", "order", json!(42))
             .expect("in-memory set");
@@ -3612,7 +3612,7 @@ mod cas_transitions {
             "stubs": [stub]
         }))
         .expect("config");
-        Imposter::new(config)
+        Imposter::new(config).expect("test imposter")
     }
 
     fn gated_stub() -> serde_json::Value {

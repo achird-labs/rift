@@ -151,7 +151,7 @@ pub struct Imposter {
 
 impl Imposter {
     /// Create a new imposter from config (no custom flow-store provider).
-    pub fn new(config: ImposterConfig) -> Self {
+    pub fn new(config: ImposterConfig) -> anyhow::Result<Self> {
         Self::new_with_provider(config, None)
     }
 
@@ -160,7 +160,7 @@ impl Imposter {
     pub fn new_with_provider(
         config: ImposterConfig,
         provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         Self::new_with_hooks(config, provider, None)
     }
 
@@ -170,7 +170,7 @@ impl Imposter {
         config: ImposterConfig,
         provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
         sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         Self::new_with_hooks_and_journal(config, provider, sequencer, None)
     }
 
@@ -178,12 +178,17 @@ impl Imposter {
     ///
     /// `config.port` must be resolved (Some) before the imposter serves requests: a shared
     /// journal keys by port, and unresolved ports would silently multiplex onto slot 0.
+    ///
+    /// Fails (issue #325) when an explicitly-requested `_rift.flowState.backend` cannot be
+    /// built (e.g. `"redis"` with no config block, or without the `redis-backend` feature) —
+    /// such requests must not silently downgrade to `NoOpFlowStore`. The implicit NoOp (no
+    /// `_rift.flowState` configured) still succeeds.
     pub fn new_with_hooks_and_journal(
         config: ImposterConfig,
         provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
         sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
         journal: Option<Arc<dyn crate::imposter::journal::RequestJournal>>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let stubs: Vec<Arc<StubState>> = config
             .stubs
             .iter()
@@ -199,9 +204,9 @@ impl Imposter {
 
         // Initialize flow store: a registered provider wins; otherwise the built-in
         // `_rift.flowState` selection.
-        let flow_store = Self::create_flow_store(&config, provider);
+        let flow_store = Self::create_flow_store(&config, provider)?;
 
-        Self {
+        Ok(Self {
             config,
             stubs: ArcSwap::new(stubs_arc),
             stub_index,
@@ -214,7 +219,7 @@ impl Imposter {
             shutdown_tx: None,
             flow_store,
             sequencer,
-        }
+        })
     }
 
     /// Read-copy-update the stub vector (issue #291). Reads stay wait-free (`self.stubs.load()`);
@@ -259,7 +264,7 @@ impl Imposter {
     fn create_flow_store(
         config: &ImposterConfig,
         provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
-    ) -> Arc<dyn FlowStore> {
+    ) -> anyhow::Result<Arc<dyn FlowStore>> {
         if let Some(provider) = provider
             && let Some(store) = provider.provide(config)
         {
@@ -277,7 +282,7 @@ impl Imposter {
             } else {
                 debug!("FlowStoreProvider supplied the imposter flow store");
             }
-            return store;
+            return Ok(store);
         }
         if let Some(flow_state_config) = config.rift.as_ref().and_then(|r| r.flow_state.as_ref()) {
             return match flow_state_config.backend.as_str() {
@@ -286,27 +291,31 @@ impl Imposter {
                         "Creating InMemory FlowStore for imposter (ttl={}s)",
                         flow_state_config.ttl_seconds
                     );
-                    Arc::new(InMemoryFlowStore::new(flow_state_config.ttl_seconds as u64))
+                    Ok(Arc::new(InMemoryFlowStore::new(
+                        flow_state_config.ttl_seconds as u64,
+                    )))
                 }
                 "redis" => Self::create_redis_flow_store(flow_state_config),
                 #[cfg(feature = "test-backend")]
                 "failing" => {
                     info!("Creating deliberately failing FlowStore (test-backend feature)");
-                    Arc::new(crate::extensions::flow_state::FailingFlowStore)
+                    Ok(Arc::new(crate::extensions::flow_state::FailingFlowStore))
                 }
                 other => {
                     warn!("Unknown flow state backend '{}', using NoOp", other);
-                    Arc::new(NoOpFlowStore)
+                    Ok(Arc::new(NoOpFlowStore))
                 }
             };
         }
 
         if Self::uses_scenario_fsm(&config.stubs) {
             info!("Stubs declare scenario state; using default in-memory FlowStore");
-            return Arc::new(InMemoryFlowStore::new(DEFAULT_FLOW_STATE_TTL_SECS));
+            return Ok(Arc::new(InMemoryFlowStore::new(
+                DEFAULT_FLOW_STATE_TTL_SECS,
+            )));
         }
 
-        Arc::new(NoOpFlowStore)
+        Ok(Arc::new(NoOpFlowStore))
     }
 
     /// Whether any stub declares the declarative scenario FSM (`requiredScenarioState`/`newScenarioState`).
@@ -316,16 +325,21 @@ impl Imposter {
             .any(|s| s.required_scenario_state.is_some() || s.new_scenario_state.is_some())
     }
 
-    /// Create Redis flow store if configured and available
+    /// Create Redis flow store if configured and available.
+    ///
+    /// An explicitly-requested `"redis"` backend that cannot be built must fail imposter
+    /// construction rather than silently downgrade to `NoOpFlowStore` (issue #325).
     #[allow(unused_variables)]
     fn create_redis_flow_store(
         flow_state_config: &crate::imposter::types::RiftFlowStateConfig,
-    ) -> Arc<dyn FlowStore> {
+    ) -> anyhow::Result<Arc<dyn FlowStore>> {
         #[cfg(feature = "redis-backend")]
         {
             let Some(ref redis_config) = flow_state_config.redis else {
-                error!("Redis backend selected but no redis config provided, falling back to NoOp");
-                return Arc::new(NoOpFlowStore);
+                error!("Redis backend selected but no redis config provided");
+                anyhow::bail!(
+                    "flowState.backend is \"redis\" but no redis config block was provided"
+                );
             };
 
             use crate::backends::RedisFlowStore;
@@ -340,24 +354,21 @@ impl Imposter {
                         "Created Redis FlowStore for imposter (url={}, ttl={}s)",
                         redis_config.url, flow_state_config.ttl_seconds
                     );
-                    Arc::new(store)
+                    Ok(Arc::new(store))
                 }
                 Err(e) => {
-                    error!(
-                        "Failed to create Redis FlowStore: {}, falling back to NoOp",
-                        e
-                    );
-                    Arc::new(NoOpFlowStore)
+                    error!("Failed to create Redis FlowStore: {}", e);
+                    anyhow::bail!("failed to build the Redis flow store: {e}");
                 }
             }
         }
 
         #[cfg(not(feature = "redis-backend"))]
         {
-            error!(
-                "Redis backend not available (compile with --features redis-backend), falling back to NoOp"
+            error!("Redis backend not available (compile with --features redis-backend)");
+            anyhow::bail!(
+                "flowState.backend is \"redis\" but this binary was built without the redis-backend feature (rebuild with --features redis-backend)"
             );
-            Arc::new(NoOpFlowStore)
         }
     }
 
@@ -399,7 +410,7 @@ mod tests {
             protocol: "http".to_string(),
             ..Default::default()
         };
-        Imposter::new(config)
+        Imposter::new(config).expect("test imposter")
     }
 
     #[test]
@@ -415,7 +426,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let imp = Imposter::new(cfg);
+        let imp = Imposter::new(cfg).expect("test imposter");
         let headers = std::collections::HashMap::new();
         let (matched, index) = imp
             .find_matching_stub_with_client("GET", "/shared", &headers, None, None, None, None)
@@ -426,6 +437,57 @@ mod tests {
             std::sync::Arc::ptr_eq(&matched, &stored),
             "matched stub must be the shared Arc, not a deep clone"
         );
+    }
+
+    // Issue #325: an explicitly-requested redis backend that can't be built must fail imposter
+    // construction loudly, not silently downgrade to NoOp. Constructed at the ctor level (no port
+    // bind needed). `redis-backend` is a default feature, so the first case runs in `cargo test`.
+    #[cfg(feature = "redis-backend")]
+    #[test]
+    fn explicit_redis_without_config_block_fails_construction() {
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http", "stubs": [],
+            "_rift": { "flowState": { "backend": "redis" } }
+        }))
+        .expect("valid imposter config");
+        let result = Imposter::new_with_hooks_and_journal(cfg, None, None, None);
+        assert!(
+            result.is_err(),
+            "redis backend requested with no redis config block must fail construction, not NoOp"
+        );
+    }
+
+    #[cfg(not(feature = "redis-backend"))]
+    #[test]
+    fn explicit_redis_without_feature_fails_construction() {
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http", "stubs": [],
+            "_rift": { "flowState": { "backend": "redis", "redis": { "url": "redis://localhost:6379" } } }
+        }))
+        .expect("valid imposter config");
+        let result = Imposter::new_with_hooks_and_journal(cfg, None, None, None);
+        assert!(
+            result.is_err(),
+            "redis backend without the redis-backend feature must fail construction, not NoOp"
+        );
+    }
+
+    #[test]
+    fn implicit_noop_construction_succeeds_silently() {
+        // No _rift.flowState and no scenario stubs: the implicit NoOp store must not be an error.
+        let cfg = serde_json::from_value(json!({ "port": 0, "protocol": "http", "stubs": [] }))
+            .expect("valid imposter config");
+        assert!(Imposter::new_with_hooks_and_journal(cfg, None, None, None).is_ok());
+    }
+
+    #[test]
+    fn inmemory_backend_construction_succeeds() {
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http", "stubs": [],
+            "_rift": { "flowState": { "backend": "inmemory" } }
+        }))
+        .expect("valid imposter config");
+        assert!(Imposter::new_with_hooks_and_journal(cfg, None, None, None).is_ok());
     }
 
     /// Serve the state's next response body, advancing the shared cycler.
@@ -452,7 +514,7 @@ mod tests {
             }]
         }))
         .unwrap();
-        let imp = Imposter::new(cfg);
+        let imp = Imposter::new(cfg).expect("test imposter");
         assert_eq!(served_body(&imp.stubs.load()[0]), "A"); // cursor now at index 1
         let new = serde_json::from_value(json!({
             "predicates": [{ "equals": { "path": "/c" } }],
@@ -485,7 +547,7 @@ mod tests {
             }]
         }))
         .unwrap();
-        let imp = Imposter::new(cfg);
+        let imp = Imposter::new(cfg).expect("test imposter");
         assert_eq!(served_body(&imp.stubs.load()[0]), "A"); // cursor now at index 1
         let new = serde_json::from_value(json!({
             "predicates": [{ "equals": { "path": "/c" } }],
@@ -513,7 +575,7 @@ mod tests {
             "stubs": [{ "responses": [{ "proxy": { "to": "http://upstream", "mode": "proxyAlways" } }] }]
         }))
         .unwrap();
-        let imp = Imposter::new(cfg);
+        let imp = Imposter::new(cfg).expect("test imposter");
 
         // First record → inserted after the proxy stub (insert branch), 2 responses.
         let rec = serde_json::from_value(json!({
@@ -603,7 +665,7 @@ mod tests {
             }]
         }))
         .unwrap();
-        let imp = Imposter::new(cfg);
+        let imp = Imposter::new(cfg).expect("test imposter");
         assert_eq!(served_body(&imp.stubs.load()[0]), "A"); // cursor now at index 1
         let other: Stub = serde_json::from_value(json!({
             "predicates": [{ "equals": { "path": "/other" } }],
@@ -631,7 +693,7 @@ mod tests {
                         "responses": [{ "is": { "statusCode": 200, "body": "v0" } }] }]
         }))
         .unwrap();
-        let imp = StdArc::new(Imposter::new(cfg));
+        let imp = StdArc::new(Imposter::new(cfg).expect("test imposter"));
         let stop = StdArc::new(AtomicBool::new(false));
         let reader = {
             let imp = StdArc::clone(&imp);
@@ -713,7 +775,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let imp = Imposter::new(cfg);
+        let imp = Imposter::new(cfg).expect("test imposter");
 
         let mut headers: HashMap<String, String> = HashMap::new();
         headers.insert("X-Api-Key".to_string(), "secret".to_string());
@@ -912,7 +974,7 @@ mod tests {
             record_requests: true,
             ..Default::default()
         };
-        let imposter = Imposter::new(config);
+        let imposter = Imposter::new(config).expect("test imposter");
         let req = RecordedRequest {
             request_from: "127.0.0.1".to_string(),
             method: "GET".to_string(),
@@ -946,7 +1008,7 @@ mod tests {
             record_requests: true,
             ..Default::default()
         };
-        let imposter = Imposter::new(config);
+        let imposter = Imposter::new(config).expect("test imposter");
 
         let req = |space: &str| {
             let mut headers = std::collections::HashMap::new();
