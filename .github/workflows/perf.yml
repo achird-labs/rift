@@ -1,0 +1,59 @@
+name: Performance
+
+# Issue #298: run the criterion matcher benches on PRs and flag regressions, so a perf regression
+# can't land silently. Compares the PR head against the base by running the same benches on both
+# and diffing criterion's own mean estimates. Microbenchmarks on shared CI runners are noisy, so
+# the hard-fail threshold is deliberately generous (relative, per-benchmark); the full comparison
+# is always posted to the job summary for review.
+
+on:
+  pull_request:
+    # Only when code that can affect matcher performance changes (keeps the job off doc/CI-only PRs).
+    paths:
+      - "crates/rift-core/**"
+      - "crates/rift-http-proxy/**"
+      - "crates/rift-types/**"
+      - ".github/workflows/perf.yml"
+
+# One in-flight run per PR; a new push cancels the previous (benches are expensive).
+concurrency:
+  group: perf-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Regression multiple beyond which the job fails. Generous on purpose — shared runners are noisy;
+  # this catches order-of-magnitude / large regressions, not single-digit-% jitter.
+  REGRESSION_THRESHOLD: "1.25"
+
+jobs:
+  bench-regression:
+    name: Matcher benchmark regression gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for base/head)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Benchmark base (${{ github.base_ref }})
+        run: |
+          git checkout --force ${{ github.event.pull_request.base.sha }}
+          cargo bench -p rift-core --bench imposter_matcher_bench -- --save-baseline base
+
+      - name: Benchmark PR head
+        run: |
+          git checkout --force ${{ github.event.pull_request.head.sha }}
+          cargo bench -p rift-core --bench imposter_matcher_bench -- --save-baseline pr
+
+      - name: Compare and gate
+        run: python3 .github/scripts/bench_regression.py
