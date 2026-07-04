@@ -64,7 +64,7 @@ async fn run_http1<I>(
     // multiplexing (one stream's fault would tear down every concurrent stream, and the raw
     // HTTP/1 fault bytes are nonsense to an h2 client). So an imposter that can fire a TCP fault
     // is served HTTP/1-only; everything else auto-negotiates HTTP/1 and HTTP/2 (issue #295).
-    let http1_only = imposter.uses_tcp_faults();
+    let http1_only = imposter.uses_tcp_faults() || crate::util::http2_disabled();
     let service = service_fn(move |req| {
         let imposter = Arc::clone(&imposter);
         let fault_cell = Arc::clone(&fault_cell);

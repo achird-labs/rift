@@ -7,6 +7,23 @@ use hyper::{Response, StatusCode};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Whether HTTP/2 auto-negotiation should be force-disabled on the serve listeners, read once from
+/// the `RIFT_DISABLE_HTTP2` env var (issue #378). An operational escape hatch: the listeners
+/// auto-negotiate HTTP/1 and HTTP/2 by default (#295); set this (`1`/`true`/`yes`/`on`) to serve
+/// HTTP/1 only if a client misbehaves over HTTP/2.
+pub fn http2_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED
+        .get_or_init(|| http2_disabled_from(std::env::var("RIFT_DISABLE_HTTP2").ok().as_deref()))
+}
+
+/// Pure parse of the `RIFT_DISABLE_HTTP2` value, split out so it can be unit-tested without the
+/// process-global env-var races that a full end-to-end test would hit.
+fn http2_disabled_from(val: Option<&str>) -> bool {
+    val.map(|v| v.trim().to_ascii_lowercase())
+        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+}
+
 /// Build an HTTP response with the given status and body. Falls back to a minimal 500 if the
 /// builder fails (which should not happen with a valid `StatusCode`).
 pub fn build_response(status: StatusCode, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
@@ -87,4 +104,33 @@ pub fn unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::http2_disabled_from;
+
+    // Issue #378: RIFT_DISABLE_HTTP2 parsing — truthy values disable, everything else keeps HTTP/2.
+    #[test]
+    fn http2_disable_env_parsing() {
+        for on in ["1", "true", "TRUE", " yes ", "On"] {
+            assert!(
+                http2_disabled_from(Some(on)),
+                "{on:?} should disable HTTP/2"
+            );
+        }
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("2"),
+        ] {
+            assert!(
+                !http2_disabled_from(off),
+                "{off:?} should keep HTTP/2 enabled"
+            );
+        }
+    }
 }

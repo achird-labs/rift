@@ -320,14 +320,28 @@ impl ProxyServer {
                                     async move { server.handle_request_internal(req).await }
                                 });
 
-                                let builder = hyper_util::server::conn::auto::Builder::new(
-                                    hyper_util::rt::TokioExecutor::new(),
-                                );
-                                if let Err(err) = builder.serve_connection(io, service).await {
-                                    error!(
-                                        "Error serving HTTPS connection from {}: {}",
-                                        remote_addr, err
+                                // Issue #378: force-disable HTTP/2 auto-negotiation as an
+                                // operational escape hatch when a client misbehaves over h2.
+                                if crate::util::http2_disabled() {
+                                    if let Err(err) = hyper::server::conn::http1::Builder::new()
+                                        .serve_connection(io, service)
+                                        .await
+                                    {
+                                        error!(
+                                            "Error serving HTTPS connection from {}: {}",
+                                            remote_addr, err
+                                        );
+                                    }
+                                } else {
+                                    let builder = hyper_util::server::conn::auto::Builder::new(
+                                        hyper_util::rt::TokioExecutor::new(),
                                     );
+                                    if let Err(err) = builder.serve_connection(io, service).await {
+                                        error!(
+                                            "Error serving HTTPS connection from {}: {}",
+                                            remote_addr, err
+                                        );
+                                    }
                                 }
                             }
                             Err(err) => {
@@ -343,14 +357,28 @@ impl ProxyServer {
                             async move { server.handle_request_internal(req).await }
                         });
 
-                        let builder = hyper_util::server::conn::auto::Builder::new(
-                            hyper_util::rt::TokioExecutor::new(),
-                        );
-                        if let Err(err) = builder.serve_connection(io, service).await {
-                            error!(
-                                "Error serving HTTP connection from {}: {}",
-                                remote_addr, err
+                        // Issue #378: force-disable HTTP/2 auto-negotiation as an operational
+                        // escape hatch when a client misbehaves over h2.
+                        if crate::util::http2_disabled() {
+                            if let Err(err) = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(io, service)
+                                .await
+                            {
+                                error!(
+                                    "Error serving HTTP connection from {}: {}",
+                                    remote_addr, err
+                                );
+                            }
+                        } else {
+                            let builder = hyper_util::server::conn::auto::Builder::new(
+                                hyper_util::rt::TokioExecutor::new(),
                             );
+                            if let Err(err) = builder.serve_connection(io, service).await {
+                                error!(
+                                    "Error serving HTTP connection from {}: {}",
+                                    remote_addr, err
+                                );
+                            }
                         }
                     }
                     _ => {

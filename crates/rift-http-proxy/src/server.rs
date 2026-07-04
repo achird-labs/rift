@@ -451,20 +451,35 @@ async fn metrics_accept_loop(
                 }
             });
 
-            let builder =
-                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
-            let conn = builder.serve_connection(io, service);
-            tokio::pin!(conn);
-            tokio::select! {
-                res = conn.as_mut() => {
-                    if let Err(err) = res {
-                        error!("Metrics server connection error: {}", err);
+            // Both builders yield a Connection with the same drive/graceful-shutdown shape;
+            // only the protocol negotiation differs (issue #378 force-disable escape hatch).
+            macro_rules! drive_conn {
+                ($conn:expr) => {{
+                    let conn = $conn;
+                    tokio::pin!(conn);
+                    tokio::select! {
+                        res = conn.as_mut() => {
+                            if let Err(err) = res {
+                                error!("Metrics server connection error: {}", err);
+                            }
+                        }
+                        _ = conn_cancel.cancelled() => {
+                            conn.as_mut().graceful_shutdown();
+                            let _ = conn.await;
+                        }
                     }
-                }
-                _ = conn_cancel.cancelled() => {
-                    conn.as_mut().graceful_shutdown();
-                    let _ = conn.await;
-                }
+                }};
+            }
+
+            if rift_core::util::http2_disabled() {
+                drive_conn!(
+                    hyper::server::conn::http1::Builder::new().serve_connection(io, service)
+                );
+            } else {
+                let builder = hyper_util::server::conn::auto::Builder::new(
+                    hyper_util::rt::TokioExecutor::new(),
+                );
+                drive_conn!(builder.serve_connection(io, service));
             }
         });
     }
