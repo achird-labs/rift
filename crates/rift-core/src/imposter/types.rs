@@ -787,6 +787,13 @@ pub struct ImposterConfig {
         alias = "allowCORS"
     )]
     pub allow_cors: bool,
+    /// Strict behavior mode (issue #375): when true, a requested response behavior that FAILS
+    /// (decorate / shellTransform / binary base64 decode) returns a 500 — still carrying the #323
+    /// `x-rift-<behavior>-error` header — instead of serving the fallback body. Default false keeps
+    /// the lenient contract (#269): the fallback body is served and only the header signals the
+    /// failure. Can also be forced process-wide via the `RIFT_STRICT_BEHAVIORS` env var.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strict_behaviors: bool,
     /// Service name for documentation (optional metadata)
     #[serde(skip_serializing_if = "Option::is_none", alias = "service_name")]
     pub service_name: Option<String>,

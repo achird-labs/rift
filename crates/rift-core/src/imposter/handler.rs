@@ -523,6 +523,13 @@ async fn handle_request_inner(
                 return Ok(response);
             }
 
+            // Issue #375: strict mode makes a requested response behavior that fails serve a 500
+            // (still carrying the #323 signal header) instead of the fallback body. Enabled
+            // per-imposter (`strictBehaviors`) or process-wide (`RIFT_STRICT_BEHAVIORS`). Default
+            // false preserves the lenient #269/#323 contract in the Err arms below.
+            let strict_behaviors =
+                imposter.config.strict_behaviors || crate::util::strict_behaviors_env();
+
             // Expand `${request.*}` request templates (issue #269) BEFORE behaviors — matching the
             // proxy path's ordering so `shellTransform`/`decorate` operate on the expanded body.
             // Header values are templated too (the static path's AC1 requirement; the proxy path
@@ -645,6 +652,18 @@ async fn handle_request_inner(
                             // isn't a silent success (issue #323); the body is still served (#269).
                             Err(e) => {
                                 warn!("Decorate script error: {e}");
+                                if strict_behaviors {
+                                    return Ok(build_response_with_headers(
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        [
+                                            ("x-rift-imposter", "true"),
+                                            ("x-rift-decorate-error", "true"),
+                                        ],
+                                        format!(
+                                            r#"{{"error": "decorate failed (strictBehaviors): {e}"}}"#
+                                        ),
+                                    ));
+                                }
                                 headers.insert(
                                     "x-rift-decorate-error".to_string(),
                                     vec!["true".to_string()],
@@ -663,6 +682,18 @@ async fn handle_request_inner(
                             // isn't a silent success (issue #323).
                             Err(e) => {
                                 warn!("shellTransform command {cmd:?} failed: {e}");
+                                if strict_behaviors {
+                                    return Ok(build_response_with_headers(
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        [
+                                            ("x-rift-imposter", "true"),
+                                            ("x-rift-shelltransform-error", "true"),
+                                        ],
+                                        format!(
+                                            r#"{{"error": "shellTransform failed (strictBehaviors): {e}"}}"#
+                                        ),
+                                    ));
+                                }
                                 headers.insert(
                                     "x-rift-shelltransform-error".to_string(),
                                     vec!["true".to_string()],
@@ -692,7 +723,19 @@ async fn handle_request_inner(
                     match base64::engine::general_purpose::STANDARD.decode(&body) {
                         Ok(decoded) => Bytes::from(decoded),
                         Err(e) => {
-                            warn!("Failed to decode base64 body: {}, using raw body", e);
+                            if strict_behaviors {
+                                warn!(
+                                    "Failed to decode base64 body: {e}; failing loud (strictBehaviors)"
+                                );
+                                return Ok(build_response_with_headers(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    [("x-rift-imposter", "true"), ("x-rift-binary-error", "true")],
+                                    format!(
+                                        r#"{{"error": "binary base64 decode failed (strictBehaviors): {e}"}}"#
+                                    ),
+                                ));
+                            }
+                            warn!("Failed to decode base64 body: {e}, using raw body");
                             binary_decode_failed = true;
                             Bytes::from(body)
                         }

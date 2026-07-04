@@ -24,6 +24,25 @@ fn http2_disabled_from(val: Option<&str>) -> bool {
         .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
 }
 
+/// Whether strict behavior mode is force-enabled process-wide, read once from the
+/// `RIFT_STRICT_BEHAVIORS` env var (issue #375). When set (`1`/`true`/`yes`/`on`) it forces the
+/// fail-loud contract on every imposter regardless of its per-imposter `strictBehaviors` flag — an
+/// operational switch for CI runs that want a broken decorate/shellTransform/binary to surface as a
+/// 500 rather than a header-annotated fallback body.
+pub fn strict_behaviors_env() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        strict_behaviors_from(std::env::var("RIFT_STRICT_BEHAVIORS").ok().as_deref())
+    })
+}
+
+/// Pure parse of the `RIFT_STRICT_BEHAVIORS` value, split out so it can be unit-tested without the
+/// process-global env-var races that a full end-to-end test would hit.
+fn strict_behaviors_from(val: Option<&str>) -> bool {
+    val.map(|v| v.trim().to_ascii_lowercase())
+        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+}
+
 /// Build an HTTP response with the given status and body. Falls back to a minimal 500 if the
 /// builder fails (which should not happen with a valid `StatusCode`).
 pub fn build_response(status: StatusCode, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
@@ -108,7 +127,31 @@ pub fn unix_timestamp() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::http2_disabled_from;
+    use super::{http2_disabled_from, strict_behaviors_from};
+
+    // Issue #375: RIFT_STRICT_BEHAVIORS parsing — truthy values force strict, everything else lenient.
+    #[test]
+    fn strict_behaviors_env_parsing() {
+        for on in ["1", "true", "TRUE", " yes ", "On"] {
+            assert!(
+                strict_behaviors_from(Some(on)),
+                "{on:?} should enable strict behaviors"
+            );
+        }
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("2"),
+        ] {
+            assert!(
+                !strict_behaviors_from(off),
+                "{off:?} should keep behaviors lenient"
+            );
+        }
+    }
 
     // Issue #378: RIFT_DISABLE_HTTP2 parsing — truthy values disable, everything else keeps HTTP/2.
     #[test]
