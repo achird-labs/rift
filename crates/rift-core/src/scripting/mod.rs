@@ -1,4 +1,4 @@
-use crate::extensions::flow_state::{FlowStore, log_flow_err};
+use crate::extensions::flow_state::{FlowStore, flow_result, strict_flow_store};
 use anyhow::{Result, anyhow};
 use rhai::Dynamic;
 use serde_json::Value;
@@ -161,50 +161,92 @@ impl ScriptFlowStore {
         Self { store }
     }
 
-    /// Get a value from flow state
-    pub fn get(&mut self, flow_id: String, key: String) -> Dynamic {
-        match log_flow_err("get", None, self.store.get(&flow_id, &key)) {
-            Some(val) => rhai_engine::json_to_dynamic(val),
-            None => Dynamic::UNIT,
+    /// Get a value from flow state. In strict mode (issue #376) a backend failure raises; otherwise
+    /// it returns unit (the lenient #322 fallback) and records the error for `last_error()`.
+    pub fn get(
+        &mut self,
+        flow_id: String,
+        key: String,
+    ) -> std::result::Result<Dynamic, Box<rhai::EvalAltResult>> {
+        match flow_result("get", self.store.get(&flow_id, &key)) {
+            Ok(Some(val)) => Ok(rhai_engine::json_to_dynamic(val)),
+            Ok(None) => Ok(Dynamic::UNIT),
+            Err(msg) if strict_flow_store() => Err(msg.into()),
+            Err(_) => Ok(Dynamic::UNIT),
         }
     }
 
-    /// Set a value in flow state
-    pub fn set(&mut self, flow_id: String, key: String, value: Dynamic) -> bool {
+    /// Set a value in flow state. Strict mode raises on failure; else returns false (lenient #322).
+    pub fn set(
+        &mut self,
+        flow_id: String,
+        key: String,
+        value: Dynamic,
+    ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
         let json_val = rhai_engine::dynamic_to_json(value);
-        log_flow_err(
+        match flow_result(
             "set",
-            false,
             self.store.set(&flow_id, &key, json_val).map(|()| true),
-        )
+        ) {
+            Ok(v) => Ok(v),
+            Err(msg) if strict_flow_store() => Err(msg.into()),
+            Err(_) => Ok(false),
+        }
     }
 
-    /// Check if a key exists
-    pub fn exists(&mut self, flow_id: String, key: String) -> bool {
-        log_flow_err("exists", false, self.store.exists(&flow_id, &key))
+    /// Check if a key exists. Strict mode raises on failure; else returns false (lenient #322).
+    pub fn exists(
+        &mut self,
+        flow_id: String,
+        key: String,
+    ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
+        match flow_result("exists", self.store.exists(&flow_id, &key)) {
+            Ok(v) => Ok(v),
+            Err(msg) if strict_flow_store() => Err(msg.into()),
+            Err(_) => Ok(false),
+        }
     }
 
-    /// Delete a key
-    pub fn delete(&mut self, flow_id: String, key: String) -> bool {
-        log_flow_err(
-            "delete",
-            false,
-            self.store.delete(&flow_id, &key).map(|()| true),
-        )
+    /// Delete a key. Strict mode raises on failure; else returns false (lenient #322).
+    pub fn delete(
+        &mut self,
+        flow_id: String,
+        key: String,
+    ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
+        match flow_result("delete", self.store.delete(&flow_id, &key).map(|()| true)) {
+            Ok(v) => Ok(v),
+            Err(msg) if strict_flow_store() => Err(msg.into()),
+            Err(_) => Ok(false),
+        }
     }
 
-    /// Increment a counter
-    pub fn increment(&mut self, flow_id: String, key: String) -> i64 {
-        log_flow_err("increment", 0, self.store.increment(&flow_id, &key))
+    /// Increment a counter. Strict mode raises on failure; else returns 0 (lenient #322).
+    pub fn increment(
+        &mut self,
+        flow_id: String,
+        key: String,
+    ) -> std::result::Result<i64, Box<rhai::EvalAltResult>> {
+        match flow_result("increment", self.store.increment(&flow_id, &key)) {
+            Ok(v) => Ok(v),
+            Err(msg) if strict_flow_store() => Err(msg.into()),
+            Err(_) => Ok(0),
+        }
     }
 
-    /// Set TTL for a flow
-    pub fn set_ttl(&mut self, flow_id: String, ttl_seconds: i64) -> bool {
-        log_flow_err(
+    /// Set TTL for a flow. Strict mode raises on failure; else returns false (lenient #322).
+    pub fn set_ttl(
+        &mut self,
+        flow_id: String,
+        ttl_seconds: i64,
+    ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
+        match flow_result(
             "setTtl",
-            false,
             self.store.set_ttl(&flow_id, ttl_seconds).map(|()| true),
-        )
+        ) {
+            Ok(v) => Ok(v),
+            Err(msg) if strict_flow_store() => Err(msg.into()),
+            Err(_) => Ok(false),
+        }
     }
 
     /// Take (read and clear) the last flow-store op error for this thread, or unit if the
@@ -222,6 +264,89 @@ mod tests {
     use super::*;
     use crate::extensions::flow_state::NoOpFlowStore;
     use std::collections::HashMap;
+
+    /// A flow store whose every op fails — for exercising the error branches of the wrappers.
+    struct FailingStore;
+    impl FlowStore for FailingStore {
+        fn get(&self, _: &str, _: &str) -> Result<Option<Value>> {
+            Err(anyhow!("boom"))
+        }
+        fn set(&self, _: &str, _: &str, _: Value) -> Result<()> {
+            Err(anyhow!("boom"))
+        }
+        fn exists(&self, _: &str, _: &str) -> Result<bool> {
+            Err(anyhow!("boom"))
+        }
+        fn delete(&self, _: &str, _: &str) -> Result<()> {
+            Err(anyhow!("boom"))
+        }
+        fn increment(&self, _: &str, _: &str) -> Result<i64> {
+            Err(anyhow!("boom"))
+        }
+        fn set_ttl(&self, _: &str, _: i64) -> Result<()> {
+            Err(anyhow!("boom"))
+        }
+    }
+
+    // Issue #376 lenient contract (default, strict OFF): every Rhai ScriptFlowStore op, on a backend
+    // failure, returns its documented fallback (never raises) AND records the error for
+    // `last_error()` (issue #322). Covers all six ops — the strict/lenient branch is hand-written
+    // per op, so a wrong fallback in any one would be caught here. (The strict raise is covered
+    // end-to-end per engine in issue_376_strict_flow_store.rs; it can't be unit-tested reliably
+    // because `strict_flow_store()` caches the env read per process.)
+    #[test]
+    fn rhai_flow_store_lenient_ops_return_fallback_and_record_error() {
+        use crate::extensions::flow_state::take_last_flow_error;
+        let mut s = ScriptFlowStore::new(Arc::new(FailingStore));
+
+        let _ = take_last_flow_error();
+        assert!(
+            s.get("f".into(), "k".into())
+                .expect("lenient get must not raise")
+                .is_unit(),
+            "get falls back to unit"
+        );
+        assert!(
+            take_last_flow_error().is_some_and(|e| e.contains("get")),
+            "get records last_error"
+        );
+
+        assert!(
+            !s.set("f".into(), "k".into(), Dynamic::from(1))
+                .expect("lenient set must not raise"),
+            "set falls back to false"
+        );
+        assert!(take_last_flow_error().is_some_and(|e| e.contains("set")));
+
+        assert!(
+            !s.exists("f".into(), "k".into())
+                .expect("lenient exists must not raise"),
+            "exists falls back to false"
+        );
+        assert!(take_last_flow_error().is_some_and(|e| e.contains("exists")));
+
+        assert!(
+            !s.delete("f".into(), "k".into())
+                .expect("lenient delete must not raise"),
+            "delete falls back to false"
+        );
+        assert!(take_last_flow_error().is_some_and(|e| e.contains("delete")));
+
+        assert_eq!(
+            s.increment("f".into(), "k".into())
+                .expect("lenient increment must not raise"),
+            0,
+            "increment falls back to 0"
+        );
+        assert!(take_last_flow_error().is_some_and(|e| e.contains("increment")));
+
+        assert!(
+            !s.set_ttl("f".into(), 60)
+                .expect("lenient set_ttl must not raise"),
+            "set_ttl falls back to false"
+        );
+        assert!(take_last_flow_error().is_some_and(|e| e.contains("setTtl")));
+    }
 
     // AC2 (issue #322): the Rhai flow_store.last_error() accessor surfaces the last recorded
     // backend error (then leaves the slot taken so a following op reflects its own status).
@@ -450,7 +575,9 @@ mod tests {
     fn test_script_flow_store_get() {
         let store = Arc::new(NoOpFlowStore);
         let mut script_store = ScriptFlowStore::new(store);
-        let result = script_store.get("flow-1".to_string(), "key".to_string());
+        let result = script_store
+            .get("flow-1".to_string(), "key".to_string())
+            .expect("NoOp get never fails");
         // NoOpFlowStore returns Unit for get
         assert!(result.is_unit());
     }
@@ -459,11 +586,13 @@ mod tests {
     fn test_script_flow_store_set() {
         let store = Arc::new(NoOpFlowStore);
         let mut script_store = ScriptFlowStore::new(store);
-        let result = script_store.set(
-            "flow-1".to_string(),
-            "key".to_string(),
-            rhai::Dynamic::from(42),
-        );
+        let result = script_store
+            .set(
+                "flow-1".to_string(),
+                "key".to_string(),
+                rhai::Dynamic::from(42),
+            )
+            .expect("NoOp set never fails");
         assert!(result);
     }
 
@@ -471,7 +600,9 @@ mod tests {
     fn test_script_flow_store_exists() {
         let store = Arc::new(NoOpFlowStore);
         let mut script_store = ScriptFlowStore::new(store);
-        let result = script_store.exists("flow-1".to_string(), "key".to_string());
+        let result = script_store
+            .exists("flow-1".to_string(), "key".to_string())
+            .expect("NoOp exists never fails");
         assert!(!result); // NoOpFlowStore always returns false
     }
 
@@ -479,7 +610,9 @@ mod tests {
     fn test_script_flow_store_delete() {
         let store = Arc::new(NoOpFlowStore);
         let mut script_store = ScriptFlowStore::new(store);
-        let result = script_store.delete("flow-1".to_string(), "key".to_string());
+        let result = script_store
+            .delete("flow-1".to_string(), "key".to_string())
+            .expect("NoOp delete never fails");
         assert!(result);
     }
 
@@ -488,7 +621,9 @@ mod tests {
         let store = Arc::new(NoOpFlowStore);
         let mut script_store = ScriptFlowStore::new(store);
         // NoOpFlowStore returns 0 on error (which doesn't happen, but increment returns 1)
-        let result = script_store.increment("flow-1".to_string(), "counter".to_string());
+        let result = script_store
+            .increment("flow-1".to_string(), "counter".to_string())
+            .expect("NoOp increment never fails");
         assert_eq!(result, 1);
     }
 
@@ -496,7 +631,9 @@ mod tests {
     fn test_script_flow_store_set_ttl() {
         let store = Arc::new(NoOpFlowStore);
         let mut script_store = ScriptFlowStore::new(store);
-        let result = script_store.set_ttl("flow-1".to_string(), 3600);
+        let result = script_store
+            .set_ttl("flow-1".to_string(), 3600)
+            .expect("NoOp set_ttl never fails");
         assert!(result);
     }
 

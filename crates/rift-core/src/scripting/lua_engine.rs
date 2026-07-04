@@ -1,4 +1,4 @@
-use crate::extensions::flow_state::{FlowStore, log_flow_err};
+use crate::extensions::flow_state::{FlowStore, flow_result, strict_flow_store};
 use crate::scripting::{FaultDecision, ScriptRequest};
 use anyhow::{Result, anyhow};
 use mlua::prelude::*;
@@ -608,63 +608,79 @@ impl LuaFlowStore {
         Self { store }
     }
 
-    /// Get a value from flow state
+    /// Get a value from flow state. Strict mode (issue #376) raises on a backend failure; otherwise
+    /// returns nil (the lenient #322 fallback) and records the error for `last_error()`.
     fn get(&self, lua: &Lua, flow_id: String, key: String) -> LuaResult<LuaValue> {
         let store = Arc::clone(&self.store);
 
         // Direct synchronous call - no async bridging needed
-        match log_flow_err("get", None, store.get(&flow_id, &key)) {
-            Some(value) => json_to_lua(lua, &value),
-            None => Ok(LuaValue::Nil),
+        match flow_result("get", store.get(&flow_id, &key)) {
+            Ok(Some(value)) => json_to_lua(lua, &value),
+            Ok(None) => Ok(LuaValue::Nil),
+            Err(msg) if strict_flow_store() => Err(mlua::Error::runtime(msg)),
+            Err(_) => Ok(LuaValue::Nil),
         }
     }
 
-    /// Set a value in flow state
+    /// Set a value in flow state. Strict mode raises on failure; else returns false (lenient #322).
     fn set(&self, lua: &Lua, flow_id: String, key: String, value: LuaValue) -> LuaResult<bool> {
         // Convert Lua value to JSON
         let json_value = lua_to_json(lua, value)?;
 
         let store = Arc::clone(&self.store);
 
-        let result = store.set(&flow_id, &key, json_value).map(|()| true);
-
-        Ok(log_flow_err("set", false, result))
+        match flow_result("set", store.set(&flow_id, &key, json_value).map(|()| true)) {
+            Ok(v) => Ok(v),
+            Err(msg) if strict_flow_store() => Err(mlua::Error::runtime(msg)),
+            Err(_) => Ok(false),
+        }
     }
 
-    /// Check if a key exists
+    /// Check if a key exists. Strict mode raises on failure; else returns false (lenient #322).
     fn exists(&self, flow_id: String, key: String) -> LuaResult<bool> {
         let store = Arc::clone(&self.store);
 
-        Ok(log_flow_err("exists", false, store.exists(&flow_id, &key)))
+        match flow_result("exists", store.exists(&flow_id, &key)) {
+            Ok(v) => Ok(v),
+            Err(msg) if strict_flow_store() => Err(mlua::Error::runtime(msg)),
+            Err(_) => Ok(false),
+        }
     }
 
-    /// Delete a key
+    /// Delete a key. Strict mode raises on failure; else returns false (lenient #322).
     fn delete(&self, flow_id: String, key: String) -> LuaResult<bool> {
         let store = Arc::clone(&self.store);
 
-        let result = store.delete(&flow_id, &key).map(|()| true);
-
-        Ok(log_flow_err("delete", false, result))
+        match flow_result("delete", store.delete(&flow_id, &key).map(|()| true)) {
+            Ok(v) => Ok(v),
+            Err(msg) if strict_flow_store() => Err(mlua::Error::runtime(msg)),
+            Err(_) => Ok(false),
+        }
     }
 
-    /// Increment a counter
+    /// Increment a counter. Strict mode raises on failure; else returns 0 (lenient #322).
     fn increment(&self, flow_id: String, key: String) -> LuaResult<i64> {
         let store = Arc::clone(&self.store);
 
-        Ok(log_flow_err(
-            "increment",
-            0,
-            store.increment(&flow_id, &key),
-        ))
+        match flow_result("increment", store.increment(&flow_id, &key)) {
+            Ok(v) => Ok(v),
+            Err(msg) if strict_flow_store() => Err(mlua::Error::runtime(msg)),
+            Err(_) => Ok(0),
+        }
     }
 
-    /// Set TTL for a flow
+    /// Set TTL for a flow. Strict mode raises on failure; else returns false (lenient #322).
     fn set_ttl(&self, flow_id: String, ttl_seconds: i64) -> LuaResult<bool> {
         let store = Arc::clone(&self.store);
 
-        let result = store.set_ttl(&flow_id, ttl_seconds).map(|()| true);
-
-        Ok(log_flow_err("setTtl", false, result))
+        match flow_result(
+            "setTtl",
+            store.set_ttl(&flow_id, ttl_seconds).map(|()| true),
+        ) {
+            Ok(v) => Ok(v),
+            Err(msg) if strict_flow_store() => Err(mlua::Error::runtime(msg)),
+            Err(_) => Ok(false),
+        }
     }
 
     /// Take (read and clear) the last flow-store op error for this thread, or nil if the
