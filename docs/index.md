@@ -152,6 +152,12 @@ See the [Node.js Integration Guide]({{ site.baseurl }}/getting-started/nodejs/) 
 - [REST API]({{ site.baseurl }}/api/) - Admin API reference
 - [Performance]({{ site.baseurl }}/performance/) - Benchmark results
 
+### Embedding & Extension
+- [Embedding & SPI]({{ site.baseurl }}/embedding/) - Embed Rift as a library, extend it via SPI traits
+- [Embeddable Server]({{ site.baseurl }}/embedding/server/) - `ServerBuilder`, bindable admin/metrics
+- [Extension Points (SPI)]({{ site.baseurl }}/embedding/spi/) - Pluggable flow-store, journal, proxy store, sequencer
+- [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/) - Drive Rift from any language
+
 ---
 
 ## Project Status
