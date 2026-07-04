@@ -42,6 +42,11 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # rift-core links the mlua LuaJIT scripting engine, which needs the system LuaJIT dev lib
+      # (same as every ci.yml build job); without it the bench build fails at mlua-sys.
+      - name: Install LuaJIT
+        run: sudo apt-get update && sudo apt-get install -y libluajit-5.1-dev
+
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
