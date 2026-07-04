@@ -207,9 +207,19 @@ fn execute_js_script(
 
 /// Loop-iteration cap for a `should_inject` Boa context (issue #327). Boa exposes no
 /// per-instruction interrupt, so a runaway loop (`while(true){}`) can't observe the deadline abort
-/// flag and would run its `spawn_blocking` thread forever. This fixed cap bounds it: Boa throws
-/// once the limit is hit, the execution returns `Err`, and the thread is freed. Generous enough
-/// that no realistic boolean fault-decision script approaches it.
+/// flag and would otherwise run its `spawn_blocking` thread forever. This cap makes a single
+/// runaway loop throw once the limit is hit, so the execution returns `Err` and the thread is
+/// freed. Generous enough that no realistic boolean fault-decision script approaches it.
+///
+/// Known limitation (issue #371): Boa's loop-iteration counter is **per-call-frame** (reset to 0 on
+/// every function call), and Boa 0.20 has no cumulative-work budget or per-instruction interrupt.
+/// So a *nested* runaway — e.g. `while (true) { f(); }` where `f` loops — amplifies by roughly
+/// `limit^depth` before the outermost loop trips, occupying its thread far longer than a flat
+/// `while(true){}`. This is bounded, not infinite, and the client is still released at the
+/// wall-clock timeout with a 500; only a background thread lingers, and only for a deliberately
+/// adversarial *trusted* (operator-authored) script. Deep recursion is separately bounded by Boa's
+/// default `recursion_limit` (512). Fully closing the loop-amplification would need a Boa fuel /
+/// interrupt mechanism that 0.20 lacks.
 const JS_SCRIPT_LOOP_ITERATION_LIMIT: u64 = 10_000_000;
 
 /// Inner function that does the actual JavaScript execution
