@@ -237,6 +237,7 @@ mod tests {
             json!([{"and": [{"equals": {"method": "GET"}}, {"equals": {"path": "/andp"}}]}]), // 2 and -> fallback
             json!([{"equals": {"path": "/exact"}}, {"startsWith": {"path": "/exa"}}]), // 3 two path preds
             json!([{"contains": {"path": "/seg"}}]),                                   // 4 contains
+            json!([{"equals": {"path": "/pm2"}}, {"equals": {"method": "GET"}}]), // 5 path anchor + separate method predicate
         ]);
         let no_headers: HashMap<String, String> = HashMap::new();
         let requests: &[(&str, &str)] = &[
@@ -251,6 +252,8 @@ mod tests {
             ("GET", "/x/seg/y"),
             ("GET", "/exact/"), // trailing slash is not equal to /exact
             ("GET", "/andp/extra"),
+            ("GET", "/pm2"), // stub 5: path anchor indexes it, separate method predicate holds
+            ("POST", "/pm2"), // path-anchored candidate, but Stage-2 method predicate rejects -> None
         ];
         for (m, p) in requests {
             let linear =
@@ -342,6 +345,35 @@ mod tests {
                 None
             )),
             Some(0)
+        );
+    }
+
+    // AC2: a match-all (empty-predicate) stub declared BEFORE an anchored stub must still win —
+    // the index (fallback, low index) can never let a higher-index anchor jump declaration order.
+    #[test]
+    fn match_all_before_anchor_wins() {
+        let imp = imposter(&[
+            json!([]),                           // 0 match-all (fallback)
+            json!([{"equals": {"path": "/a"}}]), // 1 exact anchor
+        ]);
+        let no_headers: HashMap<String, String> = HashMap::new();
+        // /a matches both; the earlier match-all (stub 0) wins in both the indexed and linear paths.
+        assert_eq!(
+            idx(imp.find_matching_stub_linear("GET", "/a", &no_headers, None, None, None, None)),
+            Some(0)
+        );
+        assert_eq!(
+            idx(imp.find_matching_stub_with_client(
+                "GET",
+                "/a",
+                &no_headers,
+                None,
+                None,
+                None,
+                None
+            )),
+            Some(0),
+            "the earlier match-all stub must win over the anchored stub"
         );
     }
 }
