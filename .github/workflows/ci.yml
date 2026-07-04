@@ -66,6 +66,19 @@ jobs:
       - name: rift-ffi C-ABI smoke test
         run: ./scripts/verify-ffi-cdylib.sh
 
+  docs-coverage:
+    name: Docs Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Issue #280 (Section E): fail if a CLI flag / env var / subcommand exists in code but
+      # isn't documented under docs/. --self-test first proves the checker isn't a no-op.
+      - name: Verify docs cover the CLI/env reference surface
+        run: |
+          ./scripts/verify-docs-coverage.sh --self-test
+          ./scripts/verify-docs-coverage.sh
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
