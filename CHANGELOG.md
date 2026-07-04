@@ -11,6 +11,13 @@ record.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-07-04
+
+### Fixed
+- Release artifacts now include the `rift-verify` binary — the platform tarballs, the Windows zip, and the Homebrew formula ship it alongside `rift`, `rift-lint`, and `rift-tui`. It was built by the release job but never packaged, so no prior release contained it.
+
+## [0.9.0] - 2026-07-04
+
 ### Added
 - HTTP/2 and h2c support via hyper auto-negotiation on HTTP and HTTPS listeners; `RIFT_DISABLE_HTTP2` escape hatch forces HTTP/1-only.
 - Socket tuning: `TCP_NODELAY` is on by default, with `RIFT_TCP_NODELAY` and `RIFT_TCP_BACKLOG` knobs.
@@ -114,7 +121,9 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/EtaCassiopeia/rift/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/EtaCassiopeia/rift/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/EtaCassiopeia/rift/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/EtaCassiopeia/rift/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/EtaCassiopeia/rift/compare/v0.5.0...v0.6.0
