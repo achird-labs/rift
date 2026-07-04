@@ -641,8 +641,15 @@ async fn handle_request_inner(
                             }
                             // Behave as if decorate was absent: keep the original multi-value
                             // `headers` and pre-decorate body/status rather than serving a folded,
-                            // undecorated response.
-                            Err(e) => warn!("Decorate script error: {e}"),
+                            // undecorated response. Attach a visible signal so the skipped behavior
+                            // isn't a silent success (issue #323); the body is still served (#269).
+                            Err(e) => {
+                                warn!("Decorate script error: {e}");
+                                headers.insert(
+                                    "x-rift-decorate-error".to_string(),
+                                    vec!["true".to_string()],
+                                );
+                            }
                         }
                     }
 
@@ -652,7 +659,15 @@ async fn handle_request_inner(
                     for cmd in &parsed_behaviors.shell_transform {
                         match apply_shell_transform(cmd, &request_context, &body, status) {
                             Ok(transformed) => body = transformed,
-                            Err(e) => warn!("shellTransform command {cmd:?} failed: {e}"),
+                            // Keep the body unchanged (issue #269) but signal the failure so it
+                            // isn't a silent success (issue #323).
+                            Err(e) => {
+                                warn!("shellTransform command {cmd:?} failed: {e}");
+                                headers.insert(
+                                    "x-rift-shelltransform-error".to_string(),
+                                    vec!["true".to_string()],
+                                );
+                            }
                         }
                     }
                 }
@@ -670,6 +685,7 @@ async fn handle_request_inner(
             response = response.header("x-rift-imposter", "true");
 
             // Handle binary mode - decode base64 body if _mode is "binary"
+            let mut binary_decode_failed = false;
             let body_bytes = match response_mode {
                 ResponseMode::Binary => {
                     // Decode base64-encoded body
@@ -677,6 +693,7 @@ async fn handle_request_inner(
                         Ok(decoded) => Bytes::from(decoded),
                         Err(e) => {
                             warn!("Failed to decode base64 body: {}, using raw body", e);
+                            binary_decode_failed = true;
                             Bytes::from(body)
                         }
                     }
@@ -684,6 +701,10 @@ async fn handle_request_inner(
                 // Expand serve-time date templates ({{DAYS+N}}/{{MONTHS+N}}/{{NOW}}, issue #195).
                 ResponseMode::Text => Bytes::from(crate::extensions::apply_date_templates(&body)),
             };
+            // Signal a failed binary decode so serving the raw (still-encoded) body isn't silent (#323).
+            if binary_decode_failed {
+                response = response.header("x-rift-binary-error", "true");
+            }
 
             return Ok(response.body(Full::new(body_bytes)).unwrap_or_else(|_| {
                 build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
