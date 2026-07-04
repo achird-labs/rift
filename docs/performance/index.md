@@ -202,3 +202,56 @@ resources:
 | MockServer | Java | 1,000-3,000 | Contract testing |
 
 Rift provides 10-100x better performance while maintaining Mountebank compatibility.
+
+---
+
+## Build Tuning
+
+The shipped release profile is already aggressive:
+
+```toml
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+```
+
+For the last few percent on **self-hosted** deployments you can tune the build further. These are
+opt-in because they trade portability or compile time for throughput.
+
+### `target-cpu=native` (recommended for self-hosted)
+
+Build for the exact CPU you run on so the compiler can use the newest SIMD/AVX instructions:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+```
+
+or persist it in `.cargo/config.toml`:
+
+```toml
+[build]
+rustflags = ["-C", "target-cpu=native"]
+```
+
+**Caveat:** the resulting binary is **not portable** — it may crash with `SIGILL` on an older or
+different CPU. Use it only when you build on (or for) the same microarchitecture you deploy to; the
+published release artifacts deliberately omit it so they run everywhere.
+
+### `lto = "fat"`
+
+Fat LTO optimizes across the whole dependency graph rather than per-crate (thin). Expect **small,
+single-digit-percent** gains at the cost of a **substantially longer release build**. It is *not*
+enabled by default: the compile-time cost is not worth it for CI/release, and the win should be
+confirmed against the performance regression gate (see the CI perf gate) before adopting. To try it
+locally, set `lto = "fat"` under `[profile.release]`.
+
+### `panic = "abort"` — not adopted
+
+`panic = "abort"` removes unwinding machinery (smaller binary, marginally faster). It is
+**deliberately not used**: Rift runs each script (Boa / mlua) on a `spawn_blocking` worker so a
+buggy or non-yielding script is isolated, and a panic there is contained by the async runtime as a
+`JoinError` rather than crashing the server — which relies on unwinding. Under `panic = "abort"` a
+single bad script would abort the whole process. Adopting it would require re-validating the
+scripting and fault paths first, so it stays off pending that work.
