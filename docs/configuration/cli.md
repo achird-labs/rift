@@ -128,7 +128,16 @@ Environment variables override CLI defaults:
 | `RIFT_DEFAULT_TLS_CERT` | Default TLS certificate (PEM) for HTTPS imposters | |
 | `RIFT_DEFAULT_TLS_KEY` | Default TLS private key (PEM) | |
 | `RIFT_NO_SELF_SIGNED_TLS` | Disable self-signed TLS fallback (`true`/`false`) | `false` |
+| `RIFT_DISABLE_HTTP2` | Force HTTP/1-only listeners, disabling HTTP/2 & h2c auto-negotiation (truthy: `1`/`true`/`yes`/`on`) | off |
+| `RIFT_TCP_BACKLOG` | Listen backlog for the accept loop (positive integer) | `1024` |
+| `RIFT_TCP_NODELAY` | `TCP_NODELAY` on accepted sockets; set `false`/`0`/`off` to disable | on |
+| `NO_COLOR` | Suppress ANSI color and the decorative banner in `rift-verify` / `rift-lint` output | |
 | `RUST_LOG` | Detailed log configuration | `info` |
+
+`RIFT_DISABLE_HTTP2` is an escape hatch for clients or intermediaries that mishandle HTTP/2; see
+[HTTP/2 and h2c]({{ site.baseurl }}/mountebank/imposters/#http2-and-h2c). `RIFT_TCP_BACKLOG` and
+`RIFT_TCP_NODELAY` are socket-tuning knobs covered under
+[Performance → Runtime socket tuning]({{ site.baseurl }}/performance/#runtime-socket-tuning).
 
 ### Docker Example
 
@@ -313,6 +322,7 @@ Options:
   -c, --show-curl         Show curl commands for each test
   -v, --verbose           Verbose output with pass/fail details
   -t, --timeout <SECS>    Request timeout in seconds [default: 10]
+  -o, --output <FMT>      Output format: text (default), json
       --dry-run           Show what would be tested without making requests
       --skip-dynamic      Skip stubs with inject/proxy/script responses
       --status-only       Only verify status codes (ignore body/headers)
@@ -338,7 +348,15 @@ rift-verify --skip-dynamic
 
 # Status-only mode for cycling responses
 rift-verify --status-only
+
+# Machine-readable summary for CI (JSON on stdout, progress on stderr)
+rift-verify -o json
 ```
+
+With `-o json`, `rift-verify` writes a single summary object to stdout —
+`{ "imposters", "stubs", "tests", "passed", "failed", "skipped" }` — and routes all progress and
+banner output to stderr, so it pipes cleanly into other tools. Color and the decorative banner are
+also suppressed automatically when stdout is not a TTY (piped) or when `NO_COLOR` is set.
 
 See [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) for details.
 

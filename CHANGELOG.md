@@ -11,6 +11,27 @@ record.
 
 ## [Unreleased]
 
+### Added
+- HTTP/2 and h2c support via hyper auto-negotiation on HTTP and HTTPS listeners; `RIFT_DISABLE_HTTP2` escape hatch forces HTTP/1-only.
+- Socket tuning: `TCP_NODELAY` is on by default, with `RIFT_TCP_NODELAY` and `RIFT_TCP_BACKLOG` knobs.
+- Feature-gated `mimalloc` global allocator (default-on for `rift-http-proxy`).
+- `rift-verify -o json` machine-readable summary; ANSI/banner suppression when stdout is piped or `NO_COLOR` is set.
+- Opt-in strict behaviors: per-imposter `strictBehaviors` flag / `RIFT_STRICT_BEHAVIORS` env var returns `500` on a `decorate`/`shellTransform`/binary failure instead of the lenient fallback.
+- Opt-in `RIFT_STRICT_FLOW_STORE` env var raises on script flow-store op failures in all three engines.
+- `flow_store.last_error()` lets scripts distinguish a down backend from an empty result.
+- Script wall-clock timeout (`_rift.scriptEngine.timeoutMs`, default 5000 ms) plus JS loop-iteration and recursion bounds.
+
+### Changed
+- `POST /admin/reload` is now incremental (diff-based): unchanged imposters and stubs keep their runtime state, and the response reports `created`/`replaced`/`stubPatched`/`deleted`.
+- Top-level `fault` responses reset the connection at the transport level (Mountebank parity) instead of returning HTTP 502.
+- `decorate`/`shellTransform`/binary behavior failures are signaled via `x-rift-<behavior>-error` response headers instead of being served silently.
+- Bare `jsonpath` selectors (no leading `$`) are treated as root-relative.
+- Flat stub responses (top-level `statusCode`/`headers`/`body`, no `is` wrapper) are accepted and served identically to the wrapped form.
+
+### Fixed
+- An unknown `flowState` backend, or an unreachable/misconfigured redis flow-store, now fails imposter creation with `400` instead of silently downgrading to a no-op store.
+- Runaway `_rift.script` execution is bounded so it can no longer wedge the engine.
+
 ## [0.8.0] - 2026-07-01
 
 ### Added

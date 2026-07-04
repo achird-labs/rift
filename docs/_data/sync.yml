@@ -6,6 +6,6 @@
 #   2. Update the affected pages.
 #   3. Bump this file AND the version in _config.yml footer_content in the same PR.
 release: v0.8.0
-commit: 54eb2dfebdc3778edf358d6c28ca6a29697d0569
-date: 2026-07-01
+commit: 912e23c198243af81a18960ad0d409ef49964bef
+date: 2026-07-04
 tracking_issue: 280

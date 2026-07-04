@@ -176,6 +176,10 @@ Match specific values in JSON bodies using JSONPath. The `jsonpath` selector is 
 }
 ```
 
+A leading `$` is optional. A selector that does not start with `$` is treated as **root-relative**:
+`user.name` is normalized to `$.user.name`, and `[0]` to `$[0]`. This applies wherever a `jsonpath`
+selector is used — predicates and the `copy` behavior's `jsonpath` extraction alike.
+
 ### JSONPath Operators
 
 ```json

@@ -68,6 +68,22 @@ curl -X POST http://localhost:2525/imposters \
 | `cert` | string | HTTPS only | PEM-encoded certificate |
 | `mutualAuth` | boolean | No | Require client certificate |
 
+### HTTP/2 and h2c
+
+Rift auto-negotiates the HTTP version — you don't configure it per imposter:
+
+- **HTTPS imposters** advertise `h2` and `http/1.1` via TLS ALPN, so an HTTP/2-capable client gets
+  HTTP/2 and everything else falls back to HTTP/1.1.
+- **Plain HTTP imposters** accept **h2c** (cleartext HTTP/2 via prior-knowledge) alongside HTTP/1 —
+  the listener detects the HTTP/2 preface and upgrades automatically.
+
+This is on by default and backward-compatible with HTTP/1 clients. Two things force HTTP/1-only:
+
+- an imposter that uses any **TCP fault** (`_rift.fault.tcp` or a top-level `fault`), because a
+  connection-level abort is incompatible with HTTP/2 multiplexing; and
+- setting the **`RIFT_DISABLE_HTTP2`** environment variable (truthy: `1`/`true`/`yes`/`on`), which
+  forces every listener — HTTP and HTTPS, imposter, admin, and metrics — down to HTTP/1.
+
 ### Auto-Port Assignment
 
 If you omit the `port` field, Rift will automatically assign an available port from the dynamic range (49152-65535):

@@ -174,8 +174,46 @@ Simulate network-level failures:
 }
 ```
 
-TCP fault types:
-- `CONNECTION_RESET_BY_PEER` - RST packet (connection reset)
+TCP fault types (each accepts a WireMock-style canonical name or a short alias):
+
+| Fault | Aliases | Effect |
+|:------|:--------|:-------|
+| `CONNECTION_RESET_BY_PEER` | `reset` | Real TCP reset (RST) — the connection is aborted |
+| `EMPTY_RESPONSE` | `empty` | Close the connection with no bytes sent |
+| `RANDOM_DATA_THEN_CLOSE` | `random`, `garbage` | Write random bytes, then close |
+| `MALFORMED_RESPONSE_CHUNK` | `malformed` | Send a status line + a malformed chunked body, then close |
+
+These are real transport-level events applied beneath TLS, so HTTPS imposters get a genuine socket
+fault too. Because a connection-level fault aborts the whole socket, an imposter that uses any TCP
+fault is served over **HTTP/1 only** (HTTP/2 multiplexing is incompatible with mid-stream connection
+aborts).
+
+---
+
+## Top-Level Fault Response (Mountebank Parity)
+
+Mountebank lets a stub response be a bare `fault` instead of an `is`/`proxy`/`inject` body. Rift
+supports the same shape, and a top-level fault now **resets the connection at the transport level**
+rather than returning an HTTP 502 (Mountebank parity, issue #362):
+
+```json
+{
+  "stubs": [{
+    "predicates": [{ "equals": { "path": "/api/flaky" } }],
+    "responses": [{
+      "fault": "CONNECTION_RESET_BY_PEER"
+    }]
+  }]
+}
+```
+
+A client hitting this stub sees a transport error (connection reset), not a response. The recognized
+fault strings are the same set as `_rift.fault.tcp` above (`CONNECTION_RESET_BY_PEER`,
+`EMPTY_RESPONSE`, `RANDOM_DATA_THEN_CLOSE`, `MALFORMED_RESPONSE_CHUNK`, plus their aliases). An
+unrecognized fault string is a configuration error and yields `500 Unknown fault: <value>`.
+
+> **Behavior change:** before v0.8.0 a top-level `fault` returned a framed HTTP `502`. It now
+> performs a real connection reset/close, matching Mountebank's transport-fault semantics.
 
 ### Fault Precedence
 

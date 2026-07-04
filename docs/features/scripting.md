@@ -359,6 +359,52 @@ return {
 
 ---
 
+## Execution Limits
+
+`_rift.script` execution is bounded so a runaway script cannot wedge the engine.
+
+- **Wall-clock timeout.** Each script runs under a deadline — `_rift.scriptEngine.timeoutMs` if
+  configured, otherwise **5000 ms**. Rhai and Lua are interrupted mid-run when the deadline passes.
+- **JavaScript (Boa) bounds.** The Boa interpreter cannot be interrupted per-instruction, so it is
+  bounded structurally instead: a loop-iteration limit of **10,000,000 iterations per call frame**
+  and a recursion limit of **512**. The client is still released at the wall-clock timeout with an
+  error; a pathological nested loop may keep a background worker busy a little longer, but it cannot
+  run unbounded.
+- **On timeout or error** — a compile error, a runtime error, or exceeding a bound — the response is
+  `500 Internal Server Error` carrying an `x-rift-script-error: true` header.
+
+```json
+{
+  "_rift": {
+    "scriptEngine": { "timeoutMs": 2000 }
+  }
+}
+```
+
+## Flow-Store Error Semantics
+
+By **default** a flow-store backend failure (e.g. a Redis outage mid-request) is **lenient**: the
+failing op returns its empty fallback (`()` / `nil` / `null`, `false`, or `0`) and the script keeps
+running. So a script can't tell "key genuinely absent" from "backend down" by the return value
+alone — use `last_error()` for that:
+
+```rhai
+let v = flow_store.get("flow-1", "attempts");
+if flow_store.last_error() != () {
+  // the backend failed on the last op — v is a fallback, not real data
+}
+```
+
+`last_error()` returns the most recent backend error (or `()` / `nil` / `null` when the last op
+succeeded) and is reset at the start of every script execution. The call syntax follows each engine:
+`flow_store.last_error()` (Rhai), `flow_store:last_error()` (Lua), `flow_store.last_error()` (JS).
+
+Set the **`RIFT_STRICT_FLOW_STORE`** environment variable (truthy: `1`/`true`/`yes`/`on`) to make a
+flow-store op failure **raise** a script error in all three engines instead of returning a fallback.
+The raised error propagates to the standard script-error path (`500` with `x-rift-script-error`).
+
+---
+
 ## Engine Comparison
 
 | Feature | JavaScript | Rhai | Lua |

@@ -190,6 +190,23 @@ curl -X POST http://localhost:2525/imposters \
   -d @recorded.json
 ```
 
+### Flat Response Form
+
+Rift accepts a stub response in **flat form** — `statusCode`, `headers`, and `body` at the top level
+of the response object, with no `is` wrapper — and serves it identically to the wrapped form. This
+matters when replaying recorded or externally-generated mocks that emit flat responses:
+
+```json
+// Flat form (no "is" wrapper) — accepted and served as a 200 with the body
+{ "statusCode": 200, "body": "recorded" }
+
+// Equivalent to the canonical wrapped form
+{ "is": { "statusCode": 200, "body": "recorded" } }
+```
+
+`statusCode` defaults to `200` when omitted. If both a top-level field and an explicit `is` are
+present, `is` takes precedence.
+
 ---
 
 ## Modifying Proxied Responses

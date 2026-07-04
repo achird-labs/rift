@@ -205,6 +205,35 @@ Rift provides 10-100x better performance while maintaining Mountebank compatibil
 
 ---
 
+## Runtime Socket Tuning
+
+Rift tunes accepted sockets for low latency out of the box and exposes a couple of knobs via
+environment variables:
+
+| Variable | Default | Effect |
+|:---------|:--------|:-------|
+| `RIFT_TCP_NODELAY` | on | `TCP_NODELAY` is set on every accepted socket (disables Nagle's algorithm) for lower request latency. Set `false`/`0`/`off` to disable. |
+| `RIFT_TCP_BACKLOG` | `1024` | Listen backlog (queue depth) for the accept loop. A larger backlog absorbs bigger connection bursts. Non-positive or unparsable values fall back to the default. |
+
+These apply to both the imposter and proxy accept loops.
+
+## Memory Allocator (mimalloc)
+
+The `rift-http-proxy` binary uses the [mimalloc](https://github.com/microsoft/mimalloc) global
+allocator by default — it improves throughput under the allocation-heavy request path. It is a
+Cargo feature named `mimalloc`, enabled in the binary's default feature set:
+
+```bash
+# Default build — mimalloc is on
+cargo build --release
+
+# Drop it (e.g. for a cross-compile or FFI build) by opting out of default features
+cargo build --release --no-default-features --features redis-backend,lua,javascript
+```
+
+Only the `rift-http-proxy` binary is affected; `rift-core` and the FFI crate use the system
+allocator.
+
 ## Build Tuning
 
 The shipped release profile is already aggressive:

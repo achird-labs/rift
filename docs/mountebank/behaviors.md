@@ -502,6 +502,47 @@ When multiple behaviors are defined, they execute in this order:
 
 ---
 
+## Error Semantics
+
+When a transforming behavior fails — a `decorate` function throws, a `shellTransform` command exits
+non-zero, or a `binary`/base64 body can't be decoded — Rift signals the failure rather than failing
+silently.
+
+**Default (lenient).** The fallback response (the un-transformed body) is still served with its
+normal status, and a header flags what failed:
+
+| Behavior | Failure header |
+|:---------|:---------------|
+| `decorate` | `x-rift-decorate-error: true` |
+| `shellTransform` | `x-rift-shelltransform-error: true` |
+| `binary` (base64) | `x-rift-binary-error: true` |
+
+**Strict mode.** Set the per-imposter `strictBehaviors` flag (or the `RIFT_STRICT_BEHAVIORS`
+environment variable, truthy: `1`/`true`/`yes`/`on`) to turn a behavior failure into a
+`500 Internal Server Error` — the failing behavior no longer serves a fallback. The response still
+carries the matching `x-rift-<behavior>-error` header. The per-imposter flag and the env var combine
+with **OR**: either being set forces strict mode. The default is lenient (both unset).
+
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "strictBehaviors": true,
+  "stubs": [{
+    "responses": [{
+      "is": { "statusCode": 200, "body": "Hello" },
+      "_behaviors": {
+        "decorate": "function(request, response) { throw new Error('boom'); }"
+      }
+    }]
+  }]
+}
+```
+
+With `strictBehaviors` on, the throwing `decorate` above returns `500` instead of serving `"Hello"`.
+
+---
+
 ## Best Practices
 
 1. **Use wait sparingly** - Only for testing timeout handling

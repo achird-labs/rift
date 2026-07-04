@@ -36,6 +36,19 @@ is resolved exactly as for [Spaces]({{ site.baseurl }}/features/spaces/).
 With `backend: "redis"` you may also set `url`, `poolSize` (default 10), and `keyPrefix`
 (default `"rift:"`).
 
+### Backend configuration is fail-loud
+
+An explicit `flowState` block that can't be honored now **fails imposter creation** with
+`400 Bad Request` rather than silently downgrading to a no-op store:
+
+- An **unknown backend** string (anything other than `inmemory` or `redis`) is rejected at
+  construction (issue #381) — previously it logged a warning and became a no-op.
+- A **`redis` backend that can't be created** — no redis config block, a connection/pool failure, or
+  a binary built without the `redis-backend` feature — fails creation too (issue #369).
+
+Only the *implicit* no-op case is silent: an imposter with **no** `flowState` block (and no scenario
+stubs) uses a no-op store where values never persist, exactly as before.
+
 ---
 
 ## Script API
@@ -51,6 +64,7 @@ syntax). All operations take the flow id explicitly.
 | `flow_store.delete(flow_id, key)` | remove a key |
 | `flow_store.increment(flow_id, key)` | atomically increment, returns the new number |
 | `flow_store.set_ttl(flow_id, ttl_seconds)` | override the TTL for a flow |
+| `flow_store.last_error()` | last backend error (or `()` / `nil` / `null` if the last op succeeded) — see [Scripting → Flow-Store Error Semantics]({{ site.baseurl }}/features/scripting/#flow-store-error-semantics) |
 
 ---
 
