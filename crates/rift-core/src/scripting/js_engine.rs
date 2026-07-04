@@ -1,4 +1,4 @@
-use crate::extensions::flow_state::{FlowStore, log_flow_err};
+use crate::extensions::flow_state::{FlowStore, flow_result, strict_flow_store};
 use crate::scripting::{FaultDecision, ScriptRequest};
 use anyhow::{Result, anyhow};
 use boa_engine::{
@@ -372,6 +372,22 @@ fn create_request_object(context: &mut Context, request: &ScriptRequest) -> Resu
 
 // Native function implementations that use thread-local storage
 
+/// Map a flow-store op outcome to a JS value: a success yields the value; a failure raises a native
+/// error in strict mode (issue #376) or returns the lenient fallback (issue #322). `None` (no store
+/// bound on this thread) also uses the fallback.
+fn js_flow_outcome<T: Into<JsValue>>(
+    outcome: Option<std::result::Result<T, String>>,
+    fallback: T,
+) -> JsResult<JsValue> {
+    match outcome {
+        Some(Ok(v)) => Ok(v.into()),
+        Some(Err(msg)) if strict_flow_store() => {
+            Err(JsNativeError::error().with_message(msg).into())
+        }
+        Some(Err(_)) | None => Ok(fallback.into()),
+    }
+}
+
 fn flow_store_get(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let flow_id = args
         .first()
@@ -384,14 +400,15 @@ fn flow_store_get(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsRes
         .map(|s| s.to_std_string_escaped())
         .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
 
-    let result = with_current_flow_store(|store| store.get(&flow_id, &key));
+    let outcome = with_current_flow_store(|store| flow_result("get", store.get(&flow_id, &key)));
 
-    match result {
-        Some(store_result) => match log_flow_err("get", None, store_result) {
-            Some(value) => json_to_js_result(ctx, &value),
-            None => Ok(JsValue::null()),
-        },
-        None => Ok(JsValue::null()),
+    match outcome {
+        Some(Ok(Some(value))) => json_to_js_result(ctx, &value),
+        Some(Ok(None)) => Ok(JsValue::null()),
+        Some(Err(msg)) if strict_flow_store() => {
+            Err(JsNativeError::error().with_message(msg).into())
+        }
+        Some(Err(_)) | None => Ok(JsValue::null()),
     }
 }
 
@@ -409,16 +426,11 @@ fn flow_store_set(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsRes
     let value = args.get(2).cloned().unwrap_or(JsValue::null());
 
     let json_value = js_to_json(ctx, &value)?;
-    let result = with_current_flow_store(|store| {
-        log_flow_err(
-            "set",
-            false,
-            store.set(&flow_id, &key, json_value).map(|()| true),
-        )
-    })
-    .unwrap_or(false);
+    let outcome = with_current_flow_store(|store| {
+        flow_result("set", store.set(&flow_id, &key, json_value).map(|()| true))
+    });
 
-    Ok(JsValue::from(result))
+    js_flow_outcome(outcome, false)
 }
 
 fn flow_store_exists(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
@@ -433,12 +445,10 @@ fn flow_store_exists(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> J
         .map(|s| s.to_std_string_escaped())
         .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
 
-    let result = with_current_flow_store(|store| {
-        log_flow_err("exists", false, store.exists(&flow_id, &key))
-    })
-    .unwrap_or(false);
+    let outcome =
+        with_current_flow_store(|store| flow_result("exists", store.exists(&flow_id, &key)));
 
-    Ok(JsValue::from(result))
+    js_flow_outcome(outcome, false)
 }
 
 fn flow_store_delete(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
@@ -453,12 +463,11 @@ fn flow_store_delete(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> J
         .map(|s| s.to_std_string_escaped())
         .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
 
-    let result = with_current_flow_store(|store| {
-        log_flow_err("delete", false, store.delete(&flow_id, &key).map(|()| true))
-    })
-    .unwrap_or(false);
+    let outcome = with_current_flow_store(|store| {
+        flow_result("delete", store.delete(&flow_id, &key).map(|()| true))
+    });
 
-    Ok(JsValue::from(result))
+    js_flow_outcome(outcome, false)
 }
 
 fn flow_store_increment(
@@ -477,12 +486,10 @@ fn flow_store_increment(
         .map(|s| s.to_std_string_escaped())
         .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
 
-    let result = with_current_flow_store(|store| {
-        log_flow_err("increment", 0, store.increment(&flow_id, &key))
-    })
-    .unwrap_or(0);
+    let outcome =
+        with_current_flow_store(|store| flow_result("increment", store.increment(&flow_id, &key)));
 
-    Ok(JsValue::from(result))
+    js_flow_outcome(outcome, 0i64)
 }
 
 fn flow_store_set_ttl(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
@@ -497,16 +504,14 @@ fn flow_store_set_ttl(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> 
         .map(|n| n as i64)
         .ok_or_else(|| JsNativeError::typ().with_message("ttl_seconds must be a number"))?;
 
-    let result = with_current_flow_store(|store| {
-        log_flow_err(
+    let outcome = with_current_flow_store(|store| {
+        flow_result(
             "setTtl",
-            false,
             store.set_ttl(&flow_id, ttl_seconds).map(|()| true),
         )
-    })
-    .unwrap_or(false);
+    });
 
-    Ok(JsValue::from(result))
+    js_flow_outcome(outcome, false)
 }
 
 fn flow_store_last_error(
