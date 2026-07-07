@@ -53,7 +53,7 @@ Each mirrors the corresponding admin-HTTP handler exactly (same `ImposterManager
 
 | Function | Signature | Returns |
 |---|---|---|
-| `rift_flow_state_get` | `char* rift_flow_state_get(RiftHandle* h, uint16_t port, const char* flow_id, const char* key)` | JSON `{"flowId","key","value"}` (**caller frees**), or `NULL` if unknown/absent. |
+| `rift_flow_state_get` | `char* rift_flow_state_get(RiftHandle* h, uint16_t port, const char* flow_id, const char* key)` | JSON envelope `{"found","flowId","key","value"}` (**caller frees**); `found:false` (with `value:null`) is an absent key, `NULL` is returned **only** on error. |
 | `rift_flow_state_put` | `int rift_flow_state_put(RiftHandle* h, uint16_t port, const char* flow_id, const char* key, const char* value_json)` | `0` on success, `-1` on error. `value_json` is the bare JSON value. |
 | `rift_flow_state_delete` | `int rift_flow_state_delete(RiftHandle* h, uint16_t port, const char* flow_id, const char* key)` | `0` on success, `-1` on error. |
 | `rift_space_add_stub` | `int rift_space_add_stub(RiftHandle* h, uint16_t port, const char* flow_id, const char* stub_json)` | `0` on success, `-1` on error. The stub's `space` is set from `flow_id`. |
@@ -61,9 +61,10 @@ Each mirrors the corresponding admin-HTTP handler exactly (same `ImposterManager
 | `rift_space_delete` | `int rift_space_delete(RiftHandle* h, uint16_t port, const char* flow_id)` | `0` on success, `-1` on error. One-call per-space teardown (scoped stubs + recorded + scenario state). |
 | `rift_space_recorded` | `char* rift_space_recorded(RiftHandle* h, uint16_t port, const char* flow_id)` | The requests recorded for that space (header-filtered `received`) as a JSON array (**caller frees**), or `NULL` on error. |
 
-`rift_flow_state_get` returns `NULL` both when the key is absent and on error — check
-`rift_last_error` (it reads `flow-state key not found` for a genuine absence) before treating a
-`NULL` as "unset".
+`rift_flow_state_get` never conflates "absent" with "failed": an absent key returns the envelope
+with `found:false` (a normal outcome, `rift_last_error` untouched), and `NULL` is reserved strictly
+for a genuine error — so a consumer treats `found:false` as "unset" and `NULL` as a read failure,
+with no need to parse `rift_last_error`.
 
 Errors set `rift_last_error` like the data-plane functions. Together with the data plane
 (`rift_create_imposter`/`rift_replace_stubs`/`rift_recorded`/`rift_delete_imposter`), these cover the
