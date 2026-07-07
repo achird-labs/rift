@@ -8,7 +8,11 @@ use crate::admin_api::{AdminApiServer, DEFAULT_ADMIN_PORT, RunningAdminApi};
 use crate::config_loader::{self, ConfigSource};
 use crate::extensions::metrics;
 use crate::imposter::{ImposterConfig, ImposterManager, TlsDefaults};
+use crate::intercept::InterceptListener;
+use crate::intercept_rules::{InterceptRules, InterceptState};
+use anyhow::Context;
 use clap::{Parser, Subcommand};
+use rift_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -128,6 +132,20 @@ pub struct Cli {
     /// instead of serving with a generated self-signed cert (issue #206)
     #[arg(long, env = "RIFT_NO_SELF_SIGNED_TLS")]
     pub no_self_signed_tls: bool,
+
+    /// Start a TLS-MITM intercept/redirect proxy listener on this port (epic #394). Off when
+    /// unset. Configure rules and export the CA via the admin API's `/intercept/*` routes.
+    #[arg(long, value_name = "PORT", env = "RIFT_INTERCEPT_PORT")]
+    pub intercept_port: Option<u16>,
+
+    /// PEM CA certificate for interception. Used with `--intercept-ca-key`; a CA is generated
+    /// in-memory when both are omitted.
+    #[arg(long, value_name = "FILE", env = "RIFT_INTERCEPT_CA_CERT")]
+    pub intercept_ca_cert: Option<PathBuf>,
+
+    /// PEM CA private key for interception. Required together with `--intercept-ca-cert`.
+    #[arg(long, value_name = "FILE", env = "RIFT_INTERCEPT_CA_KEY")]
+    pub intercept_ca_key: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -287,8 +305,72 @@ impl ServerBuilder {
         } else if let Some(datadir) = cli.datadir {
             server = server.with_config_source(ConfigSource::Dir(datadir));
         }
-        let admin = server.bind().await?;
-        Ok(RunningServer { admin, metrics })
+
+        // Optional intercept/TLS-MITM listener (epic #394). The rule store and CA are shared with
+        // the admin server so `/intercept/*` verbs configure the same listener.
+        let intercept = match cli.intercept_port {
+            Some(intercept_port) => {
+                let ca = Arc::new(load_or_generate_ca(
+                    cli.intercept_ca_cert.as_ref(),
+                    cli.intercept_ca_key.as_ref(),
+                )?);
+                let rules = InterceptRules::new();
+                server = server.with_intercept(Arc::new(InterceptState {
+                    rules: rules.clone(),
+                    ca: ca.clone(),
+                }));
+                let intercept_addr: SocketAddr = format!("{host}:{intercept_port}").parse()?;
+                let resolver = Arc::new(SniCertResolver::new(ca));
+                let listener = InterceptListener::bind(intercept_addr, resolver, rules).await?;
+                info!(
+                    "Rift intercept proxy listening (HTTPS forward-proxy) on {}",
+                    listener.local_addr()
+                );
+                Some(listener)
+            }
+            None => None,
+        };
+
+        let admin = match server.bind().await {
+            Ok(admin) => admin,
+            Err(e) => {
+                // Don't orphan the listeners already started if the admin bind fails — start() is
+                // an embedding seam and callers may retry after an error.
+                if let Some(intercept) = intercept {
+                    intercept.shutdown().await;
+                }
+                if let Some(metrics) = metrics {
+                    metrics.shutdown().await;
+                }
+                return Err(e);
+            }
+        };
+        Ok(RunningServer {
+            admin,
+            metrics,
+            intercept,
+        })
+    }
+}
+
+/// Build the intercept CA: load it from PEM when both cert and key are given, generate one when
+/// neither is, and reject a half-configured pair.
+fn load_or_generate_ca(
+    cert: Option<&PathBuf>,
+    key: Option<&PathBuf>,
+) -> anyhow::Result<CertificateAuthority> {
+    match (cert, key) {
+        (Some(cert), Some(key)) => {
+            let cert_pem = std::fs::read_to_string(cert)
+                .with_context(|| format!("reading --intercept-ca-cert {cert:?}"))?;
+            let key_pem = std::fs::read_to_string(key)
+                .with_context(|| format!("reading --intercept-ca-key {key:?}"))?;
+            CertificateAuthority::load_pem(&cert_pem, &key_pem)
+        }
+        (None, None) => CertificateAuthority::generate(),
+        _ => anyhow::bail!(
+            "--intercept-ca-cert and --intercept-ca-key must be provided together (or both omitted to generate a CA)"
+        ),
     }
 }
 
@@ -297,6 +379,7 @@ impl ServerBuilder {
 pub struct RunningServer {
     admin: RunningAdminApi,
     metrics: Option<RunningMetrics>,
+    intercept: Option<InterceptListener>,
 }
 
 impl RunningServer {
@@ -310,6 +393,12 @@ impl RunningServer {
         self.metrics.as_ref().map(RunningMetrics::local_addr)
     }
 
+    /// The bound intercept-proxy address, if an intercept listener was started
+    /// (resolves a `:0` request to the assigned port).
+    pub fn intercept_addr(&self) -> Option<SocketAddr> {
+        self.intercept.as_ref().map(InterceptListener::local_addr)
+    }
+
     /// Run until the admin API accept loop exits — the binary's `run()` behavior. The metrics
     /// server keeps serving in the background, as it did under the previous `tokio::spawn`.
     pub async fn join(self) -> anyhow::Result<()> {
@@ -321,6 +410,9 @@ impl RunningServer {
         self.admin.shutdown().await;
         if let Some(metrics) = self.metrics {
             metrics.shutdown().await;
+        }
+        if let Some(intercept) = self.intercept {
+            intercept.shutdown().await;
         }
     }
 }
@@ -552,6 +644,47 @@ mod tests {
     fn test_no_parse_flag_accepted() {
         let cli = Cli::try_parse_from(["rift", "--noParse"]).expect("--noParse should be accepted");
         assert!(cli.no_parse);
+    }
+
+    #[test]
+    fn intercept_flags_parse() {
+        let cli = Cli::try_parse_from(["rift", "--intercept-port", "9000"]).expect("parse");
+        assert_eq!(cli.intercept_port, Some(9000));
+        let none = Cli::try_parse_from(["rift"]).expect("parse");
+        assert_eq!(none.intercept_port, None);
+    }
+
+    #[test]
+    fn load_or_generate_ca_rules() {
+        use std::path::PathBuf;
+        // Neither cert nor key: a CA is generated.
+        assert!(load_or_generate_ca(None, None).is_ok());
+        // A half-configured pair is rejected rather than silently generating.
+        let cert = PathBuf::from("ca.pem");
+        assert!(load_or_generate_ca(Some(&cert), None).is_err());
+        assert!(load_or_generate_ca(None, Some(&cert)).is_err());
+    }
+
+    #[test]
+    fn load_or_generate_ca_loads_supplied_pem() {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+        use std::io::Write;
+
+        // A real CA cert+key written to disk...
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let cert = params.self_signed(&key).unwrap();
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert.pem().as_bytes()).unwrap();
+        key_file.write_all(key.serialize_pem().as_bytes()).unwrap();
+
+        // ...is loaded, not regenerated: the CA exposes the supplied certificate.
+        let cert_path = cert_file.path().to_path_buf();
+        let key_path = key_file.path().to_path_buf();
+        let ca = load_or_generate_ca(Some(&cert_path), Some(&key_path)).expect("load supplied CA");
+        assert_eq!(ca.ca_cert_pem(), cert.pem().as_str());
     }
 
     #[test]
