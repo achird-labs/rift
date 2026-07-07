@@ -22,6 +22,9 @@ pub fn install_default_crypto_provider() {
 // ===== Admin HTTP server (control plane — server crate only) =====
 pub mod admin_api;
 
+// Inbound forward-proxy intercept listener (TLS-MITM, epic #394 slice 3)
+pub mod intercept;
+
 // Imposter config loading (--configfile / --datadir), shared with hot-reload (issue #197)
 pub mod config_loader;
 
