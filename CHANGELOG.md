@@ -11,6 +11,22 @@ record.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-07
+
+### Added
+- **Direct C-ABI over `librift_ffi` for the embedded control plane**, so a host process (e.g. a JVM
+  test harness) can drive Rift without standing up the loopback admin-HTTP server. `rift_serve_admin`
+  becomes optional.
+  - Scenario state & correlated spaces (#412): `rift_flow_state_get` / `rift_flow_state_put` /
+    `rift_flow_state_delete` and `rift_space_add_stub` / `rift_space_list_stubs` /
+    `rift_space_delete` / `rift_space_recorded` wrap the same `ImposterManager`/`Imposter` methods
+    the admin-HTTP handlers use.
+  - Intercept listener & rules (#413): `rift_start_intercept`, `rift_intercept_add_rules`,
+    `rift_intercept_list_rules`, `rift_intercept_clear_rules`, `rift_intercept_ca_pem`,
+    `rift_intercept_export_truststore` (writes a JVM-consumable trustStore to a file path), and
+    `rift_stop` for teardown — the FFI equivalent of the intercept admin API shipped in 0.10.0.
+  - Regenerated cbindgen header; documented in `docs/embedding/ffi.md`.
+
 ## [0.10.0] - 2026-07-07
 
 ### Added
@@ -129,7 +145,9 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/EtaCassiopeia/rift/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/EtaCassiopeia/rift/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/EtaCassiopeia/rift/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/EtaCassiopeia/rift/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/EtaCassiopeia/rift/compare/v0.7.0...v0.8.0
