@@ -68,6 +68,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 - [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) - Overlap detection and warnings
 - [Debug Mode]({{ site.baseurl }}/features/debug-mode/) - Request matching diagnostics
 - [TLS/HTTPS]({{ site.baseurl }}/features/tls/) - Secure connections
+- [Intercept Proxy (TLS-MITM)]({{ site.baseurl }}/features/intercept-proxy/) - Mock a hard-coded external HTTPS host without mitmproxy
 - [Metrics]({{ site.baseurl }}/features/metrics/) - Prometheus monitoring
 - [Configuration Linting]({{ site.baseurl }}/features/linting/) - Validate imposter configs before loading
 - [Terminal UI]({{ site.baseurl }}/features/tui/) - Interactive imposter management
