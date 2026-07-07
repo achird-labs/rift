@@ -918,3 +918,197 @@ fn ffi_admin_plane_error_paths() {
         rift_stop(h);
     }
 }
+
+/// Issue #410: the intercept listener + control plane entirely over FFI — start the listener,
+/// add serve + forward rules, fetch the CA, and drive an HTTPS client (trusting only that CA)
+/// through the intercept port to both a served stub and a forwarded FFI imposter.
+#[test]
+fn ffi_intercept_serve_and_forward() {
+    unsafe {
+        let h = rift_start();
+
+        // An FFI-created imposter is the target of the `forward` rule.
+        let upstream = cstr(
+            r#"{ "port": 19993, "protocol": "http",
+                 "stubs": [{ "responses": [{ "is": { "statusCode": 200, "body": "forwarded" } }] }] }"#,
+        );
+        assert_eq!(rift_create_imposter(h, upstream.as_ptr()), 19993);
+
+        // Start the intercept listener on an OS-assigned port; learn interceptPort.
+        let started = take_json(rift_start_intercept(h, cstr(r#"{"port":0}"#).as_ptr()));
+        let started: serde_json::Value = serde_json::from_str(&started).unwrap();
+        let intercept_port = started["interceptPort"].as_u64().expect("interceptPort") as u16;
+        assert!(intercept_port > 0);
+
+        // Fetch the CA (needed to trust the minted leaves).
+        let ca_pem = take_json(rift_intercept_ca_pem(h));
+        assert!(ca_pem.starts_with("-----BEGIN CERTIFICATE-----"));
+
+        // Add a serve rule and a forward rule over FFI (batch).
+        let rules = cstr(
+            r#"[ { "host": "cdn.example.com", "action": { "serve": { "statusCode": 418, "body": "served" } } },
+                 { "host": "fwd.example.com", "action": { "forward": { "port": 19993 } } } ]"#,
+        );
+        assert_eq!(rift_intercept_add_rules(h, rules.as_ptr()), 0);
+
+        // list reflects the added rules (Read completes the CRUD surface, all over FFI).
+        let listed: serde_json::Value =
+            serde_json::from_str(&take_json(rift_intercept_list_rules(h))).unwrap();
+        assert_eq!(
+            listed.as_array().unwrap().len(),
+            2,
+            "both rules are listed over FFI"
+        );
+
+        // Drive HTTPS through the intercept port with a client trusting only the intercept CA.
+        rt().block_on(async {
+            let client = reqwest::Client::builder()
+                .proxy(reqwest::Proxy::https(format!("http://127.0.0.1:{intercept_port}")).unwrap())
+                .add_root_certificate(reqwest::Certificate::from_pem(ca_pem.as_bytes()).unwrap())
+                .build()
+                .unwrap();
+
+            let served = client
+                .get("https://cdn.example.com/x")
+                .send()
+                .await
+                .expect("served");
+            assert_eq!(served.status(), 418);
+            assert_eq!(served.text().await.unwrap(), "served");
+
+            let forwarded = client
+                .get("https://fwd.example.com/y")
+                .send()
+                .await
+                .expect("forwarded");
+            assert_eq!(forwarded.status(), 200);
+            assert_eq!(forwarded.text().await.unwrap(), "forwarded");
+        });
+
+        rift_stop(h);
+    }
+}
+
+/// Export a truststore over FFI to a temp path, assert success, and return the written bytes.
+unsafe fn export_truststore_bytes(
+    h: *mut RiftHandle,
+    format: &str,
+    password: *const c_char,
+) -> Vec<u8> {
+    unsafe {
+        let path_buf =
+            std::env::temp_dir().join(format!("rift410-{}-{format}.store", std::process::id()));
+        let path = cstr(path_buf.to_str().unwrap());
+        let fmt = cstr(format);
+        assert_eq!(
+            rift_intercept_export_truststore(h, fmt.as_ptr(), password, path.as_ptr()),
+            0,
+            "export {format} succeeds"
+        );
+        let bytes = std::fs::read(&path_buf).unwrap();
+        let _ = std::fs::remove_file(&path_buf);
+        bytes
+    }
+}
+
+/// Issue #410 (AC3): truststore export writes structurally-valid PKCS#12 and JKS for the CA,
+/// with the default and a caller-supplied password; an unknown format is rejected.
+#[test]
+fn ffi_intercept_truststore_export() {
+    unsafe {
+        let h = rift_start();
+        take_json(rift_start_intercept(h, std::ptr::null()));
+
+        // PKCS#12 (default password) is DER — starts with a SEQUENCE tag.
+        let p12 = export_truststore_bytes(h, "pkcs12", std::ptr::null());
+        assert_eq!(
+            p12.first(),
+            Some(&0x30),
+            "PKCS#12 begins with a DER SEQUENCE"
+        );
+
+        // JKS (a caller-supplied password) starts with the JKS magic 0xFEEDFEED.
+        let pw = cstr("hunter2");
+        let jks = export_truststore_bytes(h, "jks", pw.as_ptr());
+        assert_eq!(jks[..4], [0xFE, 0xED, 0xFE, 0xED], "JKS magic 0xFEEDFEED");
+
+        // An unknown format is a clear error, not a silent write.
+        let bad = cstr("pem");
+        let out = cstr(
+            std::env::temp_dir()
+                .join("rift410-unused")
+                .to_str()
+                .unwrap(),
+        );
+        assert_eq!(
+            rift_intercept_export_truststore(h, bad.as_ptr(), std::ptr::null(), out.as_ptr()),
+            -1,
+            "unknown truststore format -> -1"
+        );
+
+        assert_eq!(rift_intercept_clear_rules(h), 0);
+        rift_stop(h);
+    }
+}
+
+/// Issue #410 (AC4): rift_stop shuts the intercept listener down and frees its port (no orphan),
+/// and the start response's interceptUrl matches the bound port (AC1).
+#[test]
+fn ffi_stop_shuts_down_intercept() {
+    unsafe {
+        let h = rift_start();
+        let started: serde_json::Value =
+            serde_json::from_str(&take_json(rift_start_intercept(h, std::ptr::null()))).unwrap();
+        let port = started["interceptPort"].as_u64().unwrap() as u16;
+        assert_eq!(
+            started["interceptUrl"].as_str().unwrap(),
+            format!("http://127.0.0.1:{port}")
+        );
+        rift_stop(h);
+        assert!(
+            rt().block_on(admin_refused(port)),
+            "intercept port is freed after rift_stop (no orphaned listener)"
+        );
+    }
+}
+
+/// Issue #410: opt-in — a handle that never started intercept rejects control calls (not started),
+/// and the data plane is unaffected.
+#[test]
+fn ffi_intercept_optin_not_started() {
+    unsafe {
+        let h = rift_start();
+        assert!(
+            rift_intercept_ca_pem(h).is_null(),
+            "ca_pem before start -> null"
+        );
+        assert!(
+            rift_intercept_list_rules(h).is_null(),
+            "list before start -> null"
+        );
+        assert_eq!(
+            rift_intercept_add_rules(h, cstr("[]").as_ptr()),
+            -1,
+            "add_rules before start -> -1"
+        );
+        assert_eq!(rift_intercept_clear_rules(h), -1);
+        let out = cstr("/tmp/rift410-never");
+        assert_eq!(
+            rift_intercept_export_truststore(
+                h,
+                cstr("jks").as_ptr(),
+                std::ptr::null(),
+                out.as_ptr()
+            ),
+            -1,
+            "export before start -> -1"
+        );
+        let last = rift_last_error();
+        assert!(!last.is_null(), "not-started failure records last_error");
+        rift_free(last);
+        // Data plane still works with intercept never started.
+        let cfg = cstr(r#"{ "port": 19994, "protocol": "http", "stubs": [] }"#);
+        assert_eq!(rift_create_imposter(h, cfg.as_ptr()), 19994);
+        rift_stop(h);
+    }
+}

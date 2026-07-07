@@ -142,6 +142,67 @@ int32_t rift_space_delete(RiftHandle *h, uint16_t port, const char *flow_id);
 char *rift_space_recorded(RiftHandle *h, uint16_t port, const char *flow_id);
 
 /**
+ * Start the intercept/TLS-MITM forward-proxy listener on this handle's runtime, generating an
+ * intercept CA. Returns JSON `{"interceptPort":<u16>,"interceptUrl":"http://127.0.0.1:<port>"}`
+ * the caller frees with [`rift_free`], or null on error (bad JSON, bind failure, or already
+ * started — one listener per handle). `options_json`: `{"host":"127.0.0.1","port":0}` (port 0 =
+ * OS-assigned); pass null or `{}` for defaults.
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `options_json` must be null or a valid C string.
+ */
+char *rift_start_intercept(RiftHandle *h, const char *options_json);
+
+/**
+ * Add one intercept rule (a bare object) or many (a JSON array) — same shape the
+ * `/intercept/rules` admin route accepts. Returns `0` on success, `-1` on any error.
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `rules_json` must be null or a valid C string.
+ */
+int32_t rift_intercept_add_rules(RiftHandle *h, const char *rules_json);
+
+/**
+ * Remove all intercept rules. Returns `0` on success, `-1` on any error.
+ *
+ * # Safety
+ * `h` must be a live handle (or null).
+ */
+int32_t rift_intercept_clear_rules(RiftHandle *h);
+
+/**
+ * List the current intercept rules as a JSON array the caller frees with [`rift_free`], or null
+ * on error (null handle, intercept not started, or encode failure).
+ *
+ * # Safety
+ * `h` must be a live handle (or null).
+ */
+char *rift_intercept_list_rules(RiftHandle *h);
+
+/**
+ * The intercept CA certificate as PEM, the caller frees with [`rift_free`], or null on error
+ * (null handle, or intercept not started).
+ *
+ * # Safety
+ * `h` must be a live handle (or null).
+ */
+char *rift_intercept_ca_pem(RiftHandle *h);
+
+/**
+ * Write a truststore for the intercept CA to `out_path` — a truststore is binary, so it is
+ * written to a file (the format a JVM `trustStore` consumes directly) rather than returned as a
+ * C string. `format` is `"pkcs12"` or `"jks"`; `password` may be null for the default
+ * `"changeit"`. Returns `0` on success, `-1` on any error.
+ *
+ * # Safety
+ * `h` must be a live handle (or null); the string pointers must be null or valid C strings.
+ */
+int32_t rift_intercept_export_truststore(RiftHandle *h,
+                                         const char *format,
+                                         const char *password,
+                                         const char *out_path);
+
+/**
  * Start the real admin API (and, if `metricsPort` is given, the metrics server) in-process on
  * this handle's runtime, serving over this handle's manager (issue #343).
  *

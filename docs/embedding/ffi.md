@@ -89,6 +89,27 @@ rift_free(result);
 - **Returns** (caller frees): `{"adminPort":...,"adminUrl":"...","metricsPort":...}`, or `NULL` on
   error (bad JSON, bind failure, or already serving — one admin plane per handle).
 
+## Intercept proxy over FFI
+
+Start the [intercept/TLS-MITM proxy]({{ site.baseurl }}/features/intercept-proxy/) on the handle and
+drive its whole control plane over C-ABI — no in-process admin HTTP needed. One intercept listener
+per handle; `rift_stop` shuts it down.
+
+| Function | Signature | Returns |
+|---|---|---|
+| `rift_start_intercept` | `char* rift_start_intercept(RiftHandle* h, const char* options_json)` | JSON `{"interceptPort","interceptUrl"}` (**caller frees**), or `NULL` on error (bad JSON, bind failure, already started). Generates an intercept CA. `options_json`: `{"host":"127.0.0.1","port":0}` (port 0 = OS-assigned); `NULL`/`{}` for defaults. |
+| `rift_intercept_add_rules` | `int rift_intercept_add_rules(RiftHandle* h, const char* rules_json)` | `0`/`-1`. One rule (object) or many (array), same shape as `/intercept/rules`. |
+| `rift_intercept_list_rules` | `char* rift_intercept_list_rules(RiftHandle* h)` | The current rules as a JSON array (**caller frees**), or `NULL` on error. |
+| `rift_intercept_clear_rules` | `int rift_intercept_clear_rules(RiftHandle* h)` | `0`/`-1`. |
+| `rift_intercept_ca_pem` | `char* rift_intercept_ca_pem(RiftHandle* h)` | The CA cert PEM (**caller frees**), or `NULL` on error. |
+| `rift_intercept_export_truststore` | `int rift_intercept_export_truststore(RiftHandle* h, const char* format, const char* password, const char* out_path)` | Writes a truststore to `out_path` (`format` = `"pkcs12"`/`"jks"`, `password` may be `NULL` → `"changeit"`). `0`/`-1`. A truststore is binary, so it is written to a file — the form a JVM `trustStore` consumes directly. |
+
+An embedder calls `rift_start_intercept`, reads `interceptPort`, adds rules and fetches the CA /
+truststore (all over FFI), then points a CA-trusting SUT's HTTPS proxy at `interceptPort` — with no
+loopback HTTP. `Forward { port }` rules reach any imposter on that localhost port, including
+FFI-created ones. Errors set `rift_last_error`. A handle that never calls `rift_start_intercept` is
+unaffected.
+
 ## Build identity
 
 `rift_build_info` is a **static** JSON string (never freed) — probe it to detect a v2 library and read
