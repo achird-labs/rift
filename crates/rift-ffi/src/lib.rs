@@ -29,8 +29,12 @@
 //! records the reason in [`rift_last_error`], and emits a `tracing` event.
 
 use rift_core::imposter::{ApplyReport, ImposterConfig, ImposterManager, Stub};
+use rift_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
+use rift_core::proxy::truststore::{TrustStorePassword, ca_pem, export_jks, export_pkcs12};
 use rift_http_proxy::admin_api::{AdminApiServer, RunningAdminApi};
 use rift_http_proxy::config_loader::{self, ConfigSource};
+use rift_http_proxy::intercept::InterceptListener;
+use rift_http_proxy::intercept_rules::{InterceptRule, InterceptRules, InterceptState};
 use rift_http_proxy::server::{RunningMetrics, bind_metrics_server};
 use serde_json::{Value, json};
 use std::cell::RefCell;
@@ -70,12 +74,20 @@ pub struct RiftHandle {
     runtime: Runtime,
     manager: Arc<ImposterManager>,
     admin: Mutex<Option<AdminPlane>>,
+    intercept: Mutex<Option<InterceptPlane>>,
 }
 
 /// The admin API (and optional metrics server) serving in-process for a handle (issue #343).
 struct AdminPlane {
     admin: RunningAdminApi,
     metrics: Option<RunningMetrics>,
+}
+
+/// The intercept/TLS-MITM listener serving in-process for a handle, plus the shared
+/// [`InterceptState`] (rule store + CA) its control-plane functions mutate/export (issue #410).
+struct InterceptPlane {
+    listener: InterceptListener,
+    state: InterceptState,
 }
 
 /// Borrow the handle from a raw pointer, or `None` if null.
@@ -141,6 +153,7 @@ pub extern "C" fn rift_start() -> *mut RiftHandle {
             runtime,
             manager: Arc::new(ImposterManager::new()),
             admin: Mutex::new(None),
+            intercept: Mutex::new(None),
         })),
         Err(e) => {
             set_last_error(format!("rift_start: runtime creation failed: {e}"));
@@ -575,6 +588,301 @@ pub unsafe extern "C" fn rift_space_recorded(
     }
 }
 
+// ── Intercept/TLS-MITM listener + control plane over FFI (issue #410) ────────────────────────────
+// Start an intercept forward-proxy on the handle's runtime and drive its rule store + CA export
+// entirely over C-ABI — no loopback HTTP admin plane needed. One listener per handle.
+
+/// `rift_start_intercept` options (all optional): the bind host and port.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct InterceptOptions {
+    host: Option<String>,
+    port: Option<u16>,
+}
+
+/// A single rule or a batch — `rift_intercept_add_rules` accepts either shape.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum RuleOrRules {
+    One(InterceptRule),
+    Many(Vec<InterceptRule>),
+}
+
+/// Start the intercept/TLS-MITM forward-proxy listener on this handle's runtime, generating an
+/// intercept CA. Returns JSON `{"interceptPort":<u16>,"interceptUrl":"http://127.0.0.1:<port>"}`
+/// the caller frees with [`rift_free`], or null on error (bad JSON, bind failure, or already
+/// started — one listener per handle). `options_json`: `{"host":"127.0.0.1","port":0}` (port 0 =
+/// OS-assigned); pass null or `{}` for defaults.
+///
+/// # Safety
+/// `h` must be a live handle (or null); `options_json` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_start_intercept(
+    h: *mut RiftHandle,
+    options_json: *const c_char,
+) -> *mut c_char {
+    unsafe {
+        clear_last_error();
+        let Some(handle) = handle(h) else {
+            set_last_error("rift_start_intercept: null handle");
+            return std::ptr::null_mut();
+        };
+        let opts: InterceptOptions = if options_json.is_null() {
+            InterceptOptions::default()
+        } else {
+            match c_str(options_json) {
+                Some(s) => match serde_json::from_str(s) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        set_last_error(format!("rift_start_intercept: invalid options JSON: {e}"));
+                        return std::ptr::null_mut();
+                    }
+                },
+                None => {
+                    set_last_error("rift_start_intercept: options is not valid UTF-8");
+                    return std::ptr::null_mut();
+                }
+            }
+        };
+
+        // Hold the slot across build+set so a concurrent call can't race two listeners into
+        // existence (one intercept listener per handle).
+        let mut slot = handle.intercept.lock().expect("intercept mutex poisoned");
+        if slot.is_some() {
+            set_last_error(
+                "rift_start_intercept: already started (one intercept listener per handle)",
+            );
+            return std::ptr::null_mut();
+        }
+
+        let host = opts.host.as_deref().unwrap_or("127.0.0.1");
+        let addr: std::net::SocketAddr = match format!("{host}:{}", opts.port.unwrap_or(0)).parse()
+        {
+            Ok(a) => a,
+            Err(e) => {
+                set_last_error(format!("rift_start_intercept: invalid host/port: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        let ca = match CertificateAuthority::generate() {
+            Ok(ca) => Arc::new(ca),
+            Err(e) => {
+                set_last_error(format!("rift_start_intercept: CA generation failed: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        let rules = InterceptRules::new();
+        let resolver = Arc::new(SniCertResolver::new(ca.clone()));
+        let listener =
+            match handle
+                .runtime
+                .block_on(InterceptListener::bind(addr, resolver, rules.clone()))
+            {
+                Ok(l) => l,
+                Err(e) => {
+                    set_last_error(format!("rift_start_intercept: bind failed: {e}"));
+                    warn!(error = %e, "rift_start_intercept: bind failed");
+                    return std::ptr::null_mut();
+                }
+            };
+        let intercept_port = listener.local_addr().port();
+        let response = json!({
+            "interceptPort": intercept_port,
+            "interceptUrl": format!("http://127.0.0.1:{intercept_port}"),
+        })
+        .to_string();
+        *slot = Some(InterceptPlane {
+            listener,
+            state: InterceptState { rules, ca },
+        });
+        into_c_string(response)
+    }
+}
+
+/// Add one intercept rule (a bare object) or many (a JSON array) — same shape the
+/// `/intercept/rules` admin route accepts. Returns `0` on success, `-1` on any error.
+///
+/// # Safety
+/// `h` must be a live handle (or null); `rules_json` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_intercept_add_rules(
+    h: *mut RiftHandle,
+    rules_json: *const c_char,
+) -> i32 {
+    unsafe {
+        clear_last_error();
+        let (Some(handle), Some(rules_json)) = (handle(h), c_str(rules_json)) else {
+            set_last_error("rift_intercept_add_rules: null handle or rules pointer");
+            return -1;
+        };
+        let parsed: RuleOrRules = match serde_json::from_str(rules_json) {
+            Ok(r) => r,
+            Err(e) => {
+                set_last_error(format!("rift_intercept_add_rules: invalid rule JSON: {e}"));
+                return -1;
+            }
+        };
+        let slot = handle.intercept.lock().expect("intercept mutex poisoned");
+        let Some(plane) = slot.as_ref() else {
+            set_last_error("rift_intercept_add_rules: intercept not started");
+            return -1;
+        };
+        match parsed {
+            RuleOrRules::One(rule) => plane.state.rules.add(rule),
+            RuleOrRules::Many(rules) => {
+                for rule in rules {
+                    plane.state.rules.add(rule);
+                }
+            }
+        }
+        0
+    }
+}
+
+/// Remove all intercept rules. Returns `0` on success, `-1` on any error.
+///
+/// # Safety
+/// `h` must be a live handle (or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_intercept_clear_rules(h: *mut RiftHandle) -> i32 {
+    unsafe {
+        clear_last_error();
+        let Some(handle) = handle(h) else {
+            set_last_error("rift_intercept_clear_rules: null handle");
+            return -1;
+        };
+        let slot = handle.intercept.lock().expect("intercept mutex poisoned");
+        let Some(plane) = slot.as_ref() else {
+            set_last_error("rift_intercept_clear_rules: intercept not started");
+            return -1;
+        };
+        plane.state.rules.clear();
+        0
+    }
+}
+
+/// List the current intercept rules as a JSON array the caller frees with [`rift_free`], or null
+/// on error (null handle, intercept not started, or encode failure).
+///
+/// # Safety
+/// `h` must be a live handle (or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_intercept_list_rules(h: *mut RiftHandle) -> *mut c_char {
+    unsafe {
+        clear_last_error();
+        let Some(handle) = handle(h) else {
+            set_last_error("rift_intercept_list_rules: null handle");
+            return std::ptr::null_mut();
+        };
+        let slot = handle.intercept.lock().expect("intercept mutex poisoned");
+        let Some(plane) = slot.as_ref() else {
+            set_last_error("rift_intercept_list_rules: intercept not started");
+            return std::ptr::null_mut();
+        };
+        match serde_json::to_string(&plane.state.rules.list()) {
+            Ok(json) => into_c_string(json),
+            Err(e) => {
+                set_last_error(format!("rift_intercept_list_rules: encode failed: {e}"));
+                std::ptr::null_mut()
+            }
+        }
+    }
+}
+
+/// The intercept CA certificate as PEM, the caller frees with [`rift_free`], or null on error
+/// (null handle, or intercept not started).
+///
+/// # Safety
+/// `h` must be a live handle (or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_intercept_ca_pem(h: *mut RiftHandle) -> *mut c_char {
+    unsafe {
+        clear_last_error();
+        let Some(handle) = handle(h) else {
+            set_last_error("rift_intercept_ca_pem: null handle");
+            return std::ptr::null_mut();
+        };
+        let slot = handle.intercept.lock().expect("intercept mutex poisoned");
+        let Some(plane) = slot.as_ref() else {
+            set_last_error("rift_intercept_ca_pem: intercept not started");
+            return std::ptr::null_mut();
+        };
+        into_c_string(ca_pem(&plane.state.ca))
+    }
+}
+
+/// Write a truststore for the intercept CA to `out_path` — a truststore is binary, so it is
+/// written to a file (the format a JVM `trustStore` consumes directly) rather than returned as a
+/// C string. `format` is `"pkcs12"` or `"jks"`; `password` may be null for the default
+/// `"changeit"`. Returns `0` on success, `-1` on any error.
+///
+/// # Safety
+/// `h` must be a live handle (or null); the string pointers must be null or valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_intercept_export_truststore(
+    h: *mut RiftHandle,
+    format: *const c_char,
+    password: *const c_char,
+    out_path: *const c_char,
+) -> i32 {
+    unsafe {
+        clear_last_error();
+        let (Some(handle), Some(format), Some(out_path)) =
+            (handle(h), c_str(format), c_str(out_path))
+        else {
+            set_last_error("rift_intercept_export_truststore: null handle or string pointer");
+            return -1;
+        };
+        // Null password -> the default; a present-but-invalid one is an error, not a silent default.
+        let password = if password.is_null() {
+            "changeit"
+        } else {
+            match c_str(password) {
+                Some(p) => p,
+                None => {
+                    set_last_error("rift_intercept_export_truststore: password is not valid UTF-8");
+                    return -1;
+                }
+            }
+        };
+        let slot = handle.intercept.lock().expect("intercept mutex poisoned");
+        let Some(plane) = slot.as_ref() else {
+            set_last_error("rift_intercept_export_truststore: intercept not started");
+            return -1;
+        };
+        let pw = TrustStorePassword::new(password);
+        let bytes = match format {
+            "pkcs12" => export_pkcs12(&plane.state.ca, &pw),
+            "jks" => export_jks(&plane.state.ca, &pw),
+            other => {
+                set_last_error(format!(
+                    "rift_intercept_export_truststore: unknown format '{other}' (want pkcs12/jks)"
+                ));
+                return -1;
+            }
+        };
+        let bytes = match bytes {
+            Ok(b) => b,
+            Err(e) => {
+                set_last_error(format!(
+                    "rift_intercept_export_truststore: export failed: {e}"
+                ));
+                return -1;
+            }
+        };
+        match std::fs::write(out_path, bytes) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(format!(
+                    "rift_intercept_export_truststore: writing {out_path}: {e}"
+                ));
+                warn!(error = %e, out_path, "rift_intercept_export_truststore: write failed");
+                -1
+            }
+        }
+    }
+}
+
 /// Start the real admin API (and, if `metricsPort` is given, the metrics server) in-process on
 /// this handle's runtime, serving over this handle's manager (issue #343).
 ///
@@ -880,14 +1188,23 @@ pub unsafe extern "C" fn rift_stop(h: *mut RiftHandle) {
             return;
         }
         let handle = Box::from_raw(h);
-        // Ordering (issue #343): admin/metrics listeners down first, then the manager.
+        // Ordering (issue #343/#410): admin/metrics + intercept listeners down first, then the
+        // manager.
         let plane = handle.admin.lock().expect("admin mutex poisoned").take();
+        let intercept = handle
+            .intercept
+            .lock()
+            .expect("intercept mutex poisoned")
+            .take();
         handle.runtime.block_on(async {
             if let Some(plane) = plane {
                 plane.admin.shutdown().await;
                 if let Some(metrics) = plane.metrics {
                     metrics.shutdown().await;
                 }
+            }
+            if let Some(intercept) = intercept {
+                intercept.listener.shutdown().await;
             }
             handle.manager.shutdown().await;
         });
