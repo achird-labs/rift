@@ -1,7 +1,11 @@
 //! Integration tests for RedisFlowStore using testcontainers.
 //!
-//! These tests automatically start a Redis container, so no manual Docker setup is needed.
-//! Requires Docker to be running.
+//! These tests start a throwaway Redis container via testcontainers, so **Docker must be
+//! running**. When Docker is not available they are **skipped** locally (with a note on stderr)
+//! rather than hanging and failing — so `cargo test -p rift-http-proxy` is green on a dev machine
+//! without Docker. In CI (`CI`/`GITHUB_ACTIONS` set) an unavailable Docker is a hard failure, so
+//! coverage is never silently lost. To run them locally, start Docker (e.g. `colima start` or
+//! Docker Desktop) and re-run.
 
 #[cfg(feature = "redis-backend")]
 mod tests {
@@ -11,7 +15,55 @@ mod tests {
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::redis::Redis;
 
-    async fn setup(ttl: i64) -> (testcontainers::ContainerAsync<Redis>, RedisFlowStore) {
+    /// Whether a Docker daemon is reachable, probed once. testcontainers needs Docker to start the
+    /// Redis container; probing up front lets us skip fast instead of waiting out its ~120s
+    /// container-start retry. The probe itself is bounded to 5s and killed if it exceeds that,
+    /// because `docker info` can itself hang when the CLI is installed but the daemon is down.
+    fn docker_available() -> bool {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *AVAILABLE.get_or_init(|| {
+            let Ok(mut child) = Command::new("docker")
+                .arg("info")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            else {
+                return false; // docker CLI not installed
+            };
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => return status.success(),
+                    Ok(None) if Instant::now() >= deadline => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return false; // daemon unreachable / probe hung
+                    }
+                    Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                    Err(_) => return false,
+                }
+            }
+        })
+    }
+
+    /// Start a Redis container and build a store against it. Returns `None` when Docker is
+    /// unavailable so the caller can skip — except under `CI`, where Docker is required and its
+    /// absence is a hard failure (so CI never silently loses Redis coverage).
+    async fn setup(ttl: i64) -> Option<(testcontainers::ContainerAsync<Redis>, RedisFlowStore)> {
+        if !docker_available() {
+            let in_ci = std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok();
+            assert!(
+                !in_ci,
+                "Docker is required for the Redis integration tests in CI (CI/GITHUB_ACTIONS set) but is not available"
+            );
+            eprintln!(
+                "skipping Redis integration test: Docker is not available (start Docker to run these locally)"
+            );
+            return None;
+        }
         let container = Redis::default().start().await.unwrap();
         let port = container.get_host_port_ipv4(6379).await.unwrap();
         let store = RedisFlowStore::new(
@@ -21,12 +73,14 @@ mod tests {
             ttl,
         )
         .unwrap();
-        (container, store)
+        Some((container, store))
     }
 
     #[tokio::test]
     async fn test_redis_get_set() {
-        let (_container, store) = setup(300).await;
+        let Some((_container, store)) = setup(300).await else {
+            return;
+        };
 
         store.set("flow1", "key1", json!("value1")).unwrap();
         let value = store.get("flow1", "key1").unwrap();
@@ -37,7 +91,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_increment() {
-        let (_container, store) = setup(300).await;
+        let Some((_container, store)) = setup(300).await else {
+            return;
+        };
 
         let v1 = store.increment("flow1", "counter").unwrap();
         assert_eq!(v1, 1);
@@ -53,7 +109,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_ttl() {
-        let (_container, store) = setup(2).await;
+        let Some((_container, store)) = setup(2).await else {
+            return;
+        };
 
         store.set("flow1", "key1", json!("value1")).unwrap();
         assert!(store.exists("flow1", "key1").unwrap());
@@ -66,7 +124,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_exists_delete() {
-        let (_container, store) = setup(300).await;
+        let Some((_container, store)) = setup(300).await else {
+            return;
+        };
 
         store.set("flow1", "key1", json!("value1")).unwrap();
         assert!(store.exists("flow1", "key1").unwrap());
@@ -81,7 +141,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_cas_expected_absent_applies() {
-        let (_container, store) = setup(300).await;
+        let Some((_container, store)) = setup(300).await else {
+            return;
+        };
 
         let outcome = store
             .compare_and_set("casf", "state", None, json!("paid"))
@@ -96,7 +158,9 @@ mod tests {
     // like a set() key (a dropped TTL arg would mean unbounded key growth in Redis).
     #[tokio::test]
     async fn test_redis_cas_applied_key_expires() {
-        let (_container, store) = setup(2).await;
+        let Some((_container, store)) = setup(2).await else {
+            return;
+        };
 
         let outcome = store
             .compare_and_set("casttl", "state", None, json!("paid"))
@@ -114,7 +178,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_cas_expected_present_and_conflict() {
-        let (_container, store) = setup(300).await;
+        let Some((_container, store)) = setup(300).await else {
+            return;
+        };
         store.set("casf2", "state", json!("Started")).unwrap();
 
         let outcome = store
