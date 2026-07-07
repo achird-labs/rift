@@ -11,6 +11,14 @@ record.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-07
+
+### Added
+- **Built-in intercept/redirect proxy mode (TLS-MITM).** Rift can now sit in the request path as an opt-in HTTPS forward proxy to mock an external dependency whose host the system-under-test hard-codes (e.g. a feature-flag SDK that always fetches `https://cdn.example.com/config.json`) — replacing an external mitmproxy sidecar with no committed crypto. It accepts HTTP `CONNECT`, TLS-terminates using an intercept CA (generated at startup, or loaded from PEM) that mints a per-SNI leaf certificate on demand, matches the decrypted request with the existing predicate engine, and either serves an inline stub or forwards it to an imposter port.
+  - Admin API: `POST`/`GET`/`DELETE /intercept/rules`, plus `GET /intercept/ca.pem` and `/intercept/truststore.p12` / `/intercept/truststore.jks` to export the CA cert and a ready-to-use PKCS#12 or JKS truststore (with password) for a SUT to trust.
+  - Standalone binary: `--intercept-port` (env `RIFT_INTERCEPT_PORT`) starts the listener; `--intercept-ca-cert` / `--intercept-ca-key` load an existing CA, otherwise one is generated in-memory. The rule store and CA are shared with the admin API.
+  - Documented in `docs/features/intercept-proxy.md` with a runnable end-to-end example. Non-goals: HTTP/2, WebSocket proxying, chunked request bodies, and transparent (non-`CONNECT`) interception.
+
 ## [0.9.1] - 2026-07-04
 
 ### Fixed
