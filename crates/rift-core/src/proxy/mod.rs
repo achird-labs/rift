@@ -28,6 +28,7 @@ mod server;
 pub(crate) mod tls;
 
 mod context;
+pub mod intercept_ca;
 #[cfg(test)]
 mod tests;
 
