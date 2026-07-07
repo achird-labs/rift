@@ -45,11 +45,36 @@ rift_stop(h);                     // stop and free
 | `rift_recorded` | `char* rift_recorded(RiftHandle* h, uint16_t port)` | Recorded requests as a JSON string (**caller frees** with `rift_free`), or `NULL` on error. |
 | `rift_apply_config` | `char* rift_apply_config(RiftHandle* h, const char* json)` | Reconcile the full imposter set (like `POST /admin/reload`); returns the apply report JSON (caller frees). |
 
-## In-process admin plane
+## Admin long tail over FFI (scenario state + correlated spaces)
+
+The admin "long tail" — scenario/flow-state and the correlated per-space stub plane — has direct
+C-ABI entry points, so an embedder can drive it with **zero loopback HTTP** (no `rift_serve_admin`).
+Each mirrors the corresponding admin-HTTP handler exactly (same `ImposterManager` calls, same JSON):
+
+| Function | Signature | Returns |
+|---|---|---|
+| `rift_flow_state_get` | `char* rift_flow_state_get(RiftHandle* h, uint16_t port, const char* flow_id, const char* key)` | JSON `{"flowId","key","value"}` (**caller frees**), or `NULL` if unknown/absent. |
+| `rift_flow_state_put` | `int rift_flow_state_put(RiftHandle* h, uint16_t port, const char* flow_id, const char* key, const char* value_json)` | `0` on success, `-1` on error. `value_json` is the bare JSON value. |
+| `rift_flow_state_delete` | `int rift_flow_state_delete(RiftHandle* h, uint16_t port, const char* flow_id, const char* key)` | `0` on success, `-1` on error. |
+| `rift_space_add_stub` | `int rift_space_add_stub(RiftHandle* h, uint16_t port, const char* flow_id, const char* stub_json)` | `0` on success, `-1` on error. The stub's `space` is set from `flow_id`. |
+| `rift_space_list_stubs` | `char* rift_space_list_stubs(RiftHandle* h, uint16_t port, const char* flow_id)` | JSON `{"space","stubs":[…]}` (**caller frees**), or `NULL` on error. |
+| `rift_space_delete` | `int rift_space_delete(RiftHandle* h, uint16_t port, const char* flow_id)` | `0` on success, `-1` on error. One-call per-space teardown (scoped stubs + recorded + scenario state). |
+| `rift_space_recorded` | `char* rift_space_recorded(RiftHandle* h, uint16_t port, const char* flow_id)` | The requests recorded for that space (header-filtered `received`) as a JSON array (**caller frees**), or `NULL` on error. |
+
+`rift_flow_state_get` returns `NULL` both when the key is absent and on error — check
+`rift_last_error` (it reads `flow-state key not found` for a genuine absence) before treating a
+`NULL` as "unset".
+
+Errors set `rift_last_error` like the data-plane functions. Together with the data plane
+(`rift_create_imposter`/`rift_replace_stubs`/`rift_recorded`/`rift_delete_imposter`), these cover the
+whole SPI over C-ABI — an embedded consumer needs no admin HTTP server and no loopback client.
+
+## In-process admin plane (optional)
 
 `rift_serve_admin` starts the **real** admin API (and, if `metricsPort` is set, the metrics server)
 on the handle's runtime, serving the handle's manager — so external tooling can talk to an embedded
-Rift over HTTP.
+Rift over HTTP. It is **optional**: the direct C-ABI above already covers the admin long tail; use
+`rift_serve_admin` only when you want an actual HTTP admin surface.
 
 ```c
 char* result = rift_serve_admin(h, "{\"port\":0}");

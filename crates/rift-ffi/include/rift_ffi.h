@@ -71,6 +71,77 @@ int32_t rift_delete_imposter(RiftHandle *h, uint16_t port);
 char *rift_recorded(RiftHandle *h, uint16_t port);
 
 /**
+ * Get a scenario/flow-state value as JSON `{"flowId","key","value"}` the caller frees with
+ * [`rift_free`]. Returns null if the handle/port is unknown, the key is absent, or encoding
+ * fails (reason in `rift_last_error`).
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `flow_id`/`key` must be null or valid C strings.
+ */
+char *rift_flow_state_get(RiftHandle *h, uint16_t port, const char *flow_id, const char *key);
+
+/**
+ * Set a scenario/flow-state value from a bare JSON value (`value_json`). Returns `0` on success,
+ * `-1` on any error.
+ *
+ * # Safety
+ * `h` must be a live handle (or null); the string pointers must be null or valid C strings.
+ */
+int32_t rift_flow_state_put(RiftHandle *h,
+                            uint16_t port,
+                            const char *flow_id,
+                            const char *key,
+                            const char *value_json);
+
+/**
+ * Delete a scenario/flow-state key. Returns `0` on success, `-1` on any error.
+ *
+ * # Safety
+ * `h` must be a live handle (or null); the string pointers must be null or valid C strings.
+ */
+int32_t rift_flow_state_delete(RiftHandle *h, uint16_t port, const char *flow_id, const char *key);
+
+/**
+ * Register a stub scoped to `flow_id` (its `space` is set from `flow_id`, ignoring any `space`
+ * in the JSON, mirroring the admin path). Returns `0` on success, `-1` on any error.
+ *
+ * # Safety
+ * `h` must be a live handle (or null); the string pointers must be null or valid C strings.
+ */
+int32_t rift_space_add_stub(RiftHandle *h,
+                            uint16_t port,
+                            const char *flow_id,
+                            const char *stub_json);
+
+/**
+ * List a space's scoped stubs as JSON `{"space","stubs":[…]}` the caller frees with
+ * [`rift_free`], or null on error.
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `flow_id` must be null or a valid C string.
+ */
+char *rift_space_list_stubs(RiftHandle *h, uint16_t port, const char *flow_id);
+
+/**
+ * Tear down a space in one call (its scoped stubs, recorded requests, and scenario state — never
+ * a global reset). Returns `0` on success, `-1` on any error.
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `flow_id` must be null or a valid C string.
+ */
+int32_t rift_space_delete(RiftHandle *h, uint16_t port, const char *flow_id);
+
+/**
+ * The requests recorded for `flow_id` — filtered by the space's resolved flow-id, the same
+ * resolution the space-inspection view uses (the header-filtered `received`, issue #201) — as a
+ * JSON array the caller frees with [`rift_free`], or null on error.
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `flow_id` must be null or a valid C string.
+ */
+char *rift_space_recorded(RiftHandle *h, uint16_t port, const char *flow_id);
+
+/**
  * Start the real admin API (and, if `metricsPort` is given, the metrics server) in-process on
  * this handle's runtime, serving over this handle's manager (issue #343).
  *

@@ -300,6 +300,281 @@ pub unsafe extern "C" fn rift_recorded(h: *mut RiftHandle, port: u16) -> *mut c_
     }
 }
 
+// ── Admin long tail over direct C-ABI: scenario state + correlated spaces (issue #411) ──────────
+// Each function calls the same `ImposterManager`/`Imposter` methods the admin-HTTP handlers call
+// and returns the same JSON, so an embedder can drive scenario state and correlated spaces with
+// zero loopback HTTP (no `rift_serve_admin` needed).
+
+/// Get a scenario/flow-state value as JSON `{"flowId","key","value"}` the caller frees with
+/// [`rift_free`]. Returns null if the handle/port is unknown, the key is absent, or encoding
+/// fails (reason in `rift_last_error`).
+///
+/// # Safety
+/// `h` must be a live handle (or null); `flow_id`/`key` must be null or valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_flow_state_get(
+    h: *mut RiftHandle,
+    port: u16,
+    flow_id: *const c_char,
+    key: *const c_char,
+) -> *mut c_char {
+    unsafe {
+        clear_last_error();
+        let (Some(handle), Some(flow_id), Some(key)) = (handle(h), c_str(flow_id), c_str(key))
+        else {
+            set_last_error("rift_flow_state_get: null handle or string pointer");
+            return std::ptr::null_mut();
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_flow_state_get: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        match imposter.flow_get(flow_id, key) {
+            Ok(Some(value)) => {
+                into_c_string(json!({ "flowId": flow_id, "key": key, "value": value }).to_string())
+            }
+            Ok(None) => {
+                set_last_error("rift_flow_state_get: flow-state key not found");
+                std::ptr::null_mut()
+            }
+            Err(e) => {
+                set_last_error(format!("rift_flow_state_get: {e}"));
+                warn!(error = %e, port, "rift_flow_state_get failed");
+                std::ptr::null_mut()
+            }
+        }
+    }
+}
+
+/// Set a scenario/flow-state value from a bare JSON value (`value_json`). Returns `0` on success,
+/// `-1` on any error.
+///
+/// # Safety
+/// `h` must be a live handle (or null); the string pointers must be null or valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_flow_state_put(
+    h: *mut RiftHandle,
+    port: u16,
+    flow_id: *const c_char,
+    key: *const c_char,
+    value_json: *const c_char,
+) -> i32 {
+    unsafe {
+        clear_last_error();
+        let (Some(handle), Some(flow_id), Some(key), Some(value_json)) =
+            (handle(h), c_str(flow_id), c_str(key), c_str(value_json))
+        else {
+            set_last_error("rift_flow_state_put: null handle or string pointer");
+            return -1;
+        };
+        let value = match serde_json::from_str::<Value>(value_json) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(format!("rift_flow_state_put: invalid value JSON: {e}"));
+                return -1;
+            }
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_flow_state_put: {e}"));
+                return -1;
+            }
+        };
+        match imposter.flow_set(flow_id, key, value) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(format!("rift_flow_state_put: {e}"));
+                warn!(error = %e, port, "rift_flow_state_put failed");
+                -1
+            }
+        }
+    }
+}
+
+/// Delete a scenario/flow-state key. Returns `0` on success, `-1` on any error.
+///
+/// # Safety
+/// `h` must be a live handle (or null); the string pointers must be null or valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_flow_state_delete(
+    h: *mut RiftHandle,
+    port: u16,
+    flow_id: *const c_char,
+    key: *const c_char,
+) -> i32 {
+    unsafe {
+        clear_last_error();
+        let (Some(handle), Some(flow_id), Some(key)) = (handle(h), c_str(flow_id), c_str(key))
+        else {
+            set_last_error("rift_flow_state_delete: null handle or string pointer");
+            return -1;
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_flow_state_delete: {e}"));
+                return -1;
+            }
+        };
+        match imposter.flow_delete(flow_id, key) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(format!("rift_flow_state_delete: {e}"));
+                warn!(error = %e, port, "rift_flow_state_delete failed");
+                -1
+            }
+        }
+    }
+}
+
+/// Register a stub scoped to `flow_id` (its `space` is set from `flow_id`, ignoring any `space`
+/// in the JSON, mirroring the admin path). Returns `0` on success, `-1` on any error.
+///
+/// # Safety
+/// `h` must be a live handle (or null); the string pointers must be null or valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_space_add_stub(
+    h: *mut RiftHandle,
+    port: u16,
+    flow_id: *const c_char,
+    stub_json: *const c_char,
+) -> i32 {
+    unsafe {
+        clear_last_error();
+        let (Some(handle), Some(flow_id), Some(stub_json)) =
+            (handle(h), c_str(flow_id), c_str(stub_json))
+        else {
+            set_last_error("rift_space_add_stub: null handle or string pointer");
+            return -1;
+        };
+        let mut stub = match serde_json::from_str::<Stub>(stub_json) {
+            Ok(s) => s,
+            Err(e) => {
+                set_last_error(format!("rift_space_add_stub: invalid stub JSON: {e}"));
+                return -1;
+            }
+        };
+        stub.space = Some(flow_id.to_string());
+        match handle
+            .runtime
+            .block_on(handle.manager.add_stub(port, stub, None))
+        {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(format!("rift_space_add_stub: {e}"));
+                warn!(error = %e, port, "rift_space_add_stub failed");
+                -1
+            }
+        }
+    }
+}
+
+/// List a space's scoped stubs as JSON `{"space","stubs":[…]}` the caller frees with
+/// [`rift_free`], or null on error.
+///
+/// # Safety
+/// `h` must be a live handle (or null); `flow_id` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_space_list_stubs(
+    h: *mut RiftHandle,
+    port: u16,
+    flow_id: *const c_char,
+) -> *mut c_char {
+    unsafe {
+        clear_last_error();
+        let (Some(handle), Some(flow_id)) = (handle(h), c_str(flow_id)) else {
+            set_last_error("rift_space_list_stubs: null handle or flow_id pointer");
+            return std::ptr::null_mut();
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_space_list_stubs: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        into_c_string(
+            json!({ "space": flow_id, "stubs": imposter.space_stubs(flow_id) }).to_string(),
+        )
+    }
+}
+
+/// Tear down a space in one call (its scoped stubs, recorded requests, and scenario state — never
+/// a global reset). Returns `0` on success, `-1` on any error.
+///
+/// # Safety
+/// `h` must be a live handle (or null); `flow_id` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_space_delete(
+    h: *mut RiftHandle,
+    port: u16,
+    flow_id: *const c_char,
+) -> i32 {
+    unsafe {
+        clear_last_error();
+        let (Some(handle), Some(flow_id)) = (handle(h), c_str(flow_id)) else {
+            set_last_error("rift_space_delete: null handle or flow_id pointer");
+            return -1;
+        };
+        match handle
+            .runtime
+            .block_on(handle.manager.teardown_space(port, flow_id))
+        {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(format!("rift_space_delete: {e}"));
+                warn!(error = %e, port, "rift_space_delete failed");
+                -1
+            }
+        }
+    }
+}
+
+/// The requests recorded for `flow_id` — filtered by the space's resolved flow-id, the same
+/// resolution the space-inspection view uses (the header-filtered `received`, issue #201) — as a
+/// JSON array the caller frees with [`rift_free`], or null on error.
+///
+/// # Safety
+/// `h` must be a live handle (or null); `flow_id` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_space_recorded(
+    h: *mut RiftHandle,
+    port: u16,
+    flow_id: *const c_char,
+) -> *mut c_char {
+    unsafe {
+        clear_last_error();
+        let (Some(handle), Some(flow_id)) = (handle(h), c_str(flow_id)) else {
+            set_last_error("rift_space_recorded: null handle or flow_id pointer");
+            return std::ptr::null_mut();
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_space_recorded: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        let recorded: Vec<_> = imposter
+            .get_recorded_requests()
+            .into_iter()
+            .filter(|r| imposter.resolve_flow_id_recorded(&r.headers) == flow_id)
+            .collect();
+        match serde_json::to_string(&recorded) {
+            Ok(json) => into_c_string(json),
+            Err(e) => {
+                set_last_error(format!("rift_space_recorded: encode failed: {e}"));
+                warn!(error = %e, port, "rift_space_recorded: failed to encode");
+                std::ptr::null_mut()
+            }
+        }
+    }
+}
+
 /// Start the real admin API (and, if `metricsPort` is given, the metrics server) in-process on
 /// this handle's runtime, serving over this handle's manager (issue #343).
 ///

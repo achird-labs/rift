@@ -758,3 +758,163 @@ fn ffi_serve_admin_retry_after_partial_failure_is_idempotent() {
         let _ = std::fs::remove_file(&path);
     }
 }
+
+/// Issue #411: the admin long tail — scenario/flow-state and correlated spaces — over direct
+/// C-ABI, with the same wire fidelity as the admin-HTTP handlers.
+#[test]
+fn ffi_admin_plane_round_trip() {
+    unsafe {
+        let h = rift_start();
+        assert!(!h.is_null());
+        let config = cstr(
+            r#"{ "port": 19991, "protocol": "http", "recordRequests": true,
+                 "_rift": { "flowState": { "backend": "inmemory" } }, "stubs": [] }"#,
+        );
+        let port = rift_create_imposter(h, config.as_ptr());
+        assert_eq!(port, 19991);
+
+        // --- flow state: put -> get (JSON {flowId,key,value}) -> delete -> get(null) ---
+        let flow = cstr("flow-1");
+        let key = cstr("state");
+        let val = cstr(r#""paid""#);
+        assert_eq!(
+            rift_flow_state_put(h, port, flow.as_ptr(), key.as_ptr(), val.as_ptr()),
+            0
+        );
+        let got: serde_json::Value = serde_json::from_str(&take_json(rift_flow_state_get(
+            h,
+            port,
+            flow.as_ptr(),
+            key.as_ptr(),
+        )))
+        .unwrap();
+        assert_eq!(got["flowId"], "flow-1");
+        assert_eq!(got["key"], "state");
+        assert_eq!(got["value"], "paid");
+        assert_eq!(
+            rift_flow_state_delete(h, port, flow.as_ptr(), key.as_ptr()),
+            0
+        );
+        assert!(
+            rift_flow_state_get(h, port, flow.as_ptr(), key.as_ptr()).is_null(),
+            "get after delete returns null (not found)"
+        );
+
+        // --- correlated space stubs: add -> list ({space,stubs}) -> delete -> list(empty) ---
+        let space = cstr("space-a");
+        let stub = cstr(
+            r#"{ "predicates": [{ "equals": { "path": "/x" } }], "responses": [{ "is": { "statusCode": 204 } }] }"#,
+        );
+        assert_eq!(
+            rift_space_add_stub(h, port, space.as_ptr(), stub.as_ptr()),
+            0
+        );
+        let listed: serde_json::Value =
+            serde_json::from_str(&take_json(rift_space_list_stubs(h, port, space.as_ptr())))
+                .unwrap();
+        assert_eq!(listed["space"], "space-a");
+        assert_eq!(listed["stubs"].as_array().unwrap().len(), 1);
+        assert_eq!(rift_space_delete(h, port, space.as_ptr()), 0);
+        let after: serde_json::Value =
+            serde_json::from_str(&take_json(rift_space_list_stubs(h, port, space.as_ptr())))
+                .unwrap();
+        assert_eq!(
+            after["stubs"].as_array().unwrap().len(),
+            0,
+            "teardown removed the space's stubs"
+        );
+
+        // --- header-filtered recorded (issue #201): default flow-id source is the port ---
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let _ = reqwest::get("http://127.0.0.1:19991/ping").await;
+        });
+        let matching = cstr("19991");
+        let recorded: serde_json::Value =
+            serde_json::from_str(&take_json(rift_space_recorded(h, port, matching.as_ptr())))
+                .unwrap();
+        assert_eq!(
+            recorded.as_array().unwrap().len(),
+            1,
+            "recorded filtered to the matching flow-id"
+        );
+        let other = cstr("other-flow");
+        let none: serde_json::Value =
+            serde_json::from_str(&take_json(rift_space_recorded(h, port, other.as_ptr()))).unwrap();
+        assert_eq!(
+            none.as_array().unwrap().len(),
+            0,
+            "a non-matching flow-id yields no recorded requests"
+        );
+
+        assert_eq!(rift_delete_all(h), 0);
+        rift_stop(h);
+    }
+}
+
+/// Issue #411: null-handle and unknown-port error paths map to the crate's sentinels.
+#[test]
+fn ffi_admin_plane_error_paths() {
+    unsafe {
+        let flow = cstr("f");
+        let key = cstr("k");
+        let one = cstr("1");
+        // Null handle -> the documented sentinel for each return shape...
+        assert!(
+            rift_flow_state_get(std::ptr::null_mut(), 1, flow.as_ptr(), key.as_ptr()).is_null()
+        );
+        // ...and the failure records `last_error` (reading it clears it).
+        let err = rift_last_error();
+        assert!(!err.is_null(), "flow_state_get failure records last_error");
+        rift_free(err);
+
+        assert_eq!(
+            rift_flow_state_put(
+                std::ptr::null_mut(),
+                1,
+                flow.as_ptr(),
+                key.as_ptr(),
+                one.as_ptr()
+            ),
+            -1
+        );
+        assert_eq!(
+            rift_flow_state_delete(std::ptr::null_mut(), 1, flow.as_ptr(), key.as_ptr()),
+            -1
+        );
+        assert_eq!(
+            rift_space_add_stub(std::ptr::null_mut(), 1, flow.as_ptr(), key.as_ptr()),
+            -1
+        );
+        assert!(rift_space_list_stubs(std::ptr::null_mut(), 1, flow.as_ptr()).is_null());
+        assert_eq!(
+            rift_space_delete(std::ptr::null_mut(), 1, flow.as_ptr()),
+            -1
+        );
+        assert!(rift_space_recorded(std::ptr::null_mut(), 1, flow.as_ptr()).is_null());
+
+        // Live handle, unknown port -> same sentinels for all seven.
+        let h = rift_start();
+        assert!(rift_flow_state_get(h, 65000, flow.as_ptr(), key.as_ptr()).is_null());
+        assert_eq!(
+            rift_flow_state_put(h, 65000, flow.as_ptr(), key.as_ptr(), one.as_ptr()),
+            -1
+        );
+        assert_eq!(
+            rift_flow_state_delete(h, 65000, flow.as_ptr(), key.as_ptr()),
+            -1
+        );
+        assert_eq!(
+            rift_space_add_stub(h, 65000, flow.as_ptr(), cstr("{}").as_ptr()),
+            -1
+        );
+        assert_eq!(rift_space_delete(h, 65000, flow.as_ptr()), -1);
+        assert!(rift_space_list_stubs(h, 65000, flow.as_ptr()).is_null());
+        assert!(rift_space_recorded(h, 65000, flow.as_ptr()).is_null());
+        // The last failure also recorded a message (AC3).
+        let err2 = rift_last_error();
+        assert!(!err2.is_null(), "unknown-port failure records last_error");
+        rift_free(err2);
+        rift_stop(h);
+    }
+}
