@@ -62,6 +62,20 @@ let listener = InterceptListener::bind("127.0.0.1:0".parse()?, resolver, rules.c
 To expose rule configuration and CA export over the admin API, build the admin server
 `with_intercept(Arc::new(InterceptState { rules, ca }))`.
 
+### Standalone binary
+
+The `rift` binary starts an intercept listener when `--intercept-port` is set; its rule store and
+CA are automatically shared with the admin API, so the `/intercept/*` routes below configure it:
+
+```bash
+# Generate a CA in-memory:
+rift --intercept-port 8443
+# Or load an existing CA:
+rift --intercept-port 8443 --intercept-ca-cert ca.pem --intercept-ca-key ca.key
+```
+
+(Equivalently `RIFT_INTERCEPT_PORT` / `RIFT_INTERCEPT_CA_CERT` / `RIFT_INTERCEPT_CA_KEY`.)
+
 ---
 
 ## Configuring rules (admin API)
@@ -145,5 +159,5 @@ private keys**, and it works identically for the container and embedded adapters
 - **Request bodies are read only when `Content-Length`-framed** — chunked / streamed request bodies
   are not decoded and are treated as empty for matching and forwarding (logged at `warn`).
 - **Forward-proxy (`CONNECT`) only** — transparent interception is not implemented.
-- The listener is started by an **embedder** (or the zio-bdd adapter); a CLI flag to start it from
-  the standalone `rift` binary is a follow-up.
+- The listener is started either by an **embedder** (or the zio-bdd adapter) or from the standalone
+  `rift` binary via `--intercept-port` (see [Standalone binary](#standalone-binary)).

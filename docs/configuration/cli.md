@@ -52,6 +52,9 @@ Options:
       --default-tls-cert <FILE>    Default TLS certificate (PEM) for HTTPS imposters without their own
       --default-tls-key <FILE>     Default TLS private key (PEM), paired with --default-tls-cert
       --no-self-signed-tls         Disable the self-signed fallback; an HTTPS imposter with no cert is an error
+      --intercept-port <PORT>      Start the TLS-MITM intercept/redirect proxy on this port (epic #394); off when unset
+      --intercept-ca-cert <FILE>   PEM CA certificate for interception (with --intercept-ca-key); a CA is generated if omitted
+      --intercept-ca-key <FILE>    PEM CA private key for interception (required with --intercept-ca-cert)
       --no-parse                   Disable EJS preprocessing of --configfile (alias: --noParse)
       --formatter <NAME>           Custom config formatter module (no-op; Rift auto-detects JSON/YAML)
       --protofile <FILE>           Custom protocol definitions file (no-op; custom protocols unsupported)
@@ -128,6 +131,9 @@ Environment variables override CLI defaults:
 | `RIFT_DEFAULT_TLS_CERT` | Default TLS certificate (PEM) for HTTPS imposters | |
 | `RIFT_DEFAULT_TLS_KEY` | Default TLS private key (PEM) | |
 | `RIFT_NO_SELF_SIGNED_TLS` | Disable self-signed TLS fallback (`true`/`false`) | `false` |
+| `RIFT_INTERCEPT_PORT` | Start the intercept/TLS-MITM proxy on this port (epic #394) | |
+| `RIFT_INTERCEPT_CA_CERT` | PEM CA certificate for interception (with `RIFT_INTERCEPT_CA_KEY`) | |
+| `RIFT_INTERCEPT_CA_KEY` | PEM CA private key for interception | |
 | `RIFT_DISABLE_HTTP2` | Force HTTP/1-only listeners, disabling HTTP/2 & h2c auto-negotiation (truthy: `1`/`true`/`yes`/`on`) | off |
 | `RIFT_TCP_BACKLOG` | Listen backlog for the accept loop (positive integer) | `1024` |
 | `RIFT_TCP_NODELAY` | `TCP_NODELAY` on accepted sockets; set `false`/`0`/`off` to disable | on |
