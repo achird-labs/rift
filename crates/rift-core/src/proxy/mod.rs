@@ -31,6 +31,7 @@ mod context;
 pub mod intercept_ca;
 #[cfg(test)]
 mod tests;
+pub mod truststore;
 
 // Re-export public API types
 // These are used by main.rs and may be used by external consumers

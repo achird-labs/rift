@@ -81,6 +81,9 @@ sxd-xpath = "0.4"
 
 # JSONPath RFC 9535 support
 serde_json_path = "0.7"
+p12 = "0.6.3"
+yasna = "0.5"
+ring = "0.17"
 
 [dev-dependencies]
 tempfile = "3.8"
