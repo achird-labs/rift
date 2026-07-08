@@ -11,6 +11,20 @@ record.
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-07-08
+
+### Fixed
+- **`rift_start_intercept` now returns a truthful `interceptUrl`** (#425). It previously hardcoded
+  `http://127.0.0.1:<port>` even when the listener bound a non-loopback host, misreporting the
+  endpoint as loopback for a `0.0.0.0`/NIC-IP bind (e.g. for cross-container reachability). The URL
+  and port are now derived from the listener's real bound address; the loopback default is unchanged.
+
+### Changed
+- **Refreshed the Rift vs Mountebank benchmark and README performance numbers** (#419). Added a
+  no-Docker, direct-process harness (`tests/benchmark/scripts/bench_direct.py`) that runs each engine
+  in isolation on disjoint ports and asserts every scenario's response body actually matches before
+  measuring, replacing the stale figures with reproducible ones.
+
 ## [0.11.1] - 2026-07-07
 
 ### Added
@@ -160,7 +174,8 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/EtaCassiopeia/rift/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/EtaCassiopeia/rift/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/EtaCassiopeia/rift/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/EtaCassiopeia/rift/compare/v0.9.1...v0.10.0
