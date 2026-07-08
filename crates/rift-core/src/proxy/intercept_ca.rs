@@ -9,8 +9,10 @@
 //! `rift-http-proxy` crate.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa,
     KeyPair, KeyUsagePurpose,
@@ -90,6 +92,30 @@ impl CertificateAuthority {
             cert_pem: cert_pem.to_string(),
             cert_der,
         })
+    }
+
+    /// Load the CA from PEM files when both paths are supplied, generate a fresh one when neither
+    /// is, and reject a half-configured pair (both-or-neither). This is the single implementation
+    /// shared by the container adapter (`--intercept-ca-cert`/`--intercept-ca-key`) and the
+    /// embedded FFI (`caCertPath`/`caKeyPath`), so both surfaces agree on load-or-generate
+    /// semantics and error.
+    pub fn load_or_generate(
+        cert_path: Option<&Path>,
+        key_path: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        match (cert_path, key_path) {
+            (Some(cert), Some(key)) => {
+                let cert_pem = std::fs::read_to_string(cert)
+                    .with_context(|| format!("reading intercept CA cert {}", cert.display()))?;
+                let key_pem = std::fs::read_to_string(key)
+                    .with_context(|| format!("reading intercept CA key {}", key.display()))?;
+                Self::load_pem(&cert_pem, &key_pem)
+            }
+            (None, None) => Self::generate(),
+            _ => anyhow::bail!(
+                "intercept CA cert and key must be provided together (or both omitted to generate a CA)"
+            ),
+        }
     }
 
     /// The CA certificate as PEM.

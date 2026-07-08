@@ -147,13 +147,16 @@ int32_t rift_space_delete(RiftHandle *h, uint16_t port, const char *flow_id);
 char *rift_space_recorded(RiftHandle *h, uint16_t port, const char *flow_id);
 
 /**
- * Start the intercept/TLS-MITM forward-proxy listener on this handle's runtime, generating an
- * intercept CA. Returns JSON `{"interceptPort":<u16>,"interceptUrl":"http://<bind-host>:<port>"}`
- * the caller frees with [`rift_free`], or null on error (bad JSON, bind failure, or already
- * started — one listener per handle). `interceptUrl` reflects the bound address (the configured
- * `host`, loopback by default; a `0.0.0.0` bind surfaces verbatim, so dial a concrete interface).
- * `options_json`: `{"host":"127.0.0.1","port":0}` (port 0 = OS-assigned); pass null or `{}` for
- * defaults.
+ * Start the intercept/TLS-MITM forward-proxy listener on this handle's runtime. The intercept CA
+ * is loaded from `caCertPath`/`caKeyPath` when both are supplied (letting independent instances
+ * share a committed trust anchor), and generated fresh otherwise. Returns JSON
+ * `{"interceptPort":<u16>,"interceptUrl":"http://<bind-host>:<port>"}` the caller frees with
+ * [`rift_free`], or null on error (bad JSON, half-configured CA pair, CA load failure, bind
+ * failure, or already started — one listener per handle). `interceptUrl` reflects the bound
+ * address (the configured `host`, loopback by default; a `0.0.0.0` bind surfaces verbatim, so
+ * dial a concrete interface). `options_json`:
+ * `{"host":"127.0.0.1","port":0,"caCertPath":"ca.pem","caKeyPath":"ca.key"}` (port 0 =
+ * OS-assigned; CA paths optional, both-or-neither); pass null or `{}` for defaults.
  *
  * # Safety
  * `h` must be a live handle (or null); `options_json` must be null or a valid C string.

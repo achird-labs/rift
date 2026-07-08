@@ -3424,6 +3424,7 @@ dependencies = [
 name = "rift-ffi"
 version = "0.1.0"
 dependencies = [
+ "rcgen",
  "reqwest",
  "rift-core",
  "rift-http-proxy",

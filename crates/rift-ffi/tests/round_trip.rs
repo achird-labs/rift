@@ -1244,3 +1244,150 @@ fn ffi_intercept_optin_not_started() {
         rift_stop(h);
     }
 }
+
+/// Mint a committed CA (cert + key PEM) to two temp files and return their paths, mirroring the
+/// certificate shape `CertificateAuthority::generate()` produces so loaded leaves validate.
+fn write_committed_ca(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
+    let key = KeyPair::generate().expect("generate CA key");
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+        KeyUsagePurpose::DigitalSignature,
+    ];
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "Rift Test Committed CA");
+    let cert = params.self_signed(&key).expect("self-sign CA");
+    let dir = std::env::temp_dir();
+    let cert_path = dir.join(format!("rift429-{}-{tag}-ca.pem", std::process::id()));
+    let key_path = dir.join(format!("rift429-{}-{tag}-ca.key", std::process::id()));
+    std::fs::write(&cert_path, cert.pem()).expect("write CA cert");
+    std::fs::write(&key_path, key.serialize_pem()).expect("write CA key");
+    (cert_path, key_path)
+}
+
+/// Issue #429 (AC1/AC4): two `rift_start_intercept` instances started with the SAME committed CA
+/// present mutually-trusted leaves — a truststore holding instance A's exported CA validates the
+/// TLS instance B intercepts. Both instances expose the committed CA verbatim (loaded, not
+/// regenerated).
+#[test]
+fn ffi_intercept_reuses_committed_ca() {
+    unsafe {
+        let (cert_path, key_path) = write_committed_ca("reuse");
+        let committed = std::fs::read_to_string(&cert_path).unwrap();
+
+        let opts = serde_json::json!({
+            "port": 0,
+            "caCertPath": cert_path.to_str().unwrap(),
+            "caKeyPath": key_path.to_str().unwrap(),
+        })
+        .to_string();
+
+        // Instance A and instance B both load the same committed CA.
+        let ha = rift_start();
+        take_json(rift_start_intercept(ha, cstr(&opts).as_ptr()));
+        let hb = rift_start();
+        let started_b: serde_json::Value =
+            serde_json::from_str(&take_json(rift_start_intercept(hb, cstr(&opts).as_ptr())))
+                .unwrap();
+        let port_b = started_b["interceptPort"].as_u64().expect("interceptPort") as u16;
+
+        // Both expose the committed CA verbatim — loaded, not regenerated.
+        let ca_a = take_json(rift_intercept_ca_pem(ha));
+        let ca_b = take_json(rift_intercept_ca_pem(hb));
+        assert_eq!(ca_a, ca_b, "both instances expose the same CA");
+        assert_eq!(
+            ca_a.trim(),
+            committed.trim(),
+            "instance A exposes the committed CA, not a fresh one"
+        );
+
+        // Instance B intercepts and serves a host.
+        let rules = cstr(
+            r#"[{ "host": "reuse.example.com",
+                  "action": { "serve": { "statusCode": 200, "body": "served-by-b" } } }]"#,
+        );
+        assert_eq!(rift_intercept_add_rules(hb, rules.as_ptr()), 0);
+
+        // A client trusting ONLY instance A's exported CA validates instance B's intercepted TLS —
+        // proving the committed CA is a shared trust anchor across independent instances.
+        rt().block_on(async {
+            let client = reqwest::Client::builder()
+                .proxy(reqwest::Proxy::https(format!("http://127.0.0.1:{port_b}")).unwrap())
+                .add_root_certificate(reqwest::Certificate::from_pem(ca_a.as_bytes()).unwrap())
+                .build()
+                .unwrap();
+            let resp = client
+                .get("https://reuse.example.com/x")
+                .send()
+                .await
+                .expect("A's truststore validates B's intercepted leaf");
+            assert_eq!(resp.status(), 200);
+            assert_eq!(resp.text().await.unwrap(), "served-by-b");
+        });
+
+        rift_stop(ha);
+        rift_stop(hb);
+        let _ = std::fs::remove_file(&cert_path);
+        let _ = std::fs::remove_file(&key_path);
+    }
+}
+
+/// Read and free `rift_last_error`, asserting it is present.
+unsafe fn take_last_error() -> String {
+    unsafe {
+        let p = rift_last_error();
+        assert!(!p.is_null(), "expected a recorded last_error");
+        let s = CStr::from_ptr(p).to_str().expect("utf8").to_owned();
+        rift_free(p);
+        s
+    }
+}
+
+/// Issue #429 (AC2): a half-configured CA pair is rejected — in either direction — with a clear
+/// both-or-neither error rather than silently generating an ephemeral CA.
+#[test]
+fn ffi_intercept_ca_both_or_neither() {
+    unsafe {
+        // caCertPath without caKeyPath.
+        let h = rift_start();
+        let cert_only = serde_json::json!({ "port": 0, "caCertPath": "/nonexistent/ca.pem" });
+        assert!(
+            rift_start_intercept(h, cstr(&cert_only.to_string()).as_ptr()).is_null(),
+            "caCertPath alone -> rejected, not a silent ephemeral CA"
+        );
+        assert!(
+            take_last_error().contains("provided together"),
+            "the error names the both-or-neither rule"
+        );
+
+        // caKeyPath without caCertPath (the mirror direction).
+        let key_only = serde_json::json!({ "port": 0, "caKeyPath": "/nonexistent/ca.key" });
+        assert!(
+            rift_start_intercept(h, cstr(&key_only.to_string()).as_ptr()).is_null(),
+            "caKeyPath alone -> rejected"
+        );
+        assert!(take_last_error().contains("provided together"));
+
+        rift_stop(h);
+    }
+}
+
+/// Issue #429: a misspelled CA option key is a hard error (deny_unknown_fields), never a silent
+/// fallback to a fresh ephemeral CA that would quietly defeat the caller's intended CA reuse.
+#[test]
+fn ffi_intercept_rejects_unknown_ca_option() {
+    unsafe {
+        let h = rift_start();
+        let typo = serde_json::json!({ "port": 0, "caCertpath": "/some/ca.pem" });
+        assert!(
+            rift_start_intercept(h, cstr(&typo.to_string()).as_ptr()).is_null(),
+            "a typo'd CA option key is rejected, not silently ignored"
+        );
+        assert!(!take_last_error().is_empty(), "records why it was rejected");
+        rift_stop(h);
+    }
+}
