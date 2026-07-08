@@ -11,6 +11,21 @@ record.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-07-07
+
+### Added
+- **`rift_flow_state_get` now gives an unambiguous "not found" signal** over the embedded C-ABI
+  (#416). It previously returned `null` both for an absent key and for an error, so a host could
+  not tell the two apart; the call now reports "not found" distinctly from a genuine failure.
+
+### Fixed
+- **PKCS#12 truststore export is now loadable as a JVM trust store** (#417). `export_pkcs12` (and
+  thus `rift_intercept_export_truststore` / `GET /intercept/truststore.p12`) previously wrote the CA
+  as a bare cert bag that a JVM `TrustManagerFactory` did not surface as a trust anchor — TLS
+  validation failed with "the trustAnchors parameter must be non-empty". The export now carries the
+  trusted-certificate marker `keytool` writes, so the CA loads as a trust anchor, matching the JKS
+  export.
+
 ## [0.11.0] - 2026-07-07
 
 ### Added
@@ -145,7 +160,8 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/EtaCassiopeia/rift/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/EtaCassiopeia/rift/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/EtaCassiopeia/rift/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/EtaCassiopeia/rift/compare/v0.9.0...v0.9.1
