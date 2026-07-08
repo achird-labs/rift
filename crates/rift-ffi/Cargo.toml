@@ -36,6 +36,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
+# Mint a committed CA (cert+key PEM) on disk in the intercept CA-reuse gate test (issue #429).
+rcgen = "0.13"
 
 [features]
 default = ["redis-backend", "lua", "javascript"]

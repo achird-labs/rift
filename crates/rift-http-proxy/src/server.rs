@@ -10,7 +10,6 @@ use crate::extensions::metrics;
 use crate::imposter::{ImposterConfig, ImposterManager, TlsDefaults};
 use crate::intercept::InterceptListener;
 use crate::intercept_rules::{InterceptRules, InterceptState};
-use anyhow::Context;
 use clap::{Parser, Subcommand};
 use rift_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
 use std::net::SocketAddr;
@@ -310,9 +309,9 @@ impl ServerBuilder {
         // the admin server so `/intercept/*` verbs configure the same listener.
         let intercept = match cli.intercept_port {
             Some(intercept_port) => {
-                let ca = Arc::new(load_or_generate_ca(
-                    cli.intercept_ca_cert.as_ref(),
-                    cli.intercept_ca_key.as_ref(),
+                let ca = Arc::new(CertificateAuthority::load_or_generate(
+                    cli.intercept_ca_cert.as_deref(),
+                    cli.intercept_ca_key.as_deref(),
                 )?);
                 let rules = InterceptRules::new();
                 server = server.with_intercept(Arc::new(InterceptState {
@@ -350,27 +349,6 @@ impl ServerBuilder {
             metrics,
             intercept,
         })
-    }
-}
-
-/// Build the intercept CA: load it from PEM when both cert and key are given, generate one when
-/// neither is, and reject a half-configured pair.
-fn load_or_generate_ca(
-    cert: Option<&PathBuf>,
-    key: Option<&PathBuf>,
-) -> anyhow::Result<CertificateAuthority> {
-    match (cert, key) {
-        (Some(cert), Some(key)) => {
-            let cert_pem = std::fs::read_to_string(cert)
-                .with_context(|| format!("reading --intercept-ca-cert {cert:?}"))?;
-            let key_pem = std::fs::read_to_string(key)
-                .with_context(|| format!("reading --intercept-ca-key {key:?}"))?;
-            CertificateAuthority::load_pem(&cert_pem, &key_pem)
-        }
-        (None, None) => CertificateAuthority::generate(),
-        _ => anyhow::bail!(
-            "--intercept-ca-cert and --intercept-ca-key must be provided together (or both omitted to generate a CA)"
-        ),
     }
 }
 
@@ -656,13 +634,13 @@ mod tests {
 
     #[test]
     fn load_or_generate_ca_rules() {
-        use std::path::PathBuf;
+        use std::path::Path;
         // Neither cert nor key: a CA is generated.
-        assert!(load_or_generate_ca(None, None).is_ok());
+        assert!(CertificateAuthority::load_or_generate(None, None).is_ok());
         // A half-configured pair is rejected rather than silently generating.
-        let cert = PathBuf::from("ca.pem");
-        assert!(load_or_generate_ca(Some(&cert), None).is_err());
-        assert!(load_or_generate_ca(None, Some(&cert)).is_err());
+        let cert = Path::new("ca.pem");
+        assert!(CertificateAuthority::load_or_generate(Some(cert), None).is_err());
+        assert!(CertificateAuthority::load_or_generate(None, Some(cert)).is_err());
     }
 
     #[test]
@@ -681,9 +659,9 @@ mod tests {
         key_file.write_all(key.serialize_pem().as_bytes()).unwrap();
 
         // ...is loaded, not regenerated: the CA exposes the supplied certificate.
-        let cert_path = cert_file.path().to_path_buf();
-        let key_path = key_file.path().to_path_buf();
-        let ca = load_or_generate_ca(Some(&cert_path), Some(&key_path)).expect("load supplied CA");
+        let ca =
+            CertificateAuthority::load_or_generate(Some(cert_file.path()), Some(key_file.path()))
+                .expect("load supplied CA");
         assert_eq!(ca.ca_cert_pem(), cert.pem().as_str());
     }
 

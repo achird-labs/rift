@@ -40,7 +40,7 @@ use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::runtime::Runtime;
 use tracing::warn;
@@ -600,12 +600,17 @@ pub unsafe extern "C" fn rift_space_recorded(
 // Start an intercept forward-proxy on the handle's runtime and drive its rule store + CA export
 // entirely over C-ABI — no loopback HTTP admin plane needed. One listener per handle.
 
-/// `rift_start_intercept` options (all optional): the bind host and port.
+/// `rift_start_intercept` options (all optional): the bind host and port, plus an optional
+/// caller-provided intercept CA (`caCertPath`/`caKeyPath`, PEM file paths — both or neither).
+/// `deny_unknown_fields` so a misspelled key (e.g. `caCertpath`) is a hard error, not a silent
+/// fallback to a fresh ephemeral CA that would defeat the caller's intended CA reuse.
 #[derive(serde::Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct InterceptOptions {
     host: Option<String>,
     port: Option<u16>,
+    ca_cert_path: Option<String>,
+    ca_key_path: Option<String>,
 }
 
 /// A single rule or a batch — `rift_intercept_add_rules` accepts either shape.
@@ -616,13 +621,16 @@ enum RuleOrRules {
     Many(Vec<InterceptRule>),
 }
 
-/// Start the intercept/TLS-MITM forward-proxy listener on this handle's runtime, generating an
-/// intercept CA. Returns JSON `{"interceptPort":<u16>,"interceptUrl":"http://<bind-host>:<port>"}`
-/// the caller frees with [`rift_free`], or null on error (bad JSON, bind failure, or already
-/// started — one listener per handle). `interceptUrl` reflects the bound address (the configured
-/// `host`, loopback by default; a `0.0.0.0` bind surfaces verbatim, so dial a concrete interface).
-/// `options_json`: `{"host":"127.0.0.1","port":0}` (port 0 = OS-assigned); pass null or `{}` for
-/// defaults.
+/// Start the intercept/TLS-MITM forward-proxy listener on this handle's runtime. The intercept CA
+/// is loaded from `caCertPath`/`caKeyPath` when both are supplied (letting independent instances
+/// share a committed trust anchor), and generated fresh otherwise. Returns JSON
+/// `{"interceptPort":<u16>,"interceptUrl":"http://<bind-host>:<port>"}` the caller frees with
+/// [`rift_free`], or null on error (bad JSON, half-configured CA pair, CA load failure, bind
+/// failure, or already started — one listener per handle). `interceptUrl` reflects the bound
+/// address (the configured `host`, loopback by default; a `0.0.0.0` bind surfaces verbatim, so
+/// dial a concrete interface). `options_json`:
+/// `{"host":"127.0.0.1","port":0,"caCertPath":"ca.pem","caKeyPath":"ca.key"}` (port 0 =
+/// OS-assigned; CA paths optional, both-or-neither); pass null or `{}` for defaults.
 ///
 /// # Safety
 /// `h` must be a live handle (or null); `options_json` must be null or a valid C string.
@@ -674,10 +682,16 @@ pub unsafe extern "C" fn rift_start_intercept(
                 return std::ptr::null_mut();
             }
         };
-        let ca = match CertificateAuthority::generate() {
+        let ca = match CertificateAuthority::load_or_generate(
+            opts.ca_cert_path.as_deref().map(Path::new),
+            opts.ca_key_path.as_deref().map(Path::new),
+        ) {
             Ok(ca) => Arc::new(ca),
             Err(e) => {
-                set_last_error(format!("rift_start_intercept: CA generation failed: {e}"));
+                // `{e:#}` so the chained cause (missing file, bad PEM, mismatched pair) reaches the
+                // caller — `rift_last_error` is their only diagnostic channel.
+                set_last_error(format!("rift_start_intercept: CA setup failed: {e:#}"));
+                warn!(error = %e, "rift_start_intercept: CA setup failed");
                 return std::ptr::null_mut();
             }
         };
