@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-nightly-orange)](https://www.rust-lang.org/)
 
-Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible mock server that delivers **2-250x better performance**. Use your existing Mountebank configurations and enjoy faster test execution.
+Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible mock server that delivers **~20–150x faster throughput on typical workloads, and up to ~450x on large regex predicate sets**. Use your existing Mountebank configurations and enjoy faster test execution.
 
 **[Documentation](https://etacassiopeia.github.io/rift/)** | **[Quick Start](#quick-start)** | **[Examples](examples/)**
 
@@ -22,12 +22,22 @@ Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible moc
 
 ### Blazing Fast Performance
 
-| Feature | Mountebank | Rift | Speedup |
-|:--------|:-----------|:-----|:--------|
-| Simple stubs | 1,900 RPS | 39,000 RPS | **20x faster** |
-| JSONPath predicates | 107 RPS | 26,500 RPS | **247x faster** |
-| XPath predicates | 169 RPS | 28,700 RPS | **170x faster** |
-| Complex predicates | 900 RPS | 29,300 RPS | **32x faster** |
+| Workload | Mountebank | Rift | Speedup |
+|:---------|-----------:|-----:|:--------|
+| Simple static stub | 4,141 RPS | 214,028 RPS | **~52x** |
+| Deep path match (410 stubs) | 1,342 RPS | 208,580 RPS | **~155x** |
+| Complex AND/OR predicates | 4,619 RPS | 191,724 RPS | **~42x** |
+| JSON body equals | 7,780 RPS | 203,490 RPS | **~26x** |
+| JSONPath predicate | 3,586 RPS | 201,029 RPS | **~56x** |
+| XPath predicate | 5,640 RPS | 185,417 RPS | **~33x** |
+| Regex path (100 patterns) | 107 RPS | 48,029 RPS | **~449x** |
+
+<sub>Measured 2026-07-07 — Rift `0.11.0` (built from `master`) vs Mountebank `2.9.1`, native
+processes (no Docker) on Apple Silicon (macOS), `oha` at 50 keep-alive connections, 20s/scenario
+after warmup, each engine run alone on the same machine. Throughput scales with matching
+complexity: Rift stays flat while Mountebank's per-request cost grows with stub count and predicate
+type. Full methodology and all 13 scenarios: [`tests/benchmark`](tests/benchmark/). Your numbers
+will vary with hardware and config.</sub>
 
 ### Full Feature Support
 

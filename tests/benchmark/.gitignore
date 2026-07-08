@@ -1,6 +1,11 @@
 # Generated benchmark detailed output files (large)
 results/*_detailed.txt
 
+# Direct-process mode outputs (machine-specific; regenerate with scripts/bench_direct.py)
+results/DIRECT_BENCHMARK_REPORT.md
+results/direct_*.csv
+results/*-engine.log
+
 # Keep summary reports tracked
 !results/BENCHMARK_REPORT.md
 !results/results.csv

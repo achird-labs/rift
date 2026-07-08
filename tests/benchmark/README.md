@@ -21,13 +21,44 @@ cat results/BENCHMARK_REPORT.md
 docker compose down -v
 ```
 
-## Prerequisites
+## Direct-process mode (no Docker)
 
-- **Docker** and **Docker Compose** (v2.0+)
-- **curl** - HTTP client
-- **hey** - HTTP load generator
-- **jq** - JSON processor
-- **bc** - Calculator for percentage calculations
+`scripts/bench_direct.py` runs the same comparison without Docker — useful on
+machines where cgroup limits aren't available (e.g. macOS) or where you'd
+rather give each engine the whole box.
+
+```bash
+# Prereqs: oha (load generator) on PATH, a release Rift binary, and mountebank
+#   cargo build --release -p rift-http-proxy
+#   npm install mountebank@2.9.1        # into ~/bench-mb, or pass --mb-bin
+
+python3 scripts/bench_direct.py --run-all \
+    --duration 20s --warmup 3s --connections 50 \
+    --rift-bin ../../target/release/rift-http-proxy \
+    --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
+
+cat results/DIRECT_BENCHMARK_REPORT.md
+```
+
+How it stays fair and correct:
+
+- **Sequential, not concurrent** — each engine runs alone, so they never
+  contend for CPU on a shared machine.
+- **Disjoint port ranges** — Rift on `2525`/`4545+`, Mountebank on
+  `2625`/`4645+`. Even if one engine fails to shut down it cannot be measured
+  in place of the other.
+- **Hard teardown** — each engine is launched in its own process group and
+  killed by group + `lsof`; its ports must be confirmed free before the next
+  engine starts.
+- **Response assertions** — every scenario sends one real request first and
+  checks the returned **body** (not just a 2xx status) proves the intended stub
+  matched. A request that falls through to the empty no-match default aborts the
+  run, so a mis-configured stub can't silently inflate throughput.
+- **Identical configs** — both engines get byte-identical imposter JSON.
+
+> `oha` initialises a TLS stack that reads the macOS keychain even for
+> plain-HTTP targets, so run this outside a restricted sandbox.
+
 
 Install all tools automatically:
 ```bash
