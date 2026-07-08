@@ -66,6 +66,45 @@ jobs:
       - name: rift-ffi C-ABI smoke test
         run: ./scripts/verify-ffi-cdylib.sh
 
+  # Issue #420: the truststore keytool tests are #[ignore]d (they need a JDK on PATH), so the
+  # matrix `test` job never runs them and the PKCS#12/JKS JVM-loadability guarantee has no CI
+  # enforcement — a regression that breaks the container structure (e.g. dropping the Oracle
+  # TrustedKeyUsage attribute added in #417) would pass CI green. This job installs a JDK and runs
+  # them. --no-default-features avoids the LuaJIT/Redis system deps the truststore module doesn't use.
+  jvm-truststore:
+    name: JVM Truststore Integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-jvm-truststore-${{ hashFiles('**/Cargo.lock') }}
+
+      # keytool proves real JVM interop (KeyStore.load surfacing a trustedCertEntry), which the
+      # pure-Rust structural tests cannot.
+      - name: Run JVM truststore integration tests
+        run: cargo test -p rift-core --no-default-features --lib proxy::truststore -- --ignored
+
   docs-coverage:
     name: Docs Coverage
     runs-on: ubuntu-latest
