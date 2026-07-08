@@ -582,3 +582,20 @@ jobs:
     with:
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     secrets: inherit
+
+  # =============================================================================
+  # Update Homebrew formula
+  # =============================================================================
+  # Invoked here (not via update-homebrew.yml's `release:` trigger) because a release created by
+  # this workflow's GITHUB_TOKEN does not emit `release: published`. Runs after `release` so the
+  # tap formula points at assets that already exist.
+  publish-homebrew:
+    name: Update Homebrew Formula
+    needs: release
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+    permissions:
+      contents: read
+    uses: ./.github/workflows/update-homebrew.yml
+    with:
+      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    secrets: inherit
