@@ -151,6 +151,11 @@ substitutes them into the response **body** and **header values** before any beh
 | `${request.body}` | Raw request body |
 | `${request.query.<name>}` | Query parameter `<name>` |
 | `${request.headers.<name>}` | Request header `<name>` (case-insensitive) |
+| `${request.pathParams.<name>}` | Path parameter `<name>` captured from the stub's `routePattern` |
+
+`${request.pathParams.<name>}` only resolves when the stub declares a top-level `routePattern`
+(e.g. `/users/:id`) whose shape matches the request path — see
+[Route patterns]({{ site.baseurl }}/configuration/native/#route-patterns-routepattern).
 
 ```json
 {

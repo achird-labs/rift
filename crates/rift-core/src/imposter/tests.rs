@@ -40,6 +40,7 @@ fn test_imposter_config_no_port() {
 fn test_predicate_matching() {
     let stub = Stub {
         id: None,
+        route_pattern: None,
         predicates: predicates_from_jsons(vec![serde_json::json!({
             "equals": {
                 "method": "GET",
@@ -138,6 +139,7 @@ fn test_execute_stub() {
 
     let stub = Stub {
         id: None,
+        route_pattern: None,
         predicates: vec![],
         responses: vec![StubResponse::Is {
             is: IsResponse {
@@ -2427,6 +2429,7 @@ async fn test_cors_headers_on_stub_response() {
     let manager = ImposterManager::new();
     let stub = Stub {
         id: None,
+        route_pattern: None,
         predicates: predicates_from_jsons(vec![serde_json::json!({
             "equals": {"method": "GET", "path": "/test"}
         })]),
@@ -3766,4 +3769,222 @@ mod cas_transitions {
             "an ungated transition keeps today's unconditional overwrite semantics"
         );
     }
+}
+
+// Issue #433: a stub-level `routePattern` populates `request.pathParams.<name>` for both response
+// templates and every script engine; absent a pattern the map stays empty (unchanged default).
+#[tokio::test]
+async fn test_path_params_template_end_to_end() {
+    let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+        "port": 19741,
+        "protocol": "http",
+        "stubs": [{
+            "routePattern": "/users/:id",
+            "predicates": [{ "equals": { "path": "/users/123" } }],
+            "responses": [{ "is": { "statusCode": 200, "body": "${request.pathParams.id}" } }]
+        }]
+    }))
+    .expect("config");
+
+    let manager = ImposterManager::new();
+    manager
+        .create_imposter(config)
+        .await
+        .expect("create imposter");
+    let body = reqwest::Client::new()
+        .get("http://127.0.0.1:19741/users/123")
+        .send()
+        .await
+        .expect("GET failed")
+        .text()
+        .await
+        .expect("body");
+    let _ = manager.delete_imposter(19741).await;
+
+    assert_eq!(
+        body, "123",
+        "routePattern must populate ${{request.pathParams.id}} in the response template, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_path_params_script_rhai() {
+    let script = "fn should_inject(request, flow_store) { \
+         let id = request.pathParams[\"id\"]; if id == () { id = \"MISS\"; } \
+         #{ inject: true, fault: \"error\", status: 200, body: id } }";
+    let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+        "port": 19742,
+        "protocol": "http",
+        "stubs": [{
+            "routePattern": "/users/:id",
+            "predicates": [{ "equals": { "path": "/users/123" } }],
+            "responses": [{ "_rift": { "script": { "engine": "rhai", "code": script } } }]
+        }]
+    }))
+    .expect("config");
+
+    let manager = ImposterManager::new();
+    manager
+        .create_imposter(config)
+        .await
+        .expect("create imposter");
+    let body = reqwest::Client::new()
+        .get("http://127.0.0.1:19742/users/123")
+        .send()
+        .await
+        .expect("GET failed")
+        .text()
+        .await
+        .expect("body");
+    let _ = manager.delete_imposter(19742).await;
+
+    assert_eq!(
+        body, "123",
+        "rhai script must read a populated request.pathParams.id, got: {body}"
+    );
+}
+
+#[cfg(feature = "lua")]
+#[tokio::test]
+async fn test_path_params_script_lua() {
+    let script = "function should_inject(request, flow_store) \
+         return { inject = true, fault = \"error\", status = 200, body = request.pathParams.id } end";
+    let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+        "port": 19743,
+        "protocol": "http",
+        "stubs": [{
+            "routePattern": "/users/:id",
+            "predicates": [{ "equals": { "path": "/users/123" } }],
+            "responses": [{ "_rift": { "script": { "engine": "lua", "code": script } } }]
+        }]
+    }))
+    .expect("config");
+
+    let manager = ImposterManager::new();
+    manager
+        .create_imposter(config)
+        .await
+        .expect("create imposter");
+    let body = reqwest::Client::new()
+        .get("http://127.0.0.1:19743/users/123")
+        .send()
+        .await
+        .expect("GET failed")
+        .text()
+        .await
+        .expect("body");
+    let _ = manager.delete_imposter(19743).await;
+
+    assert_eq!(
+        body, "123",
+        "lua script must read a populated request.pathParams.id, got: {body}"
+    );
+}
+
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn test_path_params_script_js() {
+    let script = "function should_inject(request, flow_store) { \
+         return { inject: true, fault: \"error\", status: 200, body: request.pathParams.id }; }";
+    let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+        "port": 19744,
+        "protocol": "http",
+        "stubs": [{
+            "routePattern": "/users/:id",
+            "predicates": [{ "equals": { "path": "/users/123" } }],
+            "responses": [{ "_rift": { "script": { "engine": "javascript", "code": script } } }]
+        }]
+    }))
+    .expect("config");
+
+    let manager = ImposterManager::new();
+    manager
+        .create_imposter(config)
+        .await
+        .expect("create imposter");
+    let body = reqwest::Client::new()
+        .get("http://127.0.0.1:19744/users/123")
+        .send()
+        .await
+        .expect("GET failed")
+        .text()
+        .await
+        .expect("body");
+    let _ = manager.delete_imposter(19744).await;
+
+    assert_eq!(
+        body, "123",
+        "js script must read a populated request.pathParams.id, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_path_params_absent_pattern_is_empty() {
+    // No routePattern → pathParams stays empty and nothing errors (unchanged default). The `[]`
+    // wrapper makes the empty substitution observable.
+    let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+        "port": 19745,
+        "protocol": "http",
+        "stubs": [{
+            "predicates": [{ "equals": { "path": "/users/456" } }],
+            "responses": [{ "is": { "statusCode": 200, "body": "[${request.pathParams.id}]" } }]
+        }]
+    }))
+    .expect("config");
+
+    let manager = ImposterManager::new();
+    manager
+        .create_imposter(config)
+        .await
+        .expect("create imposter");
+    let body = reqwest::Client::new()
+        .get("http://127.0.0.1:19745/users/456")
+        .send()
+        .await
+        .expect("GET failed")
+        .text()
+        .await
+        .expect("body");
+    let _ = manager.delete_imposter(19745).await;
+
+    assert_eq!(
+        body, "[]",
+        "without routePattern, request.pathParams.id resolves to empty, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_path_params_non_matching_pattern_is_empty() {
+    // routePattern is set but structurally does not match the request path (segment counts differ):
+    // the predicate still matches, so the stub is served, but pathParams must be empty (no error).
+    let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+        "port": 19746,
+        "protocol": "http",
+        "stubs": [{
+            "routePattern": "/users/:id",
+            "predicates": [{ "equals": { "path": "/users/123/profile" } }],
+            "responses": [{ "is": { "statusCode": 200, "body": "[${request.pathParams.id}]" } }]
+        }]
+    }))
+    .expect("config");
+
+    let manager = ImposterManager::new();
+    manager
+        .create_imposter(config)
+        .await
+        .expect("create imposter");
+    let body = reqwest::Client::new()
+        .get("http://127.0.0.1:19746/users/123/profile")
+        .send()
+        .await
+        .expect("GET failed")
+        .text()
+        .await
+        .expect("body");
+    let _ = manager.delete_imposter(19746).await;
+
+    assert_eq!(
+        body, "[]",
+        "a routePattern that doesn't match the path shape yields empty pathParams, got: {body}"
+    );
 }

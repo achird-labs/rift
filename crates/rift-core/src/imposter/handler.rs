@@ -411,7 +411,13 @@ async fn handle_request_inner(
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or(serde_json::Value::Null),
                 query: parse_query_string(&query_str),
-                path_params: HashMap::new(),
+                // Issue #433: populate path params from the matched stub's route pattern, if any.
+                path_params: stub_state
+                    .stub
+                    .route_pattern
+                    .as_deref()
+                    .map(|pattern| crate::extensions::template::extract_path_params(pattern, &path))
+                    .unwrap_or_default(),
             };
 
             // Execute the script off the async worker under a wall-clock deadline (issue
@@ -548,7 +554,8 @@ async fn handle_request_inner(
                         query_opt,
                         &headers_for_context,
                         body_string.as_deref(),
-                    );
+                    )
+                    .with_route_pattern(stub_state.stub.route_pattern.as_deref());
                     if need_body {
                         body = process_template(&body, &request_data);
                     }

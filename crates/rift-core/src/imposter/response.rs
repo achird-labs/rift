@@ -260,6 +260,7 @@ pub fn create_stub_from_proxy_response(
         .collect();
     super::types::Stub {
         id: None,
+        route_pattern: None,
         predicates,
         responses: vec![StubResponse::Is {
             is: is_response,

@@ -260,6 +260,7 @@ mod tests {
     fn make_rift_script_stub(engine: &str, code: &str) -> Stub {
         Stub {
             id: Some("test-stub".to_string()),
+            route_pattern: None,
             predicates: vec![],
             responses: vec![StubResponse::RiftScript {
                 rift: RiftResponseExtension {
@@ -282,6 +283,7 @@ mod tests {
     fn make_inject_stub(code: &str) -> Stub {
         Stub {
             id: Some("inject-stub".to_string()),
+            route_pattern: None,
             predicates: vec![],
             responses: vec![StubResponse::Inject {
                 inject: code.to_string(),
@@ -364,6 +366,7 @@ mod tests {
         let stubs = vec![
             Stub {
                 id: None, // No id, will use stub[0]
+                route_pattern: None,
                 predicates: vec![],
                 responses: vec![StubResponse::RiftScript {
                     rift: RiftResponseExtension {
@@ -384,6 +387,7 @@ mod tests {
             },
             Stub {
                 id: None, // No id, will use stub[1]
+                route_pattern: None,
                 predicates: vec![],
                 responses: vec![StubResponse::RiftScript {
                     rift: RiftResponseExtension {

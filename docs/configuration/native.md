@@ -234,6 +234,39 @@ for the full walkthrough of `decorate`/`shellTransform`/binary failures under st
 
 ---
 
+## Route Patterns (`routePattern`)
+
+`routePattern` is a **top-level stub field** — a sibling of `predicates`/`responses`/`id`/
+`scenarioName`, **not** nested under `_rift` — that declares a path shape (e.g. `/users/:id`) for
+extracting named path parameters from the request.
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:-------------|
+| `routePattern` | string | — | Path shape with `:name` segments to capture as path parameters. |
+
+When the request path has the same number of `/`-separated segments as the pattern, each literal
+segment must match exactly and each `:name` segment captures the corresponding path segment. The
+captured values are exposed as:
+
+- `${request.pathParams.<name>}` in response templates (see
+  [Request Interpolation]({{ site.baseurl }}/mountebank/responses/#request-interpolation)).
+- `request.pathParams.<name>` in scripts, for every engine (see
+  [Scripting]({{ site.baseurl }}/features/scripting/)).
+
+If `routePattern` is absent, or the request path doesn't match its segment shape, `pathParams` is
+simply empty — nothing errors. Extraction is `:name`-segment matching only; there's no regex or
+glob support.
+
+```json
+{
+  "routePattern": "/users/:id",
+  "predicates": [{ "matches": { "path": "^/users/[^/]+$" } }],
+  "responses": [{ "is": { "statusCode": 200, "body": "user ${request.pathParams.id}" } }]
+}
+```
+
+---
+
 ## Fault Injection
 
 Add probabilistic fault injection to responses:

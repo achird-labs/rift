@@ -183,6 +183,12 @@ pub struct Stub {
     /// Useful for targeting specific stubs for updates/deletion without relying on index
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Route pattern for path-parameter extraction (issue #433, Rift extension), e.g.
+    /// `/users/:id`. When set and the request path matches its shape, each `:name` segment
+    /// populates `request.pathParams.<name>` for response templates and scripts. Absent ⇒ no path
+    /// params (unchanged default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_pattern: Option<String>,
     #[serde(default)]
     pub predicates: Vec<Predicate>,
     #[serde(default)]
@@ -214,6 +220,8 @@ struct StubRaw {
     space: Option<String>,
     #[serde(default)]
     id: Option<String>,
+    #[serde(default)]
+    route_pattern: Option<String>,
     #[serde(default)]
     predicates: Vec<Predicate>,
     /// Alternative field name "rules" used instead of "predicates" in some recorded formats
@@ -281,6 +289,7 @@ impl From<StubRaw> for Stub {
             new_scenario_state: raw.new_scenario_state,
             space: raw.space,
             id: raw.id,
+            route_pattern: raw.route_pattern,
             predicates,
             responses,
             recorded_from: raw.recorded_from,

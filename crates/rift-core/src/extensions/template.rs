@@ -82,6 +82,17 @@ impl RequestData {
         }
     }
 
+    /// Populate `path_params` by matching the request path against a route `pattern` (issue #433),
+    /// e.g. `/users/:id`. A `None` pattern — or one whose shape doesn't match the path — leaves the
+    /// map empty (the unchanged default), so callers can pass a stub's optional pattern directly.
+    #[must_use]
+    pub fn with_route_pattern(mut self, pattern: Option<&str>) -> Self {
+        if let Some(pattern) = pattern {
+            self.path_params = extract_path_params(pattern, &self.path);
+        }
+        self
+    }
+
     /// Get a value by dotted path (e.g., "query.name", "headers.content-type")
     pub fn get(&self, path: &str) -> Option<String> {
         let parts: Vec<&str> = path.splitn(2, '.').collect();
@@ -98,9 +109,9 @@ impl RequestData {
     }
 }
 
-/// Extract path parameters from a route pattern and actual path (used in tests)
-#[cfg(test)]
-fn extract_path_params(pattern: &str, path: &str) -> HashMap<String, String> {
+/// Extract path parameters from a route `pattern` (`:name` segments) and the actual request
+/// `path`. Returns an empty map when the segment counts differ or a literal segment doesn't match.
+pub(crate) fn extract_path_params(pattern: &str, path: &str) -> HashMap<String, String> {
     let mut params = HashMap::new();
 
     let pattern_parts: Vec<&str> = pattern.split('/').collect();
@@ -248,6 +259,22 @@ mod tests {
     fn test_extract_path_params_no_match() {
         let params = extract_path_params("/users/:id", "/posts/123");
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_with_route_pattern_builder() {
+        let headers = hyper::HeaderMap::new();
+        // A matching pattern populates path_params from the request path.
+        let data = RequestData::new("GET", "/users/42", None, &headers, None)
+            .with_route_pattern(Some("/users/:id"));
+        assert_eq!(data.get("pathParams.id"), Some("42".to_string()));
+        // No pattern (and a non-matching pattern) leave the map empty.
+        let none =
+            RequestData::new("GET", "/users/42", None, &headers, None).with_route_pattern(None);
+        assert!(none.path_params.is_empty());
+        let mismatch = RequestData::new("GET", "/orders/42", None, &headers, None)
+            .with_route_pattern(Some("/users/:id"));
+        assert!(mismatch.path_params.is_empty());
     }
 
     #[test]

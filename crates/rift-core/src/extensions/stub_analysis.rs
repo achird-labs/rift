@@ -414,6 +414,7 @@ mod tests {
         let predicates = predicates_from_jsons(predicates);
         Stub {
             id: None,
+            route_pattern: None,
             predicates,
             responses: vec![],
             scenario_name: None,
@@ -429,6 +430,7 @@ mod tests {
         let predicates = predicates_from_jsons(predicates);
         Stub {
             id: Some(id.to_string()),
+            route_pattern: None,
             predicates,
             responses: vec![],
             scenario_name: None,
