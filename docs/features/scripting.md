@@ -11,6 +11,46 @@ Rift supports multiple scripting engines for dynamic behavior.
 
 ---
 
+## Script API v2: unified `ctx`, `respond(ctx)`, result constructors
+
+As of this release, `_rift.script` has a single contract that is **identical across Rhai, Lua, and
+JavaScript**: a `ctx` object passed into the script, and result constructors instead of a hand-built
+`#{ inject:, fault: }` map. This is the recommended way to write new scripts — see
+[`ctx` API v2](#ctx-api-v2) below for the full reference.
+
+The **v1 `should_inject(request, flow_store)` wrapper still works unchanged** and is not going
+away in this release; `rift-lint` flags it with a deprecation hint (`E041`) so you can migrate at
+your own pace. A script is v1 if (and only if) it defines a `should_inject` function — v2 scripts
+never need to.
+
+```rhai
+// v2: named entrypoint
+fn respond(ctx) {
+  let n = ctx.state.incr("attempts");
+  if n <= 2 {
+    http(503, #{ error: "unavailable", attempt: n }).header("Retry-After", "1")
+  } else {
+    http(200, #{ ok: true, succeededOnAttempt: n })
+  }
+}
+```
+
+```rhai
+// v2: bare-expression form — no `fn respond(ctx) { ... }` wrapper at all. The whole script body
+// IS the function, with `ctx` already in scope. Equivalent to the named form above.
+let n = ctx.state.incr("attempts");
+if n <= 2 {
+  http(503, #{ error: "unavailable", attempt: n }).header("Retry-After", "1")
+} else {
+  http(200, #{ ok: true, succeededOnAttempt: n })
+}
+```
+
+Both forms are legal for every hook placement; which named entrypoint applies depends on where the
+script is attached — see the table below.
+
+---
+
 ## Available Engines
 
 | Engine | Format | Use Case |
@@ -428,6 +468,123 @@ unknown `ref:` or a `file:` that can't be read is a config-time validation error
 
 ---
 
+## `ctx` API v2
+
+`ctx` is built the same way, with the same field names and semantics, in every engine and at every
+hook placement. Placement determines which entrypoint the engine looks for:
+
+| Placement | Entrypoint | Returns |
+|:----------|:-----------|:--------|
+| Response script (`_rift.script`) | `respond(ctx)` | a result constructor, or nothing (pass through) |
+| Predicate script | `matches(ctx)` | `true`/`false` |
+| Decorate behavior | `transform(ctx)` | a result constructor describing the new response, or nothing (no change) |
+| Wait behavior | `delay(ctx)` | a number of milliseconds |
+
+For each placement, the script may either define the named function explicitly, or omit the
+wrapper entirely and write the function body directly at the top level (bare-expression form) —
+both are shown above for `respond`.
+
+### `ctx.request`
+
+```
+ctx.request.method        // "GET", "POST", etc.
+ctx.request.path          // "/api/users/123"
+ctx.request.pathParams    // map: populated from the stub's routePattern
+ctx.request.query         // map of query-string parameters
+ctx.request.headers       // map with LOWERCASED keys — always, regardless of wire casing
+ctx.request.header(name)  // case-insensitive getter, e.g. ctx.request.header("X-Flow-Id")
+ctx.request.body          // the raw request body, as a string
+ctx.request.json          // the body lazily parsed as JSON; unit/nil/null if it isn't JSON
+```
+
+`ctx.request.header(name)` exists so `X-Flow-Id`, `x-flow-id`, and `X-FLOW-ID` all resolve the same
+value — a common source of bugs when reading `request.headers[...]` directly against on-the-wire
+casing.
+
+### `ctx.response`
+
+Available **only** on the decorate/`transform(ctx)` hook — `undefined`/`nil`/absent everywhere
+else. Same shape as `ctx.request`, describing the in-flight response instead:
+
+```
+ctx.response.status        // number
+ctx.response.headers       // map, lowercased keys
+ctx.response.header(name)  // case-insensitive getter
+ctx.response.body          // raw string
+ctx.response.json          // lazily parsed JSON, or unit/nil/null
+```
+
+### `ctx.state` and `ctx.store`
+
+`ctx.state` is a flow-scoped state handle, already bound to the request's resolved flow id (per
+`flowIdSource` — the same resolution the scenario-state gate uses):
+
+```rhai
+let n = ctx.state.get("key");     // unit if not set
+ctx.state.set("key", n + 1);
+let attempts = ctx.state.incr("attempts");
+ctx.state.exists("key");          // bool
+ctx.state.delete("key");
+```
+
+(Full `get_or`/parameterized `incr`/CAS support is a separate, upcoming addition — this covers the
+common get/set/incr/exists/delete case today.)
+
+`ctx.store` is the escape hatch for touching a *different* flow's state — `ctx.store.flow(id)`
+returns a handle just like `ctx.state`, but scoped to `id` instead of the request's own flow:
+
+```rhai
+ctx.store.flow("other-flow-id").set("shared", 99);
+```
+
+### `ctx.flowId` and `ctx.stub`
+
+```
+ctx.flowId              // the resolved flow id (string) — same value ctx.state is bound to
+ctx.stub.scenarioName    // string, or unit/nil/null if the stub isn't part of a scenario
+ctx.stub.scenarioState   // string, or unit/nil/null
+ctx.stub.id              // the stub's own id, or unit/nil/null if it has none
+```
+
+### `ctx.logger`
+
+Real logging (not a no-op): `debug`/`info`/`warn`/`error`, routed to the process's own tracing
+output at target `rift::script`, tagged with the imposter port and stub id where available.
+
+```rhai
+ctx.logger.info("handling request " + ctx.request.path);
+```
+
+### Result constructors
+
+Replace the v1 `#{ inject:, fault: }` map. Available in `respond(ctx)`/`transform(ctx)` (and as the
+return value of a bare-expression script for those placements):
+
+| Constructor | Meaning | Replaces (v1) |
+|:------------|:--------|:---------------|
+| `http(status)` / `http(status, body)` | respond with this status/body; chain `.header(k, v)` for extra headers | `#{inject:true, fault:"error", status, body, headers}` |
+| `delay(ms)` | inject latency, then respond normally | `#{inject:true, fault:"latency", duration_ms}` |
+| `reset()` | reset the connection (transport-level) | `fault: "tcp"` / a top-level `fault` string |
+| `pass()` | respond normally, no injection | `#{inject: false}` |
+| *(nothing)* | same as `pass()` | `#{inject: false}` |
+
+`http`'s body is a **value**, not a hand-assembled JSON string: pass a map/array and it is
+JSON-serialized with `Content-Type: application/json` set automatically (unless you set your own
+`Content-Type` via `.header(...)`, which always wins); pass a string and it's used verbatim.
+
+```rhai
+// Object body -> JSON + Content-Type: application/json
+http(503, #{ error: "unavailable", attempt: 2 })
+
+// String body -> passed through as-is, no Content-Type added
+http(200, "OK")
+
+// Chained headers
+http(429, #{ error: "rate limited" }).header("Retry-After", "60")
+```
+
+---
+
 ## Execution Limits
 
 `_rift.script` execution is bounded so a runaway script cannot wedge the engine.
@@ -493,7 +650,7 @@ The raised error propagates to the standard script-error path (`500` with `x-rif
 | Format | `inject` response | `_rift.script` | `_rift.script` |
 | State access | `state.key` | `flow_store.get(id, key)` | `flow_store:get(id, key)` |
 | Flow isolation | Per imposter | Per flow_id | Per flow_id |
-| Function wrapper | None needed | `should_inject(request, flow_store)` | `should_inject(request, flow_store)` |
+| Function wrapper | None needed | `respond(ctx)`/bare (v2, recommended) or `should_inject(request, flow_store)` (v1, deprecated) | same as Rhai |
 | Performance | Good | Excellent | Excellent |
 | Mountebank compatible | Yes | No | No |
 

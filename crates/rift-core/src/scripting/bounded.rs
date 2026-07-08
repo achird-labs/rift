@@ -6,7 +6,7 @@
 //! at a wall-clock deadline using the same abort-flag mechanism as the pooled path (#172):
 //! Rhai's `on_progress` callback, and a Lua instruction hook.
 
-use super::{FaultDecision, ScriptEngine, ScriptRequest};
+use super::{FaultDecision, ScriptCtxExtras, ScriptEngine, ScriptRequest};
 use crate::extensions::flow_state::FlowStore;
 use crate::imposter::ImposterConfig;
 use anyhow::Result;
@@ -45,6 +45,30 @@ pub async fn should_inject_bounded(
     flow_store: Arc<dyn FlowStore>,
     timeout: Duration,
 ) -> Result<FaultDecision> {
+    should_inject_bounded_with_ctx(
+        engine_type,
+        code,
+        rule_id,
+        request,
+        flow_store,
+        timeout,
+        ScriptCtxExtras::default(),
+    )
+    .await
+}
+
+/// As [`should_inject_bounded`], but threading real `ctx.flowId`/`ctx.stub` context (issue #357
+/// Item 1) through to the v2 `ctx` object — used by the imposter `_rift.script` hook, which knows
+/// the resolved flow id and matched stub.
+pub async fn should_inject_bounded_with_ctx(
+    engine_type: String,
+    code: String,
+    rule_id: String,
+    request: ScriptRequest,
+    flow_store: Arc<dyn FlowStore>,
+    timeout: Duration,
+    ctx_extra: ScriptCtxExtras,
+) -> Result<FaultDecision> {
     let abort = Arc::new(AtomicBool::new(false));
     let run_abort = Arc::clone(&abort);
     let handle = tokio::task::spawn_blocking(move || {
@@ -55,6 +79,7 @@ pub async fn should_inject_bounded(
             &request,
             flow_store,
             &run_abort,
+            &ctx_extra,
         )
     });
 
@@ -88,21 +113,22 @@ fn run_should_inject_with_abort(
     request: &ScriptRequest,
     flow_store: Arc<dyn FlowStore>,
     abort: &Arc<AtomicBool>,
+    ctx_extra: &ScriptCtxExtras,
 ) -> Result<FaultDecision> {
     // Start each execution with a clean last-flow-error slot so `flow_store.last_error()` can't
     // observe a stale error left by a previous script on this reused worker thread (issue #322).
     crate::extensions::flow_state::clear_last_flow_error();
     match engine_type {
         "rhai" => super::rhai_engine::run_should_inject_with_abort_rhai(
-            code, rule_id, request, flow_store, abort,
+            code, rule_id, request, flow_store, abort, ctx_extra,
         ),
         #[cfg(feature = "lua")]
         "lua" => super::lua_engine::run_should_inject_with_abort_lua(
-            code, rule_id, request, flow_store, abort,
+            code, rule_id, request, flow_store, abort, ctx_extra,
         ),
         other => {
             let engine = ScriptEngine::new(other, code, rule_id)?;
-            engine.should_inject_fault(request, flow_store)
+            engine.should_inject_fault_with_ctx(request, flow_store, ctx_extra)
         }
     }
 }
@@ -115,6 +141,7 @@ mod tests {
 
     fn req() -> ScriptRequest {
         ScriptRequest {
+            raw_body: None,
             method: "GET".into(),
             path: "/hang".into(),
             headers: Default::default(),
@@ -162,7 +189,15 @@ mod tests {
         });
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let res = run_should_inject_with_abort(engine, code, "t", &req(), store(), &abort);
+            let res = run_should_inject_with_abort(
+                engine,
+                code,
+                "t",
+                &req(),
+                store(),
+                &abort,
+                &ScriptCtxExtras::default(),
+            );
             let _ = tx.send(res.is_err());
         });
         match rx.recv_timeout(Duration::from_secs(5)) {

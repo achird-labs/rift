@@ -329,6 +329,11 @@ impl Imposter {
     /// Whether any current stub can trigger a connection-level TCP fault (`_rift.fault.tcp`, or a
     /// Mountebank `fault` that maps to one). Such imposters must be served HTTP/1-only: a TCP fault
     /// aborts the whole socket, which is incompatible with HTTP/2 stream multiplexing (issue #295).
+    ///
+    /// A `_rift.script` (RiftScript) stub also counts (issue #357 B2): a script can dynamically
+    /// call `reset()` — the v2 connection-reset result constructor — which lowers to the same
+    /// transport-level abort as `_rift.fault.tcp`, so a script-bearing stub must likewise be
+    /// served HTTP/1-only even though its reset path isn't visible in the static config.
     pub(crate) fn uses_tcp_faults(&self) -> bool {
         use crate::imposter::fault_io::TcpFaultKind;
         let rift_has_tcp = |rift: &RiftResponseExtension| {
@@ -344,7 +349,8 @@ impl Imposter {
             .any(|resp| match resp {
                 StubResponse::Fault { fault } => TcpFaultKind::parse(fault).is_some(),
                 StubResponse::Is { rift: Some(r), .. } => rift_has_tcp(r),
-                StubResponse::RiftScript { rift } => rift_has_tcp(rift),
+                // A script may call `reset()` at runtime, so conservatively force H1-only.
+                StubResponse::RiftScript { .. } => true,
                 _ => false,
             })
     }

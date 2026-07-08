@@ -247,11 +247,18 @@ evaluated. If you want the top-level transport fault, the response must be a bar
 
 ## Scripted Faults
 
-For dynamic fault injection based on request data or state, use the scripting feature.
+For dynamic fault injection based on request data or state, use the scripting feature. Full
+reference (the unified `ctx` object, result constructors, entrypoint placement) lives on the
+[Scripting](./scripting.md#ctx-api-v2) page; this section just shows it applied to fault injection.
+`_rift.script` accepts both the v2 forms below and the deprecated v1 `should_inject(request,
+flow_store)` wrapper — a script needs neither an `inject`/`fault` map nor a `should_inject` wrapper
+to be valid; see [Scripting](./scripting.md) for the full v1/v2 contract.
 
 ### Rhai Script - Retry Simulation
 
-Fail the first 2 requests, pass through on the 3rd:
+Fail the first 2 requests, pass through on the 3rd. Bare-expression form (issue #357): the whole
+script body is the `respond(ctx)` function, with `ctx` already in scope, and `http(status, body)`
+replaces the hand-built `#{ inject:, fault: }` map:
 
 ```json
 {
@@ -265,7 +272,7 @@ Fail the first 2 requests, pass through on the 3rd:
       "_rift": {
         "script": {
           "engine": "rhai",
-          "code": "let flow_id = request.headers[\"x-flow-id\"]; if flow_id == () { flow_id = \"default\"; }; let attempts = flow_store.get(flow_id, \"attempts\"); if attempts == () { attempts = 0; }; attempts += 1; flow_store.set(flow_id, \"attempts\", attempts); if attempts <= 2 { #{inject: true, fault: \"error\", status: 503, body: `{\"error\":\"Temporary failure\",\"attempt\":${attempts}}`, headers: #{\"Content-Type\": \"application/json\"}} } else { #{inject: false} }"
+          "code": "let n = ctx.state.incr(\"attempts\"); if n <= 2 { http(503, #{ error: \"Temporary failure\", attempt: n }) } else { pass() }"
         }
       }
     }]
@@ -293,7 +300,12 @@ Fail the first 2 requests, pass through on the 3rd:
 }
 ```
 
-### Script Return Values
+### Script Return Values (v1, deprecated)
+
+The Lua example above, and the shapes below, use the **v1** `should_inject(request, flow_store)`
+wrapper and its `inject`/`fault` return map — still supported, but superseded by the `respond(ctx)`
++ result-constructor contract shown in the Rhai example above and documented in full on the
+[Scripting](./scripting.md#ctx-api-v2) page. New scripts should prefer v2.
 
 Scripts must return a map/table with an `inject` flag:
 

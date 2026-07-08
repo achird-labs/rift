@@ -1,7 +1,7 @@
 use rift_lint::{
-    LintOptions, LintResult, lint_directory, lint_file, lint_json, lint_value, validate_behavior,
-    validate_imposter, validate_is_response, validate_predicate, validate_proxy_response,
-    validate_response, validate_stub,
+    LintOptions, LintResult, Severity, lint_directory, lint_file, lint_json, lint_value,
+    validate_behavior, validate_imposter, validate_is_response, validate_predicate,
+    validate_proxy_response, validate_response, validate_stub,
 };
 use serde_json::{Value, json};
 use std::path::Path;
@@ -1127,4 +1127,89 @@ fn e040_invalid_javascript_file_syntax_is_an_error() {
 
     let r = lint_file(&config_path, &opts());
     assert!(has_code(&r, "E040"), "expected E040, got {:?}", codes(&r));
+}
+
+// ─── Issue #357 Item 5: E041 deprecation lint for the v1 `should_inject` wrapper ──────
+
+#[test]
+fn e041_fires_for_v1_should_inject_wrapper_rhai() {
+    let v = make_imposter(json!([rift_script_stub(json!({
+        "code": "fn should_inject(request, flow_store) { #{ inject: false } }"
+    }))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(has_code(&r, "E041"), "expected E041, got {:?}", codes(&r));
+}
+
+#[test]
+fn e041_fires_for_v1_should_inject_wrapper_lua() {
+    let v = make_imposter(json!([rift_script_stub(json!({
+        "engine": "lua",
+        "code": "function should_inject(request, flow_store) return { inject = false } end"
+    }))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(has_code(&r, "E041"), "expected E041, got {:?}", codes(&r));
+}
+
+#[test]
+fn e041_fires_for_v1_should_inject_wrapper_js() {
+    let v = make_imposter(json!([rift_script_stub(json!({
+        "engine": "javascript",
+        "code": "function should_inject(request, flow_store) { return { inject: false }; }"
+    }))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(has_code(&r, "E041"), "expected E041, got {:?}", codes(&r));
+}
+
+#[test]
+fn e041_does_not_fire_for_v2_named_respond() {
+    let v = make_imposter(json!([rift_script_stub(json!({
+        "code": "fn respond(ctx) { http(200) }"
+    }))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(!has_code(&r, "E041"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e041_does_not_fire_for_v2_bare_expression() {
+    let v = make_imposter(json!([rift_script_stub(json!({
+        "code": "if ctx.request.method == \"POST\" { http(503) } else { pass() }"
+    }))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(!has_code(&r, "E041"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e041_does_not_fire_for_should_inject_only_in_a_comment() {
+    // The lint anchors on a function DECLARATION (`fn`/`function should_inject`), so a mere
+    // mention of the word in a comment/string is not a v1 wrapper and must not warn.
+    let v = make_imposter(json!([rift_script_stub(json!({
+        "code": "// migrated away from should_inject\nfn respond(ctx) { http(200) }"
+    }))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(!has_code(&r, "E041"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e041_is_a_warning_not_an_error() {
+    let v = make_imposter(json!([rift_script_stub(json!({
+        "code": "fn should_inject(request, flow_store) { #{ inject: false } }"
+    }))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    let issue = r
+        .issues
+        .iter()
+        .find(|i| i.code == "E041")
+        .expect("E041 must fire");
+    assert_eq!(
+        issue.severity,
+        Severity::Warning,
+        "E041 must be a deprecation warning, not a hard error"
+    );
 }

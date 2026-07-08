@@ -39,16 +39,18 @@ fn req(attempt_tag: &str) -> ScriptRequest {
         body: serde_json::Value::Null,
         query: Default::default(),
         path_params: Default::default(),
+        raw_body: None,
     }
 }
 
-/// (status, body) for an `Error` decision, or `None` for `FaultDecision::None`. `Latency` isn't
-/// produced by this script so it's left unmatched (a test failure if it ever were).
+/// (status, body) for an `Error` decision, or `None` for `FaultDecision::None`. `Latency`/`Reset`
+/// aren't produced by this script so they're left unmatched (a test failure if they ever were).
 fn decision_summary(decision: &FaultDecision) -> Option<(u16, String)> {
     match decision {
         FaultDecision::None => None,
         FaultDecision::Error { status, body, .. } => Some((*status, body.clone())),
         FaultDecision::Latency { .. } => panic!("script never injects latency"),
+        FaultDecision::Reset { .. } => panic!("script never resets the connection"),
     }
 }
 

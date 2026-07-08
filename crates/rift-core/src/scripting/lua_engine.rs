@@ -1,5 +1,8 @@
 use crate::extensions::flow_state::{FlowStore, flow_result, strict_flow_store};
-use crate::scripting::{FaultDecision, ScriptRequest};
+use crate::scripting::{
+    FaultDecision, ScriptCtxExtras, ScriptCtxInput, ScriptRequest, ScriptResponseContext,
+    ScriptResult, ScriptResultBody, ScriptStubContext, entrypoints,
+};
 use anyhow::{Result, anyhow};
 use mlua::prelude::*;
 use serde_json::Value;
@@ -93,18 +96,18 @@ pub struct LuaEngine {
 
 impl LuaEngine {
     pub fn new(script: &str, rule_id: &str) -> Result<Self> {
-        // Validate script compiles
+        // Validate the script COMPILES — not that it runs (`.into_function()` compiles without
+        // calling). Issue #357 Item 2 legalizes bare-expression scripts, which reference a
+        // top-level `ctx` global that only exists at real execution time (`request`/`flow_store`/
+        // `ctx` all bound); `.exec()`-ing an unbound bare script here would spuriously fail with
+        // "ctx is nil", and for a wrapper-form script would run its top-level side effects at
+        // construction time, not request time. A missing `should_inject` is also no longer a
+        // construction error (issue #357 Item 4), matching `RhaiEngine::new`, which never required
+        // it either.
         let lua = Lua::new();
         lua.load(script)
-            .exec()
+            .into_function()
             .map_err(|e| anyhow!("Failed to compile Lua script: {e}"))?;
-
-        // Check that should_inject function exists
-        let globals = lua.globals();
-        let func: LuaResult<LuaFunction> = globals.get("should_inject");
-        if func.is_err() {
-            return Err(anyhow!("Script must define should_inject function"));
-        }
 
         Ok(Self {
             script: script.to_string(),
@@ -112,10 +115,24 @@ impl LuaEngine {
         })
     }
 
+    /// Execute the script and determine if a fault should be injected. Auto-detects v1
+    /// (`should_inject(request, flow_store)`) vs v2 (`respond(ctx)` or bare) — see
+    /// [`crate::scripting::ScriptEngine::should_inject_fault`] for the full contract.
     pub fn should_inject(
         &self,
         request: &ScriptRequest,
         flow_store: Arc<dyn FlowStore>,
+    ) -> Result<FaultDecision> {
+        self.should_inject_with_ctx(request, flow_store, &ScriptCtxExtras::default())
+    }
+
+    /// As [`Self::should_inject`], but with real `ctx.flowId`/`ctx.stub` context (issue #357
+    /// Item 1).
+    pub fn should_inject_with_ctx(
+        &self,
+        request: &ScriptRequest,
+        flow_store: Arc<dyn FlowStore>,
+        extra: &ScriptCtxExtras,
     ) -> Result<FaultDecision> {
         // DEPRECATED: This method spawns a thread+runtime per execution (expensive!)
         // Script pool workers should use execute_lua_with_state() instead
@@ -123,6 +140,7 @@ impl LuaEngine {
         let script = self.script.clone();
         let request = request.clone();
         let rule_id = self.rule_id.clone();
+        let extra_owned = extra.clone();
         let (tx, rx) = std::sync::mpsc::channel();
 
         std::thread::spawn(move || {
@@ -130,7 +148,9 @@ impl LuaEngine {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
             let _guard = rt.enter();
 
-            let result = Self::execute_in_thread(script, request, flow_store, rule_id);
+            let ctx_input = extra_owned.build_ctx_input(&request);
+            let result =
+                Self::execute_respond_in_thread(script, &request, flow_store, rule_id, &ctx_input);
             let _ = tx.send(result);
         });
 
@@ -138,175 +158,21 @@ impl LuaEngine {
             .map_err(|_| anyhow!("Lua execution thread panicked"))?
     }
 
-    fn execute_in_thread(
+    /// Compile-and-run a script for `should_inject_with_ctx` — replaces the old duplicated
+    /// table-building (now shared via [`run_entrypoint_lua`]) with the v1/v2-aware dispatch.
+    fn execute_respond_in_thread(
         script: String,
-        request: ScriptRequest,
+        request: &ScriptRequest,
         flow_store: Arc<dyn FlowStore>,
         rule_id: String,
+        ctx_input: &ScriptCtxInput,
     ) -> Result<FaultDecision> {
         let lua = Lua::new();
-
-        // Create request table
-        let request_table = lua
-            .create_table()
-            .map_err(|e| anyhow!("Failed to create request table: {e}"))?;
-        request_table
-            .set("method", request.method.clone())
-            .map_err(|e| anyhow!("Failed to set method: {e}"))?;
-        request_table
-            .set("path", request.path.clone())
-            .map_err(|e| anyhow!("Failed to set path: {e}"))?;
-
-        // Create headers table
-        let headers_table = lua
-            .create_table()
-            .map_err(|e| anyhow!("Failed to create headers table: {e}"))?;
-        for (k, v) in &request.headers {
-            headers_table
-                .set(k.as_str(), v.as_str())
-                .map_err(|e| anyhow!("Failed to set header: {e}"))?;
-        }
-        request_table
-            .set("headers", headers_table)
-            .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
-
-        // Convert body JSON to Lua value
-        let body_value =
-            json_to_lua(&lua, &request.body).map_err(|e| anyhow!("Failed to convert body: {e}"))?;
-        request_table
-            .set("body", body_value)
-            .map_err(|e| anyhow!("Failed to set body: {e}"))?;
-
-        // Create query parameters table
-        let query_table = lua
-            .create_table()
-            .map_err(|e| anyhow!("Failed to create query table: {e}"))?;
-        for (k, v) in &request.query {
-            query_table
-                .set(k.as_str(), v.as_str())
-                .map_err(|e| anyhow!("Failed to set query param: {e}"))?;
-        }
-        request_table
-            .set("query", query_table)
-            .map_err(|e| anyhow!("Failed to set query: {e}"))?;
-
-        // Create path parameters table
-        let path_params_table = lua
-            .create_table()
-            .map_err(|e| anyhow!("Failed to create path_params table: {e}"))?;
-        for (k, v) in &request.path_params {
-            path_params_table
-                .set(k.as_str(), v.as_str())
-                .map_err(|e| anyhow!("Failed to set path param: {e}"))?;
-        }
-        request_table
-            .set("pathParams", path_params_table)
-            .map_err(|e| anyhow!("Failed to set pathParams: {e}"))?;
-
-        // Create flow_store userdata
-        let flow_store_ud = lua
-            .create_userdata(LuaFlowStore::new(flow_store))
-            .map_err(|e| anyhow!("Failed to create flow_store userdata: {e}"))?;
-
-        // Set global variables
-        let globals = lua.globals();
-        globals
-            .set("request", request_table)
-            .map_err(|e| anyhow!("Failed to set request global: {e}"))?;
-        globals
-            .set("flow_store", flow_store_ud)
-            .map_err(|e| anyhow!("Failed to set flow_store global: {e}"))?;
-
-        // Load and execute script
-        lua.load(&script)
-            .exec()
-            .map_err(|e| anyhow!("Failed to execute script: {e}"))?;
-
-        // Call should_inject function
-        let should_inject: LuaFunction = globals
-            .get("should_inject")
-            .map_err(|e| anyhow!("Failed to get should_inject function: {e}"))?;
-        let request_arg: LuaTable = globals
-            .get("request")
-            .map_err(|e| anyhow!("Failed to get request: {e}"))?;
-        let flow_store_arg: LuaAnyUserData = globals
-            .get("flow_store")
-            .map_err(|e| anyhow!("Failed to get flow_store: {e}"))?;
-        let result: LuaTable = should_inject
-            .call((request_arg, flow_store_arg))
-            .map_err(|e| anyhow!("Failed to call should_inject: {e}"))?;
-
-        // Parse result table
-        Self::parse_fault_decision(&lua, result, rule_id)
-    }
-
-    fn parse_fault_decision(
-        _lua: &Lua,
-        result: LuaTable,
-        rule_id: String,
-    ) -> Result<FaultDecision> {
-        let inject: bool = result.get("inject").unwrap_or(false);
-
-        if !inject {
-            return Ok(FaultDecision::None);
-        }
-
-        let fault_type: String = result.get("fault").unwrap_or_else(|_| "none".to_string());
-
-        match fault_type.as_str() {
-            "latency" => {
-                let duration_ms: u64 = result
-                    .get("duration_ms")
-                    .map_err(|_| anyhow!("latency fault requires duration_ms field"))?;
-                Ok(FaultDecision::Latency {
-                    duration_ms,
-                    rule_id,
-                })
-            }
-            "error" => {
-                let status: u16 = result
-                    .get("status")
-                    .map_err(|_| anyhow!("error fault requires status field"))?;
-                let body: String = result.get("body").unwrap_or_else(|_| "".to_string());
-
-                // Extract optional headers table
-                let mut headers = std::collections::HashMap::new();
-                if let Ok(headers_table) = result.get::<LuaTable>("headers") {
-                    for (key, value) in headers_table.pairs::<LuaValue, LuaValue>().flatten() {
-                        // Convert key to string
-                        let key_str = match key {
-                            LuaValue::String(s) => {
-                                s.to_str().map(|s| s.to_string()).unwrap_or_default()
-                            }
-                            LuaValue::Integer(i) => i.to_string(),
-                            LuaValue::Number(n) => n.to_string(),
-                            _ => continue, // Skip non-stringable keys
-                        };
-
-                        // Convert value to string
-                        let value_str = match value {
-                            LuaValue::String(s) => {
-                                s.to_str().map(|s| s.to_string()).unwrap_or_default()
-                            }
-                            LuaValue::Integer(i) => i.to_string(),
-                            LuaValue::Number(n) => n.to_string(),
-                            LuaValue::Boolean(b) => b.to_string(),
-                            _ => continue, // Skip non-stringable values
-                        };
-
-                        headers.insert(key_str, value_str);
-                    }
-                }
-
-                Ok(FaultDecision::Error {
-                    status,
-                    body,
-                    rule_id,
-                    headers,
-                })
-            }
-            _ => Ok(FaultDecision::None),
-        }
+        let chunk_fn = lua
+            .load(&script)
+            .into_function()
+            .map_err(|e| anyhow!("Failed to compile script: {e}"))?;
+        call_respond_lua(&lua, &chunk_fn, request, ctx_input, flow_store, &rule_id)
     }
 }
 
@@ -326,8 +192,9 @@ pub fn compile_to_bytecode(script: &str) -> Result<Vec<u8>> {
     Ok(bytecode)
 }
 
-/// Public function to execute Lua bytecode with a reusable Lua state (for script pool)
-/// This eliminates the expensive compilation overhead on each execution
+/// Public function to execute Lua bytecode with a reusable Lua state (for script pool). Routes
+/// through the shared v1/v2-aware [`call_respond_lua`] (issue #357 Item 4); `ctx` gets
+/// best-effort defaults since the pool has no imposter context here.
 pub fn execute_lua_bytecode(
     lua: &Lua,
     bytecode: &[u8],
@@ -335,102 +202,16 @@ pub fn execute_lua_bytecode(
     flow_store: Arc<dyn FlowStore>,
     rule_id: &str,
 ) -> Result<FaultDecision> {
-    // Create request table
-    let request_table = lua
-        .create_table()
-        .map_err(|e| anyhow!("Failed to create request table: {e}"))?;
-    request_table
-        .set("method", request.method.clone())
-        .map_err(|e| anyhow!("Failed to set method: {e}"))?;
-    request_table
-        .set("path", request.path.clone())
-        .map_err(|e| anyhow!("Failed to set path: {e}"))?;
-
-    // Create headers table
-    let headers_table = lua
-        .create_table()
-        .map_err(|e| anyhow!("Failed to create headers table: {e}"))?;
-    for (k, v) in &request.headers {
-        headers_table
-            .set(k.as_str(), v.as_str())
-            .map_err(|e| anyhow!("Failed to set header: {e}"))?;
-    }
-    request_table
-        .set("headers", headers_table)
-        .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
-
-    // Convert body JSON to Lua value
-    let body_value =
-        json_to_lua(lua, &request.body).map_err(|e| anyhow!("Failed to convert body: {e}"))?;
-    request_table
-        .set("body", body_value)
-        .map_err(|e| anyhow!("Failed to set body: {e}"))?;
-
-    // Create query parameters table
-    let query_table = lua
-        .create_table()
-        .map_err(|e| anyhow!("Failed to create query table: {e}"))?;
-    for (k, v) in &request.query {
-        query_table
-            .set(k.as_str(), v.as_str())
-            .map_err(|e| anyhow!("Failed to set query param: {e}"))?;
-    }
-    request_table
-        .set("query", query_table)
-        .map_err(|e| anyhow!("Failed to set query: {e}"))?;
-
-    // Create path parameters table
-    let path_params_table = lua
-        .create_table()
-        .map_err(|e| anyhow!("Failed to create path_params table: {e}"))?;
-    for (k, v) in &request.path_params {
-        path_params_table
-            .set(k.as_str(), v.as_str())
-            .map_err(|e| anyhow!("Failed to set path param: {e}"))?;
-    }
-    request_table
-        .set("pathParams", path_params_table)
-        .map_err(|e| anyhow!("Failed to set pathParams: {e}"))?;
-
-    // Create flow_store userdata
-    let flow_store_ud = lua
-        .create_userdata(LuaFlowStore::new(flow_store))
-        .map_err(|e| anyhow!("Failed to create flow_store userdata: {e}"))?;
-
-    // Set global variables
-    let globals = lua.globals();
-    globals
-        .set("request", request_table)
-        .map_err(|e| anyhow!("Failed to set request global: {e}"))?;
-    globals
-        .set("flow_store", flow_store_ud)
-        .map_err(|e| anyhow!("Failed to set flow_store global: {e}"))?;
-
-    // Load and execute bytecode (MUCH faster than compiling from source)
-    lua.load(bytecode)
-        .exec()
-        .map_err(|e| anyhow!("Failed to execute bytecode: {e}"))?;
-
-    // Call should_inject function
-    let should_inject: LuaFunction = globals
-        .get("should_inject")
-        .map_err(|e| anyhow!("Failed to get should_inject function: {e}"))?;
-    let request_arg: LuaTable = globals
-        .get("request")
-        .map_err(|e| anyhow!("Failed to get request: {e}"))?;
-    let flow_store_arg: LuaAnyUserData = globals
-        .get("flow_store")
-        .map_err(|e| anyhow!("Failed to get flow_store: {e}"))?;
-    let result: LuaTable = should_inject
-        .call((request_arg, flow_store_arg))
-        .map_err(|e| anyhow!("Failed to call should_inject: {e}"))?;
-
-    // Parse result table with rule_id parameter
-    parse_fault_decision_lua(lua, result, rule_id)
+    let chunk_fn = lua
+        .load(bytecode)
+        .into_function()
+        .map_err(|e| anyhow!("Failed to load bytecode: {e}"))?;
+    let ctx_input = ScriptCtxExtras::default().build_ctx_input(request);
+    call_respond_lua(lua, &chunk_fn, request, &ctx_input, flow_store, rule_id)
 }
 
-/// Public function to execute Lua script with a reusable Lua state (for script pool)
-/// This eliminates the expensive thread spawning and runtime creation overhead
+/// Public function to execute Lua script with a reusable Lua state (for script pool). As
+/// [`execute_lua_bytecode`], but compiling from source each call.
 pub fn execute_lua_with_state(
     lua: &Lua,
     script: &str,
@@ -438,98 +219,12 @@ pub fn execute_lua_with_state(
     flow_store: Arc<dyn FlowStore>,
     rule_id: &str,
 ) -> Result<FaultDecision> {
-    // Create request table
-    let request_table = lua
-        .create_table()
-        .map_err(|e| anyhow!("Failed to create request table: {e}"))?;
-    request_table
-        .set("method", request.method.clone())
-        .map_err(|e| anyhow!("Failed to set method: {e}"))?;
-    request_table
-        .set("path", request.path.clone())
-        .map_err(|e| anyhow!("Failed to set path: {e}"))?;
-
-    // Create headers table
-    let headers_table = lua
-        .create_table()
-        .map_err(|e| anyhow!("Failed to create headers table: {e}"))?;
-    for (k, v) in &request.headers {
-        headers_table
-            .set(k.as_str(), v.as_str())
-            .map_err(|e| anyhow!("Failed to set header: {e}"))?;
-    }
-    request_table
-        .set("headers", headers_table)
-        .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
-
-    // Convert body JSON to Lua value
-    let body_value =
-        json_to_lua(lua, &request.body).map_err(|e| anyhow!("Failed to convert body: {e}"))?;
-    request_table
-        .set("body", body_value)
-        .map_err(|e| anyhow!("Failed to set body: {e}"))?;
-
-    // Create query parameters table
-    let query_table = lua
-        .create_table()
-        .map_err(|e| anyhow!("Failed to create query table: {e}"))?;
-    for (k, v) in &request.query {
-        query_table
-            .set(k.as_str(), v.as_str())
-            .map_err(|e| anyhow!("Failed to set query param: {e}"))?;
-    }
-    request_table
-        .set("query", query_table)
-        .map_err(|e| anyhow!("Failed to set query: {e}"))?;
-
-    // Create path parameters table
-    let path_params_table = lua
-        .create_table()
-        .map_err(|e| anyhow!("Failed to create path_params table: {e}"))?;
-    for (k, v) in &request.path_params {
-        path_params_table
-            .set(k.as_str(), v.as_str())
-            .map_err(|e| anyhow!("Failed to set path param: {e}"))?;
-    }
-    request_table
-        .set("pathParams", path_params_table)
-        .map_err(|e| anyhow!("Failed to set pathParams: {e}"))?;
-
-    // Create flow_store userdata
-    let flow_store_ud = lua
-        .create_userdata(LuaFlowStore::new(flow_store))
-        .map_err(|e| anyhow!("Failed to create flow_store userdata: {e}"))?;
-
-    // Set global variables
-    let globals = lua.globals();
-    globals
-        .set("request", request_table)
-        .map_err(|e| anyhow!("Failed to set request global: {e}"))?;
-    globals
-        .set("flow_store", flow_store_ud)
-        .map_err(|e| anyhow!("Failed to set flow_store global: {e}"))?;
-
-    // Load and execute script (from string for now, bytecode could be added later)
-    lua.load(script)
-        .exec()
-        .map_err(|e| anyhow!("Failed to execute script: {e}"))?;
-
-    // Call should_inject function
-    let should_inject: LuaFunction = globals
-        .get("should_inject")
-        .map_err(|e| anyhow!("Failed to get should_inject function: {e}"))?;
-    let request_arg: LuaTable = globals
-        .get("request")
-        .map_err(|e| anyhow!("Failed to get request: {e}"))?;
-    let flow_store_arg: LuaAnyUserData = globals
-        .get("flow_store")
-        .map_err(|e| anyhow!("Failed to get flow_store: {e}"))?;
-    let result: LuaTable = should_inject
-        .call((request_arg, flow_store_arg))
-        .map_err(|e| anyhow!("Failed to call should_inject: {e}"))?;
-
-    // Parse result table with rule_id parameter
-    parse_fault_decision_lua(lua, result, rule_id)
+    let chunk_fn = lua
+        .load(script)
+        .into_function()
+        .map_err(|e| anyhow!("Failed to compile script: {e}"))?;
+    let ctx_input = ScriptCtxExtras::default().build_ctx_input(request);
+    call_respond_lua(lua, &chunk_fn, request, &ctx_input, flow_store, rule_id)
 }
 
 /// Helper to parse Lua fault decision with given rule_id
@@ -595,6 +290,477 @@ fn parse_fault_decision_lua(_lua: &Lua, result: LuaTable, rule_id: &str) -> Resu
             })
         }
         _ => Ok(FaultDecision::None),
+    }
+}
+
+// =============================================================================
+// v2 `ctx` API (issue #357 Items 1-4)
+// =============================================================================
+
+/// What a script entrypoint call returned, tagged with which contract (v1 vs v2) produced it.
+enum LuaEntrypointOutcome {
+    V1(LuaValue),
+    V2(LuaValue),
+}
+
+fn build_v1_request_table(lua: &Lua, request: &ScriptRequest) -> LuaResult<LuaTable> {
+    let request_table = lua.create_table()?;
+    request_table.set("method", request.method.clone())?;
+    request_table.set("path", request.path.clone())?;
+
+    let headers_table = lua.create_table()?;
+    for (k, v) in &request.headers {
+        headers_table.set(k.as_str(), v.as_str())?;
+    }
+    request_table.set("headers", headers_table)?;
+
+    let body_value = json_to_lua(lua, &request.body)?;
+    request_table.set("body", body_value)?;
+
+    let query_table = lua.create_table()?;
+    for (k, v) in &request.query {
+        query_table.set(k.as_str(), v.as_str())?;
+    }
+    request_table.set("query", query_table)?;
+
+    let path_params_table = lua.create_table()?;
+    for (k, v) in &request.path_params {
+        path_params_table.set(k.as_str(), v.as_str())?;
+    }
+    request_table.set("pathParams", path_params_table)?;
+
+    Ok(request_table)
+}
+
+fn parse_json_or_nil(lua: &Lua, raw: &str) -> LuaResult<LuaValue> {
+    match serde_json::from_str::<Value>(raw) {
+        Ok(v) => json_to_lua(lua, &v),
+        Err(_) => Ok(LuaValue::Nil),
+    }
+}
+
+/// Case-insensitive `header(name)` getter closure shared by `ctx.request`/`ctx.response`. Accepts
+/// both `t:header("X")` (colon self-call — the idiomatic Lua form) and `t.header("X")`.
+fn make_header_getter(
+    lua: &Lua,
+    headers: &std::collections::HashMap<String, String>,
+) -> LuaResult<LuaFunction> {
+    let owned: Vec<(String, String)> = headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    lua.create_function(move |lua, args: LuaMultiValue| -> LuaResult<LuaValue> {
+        let name = args
+            .iter()
+            .rev()
+            .find_map(|v| v.as_str().map(|s| s.to_string()));
+        match name.and_then(|n| {
+            owned
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&n))
+                .map(|(_, v)| v.clone())
+        }) {
+            Some(v) => Ok(LuaValue::String(lua.create_string(&v)?)),
+            None => Ok(LuaValue::Nil),
+        }
+    })
+}
+
+fn build_request_ctx_table(lua: &Lua, request: &ScriptRequest) -> LuaResult<LuaTable> {
+    let t = lua.create_table()?;
+    t.set("method", request.method.clone())?;
+    t.set("path", request.path.clone())?;
+
+    let path_params = lua.create_table()?;
+    for (k, v) in &request.path_params {
+        path_params.set(k.as_str(), v.as_str())?;
+    }
+    t.set("pathParams", path_params)?;
+
+    let query = lua.create_table()?;
+    for (k, v) in &request.query {
+        query.set(k.as_str(), v.as_str())?;
+    }
+    t.set("query", query)?;
+
+    let mut lowercased = std::collections::HashMap::new();
+    for (k, v) in &request.headers {
+        lowercased.insert(k.to_ascii_lowercase(), v.clone());
+    }
+    let headers_table = lua.create_table()?;
+    for (k, v) in &lowercased {
+        headers_table.set(k.as_str(), v.as_str())?;
+    }
+    t.set("headers", headers_table)?;
+    t.set("header", make_header_getter(lua, &request.headers)?)?;
+
+    // ctx.request.body is always the raw string (issue #357 Item 1); fall back to
+    // re-serializing the parsed `body` for callers that only populated that field.
+    let raw = request.raw_body.clone().unwrap_or_else(|| {
+        if request.body.is_null() {
+            String::new()
+        } else {
+            serde_json::to_string(&request.body).unwrap_or_default()
+        }
+    });
+    t.set("json", parse_json_or_nil(lua, &raw)?)?;
+    t.set("body", raw)?;
+
+    Ok(t)
+}
+
+fn build_response_ctx_table(lua: &Lua, response: &ScriptResponseContext) -> LuaResult<LuaTable> {
+    let t = lua.create_table()?;
+    t.set("status", response.status)?;
+    let headers_table = lua.create_table()?;
+    for (k, v) in &response.headers {
+        headers_table.set(k.to_ascii_lowercase(), v.as_str())?;
+    }
+    t.set("headers", headers_table)?;
+    t.set("header", make_header_getter(lua, &response.headers)?)?;
+    t.set("json", parse_json_or_nil(lua, &response.body)?)?;
+    t.set("body", response.body.clone())?;
+    Ok(t)
+}
+
+fn build_stub_ctx_table(lua: &Lua, stub: &ScriptStubContext) -> LuaResult<LuaTable> {
+    let t = lua.create_table()?;
+    t.set("scenarioName", stub.scenario_name.clone())?;
+    t.set("scenarioState", stub.scenario_state.clone())?;
+    t.set("id", stub.stub_id.clone())?;
+    Ok(t)
+}
+
+/// Flow-state handle bound to one flow id — `ctx.state` and the value returned by
+/// `ctx.store:flow(id)` (issue #357 Item 1).
+struct LuaStateHandle {
+    inner: LuaFlowStore,
+    flow_id: String,
+}
+
+impl LuaStateHandle {
+    fn new(store: Arc<dyn FlowStore>, flow_id: String) -> Self {
+        Self {
+            inner: LuaFlowStore::new(store),
+            flow_id,
+        }
+    }
+}
+
+impl LuaUserData for LuaStateHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("get", |lua, this, key: String| {
+            this.inner.get(lua, this.flow_id.clone(), key)
+        });
+        methods.add_method("set", |lua, this, (key, value): (String, LuaValue)| {
+            this.inner.set(lua, this.flow_id.clone(), key, value)
+        });
+        methods.add_method("incr", |_lua, this, key: String| {
+            this.inner.increment(this.flow_id.clone(), key)
+        });
+        methods.add_method("exists", |_lua, this, key: String| {
+            this.inner.exists(this.flow_id.clone(), key)
+        });
+        methods.add_method("delete", |_lua, this, key: String| {
+            this.inner.delete(this.flow_id.clone(), key)
+        });
+    }
+}
+
+/// `ctx.store`: the flow-store escape hatch (issue #357 Item 1) — `:flow(id)` returns a handle
+/// scoped to an arbitrary flow id.
+struct LuaStoreHandle {
+    store: Arc<dyn FlowStore>,
+}
+
+impl LuaUserData for LuaStoreHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("flow", |_lua, this, flow_id: String| {
+            Ok(LuaStateHandle::new(Arc::clone(&this.store), flow_id))
+        });
+    }
+}
+
+/// `ctx.logger`: real `debug`/`info`/`warn`/`error`, routed to `tracing` at target
+/// `"rift::script"` (issue #357 Item 1, reusing P1's logging target — issue #355).
+struct LuaLoggerHandle {
+    port: u16,
+    stub_id: Option<String>,
+}
+
+impl LuaLoggerHandle {
+    fn log(&self, level: tracing::Level, message: &str) {
+        let port = self.port;
+        let stub_id = self.stub_id.as_deref().unwrap_or("");
+        match level {
+            tracing::Level::DEBUG => {
+                tracing::debug!(target: "rift::script", port, stub_id, "{message}")
+            }
+            tracing::Level::INFO => {
+                tracing::info!(target: "rift::script", port, stub_id, "{message}")
+            }
+            tracing::Level::WARN => {
+                tracing::warn!(target: "rift::script", port, stub_id, "{message}")
+            }
+            _ => tracing::error!(target: "rift::script", port, stub_id, "{message}"),
+        }
+    }
+}
+
+impl LuaUserData for LuaLoggerHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("debug", |_lua, this, message: String| {
+            this.log(tracing::Level::DEBUG, &message);
+            Ok(())
+        });
+        methods.add_method("info", |_lua, this, message: String| {
+            this.log(tracing::Level::INFO, &message);
+            Ok(())
+        });
+        methods.add_method("warn", |_lua, this, message: String| {
+            this.log(tracing::Level::WARN, &message);
+            Ok(())
+        });
+        methods.add_method("error", |_lua, this, message: String| {
+            this.log(tracing::Level::ERROR, &message);
+            Ok(())
+        });
+    }
+}
+
+/// The v2 result-constructor builder (issue #357 Item 3): `http()`/`delay()`/`reset()`/`pass()`
+/// all produce one of these; `:header(k, v)` mutates and returns a clone for chaining.
+#[derive(Clone)]
+struct LuaScriptResultHandle(ScriptResult);
+
+impl LuaUserData for LuaScriptResultHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("header", |_lua, this, (k, v): (String, String)| {
+            this.0.add_header(k, v);
+            Ok(this.clone())
+        });
+    }
+}
+
+fn clamp_u16(n: i64) -> u16 {
+    n.clamp(0, i64::from(u16::MAX)) as u16
+}
+
+fn lua_value_to_script_result_body(lua: &Lua, value: LuaValue) -> LuaResult<ScriptResultBody> {
+    match &value {
+        LuaValue::String(s) => Ok(ScriptResultBody::Str(s.to_str()?.to_string())),
+        _ => Ok(ScriptResultBody::Json(lua_to_json(lua, value)?)),
+    }
+}
+
+/// Register the v2 result constructors (issue #357 Item 3) as globals on `lua`. Cheap and
+/// idempotent, so it's called on every entrypoint run rather than requiring every `Lua::new()`
+/// call site in this module to remember to register them once.
+fn register_result_constructors(lua: &Lua) -> LuaResult<()> {
+    let globals = lua.globals();
+
+    let http_fn = lua.create_function(
+        |lua, args: LuaMultiValue| -> LuaResult<LuaScriptResultHandle> {
+            let mut it = args.into_iter();
+            let status = it.next().and_then(|v| v.as_i64()).unwrap_or(200);
+            let body = match it.next() {
+                None | Some(LuaValue::Nil) => None,
+                Some(v) => Some(lua_value_to_script_result_body(lua, v)?),
+            };
+            Ok(LuaScriptResultHandle(ScriptResult::http(
+                clamp_u16(status),
+                body,
+            )))
+        },
+    )?;
+    globals.set("http", http_fn)?;
+
+    let delay_fn = lua.create_function(|_lua, ms: i64| {
+        Ok(LuaScriptResultHandle(ScriptResult::Delay(ms.max(0) as u64)))
+    })?;
+    globals.set("delay", delay_fn)?;
+
+    let reset_fn =
+        lua.create_function(|_lua, ()| Ok(LuaScriptResultHandle(ScriptResult::Reset)))?;
+    globals.set("reset", reset_fn)?;
+
+    let pass_fn = lua.create_function(|_lua, ()| Ok(LuaScriptResultHandle(ScriptResult::Pass)))?;
+    globals.set("pass", pass_fn)?;
+
+    Ok(())
+}
+
+fn lua_value_to_fault_decision(value: LuaValue, rule_id: &str) -> Result<FaultDecision> {
+    match value {
+        LuaValue::Nil => Ok(FaultDecision::None),
+        LuaValue::UserData(ud) => {
+            let handle = ud
+                .borrow::<LuaScriptResultHandle>()
+                .map_err(|e| anyhow!("respond(ctx) result error: {e}"))?;
+            Ok(handle.0.clone().into_fault_decision(rule_id))
+        }
+        _ => Err(anyhow!(
+            "respond(ctx) must return http(...)/delay(...)/reset()/pass() or nothing"
+        )),
+    }
+}
+
+/// Build the v2 `ctx` table (issue #357 Item 1): identical field names/semantics across engines —
+/// see the doc comment on [`ScriptCtxInput`].
+fn build_ctx_table(
+    lua: &Lua,
+    input: &ScriptCtxInput,
+    flow_store: Arc<dyn FlowStore>,
+) -> LuaResult<LuaTable> {
+    let ctx = lua.create_table()?;
+    ctx.set("request", build_request_ctx_table(lua, input.request)?)?;
+    if let Some(resp) = &input.response {
+        ctx.set("response", build_response_ctx_table(lua, resp)?)?;
+    }
+    ctx.set("flowId", input.flow_id.clone())?;
+    ctx.set("stub", build_stub_ctx_table(lua, &input.stub)?)?;
+    ctx.set(
+        "state",
+        LuaStateHandle::new(Arc::clone(&flow_store), input.flow_id.clone()),
+    )?;
+    ctx.set(
+        "store",
+        LuaStoreHandle {
+            store: Arc::clone(&flow_store),
+        },
+    )?;
+    ctx.set(
+        "logger",
+        LuaLoggerHandle {
+            port: input.port,
+            stub_id: input.stub.stub_id.clone(),
+        },
+    )?;
+    Ok(ctx)
+}
+
+/// Run one v2-placement entrypoint or its v1 `should_inject` fallback (issue #357 Items 2/4).
+/// Detection: the loaded chunk is called once (globals `request`/`flow_store`/`ctx` already set,
+/// so both forms have what they need); its return value is the bare-expression result. Then: a
+/// global `should_inject` AND `entrypoint == "respond"` → v1 (call it with the v1 args). Else a
+/// global function named `entrypoint` → v2 named (call it with `ctx`). Else → v2 bare (the
+/// chunk's own return value from the single call above).
+fn run_entrypoint_lua(
+    lua: &Lua,
+    chunk_fn: &LuaFunction,
+    entrypoint: &str,
+    request: &ScriptRequest,
+    ctx_input: &ScriptCtxInput,
+    flow_store: Arc<dyn FlowStore>,
+) -> Result<LuaEntrypointOutcome> {
+    let request_table = build_v1_request_table(lua, request)
+        .map_err(|e| anyhow!("Failed to build request: {e}"))?;
+    let flow_store_ud = lua
+        .create_userdata(LuaFlowStore::new(Arc::clone(&flow_store)))
+        .map_err(|e| anyhow!("Failed to create flow_store userdata: {e}"))?;
+    let ctx_table = build_ctx_table(lua, ctx_input, flow_store)
+        .map_err(|e| anyhow!("Failed to build ctx: {e}"))?;
+    register_result_constructors(lua).map_err(|e| anyhow!("Failed to register result API: {e}"))?;
+
+    let globals = lua.globals();
+    globals
+        .set("request", request_table.clone())
+        .map_err(|e| anyhow!("Failed to set request global: {e}"))?;
+    globals
+        .set("flow_store", flow_store_ud.clone())
+        .map_err(|e| anyhow!("Failed to set flow_store global: {e}"))?;
+    globals
+        .set("ctx", ctx_table.clone())
+        .map_err(|e| anyhow!("Failed to set ctx global: {e}"))?;
+
+    // Snapshot the global names present BEFORE running the chunk, so afterwards we can tell which
+    // function globals the SCRIPT itself declared (B1): Lua builtins plus the request/flow_store/
+    // ctx/http/delay/reset/pass globals we set above are all already present here.
+    let pre_existing: std::collections::HashSet<String> = globals
+        .pairs::<LuaValue, LuaValue>()
+        .filter_map(|pair| pair.ok())
+        .filter_map(|(k, _)| lua_string_key(&k))
+        .collect();
+
+    let bare_result: LuaValue = chunk_fn
+        .call(())
+        .map_err(|e| anyhow!("Script execution error: {e}"))?;
+
+    if entrypoint == entrypoints::RESPOND
+        && let Ok(f) = globals.get::<LuaFunction>(entrypoints::SHOULD_INJECT)
+    {
+        let result: LuaValue = f
+            .call((request_table, flow_store_ud))
+            .map_err(|e| anyhow!("Failed to call should_inject: {e}"))?;
+        return Ok(LuaEntrypointOutcome::V1(result));
+    }
+
+    if let Ok(f) = globals.get::<LuaFunction>(entrypoint) {
+        let result: LuaValue = f
+            .call(ctx_table)
+            .map_err(|e| anyhow!("Failed to call {entrypoint}(ctx): {e}"))?;
+        return Ok(LuaEntrypointOutcome::V2(result));
+    }
+
+    // B1 (issue #357, "nothing fails silently"): if the script DECLARED a function global that
+    // isn't the requested entrypoint (nor `should_inject`) and produced no bare-expression value
+    // (nil), it almost certainly has a MISNAMED entrypoint (e.g. `function respnod(ctx)`).
+    // Falling through to `bare_result` (nil → `None`) would silently serve a normal response with
+    // no sign the script never ran. Surface it as an explicit error instead. A genuine bare
+    // expression is still fine: it either declared no new functions, or produced a non-nil value.
+    if matches!(bare_result, LuaValue::Nil) {
+        let declared_a_function = globals
+            .pairs::<LuaValue, LuaValue>()
+            .filter_map(|pair| pair.ok())
+            .any(|(k, v)| {
+                matches!(v, LuaValue::Function(_))
+                    && lua_string_key(&k).is_some_and(|name| !pre_existing.contains(&name))
+            });
+        if declared_a_function {
+            return Err(anyhow!(
+                "script defines function(s) but none is the `{entrypoint}` entrypoint \
+                 (and there is no bare expression to evaluate); did you mean `{entrypoint}`?"
+            ));
+        }
+    }
+
+    Ok(LuaEntrypointOutcome::V2(bare_result))
+}
+
+/// A Lua value's string key as an owned `String`, or `None` for non-string keys.
+fn lua_string_key(k: &LuaValue) -> Option<String> {
+    match k {
+        LuaValue::String(s) => s.to_str().ok().map(|s| s.to_string()),
+        _ => None,
+    }
+}
+
+/// `respond(ctx)` (issue #357 Item 2): the response-script entrypoint. Auto-detects the v1
+/// `should_inject` wrapper (issue #357 Item 4).
+fn call_respond_lua(
+    lua: &Lua,
+    chunk_fn: &LuaFunction,
+    request: &ScriptRequest,
+    ctx_input: &ScriptCtxInput,
+    flow_store: Arc<dyn FlowStore>,
+    rule_id: &str,
+) -> Result<FaultDecision> {
+    match run_entrypoint_lua(
+        lua,
+        chunk_fn,
+        entrypoints::RESPOND,
+        request,
+        ctx_input,
+        flow_store,
+    )? {
+        LuaEntrypointOutcome::V1(v) => {
+            let t: LuaTable = match v {
+                LuaValue::Table(t) => t,
+                _ => return Err(anyhow!("should_inject must return a table")),
+            };
+            parse_fault_decision_lua(lua, t, rule_id)
+        }
+        LuaEntrypointOutcome::V2(v) => lua_value_to_fault_decision(v, rule_id),
     }
 }
 
@@ -806,6 +972,7 @@ pub fn run_should_inject_with_abort_lua(
     request: &ScriptRequest,
     flow_store: Arc<dyn FlowStore>,
     abort: &Arc<AtomicBool>,
+    ctx_extra: &ScriptCtxExtras,
 ) -> Result<FaultDecision> {
     let lua = Lua::new();
     // Disable JIT: LuaJIT trace-compiles hot loops (e.g. `while true do end`) into machine
@@ -830,7 +997,12 @@ pub fn run_should_inject_with_abort_lua(
         },
     );
     let bytecode = compile_to_bytecode(code)?;
-    execute_lua_bytecode(&lua, &bytecode, request, flow_store, rule_id)
+    let chunk_fn = lua
+        .load(&bytecode)
+        .into_function()
+        .map_err(|e| anyhow!("Failed to load bytecode: {e}"))?;
+    let ctx_input = ctx_extra.build_ctx_input(request);
+    call_respond_lua(&lua, &chunk_fn, request, &ctx_input, flow_store, rule_id)
 }
 
 #[cfg(test)]
@@ -853,7 +1025,10 @@ end
     }
 
     #[tokio::test]
-    async fn test_lua_engine_missing_function() {
+    async fn test_lua_engine_without_should_inject_still_constructs() {
+        // Issue #357 Item 4: a script defining neither `should_inject` (v1) nor a v2 named
+        // entrypoint is now legal — it's a v2 bare-expression script (Item 2). Construction only
+        // validates that the script compiles.
         let script = r#"
 function some_other_function()
     return true
@@ -861,8 +1036,21 @@ end
 "#;
 
         let engine = LuaEngine::new(script, "test-rule");
-        assert!(engine.is_err());
-        assert!(engine.unwrap_err().to_string().contains("should_inject"));
+        assert!(
+            engine.is_ok(),
+            "bare/helper-only scripts must construct: {:?}",
+            engine.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lua_engine_syntax_error_fails_construction() {
+        let script = "function should_inject(request, flow_store {  -- missing paren";
+        let engine = LuaEngine::new(script, "test-rule");
+        assert!(
+            engine.is_err(),
+            "a genuine syntax error must still fail construction"
+        );
     }
 
     #[tokio::test]
@@ -888,6 +1076,7 @@ end
         headers.insert("content-type".to_string(), "application/json".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
             headers,
@@ -923,6 +1112,7 @@ end
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
             headers: HashMap::new(),
@@ -972,6 +1162,7 @@ end
         headers.insert("x-flow-id".to_string(), "flow-123".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
             headers,
@@ -1040,6 +1231,7 @@ end
         let store: Arc<dyn FlowStore> = Arc::new(FailingGetFlowStore);
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/".to_string(),
             headers: HashMap::new(),
@@ -1094,6 +1286,7 @@ end
         headers.insert("x-flow-id".to_string(), "flow-123".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
             headers,
@@ -1137,6 +1330,7 @@ end
         headers.insert("content-type".to_string(), "application/json".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
             headers,
@@ -1171,6 +1365,7 @@ end
 
         // Verify that we can execute a different request with the same state
         let request2 = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/other".to_string(),
             headers: HashMap::new(),
@@ -1215,6 +1410,7 @@ end
             headers.insert("x-flow-id".to_string(), "flow-A".to_string());
 
             let request = ScriptRequest {
+                raw_body: None,
                 method: "GET".to_string(),
                 path: "/api/test".to_string(),
                 headers,
@@ -1241,6 +1437,7 @@ end
         headers_b.insert("x-flow-id".to_string(), "flow-B".to_string());
 
         let request_b = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
             headers: headers_b,
@@ -1266,6 +1463,7 @@ end
         headers_a2.insert("x-flow-id".to_string(), "flow-A".to_string());
 
         let request_a2 = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
             headers: headers_a2,
@@ -1303,6 +1501,7 @@ end
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
             headers: HashMap::new(),
@@ -1358,6 +1557,7 @@ end
 
         // Test with high value
         let request1 = ScriptRequest {
+            raw_body: None,
             method: "POST".to_string(),
             path: "/api/test".to_string(),
             headers: HashMap::new(),
@@ -1385,6 +1585,7 @@ end
 
         // Test with low value
         let request2 = ScriptRequest {
+            raw_body: None,
             method: "POST".to_string(),
             path: "/api/test".to_string(),
             headers: HashMap::new(),
@@ -1462,6 +1663,7 @@ end
         headers.insert("content-type".to_string(), "application/json".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/bytecode".to_string(),
             headers,
@@ -1519,6 +1721,7 @@ end
         headers.insert("x-flow-id".to_string(), "flow-456".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
             headers,
@@ -1568,6 +1771,7 @@ end
         query.insert("page".to_string(), "42".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
             headers: HashMap::new(),
@@ -1614,6 +1818,7 @@ end
         path_params.insert("action".to_string(), "update".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "POST".to_string(),
             path: "/users/123/update".to_string(),
             headers: HashMap::new(),
@@ -1630,6 +1835,262 @@ end
                 assert_eq!(body, "User 123 action: update");
             }
             _ => panic!("Expected error fault decision with path params"),
+        }
+    }
+
+    // ============================================
+    // Issue #357: unified ctx, v2 respond entrypoint, result constructors (Lua)
+    // ============================================
+    mod v2 {
+        use super::*;
+
+        fn req(headers: HashMap<String, String>, raw_body: Option<&str>) -> ScriptRequest {
+            ScriptRequest {
+                method: "POST".to_string(),
+                path: "/api/orders".to_string(),
+                headers,
+                body: json!(null),
+                query: HashMap::new(),
+                path_params: HashMap::new(),
+                raw_body: raw_body.map(|s| s.to_string()),
+            }
+        }
+
+        fn store() -> Arc<dyn FlowStore> {
+            Arc::new(InMemoryFlowStore::new(300))
+        }
+
+        fn run_respond(script: &str, request: &ScriptRequest) -> Result<FaultDecision> {
+            let engine = LuaEngine::new(script, "v2-rule").unwrap();
+            engine.should_inject(request, store())
+        }
+
+        #[tokio::test]
+        async fn respond_named_wrapper() {
+            let script = r#"
+                function respond(ctx)
+                    return http(503, { error = "unavailable" })
+                end
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error {
+                    status,
+                    body,
+                    headers,
+                    ..
+                } => {
+                    assert_eq!(status, 503);
+                    assert!(body.contains("unavailable"));
+                    assert_eq!(
+                        headers.get("Content-Type").map(String::as_str),
+                        Some("application/json")
+                    );
+                }
+                other => panic!("expected Error, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn respond_bare_expression() {
+            let script = r#"
+                if ctx.request.method == "POST" then
+                    return http(503, { error = "unavailable" })
+                else
+                    return pass()
+                end
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            assert!(matches!(decision, FaultDecision::Error { status: 503, .. }));
+        }
+
+        #[tokio::test]
+        async fn ctx_request_header_case_insensitive() {
+            let headers = HashMap::from([("X-Flow-Id".to_string(), "flow-9".to_string())]);
+            let script = r#"
+                function respond(ctx)
+                    local v = ctx.request:header("x-flow-id")
+                    return http(200, { seen = v })
+                end
+            "#;
+            let decision = run_respond(script, &req(headers, None)).unwrap();
+            match decision {
+                FaultDecision::Error { status, body, .. } => {
+                    assert_eq!(status, 200);
+                    assert!(body.contains("flow-9"));
+                }
+                other => panic!("expected Error(200) carrier, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn ctx_request_json_lazy_parse() {
+            let script = r#"
+                function respond(ctx)
+                    if ctx.request.json == nil then
+                        return http(500)
+                    end
+                    return http(200, { n = ctx.request.json.n })
+                end
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), Some(r#"{"n": 7}"#))).unwrap();
+            match decision {
+                FaultDecision::Error { status, body, .. } => {
+                    assert_eq!(status, 200);
+                    assert!(body.contains('7'));
+                }
+                other => panic!("expected Error(200) carrier, got {other:?}"),
+            }
+
+            let decision2 = run_respond(script, &req(HashMap::new(), Some("not json"))).unwrap();
+            assert!(matches!(
+                decision2,
+                FaultDecision::Error { status: 500, .. }
+            ));
+        }
+
+        #[tokio::test]
+        async fn result_constructors_delay_reset_pass() {
+            let delay = run_respond(
+                "function respond(ctx) return delay(42) end",
+                &req(HashMap::new(), None),
+            )
+            .unwrap();
+            match delay {
+                FaultDecision::Latency { duration_ms, .. } => assert_eq!(duration_ms, 42),
+                other => panic!("expected Latency, got {other:?}"),
+            }
+
+            let reset = run_respond(
+                "function respond(ctx) return reset() end",
+                &req(HashMap::new(), None),
+            )
+            .unwrap();
+            assert!(matches!(reset, FaultDecision::Reset { .. }));
+
+            let pass = run_respond(
+                "function respond(ctx) return pass() end",
+                &req(HashMap::new(), None),
+            )
+            .unwrap();
+            assert!(matches!(pass, FaultDecision::None));
+
+            let nothing =
+                run_respond("function respond(ctx) end", &req(HashMap::new(), None)).unwrap();
+            assert!(matches!(nothing, FaultDecision::None));
+        }
+
+        #[tokio::test]
+        async fn http_string_body_passes_through_verbatim() {
+            let script = r#"function respond(ctx) return http(200, "hello world") end"#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { body, headers, .. } => {
+                    assert_eq!(body, "hello world");
+                    assert!(!headers.contains_key("Content-Type"));
+                }
+                other => panic!("expected Error, got {other:?}"),
+            }
+        }
+
+        // v1 back-compat: `should_inject` still wins (issue #357 Item 4).
+        #[tokio::test]
+        async fn v1_should_inject_still_works_unchanged() {
+            let script = r#"
+                function should_inject(request, flow_store)
+                    return { inject = true, fault = "error", status = 418, body = "teapot" }
+                end
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { status, body, .. } => {
+                    assert_eq!(status, 418);
+                    assert_eq!(body, "teapot");
+                }
+                other => panic!("expected v1 Error decision, got {other:?}"),
+            }
+        }
+
+        // Retry example from the issue: ctx.state:incr + http() executes end-to-end.
+        #[tokio::test]
+        async fn retry_example_end_to_end_with_ctx_state_incr() {
+            let script = r#"
+                function respond(ctx)
+                    local n = ctx.state:incr("attempts")
+                    if n <= 2 then
+                        return http(503, { error = "unavailable", attempt = n }):header("Retry-After", "1")
+                    end
+                    return http(200, { ok = true, succeededOnAttempt = n })
+                end
+            "#;
+            let engine = LuaEngine::new(script, "retry-rule").unwrap();
+            let shared_store = store();
+            let request = req(HashMap::new(), None);
+
+            let d1 = engine
+                .should_inject(&request, Arc::clone(&shared_store))
+                .unwrap();
+            assert!(matches!(d1, FaultDecision::Error { status: 503, .. }));
+
+            let d2 = engine
+                .should_inject(&request, Arc::clone(&shared_store))
+                .unwrap();
+            assert!(matches!(d2, FaultDecision::Error { status: 503, .. }));
+
+            let d3 = engine.should_inject(&request, shared_store).unwrap();
+            match d3 {
+                FaultDecision::Error { status, body, .. } => {
+                    assert_eq!(status, 200);
+                    assert!(body.contains("succeededOnAttempt"));
+                }
+                other => panic!("expected 200 on third attempt, got {other:?}"),
+            }
+        }
+
+        // B1 (issue #357): a script defining ONLY a misnamed entrypoint must Err, not None.
+        #[tokio::test]
+        async fn misnamed_entrypoint_errors_not_none() {
+            let script = r#"
+                function respnod(ctx)
+                    return http(500)
+                end
+            "#;
+            let result = LuaEngine::new(script, "v2-rule")
+                .unwrap()
+                .should_inject(&req(HashMap::new(), None), store());
+            assert!(
+                result.is_err(),
+                "a misnamed entrypoint must surface an error, got {result:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn genuine_bare_expression_still_ok_after_b1() {
+            let decision = run_respond("return http(503)", &req(HashMap::new(), None)).unwrap();
+            assert!(matches!(decision, FaultDecision::Error { status: 503, .. }));
+        }
+
+        // ctx.request.pathParams and ctx.request.query round-trip (mirrors the Rhai test).
+        #[tokio::test]
+        async fn ctx_request_path_params_and_query() {
+            let mut request = req(HashMap::new(), None);
+            request
+                .path_params
+                .insert("id".to_string(), "42".to_string());
+            request.query.insert("page".to_string(), "2".to_string());
+            let script = r#"
+                function respond(ctx)
+                    return http(200, { id = ctx.request.pathParams.id, page = ctx.request.query.page })
+                end
+            "#;
+            let decision = run_respond(script, &request).unwrap();
+            match decision {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("42"), "pathParams.id missing: {body}");
+                    assert!(body.contains('2'), "query.page missing: {body}");
+                }
+                other => panic!("expected Error(200) carrier, got {other:?}"),
+            }
         }
     }
 }

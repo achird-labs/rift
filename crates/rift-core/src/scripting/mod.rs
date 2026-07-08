@@ -9,7 +9,10 @@ use std::sync::Arc;
 mod bounded;
 mod compiled_cache;
 mod rhai_engine;
-pub use bounded::{DEFAULT_SCRIPT_TIMEOUT_MS, resolve_script_timeout_ms, should_inject_bounded};
+pub use bounded::{
+    DEFAULT_SCRIPT_TIMEOUT_MS, resolve_script_timeout_ms, should_inject_bounded,
+    should_inject_bounded_with_ctx,
+};
 
 pub use rhai_engine::RhaiEngine;
 
@@ -90,6 +93,208 @@ pub enum FaultDecision {
         rule_id: String,
         headers: std::collections::HashMap<String, String>,
     },
+    /// Connection reset, requested via the v2 `reset()` result constructor (issue #357 Item 3) —
+    /// the scripting analogue of the Mountebank-compatible `_rift.fault.tcp` / top-level `fault`
+    /// carrier (see `imposter::fault_io::TcpFaultKind`). Callers apply it the same way: attach
+    /// `TcpFaultKind::Reset` to a carrier response's extensions so the serve loop's `FaultIo`
+    /// aborts the connection instead of framing a clean HTTP response.
+    Reset {
+        rule_id: String,
+    },
+}
+
+/// Everything about the calling stub thread into `ctx.stub` (issue #357 Item 1). Fields are
+/// `None` where unavailable, mirroring P1's `stub_id` contract (issue #355).
+#[derive(Debug, Clone, Default)]
+pub struct ScriptStubContext {
+    pub scenario_name: Option<String>,
+    pub scenario_state: Option<String>,
+    pub stub_id: Option<String>,
+}
+
+/// The in-flight response, exposed as `ctx.response` on transform/decorate hooks only (issue
+/// #357 Item 1). Absent (`None` on `ScriptCtxInput`) for every other hook point.
+#[derive(Debug, Clone)]
+pub struct ScriptResponseContext {
+    pub status: u16,
+    pub headers: HashMap<String, String>,
+    pub body: String,
+}
+
+/// Everything the shared `ctx` builder (issue #357 Item 1) needs, engine-agnostic. Each engine
+/// (`rhai_engine`, `lua_engine`, `js_engine`) turns this into its own native `ctx` value; the
+/// field names/semantics are identical across engines by contract — keep them that way.
+#[derive(Debug, Clone)]
+pub struct ScriptCtxInput<'a> {
+    pub request: &'a ScriptRequest,
+    pub response: Option<ScriptResponseContext>,
+    pub flow_id: String,
+    pub stub: ScriptStubContext,
+    /// Imposter port, used only to tag `ctx.logger` output; 0 when not running under an imposter
+    /// (e.g. the proxy path, or a bare `ScriptEngine::should_inject_fault` call in tests).
+    pub port: u16,
+}
+
+impl<'a> ScriptCtxInput<'a> {
+    pub fn new(request: &'a ScriptRequest, flow_id: impl Into<String>) -> Self {
+        Self {
+            request,
+            response: None,
+            flow_id: flow_id.into(),
+            stub: ScriptStubContext::default(),
+            port: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn with_response(mut self, response: ScriptResponseContext) -> Self {
+        self.response = Some(response);
+        self
+    }
+
+    #[must_use]
+    pub fn with_stub(mut self, stub: ScriptStubContext) -> Self {
+        self.stub = stub;
+        self
+    }
+
+    #[must_use]
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
+    }
+}
+
+/// Extra, optional context a caller can thread into `ctx` beyond the bare `(request, flow_store)`
+/// pair (issue #357 Item 1). Callers with no imposter context (the proxy path, direct engine unit
+/// tests) use `Default`, which falls back to `request.headers["x-flow-id"]` (or `""`) for
+/// `ctx.flowId` and leaves `ctx.stub` fields `None` — the real HTTP path
+/// (`imposter::handler`) supplies the resolved flow id and stub metadata for full fidelity.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptCtxExtras {
+    pub flow_id: Option<String>,
+    pub stub: ScriptStubContext,
+    pub port: u16,
+}
+
+impl ScriptCtxExtras {
+    pub fn build_ctx_input<'a>(&self, request: &'a ScriptRequest) -> ScriptCtxInput<'a> {
+        let flow_id = self.flow_id.clone().unwrap_or_else(|| {
+            request
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("x-flow-id"))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        });
+        ScriptCtxInput::new(request, flow_id)
+            .with_stub(self.stub.clone())
+            .with_port(self.port)
+    }
+}
+
+/// A `respond`/bare-expression return value that isn't a string or a JSON-shaped value (issue
+/// #357 Item 3 — body values). `http(status, body)` decides which of these to serialize based on
+/// the script value's own type: a string passes through verbatim; a map/array is JSON-serialized.
+#[derive(Debug, Clone)]
+pub enum ScriptResultBody {
+    Json(Value),
+    Str(String),
+}
+
+/// The v2 result constructors (issue #357 Item 3), engine-agnostic: `http()`/`delay()`/`reset()`/
+/// `pass()` all build one of these, which `into_fault_decision` then turns into the
+/// [`FaultDecision`] the caller applies. Each engine wraps this in its own native "builder" value
+/// so `.header(k, v)` can chain.
+#[derive(Debug, Clone)]
+pub enum ScriptResult {
+    /// `pass()` or a script returning nothing: respond normally, no injection.
+    Pass,
+    /// `delay(ms)`.
+    Delay(u64),
+    /// `reset()`: connection reset (the old `fault: "tcp"` shape).
+    Reset,
+    /// `http(status, body?)`, with zero or more `.header(k, v)` calls applied.
+    Http {
+        status: u16,
+        body: Option<ScriptResultBody>,
+        headers: Vec<(String, String)>,
+    },
+}
+
+impl ScriptResult {
+    pub fn http(status: u16, body: Option<ScriptResultBody>) -> Self {
+        ScriptResult::Http {
+            status,
+            body,
+            headers: Vec::new(),
+        }
+    }
+
+    /// Apply a `.header(k, v)` builder call. A no-op on `Delay`/`Reset`/`Pass` — only `http()`
+    /// results carry headers.
+    pub fn add_header(&mut self, key: String, value: String) {
+        if let ScriptResult::Http { headers, .. } = self {
+            headers.push((key, value));
+        }
+    }
+
+    /// Convert a result constructor (issue #357 Item 3) into the [`FaultDecision`] the caller
+    /// applies. A JSON `body` gets `Content-Type: application/json` UNLESS the script already set
+    /// a `content-type` header itself (case-insensitive match; an explicit header always wins).
+    pub fn into_fault_decision(self, rule_id: &str) -> FaultDecision {
+        match self {
+            ScriptResult::Pass => FaultDecision::None,
+            ScriptResult::Delay(duration_ms) => FaultDecision::Latency {
+                duration_ms,
+                rule_id: rule_id.to_string(),
+            },
+            ScriptResult::Reset => FaultDecision::Reset {
+                rule_id: rule_id.to_string(),
+            },
+            ScriptResult::Http {
+                status,
+                body,
+                headers,
+            } => {
+                let mut header_map: HashMap<String, String> = HashMap::new();
+                let mut has_content_type = false;
+                for (k, v) in headers {
+                    if k.eq_ignore_ascii_case("content-type") {
+                        has_content_type = true;
+                    }
+                    header_map.insert(k, v);
+                }
+                let body_str = match body {
+                    None => String::new(),
+                    Some(ScriptResultBody::Str(s)) => s,
+                    Some(ScriptResultBody::Json(v)) => {
+                        if !has_content_type {
+                            header_map
+                                .insert("Content-Type".to_string(), "application/json".to_string());
+                        }
+                        serde_json::to_string(&v).unwrap_or_default()
+                    }
+                };
+                FaultDecision::Error {
+                    status,
+                    body: body_str,
+                    rule_id: rule_id.to_string(),
+                    headers: header_map,
+                }
+            }
+        }
+    }
+}
+
+/// Names of the v2 named entrypoints and the v1 back-compat wrapper (issue #357 Items 2/4).
+/// Placement determines which v2 name a hook looks for; `should_inject` always means v1.
+pub mod entrypoints {
+    pub const RESPOND: &str = "respond";
+    pub const MATCHES: &str = "matches";
+    pub const TRANSFORM: &str = "transform";
+    pub const DELAY: &str = "delay";
+    pub const SHOULD_INJECT: &str = "should_inject";
 }
 
 /// Unified script engine that supports Rhai, Lua, and JavaScript
@@ -124,18 +329,37 @@ impl ScriptEngine {
         }
     }
 
-    /// Execute the script and determine if a fault should be injected
+    /// Execute the script and determine if a fault should be injected. Auto-detects v1
+    /// (`should_inject(request, flow_store)`) vs v2 (`respond(ctx)` or bare) scripts (issue #357
+    /// Item 4). `ctx` gets best-effort defaults ([`ScriptCtxExtras::default`]) — callers with real
+    /// flow-id/stub context should use [`Self::should_inject_fault_with_ctx`] instead.
     pub fn should_inject_fault(
         &self,
         request: &ScriptRequest,
         flow_store: Arc<dyn FlowStore>,
     ) -> Result<FaultDecision> {
+        self.should_inject_fault_with_ctx(request, flow_store, &ScriptCtxExtras::default())
+    }
+
+    /// As [`Self::should_inject_fault`], but with real `ctx.flowId`/`ctx.stub` context (issue
+    /// #357 Item 1) — used by the imposter `_rift.script` hook, which knows the resolved flow id
+    /// and matched stub.
+    pub fn should_inject_fault_with_ctx(
+        &self,
+        request: &ScriptRequest,
+        flow_store: Arc<dyn FlowStore>,
+        extra: &ScriptCtxExtras,
+    ) -> Result<FaultDecision> {
         match self {
-            ScriptEngine::Rhai(engine) => engine.should_inject_fault(request, flow_store),
+            ScriptEngine::Rhai(engine) => {
+                engine.should_inject_fault_with_ctx(request, flow_store, extra)
+            }
             #[cfg(feature = "lua")]
-            ScriptEngine::Lua(engine) => engine.should_inject(request, flow_store),
+            ScriptEngine::Lua(engine) => engine.should_inject_with_ctx(request, flow_store, extra),
             #[cfg(feature = "javascript")]
-            ScriptEngine::JavaScript(engine) => engine.should_inject(request, flow_store),
+            ScriptEngine::JavaScript(engine) => {
+                engine.should_inject_with_ctx(request, flow_store, extra)
+            }
         }
     }
 }
@@ -152,6 +376,12 @@ pub struct ScriptRequest {
     pub query: HashMap<String, String>,
     /// Path parameters extracted from route patterns (e.g., /users/:id)
     pub path_params: HashMap<String, String>,
+    /// The raw request body text, exactly as received (issue #357 Item 1: `ctx.request.body` is
+    /// always the raw string, unifying the old split where the Mountebank path kept a raw string
+    /// and the `_rift.script` path kept parsed JSON). `None` when the caller only has/derives a
+    /// parsed `body`; ctx-building then falls back to re-serializing `body` (loses exact
+    /// whitespace but not shape) so callers migrated ad hoc from `body` alone still work.
+    pub raw_body: Option<String>,
 }
 
 /// Wrapper for FlowStore that can be used in scripts (both Rhai and Lua)
@@ -269,6 +499,7 @@ impl ScriptFlowStore {
 mod tests {
     use super::*;
     use crate::extensions::flow_state::NoOpFlowStore;
+    use serde_json::json;
     use std::collections::HashMap;
 
     /// A flow store whose every op fails — for exercising the error branches of the wrappers.
@@ -462,6 +693,84 @@ mod tests {
         assert!(debug_str.contains("None"));
     }
 
+    // Issue #357 Item 3: `reset()` maps to FaultDecision::Reset.
+    #[test]
+    fn test_fault_decision_reset() {
+        let decision = FaultDecision::Reset {
+            rule_id: "reset-rule".to_string(),
+        };
+        match decision {
+            FaultDecision::Reset { rule_id } => assert_eq!(rule_id, "reset-rule"),
+            _ => panic!("Expected FaultDecision::Reset"),
+        }
+    }
+
+    // Issue #357 Item 3: the ScriptResult -> FaultDecision conversions used by every engine.
+    #[test]
+    fn test_script_result_into_fault_decision() {
+        assert!(matches!(
+            ScriptResult::Pass.into_fault_decision("r"),
+            FaultDecision::None
+        ));
+        assert!(matches!(
+            ScriptResult::Delay(42).into_fault_decision("r"),
+            FaultDecision::Latency {
+                duration_ms: 42,
+                ..
+            }
+        ));
+        assert!(matches!(
+            ScriptResult::Reset.into_fault_decision("r"),
+            FaultDecision::Reset { .. }
+        ));
+
+        let mut json_result =
+            ScriptResult::http(503, Some(ScriptResultBody::Json(json!({"e": 1}))));
+        json_result.add_header("Retry-After".to_string(), "1".to_string());
+        match json_result.into_fault_decision("r") {
+            FaultDecision::Error {
+                status,
+                body,
+                headers,
+                ..
+            } => {
+                assert_eq!(status, 503);
+                assert_eq!(body, r#"{"e":1}"#);
+                assert_eq!(headers.get("Retry-After").map(String::as_str), Some("1"));
+                assert_eq!(
+                    headers.get("Content-Type").map(String::as_str),
+                    Some("application/json")
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // An explicit content-type header always wins over the JSON-body default.
+        let mut custom_ct = ScriptResult::http(200, Some(ScriptResultBody::Json(json!({}))));
+        custom_ct.add_header("content-type".to_string(), "application/custom".to_string());
+        match custom_ct.into_fault_decision("r") {
+            FaultDecision::Error { headers, .. } => {
+                assert_eq!(
+                    headers.get("content-type").map(String::as_str),
+                    Some("application/custom")
+                );
+                assert!(!headers.contains_key("Content-Type"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // A string body passes through verbatim with no Content-Type added.
+        match ScriptResult::http(200, Some(ScriptResultBody::Str("hi".to_string())))
+            .into_fault_decision("r")
+        {
+            FaultDecision::Error { body, headers, .. } => {
+                assert_eq!(body, "hi");
+                assert!(!headers.contains_key("Content-Type"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
     // ============================================
     // Tests for ScriptRequest
     // ============================================
@@ -469,6 +778,7 @@ mod tests {
     #[test]
     fn test_script_request_creation() {
         let request = ScriptRequest {
+            raw_body: None,
             method: "POST".to_string(),
             path: "/api/users".to_string(),
             headers: HashMap::new(),
@@ -487,6 +797,7 @@ mod tests {
         headers.insert("Authorization".to_string(), "Bearer token".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/data".to_string(),
             headers,
@@ -508,6 +819,7 @@ mod tests {
         query.insert("limit".to_string(), "10".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/items".to_string(),
             headers: HashMap::new(),
@@ -526,6 +838,7 @@ mod tests {
         path_params.insert("action".to_string(), "edit".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "PUT".to_string(),
             path: "/api/users/123/edit".to_string(),
             headers: HashMap::new(),
@@ -539,6 +852,7 @@ mod tests {
     #[test]
     fn test_script_request_clone() {
         let request = ScriptRequest {
+            raw_body: None,
             method: "DELETE".to_string(),
             path: "/api/items/456".to_string(),
             headers: HashMap::new(),
@@ -554,6 +868,7 @@ mod tests {
     #[test]
     fn test_script_request_debug() {
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
             headers: HashMap::new(),
@@ -686,6 +1001,7 @@ mod tests {
         let engine = ScriptEngine::new("rhai", script, "test-rule").unwrap();
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
             headers: HashMap::new(),

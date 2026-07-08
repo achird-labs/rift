@@ -688,6 +688,7 @@ mod tests {
         let pool = ScriptPool::new(config).unwrap();
 
         let make_request = || ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
             headers: HashMap::new(),
@@ -796,6 +797,7 @@ mod tests {
         };
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
             headers: HashMap::new(),

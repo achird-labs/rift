@@ -189,6 +189,7 @@ async fn handle_script_rules(
     let query_params = crate::predicate::parse_query_string(request_info.uri.query());
 
     let script_request = ScriptRequest {
+        raw_body: Some(String::from_utf8_lossy(&body_bytes).into_owned()),
         method: request_info.method.to_string(),
         path: request_info.uri.path().to_string(),
         headers: headers_map.clone(),
@@ -365,6 +366,31 @@ async fn handle_script_result(
             response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
             response.set_header(&X_RIFT_SCRIPT, &VALUE_TRUE);
             response.set_header_value(&X_RIFT_LATENCY_MS, &duration_ms.to_string());
+            response.into_boxed()
+        }
+        Ok(ScriptFaultDecision::Reset { rule_id }) => {
+            // The proxy path has no transport-level reset hook (unlike the imposter serve loop's
+            // `FaultIo`), so `reset()` is simulated the same way a config-driven `TcpFault` is on
+            // this path: a synthesized 502 tagged with the tcp-fault headers.
+            warn!("Script injecting connection reset fault: rule={}", rule_id);
+
+            metrics::record_script_execution(&rule_id, script_duration, "inject");
+            metrics::record_script_fault("reset", &rule_id, None);
+            metrics::record_error_injection(&rule_id, 0);
+
+            let duration_ms = forwarding_ctx.start_time.elapsed().as_secs_f64() * 1000.0;
+            metrics::record_proxy_duration(request_info.method.as_str(), duration_ms, "script");
+
+            let mut response = create_error_response(
+                502,
+                r#"{"error": "Connection reset by peer"}"#.to_string(),
+                None,
+                None,
+            )
+            .unwrap();
+            response.set_header(&X_RIFT_FAULT, &VALUE_TCP);
+            response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
+            response.set_header(&X_RIFT_SCRIPT, &VALUE_TRUE);
             response.into_boxed()
         }
         Ok(ScriptFaultDecision::None) => {

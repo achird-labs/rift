@@ -18,7 +18,8 @@ use crate::extensions::decorate::{
 };
 use crate::extensions::template::{RequestData, has_template_variables, process_template};
 use crate::scripting::{
-    FaultDecision, ScriptRequest, resolve_script_timeout_ms, should_inject_bounded,
+    FaultDecision, ScriptCtxExtras, ScriptRequest, ScriptStubContext, resolve_script_timeout_ms,
+    should_inject_bounded_with_ctx,
 };
 #[cfg(feature = "javascript")]
 use crate::scripting::{MountebankRequest, execute_mountebank_inject};
@@ -425,6 +426,7 @@ async fn handle_request_inner(
             // them case-insensitively (e.g. `request.headers["x-flow-id"]`) regardless of the
             // wire casing; this matches the engine docs and HTTP header semantics.
             let script_request = ScriptRequest {
+                raw_body: Some(body_string.clone().unwrap_or_default()),
                 method: method.clone(),
                 path: path.clone(),
                 headers: headers_clone
@@ -450,13 +452,36 @@ async fn handle_request_inner(
             // (default 5s) instead of wedging the whole engine.
             let timeout_ms = resolve_script_timeout_ms(&imposter.config);
             let flow_store = imposter.flow_store.clone();
-            match should_inject_bounded(
+
+            // ctx.stub (issue #357 Item 1): thread the matched stub's identity through, resolving
+            // its current scenario state (if it belongs to a scenario) the same way the FSM gate
+            // already does. A backend failure here must surface, not silently drop to `None`
+            // (this epic's "nothing fails silently" principle).
+            let scenario_state = match &stub_state.stub.scenario_name {
+                Some(name) => match imposter.scenario_state(&scenario_flow_id, name) {
+                    Ok(s) => Some(s),
+                    Err(e) => return Ok(backend_error_response(&e)),
+                },
+                None => None,
+            };
+            let ctx_extra = ScriptCtxExtras {
+                flow_id: Some(scenario_flow_id.clone()),
+                stub: ScriptStubContext {
+                    scenario_name: stub_state.stub.scenario_name.clone(),
+                    scenario_state,
+                    stub_id: stub_state.stub.id.clone(),
+                },
+                port: imposter.config.port.unwrap_or(0),
+            };
+
+            match should_inject_bounded_with_ctx(
                 engine.clone(),
                 code,
                 format!("rift_script_{stub_index}"),
                 script_request,
                 flow_store,
                 Duration::from_millis(timeout_ms),
+                ctx_extra,
             )
             .await
             {
@@ -517,6 +542,29 @@ async fn handle_request_inner(
                         ],
                         Bytes::new(),
                     ));
+                }
+                Ok(FaultDecision::Reset { .. }) => {
+                    // v2 `reset()` result constructor (issue #357 Item 3): a connection reset,
+                    // applied the same real way as `_rift.fault.tcp` / a top-level `fault` (see
+                    // `handle_fault_response`) — attach the parsed TcpFaultKind as a response
+                    // extension; the serve loop's FaultIo aborts the connection before this
+                    // carrier response is ever sent, so its status/body are never observed.
+                    if let Err(e) = imposter.advance_cycler_for_rift_script(&stub_state) {
+                        return Ok(backend_error_response(&e));
+                    }
+
+                    let mut response = build_response_with_headers(
+                        StatusCode::BAD_GATEWAY,
+                        [
+                            ("x-rift-imposter", "true"),
+                            ("x-rift-script", engine.as_str()),
+                        ],
+                        Bytes::new(),
+                    );
+                    response
+                        .extensions_mut()
+                        .insert(super::fault_io::TcpFaultKind::Reset);
+                    return Ok(response);
                 }
                 Err(e) => {
                     warn!("Rift script execution failed: {}", e);

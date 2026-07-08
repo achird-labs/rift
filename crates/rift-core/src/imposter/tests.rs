@@ -3988,3 +3988,38 @@ async fn test_path_params_non_matching_pattern_is_empty() {
         "a routePattern that doesn't match the path shape yields empty pathParams, got: {body}"
     );
 }
+
+// Issue #357 B2: a `_rift.script` stub can dynamically call `reset()` (the v2 connection-reset
+// result constructor), so `uses_tcp_faults()` must report true for it — forcing the imposter
+// HTTP/1-only, since a socket reset is incompatible with HTTP/2 stream multiplexing.
+#[test]
+fn script_bearing_stub_forces_http1_only() {
+    use crate::imposter::core::Imposter;
+
+    let with_script: ImposterConfig = serde_json::from_value(serde_json::json!({
+        "port": 19507,
+        "protocol": "http",
+        "stubs": [{
+            "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { reset() }" } } }]
+        }]
+    }))
+    .expect("config");
+    let imposter = Imposter::new(with_script).expect("test imposter");
+    assert!(
+        imposter.uses_tcp_faults(),
+        "a stub carrying a _rift.script (which may call reset()) must force HTTP/1-only"
+    );
+
+    // Control: a plain `is` stub with no script and no tcp fault stays HTTP/2-eligible.
+    let plain: ImposterConfig = serde_json::from_value(serde_json::json!({
+        "port": 19508,
+        "protocol": "http",
+        "stubs": [{ "responses": [{ "is": { "statusCode": 200 } }] }]
+    }))
+    .expect("config");
+    let plain_imposter = Imposter::new(plain).expect("test imposter");
+    assert!(
+        !plain_imposter.uses_tcp_faults(),
+        "a plain is-response stub must not be forced HTTP/1-only"
+    );
+}
