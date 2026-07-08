@@ -9,9 +9,19 @@
 name: Update Homebrew Formula
 
 on:
+  # Note: a release created by release.yml's default GITHUB_TOKEN does NOT emit the
+  # `release: published` event (GitHub suppresses it to prevent workflow recursion), so this
+  # trigger only fires for a release published manually via the web UI. The reliable path is the
+  # `workflow_call` below, invoked by release.yml after the release job uploads the assets.
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.1.0)'
+        required: true
+        type: string
+  workflow_call:
     inputs:
       tag:
         description: 'Release tag (e.g., v0.1.0)'
@@ -30,7 +40,9 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          # `inputs.tag` is set for both workflow_dispatch and workflow_call; for a manual
+          # web-UI release publish there is no input, so fall back to the release payload's tag.
+          if [ -n "${{ inputs.tag }}" ]; then
             VERSION="${{ inputs.tag }}"
           else
             VERSION="${{ github.event.release.tag_name }}"
