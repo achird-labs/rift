@@ -112,11 +112,18 @@ unsafe fn c_str<'a>(p: *const c_char) -> Option<&'a str> {
 }
 
 /// Move a `String` across the boundary as an owned `*mut c_char` the caller frees with
-/// [`rift_free`]. Returns null if the string contains an interior NUL.
+/// [`rift_free`]. Returns null if the string contains an interior NUL, recording the reason in
+/// `rift_last_error` so a null return always carries a diagnostic — the contract every
+/// string-returning entry point advertises (null means error, reason in `rift_last_error`).
 fn into_c_string(s: String) -> *mut c_char {
     match CString::new(s) {
         Ok(c) => c.into_raw(),
-        Err(_) => std::ptr::null_mut(),
+        Err(e) => {
+            set_last_error(format!(
+                "internal error: response contained an interior NUL byte ({e})"
+            ));
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -318,9 +325,11 @@ pub unsafe extern "C" fn rift_recorded(h: *mut RiftHandle, port: u16) -> *mut c_
 // and returns the same JSON, so an embedder can drive scenario state and correlated spaces with
 // zero loopback HTTP (no `rift_serve_admin` needed).
 
-/// Get a scenario/flow-state value as JSON `{"flowId","key","value"}` the caller frees with
-/// [`rift_free`]. Returns null if the handle/port is unknown, the key is absent, or encoding
-/// fails (reason in `rift_last_error`).
+/// Get a scenario/flow-state value as a JSON envelope `{"found","flowId","key","value"}` the caller
+/// frees with [`rift_free`]. `found` disambiguates an absent key from a failure: a missing key is a
+/// non-error outcome (`{"found":false,"value":null}`), while a null pointer is returned **only** on a
+/// genuine error (unknown handle/port or encode failure, reason in `rift_last_error`) — matching
+/// [`rift_recorded`] and the rc-returning calls, where null/`-1` means error alone.
 ///
 /// # Safety
 /// `h` must be a live handle (or null); `flow_id`/`key` must be null or valid C strings.
@@ -346,13 +355,12 @@ pub unsafe extern "C" fn rift_flow_state_get(
             }
         };
         match imposter.flow_get(flow_id, key) {
-            Ok(Some(value)) => {
-                into_c_string(json!({ "flowId": flow_id, "key": key, "value": value }).to_string())
-            }
-            Ok(None) => {
-                set_last_error("rift_flow_state_get: flow-state key not found");
-                std::ptr::null_mut()
-            }
+            // An absent key is a first-class result (`found:false`), not an error — `value` is a
+            // bare JSON value or null (an `Option<Value>` serializes to the value or JSON null).
+            Ok(value) => into_c_string(
+                json!({ "found": value.is_some(), "flowId": flow_id, "key": key, "value": value })
+                    .to_string(),
+            ),
             Err(e) => {
                 set_last_error(format!("rift_flow_state_get: {e}"));
                 warn!(error = %e, port, "rift_flow_state_get failed");

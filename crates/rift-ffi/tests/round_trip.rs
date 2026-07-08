@@ -788,6 +788,7 @@ fn ffi_admin_plane_round_trip() {
             key.as_ptr(),
         )))
         .unwrap();
+        assert_eq!(got["found"], true);
         assert_eq!(got["flowId"], "flow-1");
         assert_eq!(got["key"], "state");
         assert_eq!(got["value"], "paid");
@@ -795,10 +796,18 @@ fn ffi_admin_plane_round_trip() {
             rift_flow_state_delete(h, port, flow.as_ptr(), key.as_ptr()),
             0
         );
-        assert!(
-            rift_flow_state_get(h, port, flow.as_ptr(), key.as_ptr()).is_null(),
-            "get after delete returns null (not found)"
+        let after_del: serde_json::Value = serde_json::from_str(&take_json(rift_flow_state_get(
+            h,
+            port,
+            flow.as_ptr(),
+            key.as_ptr(),
+        )))
+        .unwrap();
+        assert_eq!(
+            after_del["found"], false,
+            "get after delete -> found:false (absent), not a null/error"
         );
+        assert!(after_del["value"].is_null());
 
         // --- correlated space stubs: add -> list ({space,stubs}) -> delete -> list(empty) ---
         let space = cstr("space-a");
@@ -915,6 +924,92 @@ fn ffi_admin_plane_error_paths() {
         let err2 = rift_last_error();
         assert!(!err2.is_null(), "unknown-port failure records last_error");
         rift_free(err2);
+        rift_stop(h);
+    }
+}
+
+/// Issue #415: `rift_flow_state_get` gives an unambiguous "not found" signal — an absent key is a
+/// first-class value (`{"found":false}`), distinct from a genuine error (null pointer). Covers all
+/// three outcomes without parsing `rift_last_error`.
+#[test]
+fn ffi_flow_state_get_absent_vs_error() {
+    unsafe {
+        let h = rift_start();
+        assert!(!h.is_null());
+        let config = cstr(
+            r#"{ "port": 19994, "protocol": "http",
+                 "_rift": { "flowState": { "backend": "inmemory" } }, "stubs": [] }"#,
+        );
+        let port = rift_create_imposter(h, config.as_ptr());
+        assert_eq!(port, 19994);
+
+        let flow = cstr("flow-x");
+        let present = cstr("present");
+        let absent = cstr("absent");
+        let val = cstr(r#""ready""#);
+
+        // present key -> found:true carrying the value.
+        assert_eq!(
+            rift_flow_state_put(h, port, flow.as_ptr(), present.as_ptr(), val.as_ptr()),
+            0
+        );
+        let hit: serde_json::Value = serde_json::from_str(&take_json(rift_flow_state_get(
+            h,
+            port,
+            flow.as_ptr(),
+            present.as_ptr(),
+        )))
+        .unwrap();
+        assert_eq!(hit["found"], true);
+        assert_eq!(hit["value"], "ready");
+
+        // a *stored* JSON null is found:true with value null — distinct from an absent key. This is
+        // the exact ambiguity the `found` field exists to resolve.
+        let null_key = cstr("null-value");
+        assert_eq!(
+            rift_flow_state_put(
+                h,
+                port,
+                flow.as_ptr(),
+                null_key.as_ptr(),
+                cstr("null").as_ptr()
+            ),
+            0
+        );
+        let stored_null: serde_json::Value = serde_json::from_str(&take_json(rift_flow_state_get(
+            h,
+            port,
+            flow.as_ptr(),
+            null_key.as_ptr(),
+        )))
+        .unwrap();
+        assert_eq!(
+            stored_null["found"], true,
+            "a stored null is present, not absent"
+        );
+        assert!(stored_null["value"].is_null());
+
+        // absent key -> found:false, value null, and NOT an error (no null pointer, last_error clear).
+        let ptr = rift_flow_state_get(h, port, flow.as_ptr(), absent.as_ptr());
+        assert!(!ptr.is_null(), "an absent key is a value, not a null/error");
+        let miss: serde_json::Value = serde_json::from_str(&take_json(ptr)).unwrap();
+        assert_eq!(miss["found"], false);
+        assert!(miss["value"].is_null());
+        assert!(
+            rift_last_error().is_null(),
+            "an absent key must not record last_error"
+        );
+
+        // bad port -> genuine error -> null pointer, and last_error recorded.
+        assert!(
+            rift_flow_state_get(h, 65001, flow.as_ptr(), absent.as_ptr()).is_null(),
+            "an unknown port is a genuine error -> null"
+        );
+        let err = rift_last_error();
+        assert!(!err.is_null(), "the error path records last_error");
+        rift_free(err);
+
+        assert_eq!(rift_delete_all(h), 0);
         rift_stop(h);
     }
 }

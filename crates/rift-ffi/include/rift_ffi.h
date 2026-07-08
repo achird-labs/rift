@@ -71,14 +71,19 @@ int32_t rift_delete_imposter(RiftHandle *h, uint16_t port);
 char *rift_recorded(RiftHandle *h, uint16_t port);
 
 /**
- * Get a scenario/flow-state value as JSON `{"flowId","key","value"}` the caller frees with
- * [`rift_free`]. Returns null if the handle/port is unknown, the key is absent, or encoding
- * fails (reason in `rift_last_error`).
+ * Get a scenario/flow-state value as a JSON envelope `{"found","flowId","key","value"}` the caller
+ * frees with [`rift_free`]. `found` disambiguates an absent key from a failure: a missing key is a
+ * non-error outcome (`{"found":false,"value":null}`), while a null pointer is returned **only** on a
+ * genuine error (unknown handle/port or encode failure, reason in `rift_last_error`) — matching
+ * [`rift_recorded`] and the rc-returning calls, where null/`-1` means error alone.
  *
  * # Safety
  * `h` must be a live handle (or null); `flow_id`/`key` must be null or valid C strings.
  */
-char *rift_flow_state_get(RiftHandle *h, uint16_t port, const char *flow_id, const char *key);
+char *rift_flow_state_get(RiftHandle *h,
+                          uint16_t port,
+                          const char *flow_id,
+                          const char *key);
 
 /**
  * Set a scenario/flow-state value from a bare JSON value (`value_json`). Returns `0` on success,
