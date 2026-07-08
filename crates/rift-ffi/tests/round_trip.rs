@@ -1167,6 +1167,43 @@ fn ffi_stop_shuts_down_intercept() {
     }
 }
 
+/// Issue #425: the start response's interceptUrl reflects the ACTUAL bound host, not a hardcoded
+/// 127.0.0.1. A non-loopback bind (0.0.0.0) must surface as the bound address; the loopback default
+/// is unchanged.
+#[test]
+fn ffi_intercept_url_reflects_bind_host() {
+    unsafe {
+        // Non-loopback bind (0.0.0.0 wildcard, OS-assigned port) -> URL reflects the bound host.
+        let h = rift_start();
+        let started: serde_json::Value = serde_json::from_str(&take_json(rift_start_intercept(
+            h,
+            cstr(r#"{"host":"0.0.0.0","port":0}"#).as_ptr(),
+        )))
+        .unwrap();
+        let port = started["interceptPort"].as_u64().expect("interceptPort");
+        assert!(port > 0, "OS-assigned port is surfaced");
+        assert_eq!(
+            started["interceptUrl"].as_str().expect("interceptUrl"),
+            format!("http://0.0.0.0:{port}"),
+            "interceptUrl reflects the bound host, not a hardcoded 127.0.0.1"
+        );
+        rift_stop(h);
+
+        // Loopback default (AC2) is unchanged.
+        let h2 = rift_start();
+        let d: serde_json::Value =
+            serde_json::from_str(&take_json(rift_start_intercept(h2, cstr("{}").as_ptr())))
+                .unwrap();
+        let p2 = d["interceptPort"].as_u64().expect("interceptPort");
+        assert_eq!(
+            d["interceptUrl"].as_str().unwrap(),
+            format!("http://127.0.0.1:{p2}"),
+            "loopback default unchanged"
+        );
+        rift_stop(h2);
+    }
+}
+
 /// Issue #410: opt-in — a handle that never started intercept rejects control calls (not started),
 /// and the data plane is unaffected.
 #[test]
