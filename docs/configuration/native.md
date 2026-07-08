@@ -57,6 +57,14 @@ Enable stateful testing scenarios with flow state:
 | `ttlSeconds` | integer | `300` | Time-to-live for state entries (5 minutes) |
 | `redis` | object | - | Redis-specific configuration (required for redis backend) |
 
+**Fail-loud backend errors**: an unknown `backend` string, or a `redis` backend that can't be
+created (missing `redis` config, a connection/pool failure, or a binary built without the
+`redis-backend` feature), fails imposter creation with `400 Bad Request` rather than silently
+degrading to a no-op store. See
+[Flow State → Backend configuration is fail-loud]({{ site.baseurl }}/features/flow-state/#backend-configuration-is-fail-loud)
+for details. Only the *implicit* case — no `flowState` block at all — stays silent, using a no-op
+store.
+
 ### Redis Configuration
 
 When using `redis` backend:
@@ -184,6 +192,45 @@ Defaults for `_rift.script` execution.
 |:------|:-----|:--------|:------|
 | `defaultEngine` | string | `"rhai"` | Engine used when a script omits `engine`. |
 | `timeoutMs` | integer | `5000` | Per-script wall-clock timeout. |
+
+---
+
+## Strict Behaviors (`strictBehaviors`)
+
+`strictBehaviors` is a top-level imposter field — a sibling of `protocol`/`stubs`, not nested under
+`_rift` — that controls whether a failing response behavior degrades quietly or fails loudly.
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:-------------|
+| `strictBehaviors` | boolean | `false` | When `true`, a `decorate`/`shellTransform`/binary-base64-decode failure returns `500` instead of silently serving the fallback body. |
+
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "strictBehaviors": true,
+  "stubs": [{
+    "responses": [{
+      "is": {"statusCode": 200, "body": "Hello"},
+      "_behaviors": {"decorate": "function(request, response) { throw new Error('boom'); }"}
+    }]
+  }]
+}
+```
+
+By default (`strictBehaviors: false`), a throwing `decorate`/`shellTransform`, or a `_mode: "binary"`
+response whose body isn't valid base64, still serves the stub's fallback body and only signals the
+failure via an `x-rift-<behavior>-error` header. With `strictBehaviors` on, the same failure returns
+`500` (still carrying that header) instead.
+
+Strict mode can also be forced process-wide with the `RIFT_STRICT_BEHAVIORS` environment variable
+(see [CLI Reference]({{ site.baseurl }}/configuration/cli/)) — the per-imposter flag **or** the env
+var enables it. This is orthogonal to `RIFT_STRICT_FLOW_STORE` ([Scripting]({{ site.baseurl
+}}/features/scripting/)): neither implies the other, since one governs response behaviors and the
+other governs flow-store script errors.
+
+See [Mountebank Behaviors → Error Semantics]({{ site.baseurl }}/mountebank/behaviors/#error-semantics)
+for the full walkthrough of `decorate`/`shellTransform`/binary failures under strict mode.
 
 ---
 

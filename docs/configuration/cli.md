@@ -137,6 +137,7 @@ Environment variables override CLI defaults:
 | `RIFT_DISABLE_HTTP2` | Force HTTP/1-only listeners, disabling HTTP/2 & h2c auto-negotiation (truthy: `1`/`true`/`yes`/`on`) | off |
 | `RIFT_TCP_BACKLOG` | Listen backlog for the accept loop (positive integer) | `1024` |
 | `RIFT_TCP_NODELAY` | `TCP_NODELAY` on accepted sockets; set `false`/`0`/`off` to disable | on |
+| `RIFT_STRICT_BEHAVIORS` | Force strict mode process-wide (truthy: `1`/`true`/`yes`/`on`): a `decorate`/`shellTransform`/binary-base64-decode failure returns `500` instead of the lenient fallback body | off |
 | `NO_COLOR` | Suppress ANSI color and the decorative banner in `rift-verify` / `rift-lint` output | |
 | `RUST_LOG` | Detailed log configuration | `info` |
 
@@ -144,6 +145,13 @@ Environment variables override CLI defaults:
 [HTTP/2 and h2c]({{ site.baseurl }}/mountebank/imposters/#http2-and-h2c). `RIFT_TCP_BACKLOG` and
 `RIFT_TCP_NODELAY` are socket-tuning knobs covered under
 [Performance → Runtime socket tuning]({{ site.baseurl }}/performance/#runtime-socket-tuning).
+
+`RIFT_STRICT_BEHAVIORS` and the per-imposter `strictBehaviors` field combine with **OR** — either
+being set enables strict mode. It is orthogonal to `RIFT_STRICT_FLOW_STORE`
+([Scripting]({{ site.baseurl }}/features/scripting/)): the two env vars gate unrelated failure
+paths (response behaviors vs. flow-store script errors), and neither implies the other. See
+[Rift Extensions → Strict Behaviors]({{ site.baseurl }}/configuration/native/#strict-behaviors-strictbehaviors)
+for the full semantics.
 
 ### Docker Example
 
@@ -331,6 +339,7 @@ Options:
   -o, --output <FMT>      Output format: text (default), json
       --dry-run           Show what would be tested without making requests
       --skip-dynamic      Skip stubs with inject/proxy/script responses
+      --verify-dynamic    Opt-in: assert dynamic stubs instead of skipping them
       --status-only       Only verify status codes (ignore body/headers)
       --demo              Run demo showing enhanced error output
   -h, --help              Print help
@@ -352,6 +361,9 @@ rift-verify --dry-run --verbose
 # Skip dynamic stubs (proxy, inject, script)
 rift-verify --skip-dynamic
 
+# Assert dynamic stubs instead of skipping them
+rift-verify --verify-dynamic
+
 # Status-only mode for cycling responses
 rift-verify --status-only
 
@@ -364,7 +376,19 @@ With `-o json`, `rift-verify` writes a single summary object to stdout —
 banner output to stderr, so it pipes cleanly into other tools. Color and the decorative banner are
 also suppressed automatically when stdout is not a TTY (piped) or when `NO_COLOR` is set.
 
-See [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) for details.
+By default, `rift-verify` SKIPs stubs whose response is dynamic (proxy/inject/script/cycling/faults)
+because their output isn't a static function of the stub — `--skip-dynamic` makes that skip explicit.
+`--verify-dynamic` is the opt-in complement: it asserts those stubs instead of skipping them, using
+three mechanisms — an embedded mock upstream for `proxy` stubs (verifying the proxied response and,
+when `predicateGenerators` is set, the recorded-stub prepend); a `_verify` expectation sequence
+(see below) run against a freshly recreated imposter for inject/script/decorate/cycling/stateful
+stubs; and deterministic (`probability: 1.0` or unset) `_rift.fault` assertions for latency/error/tcp
+faults. Each check runs against a throwaway imposter that is torn down afterward, so it never mutates
+the imposters under test. A dynamic stub with none of these assertable markers is still surfaced as a
+visible `SKIP` in the output rather than silently ignored.
+
+See [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) for details, including the `_verify`
+annotation schema.
 
 ### rift-lint
 
