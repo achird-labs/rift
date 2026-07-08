@@ -617,10 +617,12 @@ enum RuleOrRules {
 }
 
 /// Start the intercept/TLS-MITM forward-proxy listener on this handle's runtime, generating an
-/// intercept CA. Returns JSON `{"interceptPort":<u16>,"interceptUrl":"http://127.0.0.1:<port>"}`
+/// intercept CA. Returns JSON `{"interceptPort":<u16>,"interceptUrl":"http://<bind-host>:<port>"}`
 /// the caller frees with [`rift_free`], or null on error (bad JSON, bind failure, or already
-/// started — one listener per handle). `options_json`: `{"host":"127.0.0.1","port":0}` (port 0 =
-/// OS-assigned); pass null or `{}` for defaults.
+/// started — one listener per handle). `interceptUrl` reflects the bound address (the configured
+/// `host`, loopback by default; a `0.0.0.0` bind surfaces verbatim, so dial a concrete interface).
+/// `options_json`: `{"host":"127.0.0.1","port":0}` (port 0 = OS-assigned); pass null or `{}` for
+/// defaults.
 ///
 /// # Safety
 /// `h` must be a live handle (or null); `options_json` must be null or a valid C string.
@@ -693,10 +695,12 @@ pub unsafe extern "C" fn rift_start_intercept(
                     return std::ptr::null_mut();
                 }
             };
-        let intercept_port = listener.local_addr().port();
+        // Derive both fields from the real bound address so the URL reflects the actual host
+        // (and OS-assigned port), not a hardcoded loopback.
+        let local_addr = listener.local_addr();
         let response = json!({
-            "interceptPort": intercept_port,
-            "interceptUrl": format!("http://127.0.0.1:{intercept_port}"),
+            "interceptPort": local_addr.port(),
+            "interceptUrl": format!("http://{local_addr}"),
         })
         .to_string();
         *slot = Some(InterceptPlane {

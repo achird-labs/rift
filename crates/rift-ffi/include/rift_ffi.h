@@ -148,10 +148,12 @@ char *rift_space_recorded(RiftHandle *h, uint16_t port, const char *flow_id);
 
 /**
  * Start the intercept/TLS-MITM forward-proxy listener on this handle's runtime, generating an
- * intercept CA. Returns JSON `{"interceptPort":<u16>,"interceptUrl":"http://127.0.0.1:<port>"}`
+ * intercept CA. Returns JSON `{"interceptPort":<u16>,"interceptUrl":"http://<bind-host>:<port>"}`
  * the caller frees with [`rift_free`], or null on error (bad JSON, bind failure, or already
- * started — one listener per handle). `options_json`: `{"host":"127.0.0.1","port":0}` (port 0 =
- * OS-assigned); pass null or `{}` for defaults.
+ * started — one listener per handle). `interceptUrl` reflects the bound address (the configured
+ * `host`, loopback by default; a `0.0.0.0` bind surfaces verbatim, so dial a concrete interface).
+ * `options_json`: `{"host":"127.0.0.1","port":0}` (port 0 = OS-assigned); pass null or `{}` for
+ * defaults.
  *
  * # Safety
  * `h` must be a live handle (or null); `options_json` must be null or a valid C string.
