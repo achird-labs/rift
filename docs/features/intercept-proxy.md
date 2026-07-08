@@ -76,6 +76,15 @@ rift --intercept-port 8443 --intercept-ca-cert ca.pem --intercept-ca-key ca.key
 
 (Equivalently `RIFT_INTERCEPT_PORT` / `RIFT_INTERCEPT_CA_CERT` / `RIFT_INTERCEPT_CA_KEY`.)
 
+### Embedding over the C-ABI (non-Rust)
+
+> A non-Rust host (JVM, Node, Go, Python, …) can start and drive the intercept listener with **no
+> loopback HTTP and no Rust code** — see [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/#intercept-proxy-over-ffi).
+> `rift_start_intercept` starts the listener, and the `rift_intercept_*` control-plane functions —
+> `rift_intercept_add_rules`, `rift_intercept_list_rules`, `rift_intercept_clear_rules`,
+> `rift_intercept_export_truststore`, and `rift_intercept_ca_pem` — add rules, list them, export a
+> truststore, and fetch the CA PEM, all over C-ABI.
+
 ---
 
 ## Configuring rules (admin API)
@@ -137,6 +146,15 @@ echoing the password used (default `changeit`, override with `?password=`).
 
 ```
 -Djavax.net.ssl.trustStore=ts.jks -Djavax.net.ssl.trustStorePassword=changeit \
+-Dhttps.proxyHost=<rift-host> -Dhttps.proxyPort=<intercept-port>
+```
+
+The JKS store above is `-Djavax.net.ssl.trustStoreType=JKS` (the JVM default); a PKCS#12 store also
+loads as a JVM trust anchor by adding the type:
+
+```
+-Djavax.net.ssl.trustStore=ts.p12 -Djavax.net.ssl.trustStoreType=PKCS12 \
+-Djavax.net.ssl.trustStorePassword=changeit \
 -Dhttps.proxyHost=<rift-host> -Dhttps.proxyPort=<intercept-port>
 ```
 
