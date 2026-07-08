@@ -7,7 +7,9 @@
 use crate::admin_api::{AdminApiServer, DEFAULT_ADMIN_PORT, RunningAdminApi};
 use crate::config_loader::{self, ConfigSource};
 use crate::extensions::metrics;
-use crate::imposter::{ImposterConfig, ImposterManager, TlsDefaults};
+use crate::imposter::{
+    ImposterConfig, ImposterManager, ScriptBaseDir, TlsDefaults, resolve_scripts,
+};
 use crate::intercept::InterceptListener;
 use crate::intercept_rules::{InterceptRules, InterceptState};
 use clap::{Parser, Subcommand};
@@ -53,6 +55,13 @@ pub struct Cli {
     /// Directory for persistent imposter storage
     #[arg(long, value_name = "DIR", env = "MB_DATADIR")]
     pub datadir: Option<PathBuf>,
+
+    /// Root directory `_rift.script` `file:` references resolve under for admin-API-created
+    /// imposters (issue #356). A resolved path that escapes this root is rejected. Without it,
+    /// admin-API `file:` script references are rejected outright (`--configfile`/`--datadir`
+    /// loads are unaffected — those resolve relative to the config's own directory).
+    #[arg(long, value_name = "DIR", env = "RIFT_SCRIPTS_DIR")]
+    pub scripts_dir: Option<PathBuf>,
 
     /// Allow JavaScript injection in responses (for inject and decorate)
     #[arg(long, visible_alias = "allowInjection", env = "MB_ALLOW_INJECTION")]
@@ -296,6 +305,9 @@ impl ServerBuilder {
         // Injection gating is threaded explicitly (issue #342) rather than read from env.
         let mut server = AdminApiServer::new(addr, manager, cli.api_key)
             .with_allow_injection(cli.allow_injection);
+        if let Some(scripts_dir) = cli.scripts_dir {
+            server = server.with_scripts_dir(scripts_dir);
+        }
         if let Some(configfile) = cli.configfile {
             server = server.with_config_source(ConfigSource::File {
                 path: configfile,
@@ -595,18 +607,30 @@ async fn load_imposters_from_datadir(
         return Ok(());
     }
 
+    // `file:`/`ref:` scripts in a datadir-loaded imposter resolve relative to the datadir itself,
+    // escape-checked: these `{port}.json` files can be network-authored (persisted from an
+    // admin-API POST), so an absolute path or `..` escape is rejected, never read (issue #356
+    // B1/B2 defense-in-depth against a datadir re-resolution reading `/etc/passwd`).
+    let base = ScriptBaseDir::DatadirRelative(datadir.clone());
     for entry in std::fs::read_dir(datadir)? {
         let entry = entry?;
         let path = entry.path();
 
         if path.extension().map(|e| e == "json").unwrap_or(false) {
             let content = std::fs::read_to_string(&path)?;
-            if let Ok(config) = serde_json::from_str::<ImposterConfig>(&content) {
-                info!("Loading imposter on port {:?} from {:?}", config.port, path);
-                match manager.create_imposter(config).await {
-                    Ok(port) => info!("Created imposter on port {} from {:?}", port, path),
-                    Err(e) => error!("Failed to create imposter from {:?}: {}", path, e),
+            match serde_json::from_str::<ImposterConfig>(&content) {
+                Ok(mut config) => {
+                    if let Err(e) = resolve_scripts(&mut config, &base) {
+                        error!("Failed to resolve scripts for {:?}: {}", path, e);
+                        continue;
+                    }
+                    info!("Loading imposter on port {:?} from {:?}", config.port, path);
+                    match manager.create_imposter(config).await {
+                        Ok(port) => info!("Created imposter on port {} from {:?}", port, path),
+                        Err(e) => error!("Failed to create imposter from {:?}: {}", path, e),
+                    }
                 }
+                Err(e) => warn!("Skipping invalid imposter file {:?}: {}", path, e),
             }
         }
     }
@@ -630,6 +654,18 @@ mod tests {
         assert_eq!(cli.intercept_port, Some(9000));
         let none = Cli::try_parse_from(["rift"]).expect("parse");
         assert_eq!(none.intercept_port, None);
+    }
+
+    // Issue #356: `--scripts-dir` is the admin-API `file:` script resolution root.
+    #[test]
+    fn scripts_dir_flag_parses() {
+        let cli = Cli::try_parse_from(["rift", "--scripts-dir", "/tmp/scripts"]).expect("parse");
+        assert_eq!(
+            cli.scripts_dir,
+            Some(std::path::PathBuf::from("/tmp/scripts"))
+        );
+        let none = Cli::try_parse_from(["rift"]).expect("parse");
+        assert_eq!(none.scripts_dir, None);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use rift_lint::{
-    LintOptions, LintResult, lint_directory, lint_json, lint_value, validate_behavior,
+    LintOptions, LintResult, lint_directory, lint_file, lint_json, lint_value, validate_behavior,
     validate_imposter, validate_is_response, validate_predicate, validate_proxy_response,
     validate_response, validate_stub,
 };
@@ -140,7 +140,7 @@ fn w001_not_fired_for_normal_port() {
 fn e006_stub_missing_responses() {
     let stub = json!({ "predicates": [] });
     let mut r = LintResult::new();
-    validate_stub(path(), &stub, 0, &mut r, &opts());
+    validate_stub(path(), &stub, 0, &mut r, &opts(), &serde_json::Value::Null);
     assert!(has_code(&r, "E006"));
 }
 
@@ -148,7 +148,7 @@ fn e006_stub_missing_responses() {
 fn w002_stub_empty_responses() {
     let stub = json!({ "responses": [] });
     let mut r = LintResult::new();
-    validate_stub(path(), &stub, 0, &mut r, &opts());
+    validate_stub(path(), &stub, 0, &mut r, &opts(), &serde_json::Value::Null);
     assert!(has_code(&r, "W002"));
 }
 
@@ -156,7 +156,7 @@ fn w002_stub_empty_responses() {
 fn w002_not_fired_with_response() {
     let stub = minimal_stub();
     let mut r = LintResult::new();
-    validate_stub(path(), &stub, 0, &mut r, &opts());
+    validate_stub(path(), &stub, 0, &mut r, &opts(), &serde_json::Value::Null);
     assert!(!has_code(&r, "W002"));
 }
 
@@ -248,7 +248,14 @@ fn e013_not_fired_for_valid_regex() {
 fn e014_response_no_type() {
     let resp = json!({ "behaviors": [] });
     let mut r = LintResult::new();
-    validate_response(path(), &resp, "loc", &mut r, &opts());
+    validate_response(
+        path(),
+        &resp,
+        "loc",
+        &mut r,
+        &opts(),
+        &serde_json::Value::Null,
+    );
     assert!(has_code(&r, "E014"));
 }
 
@@ -256,7 +263,14 @@ fn e014_response_no_type() {
 fn e014_not_fired_for_is_response() {
     let resp = json!({ "is": { "statusCode": 200 } });
     let mut r = LintResult::new();
-    validate_response(path(), &resp, "loc", &mut r, &opts());
+    validate_response(
+        path(),
+        &resp,
+        "loc",
+        &mut r,
+        &opts(),
+        &serde_json::Value::Null,
+    );
     assert!(!has_code(&r, "E014"), "unexpected E014: {:?}", codes(&r));
 }
 
@@ -264,7 +278,14 @@ fn e014_not_fired_for_is_response() {
 fn e014_not_fired_for_rift_response() {
     let resp = json!({ "_rift": { "script": "console.log('hi')" } });
     let mut r = LintResult::new();
-    validate_response(path(), &resp, "loc", &mut r, &opts());
+    validate_response(
+        path(),
+        &resp,
+        "loc",
+        &mut r,
+        &opts(),
+        &serde_json::Value::Null,
+    );
     assert!(
         !has_code(&r, "E014"),
         "E014 should not fire for _rift response, got {:?}",
@@ -281,7 +302,14 @@ fn e014_not_fired_for_rift_response() {
 fn e014_not_fired_for_inject_response() {
     let resp = json!({ "inject": "function(req, state, logger, callback) { callback({statusCode: 200}); }" });
     let mut r = LintResult::new();
-    validate_response(path(), &resp, "loc", &mut r, &opts());
+    validate_response(
+        path(),
+        &resp,
+        "loc",
+        &mut r,
+        &opts(),
+        &serde_json::Value::Null,
+    );
     assert!(!has_code(&r, "E014"));
 }
 
@@ -289,7 +317,14 @@ fn e014_not_fired_for_inject_response() {
 fn e014_not_fired_for_fault_response() {
     let resp = json!({ "fault": "CONNECTION_RESET_BY_PEER" });
     let mut r = LintResult::new();
-    validate_response(path(), &resp, "loc", &mut r, &opts());
+    validate_response(
+        path(),
+        &resp,
+        "loc",
+        &mut r,
+        &opts(),
+        &serde_json::Value::Null,
+    );
     assert!(!has_code(&r, "E014"));
 }
 
@@ -300,7 +335,14 @@ fn w003_both_is_and_proxy() {
         "proxy": { "to": "http://example.com" }
     });
     let mut r = LintResult::new();
-    validate_response(path(), &resp, "loc", &mut r, &opts());
+    validate_response(
+        path(),
+        &resp,
+        "loc",
+        &mut r,
+        &opts(),
+        &serde_json::Value::Null,
+    );
     assert!(has_code(&r, "W003"));
 }
 
@@ -672,7 +714,14 @@ fn e025_via_response_underscore_behaviors_object() {
         "_behaviors": { "wait": true }
     });
     let mut r = LintResult::new();
-    validate_response(path(), &resp, "loc", &mut r, &opts());
+    validate_response(
+        path(),
+        &resp,
+        "loc",
+        &mut r,
+        &opts(),
+        &serde_json::Value::Null,
+    );
     assert!(
         has_code(&r, "E025"),
         "E025 must fire through _behaviors dispatch, got {:?}",
@@ -687,7 +736,14 @@ fn e025_not_fired_via_response_for_valid_wait_range() {
         "_behaviors": { "wait": { "min": 100, "max": 500 } }
     });
     let mut r = LintResult::new();
-    validate_response(path(), &resp, "loc", &mut r, &opts());
+    validate_response(
+        path(),
+        &resp,
+        "loc",
+        &mut r,
+        &opts(),
+        &serde_json::Value::Null,
+    );
     assert!(
         !has_code(&r, "E025"),
         "E025 must not fire for {{min,max}} via _behaviors, got {:?}",
@@ -702,7 +758,14 @@ fn e035_via_response_underscore_behaviors_object() {
         "_behaviors": { "repeat": 0 }
     });
     let mut r = LintResult::new();
-    validate_response(path(), &resp, "loc", &mut r, &opts());
+    validate_response(
+        path(),
+        &resp,
+        "loc",
+        &mut r,
+        &opts(),
+        &serde_json::Value::Null,
+    );
     assert!(
         has_code(&r, "E035"),
         "E035 must fire through _behaviors dispatch, got {:?}",
@@ -718,7 +781,14 @@ fn behaviors_array_format_still_dispatches() {
         "behaviors": [{ "wait": true }]
     });
     let mut r = LintResult::new();
-    validate_response(path(), &resp, "loc", &mut r, &opts());
+    validate_response(
+        path(),
+        &resp,
+        "loc",
+        &mut r,
+        &opts(),
+        &serde_json::Value::Null,
+    );
     assert!(
         has_code(&r, "E025"),
         "E025 must fire through behaviors array dispatch, got {:?}",
@@ -735,7 +805,14 @@ fn underscore_behaviors_takes_priority_over_behaviors_array() {
         "behaviors": [{ "wait": true }]  // invalid, but should not be reached
     });
     let mut r = LintResult::new();
-    validate_response(path(), &resp, "loc", &mut r, &opts());
+    validate_response(
+        path(),
+        &resp,
+        "loc",
+        &mut r,
+        &opts(),
+        &serde_json::Value::Null,
+    );
     assert!(
         !has_code(&r, "E025"),
         "_behaviors (valid) should shadow behaviors array, got {:?}",
@@ -935,4 +1012,119 @@ fn w009_still_fired_for_non_function_wait_through_behavior() {
     let mut r = LintResult::new();
     validate_behavior(path(), &behavior, "loc", &mut r, &opts());
     assert!(has_code(&r, "W009"), "non-function wait should warn W009");
+}
+
+// ─── Issue #356: `_rift.script` file:/ref: validation ────────────────────────
+
+fn rift_script_stub(script: Value) -> Value {
+    json!({
+        "responses": [{ "_rift": { "script": script } }]
+    })
+}
+
+#[test]
+fn e036_zero_script_sources_is_an_error() {
+    let v = make_imposter(json!([rift_script_stub(json!({}))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(has_code(&r, "E036"), "expected E036, got {:?}", codes(&r));
+}
+
+#[test]
+fn e036_multiple_script_sources_is_an_error() {
+    let v = make_imposter(json!([rift_script_stub(
+        json!({ "code": "fn should_inject() {}", "file": "x.rhai" })
+    )]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(has_code(&r, "E036"), "expected E036, got {:?}", codes(&r));
+}
+
+#[test]
+fn inline_code_is_accepted_without_e036() {
+    let v = make_imposter(json!([rift_script_stub(
+        json!({ "code": "fn should_inject() {}" })
+    )]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(!has_code(&r, "E036"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e037_unknown_ref_is_an_error() {
+    let v = make_imposter(json!([rift_script_stub(json!({ "ref": "missing" }))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(has_code(&r, "E037"), "expected E037, got {:?}", codes(&r));
+}
+
+#[test]
+fn ref_resolves_against_the_registry_without_e037() {
+    let mut v = make_imposter(json!([rift_script_stub(json!({ "ref": "failTwice" }))]));
+    v["_rift"] = json!({ "scripts": { "failTwice": { "code": "fn should_inject() {}" } } });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(!has_code(&r, "E037"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e039_registry_entry_cannot_itself_use_ref() {
+    let mut v = make_imposter(json!([minimal_stub()]));
+    v["_rift"] = json!({ "scripts": { "a": { "ref": "b" }, "b": { "code": "x" } } });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(has_code(&r, "E039"), "expected E039, got {:?}", codes(&r));
+}
+
+#[test]
+fn e038_missing_file_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = make_imposter(json!([rift_script_stub(
+        json!({ "file": "does-not-exist.rhai" })
+    )]));
+    let config_path = dir.path().join("imposter.json");
+    std::fs::write(&config_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+    let r = lint_file(&config_path, &opts());
+    assert!(has_code(&r, "E038"), "expected E038, got {:?}", codes(&r));
+}
+
+#[test]
+fn file_resolves_relative_to_the_config_and_is_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("script.rhai"), "fn should_inject() {}").unwrap();
+    let cfg = make_imposter(json!([rift_script_stub(json!({ "file": "script.rhai" }))]));
+    let config_path = dir.path().join("imposter.json");
+    std::fs::write(&config_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+    let r = lint_file(&config_path, &opts());
+    assert!(!has_code(&r, "E038"), "got {:?}", codes(&r));
+    assert!(!has_code(&r, "E036"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn ref_to_file_backed_registry_entry_resolves_relative_to_config() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("fail-twice.rhai"), "fn should_inject() {}").unwrap();
+    let mut cfg = make_imposter(json!([rift_script_stub(json!({ "ref": "failTwice" }))]));
+    cfg["_rift"] = json!({ "scripts": { "failTwice": { "file": "fail-twice.rhai" } } });
+    let config_path = dir.path().join("imposter.json");
+    std::fs::write(&config_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+    let r = lint_file(&config_path, &opts());
+    assert!(!has_code(&r, "E037"), "got {:?}", codes(&r));
+    assert!(!has_code(&r, "E038"), "got {:?}", codes(&r));
+}
+
+#[cfg(feature = "javascript")]
+#[test]
+fn e040_invalid_javascript_file_syntax_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("bad.js"), "function should_inject( {").unwrap();
+    let cfg = make_imposter(json!([rift_script_stub(json!({ "file": "bad.js" }))]));
+    let config_path = dir.path().join("imposter.json");
+    std::fs::write(&config_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+    let r = lint_file(&config_path, &opts());
+    assert!(has_code(&r, "E040"), "expected E040, got {:?}", codes(&r));
 }

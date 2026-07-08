@@ -2,7 +2,7 @@
 //! by startup and the `POST /admin/reload` hot-reload endpoint (issue #197). Parsing is pure (no
 //! running state is touched), so a parse error is returned rather than applied.
 
-use crate::imposter::ImposterConfig;
+use crate::imposter::{ImposterConfig, ScriptBaseDir, resolve_scripts};
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
@@ -33,7 +33,7 @@ fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<Vec<ImposterConfig>>
     };
 
     let trimmed = content.trim_start();
-    let configs: Vec<ImposterConfig> = if trimmed.starts_with('{') {
+    let mut configs: Vec<ImposterConfig> = if trimmed.starts_with('{') {
         // Single imposter, or a `{ "imposters": [...] }` wrapper (Mountebank format).
         let value: serde_json::Value = serde_json::from_str(&content)?;
         match value.get("imposters") {
@@ -45,6 +45,19 @@ fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<Vec<ImposterConfig>>
     } else {
         serde_yaml::from_str(&content)?
     };
+
+    // Resolve `_rift.script` `file:`/`ref:` sources (issue #356) relative to the config file's
+    // own directory, before the configs are handed to the caller — so a parse error and a
+    // resolve error are both surfaced up front, and hot-reload (which re-runs this loader)
+    // automatically picks up edits to referenced script files.
+    let base = ScriptBaseDir::ConfigRelative(
+        path.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+    );
+    for config in &mut configs {
+        resolve_scripts(config, &base)?;
+    }
     Ok(configs)
 }
 
@@ -52,12 +65,18 @@ fn load_dir(dir: &Path) -> anyhow::Result<Vec<ImposterConfig>> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
+    // Datadir `{port}.json` files can be network-authored (a stub POSTed through the admin API is
+    // persisted here), so `file:` references are escape-checked — an absolute path or a `..`
+    // escape is rejected, never read (issue #356 B1/B2 defense-in-depth).
+    let base = ScriptBaseDir::DatadirRelative(dir.to_path_buf());
     let mut configs = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if path.extension().map(|e| e == "json").unwrap_or(false) {
             let content = std::fs::read_to_string(&path)?;
-            configs.push(serde_json::from_str::<ImposterConfig>(&content)?);
+            let mut config: ImposterConfig = serde_json::from_str(&content)?;
+            resolve_scripts(&mut config, &base)?;
+            configs.push(config);
         }
     }
     Ok(configs)
@@ -244,6 +263,37 @@ mod tests {
             load_configs(&ConfigSource::Dir(dir.path().to_path_buf())).is_err(),
             "a malformed file makes the whole reload fail (no partial apply)"
         );
+    }
+
+    // Issue #356 B1 (security regression): a persisted datadir `{port}.json` carrying an absolute
+    // or `..`-escaping `_rift.script.file:` is REJECTED on load — never read. This is the proof
+    // that a stub POSTed through the admin API and persisted here cannot turn a later
+    // reload/restart into an arbitrary file read (`/etc/passwd`).
+    #[test]
+    fn datadir_rejects_escaping_file_script_without_reading() {
+        for bad in ["/etc/passwd", "../secret.rhai"] {
+            let dir = tempfile::tempdir().unwrap();
+            // A real secret adjacent to the datadir that a naive resolver would read.
+            std::fs::write(dir.path().join("secret.rhai"), "SUPER-SECRET").unwrap();
+            let datadir = dir.path().join("data");
+            std::fs::create_dir(&datadir).unwrap();
+            let cfg = format!(
+                r#"{{"port":8300,"protocol":"http","stubs":[{{"responses":[{{"_rift":{{"script":{{"file":"{bad}"}}}}}}]}}]}}"#
+            );
+            write(&datadir, "8300.json", &cfg);
+
+            let result = load_configs(&ConfigSource::Dir(datadir));
+            let err = result.expect_err("escaping datadir file: must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("escapes"),
+                "datadir `{bad}` should be a path-escape error, got: {msg}"
+            );
+            assert!(
+                !msg.contains("SUPER-SECRET"),
+                "the secret's content must never appear (it must not be read): {msg}"
+            );
+        }
     }
 
     #[test]

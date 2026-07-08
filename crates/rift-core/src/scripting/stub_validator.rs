@@ -5,7 +5,7 @@
 //! rather than at request time.
 
 use super::validator::ScriptValidator;
-use crate::imposter::{Stub, StubResponse};
+use crate::imposter::{RiftScriptConfig, Stub, StubResponse};
 use std::fmt;
 
 /// Error type for stub script validation
@@ -105,40 +105,45 @@ fn validate_response(
 ) -> Option<StubValidationError> {
     match response {
         // Rift script responses (_rift.script)
-        StubResponse::RiftScript { rift } => {
-            if let Some(ref script_config) = rift.script {
-                validate_rift_script(
-                    &script_config.engine,
-                    &script_config.code,
-                    stub_id,
-                    response_index,
-                )
-            } else {
-                None
-            }
-        }
+        StubResponse::RiftScript { rift } => rift.script.as_ref().and_then(|script_config| {
+            validate_rift_script_config(script_config, stub_id, response_index)
+        }),
         // Is responses with optional _rift extension
-        StubResponse::Is { rift, .. } => {
-            if let Some(rift_ext) = rift {
-                if let Some(ref script_config) = rift_ext.script {
-                    validate_rift_script(
-                        &script_config.engine,
-                        &script_config.code,
-                        stub_id,
-                        response_index,
-                    )
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
+        StubResponse::Is { rift, .. } => rift.as_ref().and_then(|rift_ext| {
+            rift_ext.script.as_ref().and_then(|script_config| {
+                validate_rift_script_config(script_config, stub_id, response_index)
+            })
+        }),
         // JavaScript inject responses
         StubResponse::Inject { inject } => validate_inject_script(inject, stub_id, response_index),
         // Proxy and Fault responses don't have inline scripts to validate
         StubResponse::Proxy { .. } | StubResponse::Fault { .. } => None,
     }
+}
+
+/// Validates a single `_rift.script` config. `code`/`file`/`ref` exactly-one is checked
+/// unconditionally; the syntax check only runs against `code` — a `file`/`ref` source is
+/// unresolved here (that happens in the config-time resolve-scripts pass, issue #356) so an
+/// unresolved script is structurally checked but not syntax-checked by this call site.
+fn validate_rift_script_config(
+    script_config: &RiftScriptConfig,
+    stub_id: &str,
+    response_index: usize,
+) -> Option<StubValidationError> {
+    if !script_config.has_valid_source() {
+        return Some(StubValidationError {
+            stub_id: stub_id.to_string(),
+            response_index,
+            engine: script_config.engine.clone().unwrap_or_default(),
+            message: format!(
+                "script must specify exactly one of `code`, `file`, or `ref` (found {})",
+                script_config.source_count()
+            ),
+        });
+    }
+    let code = script_config.code.as_deref()?;
+    let engine = script_config.engine.as_deref().unwrap_or("rhai");
+    validate_rift_script(engine, code, stub_id, response_index)
 }
 
 /// Validates a Rift script (_rift.script) using the appropriate validator
@@ -266,8 +271,10 @@ mod tests {
                 rift: RiftResponseExtension {
                     fault: None,
                     script: Some(RiftScriptConfig {
-                        engine: engine.to_string(),
-                        code: code.to_string(),
+                        engine: Some(engine.to_string()),
+                        code: Some(code.to_string()),
+                        file: None,
+                        ref_name: None,
                     }),
                 },
             }],
@@ -372,9 +379,13 @@ mod tests {
                     rift: RiftResponseExtension {
                         fault: None,
                         script: Some(RiftScriptConfig {
-                            engine: "rhai".to_string(),
-                            code: r#"fn should_inject(request, flow_store) { #{ inject: false } }"#
-                                .to_string(),
+                            engine: Some("rhai".to_string()),
+                            code: Some(
+                                r#"fn should_inject(request, flow_store) { #{ inject: false } }"#
+                                    .to_string(),
+                            ),
+                            file: None,
+                            ref_name: None,
                         }),
                     },
                 }],
@@ -393,9 +404,13 @@ mod tests {
                     rift: RiftResponseExtension {
                         fault: None,
                         script: Some(RiftScriptConfig {
-                            engine: "rhai".to_string(),
-                            code: r#"fn should_inject(request, flow_store) { #{ inject: "#
-                                .to_string(), // Invalid
+                            engine: Some("rhai".to_string()),
+                            code: Some(
+                                r#"fn should_inject(request, flow_store) { #{ inject: "#
+                                    .to_string(), // Invalid
+                            ),
+                            file: None,
+                            ref_name: None,
                         }),
                     },
                 }],

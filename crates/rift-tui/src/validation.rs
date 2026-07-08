@@ -54,7 +54,15 @@ pub fn validate_stub_json(json: &str) -> ValidationReport {
         ..Default::default()
     };
     let path = PathBuf::from("<editor>");
-    validate_stub(&path, &value, 0, &mut lint_result, &options);
+    // A standalone stub has no imposter-level `_rift.scripts` registry to resolve `ref:` against.
+    validate_stub(
+        &path,
+        &value,
+        0,
+        &mut lint_result,
+        &options,
+        &serde_json::Value::Null,
+    );
 
     ValidationReport::from_lint_result(lint_result)
 }

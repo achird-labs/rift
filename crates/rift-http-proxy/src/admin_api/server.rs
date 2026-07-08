@@ -11,6 +11,7 @@ use hyper::service::service_fn;
 use hyper::{Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -30,6 +31,7 @@ pub struct AdminApiServer {
     config_source: Option<Arc<ConfigSource>>,
     allow_injection: bool,
     intercept: Option<Arc<InterceptState>>,
+    scripts_dir: Option<Arc<PathBuf>>,
 }
 
 impl AdminApiServer {
@@ -42,6 +44,7 @@ impl AdminApiServer {
             config_source: None,
             allow_injection: false,
             intercept: None,
+            scripts_dir: None,
         }
     }
 
@@ -70,6 +73,15 @@ impl AdminApiServer {
         self
     }
 
+    /// Set the root directory `_rift.script` `file:` references resolve under for imposters
+    /// created through the admin API (issue #356). Without it, admin-API `file:` references are
+    /// rejected — see `imposter::ScriptBaseDir::Unconfigured`.
+    #[must_use]
+    pub fn with_scripts_dir(mut self, dir: PathBuf) -> Self {
+        self.scripts_dir = Some(Arc::new(dir));
+        self
+    }
+
     /// Bind the listener (`:0` is fine) and start serving on the current runtime, returning a
     /// handle that reports the bound address and can be shut down gracefully (issue #342).
     pub async fn bind(self) -> anyhow::Result<RunningAdminApi> {
@@ -95,6 +107,7 @@ impl AdminApiServer {
                 self.config_source,
                 self.allow_injection,
                 self.intercept,
+                self.scripts_dir,
                 loop_cancel,
                 loop_tracker,
             )
@@ -190,6 +203,7 @@ async fn accept_loop(
     config_source: Option<Arc<ConfigSource>>,
     allow_injection: bool,
     intercept: Option<Arc<InterceptState>>,
+    scripts_dir: Option<Arc<PathBuf>>,
     cancel: CancellationToken,
     tracker: TaskTracker,
 ) -> anyhow::Result<()> {
@@ -203,6 +217,7 @@ async fn accept_loop(
         let api_key = api_key.clone();
         let config_source = config_source.clone();
         let intercept = intercept.clone();
+        let scripts_dir = scripts_dir.clone();
         let conn_cancel = cancel.clone();
 
         tracker.spawn(async move {
@@ -211,6 +226,7 @@ async fn accept_loop(
                 let api_key = api_key.clone();
                 let config_source = config_source.clone();
                 let intercept = intercept.clone();
+                let scripts_dir = scripts_dir.clone();
                 async move {
                     // Per-request annotation scope + response decorator (issue #318):
                     // every response through this listener — including the `/__rift/`
@@ -235,7 +251,15 @@ async fn accept_loop(
                                 return Ok::<_, hyper::Error>(unauthorized_response());
                             }
                         }
-                        route_request(req, manager, config_source, allow_injection, intercept).await
+                        route_request(
+                            req,
+                            manager,
+                            config_source,
+                            allow_injection,
+                            intercept,
+                            scripts_dir,
+                        )
+                        .await
                     })
                     .await;
                     let mut response = result?;

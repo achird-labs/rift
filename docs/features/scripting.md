@@ -314,6 +314,73 @@ return {
 }
 ```
 
+### Authoring Scripts: `file:` and `ref:` (YAML)
+
+The retry script above works fine as a single JSON-escaped line, but it stops being readable once
+a script grows past a few statements. `_rift.script` also accepts `file:` (load the script from a
+separate file) and `ref:` (resolve from a named entry under `_rift.scripts`) instead of inline
+`code:` — exactly one of `code`, `file`, or `ref` must be set. This is most useful in a YAML
+configfile, where a block scalar (`|`) lets you write the same script as normal multi-line Rhai.
+`rift --configfile config.yaml` expects a YAML *sequence* of imposters at the document root (a
+single imposter is still a one-element sequence):
+
+```yaml
+- port: 4545
+  protocol: http
+  _rift:
+    flowState: { backend: inmemory, ttlSeconds: 300 }
+  stubs:
+    - responses:
+        - _rift:
+            script:
+              engine: rhai
+              # Block scalar: the exact retry logic from the JSON example above, just readable.
+              code: |
+                fn should_inject(request, flow_store) {
+                  let flow_id = request.headers["x-flow-id"];
+                  if flow_id == () { flow_id = "default"; }
+                  let attempts = flow_store.get(flow_id, "attempts");
+                  if attempts == () { attempts = 0; }
+                  attempts += 1;
+                  flow_store.set(flow_id, "attempts", attempts);
+                  if attempts <= 2 {
+                    #{
+                      inject: true, fault: "error", status: 503,
+                      body: `{"error":"Temporary failure","attempt":${attempts}}`,
+                      headers: #{"Content-Type": "application/json"}
+                    }
+                  } else {
+                    #{ inject: false }
+                  }
+                }
+```
+
+For a script reused across stubs — or one you'd rather keep in its own file for editor
+syntax-highlighting and diffs — use `file:` instead, resolved relative to the configfile's own
+directory (`--datadir` files resolve the same way; admin-API-created imposters resolve under
+`--scripts-dir` instead, and reject any path that escapes it):
+
+```yaml
+- port: 4545
+  protocol: http
+  _rift:
+    flowState: { backend: inmemory, ttlSeconds: 300 }
+    # Named registry (issue #356): give a script a name once, `ref:` it from any response.
+    scripts:
+      failTwice:
+        file: scripts/fail-twice.rhai   # engine inferred from the extension: .rhai -> rhai
+  stubs:
+    - responses:
+        - _rift:
+            script:
+              ref: failTwice
+```
+
+`engine` is inferred from `file`'s extension (`.rhai` -> `rhai`, `.lua` -> `lua`, `.js` ->
+`javascript`) when omitted; a `ref:` may not itself point at another `ref:` (no chains), and an
+unknown `ref:` or a `file:` that can't be read is a config-time validation error — surfaced at
+`rift --configfile` load, at `POST /imposters` as a `400`, and by `rift-lint`.
+
 ### Counter with Multiple Endpoints
 
 ```json

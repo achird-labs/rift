@@ -550,6 +550,10 @@ pub(super) fn dynamic_to_json(value: Dynamic) -> Value {
 /// evaluates, Rhai calls the registered `on_progress` callback periodically; when `abort`
 /// is set (by the caller's deadline), it returns `Some(_)`, terminating execution with an
 /// error — the same mechanism the pooled path uses (#172).
+///
+/// The AST is compiled through the content-addressed cache (issue #356): repeated requests for
+/// the same `code` (e.g. several stubs `ref:`-ing the same registry entry, or repeated requests
+/// against the same stub) reuse the compiled AST instead of recompiling every call.
 pub fn run_should_inject_with_abort_rhai(
     code: &str,
     rule_id: &str,
@@ -557,7 +561,7 @@ pub fn run_should_inject_with_abort_rhai(
     flow_store: Arc<dyn FlowStore>,
     abort: &Arc<AtomicBool>,
 ) -> Result<FaultDecision> {
-    let compiled = RhaiEngine::new(code, rule_id)?;
+    let ast = super::compiled_cache::cached_rhai_ast(code)?;
     let mut engine = RhaiEngine::create_engine();
     let flag = Arc::clone(abort);
     engine.on_progress(move |_ops| {
@@ -567,7 +571,7 @@ pub fn run_should_inject_with_abort_rhai(
             None
         }
     });
-    execute_rhai_with_engine(&engine, compiled.ast(), request, flow_store, rule_id)
+    execute_rhai_with_engine(&engine, &ast, request, flow_store, rule_id)
 }
 
 #[cfg(test)]

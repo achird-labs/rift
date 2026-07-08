@@ -10,7 +10,7 @@ use crate::extensions::decorate::backend_error_response;
 use crate::extensions::stub_analysis::analyze_stubs;
 use crate::imposter::{
     Imposter, ImposterConfig, ImposterError, ImposterManager, Predicate, PredicateOperation,
-    RecordedRequest, Stub, StubResponse,
+    RecordedRequest, ScriptBaseDir, Stub, StubResponse, resolve_scripts,
 };
 use crate::scripting::validate_stubs;
 use bytes::Bytes;
@@ -18,8 +18,34 @@ use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use serde::Deserialize;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info, warn};
+
+/// The `ScriptBaseDir` a `--scripts-dir`-carrying admin API resolves `file:` scripts under;
+/// `Unconfigured` when the flag was never set. Shared by the imposter CRUD handlers and the stub
+/// sub-resource handlers (issue #356 B1) so a `file:`/`ref:` script added through ANY admin-API
+/// write path is resolved & escape-checked under the same root before it is persisted.
+pub(crate) fn admin_script_base(scripts_dir: &Option<Arc<PathBuf>>) -> ScriptBaseDir {
+    match scripts_dir {
+        Some(dir) => ScriptBaseDir::ScriptsDir(dir.as_ref().clone()),
+        None => ScriptBaseDir::Unconfigured,
+    }
+}
+
+/// The `_rift.scripts` registry of the imposter on `port` (already resolved when the imposter was
+/// created), for resolving a newly-added stub's `{ "ref": "name" }` against. Empty when the
+/// imposter doesn't exist or declares no registry.
+pub(crate) fn imposter_script_registry(
+    manager: &ImposterManager,
+    port: u16,
+) -> std::collections::HashMap<String, crate::imposter::RiftScriptConfig> {
+    manager
+        .get_imposter(port)
+        .ok()
+        .and_then(|imposter| imposter.config.rift.as_ref().map(|r| r.scripts.clone()))
+        .unwrap_or_default()
+}
 
 /// True if any stub in `stubs` uses a Mountebank scripting surface gated by `--allowInjection`
 /// (issue #355 Item 4): an inject response, a decorate behavior (`_behaviors.decorate` / a
@@ -128,13 +154,14 @@ pub async fn handle_create(
     base_url: &str,
     manager: Arc<ImposterManager>,
     allow_injection: bool,
+    scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
 
-    let config: ImposterConfig = match serde_json::from_slice(&body) {
+    let mut config: ImposterConfig = match serde_json::from_slice(&body) {
         Ok(c) => c,
         Err(e) => {
             return error_response(
@@ -146,6 +173,16 @@ pub async fn handle_create(
 
     if let Some(rejection) = reject_if_injection_disallowed(&config, allow_injection) {
         return rejection;
+    }
+
+    // Resolve `_rift.script` `file:`/`ref:` sources (issue #356) before validating/creating —
+    // a `file:` outside `--scripts-dir` (or with no `--scripts-dir` configured at all) is
+    // rejected here, never read.
+    if let Err(e) = resolve_scripts(&mut config, &admin_script_base(&scripts_dir)) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Script resolution failed: {e}"),
+        );
     }
 
     // Validate all scripts in stubs before creating the imposter
@@ -239,6 +276,7 @@ pub async fn handle_replace_all(
     base_url: &str,
     manager: Arc<ImposterManager>,
     allow_injection: bool,
+    scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
@@ -250,7 +288,7 @@ pub async fn handle_replace_all(
         imposters: Vec<ImposterConfig>,
     }
 
-    let batch: BatchRequest = match serde_json::from_slice(&body) {
+    let mut batch: BatchRequest = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => {
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid batch JSON: {e}"));
@@ -262,6 +300,21 @@ pub async fn handle_replace_all(
     for config in &batch.imposters {
         if let Some(rejection) = reject_if_injection_disallowed(config, allow_injection) {
             return rejection;
+        }
+    }
+
+    // Resolve `_rift.script` `file:`/`ref:` sources (issue #356) for every imposter before
+    // making any changes — same rejection rules as `handle_create`.
+    let base = admin_script_base(&scripts_dir);
+    for (idx, config) in batch.imposters.iter_mut().enumerate() {
+        if let Err(e) = resolve_scripts(config, &base) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "Script resolution failed in imposter[{idx}] (port {:?}): {e}",
+                    config.port
+                ),
+            );
         }
     }
 

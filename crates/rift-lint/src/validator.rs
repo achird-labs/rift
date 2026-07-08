@@ -61,10 +61,211 @@ pub fn validate_imposter(
     check_protocol(file, imposter, result);
     check_port_range(file, imposter, result);
 
+    // Named script registry (`_rift.scripts`, issue #356): validated once up front (each entry
+    // must be a `code:`/`file:` leaf, not a `ref:`), then handed to every response so a
+    // `{ "ref": "name" }` script can be resolved and validated the same way as inline `code:`.
+    let registry = imposter
+        .get("_rift")
+        .and_then(|r| r.get("scripts"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    validate_script_registry(file, &registry, result);
+
     if let Some(stubs) = imposter.get("stubs").and_then(|v| v.as_array()) {
         for (idx, stub) in stubs.iter().enumerate() {
-            validate_stub(file, stub, idx, result, options);
+            validate_stub(file, stub, idx, result, options, &registry);
         }
+    }
+}
+
+/// Infer a script's effective engine: explicit `engine`, else inferred from a `file` path's
+/// extension (`.rhai`/`.lua`/`.js`), else the "rhai" default — mirrors
+/// `rift_core::imposter::RiftScriptConfig`'s resolution rule.
+fn infer_script_engine(explicit: Option<&str>, file_field: Option<&str>) -> String {
+    if let Some(e) = explicit {
+        return e.to_string();
+    }
+    let ext = file_field
+        .and_then(|f| Path::new(f).extension())
+        .and_then(|e| e.to_str());
+    match ext {
+        Some("rhai") => "rhai",
+        Some("lua") => "lua",
+        Some("js") => "javascript",
+        _ => "rhai",
+    }
+    .to_string()
+}
+
+/// Read a `file:` script path relative to the linted config file's own directory.
+fn read_script_file_relative(config_file: &Path, rel: &str) -> std::io::Result<String> {
+    let dir = config_file.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::read_to_string(dir.join(rel))
+}
+
+/// Syntax-check a resolved script's content at the same level inline `code:` would get for its
+/// engine. Only "javascript" has an embedded syntax checker in this crate (`js_validator`,
+/// gated behind the `javascript` feature) — rhai/lua scripts get the structural checks above
+/// (exactly-one-source, ref resolution, file existence) but no deep syntax check here.
+fn check_script_syntax(
+    file: &Path,
+    code: &str,
+    engine: &str,
+    location: &str,
+    result: &mut LintResult,
+) {
+    if (engine == "javascript" || engine == "js")
+        && let Err(e) = js_validator::validate_javascript(code)
+    {
+        result.add_issue(
+            LintIssue::error(
+                "E040",
+                format!("JavaScript syntax error in _rift.script: {e}"),
+                file.to_path_buf(),
+            )
+            .with_location(location),
+        );
+    }
+}
+
+/// Validate one `_rift.script`-shaped object: `{ engine?, code?, file?, ref? }` (issue #356).
+/// Exactly one of `code`/`file`/`ref` must be present (E036). A `file:` is read relative to
+/// `config_file`'s own directory (E038 if unreadable); a `ref:` is resolved against `registry`
+/// (`Value::Null` when validating a registry entry itself, which cannot use `ref`) — E037 if the
+/// name is unknown. Whatever content is resolved gets the same syntax check inline `code:` would.
+fn validate_script_source(
+    config_file: &Path,
+    script: &Value,
+    location: &str,
+    result: &mut LintResult,
+    registry: &Value,
+) {
+    let code_field = script.get("code").and_then(|v| v.as_str());
+    let file_field = script.get("file").and_then(|v| v.as_str());
+    let ref_field = script.get("ref").and_then(|v| v.as_str());
+    let engine_field = script.get("engine").and_then(|v| v.as_str());
+
+    let source_count = [
+        code_field.is_some(),
+        file_field.is_some(),
+        ref_field.is_some(),
+    ]
+    .into_iter()
+    .filter(|set| *set)
+    .count();
+    if source_count != 1 {
+        result.add_issue(
+            LintIssue::error(
+                "E036",
+                format!(
+                    "script must specify exactly one of 'code', 'file', or 'ref' (found {source_count})"
+                ),
+                config_file.to_path_buf(),
+            )
+            .with_location(location)
+            .with_suggestion("Set exactly one of 'code', 'file', or 'ref'"),
+        );
+        return;
+    }
+
+    if let Some(ref_name) = ref_field {
+        let Some(target) = registry.get(ref_name) else {
+            result.add_issue(
+                LintIssue::error(
+                    "E037",
+                    format!(
+                        "Unknown script ref '{ref_name}': no entry named '{ref_name}' in _rift.scripts"
+                    ),
+                    config_file.to_path_buf(),
+                )
+                .with_location(location)
+                .with_suggestion("Add this name under _rift.scripts, or fix the typo"),
+            );
+            return;
+        };
+        // The target's own exactly-one-source / no-ref-chain checks already ran in
+        // `validate_script_registry`; here we only need its resolved code to syntax-check what
+        // this `ref:` actually points at.
+        let target_code = target.get("code").and_then(|v| v.as_str());
+        let target_file = target.get("file").and_then(|v| v.as_str());
+        let target_engine = target.get("engine").and_then(|v| v.as_str());
+        let resolved = match (target_code, target_file) {
+            (Some(c), _) => Some(c.to_string()),
+            (None, Some(f)) => match read_script_file_relative(config_file, f) {
+                Ok(content) => Some(content),
+                Err(e) => {
+                    result.add_issue(
+                        LintIssue::error(
+                            "E038",
+                            format!(
+                                "script file '{f}' (via ref '{ref_name}') could not be read: {e}"
+                            ),
+                            config_file.to_path_buf(),
+                        )
+                        .with_location(location),
+                    );
+                    return;
+                }
+            },
+            _ => None,
+        };
+        if let Some(code) = resolved {
+            let engine = infer_script_engine(target_engine, target_file);
+            check_script_syntax(config_file, &code, &engine, location, result);
+        }
+        return;
+    }
+
+    if let Some(f) = file_field {
+        match read_script_file_relative(config_file, f) {
+            Ok(content) => {
+                let engine = infer_script_engine(engine_field, Some(f));
+                check_script_syntax(config_file, &content, &engine, location, result);
+            }
+            Err(e) => {
+                result.add_issue(
+                    LintIssue::error(
+                        "E038",
+                        format!("script file '{f}' could not be read: {e}"),
+                        config_file.to_path_buf(),
+                    )
+                    .with_location(location)
+                    .with_suggestion("Check the path is relative to the config file"),
+                );
+            }
+        }
+        return;
+    }
+
+    if let Some(code) = code_field {
+        let engine = infer_script_engine(engine_field, None);
+        check_script_syntax(config_file, code, &engine, location, result);
+    }
+}
+
+/// Validate every entry in the `_rift.scripts` registry: each must be a `code:`/`file:` leaf
+/// script (never `ref:` — no chains), and its source resolved/checked exactly like an inline
+/// stub response script.
+fn validate_script_registry(file: &Path, registry: &Value, result: &mut LintResult) {
+    let Some(entries) = registry.as_object() else {
+        return;
+    };
+    for (name, entry) in entries {
+        let location = format!("_rift.scripts.{name}");
+        if entry.get("ref").and_then(|v| v.as_str()).is_some() {
+            result.add_issue(
+                LintIssue::error(
+                    "E039",
+                    format!(
+                        "_rift.scripts entry '{name}' may not itself use 'ref' (ref chains are not allowed)"
+                    ),
+                    file.to_path_buf(),
+                )
+                .with_location(location),
+            );
+            continue;
+        }
+        validate_script_source(file, entry, &location, result, &Value::Null);
     }
 }
 
@@ -146,6 +347,7 @@ pub fn validate_stub(
     idx: usize,
     result: &mut LintResult,
     options: &LintOptions,
+    registry: &Value,
 ) {
     let location = format!("stubs[{idx}]");
 
@@ -177,6 +379,7 @@ pub fn validate_stub(
                 &format!("{location}.responses[{resp_idx}]"),
                 result,
                 options,
+                registry,
             );
         }
     } else {
@@ -367,6 +570,7 @@ pub fn validate_response(
     location: &str,
     result: &mut LintResult,
     options: &LintOptions,
+    registry: &Value,
 ) {
     let has_is = response.get("is").is_some();
     let has_proxy = response
@@ -385,6 +589,18 @@ pub fn validate_response(
                 file.to_path_buf(),
             )
             .with_location(location),
+        );
+    }
+
+    // `_rift.script` `file:`/`ref:` sources are validated exactly like inline `code:` (issue
+    // #356): read/resolved, then syntax-checked at whatever level the engine supports.
+    if let Some(script) = response.get("_rift").and_then(|rift| rift.get("script")) {
+        validate_script_source(
+            file,
+            script,
+            &format!("{location}._rift.script"),
+            result,
+            registry,
         );
     }
 

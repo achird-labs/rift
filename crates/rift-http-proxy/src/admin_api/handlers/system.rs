@@ -323,6 +323,75 @@ mod tests {
         manager.delete_all().await;
     }
 
+    // Issue #356: editing a `file:`-referenced script and reloading must pick up the new
+    // content — the resolve-scripts pass has to re-run on every reload (it does, since reload
+    // re-reads the config source from scratch via `config_loader::load_configs`, which resolves
+    // scripts as part of parsing), not just once at startup.
+    #[tokio::test]
+    async fn test_handle_reload_picks_up_edited_file_referenced_script() {
+        use crate::imposter::StubResponse;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script_path = dir.path().join("should_inject.rhai");
+        std::fs::write(
+            &script_path,
+            r#"fn should_inject(request, flow_store) { #{ inject: true, fault: "error", status: 503, body: "v1" } }"#,
+        )
+        .expect("write script v1");
+
+        let config_path = dir.path().join("imposter.json");
+        std::fs::write(
+            &config_path,
+            r#"{"port":19479,"protocol":"http","stubs":[{"responses":[{"_rift":{"script":{"file":"should_inject.rhai"}}}]}]}"#,
+        )
+        .expect("write config");
+
+        let source = Arc::new(crate::config_loader::ConfigSource::File {
+            path: config_path,
+            no_parse: false,
+        });
+
+        let manager = Arc::new(ImposterManager::new());
+
+        // Initial reload creates the imposter with the v1 script content resolved.
+        let resp = handle_reload(manager.clone(), Some(source.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let script_code = |manager: &ImposterManager| {
+            let imposter = manager.get_imposter(19479).expect("imposter exists");
+            let stubs = imposter.get_stubs();
+            match &stubs[0].responses[0] {
+                StubResponse::RiftScript { rift } => {
+                    rift.script.as_ref().and_then(|s| s.code.clone())
+                }
+                other => panic!("expected RiftScript response, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            script_code(&manager).as_deref(),
+            Some(
+                r#"fn should_inject(request, flow_store) { #{ inject: true, fault: "error", status: 503, body: "v1" } }"#
+            )
+        );
+
+        // Edit the referenced file (the configfile itself is untouched) and reload again.
+        std::fs::write(
+            &script_path,
+            r#"fn should_inject(request, flow_store) { #{ inject: true, fault: "error", status: 503, body: "v2" } }"#,
+        )
+        .expect("write script v2");
+        let resp = handle_reload(manager.clone(), Some(source)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            script_code(&manager).as_deref(),
+            Some(
+                r#"fn should_inject(request, flow_store) { #{ inject: true, fault: "error", status: 503, body: "v2" } }"#
+            ),
+            "reload must pick up the edited file content"
+        );
+
+        manager.delete_all().await;
+    }
+
     #[test]
     fn test_handle_logs_no_query() {
         let resp = handle_logs(None);

@@ -23,6 +23,7 @@ mod manager;
 mod predicates;
 mod reconcile;
 mod response;
+mod script_resolve;
 mod types;
 
 #[cfg(test)]
@@ -38,6 +39,11 @@ pub use types::{
     RiftFlowStateConfig, RiftLatencyFault, RiftMetricsConfig, RiftProxyConfig, RiftRedisConfig,
     RiftResponseExtension, RiftScriptConfig, RiftScriptEngineConfig, RiftUpstreamConfig, Stub,
     StubResponse,
+};
+
+// Re-export script `file:`/`ref:` resolution (issue #356)
+pub use script_resolve::{
+    ScriptBaseDir, ScriptResolveError, resolve_scripts, resolve_stub_scripts,
 };
 
 // Re-export core imposter

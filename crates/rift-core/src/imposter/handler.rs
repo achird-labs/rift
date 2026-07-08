@@ -403,10 +403,23 @@ async fn handle_request_inner(
             Err(e) => return Ok(backend_error_response(&e)),
         };
         if let Some(script_config) = script_config {
-            debug!(
-                "Handling Rift script response (engine: {})",
-                script_config.engine
-            );
+            // `code` is populated by the config-time resolve-scripts pass (issue #356), which
+            // runs before an imposter carrying `file:`/`ref:` scripts is ever created. A `None`
+            // here means that pass was skipped (e.g. a stub added through a sub-resource
+            // endpoint that doesn't resolve scripts) — surface it as a clear error instead of
+            // silently running an empty script.
+            let Some(code) = script_config.code.clone() else {
+                return Ok(build_response_with_headers(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [("x-rift-imposter", "true"), ("x-rift-script-error", "true")],
+                    r#"{"error": "script not resolved: `file:`/`ref:` sources must be resolved before serving"}"#,
+                ));
+            };
+            let engine = script_config
+                .engine
+                .clone()
+                .unwrap_or_else(|| "rhai".to_string());
+            debug!("Handling Rift script response (engine: {})", engine);
 
             // Build script request. Expose headers with lowercase keys so scripts can read
             // them case-insensitively (e.g. `request.headers["x-flow-id"]`) regardless of the
@@ -438,8 +451,8 @@ async fn handle_request_inner(
             let timeout_ms = resolve_script_timeout_ms(&imposter.config);
             let flow_store = imposter.flow_store.clone();
             match should_inject_bounded(
-                script_config.engine.clone(),
-                script_config.code.clone(),
+                engine.clone(),
+                code,
                 format!("rift_script_{stub_index}"),
                 script_request,
                 flow_store,
@@ -462,7 +475,7 @@ async fn handle_request_inner(
                         response = response.header(k, v);
                     }
                     response = response.header("x-rift-imposter", "true");
-                    response = response.header("x-rift-script", &script_config.engine);
+                    response = response.header("x-rift-script", &engine);
 
                     return Ok(response
                         .body(Full::new(Bytes::from(body)))
@@ -484,7 +497,7 @@ async fn handle_request_inner(
                         StatusCode::OK,
                         [
                             ("x-rift-imposter", "true"),
-                            ("x-rift-script", &script_config.engine),
+                            ("x-rift-script", &engine),
                             ("x-rift-latency-ms", &duration_ms.to_string()),
                         ],
                         Bytes::new(),
@@ -500,7 +513,7 @@ async fn handle_request_inner(
                         StatusCode::OK,
                         [
                             ("x-rift-imposter", "true"),
-                            ("x-rift-script", script_config.engine.as_str()),
+                            ("x-rift-script", engine.as_str()),
                         ],
                         Bytes::new(),
                     ));

@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 // Engine modules (only used by proxy.rs for compilation)
 mod bounded;
+mod compiled_cache;
 mod rhai_engine;
 pub use bounded::{DEFAULT_SCRIPT_TIMEOUT_MS, resolve_script_timeout_ms, should_inject_bounded};
 
