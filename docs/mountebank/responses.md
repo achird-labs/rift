@@ -151,7 +151,6 @@ substitutes them into the response **body** and **header values** before any beh
 | `${request.body}` | Raw request body |
 | `${request.query.<name>}` | Query parameter `<name>` |
 | `${request.headers.<name>}` | Request header `<name>` (case-insensitive) |
-| `${request.pathParams.<name>}` | Path parameter `<name>` |
 
 ```json
 {

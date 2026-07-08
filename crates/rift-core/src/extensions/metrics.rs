@@ -64,7 +64,7 @@ lazy_static! {
     pub static ref ACTIVE_FLOWS: GaugeVec = register_gauge_vec!(
         "rift_active_flows",
         "Number of active flows being tracked in flow state",
-        &["backend"]  // backend: inmemory|redis|valkey
+        &["backend"]  // backend: inmemory|redis
     )
     .unwrap();
 
@@ -342,7 +342,7 @@ mod tests {
     fn test_set_active_flows_backends() {
         set_active_flows("inmemory", 100);
         set_active_flows("redis", 200);
-        set_active_flows("valkey", 150);
+        set_active_flows("redis", 150);
 
         let metrics = collect_metrics();
         assert!(metrics.contains("rift_active_flows"));
