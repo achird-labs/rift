@@ -103,7 +103,6 @@ request.method          // String: "GET", "POST", etc.
 request.path            // String: "/api/users"
 request.headers         // Map: access via request.headers["header-name"]
 request.query           // Map: access via request.query["param"]
-request.pathParams      // Map: access via request.pathParams["id"]
 request.body            // Parsed JSON body
 
 // Helper functions
@@ -203,7 +202,6 @@ request.method          -- String
 request.path            -- String
 request.headers         -- Table: request.headers["header-name"]
 request.query           -- Table: request.query["param"]
-request.pathParams      -- Table: request.pathParams["id"]
 request.body            -- Parsed body (table or string)
 
 -- Standard Lua functions
@@ -377,6 +375,18 @@ return {
 {
   "_rift": {
     "scriptEngine": { "timeoutMs": 2000 }
+  }
+}
+```
+
+`_rift.scriptEngine.defaultEngine` sets which engine runs a `_rift.script` block when the block
+itself omits `engine`: `"rhai"` (default), `"lua"`, or `"javascript"`. A per-script `engine` field
+always takes precedence over `defaultEngine`.
+
+```json
+{
+  "_rift": {
+    "scriptEngine": { "defaultEngine": "lua" }
   }
 }
 ```

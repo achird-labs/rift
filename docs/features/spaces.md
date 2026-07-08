@@ -69,6 +69,22 @@ curl http://localhost:4510/health                          # OK  (global stub)
 
 ---
 
+## Recorded requests, scoped to a space
+
+With `recordRequests: true`, `GET /imposters/{port}/savedRequests` accepts a `match=flow_id=<value>`
+query parameter (see the [API Reference]({{ site.baseurl }}/api/#requests)) to read or clear only
+one space's requests, leaving other spaces and the imposter itself untouched:
+
+```bash
+# Read only alice's recorded requests
+curl 'http://localhost:2525/imposters/4510/savedRequests?match=flow_id=alice'
+
+# Clear only alice's recorded requests (bob's and the port's own are unaffected)
+curl -X DELETE 'http://localhost:2525/imposters/4510/savedRequests?match=flow_id=alice'
+```
+
+---
+
 ## Managing spaces at runtime
 
 Instead of declaring `space` inline, you can add stubs to a space through the admin API and tear the
@@ -82,5 +98,19 @@ curl http://localhost:2525/imposters/4510/spaces/alice        # inspect the spac
 curl -X DELETE http://localhost:2525/imposters/4510/spaces/alice   # teardown
 ```
 
+Spaces are addressed by a known flow id — there is no bare `GET /imposters/{port}/spaces` route to
+list or discover which spaces currently exist under an imposter. If you need an inventory of active
+flow ids, track them on the caller side (or derive them from recorded requests / stub `space`
+fields); the admin API only ever answers "what does *this* flow id look like."
+
 Spaces build on the same store as [Flow State]({{ site.baseurl }}/features/flow-state/) and
 [Scenarios]({{ site.baseurl }}/features/scenarios/), which are likewise partitioned by flow id.
+
+---
+
+## Embedding over the C-ABI
+
+Everything above is also reachable with zero loopback HTTP from an embedded Rift: the FFI exposes
+`rift_space_add_stub`, `rift_space_list_stubs`, `rift_space_delete`, and `rift_space_recorded`,
+each mirroring the corresponding admin-HTTP handler exactly. See
+[FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/) for signatures and ownership rules.

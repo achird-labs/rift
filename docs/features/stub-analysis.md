@@ -320,6 +320,71 @@ Stubs with the same path but different methods don't conflict:
 
 ---
 
+## The `_verify` annotation
+
+`rift-verify` normally SKIPs stubs whose response is dynamic (`inject`, `proxy`, `script`, cycling,
+`_rift.fault`) because their output isn't a static function of the stub, and `--skip-dynamic` makes
+that skip explicit. Passing `--verify-dynamic` instead asserts those stubs, using whichever of three
+mechanisms applies:
+
+1. **`proxy` stubs** — an embedded mock upstream is stood up and the proxy stub is recreated pointing
+   at it; the verifier asserts the proxied response comes back, and (when the stub's `proxy` config
+   sets `predicateGenerators`) that a recorded stub is prepended.
+2. **`_verify`-annotated stubs** — the stub is recreated on a fresh throwaway imposter (clean
+   cyclic/FSM state) and the declared request/expectation `sequence` is driven against it. This is
+   the mechanism for `inject`/`script`/`decorate`/`copy`/`lookup`/cycling/repeat/stateful stubs, none
+   of which the verifier can infer an expected response for on its own.
+3. **Deterministic `_rift.fault` stubs** — a fault whose `probability` is `1.0` or unset always
+   fires, so the verifier can assert it directly: `tcp` as a transport-level reset, `latency` as an
+   elapsed time at or above the configured delay, `error` as the configured status code.
+
+A dynamic stub that carries none of these markers is still surfaced as a visible `SKIP` in the
+output — it is never silently dropped.
+
+`_verify` is a stub-level annotation (a sibling of `predicates`/`responses`) that declares a sequence
+of requests and expected outcomes to drive against a fresh copy of the imposter:
+
+```json
+{
+  "predicates": [{ "equals": { "path": "/orders/77" } }],
+  "responses": [{
+    "_rift": {
+      "script": {
+        "engine": "rhai",
+        "code": "fn should_inject(request, flow_store) { let n = flow_store.increment(\"77\", \"attempts\"); if n <= 1 { #{ inject: true, fault: \"error\", status: 503 } } else { #{ inject: true, fault: \"error\", status: 200, body: `order 77 ready` } } }"
+      }
+    }
+  }],
+  "_verify": {
+    "sequence": [
+      { "request": { "method": "GET", "path": "/orders/77" }, "expect": { "status": 503 } },
+      { "request": { "path": "/orders/77" }, "expect": { "status": 200, "bodyContains": "ready" } }
+    ]
+  }
+}
+```
+
+Fields:
+
+| Field | Default | Notes |
+|:------|:--------|:------|
+| `sequence` | `[]` | Ordered list of `{ request, expect }` steps, driven one after another against the same fresh imposter. |
+| `request.method` | `"GET"` | HTTP method for the step. |
+| `request.path` | required | Request path. |
+| `request.body` | — | Optional request body. |
+| `request.headers` | `{}` | Optional request headers. |
+| `expect.status` | — | Expected status code; omit to ignore status. |
+| `expect.bodyContains` | — | Substring the response body must contain. |
+| `expect.bodyEquals` | — | Exact response body match. |
+
+An `expect` with no fields set matches any response. A malformed `_verify` block (e.g. a step missing
+`request`) fails that stub's check rather than being silently skipped.
+
+See [CLI Reference → `rift-verify`]({{ site.baseurl }}/configuration/cli/#rift-verify) for
+`--skip-dynamic` and `--verify-dynamic`.
+
+---
+
 ## Mountebank Compatibility
 
 | Feature | Mountebank | Rift |

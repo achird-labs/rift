@@ -23,7 +23,7 @@ impl Default for ScriptEngineConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FlowStateConfig {
     #[serde(default = "default_backend_type")]
-    pub backend: String, // "inmemory", "redis", "valkey"
+    pub backend: String, // "inmemory", "redis"
     #[serde(default = "default_ttl_seconds")]
     pub ttl_seconds: i64,
     #[serde(default)]

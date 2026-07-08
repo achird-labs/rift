@@ -34,7 +34,7 @@ search:
   button: false
 
 # Footer
-footer_content: "Copyright &copy; 2024-2025 Rift Contributors. Distributed under the <a href=\"https://github.com/EtaCassiopeia/rift/blob/master/LICENSE\">Apache License 2.0</a>. Docs current as of <a href=\"https://github.com/EtaCassiopeia/rift/releases/tag/v0.8.0\">v0.8.0</a>."
+footer_content: "Copyright &copy; 2024-2025 Rift Contributors. Distributed under the <a href=\"https://github.com/EtaCassiopeia/rift/blob/master/LICENSE\">Apache License 2.0</a>. Docs current as of <a href=\"https://github.com/EtaCassiopeia/rift/releases/tag/v0.11.3\">v0.11.3</a>."
 
 # Back to top link
 back_to_top: true

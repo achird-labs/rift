@@ -212,6 +212,11 @@ fault strings are the same set as `_rift.fault.tcp` above (`CONNECTION_RESET_BY_
 `EMPTY_RESPONSE`, `RANDOM_DATA_THEN_CLOSE`, `MALFORMED_RESPONSE_CHUNK`, plus their aliases). An
 unrecognized fault string is a configuration error and yields `500 Unknown fault: <value>`.
 
+Like `_rift.fault.tcp`, a bare top-level `fault` also forces the whole imposter onto **HTTP/1
+only**: it is a connection-level event, and aborting a socket mid-stream is incompatible with
+HTTP/2 multiplexing — so an imposter with even one stub returning a top-level `fault` never
+negotiates HTTP/2, regardless of what its other stubs do.
+
 > **Behavior change:** before v0.8.0 a top-level `fault` returned a framed HTTP `502`. It now
 > performs a real connection reset/close, matching Mountebank's transport-fault semantics.
 
@@ -227,6 +232,16 @@ this order:
 
 So `latency` + `tcp` is a *delay-then-drop*, and a configured `tcp` fault always wins over an
 `error` fault rather than being silently dropped.
+
+### Response-type precedence
+
+`_rift.fault` and a top-level `fault` string live on different response shapes, and a single stub
+response can only render as one shape. When a response carries more than one recognized type, Rift
+picks in this order: **`is` > `proxy` > `inject` > `fault`**. This response-type precedence means a
+stub combining an `is` block (with `_rift.fault` inside it) *and* a top-level `"fault"` string on
+the same response silently drops the top-level `fault` — `is` wins and the fault string is never
+evaluated. If you want the top-level transport fault, the response must be a bare `fault` with no
+`is`/`proxy`/`inject` alongside it.
 
 ---
 

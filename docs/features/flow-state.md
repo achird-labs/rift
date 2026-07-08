@@ -116,3 +116,8 @@ curl -X DELETE http://localhost:2525/admin/imposters/4506/flow-state/t1/attempts
 
 Note: an imposter gets a real store only when `_rift.flowState` is configured (or it declares
 scenario stubs); otherwise a no-op store is used and values never persist.
+
+> **Embedding over the C-ABI (non-Rust)**: a non-Rust host can read, write, and delete flow-state
+> keys with zero loopback HTTP via [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/#admin-long-tail-over-ffi-scenario-state--correlated-spaces) —
+> `rift_flow_state_get` / `rift_flow_state_put` / `rift_flow_state_delete` mirror the admin-API
+> calls above exactly (same `ImposterManager` calls, same JSON shapes).

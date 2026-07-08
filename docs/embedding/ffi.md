@@ -98,7 +98,7 @@ per handle; `rift_stop` shuts it down.
 
 | Function | Signature | Returns |
 |---|---|---|
-| `rift_start_intercept` | `char* rift_start_intercept(RiftHandle* h, const char* options_json)` | JSON `{"interceptPort","interceptUrl"}` (**caller frees**), or `NULL` on error (bad JSON, bind failure, already started). Generates an intercept CA. `options_json`: `{"host":"127.0.0.1","port":0}` (port 0 = OS-assigned); `NULL`/`{}` for defaults. |
+| `rift_start_intercept` | `char* rift_start_intercept(RiftHandle* h, const char* options_json)` | JSON `{"interceptPort","interceptUrl"}` (**caller frees**), or `NULL` on error (bad JSON, bind failure, half-configured CA pair, CA load failure, already started). `options_json`: `{"host":"127.0.0.1","port":0,"caCertPath":null,"caKeyPath":null}` (port 0 = OS-assigned); `NULL`/`{}` for defaults. |
 | `rift_intercept_add_rules` | `int rift_intercept_add_rules(RiftHandle* h, const char* rules_json)` | `0`/`-1`. One rule (object) or many (array), same shape as `/intercept/rules`. |
 | `rift_intercept_list_rules` | `char* rift_intercept_list_rules(RiftHandle* h)` | The current rules as a JSON array (**caller frees**), or `NULL` on error. |
 | `rift_intercept_clear_rules` | `int rift_intercept_clear_rules(RiftHandle* h)` | `0`/`-1`. |
@@ -111,6 +111,17 @@ loopback HTTP. `Forward { port }` rules reach any imposter on that localhost por
 FFI-created ones. Errors set `rift_last_error`. A handle that never calls `rift_start_intercept` is
 unaffected.
 
+By default (no `caCertPath`/`caKeyPath`) `rift_start_intercept` generates a fresh ephemeral intercept
+CA, unchanged from earlier releases. As of v0.11.3 (#429), passing both `caCertPath` and `caKeyPath`
+(PEM file paths) loads that committed CA instead — letting independent embedded instances share one
+trust anchor rather than each minting its own. Passing only one of the pair is a hard error (both or
+neither).
+
+`interceptUrl`/`interceptPort` in the response are derived from the listener's **actual bound
+address** (v0.11.2, #425/#426) — not hardcoded to `127.0.0.1`. A loopback `host` (the default)
+reports loopback as before; a `0.0.0.0` (or other non-loopback) bind surfaces that address verbatim,
+so dial a concrete interface rather than assuming `127.0.0.1`.
+
 ## Build identity
 
 `rift_build_info` is a **static** JSON string (never freed) — probe it to detect a v2 library and read
@@ -118,7 +129,7 @@ which engines are compiled in:
 
 ```c
 const char* info = rift_build_info();
-// {"version":"0.8.0","commit":"<sha>|null","builtAt":"<iso8601>|null","features":["redis-backend","lua","javascript"]}
+// {"version":"0.11.3","commit":"<sha>|null","builtAt":"<iso8601>|null","features":["redis-backend","lua","javascript"]}
 // Do NOT call rift_free on this pointer.
 ```
 
