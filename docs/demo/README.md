@@ -1,3 +1,10 @@
+---
+layout: default
+title: Demos
+nav_order: 9.5
+permalink: /demo/
+---
+
 # Rift Demo
 
 Quick-start demos for Rift in different modes.
