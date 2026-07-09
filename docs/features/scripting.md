@@ -532,14 +532,19 @@ value. The raised error propagates to the standard script-error path (`500` with
 
 ## Engine Comparison
 
+Both engines share the same unified `ctx` API for `_rift.script` — `respond(ctx)`, `ctx.state`,
+and the `http()`/`delay()`/`reset()`/`pass()` result constructors all work identically on either
+engine. The two real differentiators are Mountebank-native `inject`/`decorate` compat (JavaScript
+only) and raw throughput (Rhai, compiled and cached).
+
 | Feature | JavaScript | Rhai |
 |:--------|:-----------|:-----|
-| Format | `inject` response | `_rift.script` |
-| State access | `state.key` | `ctx.state.get(key)` |
-| Flow isolation | Per imposter | Per flow_id |
-| Function wrapper | None needed | `respond(ctx)`/bare |
+| Format | `_rift.script` (unified `ctx`), or Mountebank `inject`/`decorate` | `_rift.script` (unified `ctx`) |
+| State access | `ctx.state.get(key)` (Mountebank `inject` path: `config.state`) | `ctx.state.get(key)` |
+| Flow isolation | Per flow_id | Per flow_id |
+| Function wrapper | `respond(ctx)` or bare expression | `respond(ctx)` or bare expression |
 | Performance | Good | Excellent |
-| Mountebank compatible | Yes | No |
+| Mountebank compatible | Yes (via `inject`/`decorate`) | No |
 
 ---
 

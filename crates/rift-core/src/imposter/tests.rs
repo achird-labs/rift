@@ -68,56 +68,68 @@ fn test_predicate_matching() {
     let empty_headers = HashMap::new();
 
     // Should match
-    assert!(stub_matches(
-        &stub.predicates,
-        "GET",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(stub_matches(
-        &stub.predicates,
-        "get",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    )); // case-insensitive method
+    assert!(
+        stub_matches(
+            &stub.predicates,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        stub_matches(
+            &stub.predicates,
+            "get",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    ); // case-insensitive method
 
     // Should not match
-    assert!(!stub_matches(
-        &stub.predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(!stub_matches(
-        &stub.predicates,
-        "GET",
-        "/other",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &stub.predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        !stub_matches(
+            &stub.predicates,
+            "GET",
+            "/other",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -492,56 +504,68 @@ fn test_predicate_ends_with() {
     let empty_headers = HashMap::new();
 
     // Should match
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/api/lender-details",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/user-details",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/api/lender-details",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/user-details",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Should not match
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/details/other",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/api/details/v1",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/details/other",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/api/details/v1",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -553,42 +577,51 @@ fn test_predicate_deep_equals_method() {
 
     let empty_headers = HashMap::new();
 
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(stub_matches(
-        &predicates,
-        "get",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    )); // case-insensitive
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        stub_matches(
+            &predicates,
+            "get",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    ); // case-insensitive
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -601,44 +634,53 @@ fn test_predicate_deep_equals_body() {
     let empty_headers = HashMap::new();
 
     // Empty body should match
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &empty_headers,
-        Some(""),
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            Some(""),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Non-empty body should not match
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &empty_headers,
-        Some("content"),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            Some("content"),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -651,68 +693,83 @@ fn test_predicate_contains_query() {
     let empty_headers = HashMap::new();
 
     // Should match - query contains "CofTest"
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some("lenderIds=CofTestWL"),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some("lenderIds=CofTest"),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some("lenderIds=123CofTest456"),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some("lenderIds=CofTestWL"),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some("lenderIds=CofTest"),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some("lenderIds=123CofTest456"),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Should not match
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some("lenderIds=Other"),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some("lenderIds=Other"),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -725,65 +782,77 @@ fn test_predicate_equals_headers() {
     let mut headers = HashMap::new();
     headers.insert("Content-Type".to_string(), "application/json".to_string());
 
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Header key lookup is case-insensitive
     let mut headers_lower = HashMap::new();
     headers_lower.insert("content-type".to_string(), "application/json".to_string());
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &headers_lower,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &headers_lower,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Wrong value
     let mut wrong_headers = HashMap::new();
     wrong_headers.insert("Content-Type".to_string(), "text/html".to_string());
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &wrong_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &wrong_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Missing header
     let empty_headers = HashMap::new();
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -801,61 +870,73 @@ fn test_predicate_exists() {
     headers.insert("Authorization".to_string(), "Bearer xyz".to_string());
 
     // All exist
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        Some("token=abc"),
-        &headers,
-        Some("body content"),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            Some("token=abc"),
+            &headers,
+            Some("body content"),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Missing query param
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &headers,
-        Some("body content"),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &headers,
+            Some("body content"),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Missing header
     let empty_headers = HashMap::new();
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        Some("token=abc"),
-        &empty_headers,
-        Some("body content"),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            Some("token=abc"),
+            &empty_headers,
+            Some("body content"),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Missing body
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        Some("token=abc"),
-        &headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            Some("token=abc"),
+            &headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -868,42 +949,51 @@ fn test_predicate_logical_not() {
     let empty_headers = HashMap::new();
 
     // Should match anything except DELETE
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(!stub_matches(
-        &predicates,
-        "DELETE",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        !stub_matches(
+            &predicates,
+            "DELETE",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -918,42 +1008,51 @@ fn test_predicate_logical_or() {
 
     let empty_headers = HashMap::new();
 
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(stub_matches(
-        &predicates,
-        "HEAD",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        stub_matches(
+            &predicates,
+            "HEAD",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -968,42 +1067,51 @@ fn test_predicate_logical_and() {
 
     let empty_headers = HashMap::new();
 
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/api/users",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/api/users",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/other",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/api/users",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/api/users",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/other",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1018,54 +1126,66 @@ fn test_predicate_matches_regex_all_fields() {
 
     let empty_headers = HashMap::new();
 
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/api/v1/users",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/api/v2/items",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(!stub_matches(
-        &predicates,
-        "DELETE",
-        "/api/v1/users",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/other/path",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/api/v1/users",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/api/v2/items",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        !stub_matches(
+            &predicates,
+            "DELETE",
+            "/api/v1/users",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/other/path",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1077,30 +1197,36 @@ fn test_predicate_matches_body_regex() {
 
     let empty_headers = HashMap::new();
 
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"userId": "abc-123-def"}"#),
-        None,
-        None,
-        None,
-        0
-    ));
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"userId": "invalid!"}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"userId": "abc-123-def"}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"userId": "invalid!"}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 // =============================================================================
@@ -1121,32 +1247,38 @@ fn test_exists_predicate_body_object_field_present() {
     let empty_headers = HashMap::new();
 
     // Body has "blah" field → should match
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"blah": "hello", "other": "stuff"}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"blah": "hello", "other": "stuff"}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Body does NOT have "blah" field → should not match
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"other": "stuff"}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"other": "stuff"}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1163,32 +1295,38 @@ fn test_exists_predicate_body_object_field_absent() {
     let empty_headers = HashMap::new();
 
     // Body has "blah" field → should NOT match (we want it absent)
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"blah": "hello"}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"blah": "hello"}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Body does NOT have "blah" field → should match
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"other": "stuff"}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"other": "stuff"}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1204,18 +1342,21 @@ fn test_exists_predicate_body_object_non_json_body() {
 
     let empty_headers = HashMap::new();
 
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some("not json at all"),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some("not json at all"),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1229,31 +1370,37 @@ fn test_exists_predicate_body_boolean_still_works() {
 
     let empty_headers = HashMap::new();
 
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some("any body content"),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some("any body content"),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 // =============================================================================
@@ -1272,18 +1419,21 @@ fn test_ends_with_object_value_does_not_always_match() {
     let empty_headers = HashMap::new();
 
     // Path is a plain string, not JSON → should NOT match (was incorrectly always matching)
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/blah",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/blah",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1298,32 +1448,38 @@ fn test_ends_with_path_as_json_object() {
     let empty_headers = HashMap::new();
 
     // Path is a JSON string with a field whose value ends with "123"
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        r#"{"abc": "other123", "other": "ignored"}"#,
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            r#"{"abc": "other123", "other": "ignored"}"#,
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Path is a JSON string but field doesn't end with "123"
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        r#"{"abc": "other456"}"#,
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            r#"{"abc": "other456"}"#,
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1337,18 +1493,21 @@ fn test_starts_with_object_value_does_not_always_match() {
 
     let empty_headers = HashMap::new();
 
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/something",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/something",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1365,46 +1524,55 @@ fn test_equals_body_as_json_object() {
     let empty_headers = HashMap::new();
 
     // Body with matching field (extra fields ignored for equals)
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"blah": "123", "other": "ignored"}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"blah": "123", "other": "ignored"}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Body with wrong value
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"blah": "456"}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"blah": "456"}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Body missing the field
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"other": "123"}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"other": "123"}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1418,31 +1586,37 @@ fn test_ends_with_body_object_with_numeric_value() {
 
     let empty_headers = HashMap::new();
 
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"abc": "other123"}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"abc": "other123"}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"abc": "other456"}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"abc": "other456"}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 // Issue #77 (reopened): Object predicates in query, headers, and form
@@ -1474,7 +1648,8 @@ fn test_ends_with_query_object_value_does_not_always_match() {
             None,
             None,
             0
-        ),
+        )
+        .unwrap(),
         "Object expected value in query should not match a plain string"
     );
 }
@@ -1491,32 +1666,38 @@ fn test_ends_with_query_object_value_recursive_match() {
     let empty_headers = HashMap::new();
 
     // query param 'data' is a JSON string with a field ending in "123"
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some(r#"data={"key": "other123", "extra": "ignored"}"#),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some(r#"data={"key": "other123", "extra": "ignored"}"#),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // query param 'data' has a field NOT ending in "123"
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some(r#"data={"key": "other456"}"#),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some(r#"data={"key": "other456"}"#),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1544,7 +1725,8 @@ fn test_ends_with_header_object_value_does_not_always_match() {
             None,
             None,
             0
-        ),
+        )
+        .unwrap(),
         "Object expected value in headers should not match a plain string"
     );
 }
@@ -1564,33 +1746,39 @@ fn test_ends_with_header_object_value_recursive_match() {
         r#"{"abc": "other123", "extra": "ignored"}"#.to_string(),
     );
 
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Header value with field NOT ending in "123"
     headers.insert("X-Data".to_string(), r#"{"abc": "other456"}"#.to_string());
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1619,7 +1807,8 @@ fn test_ends_with_form_object_value_does_not_always_match() {
             None,
             Some(&form),
             0
-        ),
+        )
+        .unwrap(),
         "Object expected value in form should not match a plain string"
     );
 }
@@ -1640,33 +1829,39 @@ fn test_ends_with_form_object_value_recursive_match() {
         r#"{"key": "other123", "extra": "ignored"}"#.to_string(),
     );
 
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/submit",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        Some(&form),
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/submit",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            Some(&form),
+            0
+        )
+        .unwrap()
+    );
 
     // Form field with value NOT ending in "123"
     form.insert("payload".to_string(), r#"{"key": "other456"}"#.to_string());
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/submit",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        Some(&form),
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/submit",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            Some(&form),
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1681,32 +1876,38 @@ fn test_contains_query_object_value() {
     let empty_headers = HashMap::new();
 
     // query param 'data' is a JSON string with a field containing "ohn"
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some(r#"data={"name": "John", "age": "30"}"#),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some(r#"data={"name": "John", "age": "30"}"#),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // query param 'data' does NOT contain "ohn"
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some(r#"data={"name": "Jane"}"#),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some(r#"data={"name": "Jane"}"#),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1725,33 +1926,39 @@ fn test_equals_header_object_value() {
     );
 
     // equals with object does recursive field match (extra fields OK)
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Mismatched value
     headers.insert("X-Config".to_string(), r#"{"mode": "prod"}"#.to_string());
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 // Issue #77: matches predicate with object expected values in query/headers/form
@@ -1781,7 +1988,8 @@ fn test_matches_query_object_value_does_not_always_match() {
             None,
             None,
             0
-        ),
+        )
+        .unwrap(),
         "Object expected value in matches/query should not match a plain string"
     );
 }
@@ -1798,32 +2006,38 @@ fn test_matches_query_object_value_recursive_regex() {
     let empty_headers = HashMap::new();
 
     // query param 'data' is JSON with a "name" field matching regex ^J.*n$
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some(r#"data={"name": "John", "age": "30"}"#),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some(r#"data={"name": "John", "age": "30"}"#),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // "Jane" does NOT match ^J.*n$ (ends with 'e')
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some(r#"data={"name": "Jane"}"#),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some(r#"data={"name": "Jane"}"#),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1841,33 +2055,39 @@ fn test_matches_header_object_value_recursive_regex() {
     );
 
     // "12345" matches ^\d+$
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // "abc" does NOT match ^\d+$
     headers.insert("X-Data".to_string(), r#"{"id": "abc"}"#.to_string());
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1886,33 +2106,39 @@ fn test_matches_form_object_value_recursive_regex() {
     );
 
     // "ABC" matches ^[A-Z]{3}$
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/submit",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        Some(&form),
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/submit",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            Some(&form),
+            0
+        )
+        .unwrap()
+    );
 
     // "abcd" does NOT match ^[A-Z]{3}$
     form.insert("payload".to_string(), r#"{"code": "abcd"}"#.to_string());
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/submit",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        Some(&form),
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/submit",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            Some(&form),
+            0
+        )
+        .unwrap()
+    );
 }
 
 // =============================================================================
@@ -1930,32 +2156,38 @@ fn test_deep_equals_body_extra_keys_rejected() {
     let empty_headers = HashMap::new();
 
     // Exact match should pass
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"a": "1"}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"a": "1"}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Extra key should be rejected by deepEquals
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"a": "1", "b": "2"}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"a": "1", "b": "2"}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1969,18 +2201,21 @@ fn test_equals_body_extra_keys_allowed() {
 
     let empty_headers = HashMap::new();
 
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"a": "1", "b": "2"}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"a": "1", "b": "2"}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -1994,32 +2229,38 @@ fn test_deep_equals_body_nested_extra_keys_rejected() {
     let empty_headers = HashMap::new();
 
     // Exact nested match
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"outer": {"inner": "val"}}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"outer": {"inner": "val"}}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Extra key in nested object
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"outer": {"inner": "val", "extra": "x"}}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"outer": {"inner": "val", "extra": "x"}}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -2033,46 +2274,55 @@ fn test_deep_equals_body_array_comparison() {
     let empty_headers = HashMap::new();
 
     // Exact array match
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"items": [1, 2, 3]}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"items": [1, 2, 3]}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Different length array
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"items": [1, 2, 3, 4]}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"items": [1, 2, 3, 4]}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     // Different values
-    assert!(!stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        Some(r#"{"items": [1, 2, 99]}"#),
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"items": [1, 2, 99]}"#),
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 // =============================================================================
@@ -2089,18 +2339,21 @@ fn test_exists_predicate_query_key_case_insensitive() {
 
     let empty_headers = HashMap::new();
 
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some("token=abc"),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some("token=abc"),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -2114,31 +2367,37 @@ fn test_exists_predicate_query_key_case_sensitive() {
 
     let empty_headers = HashMap::new();
 
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some("token=abc"),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some("token=abc"),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some("Token=abc"),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some("Token=abc"),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -2153,18 +2412,21 @@ fn test_exists_predicate_form_key_case_insensitive() {
     let mut form = HashMap::new();
     form.insert("username".to_string(), "alice".to_string());
 
-    assert!(stub_matches(
-        &predicates,
-        "POST",
-        "/test",
-        None,
-        &empty_headers,
-        None,
-        None,
-        None,
-        Some(&form),
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            Some(&form),
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -2179,34 +2441,40 @@ fn test_exists_predicate_headers_key_case_sensitive() {
     let mut headers = HashMap::new();
     headers.insert("x-custom".to_string(), "value".to_string());
 
-    assert!(!stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 
     let mut headers_exact = HashMap::new();
     headers_exact.insert("X-Custom".to_string(), "value".to_string());
 
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &headers_exact,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &headers_exact,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 // =============================================================================
@@ -2240,18 +2508,21 @@ fn test_header_predicate_matches_title_case() {
     let mut headers = HashMap::new();
     headers.insert("Content-Type".to_string(), "application/json".to_string());
 
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        None,
-        &headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 // =============================================================================
@@ -2281,18 +2552,21 @@ fn test_bare_query_param_exists_predicate() {
 
     let empty_headers = HashMap::new();
 
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some("flag"),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some("flag"),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -2305,18 +2579,21 @@ fn test_bare_query_param_equals_empty_string() {
 
     let empty_headers = HashMap::new();
 
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some("flag"),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some("flag"),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 // =============================================================================
@@ -2344,18 +2621,21 @@ fn test_multi_valued_query_param_equals() {
         }
     })]);
 
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some("key=a&key=b"),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some("key=a&key=b"),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -2367,18 +2647,21 @@ fn test_multi_valued_query_param_contains() {
         }
     })]);
 
-    assert!(stub_matches(
-        &predicates,
-        "GET",
-        "/test",
-        Some("key=a&key=b&other=x"),
-        &empty_headers,
-        None,
-        None,
-        None,
-        None,
-        0
-    ));
+    assert!(
+        stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            Some("key=a&key=b&other=x"),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None,
+            0
+        )
+        .unwrap()
+    );
 }
 
 // =============================================================================

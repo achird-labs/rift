@@ -85,7 +85,7 @@ impl Imposter {
                 form.as_ref(),
                 imposter_port,
                 body_json.as_ref(),
-            ) {
+            )? {
                 // Bump the refcount instead of deep-cloning the whole `StubState` (issue #287).
                 // The caller (`handler.rs`) holds the returned `Arc<StubState>` across `.await`
                 // points, so the arc-swap load guard must be released before returning (issue #291);
@@ -144,7 +144,7 @@ impl Imposter {
                 form.as_ref(),
                 imposter_port,
                 body_json.as_ref(),
-            ) {
+            )? {
                 return Ok(Some((Arc::clone(stub_state), index)));
             }
         }

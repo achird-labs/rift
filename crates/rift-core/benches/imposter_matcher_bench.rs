@@ -38,6 +38,7 @@ fn bench_stub_matches(c: &mut Criterion) {
                 None,
                 0,
             )
+            .unwrap()
         })
     });
 
@@ -59,6 +60,7 @@ fn bench_stub_matches(c: &mut Criterion) {
                 None,
                 0,
             )
+            .unwrap()
         })
     });
 
@@ -82,6 +84,7 @@ fn bench_stub_matches(c: &mut Criterion) {
                 None,
                 0,
             )
+            .unwrap()
         })
     });
 

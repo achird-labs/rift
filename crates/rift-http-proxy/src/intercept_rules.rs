@@ -125,7 +125,15 @@ impl InterceptRules {
                             None,
                             None,
                             0,
-                        ))
+                        )
+                        // A predicate `inject` error (e.g. a throwing script) is out of scope for
+                        // intercept-rule fail-loud handling (issue #440 only covers imposter stub
+                        // matching) — log and treat the rule as non-matching rather than panic the
+                        // intercept listener on a bad script.
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(error = %e, "intercept rule predicate match failed");
+                            false
+                        }))
             })
             .map(|rule| rule.action.clone())
     }

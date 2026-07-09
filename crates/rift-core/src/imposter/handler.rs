@@ -48,6 +48,35 @@ fn csv_cache() -> &'static CsvCache {
     CSV_CACHE.get_or_init(CsvCache::new)
 }
 
+/// Map a matcher error (`find_matching_stub_with_client`) to its response.
+///
+/// A predicate-`inject` failure (issue #440 — an object-build failure or the script itself
+/// throwing) is Mountebank-shaped error parity with the response-inject case just below: a 400
+/// with `{"errors":[{"code":"invalid predicate injection","message":"..."}]}`, not a bare 500 —
+/// the script failed to produce a valid match decision, a client (config) problem, not a server
+/// fault. Every other matcher error (e.g. a scenario-state backend failure, issue #318) keeps
+/// the existing [`backend_error_response`] 5xx mapping.
+fn matcher_error_response(e: &anyhow::Error) -> Response<Full<Bytes>> {
+    #[cfg(feature = "javascript")]
+    {
+        if let Some(pred_err) = e.downcast_ref::<crate::scripting::PredicateInjectionError>() {
+            let body = serde_json::json!({
+                "errors": [{
+                    "code": "invalid predicate injection",
+                    "message": pred_err.to_string(),
+                }]
+            })
+            .to_string();
+            return build_response_with_headers(
+                StatusCode::BAD_REQUEST,
+                [("x-rift-imposter", "true"), ("x-rift-inject-error", "true")],
+                body,
+            );
+        }
+    }
+    backend_error_response(e)
+}
+
 /// [`handle_imposter_request`] inside a per-request annotation scope, with the configured
 /// [`ResponseDecorator`](crate::extensions::decorate::ResponseDecorator) applied (phase
 /// `DataPlane`, the imposter's `port`) before the response is written (issue #318). This
@@ -281,9 +310,10 @@ async fn handle_request_inner(
         Some(&client_ip),
     ) {
         Ok(matched) => matched,
-        // A backend consulted during matching failed (issue #318): surface it, never
-        // fall through to "no match" (which would serve the wrong response).
-        Err(e) => return Ok(backend_error_response(&e)),
+        // A backend consulted during matching failed (issue #318), or a predicate-`inject`
+        // errored (issue #440): surface it, never fall through to "no match" (which would
+        // serve the wrong response).
+        Err(e) => return Ok(matcher_error_response(&e)),
     };
     if let Some((stub_state, stub_index)) = matched {
         // Scenario FSM: apply the matched stub's newScenarioState transition (no-op unless set).
@@ -1143,7 +1173,7 @@ fn handle_debug_request(
         Some(&client_ip),
     ) {
         Ok(matched) => matched,
-        Err(e) => return Ok(backend_error_response(&e)),
+        Err(e) => return Ok(matcher_error_response(&e)),
     };
     let match_result = if let Some((stub_state, stub_index)) = matched {
         // Match found

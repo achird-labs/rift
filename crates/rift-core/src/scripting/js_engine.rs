@@ -1627,25 +1627,40 @@ pub fn execute_mountebank_inject(
     parse_mountebank_response(&mut context, result)
 }
 
+/// A Mountebank predicate `inject` function failed — an object-build failure or the script
+/// itself throwing/erroring. Mountebank's own `InjectionError` fails the request loud rather
+/// than silently treating the predicate as non-matching (issue #440); this type lets the HTTP
+/// handler tell this class of error apart, via `anyhow::Error::downcast_ref`, from other matcher
+/// errors (e.g. a scenario-state backend failure, issue #318) that must keep their existing 5xx
+/// mapping instead of becoming a 400.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid predicate injection: {0}")]
+pub struct PredicateInjectionError(pub String);
+
 /// Execute a Mountebank-style predicate inject function.
 ///
 /// v2 `config`-first calling convention (issue #355 Item 0): full signature
 /// `fn(config, logger, imposterState) { return bool; }`, where `config` also stands in for the
 /// legacy `request` positional argument (request fields are flattened onto `config`), and
 /// `imposterState` aliases `config.state` — the same per-port state shared with response injects
-/// and decorate for the same imposter. Returns `true` if the predicate matches, `false` otherwise.
+/// and decorate for the same imposter. Returns `Ok(true)`/`Ok(false)` for a legitimate
+/// match/non-match. Any failure to build the script's inputs, or the inject function itself
+/// throwing/erroring, returns `Err(PredicateInjectionError)` (issue #440) — mirroring Mountebank,
+/// which fails the request rather than treating an injection error as "did not match".
 pub fn execute_predicate_inject(
     inject_fn: &str,
     request: &MountebankRequest,
     imposter_port: u16,
-) -> bool {
+) -> anyhow::Result<bool> {
     let mut context = bounded_js_context();
 
     let request_obj = match create_mountebank_request_object(&mut context, request) {
         Ok(obj) => obj,
         Err(e) => {
             tracing::warn!("inject predicate: failed to build request object: {e}");
-            return false;
+            return Err(
+                PredicateInjectionError(format!("failed to build request object: {e}")).into(),
+            );
         }
     };
 
@@ -1654,7 +1669,9 @@ pub fn execute_predicate_inject(
         Ok(obj) => obj,
         Err(e) => {
             tracing::warn!("inject predicate: failed to build state object: {e}");
-            return false;
+            return Err(
+                PredicateInjectionError(format!("failed to build state object: {e}")).into(),
+            );
         }
     };
 
@@ -1665,7 +1682,9 @@ pub fn execute_predicate_inject(
         Ok(obj) => obj,
         Err(e) => {
             tracing::warn!("inject predicate: failed to build logger object: {e}");
-            return false;
+            return Err(
+                PredicateInjectionError(format!("failed to build logger object: {e}")).into(),
+            );
         }
     };
 
@@ -1692,7 +1711,7 @@ pub fn execute_predicate_inject(
         || flatten_request_onto(&config_obj, &request_obj, &mut context).is_err()
     {
         tracing::warn!("inject predicate: failed to build config object");
-        return false;
+        return Err(PredicateInjectionError("failed to build config object".to_string()).into());
     }
 
     let global = context.global_object();
@@ -1717,7 +1736,7 @@ pub fn execute_predicate_inject(
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("inject predicate: script execution error: {e}");
-            return false;
+            return Err(PredicateInjectionError(format!("script execution error: {e}")).into());
         }
     };
 
@@ -1728,7 +1747,7 @@ pub fn execute_predicate_inject(
         save_imposter_state(imposter_port, map);
     }
 
-    result.to_boolean()
+    Ok(result.to_boolean())
 }
 
 /// Execute a `predicateGenerators.inject` function during proxy recording.
@@ -3307,31 +3326,19 @@ function respond(ctx) {
     #[test]
     fn predicate_v2_config_request_path() {
         let script = r#"function(config) { return config.request.path === "/match"; }"#;
-        assert!(execute_predicate_inject(
-            script,
-            &mb_req("GET", "/match"),
-            test_port()
-        ));
+        assert!(execute_predicate_inject(script, &mb_req("GET", "/match"), test_port()).unwrap());
     }
 
     #[test]
     fn predicate_legacy_positional() {
         let script = r#"function(request, logger, state) { return request.path === "/match"; }"#;
-        assert!(execute_predicate_inject(
-            script,
-            &mb_req("GET", "/match"),
-            test_port()
-        ));
+        assert!(execute_predicate_inject(script, &mb_req("GET", "/match"), test_port()).unwrap());
     }
 
     #[test]
     fn predicate_flattened_config_path() {
         let script = r#"function(config) { return config.path === "/match"; }"#;
-        assert!(execute_predicate_inject(
-            script,
-            &mb_req("GET", "/match"),
-            test_port()
-        ));
+        assert!(execute_predicate_inject(script, &mb_req("GET", "/match"), test_port()).unwrap());
     }
 
     #[test]
@@ -3340,11 +3347,7 @@ function respond(ctx) {
             var req = config.request || config;
             return req.path === "/match";
         }"#;
-        assert!(execute_predicate_inject(
-            script,
-            &mb_req("GET", "/match"),
-            test_port()
-        ));
+        assert!(execute_predicate_inject(script, &mb_req("GET", "/match"), test_port()).unwrap());
     }
 
     #[test]
@@ -3353,11 +3356,7 @@ function respond(ctx) {
             state.checked = true;
             return config.method === "GET";
         }"#;
-        assert!(execute_predicate_inject(
-            script,
-            &mb_req("GET", "/match"),
-            test_port()
-        ));
+        assert!(execute_predicate_inject(script, &mb_req("GET", "/match"), test_port()).unwrap());
     }
 
     // Decorate: same five conventions.
@@ -3454,11 +3453,9 @@ function respond(ctx) {
         let port = test_port();
         let predicate_script =
             r#"function(config) { config.state.seen = "from-predicate"; return true; }"#;
-        assert!(execute_predicate_inject(
-            predicate_script,
-            &mb_req("GET", "/shared"),
-            port
-        ));
+        assert!(
+            execute_predicate_inject(predicate_script, &mb_req("GET", "/shared"), port).unwrap()
+        );
 
         let inject_script = r#"function(config) { return { statusCode: 200, body: config.state.seen || "missing" }; }"#;
         let resp = execute_mountebank_inject(inject_script, &mb_req("GET", "/shared"), port, None)

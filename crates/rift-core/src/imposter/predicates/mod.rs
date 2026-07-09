@@ -7,7 +7,12 @@ use crate::behaviors::{extract_jsonpath, extract_xpath_with_ns};
 use crate::imposter::types::{Predicate, PredicateOperation, PredicateSelector};
 use std::collections::HashMap;
 
-/// Check if a stub matches a request based on its predicates
+/// Check if a stub matches a request based on its predicates.
+///
+/// `Err` propagates a predicate-`inject` failure (issue #440: object-build failure or the
+/// script itself throwing) — Mountebank fails the request loud on this rather than treating the
+/// predicate as non-matching, so callers must surface the error rather than swallow it into
+/// `false`. Every other predicate op is infallible.
 #[allow(clippy::too_many_arguments)]
 pub fn stub_matches(
     predicates: &[Predicate],
@@ -20,7 +25,7 @@ pub fn stub_matches(
     client_ip: Option<&str>,
     form: Option<&HashMap<String, String>>,
     imposter_port: u16,
-) -> bool {
+) -> anyhow::Result<bool> {
     // Parse the body once for standalone callers; the request hot path parses once per request
     // (before the stub scan) and calls `stub_matches_inner` directly (issue #290).
     let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
@@ -41,6 +46,8 @@ pub fn stub_matches(
 
 /// Body of [`stub_matches`] taking the once-parsed request body so every predicate reuses one
 /// parse rather than re-parsing the body per predicate and per stub (issue #290).
+///
+/// See [`stub_matches`] for the `Err` contract (issue #440).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stub_matches_inner(
     predicates: &[Predicate],
@@ -54,10 +61,10 @@ pub(crate) fn stub_matches_inner(
     form: Option<&HashMap<String, String>>,
     imposter_port: u16,
     body_json: Option<&serde_json::Value>,
-) -> bool {
+) -> anyhow::Result<bool> {
     // If no predicates, match everything
     if predicates.is_empty() {
-        return true;
+        return Ok(true);
     }
 
     // All predicates must match (implicit AND)
@@ -74,11 +81,11 @@ pub(crate) fn stub_matches_inner(
             form,
             imposter_port,
             body_json,
-        ) {
-            return false;
+        )? {
+            return Ok(false);
         }
     }
-    true
+    Ok(true)
 }
 
 /// Parse query string for predicate matching, URL-decoding both keys and values
@@ -89,6 +96,9 @@ pub fn parse_query(query: Option<&str>) -> HashMap<String, String> {
 /// Check if a single predicate matches (Mountebank-compatible)
 /// Supports: equals, deepEquals, contains, startsWith, endsWith, matches, exists, not, or, and
 /// Also supports requestFrom, ip, and form fields
+///
+/// `Err` propagates a predicate-`inject` failure (issue #440) — see [`stub_matches`] for the
+/// full contract. Every other predicate op is infallible.
 #[allow(clippy::too_many_arguments)]
 pub fn predicate_matches(
     predicate: &Predicate,
@@ -101,7 +111,7 @@ pub fn predicate_matches(
     client_ip: Option<&str>,
     form: Option<&HashMap<String, String>>,
     imposter_port: u16,
-) -> bool {
+) -> anyhow::Result<bool> {
     // Standalone callers parse the body here; the request hot path parses once per request and
     // calls `predicate_matches_inner` directly with the shared parse (issue #290).
     let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
@@ -123,6 +133,8 @@ pub fn predicate_matches(
 /// Body of [`predicate_matches`] taking the once-parsed request body (`body_json`) so it is not
 /// re-parsed per predicate/stub. `body_json` is the parse of the raw request body; it is only
 /// used for a no-selector predicate's `body` field (a selector makes the effective body differ).
+///
+/// See [`stub_matches`] for the `Err` contract (issue #440).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn predicate_matches_inner(
     predicate: &Predicate,
@@ -136,7 +148,7 @@ pub(crate) fn predicate_matches_inner(
     form: Option<&HashMap<String, String>>,
     imposter_port: u16,
     body_json: Option<&serde_json::Value>,
-) -> bool {
+) -> anyhow::Result<bool> {
     // Get predicate options
     let case_sensitive = predicate.parameters.case_sensitive.unwrap_or(false);
 
@@ -229,43 +241,39 @@ pub(crate) fn predicate_matches_inner(
     };
 
     match &predicate.operation {
-        PredicateOperation::Equals(fields) => {
-            check_predicate_fields(
-                fields,
-                method,
-                path,
-                &query_map,
-                headers,
-                effective_body,
-                &apply_except,
-                str_equals,
-                false, // not deep equals
-                request_from,
-                client_ip,
-                form,
-                key_case_sensitive,
-                field_body_json,
-            )
-        }
-        PredicateOperation::DeepEquals(fields) => {
-            check_predicate_fields(
-                fields,
-                method,
-                path,
-                &query_map,
-                headers,
-                effective_body,
-                &apply_except,
-                str_equals,
-                true, // deep equals
-                request_from,
-                client_ip,
-                form,
-                key_case_sensitive,
-                field_body_json,
-            )
-        }
-        PredicateOperation::Contains(fields) => check_predicate_fields(
+        PredicateOperation::Equals(fields) => Ok(check_predicate_fields(
+            fields,
+            method,
+            path,
+            &query_map,
+            headers,
+            effective_body,
+            &apply_except,
+            str_equals,
+            false, // not deep equals
+            request_from,
+            client_ip,
+            form,
+            key_case_sensitive,
+            field_body_json,
+        )),
+        PredicateOperation::DeepEquals(fields) => Ok(check_predicate_fields(
+            fields,
+            method,
+            path,
+            &query_map,
+            headers,
+            effective_body,
+            &apply_except,
+            str_equals,
+            true, // deep equals
+            request_from,
+            client_ip,
+            form,
+            key_case_sensitive,
+            field_body_json,
+        )),
+        PredicateOperation::Contains(fields) => Ok(check_predicate_fields(
             fields,
             method,
             path,
@@ -280,8 +288,8 @@ pub(crate) fn predicate_matches_inner(
             form,
             key_case_sensitive,
             field_body_json,
-        ),
-        PredicateOperation::StartsWith(fields) => check_predicate_fields(
+        )),
+        PredicateOperation::StartsWith(fields) => Ok(check_predicate_fields(
             fields,
             method,
             path,
@@ -296,8 +304,8 @@ pub(crate) fn predicate_matches_inner(
             form,
             key_case_sensitive,
             field_body_json,
-        ),
-        PredicateOperation::EndsWith(fields) => check_predicate_fields(
+        )),
+        PredicateOperation::EndsWith(fields) => Ok(check_predicate_fields(
             fields,
             method,
             path,
@@ -312,8 +320,8 @@ pub(crate) fn predicate_matches_inner(
             form,
             key_case_sensitive,
             field_body_json,
-        ),
-        PredicateOperation::Matches(fields) => check_predicate_fields_regex(
+        )),
+        PredicateOperation::Matches(fields) => Ok(check_predicate_fields_regex(
             fields,
             method,
             path,
@@ -327,8 +335,8 @@ pub(crate) fn predicate_matches_inner(
             form,
             key_case_sensitive,
             field_body_json,
-        ),
-        PredicateOperation::Exists(fields) => check_exists_predicate(
+        )),
+        PredicateOperation::Exists(fields) => Ok(check_exists_predicate(
             fields,
             method,
             path,
@@ -339,8 +347,8 @@ pub(crate) fn predicate_matches_inner(
             client_ip,
             form,
             key_case_sensitive,
-        ),
-        PredicateOperation::Not(inner) => !predicate_matches_inner(
+        )),
+        PredicateOperation::Not(inner) => Ok(!predicate_matches_inner(
             inner,
             method,
             path,
@@ -352,37 +360,52 @@ pub(crate) fn predicate_matches_inner(
             form,
             imposter_port,
             body_json,
-        ),
-        PredicateOperation::Or(children) => children.iter().any(|p| {
-            predicate_matches_inner(
-                p,
-                method,
-                path,
-                query,
-                headers,
-                body,
-                request_from,
-                client_ip,
-                form,
-                imposter_port,
-                body_json,
-            )
-        }),
-        PredicateOperation::And(children) => children.iter().all(|p| {
-            predicate_matches_inner(
-                p,
-                method,
-                path,
-                query,
-                headers,
-                body,
-                request_from,
-                client_ip,
-                form,
-                imposter_port,
-                body_json,
-            )
-        }),
+        )?),
+        PredicateOperation::Or(children) => {
+            // Short-circuits on the first match, like the old `.any()`; a predicate-inject error
+            // (issue #440) encountered along the way propagates immediately rather than being
+            // treated as "this branch didn't match".
+            for p in children {
+                if predicate_matches_inner(
+                    p,
+                    method,
+                    path,
+                    query,
+                    headers,
+                    body,
+                    request_from,
+                    client_ip,
+                    form,
+                    imposter_port,
+                    body_json,
+                )? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        PredicateOperation::And(children) => {
+            // Short-circuits on the first non-match, like the old `.all()`; an inject error
+            // propagates immediately (issue #440).
+            for p in children {
+                if !predicate_matches_inner(
+                    p,
+                    method,
+                    path,
+                    query,
+                    headers,
+                    body,
+                    request_from,
+                    client_ip,
+                    form,
+                    imposter_port,
+                    body_json,
+                )? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
         PredicateOperation::Inject(inject_fn) => {
             #[cfg(feature = "javascript")]
             {
@@ -403,7 +426,7 @@ pub(crate) fn predicate_matches_inner(
                     "inject predicate requires the 'javascript' feature; predicate will not match"
                 );
                 let _ = inject_fn;
-                false
+                Ok(false)
             }
         }
     }
@@ -506,7 +529,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             result,
@@ -562,7 +586,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             result,
@@ -597,7 +622,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             result,
@@ -623,44 +649,53 @@ mod tests {
         ];
 
         // Matching body satisfies both predicates.
-        assert!(stub_matches(
-            &predicates,
-            "POST",
-            "/x",
-            None,
-            &empty_headers(),
-            Some(r#"{"b":2,"a":1}"#),
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            stub_matches(
+                &predicates,
+                "POST",
+                "/x",
+                None,
+                &empty_headers(),
+                Some(r#"{"b":2,"a":1}"#),
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
         // A body that breaks deepEquals (extra key) must fail the AND.
-        assert!(!stub_matches(
-            &predicates,
-            "POST",
-            "/x",
-            None,
-            &empty_headers(),
-            Some(r#"{"a":1,"b":2,"c":3}"#),
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            !stub_matches(
+                &predicates,
+                "POST",
+                "/x",
+                None,
+                &empty_headers(),
+                Some(r#"{"a":1,"b":2,"c":3}"#),
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
         // Non-JSON body must not match a JSON-object predicate.
-        assert!(!stub_matches(
-            &predicates,
-            "POST",
-            "/x",
-            None,
-            &empty_headers(),
-            Some("not json"),
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            !stub_matches(
+                &predicates,
+                "POST",
+                "/x",
+                None,
+                &empty_headers(),
+                Some("not json"),
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -693,7 +728,8 @@ mod tests {
                 None,
                 None,
                 0,
-            ),
+            )
+            .unwrap(),
             "deepEquals over the jsonpath-extracted object must match; reusing the raw-body parse \
              (which also has `other`) would wrongly fail"
         );
@@ -720,7 +756,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(result, "deepEquals should match identical string bodies");
     }
@@ -751,7 +788,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             result,
@@ -780,7 +818,8 @@ mod tests {
 
         let result = predicate_matches(
             &pred, "GET", "/test", None, &headers, None, None, None, None, 0,
-        );
+        )
+        .unwrap();
 
         assert!(
             result,
@@ -813,7 +852,8 @@ mod tests {
             None,
             Some(&form),
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             result,
@@ -851,7 +891,8 @@ mod tests {
 
         let result = predicate_matches(
             &pred, "GET", "/test", None, &headers, None, None, None, None, 0,
-        );
+        )
+        .unwrap();
 
         assert!(
             result,
@@ -886,7 +927,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             result,
@@ -906,43 +948,52 @@ mod tests {
 
         let pred = make_predicate(PredicateOperation::Equals(fields));
 
-        assert!(predicate_matches(
-            &pred,
-            "POST",
-            "/test",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &pred,
+                "POST",
+                "/test",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
         // Default is case-insensitive
-        assert!(predicate_matches(
-            &pred,
-            "post",
-            "/test",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
-        assert!(!predicate_matches(
-            &pred,
-            "GET",
-            "/test",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &pred,
+                "post",
+                "/test",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
+        assert!(
+            !predicate_matches(
+                &pred,
+                "GET",
+                "/test",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -954,30 +1005,36 @@ mod tests {
 
         let pred = make_predicate(PredicateOperation::Equals(fields));
 
-        assert!(predicate_matches(
-            &pred,
-            "GET",
-            "/api/users",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
-        assert!(!predicate_matches(
-            &pred,
-            "GET",
-            "/api/other",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &pred,
+                "GET",
+                "/api/users",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
+        assert!(
+            !predicate_matches(
+                &pred,
+                "GET",
+                "/api/other",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -987,30 +1044,36 @@ mod tests {
 
         let pred = make_predicate(PredicateOperation::Contains(fields));
 
-        assert!(predicate_matches(
-            &pred,
-            "POST",
-            "/",
-            None,
-            &empty_headers(),
-            Some("say hello world"),
-            None,
-            None,
-            None,
-            0,
-        ));
-        assert!(!predicate_matches(
-            &pred,
-            "POST",
-            "/",
-            None,
-            &empty_headers(),
-            Some("goodbye"),
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &pred,
+                "POST",
+                "/",
+                None,
+                &empty_headers(),
+                Some("say hello world"),
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
+        assert!(
+            !predicate_matches(
+                &pred,
+                "POST",
+                "/",
+                None,
+                &empty_headers(),
+                Some("goodbye"),
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1020,30 +1083,36 @@ mod tests {
 
         let pred = make_predicate(PredicateOperation::StartsWith(fields));
 
-        assert!(predicate_matches(
-            &pred,
-            "GET",
-            "/api/users",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
-        assert!(!predicate_matches(
-            &pred,
-            "GET",
-            "/web/page",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &pred,
+                "GET",
+                "/api/users",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
+        assert!(
+            !predicate_matches(
+                &pred,
+                "GET",
+                "/web/page",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1053,30 +1122,36 @@ mod tests {
 
         let pred = make_predicate(PredicateOperation::EndsWith(fields));
 
-        assert!(predicate_matches(
-            &pred,
-            "GET",
-            "/data/file.json",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
-        assert!(!predicate_matches(
-            &pred,
-            "GET",
-            "/data/file.xml",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &pred,
+                "GET",
+                "/data/file.json",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
+        assert!(
+            !predicate_matches(
+                &pred,
+                "GET",
+                "/data/file.xml",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1088,30 +1163,36 @@ mod tests {
 
         let pred = make_predicate(PredicateOperation::Matches(fields));
 
-        assert!(predicate_matches(
-            &pred,
-            "GET",
-            "/api/users/123",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
-        assert!(!predicate_matches(
-            &pred,
-            "GET",
-            "/api/users/abc",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &pred,
+                "GET",
+                "/api/users/123",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
+        assert!(
+            !predicate_matches(
+                &pred,
+                "GET",
+                "/api/users/abc",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1123,18 +1204,21 @@ mod tests {
         // Default (caseSensitive unset → false): the cached regex is case-insensitive, so an
         // uppercase pattern matches a lowercase path.
         let insensitive = make_predicate(PredicateOperation::Matches(fields.clone()));
-        assert!(predicate_matches(
-            &insensitive,
-            "GET",
-            "/api/users",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &insensitive,
+                "GET",
+                "/api/users",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
 
         // caseSensitive: true → the cached regex is case-sensitive and must NOT match.
         let sensitive = make_predicate_with_params(
@@ -1144,18 +1228,21 @@ mod tests {
                 ..PredicateParameters::default()
             },
         );
-        assert!(!predicate_matches(
-            &sensitive,
-            "GET",
-            "/api/users",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            !predicate_matches(
+                &sensitive,
+                "GET",
+                "/api/users",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1166,30 +1253,36 @@ mod tests {
         let inner = make_predicate(PredicateOperation::Equals(inner_fields));
         let pred = make_predicate(PredicateOperation::Not(Box::new(inner)));
 
-        assert!(!predicate_matches(
-            &pred,
-            "GET",
-            "/",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
-        assert!(predicate_matches(
-            &pred,
-            "POST",
-            "/",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            !predicate_matches(
+                &pred,
+                "GET",
+                "/",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
+        assert!(
+            predicate_matches(
+                &pred,
+                "POST",
+                "/",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1205,42 +1298,51 @@ mod tests {
             make_predicate(PredicateOperation::Equals(eq_post)),
         ]));
 
-        assert!(predicate_matches(
-            &pred,
-            "GET",
-            "/",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
-        assert!(predicate_matches(
-            &pred,
-            "POST",
-            "/",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
-        assert!(!predicate_matches(
-            &pred,
-            "DELETE",
-            "/",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &pred,
+                "GET",
+                "/",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
+        assert!(
+            predicate_matches(
+                &pred,
+                "POST",
+                "/",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
+        assert!(
+            !predicate_matches(
+                &pred,
+                "DELETE",
+                "/",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1255,42 +1357,51 @@ mod tests {
             make_predicate(PredicateOperation::Equals(eq_path)),
         ]));
 
-        assert!(predicate_matches(
-            &pred,
-            "GET",
-            "/api",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
-        assert!(!predicate_matches(
-            &pred,
-            "POST",
-            "/api",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
-        assert!(!predicate_matches(
-            &pred,
-            "GET",
-            "/other",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &pred,
+                "GET",
+                "/api",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
+        assert!(
+            !predicate_matches(
+                &pred,
+                "POST",
+                "/api",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
+        assert!(
+            !predicate_matches(
+                &pred,
+                "GET",
+                "/other",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1306,31 +1417,37 @@ mod tests {
 
         let pred = make_predicate_with_params(PredicateOperation::Equals(fields), params);
 
-        assert!(predicate_matches(
-            &pred,
-            "POST",
-            "/",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &pred,
+                "POST",
+                "/",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
         // With caseSensitive: true, "post" should NOT match "POST"
-        assert!(!predicate_matches(
-            &pred,
-            "post",
-            "/",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            !predicate_matches(
+                &pred,
+                "post",
+                "/",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1349,18 +1466,21 @@ mod tests {
 
         // except removes "/api" from actual path, so "/api/users" becomes "/users"
         // which doesn't match "/api/users"
-        assert!(!predicate_matches(
-            &pred,
-            "GET",
-            "/api/users",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            !predicate_matches(
+                &pred,
+                "GET",
+                "/api/users",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1375,44 +1495,53 @@ mod tests {
         let pred_false = make_predicate(PredicateOperation::Exists(fields_false));
 
         // Body exists
-        assert!(predicate_matches(
-            &pred_true,
-            "POST",
-            "/",
-            None,
-            &empty_headers(),
-            Some("content"),
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &pred_true,
+                "POST",
+                "/",
+                None,
+                &empty_headers(),
+                Some("content"),
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
         // Body does not exist
-        assert!(!predicate_matches(
-            &pred_true,
-            "GET",
-            "/",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            !predicate_matches(
+                &pred_true,
+                "GET",
+                "/",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
         // Body should NOT exist (false) - empty body
-        assert!(predicate_matches(
-            &pred_false,
-            "GET",
-            "/",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &pred_false,
+                "GET",
+                "/",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1427,21 +1556,25 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
 
-        assert!(predicate_matches(
-            &pred, "GET", "/", None, &headers, None, None, None, None, 0
-        ));
-        assert!(!predicate_matches(
-            &pred,
-            "GET",
-            "/",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(&pred, "GET", "/", None, &headers, None, None, None, None, 0)
+                .unwrap()
+        );
+        assert!(
+            !predicate_matches(
+                &pred,
+                "GET",
+                "/",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1454,31 +1587,37 @@ mod tests {
         let pred = make_predicate(PredicateOperation::DeepEquals(fields));
 
         // Exact match - should pass
-        assert!(predicate_matches(
-            &pred,
-            "GET",
-            "/",
-            Some("a=1"),
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &pred,
+                "GET",
+                "/",
+                Some("a=1"),
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
         // Extra param - should fail for deepEquals
-        assert!(!predicate_matches(
-            &pred,
-            "GET",
-            "/",
-            Some("a=1&b=2"),
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            !predicate_matches(
+                &pred,
+                "GET",
+                "/",
+                Some("a=1&b=2"),
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1498,47 +1637,56 @@ mod tests {
         extra_headers.insert("x-custom".to_string(), "value".to_string());
         extra_headers.insert("x-other".to_string(), "other".to_string());
 
-        assert!(predicate_matches(
-            &pred,
-            "GET",
-            "/",
-            None,
-            &exact_headers,
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
-        assert!(!predicate_matches(
-            &pred,
-            "GET",
-            "/",
-            None,
-            &extra_headers,
-            None,
-            None,
-            None,
-            None,
-            0,
-        ));
+        assert!(
+            predicate_matches(
+                &pred,
+                "GET",
+                "/",
+                None,
+                &exact_headers,
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
+        assert!(
+            !predicate_matches(
+                &pred,
+                "GET",
+                "/",
+                None,
+                &extra_headers,
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
     fn test_stub_matches_empty_predicates() {
         // Empty predicates should match everything
-        assert!(stub_matches(
-            &[],
-            "GET",
-            "/anything",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0
-        ));
+        assert!(
+            stub_matches(
+                &[],
+                "GET",
+                "/anything",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1553,30 +1701,36 @@ mod tests {
             )),
         ];
 
-        assert!(stub_matches(
-            &predicates,
-            "GET",
-            "/api",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0
-        ));
-        assert!(!stub_matches(
-            &predicates,
-            "POST",
-            "/api",
-            None,
-            &empty_headers(),
-            None,
-            None,
-            None,
-            None,
-            0
-        ));
+        assert!(
+            stub_matches(
+                &predicates,
+                "GET",
+                "/api",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0
+            )
+            .unwrap()
+        );
+        assert!(
+            !stub_matches(
+                &predicates,
+                "POST",
+                "/api",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1616,7 +1770,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             result,
@@ -1654,7 +1809,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             result,
@@ -1682,7 +1838,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             !result,
@@ -1717,7 +1874,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             result,
@@ -1744,7 +1902,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             !result,
@@ -1771,7 +1930,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             !result,
@@ -1798,7 +1958,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             !result,
@@ -1824,7 +1985,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             !result,
@@ -1857,7 +2019,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
 
         assert!(
             result,
@@ -1886,7 +2049,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
         assert!(result, "inject predicate returning true should match");
     }
 
@@ -1907,7 +2071,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
         assert!(!result, "inject predicate returning false should not match");
     }
 
@@ -1920,9 +2085,11 @@ mod tests {
         let headers = HashMap::new();
         let post_result = predicate_matches(
             &pred, "POST", "/", None, &headers, None, None, None, None, 0,
-        );
+        )
+        .unwrap();
         let get_result =
-            predicate_matches(&pred, "GET", "/", None, &headers, None, None, None, None, 0);
+            predicate_matches(&pred, "GET", "/", None, &headers, None, None, None, None, 0)
+                .unwrap();
         assert!(post_result, "inject predicate should match POST");
         assert!(!get_result, "inject predicate should not match GET");
     }
@@ -1945,7 +2112,8 @@ mod tests {
             None,
             None,
             0,
-        );
+        )
+        .unwrap();
         assert!(result, "inject predicate should access request body");
     }
 
@@ -1954,5 +2122,160 @@ mod tests {
         let json = r#"{"inject": "function(request) { return true; }"}"#;
         let op: PredicateOperation = serde_json::from_str(json).expect("should deserialize inject");
         assert!(matches!(op, PredicateOperation::Inject(_)));
+    }
+
+    // =========================================================================
+    // Issue #440: a predicate `inject` that throws/errors must fail loud (Err), not silently
+    // collapse to "didn't match" (Ok(false)) — matching Mountebank's `InjectionError` behavior.
+    // =========================================================================
+
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn test_inject_predicate_throwing_script_fails_loud() {
+        let pred = make_predicate(PredicateOperation::Inject(
+            "function(request) { throw new Error('boom'); }".to_string(),
+        ));
+        let result = predicate_matches(
+            &pred,
+            "GET",
+            "/api",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        assert!(
+            result.is_err(),
+            "a throwing inject predicate must return Err, not Ok(false)"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invalid predicate injection"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn test_inject_predicate_undefined_reference_fails_loud() {
+        let pred = make_predicate(PredicateOperation::Inject(
+            "function(request) { return someUndefinedVariable.path === request.path; }".to_string(),
+        ));
+        let result = predicate_matches(
+            &pred,
+            "GET",
+            "/api",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        assert!(
+            result.is_err(),
+            "a reference-error inject predicate must return Err, not Ok(false)"
+        );
+    }
+
+    // Not/Or/And must propagate an inject error from a nested predicate rather than swallow it
+    // into the boolean combinator result.
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn test_inject_predicate_error_propagates_through_or_and_not() {
+        let throwing = || {
+            make_predicate(PredicateOperation::Inject(
+                "function(request) { throw new Error('boom'); }".to_string(),
+            ))
+        };
+        let always_true = || make_predicate(PredicateOperation::Exists(HashMap::new()));
+
+        let or_pred = make_predicate(PredicateOperation::Or(vec![throwing(), always_true()]));
+        assert!(
+            predicate_matches_inner(
+                &or_pred,
+                "GET",
+                "/",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+                None,
+            )
+            .is_err(),
+            "an `or` must propagate a nested inject error rather than short-circuit past it"
+        );
+
+        let and_pred = make_predicate(PredicateOperation::And(vec![always_true(), throwing()]));
+        assert!(
+            predicate_matches_inner(
+                &and_pred,
+                "GET",
+                "/",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+                None,
+            )
+            .is_err(),
+            "an `and` must propagate a nested inject error"
+        );
+
+        let not_pred = make_predicate(PredicateOperation::Not(Box::new(throwing())));
+        assert!(
+            predicate_matches_inner(
+                &not_pred,
+                "GET",
+                "/",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+                None,
+            )
+            .is_err(),
+            "a `not` must propagate a nested inject error rather than negate it into a match"
+        );
+    }
+
+    // stub_matches (used by the request hot path via stub_matches_inner) must not swallow a
+    // predicate-inject error into "stub didn't match" — it must propagate so the caller can fail
+    // the request loud (issue #440).
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn test_stub_matches_propagates_predicate_inject_error() {
+        let predicates = vec![make_predicate(PredicateOperation::Inject(
+            "function(request) { throw new Error('boom'); }".to_string(),
+        ))];
+        let result = stub_matches(
+            &predicates,
+            "GET",
+            "/api",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        assert!(
+            result.is_err(),
+            "stub_matches must propagate a predicate-inject error, not collapse it to false"
+        );
     }
 }
