@@ -19,7 +19,7 @@ use crate::extensions::decorate::{
 use crate::extensions::template::{RequestData, has_template_variables, process_template};
 use crate::scripting::{
     FaultDecision, ScriptCtxExtras, ScriptRequest, ScriptStubContext, resolve_script_timeout_ms,
-    should_inject_bounded_with_ctx,
+    should_inject_bounded_with_ctx, should_inject_bounded_with_ctx_traced,
 };
 #[cfg(feature = "javascript")]
 use crate::scripting::{MountebankRequest, execute_mountebank_inject};
@@ -499,17 +499,49 @@ async fn handle_request_inner(
                 port: imposter.config.port.unwrap_or(0),
             };
 
-            match should_inject_bounded_with_ctx(
-                engine.clone(),
-                code,
-                format!("rift_script_{stub_index}"),
-                script_request,
-                flow_store,
-                Duration::from_millis(timeout_ms),
-                ctx_extra,
-            )
-            .await
-            {
+            // Debug-mode script trace (issue #360 Item 3): which hook ran, its decision,
+            // duration, and ctx.logger lines, so "why didn't my script run the way I expected"
+            // is answerable from the response alone. Zero-cost when debug mode is off — the
+            // capturing-subscriber/Instant path in the `_traced` variant is only ever built when
+            // this flag is set, so the hot (non-debug) path calls the original, unchanged
+            // `should_inject_bounded_with_ctx`.
+            let (script_result, trace_header): (Result<FaultDecision, anyhow::Error>, _) =
+                if crate::util::rift_debug_env() {
+                    let (result, mut entry) = should_inject_bounded_with_ctx_traced(
+                        engine.clone(),
+                        code,
+                        format!("rift_script_{stub_index}"),
+                        script_request,
+                        flow_store,
+                        Duration::from_millis(timeout_ms),
+                        ctx_extra,
+                    )
+                    .await;
+                    // Cap a chatty script's logger output: the trace ships on a response header,
+                    // which must stay bounded (issue #360).
+                    entry.logs = crate::scripting::cap_trace_logs(entry.logs);
+                    // `ScriptTraceEntry` is plain strings/numbers, so this can't realistically
+                    // fail — but on the off chance it does, trace the failure instead of
+                    // silently dropping the header.
+                    let header = serde_json::to_string(&[entry])
+                        .inspect_err(|e| warn!("failed to serialize x-rift-script-trace: {}", e))
+                        .ok();
+                    (result, header)
+                } else {
+                    let result = should_inject_bounded_with_ctx(
+                        engine.clone(),
+                        code,
+                        format!("rift_script_{stub_index}"),
+                        script_request,
+                        flow_store,
+                        Duration::from_millis(timeout_ms),
+                        ctx_extra,
+                    )
+                    .await;
+                    (result, None)
+                };
+
+            match script_result {
                 Ok(FaultDecision::Error {
                     status,
                     body,
@@ -526,6 +558,9 @@ async fn handle_request_inner(
                     }
                     response = response.header("x-rift-imposter", "true");
                     response = response.header("x-rift-script", &engine);
+                    if let Some(trace) = &trace_header {
+                        response = response.header("x-rift-script-trace", trace.as_str());
+                    }
 
                     return Ok(response
                         .body(Full::new(Bytes::from(body)))
@@ -543,13 +578,17 @@ async fn handle_request_inner(
                         return Ok(backend_error_response(&e));
                     }
 
+                    let mut headers = vec![
+                        ("x-rift-imposter".to_string(), "true".to_string()),
+                        ("x-rift-script".to_string(), engine.clone()),
+                        ("x-rift-latency-ms".to_string(), duration_ms.to_string()),
+                    ];
+                    if let Some(trace) = trace_header {
+                        headers.push(("x-rift-script-trace".to_string(), trace));
+                    }
                     return Ok(build_response_with_headers(
                         StatusCode::OK,
-                        [
-                            ("x-rift-imposter", "true"),
-                            ("x-rift-script", &engine),
-                            ("x-rift-latency-ms", &duration_ms.to_string()),
-                        ],
+                        headers,
                         Bytes::new(),
                     ));
                 }
@@ -559,12 +598,16 @@ async fn handle_request_inner(
                         return Ok(backend_error_response(&e));
                     }
 
+                    let mut headers = vec![
+                        ("x-rift-imposter".to_string(), "true".to_string()),
+                        ("x-rift-script".to_string(), engine.clone()),
+                    ];
+                    if let Some(trace) = trace_header {
+                        headers.push(("x-rift-script-trace".to_string(), trace));
+                    }
                     return Ok(build_response_with_headers(
                         StatusCode::OK,
-                        [
-                            ("x-rift-imposter", "true"),
-                            ("x-rift-script", engine.as_str()),
-                        ],
+                        headers,
                         Bytes::new(),
                     ));
                 }
@@ -578,14 +621,15 @@ async fn handle_request_inner(
                         return Ok(backend_error_response(&e));
                     }
 
-                    let mut response = build_response_with_headers(
-                        StatusCode::BAD_GATEWAY,
-                        [
-                            ("x-rift-imposter", "true"),
-                            ("x-rift-script", engine.as_str()),
-                        ],
-                        Bytes::new(),
-                    );
+                    let mut headers = vec![
+                        ("x-rift-imposter".to_string(), "true".to_string()),
+                        ("x-rift-script".to_string(), engine.clone()),
+                    ];
+                    if let Some(trace) = trace_header {
+                        headers.push(("x-rift-script-trace".to_string(), trace));
+                    }
+                    let mut response =
+                        build_response_with_headers(StatusCode::BAD_GATEWAY, headers, Bytes::new());
                     response
                         .extensions_mut()
                         .insert(super::fault_io::TcpFaultKind::Reset);
@@ -593,9 +637,16 @@ async fn handle_request_inner(
                 }
                 Err(e) => {
                     warn!("Rift script execution failed: {}", e);
+                    let mut headers = vec![
+                        ("x-rift-imposter".to_string(), "true".to_string()),
+                        ("x-rift-script-error".to_string(), "true".to_string()),
+                    ];
+                    if let Some(trace) = trace_header {
+                        headers.push(("x-rift-script-trace".to_string(), trace));
+                    }
                     return Ok(build_response_with_headers(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        [("x-rift-imposter", "true"), ("x-rift-script-error", "true")],
+                        headers,
                         format!(r#"{{"error": "Script error: {e}"}}"#),
                     ));
                 }

@@ -28,6 +28,19 @@ impl InMemoryFlowStore {
         format!("flow:{flow_id}:{key}")
     }
 
+    /// List every non-expired key currently stored under `flow_id`, for `rift script run`'s
+    /// post-execution state dump (issue #360 Item 2) — the [`FlowStore`] trait itself has no
+    /// enumeration method (a real backend like Redis may not make that cheap), but the CLI works
+    /// with a concrete `InMemoryFlowStore` fixture, so an inherent method here is enough.
+    pub fn keys_for_flow(&self, flow_id: &str) -> Vec<String> {
+        let prefix = format!("flow:{flow_id}:");
+        let data = self.data.read();
+        data.iter()
+            .filter(|(_, (_, expiry))| !self.is_expired(expiry))
+            .filter_map(|(key, _)| key.strip_prefix(&prefix).map(str::to_string))
+            .collect()
+    }
+
     fn is_expired(&self, expiry: &Option<SystemTime>) -> bool {
         if let Some(exp) = expiry {
             SystemTime::now() > *exp
@@ -166,6 +179,33 @@ impl FlowStore for InMemoryFlowStore {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // Issue #360 Item 2: `rift script run` dumps the flow's keys after execution.
+    #[test]
+    fn keys_for_flow_lists_only_that_flows_non_expired_keys() {
+        let store = InMemoryFlowStore::new(300);
+        store.set("flow1", "attempts", json!(2)).unwrap();
+        store.set("flow1", "last_status", json!("ok")).unwrap();
+        store.set("other-flow", "unrelated", json!(true)).unwrap();
+
+        let mut keys = store.keys_for_flow("flow1");
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["attempts".to_string(), "last_status".to_string()]
+        );
+
+        assert!(store.keys_for_flow("no-such-flow").is_empty());
+    }
+
+    #[test]
+    fn keys_for_flow_excludes_expired_keys() {
+        let store = InMemoryFlowStore::new(1);
+        store.set("flow1", "key1", json!("value1")).unwrap();
+        assert_eq!(store.keys_for_flow("flow1"), vec!["key1".to_string()]);
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(store.keys_for_flow("flow1").is_empty());
+    }
 
     #[test]
     fn test_inmemory_get_set() {

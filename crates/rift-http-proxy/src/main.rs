@@ -27,6 +27,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::Parser;
 use rift_http_proxy::admin_api::DEFAULT_ADMIN_PORT;
+use rift_http_proxy::script_cli;
 use rift_http_proxy::server::{Cli, Commands, ServerBuilder};
 use std::path::PathBuf;
 use tracing::{info, warn};
@@ -34,6 +35,21 @@ use tracing_subscriber::{EnvFilter, Layer, fmt, prelude::*};
 
 fn main() -> Result<(), anyhow::Error> {
     let mut cli = Cli::parse();
+
+    // Handle the `script` subcommand up front: no server bootstrap (tracing/rustls/rcfile),
+    // just the CLI's own exit code (issue #360). Cloned rather than matched by value so `cli`
+    // (and `cli.command`) stay intact for the Stop/Restart/Save/Replay dispatch below.
+    if let Some(Commands::Script { action }) = cli.command.clone() {
+        return script_cli::dispatch(action);
+    }
+
+    // `--debug` is the server-flag spelling of debug mode (issue #360 Item 3); `RIFT_DEBUG` is
+    // the env-var spelling `rift_core::util::rift_debug_env()` reads everywhere else (issue
+    // #359). Setting it here (before anything calls `rift_debug_env()`, which caches its read)
+    // makes both spellings equivalent. Safe: single-threaded, before the tokio runtime starts.
+    if cli.debug {
+        unsafe { std::env::set_var("RIFT_DEBUG", "1") };
+    }
 
     // Apply rcfile defaults before using CLI values (only for fields at their clap defaults)
     if let Some(ref rcfile) = cli.rcfile.clone() {
@@ -108,6 +124,11 @@ fn main() -> Result<(), anyhow::Error> {
                 configfile: Some(configfile.clone()),
                 ..cli
             });
+        }
+        // Already handled (and returned) above, before the server bootstrap; kept here so the
+        // match stays exhaustive and correct if that ever changes.
+        Some(Commands::Script { action }) => {
+            return script_cli::dispatch(action.clone());
         }
         Some(Commands::Start) | None => {
             // Default behavior - start in Mountebank mode
