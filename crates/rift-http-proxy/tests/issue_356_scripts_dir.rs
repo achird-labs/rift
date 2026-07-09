@@ -30,8 +30,8 @@ fn config_with_file_script(port: u16, file: &str) -> serde_json::Value {
 async fn file_script_within_scripts_dir_is_accepted() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
-        dir.path().join("should_inject.rhai"),
-        r#"fn should_inject(request, flow_store) { #{ inject: false } }"#,
+        dir.path().join("respond.rhai"),
+        r#"fn respond(ctx) { pass() }"#,
     )
     .unwrap();
 
@@ -48,7 +48,7 @@ async fn file_script_within_scripts_dir_is_accepted() {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{addr}/imposters"))
-        .json(&config_with_file_script(19551, "should_inject.rhai"))
+        .json(&config_with_file_script(19551, "respond.rhai"))
         .send()
         .await
         .expect("send");
@@ -113,7 +113,7 @@ async fn file_script_without_scripts_dir_configured_is_rejected() {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{addr}/imposters"))
-        .json(&config_with_file_script(19553, "should_inject.rhai"))
+        .json(&config_with_file_script(19553, "respond.rhai"))
         .send()
         .await
         .expect("send");
@@ -157,7 +157,7 @@ async fn named_registry_ref_resolves_end_to_end() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("fail-twice.rhai"),
-        r#"fn should_inject(request, flow_store) { #{ inject: true, fault: "error", status: 503, body: "nope" } }"#,
+        r#"fn respond(ctx) { http(503, "nope") }"#,
     )
     .unwrap();
 
@@ -217,7 +217,7 @@ async fn stub_add_endpoint_rejects_escaping_file_and_resolves_in_root() {
     std::fs::create_dir(&root).unwrap();
     std::fs::write(
         root.join("boom.rhai"),
-        r#"fn should_inject(request, flow_store) { #{ inject: true, fault: "error", status: 503, body: "boom" } }"#,
+        r#"fn respond(ctx) { http(503, "boom") }"#,
     )
     .unwrap();
 

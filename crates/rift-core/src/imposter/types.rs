@@ -1167,8 +1167,8 @@ mod tests {
     #[test]
     fn script_config_deserializes_code_file_and_ref_variants() {
         let code: RiftScriptConfig =
-            serde_json::from_value(json!({ "code": "fn should_inject() {}" })).unwrap();
-        assert_eq!(code.code.as_deref(), Some("fn should_inject() {}"));
+            serde_json::from_value(json!({ "code": "fn respond() {}" })).unwrap();
+        assert_eq!(code.code.as_deref(), Some("fn respond() {}"));
         assert_eq!(code.file, None);
         assert_eq!(code.ref_name, None);
         assert_eq!(
@@ -1193,11 +1193,11 @@ mod tests {
     fn script_config_back_compat_engine_and_code() {
         let cfg: RiftScriptConfig = serde_json::from_value(json!({
             "engine": "rhai",
-            "code": "fn should_inject() {}"
+            "code": "fn respond() {}"
         }))
         .unwrap();
         assert_eq!(cfg.engine.as_deref(), Some("rhai"));
-        assert_eq!(cfg.code.as_deref(), Some("fn should_inject() {}"));
+        assert_eq!(cfg.code.as_deref(), Some("fn respond() {}"));
         assert!(cfg.has_valid_source());
     }
 

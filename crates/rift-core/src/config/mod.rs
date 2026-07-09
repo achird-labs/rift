@@ -270,13 +270,12 @@ flow_state:
 script_rules:
   - id: "progressive-failure"
     script: |
-      fn should_inject(request, flow_store) {
-        let flow_id = request.headers["x-flow-id"];
-        let attempts = flow_store.increment(flow_id, "attempts");
+      fn respond(ctx) {
+        let attempts = ctx.state.incr("attempts");
         if attempts <= 2 {
-          return #{ inject: true, fault: "error", status: 503, body: "Retry" };
+          return http(503, "Retry");
         }
-        #{ inject: false }
+        pass()
       }
     match:
       methods: ["POST"]
@@ -293,7 +292,7 @@ script_rules:
         assert_eq!(config.flow_state.as_ref().unwrap().ttl_seconds, 300);
         assert_eq!(config.script_rules.len(), 1);
         assert_eq!(config.script_rules[0].id, "progressive-failure");
-        assert!(config.script_rules[0].script.contains("should_inject"));
+        assert!(config.script_rules[0].script.contains("respond"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result, strict_flow_store};
+use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result};
 use crate::scripting::{
     FaultDecision, ScriptCtxExtras, ScriptCtxInput, ScriptRequest, ScriptResponseContext,
     ScriptResult, ScriptResultBody, ScriptStubContext, entrypoints,
@@ -55,81 +55,80 @@ fn with_current_flow_store<T>(f: impl FnOnce(&Arc<dyn FlowStore>) -> T) -> Optio
 
 /// JavaScript script engine for fault injection using Boa Engine
 ///
-/// # Script Interface
+/// # Script Interface (v2 `ctx` API, issue #357; the pre-1.0 v1 `should_inject` contract was
+/// removed in issue #453)
 ///
-/// Scripts must define a `should_inject` function with the following signature:
+/// Scripts define a `respond` function (or a bare expression with no function declarations at
+/// all) taking a single `ctx` argument:
 ///
 /// ```javascript
-/// function should_inject(request, flow_store) {
+/// function respond(ctx) {
 ///     // Your logic here
-///     return { inject: false };
+///     return pass();
 /// }
 /// ```
 ///
-/// ## Request Object
+/// ## `ctx.request`
 ///
-/// The `request` parameter is an object containing:
-/// - `method` - HTTP method (string): "GET", "POST", "PUT", "DELETE", etc.
-/// - `path` - Request path (string): "/api/users/123"
-/// - `headers` - Object of header name (string) to value (string)
-/// - `body` - Request body (parsed JSON value or null)
-/// - `query` - Object of query parameter name (string) to value (string)
-/// - `pathParams` - Object of path parameters extracted from route patterns
+/// - `ctx.request.method` - HTTP method (string): "GET", "POST", "PUT", "DELETE", etc.
+/// - `ctx.request.path` - Request path (string): "/api/users/123"
+/// - `ctx.request.headers` - Object of (lowercased) header name to value
+/// - `ctx.request.header(name)` - Case-insensitive header getter
+/// - `ctx.request.body` - Raw request body (string)
+/// - `ctx.request.json` - Lazily parsed JSON body (null if not valid JSON)
+/// - `ctx.request.query` - Object of query parameter name to value
+/// - `ctx.request.pathParams` - Object of path parameters extracted from route patterns
 ///
-/// ## Flow Store Object
+/// ## `ctx.state` (flow-scoped storage)
 ///
-/// The `flow_store` parameter provides state management across requests:
-/// - `flow_store.get(flow_id, key)` - Get a stored value (returns null if not found)
-/// - `flow_store.set(flow_id, key, value)` - Store a value (returns boolean)
-/// - `flow_store.exists(flow_id, key)` - Check if key exists (returns boolean)
-/// - `flow_store.delete(flow_id, key)` - Delete a key (returns boolean)
-/// - `flow_store.increment(flow_id, key)` - Increment counter (returns number)
-/// - `flow_store.set_ttl(flow_id, ttl_seconds)` - Set flow expiration (returns boolean)
-/// - `flow_store.last_error()` - Take the last flow-store op's error (returns null if none)
+/// `ctx.state` is already scoped to the current flow id:
+/// - `ctx.state.get(key)` - Get a stored value (returns null if not found)
+/// - `ctx.state.set(key, value)` - Store a value (returns boolean)
+/// - `ctx.state.exists(key)` - Check if key exists (returns boolean)
+/// - `ctx.state.delete(key)` - Delete a key (returns boolean)
+/// - `ctx.state.incr(key)` - Increment counter (returns number)
+/// - `ctx.state.getOr(key, default)` - Get a value, or `default` if absent
+/// - `ctx.state.incrBy(key, n)` - Atomic increment by `n`, starting at 0 when absent
+/// - `ctx.state.cas(key, expected, new)` - Atomic compare-and-set
+/// - `ctx.state.ttl(seconds)` - Set flow expiration
+///
+/// `ctx.store.flow(flowId)` returns the same handle scoped to an arbitrary (not necessarily the
+/// request's own) flow id.
 ///
 /// ## Return Value
 ///
-/// The function must return an object with the fault decision:
+/// The function returns one of the result constructors, or nothing (equivalent to `pass()`):
 ///
 /// ```javascript
 /// // No fault injection
-/// { inject: false }
+/// pass()
 ///
 /// // Latency injection
-/// { inject: true, fault: "latency", duration_ms: 500 }
+/// delay(500)
 ///
 /// // Error injection
-/// { inject: true, fault: "error", status: 503, body: "Service unavailable" }
+/// http(503, "Service unavailable")
 ///
-/// // Error with custom headers
-/// {
-///     inject: true,
-///     fault: "error",
-///     status: 429,
-///     body: "Rate limited",
-///     headers: { "Retry-After": "60" }
-/// }
+/// // Error with custom headers and a JSON body
+/// http(429, { error: "Rate limited" }).header("Retry-After", "60")
 /// ```
 ///
 /// ## Example
 ///
 /// ```javascript
-/// function should_inject(request, flow_store) {
-///     // Rate limit based on flow ID from header
-///     var flow_id = request.headers["x-flow-id"];
-///     if (flow_id) {
-///         var attempts = flow_store.increment(flow_id, "attempts");
-///         if (attempts > 3) {
-///             return { inject: true, fault: "error", status: 429, body: "Rate limited" };
-///         }
+/// function respond(ctx) {
+///     // Rate limit based on the resolved flow id
+///     var attempts = ctx.state.incr("attempts");
+///     if (attempts > 3) {
+///         return http(429, "Rate limited");
 ///     }
 ///
 ///     // Inject fault for POST requests to specific path
-///     if (request.method === "POST" && request.path === "/api/test") {
-///         return { inject: true, fault: "latency", duration_ms: 100 };
+///     if (ctx.request.method === "POST" && ctx.request.path === "/api/test") {
+///         return delay(100);
 ///     }
 ///
-///     return { inject: false };
+///     return pass();
 /// }
 /// ```
 #[derive(Debug, Clone)]
@@ -142,12 +141,10 @@ impl JsEngine {
     pub fn new(script: &str, rule_id: &str) -> Result<Self> {
         // Validate the script PARSES — not that it runs. Issue #357 Item 2 legalizes bare-
         // expression scripts, which reference a top-level `ctx` that only exists at real
-        // execution time (with `request`/`flow_store`/`ctx` globals bound); fully evaluating an
-        // unbound bare script here would spuriously fail with "ctx is not defined" and, for a
-        // wrapper-form script, would run its top-level side effects at construction time, not
-        // request time. `Script::parse` catches genuine syntax errors without executing anything
-        // (issue #357 Item 4 relaxes the old "must define should_inject" requirement the same way
-        // `RhaiEngine::new`, which only ever compiled, already did).
+        // execution time; fully evaluating an unbound bare script here would spuriously fail with
+        // "ctx is not defined" and, for a wrapper-form script, would run its top-level side
+        // effects at construction time, not request time. `Script::parse` catches genuine syntax
+        // errors without executing anything.
         let mut context = Context::default();
         boa_engine::Script::parse(Source::from_bytes(script.as_bytes()), None, &mut context)
             .map_err(|e| anyhow!("Failed to compile JavaScript script: {e}"))?;
@@ -158,8 +155,8 @@ impl JsEngine {
         })
     }
 
-    /// Execute the script and determine if a fault should be injected. Auto-detects v1
-    /// (`should_inject(request, flow_store)`) vs v2 (`respond(ctx)` or bare) — see
+    /// Execute the `respond(ctx)` entrypoint (or bare-expression script) and determine if a fault
+    /// should be injected — see
     /// [`crate::scripting::ScriptEngine::should_inject_fault`] for the full contract.
     pub fn should_inject(
         &self,
@@ -178,7 +175,7 @@ impl JsEngine {
         extra: &ScriptCtxExtras,
     ) -> Result<FaultDecision> {
         let ctx_input = extra.build_ctx_input(request);
-        execute_js_script(&self.script, request, flow_store, &self.rule_id, &ctx_input)
+        execute_js_script(&self.script, flow_store, &self.rule_id, &ctx_input)
     }
 }
 
@@ -210,13 +207,12 @@ pub fn execute_js_bytecode(
     let script =
         std::str::from_utf8(bytecode).map_err(|e| anyhow!("Invalid UTF-8 in bytecode: {e}"))?;
     let ctx_input = ScriptCtxExtras::default().build_ctx_input(request);
-    execute_js_script(script, request, flow_store, rule_id, &ctx_input)
+    execute_js_script(script, flow_store, rule_id, &ctx_input)
 }
 
 /// Internal function to execute JavaScript script
 fn execute_js_script(
     script: &str,
-    request: &ScriptRequest,
     flow_store: Arc<dyn FlowStore>,
     rule_id: &str,
     ctx_input: &ScriptCtxInput,
@@ -225,14 +221,14 @@ fn execute_js_script(
     set_current_flow_store(flow_store);
 
     // Ensure we clear the flow store when done (even on error)
-    let result = execute_js_script_inner(script, request, rule_id, ctx_input);
+    let result = execute_js_script_inner(script, rule_id, ctx_input);
 
     clear_current_flow_store();
 
     result
 }
 
-/// Loop-iteration cap for a `should_inject` Boa context (issue #327). Boa exposes no
+/// Loop-iteration cap for a `respond(ctx)` Boa context (issue #327). Boa exposes no
 /// per-instruction interrupt, so a runaway loop (`while(true){}`) can't observe the deadline abort
 /// flag and would otherwise run its `spawn_blocking` thread forever. This cap makes a single
 /// runaway loop throw once the limit is hit, so the execution returns `Err` and the thread is
@@ -284,16 +280,15 @@ pub(crate) fn bounded_js_context() -> Context {
 ///  1. **Syntax** — `Script::parse` catches genuine syntax errors WITHOUT executing anything
 ///     (exactly what [`JsEngine::new`] does). `Err` here is a real syntax error.
 ///  2. **Detection** — evaluate once with the SAME host globals the real execution path binds
-///     (`request`/`flow_store`/`ctx`/`http`/`delay`/`reset`/`pass`), under the SAME
-///     loop-iteration limit ([`JS_SCRIPT_LOOP_ITERATION_LIMIT`]) that stops a top-level
-///     `while(true){}` from hanging. Binding the globals is what keeps a legitimate #357
-///     bare-expression response script (e.g. `http(503, "boom")`, or
-///     `(ctx.request.method === "POST") ? http(503) : pass()`) from spuriously throwing
-///     "http/ctx is not defined" — the very false-fail a blind unbound eval caused. The eval's
-///     own Result is intentionally ignored: JS hoists every top-level `function` declaration onto
-///     the global object BEFORE running statements, so the declared-function set is complete even
-///     if a bare expression later throws at runtime — a runtime throw is not this check's concern
-///     (matching Rhai, which never executes at all).
+///     (`ctx`/`http`/`delay`/`reset`/`pass`), under the SAME loop-iteration limit
+///     ([`JS_SCRIPT_LOOP_ITERATION_LIMIT`]) that stops a top-level `while(true){}` from hanging.
+///     Binding the globals is what keeps a legitimate #357 bare-expression response script (e.g.
+///     `http(503, "boom")`, or `(ctx.request.method === "POST") ? http(503) : pass()`) from
+///     spuriously throwing "http/ctx is not defined" — the very false-fail a blind unbound eval
+///     caused. The eval's own Result is intentionally ignored: JS hoists every top-level
+///     `function` declaration onto the global object BEFORE running statements, so the
+///     declared-function set is complete even if a bare expression later throws at runtime — a
+///     runtime throw is not this check's concern (matching Rhai, which never executes at all).
 ///
 /// Returns the names of functions the SCRIPT itself declared (via a before/after global-key
 /// diff), never the host builtins/globals bound above.
@@ -333,23 +328,10 @@ pub(crate) fn declared_functions_js(script: &str) -> Result<Vec<String>> {
         .runtime_limits_mut()
         .set_stack_size_limit(JS_SCRIPT_STACK_SIZE_LIMIT);
 
-    let request_obj = create_request_object(&mut context, &dummy_request)?;
-    let flow_store_obj = create_flow_store_object(&mut context)?;
     let ctx_obj = create_ctx_object(&mut context, &ctx_input)?;
     register_result_constructors(&mut context)?;
 
     let global = context.global_object();
-    global
-        .set(js_string!("request"), request_obj, false, &mut context)
-        .map_err(|e| anyhow!("Failed to set request global: {e}"))?;
-    global
-        .set(
-            js_string!("flow_store"),
-            flow_store_obj,
-            false,
-            &mut context,
-        )
-        .map_err(|e| anyhow!("Failed to set flow_store global: {e}"))?;
     global
         .set(js_string!("ctx"), ctx_obj, false, &mut context)
         .map_err(|e| anyhow!("Failed to set ctx global: {e}"))?;
@@ -393,30 +375,20 @@ pub(crate) fn declared_functions_js(script: &str) -> Result<Vec<String>> {
 /// Inner function that does the actual JavaScript execution
 fn execute_js_script_inner(
     script: &str,
-    request: &ScriptRequest,
     rule_id: &str,
     ctx_input: &ScriptCtxInput,
 ) -> Result<FaultDecision> {
-    execute_js_script_inner_bounded(
-        script,
-        request,
-        rule_id,
-        ctx_input,
-        JS_SCRIPT_LOOP_ITERATION_LIMIT,
-    )
+    execute_js_script_inner_bounded(script, rule_id, ctx_input, JS_SCRIPT_LOOP_ITERATION_LIMIT)
 }
 
 /// As [`execute_js_script_inner`], but with an explicit loop-iteration cap so tests can bound a
 /// runaway cheaply (issue #327).
 ///
-/// Dispatch (issue #357 Items 2/4): the script is evaluated once with `request`/`flow_store`
-/// (v1 globals) and `ctx` (v2 global) already set — its completion value is the bare-expression
-/// result. Then: a global `should_inject` → v1 (call it with `(request, flow_store)`, parse the
-/// old `#{inject:, fault:}` map). Else a global `respond` → v2 named (call it with `ctx`). Else →
-/// v2 bare (the completion value from the single eval above).
+/// Dispatch (issue #357 Item 2): the script is evaluated once with `ctx` already set — its
+/// completion value is the bare-expression result. Then: a global `respond` → named entrypoint
+/// (call it with `ctx`). Else → bare (the completion value from the single eval above).
 fn execute_js_script_inner_bounded(
     script: &str,
-    request: &ScriptRequest,
     rule_id: &str,
     ctx_input: &ScriptCtxInput,
     loop_iteration_limit: u64,
@@ -433,34 +405,16 @@ fn execute_js_script_inner_bounded(
         .runtime_limits_mut()
         .set_loop_iteration_limit(loop_iteration_limit);
 
-    let request_obj = create_request_object(&mut context, request)?;
-    let flow_store_obj = create_flow_store_object(&mut context)?;
     let ctx_obj = create_ctx_object(&mut context, ctx_input)?;
     register_result_constructors(&mut context)?;
 
     let global = context.global_object();
     global
-        .set(
-            js_string!("request"),
-            request_obj.clone(),
-            false,
-            &mut context,
-        )
-        .map_err(|e| anyhow!("Failed to set request global: {e}"))?;
-    global
-        .set(
-            js_string!("flow_store"),
-            flow_store_obj.clone(),
-            false,
-            &mut context,
-        )
-        .map_err(|e| anyhow!("Failed to set flow_store global: {e}"))?;
-    global
         .set(js_string!("ctx"), ctx_obj.clone(), false, &mut context)
         .map_err(|e| anyhow!("Failed to set ctx global: {e}"))?;
 
     // Snapshot the global own-property names present BEFORE eval, so afterwards we can tell which
-    // function globals the SCRIPT itself declared (B1): Boa builtins plus the request/flow_store/
+    // function globals the SCRIPT itself declared (B1): Boa builtins plus the
     // ctx/http/delay/reset/pass globals we set above are all already present here.
     let pre_existing: std::collections::HashSet<String> = global
         .own_property_keys(&mut context)
@@ -476,23 +430,6 @@ fn execute_js_script_inner_bounded(
         .eval(Source::from_bytes(script.as_bytes()))
         .map_err(|e| anyhow!("Failed to execute script: {e}"))?;
 
-    let should_inject_fn = global
-        .get(js_string!(entrypoints::SHOULD_INJECT), &mut context)
-        .ok()
-        .filter(JsValue::is_callable);
-    if let Some(func) = should_inject_fn {
-        let result = func
-            .as_callable()
-            .ok_or_else(|| anyhow!("should_inject is not a function"))?
-            .call(
-                &JsValue::undefined(),
-                &[request_obj, flow_store_obj],
-                &mut context,
-            )
-            .map_err(|e| anyhow!("Failed to call should_inject: {e}"))?;
-        return parse_fault_decision(&mut context, result, rule_id);
-    }
-
     let respond_fn = global
         .get(js_string!(entrypoints::RESPOND), &mut context)
         .ok()
@@ -504,12 +441,11 @@ fn execute_js_script_inner_bounded(
             .map_err(|e| anyhow!("Failed to call respond(ctx): {e}"))?
     } else {
         // B1 (issue #357, "nothing fails silently"): if the script DECLARED a function global
-        // that isn't `respond` (nor `should_inject`) and produced no bare-expression value
-        // (undefined/null), it almost certainly has a MISNAMED entrypoint (e.g.
-        // `function respnod(ctx)`). Falling through to `bare_result` (→ `None`) would silently
-        // serve a normal response with no sign the script never ran. Surface it as an explicit
-        // error instead. A genuine bare expression is still fine: it either declared no new
-        // functions, or produced a non-undefined value.
+        // that isn't `respond` and produced no bare-expression value (undefined/null), it almost
+        // certainly has a MISNAMED entrypoint (e.g. `function respnod(ctx)`). Falling through to
+        // `bare_result` (→ `None`) would silently serve a normal response with no sign the script
+        // never ran. Surface it as an explicit error instead. A genuine bare expression is still
+        // fine: it either declared no new functions, or produced a non-undefined value.
         if bare_result.is_undefined() || bare_result.is_null() {
             let keys = global.own_property_keys(&mut context).unwrap_or_default();
             let mut declared_a_function = false;
@@ -544,102 +480,10 @@ fn execute_js_script_inner_bounded(
     js_value_to_fault_decision(&mut context, result, rule_id)
 }
 
-/// Create request object from ScriptRequest
-fn create_request_object(context: &mut Context, request: &ScriptRequest) -> Result<JsValue> {
-    let obj = create_js_object(context);
-
-    // Set method
-    obj.set(
-        js_string!("method"),
-        JsValue::from(js_string!(request.method.clone())),
-        false,
-        context,
-    )
-    .map_err(|e| anyhow!("Failed to set method: {e}"))?;
-
-    // Set path
-    obj.set(
-        js_string!("path"),
-        JsValue::from(js_string!(request.path.clone())),
-        false,
-        context,
-    )
-    .map_err(|e| anyhow!("Failed to set path: {e}"))?;
-
-    // Set headers
-    let headers_obj = create_js_object(context);
-    for (k, v) in &request.headers {
-        headers_obj
-            .set(
-                js_string!(k.clone()),
-                JsValue::from(js_string!(v.clone())),
-                false,
-                context,
-            )
-            .map_err(|e| anyhow!("Failed to set header: {e}"))?;
-    }
-    obj.set(js_string!("headers"), headers_obj, false, context)
-        .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
-
-    // Set body
-    let body_value = json_to_js(context, &request.body)?;
-    obj.set(js_string!("body"), body_value, false, context)
-        .map_err(|e| anyhow!("Failed to set body: {e}"))?;
-
-    // Set query parameters
-    let query_obj = create_js_object(context);
-    for (k, v) in &request.query {
-        query_obj
-            .set(
-                js_string!(k.clone()),
-                JsValue::from(js_string!(v.clone())),
-                false,
-                context,
-            )
-            .map_err(|e| anyhow!("Failed to set query param: {e}"))?;
-    }
-    obj.set(js_string!("query"), query_obj, false, context)
-        .map_err(|e| anyhow!("Failed to set query: {e}"))?;
-
-    // Set path parameters
-    let path_params_obj = create_js_object(context);
-    for (k, v) in &request.path_params {
-        path_params_obj
-            .set(
-                js_string!(k.clone()),
-                JsValue::from(js_string!(v.clone())),
-                false,
-                context,
-            )
-            .map_err(|e| anyhow!("Failed to set path param: {e}"))?;
-    }
-    obj.set(js_string!("pathParams"), path_params_obj, false, context)
-        .map_err(|e| anyhow!("Failed to set pathParams: {e}"))?;
-
-    Ok(obj.into())
-}
-
 // Native function implementations that use thread-local storage
 
-/// Map a flow-store op outcome to a JS value: a success yields the value; a failure raises a native
-/// error in strict mode (issue #376) or returns the lenient fallback (issue #322). `None` (no store
-/// bound on this thread) also uses the fallback.
-fn js_flow_outcome<T: Into<JsValue>>(
-    outcome: Option<std::result::Result<T, String>>,
-    fallback: T,
-) -> JsResult<JsValue> {
-    match outcome {
-        Some(Ok(v)) => Ok(v.into()),
-        Some(Err(msg)) if strict_flow_store() => {
-            Err(JsNativeError::error().with_message(msg).into())
-        }
-        Some(Err(_)) | None => Ok(fallback.into()),
-    }
-}
-
-/// Map a NEW (issue #358) atomic `ctx.state` op outcome to a JS value: unlike the #357 ops above,
-/// these ALWAYS raise a native error on a backend failure (fail-loud is the whole point of the new
-/// atomic ops) rather than the lenient `RIFT_STRICT_FLOW_STORE`-gated fallback.
+/// Map a `ctx.state` op outcome to a JS value: this ALWAYS raises a native error on a backend
+/// failure (fail-loud is the whole point of the v2 `ctx.state` API, issue #358).
 fn js_flow_outcome_strict<T: Into<JsValue>>(
     outcome: Option<std::result::Result<T, String>>,
 ) -> JsResult<JsValue> {
@@ -650,145 +494,6 @@ fn js_flow_outcome_strict<T: Into<JsValue>>(
             .with_message("no flow store bound on this thread")
             .into()),
     }
-}
-
-fn flow_store_get(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
-    let flow_id = args
-        .first()
-        .and_then(|v| v.as_string())
-        .map(|s| s.to_std_string_escaped())
-        .ok_or_else(|| JsNativeError::typ().with_message("flow_id must be a string"))?;
-    let key = args
-        .get(1)
-        .and_then(|v| v.as_string())
-        .map(|s| s.to_std_string_escaped())
-        .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
-
-    let outcome = with_current_flow_store(|store| flow_result("get", store.get(&flow_id, &key)));
-
-    match outcome {
-        Some(Ok(Some(value))) => json_to_js_result(ctx, &value),
-        Some(Ok(None)) => Ok(JsValue::null()),
-        Some(Err(msg)) if strict_flow_store() => {
-            Err(JsNativeError::error().with_message(msg).into())
-        }
-        Some(Err(_)) | None => Ok(JsValue::null()),
-    }
-}
-
-fn flow_store_set(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
-    let flow_id = args
-        .first()
-        .and_then(|v| v.as_string())
-        .map(|s| s.to_std_string_escaped())
-        .ok_or_else(|| JsNativeError::typ().with_message("flow_id must be a string"))?;
-    let key = args
-        .get(1)
-        .and_then(|v| v.as_string())
-        .map(|s| s.to_std_string_escaped())
-        .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
-    let value = args.get(2).cloned().unwrap_or(JsValue::null());
-
-    let json_value = js_to_json(ctx, &value)?;
-    let outcome = with_current_flow_store(|store| {
-        flow_result("set", store.set(&flow_id, &key, json_value).map(|()| true))
-    });
-
-    js_flow_outcome(outcome, false)
-}
-
-fn flow_store_exists(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
-    let flow_id = args
-        .first()
-        .and_then(|v| v.as_string())
-        .map(|s| s.to_std_string_escaped())
-        .ok_or_else(|| JsNativeError::typ().with_message("flow_id must be a string"))?;
-    let key = args
-        .get(1)
-        .and_then(|v| v.as_string())
-        .map(|s| s.to_std_string_escaped())
-        .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
-
-    let outcome =
-        with_current_flow_store(|store| flow_result("exists", store.exists(&flow_id, &key)));
-
-    js_flow_outcome(outcome, false)
-}
-
-fn flow_store_delete(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
-    let flow_id = args
-        .first()
-        .and_then(|v| v.as_string())
-        .map(|s| s.to_std_string_escaped())
-        .ok_or_else(|| JsNativeError::typ().with_message("flow_id must be a string"))?;
-    let key = args
-        .get(1)
-        .and_then(|v| v.as_string())
-        .map(|s| s.to_std_string_escaped())
-        .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
-
-    let outcome = with_current_flow_store(|store| {
-        flow_result("delete", store.delete(&flow_id, &key).map(|()| true))
-    });
-
-    js_flow_outcome(outcome, false)
-}
-
-fn flow_store_increment(
-    _this: &JsValue,
-    args: &[JsValue],
-    _ctx: &mut Context,
-) -> JsResult<JsValue> {
-    let flow_id = args
-        .first()
-        .and_then(|v| v.as_string())
-        .map(|s| s.to_std_string_escaped())
-        .ok_or_else(|| JsNativeError::typ().with_message("flow_id must be a string"))?;
-    let key = args
-        .get(1)
-        .and_then(|v| v.as_string())
-        .map(|s| s.to_std_string_escaped())
-        .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
-
-    let outcome =
-        with_current_flow_store(|store| flow_result("increment", store.increment(&flow_id, &key)));
-
-    js_flow_outcome(outcome, 0i64)
-}
-
-fn flow_store_set_ttl(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
-    let flow_id = args
-        .first()
-        .and_then(|v| v.as_string())
-        .map(|s| s.to_std_string_escaped())
-        .ok_or_else(|| JsNativeError::typ().with_message("flow_id must be a string"))?;
-    let ttl_seconds = args
-        .get(1)
-        .and_then(|v| v.as_number())
-        .map(|n| n as i64)
-        .ok_or_else(|| JsNativeError::typ().with_message("ttl_seconds must be a number"))?;
-
-    let outcome = with_current_flow_store(|store| {
-        flow_result(
-            "setTtl",
-            store.set_ttl(&flow_id, ttl_seconds).map(|()| true),
-        )
-    });
-
-    js_flow_outcome(outcome, false)
-}
-
-fn flow_store_last_error(
-    _this: &JsValue,
-    _args: &[JsValue],
-    _ctx: &mut Context,
-) -> JsResult<JsValue> {
-    Ok(
-        match crate::extensions::flow_state::take_last_flow_error() {
-            Some(msg) => JsValue::from(js_string!(msg)),
-            None => JsValue::null(),
-        },
-    )
 }
 
 /// Register a native function method on a JS object.
@@ -806,21 +511,6 @@ fn register_method(
     )
     .map(|_| ())
     .map_err(|e| anyhow!("Failed to set {name} method: {e}"))
-}
-
-/// Create flow_store object with methods using thread-local storage
-fn create_flow_store_object(context: &mut Context) -> Result<JsValue> {
-    let obj = create_js_object(context);
-
-    register_method(&obj, "get", flow_store_get, context)?;
-    register_method(&obj, "set", flow_store_set, context)?;
-    register_method(&obj, "exists", flow_store_exists, context)?;
-    register_method(&obj, "delete", flow_store_delete, context)?;
-    register_method(&obj, "increment", flow_store_increment, context)?;
-    register_method(&obj, "set_ttl", flow_store_set_ttl, context)?;
-    register_method(&obj, "last_error", flow_store_last_error, context)?;
-
-    Ok(obj.into())
 }
 
 // =============================================================================
@@ -1048,8 +738,7 @@ fn state_get(
         .and_then(|v| v.as_string())
         .map(|s| s.to_std_string_escaped())
         .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
-    // v2 `ctx.state` is ALWAYS fail-loud (issue #358): a backend failure raises regardless of the
-    // `RIFT_STRICT_FLOW_STORE` toggle (which only gates the legacy v1 `flow_store` global).
+    // `ctx.state` is ALWAYS fail-loud (issue #358): a backend failure always raises.
     let outcome = with_current_flow_store(|store| flow_result("get", store.get(flow_id, &key)));
     match outcome {
         Some(Ok(Some(value))) => json_to_js_result(ctx, &value),
@@ -1668,116 +1357,6 @@ fn create_script_logger_object(
     }
 
     Ok(obj.into())
-}
-
-/// Parse fault decision from JavaScript result
-fn parse_fault_decision(
-    context: &mut Context,
-    result: JsValue,
-    rule_id: &str,
-) -> Result<FaultDecision> {
-    if result.is_null() || result.is_undefined() {
-        return Ok(FaultDecision::None);
-    }
-
-    let obj = result
-        .as_object()
-        .ok_or_else(|| anyhow!("Script must return an object"))?;
-
-    // Check inject flag
-    let inject = obj
-        .get(js_string!("inject"), context)
-        .ok()
-        .and_then(|v| v.as_boolean())
-        .unwrap_or(false);
-
-    if !inject {
-        return Ok(FaultDecision::None);
-    }
-
-    // Get fault type
-    let fault_type = obj
-        .get(js_string!("fault"), context)
-        .ok()
-        .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
-        .ok_or_else(|| anyhow!("Missing 'fault' field"))?;
-
-    match fault_type.as_str() {
-        "latency" => {
-            let duration_ms = obj
-                .get(js_string!("duration_ms"), context)
-                .ok()
-                .and_then(|v| v.as_number())
-                .ok_or_else(|| anyhow!("Missing 'duration_ms' for latency fault"))?
-                as u64;
-
-            Ok(FaultDecision::Latency {
-                duration_ms,
-                rule_id: rule_id.to_string(),
-            })
-        }
-        "error" => {
-            let status = obj
-                .get(js_string!("status"), context)
-                .ok()
-                .and_then(|v| v.as_number())
-                .ok_or_else(|| anyhow!("Missing 'status' for error fault"))?
-                as u16;
-
-            let body = obj
-                .get(js_string!("body"), context)
-                .ok()
-                .map(|v| {
-                    if let Some(s) = v.as_string() {
-                        s.to_std_string_escaped()
-                    } else if v.is_object() {
-                        // Convert object to JSON string
-                        let json = js_to_json(context, &v).unwrap_or(Value::Null);
-                        serde_json::to_string(&json).unwrap_or_else(|_| "{}".to_string())
-                    } else {
-                        v.display().to_string()
-                    }
-                })
-                .unwrap_or_else(|| "{}".to_string());
-
-            // Extract optional headers
-            let mut headers = std::collections::HashMap::new();
-            if let Ok(headers_val) = obj.get(js_string!("headers"), context)
-                && let Some(headers_obj) = headers_val.as_object()
-            {
-                // Get all enumerable properties
-                if let Ok(keys) = headers_obj.own_property_keys(context) {
-                    for key in keys {
-                        let key_str = match &key {
-                            PropertyKey::String(s) => s.to_std_string_escaped(),
-                            PropertyKey::Index(i) => i.get().to_string(),
-                            PropertyKey::Symbol(_) => continue, // Skip symbols
-                        };
-                        if let Ok(val) = headers_obj.get(key.clone(), context) {
-                            let val_str = if let Some(s) = val.as_string() {
-                                s.to_std_string_escaped()
-                            } else if let Some(n) = val.as_number() {
-                                n.to_string()
-                            } else if let Some(b) = val.as_boolean() {
-                                b.to_string()
-                            } else {
-                                continue;
-                            };
-                            headers.insert(key_str, val_str);
-                        }
-                    }
-                }
-            }
-
-            Ok(FaultDecision::Error {
-                status,
-                body,
-                rule_id: rule_id.to_string(),
-                headers,
-            })
-        }
-        _ => Err(anyhow!("Unknown fault type: {fault_type}")),
-    }
 }
 
 /// Convert JSON Value to JavaScript value
@@ -2910,8 +2489,8 @@ mod tests {
     #[test]
     fn test_js_engine_compiles() {
         let script = r#"
-function should_inject(request, flow_store) {
-    return {inject: false};
+function respond(ctx) {
+    return pass();
 }
 "#;
 
@@ -2921,9 +2500,8 @@ function should_inject(request, flow_store) {
 
     #[test]
     fn test_js_engine_without_should_inject_still_constructs() {
-        // Issue #357 Item 4: a script defining neither `should_inject` (v1) nor a v2 named
-        // entrypoint is now legal — it's a v2 bare-expression script (Item 2). Construction only
-        // validates that the script compiles.
+        // Issue #357 Item 4: a script defining no v2 named entrypoint is legal — it's a
+        // bare-expression script (Item 2). Construction only validates that the script compiles.
         let script = r#"
 function some_other_function() {
     return true;
@@ -2940,7 +2518,7 @@ function some_other_function() {
 
     #[test]
     fn test_js_engine_syntax_error_fails_construction() {
-        let script = "function should_inject(request, flow_store {  // missing paren";
+        let script = "function respond(ctx {  // missing paren";
         let engine = JsEngine::new(script, "test-rule");
         assert!(
             engine.is_err(),
@@ -2951,16 +2529,11 @@ function some_other_function() {
     #[test]
     fn test_js_simple_fault_injection() {
         let script = r#"
-function should_inject(request, flow_store) {
-    if (request.path === "/api/test") {
-        return {
-            inject: true,
-            fault: "error",
-            status: 503,
-            body: "Service unavailable"
-        };
+function respond(ctx) {
+    if (ctx.request.path === "/api/test") {
+        return http(503, "Service unavailable");
     }
-    return {inject: false};
+    return pass();
 }
 "#;
 
@@ -2991,11 +2564,11 @@ function should_inject(request, flow_store) {
         }
     }
 
-    // Issue #327: the JS should_inject Boa context caps loop iterations so a runaway script
+    // Issue #327: the JS respond(ctx) Boa context caps loop iterations so a runaway script
     // terminates (Boa throws) instead of leaking its spawn_blocking thread forever. A small
     // injected limit keeps these tests fast and guarantees they can never hang.
     #[test]
-    fn js_should_inject_loop_limit_terminates() {
+    fn js_respond_loop_limit_terminates() {
         set_current_flow_store(Arc::new(InMemoryFlowStore::new(300)));
         let request = ScriptRequest {
             raw_body: None,
@@ -3006,9 +2579,9 @@ function should_inject(request, flow_store) {
             query: HashMap::new(),
             path_params: HashMap::new(),
         };
-        let script = "function should_inject(request, flow_store) { while (true) {} }";
+        let script = "function respond(ctx) { while (true) {} }";
         let ctx_input = ScriptCtxExtras::default().build_ctx_input(&request);
-        let result = execute_js_script_inner_bounded(script, &request, "rule", &ctx_input, 100_000);
+        let result = execute_js_script_inner_bounded(script, "rule", &ctx_input, 100_000);
         clear_current_flow_store();
         assert!(
             result.is_err(),
@@ -3017,7 +2590,7 @@ function should_inject(request, flow_store) {
     }
 
     #[test]
-    fn js_should_inject_under_limit_runs() {
+    fn js_respond_under_limit_runs() {
         set_current_flow_store(Arc::new(InMemoryFlowStore::new(300)));
         let request = ScriptRequest {
             raw_body: None,
@@ -3028,9 +2601,9 @@ function should_inject(request, flow_store) {
             query: HashMap::new(),
             path_params: HashMap::new(),
         };
-        let script = "function should_inject(request, flow_store) { let n = 0; for (let i = 0; i < 100; i++) { n++; } return { inject: n === 100, fault: 'latency', duration_ms: 1 }; }";
+        let script = "function respond(ctx) { let n = 0; for (let i = 0; i < 100; i++) { n++; } return n === 100 ? delay(1) : pass(); }";
         let ctx_input = ScriptCtxExtras::default().build_ctx_input(&request);
-        let result = execute_js_script_inner_bounded(script, &request, "rule", &ctx_input, 100_000);
+        let result = execute_js_script_inner_bounded(script, "rule", &ctx_input, 100_000);
         clear_current_flow_store();
         assert!(
             result.is_ok(),
@@ -3039,50 +2612,11 @@ function should_inject(request, flow_store) {
         );
     }
 
-    // AC3 (issue #322): a JS script can observe a backend flow-store failure via
-    // flow_store.last_error() instead of only seeing a silent fallback value.
-    #[test]
-    fn js_flow_store_last_error_surfaces() {
-        use crate::extensions::flow_state::{log_flow_err, take_last_flow_error};
-        let _ = take_last_flow_error();
-        set_current_flow_store(Arc::new(InMemoryFlowStore::new(300)));
-        let request = ScriptRequest {
-            raw_body: None,
-            method: "GET".to_string(),
-            path: "/".to_string(),
-            headers: HashMap::new(),
-            body: json!({}),
-            query: HashMap::new(),
-            path_params: HashMap::new(),
-        };
-        // Record a failure through the shared seam, then let the script observe it.
-        let _ = log_flow_err(
-            "get",
-            None::<i32>,
-            Err::<Option<i32>, _>(anyhow::anyhow!("js backend down")),
-        );
-        let script = "function should_inject(request, flow_store) { var e = flow_store.last_error(); return { inject: true, fault: 'latency', duration_ms: (e && e.indexOf('js backend down') >= 0) ? 999 : 1 }; }";
-        let ctx_input = ScriptCtxExtras::default().build_ctx_input(&request);
-        let result = execute_js_script_inner_bounded(script, &request, "rule", &ctx_input, 100_000);
-        clear_current_flow_store();
-        match result {
-            Ok(FaultDecision::Latency { duration_ms, .. }) => assert_eq!(
-                duration_ms, 999,
-                "flow_store.last_error() must surface the recorded backend error to JS"
-            ),
-            other => panic!("expected Latency decision surfacing last_error, got {other:?}"),
-        }
-    }
-
     #[test]
     fn test_js_latency_fault() {
         let script = r#"
-function should_inject(request, flow_store) {
-    return {
-        inject: true,
-        fault: "latency",
-        duration_ms: 1000
-    };
+function respond(ctx) {
+    return delay(1000);
 }
 "#;
 
@@ -3112,24 +2646,14 @@ function should_inject(request, flow_store) {
     #[test]
     fn test_js_flow_store_increment() {
         let script = r#"
-function should_inject(request, flow_store) {
-    var flow_id = request.headers["x-flow-id"] || "";
-    if (flow_id === "") {
-        return {inject: false};
-    }
-
-    var attempts = flow_store.increment(flow_id, "attempts");
+function respond(ctx) {
+    var attempts = ctx.state.incr("attempts");
 
     if (attempts <= 2) {
-        return {
-            inject: true,
-            fault: "error",
-            status: 503,
-            body: "Attempt " + attempts
-        };
+        return http(503, "Attempt " + attempts);
     }
 
-    return {inject: false};
+    return pass();
 }
 "#;
 
@@ -3165,29 +2689,19 @@ function should_inject(request, flow_store) {
     #[test]
     fn test_js_flow_store_get_set() {
         let script = r#"
-function should_inject(request, flow_store) {
-    var flow_id = request.headers["x-flow-id"] || "";
-    if (flow_id === "") {
-        return {inject: false};
-    }
-
+function respond(ctx) {
     // Set a value
-    flow_store.set(flow_id, "test_key", "test_value");
+    ctx.state.set("test_key", "test_value");
 
     // Get it back
-    var value = flow_store.get(flow_id, "test_key");
+    var value = ctx.state.get("test_key");
 
     // Check if it matches
     if (value === "test_value") {
-        return {
-            inject: true,
-            fault: "error",
-            status: 200,
-            body: "Get/Set works!"
-        };
+        return http(200, "Get/Set works!");
     }
 
-    return {inject: false};
+    return pass();
 }
 "#;
 
@@ -3222,16 +2736,11 @@ function should_inject(request, flow_store) {
     #[test]
     fn test_compile_js_to_bytecode() {
         let script = r#"
-function should_inject(request, flow_store) {
-    if (request.path === "/test") {
-        return {
-            inject: true,
-            fault: "error",
-            status: 500,
-            body: "Test error"
-        };
+function respond(ctx) {
+    if (ctx.request.path === "/test") {
+        return http(500, "Test error");
     }
-    return {inject: false};
+    return pass();
 }
 "#;
 
@@ -3245,16 +2754,11 @@ function should_inject(request, flow_store) {
     #[test]
     fn test_execute_js_bytecode() {
         let script = r#"
-function should_inject(request, flow_store) {
-    if (request.path === "/api/bytecode") {
-        return {
-            inject: true,
-            fault: "error",
-            status: 503,
-            body: "Bytecode executed"
-        };
+function respond(ctx) {
+    if (ctx.request.path === "/api/bytecode") {
+        return http(503, "Bytecode executed");
     }
-    return {inject: false};
+    return pass();
 }
 "#;
 
@@ -3297,16 +2801,12 @@ function should_inject(request, flow_store) {
     #[test]
     fn test_js_with_complex_body() {
         let script = r#"
-function should_inject(request, flow_store) {
-    if (request.body && request.body.nested && request.body.nested.value > 100) {
-        return {
-            inject: true,
-            fault: "error",
-            status: 400,
-            body: "Value too high: " + request.body.nested.value
-        };
+function respond(ctx) {
+    var body = ctx.request.json;
+    if (body && body.nested && body.nested.value > 100) {
+        return http(400, "Value too high: " + body.nested.value);
     }
-    return {inject: false};
+    return pass();
 }
 "#;
 
@@ -3364,17 +2864,10 @@ function should_inject(request, flow_store) {
     #[test]
     fn test_js_error_with_headers() {
         let script = r#"
-function should_inject(request, flow_store) {
-    return {
-        inject: true,
-        fault: "error",
-        status: 502,
-        body: "Gateway error",
-        headers: {
-            "X-Custom-Header": "custom-value",
-            "X-Error-Code": "E001"
-        }
-    };
+function respond(ctx) {
+    return http(502, "Gateway error")
+        .header("X-Custom-Header", "custom-value")
+        .header("X-Error-Code", "E001");
 }
 "#;
 
@@ -3411,19 +2904,14 @@ function should_inject(request, flow_store) {
     #[test]
     fn test_js_query_params() {
         let script = r#"
-function should_inject(request, flow_store) {
-    var name = request.query["name"];
-    var page = request.query["page"];
+function respond(ctx) {
+    var name = ctx.request.query["name"];
+    var page = ctx.request.query["page"];
 
     if (name && page) {
-        return {
-            inject: true,
-            fault: "error",
-            status: 200,
-            body: "Hello " + name + " on page " + page
-        };
+        return http(200, "Hello " + name + " on page " + page);
     }
-    return {inject: false};
+    return pass();
 }
 "#;
 
@@ -3458,19 +2946,14 @@ function should_inject(request, flow_store) {
     #[test]
     fn test_js_path_params() {
         let script = r#"
-function should_inject(request, flow_store) {
-    var user_id = request.pathParams["id"];
-    var action = request.pathParams["action"];
+function respond(ctx) {
+    var user_id = ctx.request.pathParams["id"];
+    var action = ctx.request.pathParams["action"];
 
     if (user_id && action) {
-        return {
-            inject: true,
-            fault: "error",
-            status: 200,
-            body: "User " + user_id + " action: " + action
-        };
+        return http(200, "User " + user_id + " action: " + action);
     }
-    return {inject: false};
+    return pass();
 }
 "#;
 
@@ -4254,23 +3737,21 @@ function should_inject(request, flow_store) {
             }
         }
 
-        // v1 back-compat: `should_inject` still wins even when `respond`-shaped calls exist in
-        // the ambient globals (issue #357 Item 4).
+        // Issue #453: v1 `should_inject` was removed — a script defining only `should_inject`
+        // (and no `respond`) is now just a misnamed entrypoint, not a special v1 detection.
         #[test]
-        fn v1_should_inject_still_works_unchanged() {
+        fn should_inject_only_script_is_misnamed_entrypoint_error() {
             let script = r#"
                 function should_inject(request, flow_store) {
                     return { inject: true, fault: "error", status: 418, body: "teapot" };
                 }
             "#;
-            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
-            match decision {
-                FaultDecision::Error { status, body, .. } => {
-                    assert_eq!(status, 418);
-                    assert_eq!(body, "teapot");
-                }
-                other => panic!("expected v1 Error decision, got {other:?}"),
-            }
+            let err = run_respond(script, &req(HashMap::new(), None)).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("entrypoint") && msg.contains("respond"),
+                "expected the standard misnamed-entrypoint error naming `respond`, got: {msg}"
+            );
         }
 
         // Retry example from the issue: ctx.state.incr + http() executes end-to-end.
@@ -4481,11 +3962,10 @@ function should_inject(request, flow_store) {
             }
         }
 
-        // Issue #358 B1 / #322: pre-existing v2 ops (get/incr) fail loud even with the toggle
-        // unset, while the legacy v1 `flow_store` global stays lenient under the default toggle.
+        // Issue #358 B1 / #322: the ctx.state ops (get/incr) fail loud even with the toggle unset.
         #[cfg(feature = "test-backend")]
         #[test]
-        fn v2_state_ops_fail_loud_while_v1_flow_store_lenient() {
+        fn v2_state_ops_fail_loud_regardless_of_strict_toggle() {
             use crate::extensions::flow_state::FailingFlowStore;
             let request = req(HashMap::new(), None);
 
@@ -4504,18 +3984,6 @@ function should_inject(request, flow_store) {
             .unwrap()
             .should_inject(&request, Arc::new(FailingFlowStore));
             assert!(incr_err.is_err(), "v2 ctx.state.incr must fail loud");
-
-            // v1 flow_store.get stays lenient under the default (unset) toggle — no raise.
-            let v1 = JsEngine::new(
-                r#"function should_inject(request, flow_store) { flow_store.get("f", "k"); return { inject: false }; }"#,
-                "v1-get",
-            )
-            .unwrap()
-            .should_inject(&request, Arc::new(FailingFlowStore));
-            assert!(
-                matches!(v1, Ok(FaultDecision::None)),
-                "v1 flow_store.get must stay lenient under the default toggle, got {v1:?}"
-            );
         }
 
         // B1 (issue #357): a script defining ONLY a misnamed entrypoint must Err, not None.

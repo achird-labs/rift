@@ -2581,9 +2581,9 @@ async fn test_lookup_behavior_applied_on_is_response() {
 // matching the engine docs/tests and HTTP's case-insensitive header semantics.
 #[tokio::test]
 async fn test_script_header_access_is_case_insensitive() {
-    let script = "fn should_inject(request, flow_store) { \
-         let f = request.headers[\"x-flow-id\"]; if f == () { f = \"MISS\"; }; \
-         #{ inject: true, fault: \"error\", status: 200, body: f } }";
+    let script = "fn respond(ctx) { \
+         let f = ctx.request.header(\"x-flow-id\"); if f == () { f = \"MISS\"; }; \
+         http(200, f) }";
 
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
         "port": 19720,
@@ -3809,9 +3809,9 @@ async fn test_path_params_template_end_to_end() {
 
 #[tokio::test]
 async fn test_path_params_script_rhai() {
-    let script = "fn should_inject(request, flow_store) { \
-         let id = request.pathParams[\"id\"]; if id == () { id = \"MISS\"; } \
-         #{ inject: true, fault: \"error\", status: 200, body: id } }";
+    let script = "fn respond(ctx) { \
+         let id = ctx.request.pathParams[\"id\"]; if id == () { id = \"MISS\"; } \
+         http(200, id) }";
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
         "port": 19742,
         "protocol": "http",
@@ -3847,8 +3847,8 @@ async fn test_path_params_script_rhai() {
 #[cfg(feature = "javascript")]
 #[tokio::test]
 async fn test_path_params_script_js() {
-    let script = "function should_inject(request, flow_store) { \
-         return { inject: true, fault: \"error\", status: 200, body: request.pathParams.id }; }";
+    let script = "function respond(ctx) { \
+         return http(200, ctx.request.pathParams.id); }";
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
         "port": 19744,
         "protocol": "http",

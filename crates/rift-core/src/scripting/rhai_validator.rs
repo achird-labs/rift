@@ -75,22 +75,17 @@ impl RhaiValidator {
     ///
     /// # Checks performed
     /// 1. Script compiles without syntax errors
-    /// 2. Script contains the required `should_inject` function
     ///
-    /// Note: This does NOT validate runtime behavior - only syntax and structure.
+    /// Note: This does NOT validate runtime behavior - only syntax and structure. Issue #453
+    /// removed the old requirement that a script define `should_inject` (the v1 wrapper); v2
+    /// scripts define `respond(ctx)` or are bare expressions with no function definitions at
+    /// all, so validity is syntax-only here, matching `RhaiEngine::new`.
     pub fn validate_with_ast(&self, script: &str) -> Result<AST, RhaiValidationError> {
         // Compile the script - this catches syntax errors
         let ast = self
             .engine
             .compile(script)
             .map_err(|e| RhaiValidationError::SyntaxError(e.to_string()))?;
-
-        // Basic check: script should contain "should_inject"
-        if !script.contains("should_inject") {
-            return Err(RhaiValidationError::MissingFunction(
-                "should_inject function not found in script".to_string(),
-            ));
-        }
 
         Ok(ast)
     }
@@ -142,20 +137,18 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_function() {
+    fn test_v2_script_without_should_inject_is_valid() {
+        // Issue #453: validation is syntax-only now — a script that never defines
+        // `should_inject` (the removed v1 wrapper) must still validate fine.
         let validator = RhaiValidator::new();
         let script = r#"
-            fn wrong_function_name(request, flow_store) {
-                return #{ inject: false };
+            fn respond(ctx) {
+                http(200, "ok")
             }
         "#;
 
         let result = validator.validate(script);
-        assert!(result.is_err());
-        assert!(matches!(
-            result,
-            Err(RhaiValidationError::MissingFunction(_))
-        ));
+        assert!(result.is_ok(), "v2 script without should_inject is valid");
     }
 
     #[test]
@@ -188,7 +181,9 @@ mod tests {
                 "script1",
                 r#"fn should_inject(req, fs) { return #{ inject: false }; }"#,
             ),
-            ("script2", r#"fn wrong_name() { return true; }"#),
+            // Validation is syntax-only (issue #453) — a genuine syntax error, not a
+            // wrongly-named function, is what makes script2 invalid.
+            ("script2", r#"fn wrong_name() { return true; "#),
             (
                 "script3",
                 r#"fn should_inject(req, fs) { return #{ inject: true, fault: "latency", duration_ms: 50 }; }"#,

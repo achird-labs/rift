@@ -1,4 +1,4 @@
-//! Issue #308: a runaway `_rift.script` (should_inject) is bounded by
+//! Issue #308: a runaway `_rift.script` (`respond(ctx)`) is bounded by
 //! `_rift.scriptEngine.timeoutMs` and does NOT wedge unrelated imposters.
 
 use rift_http_proxy::imposter::{ImposterConfig, ImposterManager};
@@ -9,13 +9,14 @@ fn cfg(v: serde_json::Value) -> ImposterConfig {
     serde_json::from_value(v).expect("test imposter config")
 }
 
-// A runaway should_inject on one imposter must time out AND leave a sibling imposter
+// A runaway respond(ctx) on one imposter must time out AND leave a sibling imposter
 // responsive — the exact end-to-end symptom from the bug report.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runaway_script_times_out_and_sibling_stays_responsive() {
     let manager = Arc::new(ImposterManager::new());
 
-    // Imposter A: an infinite-loop Rhai should_inject, bounded to 500ms.
+    // Imposter A: an infinite-loop Rhai script (bare expression, issue #357 Item 2 — the whole
+    // body IS the entrypoint, so the loop actually runs), bounded to 500ms.
     manager
         .create_imposter(cfg(serde_json::json!({
             "protocol": "http", "port": 19191,
@@ -23,7 +24,7 @@ async fn runaway_script_times_out_and_sibling_stays_responsive() {
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/hang" } }],
                 "responses": [{ "_rift": { "script": { "engine": "rhai",
-                    "code": "fn should_inject(request, flow_store){ let i = 0; loop { i += 1; } }" } } }]
+                    "code": "let i = 0; loop { i += 1; }" } } }]
             }]
         })))
         .await
@@ -100,10 +101,10 @@ async fn normal_script_none_and_latency_serve_200() {
             "stubs": [
                 { "predicates": [{ "equals": { "path": "/pass" } }],
                   "responses": [{ "_rift": { "script": { "engine": "rhai",
-                      "code": "fn should_inject(request, flow_store){ #{ inject: false } }" } } }] },
+                      "code": "fn respond(ctx){ pass() }" } } }] },
                 { "predicates": [{ "equals": { "path": "/slow" } }],
                   "responses": [{ "_rift": { "script": { "engine": "rhai",
-                      "code": "fn should_inject(request, flow_store){ #{ inject: true, fault: `latency`, duration_ms: 20 } }" } } }] }
+                      "code": "fn respond(ctx){ delay(20) }" } } }] }
             ]
         })))
         .await

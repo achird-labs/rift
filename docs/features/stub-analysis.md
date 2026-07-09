@@ -351,7 +351,7 @@ of requests and expected outcomes to drive against a fresh copy of the imposter:
     "_rift": {
       "script": {
         "engine": "rhai",
-        "code": "fn should_inject(request, flow_store) { let n = flow_store.increment(\"77\", \"attempts\"); if n <= 1 { #{ inject: true, fault: \"error\", status: 503 } } else { #{ inject: true, fault: \"error\", status: 200, body: `order 77 ready` } } }"
+        "code": "fn respond(ctx) { let n = ctx.state.incr(\"attempts\"); if n <= 1 { http(503) } else { http(200, `order 77 ready`) } }"
       }
     }
   }],

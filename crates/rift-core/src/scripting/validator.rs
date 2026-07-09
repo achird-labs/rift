@@ -130,7 +130,7 @@ mod tests {
     fn test_script_validation_error_engine() {
         let err = ScriptValidationError::MissingFunction {
             engine: "javascript".to_string(),
-            function: "should_inject".to_string(),
+            function: "respond".to_string(),
         };
         assert_eq!(err.engine(), "javascript");
     }

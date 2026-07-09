@@ -13,15 +13,9 @@ Rift supports multiple scripting engines for dynamic behavior.
 
 ## Script API v2: unified `ctx`, `respond(ctx)`, result constructors
 
-As of this release, `_rift.script` has a single contract that is **identical across Rhai and
-JavaScript**: a `ctx` object passed into the script, and result constructors instead of a hand-built
-`#{ inject:, fault: }` map. This is the recommended way to write new scripts — see
-[`ctx` API v2](#ctx-api-v2) below for the full reference.
-
-The **v1 `should_inject(request, flow_store)` wrapper still works unchanged** and is not going
-away in this release; `rift-lint` flags it with a deprecation hint (`E041`) so you can migrate at
-your own pace. A script is v1 if (and only if) it defines a `should_inject` function — v2 scripts
-never need to.
+`_rift.script` has a single contract that is **identical across Rhai and JavaScript**: a `ctx`
+object passed into the script, and result constructors instead of a hand-built
+`#{ inject:, fault: }` map — see [`ctx` API v2](#ctx-api-v2) below for the full reference.
 
 ```rhai
 // v2: named entrypoint
@@ -112,7 +106,8 @@ function(config, state) {
 
 ## Rhai (`_rift.script`)
 
-Rhai is a lightweight embedded scripting language optimized for Rust. Scripts must define a `should_inject(request, flow_store)` function.
+Rhai is a lightweight embedded scripting language optimized for Rust. Scripts define a
+`respond(ctx)` function, or the bare-expression form — see [`ctx` API v2](#ctx-api-v2) below.
 
 ### Basic Script
 
@@ -128,7 +123,7 @@ Rhai is a lightweight embedded scripting language optimized for Rust. Scripts mu
       "_rift": {
         "script": {
           "engine": "rhai",
-          "code": "fn should_inject(request, flow_store) { let count = flow_store.get(\"demo\", \"counter\"); if count == () { count = 0; }; count += 1; flow_store.set(\"demo\", \"counter\", count); #{inject: true, fault: \"error\", status: 200, body: `{\"count\":${count}}`, headers: #{\"Content-Type\": \"application/json\"}} }"
+          "code": "fn respond(ctx) { let count = ctx.state.incr(\"counter\"); http(200, #{ count: count }) }"
         }
       }
     }]
@@ -138,74 +133,65 @@ Rhai is a lightweight embedded scripting language optimized for Rust. Scripts mu
 
 ### Available Variables
 
+See [`ctx.request`](#ctxrequest) for the full reference:
+
 ```rhai
 // Request information
-request.method          // String: "GET", "POST", etc.
-request.path            // String: "/api/users"
-request.headers         // Map: access via request.headers["header-name"]
-request.query           // Map: access via request.query["param"]
-request.pathParams      // Map: access via request.pathParams["name"] (populated from the stub's routePattern)
-request.body            // Parsed JSON body
+ctx.request.method        // String: "GET", "POST", etc.
+ctx.request.path          // String: "/api/users"
+ctx.request.headers       // Map with lowercased keys: access via ctx.request.headers["header-name"]
+ctx.request.header(name)  // case-insensitive getter, e.g. ctx.request.header("X-Name")
+ctx.request.query         // Map: access via ctx.request.query["param"]
+ctx.request.pathParams    // Map: access via ctx.request.pathParams["name"] (populated from the stub's routePattern)
+ctx.request.body          // Raw request body (string)
+ctx.request.json          // Body lazily parsed as JSON (unit if not JSON)
 
 // Helper functions
 timestamp_header()      // RFC 1123 formatted timestamp for HTTP Date header
 ```
 
-### Flow Store
+### State
 
-Flow store provides persistent state across requests. All methods require a `flow_id` parameter to namespace state.
+State persists across requests, automatically scoped to the request's resolved flow id — no
+explicit id argument needed. See [`ctx.state` and `ctx.store`](#ctxstate-and-ctxstore) below for
+the full reference.
 
 ```rhai
-// Get value (returns () if not set)
-let value = flow_store.get("flow-id", "key");
-let count = flow_store.get("flow-id", "counter");
-if count == () { count = 0; };
+// Get value (get_or supplies a default instead of the () / nil dance)
+let count = ctx.state.get_or("counter", 0);
 
 // Set value
-flow_store.set("flow-id", "key", "value");
-flow_store.set("flow-id", "counter", count + 1);
+ctx.state.set("counter", count + 1);
 
 // Increment counter (returns new value)
-let attempts = flow_store.increment("flow-id", "attempts");
+let attempts = ctx.state.incr("attempts");
 
 // Check existence
-if flow_store.exists("flow-id", "key") {
+if ctx.state.exists("key") {
   // key exists
 }
 
 // Delete value
-flow_store.delete("flow-id", "key");
+ctx.state.delete("key");
 
-// Set TTL for entire flow (seconds)
-flow_store.set_ttl("flow-id", 300);
+// Set TTL for the flow (seconds)
+ctx.state.ttl(300);
 ```
 
 ### Return Values
 
-Scripts must return a map with an `inject` flag:
+`respond(ctx)` returns a result constructor — see [Result constructors](#result-constructors)
+below for the full reference:
 
 ```rhai
 // No injection (pass through to next response or upstream)
-#{ inject: false }
+pass()
 
 // Inject error response
-#{
-  inject: true,
-  fault: "error",
-  status: 503,
-  body: "{\"error\": \"Service unavailable\"}",
-  headers: #{
-    "Content-Type": "application/json",
-    "Retry-After": "30"
-  }
-}
+http(503, #{ error: "Service unavailable" }).header("Retry-After", "30")
 
 // Inject latency
-#{
-  inject: true,
-  fault: "latency",
-  duration_ms: 500
-}
+delay(500)
 ```
 
 ---
@@ -224,7 +210,7 @@ Scripts must return a map with an `inject` flag:
       "_rift": {
         "script": {
           "engine": "rhai",
-          "code": "fn should_inject(request, flow_store) { let fid = \"ratelimit\"; let count = flow_store.get(fid, \"requests\"); if count == () { count = 0; }; count += 1; flow_store.set(fid, \"requests\", count); if count > 100 { #{inject: true, fault: \"error\", status: 429, body: `{\"error\":\"Rate limit exceeded\",\"count\":${count}}`, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"60\"}} } else { #{inject: false} } }"
+          "code": "fn respond(ctx) { let count = ctx.state.incr(\"requests\"); if count > 100 { http(429, #{ error: \"Rate limit exceeded\", count: count }).header(\"Retry-After\", \"60\") } else { pass() } }"
         }
       }
     }]
@@ -237,14 +223,14 @@ Scripts must return a map with an `inject` flag:
 ```json
 {
   "_rift": {
-    "flowState": {"backend": "inmemory", "ttlSeconds": 300}
+    "flowState": {"backend": "inmemory", "ttlSeconds": 300, "flowIdSource": "header:X-Flow-Id"}
   },
   "stubs": [{
     "responses": [{
       "_rift": {
         "script": {
           "engine": "rhai",
-          "code": "fn should_inject(request, flow_store) { let flow_id = request.headers[\"x-flow-id\"]; if flow_id == () { flow_id = \"default\"; }; let attempts = flow_store.get(flow_id, \"attempts\"); if attempts == () { attempts = 0; }; attempts += 1; flow_store.set(flow_id, \"attempts\", attempts); if attempts <= 2 { #{inject: true, fault: \"error\", status: 503, body: `{\"error\":\"Temporary failure\",\"attempt\":${attempts}}`, headers: #{\"Content-Type\": \"application/json\"}} } else { #{inject: false} } }"
+          "code": "fn respond(ctx) { let attempts = ctx.state.incr(\"attempts\"); if attempts <= 2 { http(503, #{ error: \"Temporary failure\", attempt: attempts }) } else { pass() } }"
         }
       }
     }]
@@ -266,7 +252,7 @@ single imposter is still a one-element sequence):
 - port: 4545
   protocol: http
   _rift:
-    flowState: { backend: inmemory, ttlSeconds: 300 }
+    flowState: { backend: inmemory, ttlSeconds: 300, flowIdSource: "header:X-Flow-Id" }
   stubs:
     - responses:
         - _rift:
@@ -274,21 +260,12 @@ single imposter is still a one-element sequence):
               engine: rhai
               # Block scalar: the exact retry logic from the JSON example above, just readable.
               code: |
-                fn should_inject(request, flow_store) {
-                  let flow_id = request.headers["x-flow-id"];
-                  if flow_id == () { flow_id = "default"; }
-                  let attempts = flow_store.get(flow_id, "attempts");
-                  if attempts == () { attempts = 0; }
-                  attempts += 1;
-                  flow_store.set(flow_id, "attempts", attempts);
+                fn respond(ctx) {
+                  let attempts = ctx.state.incr("attempts");
                   if attempts <= 2 {
-                    #{
-                      inject: true, fault: "error", status: 503,
-                      body: `{"error":"Temporary failure","attempt":${attempts}}`,
-                      headers: #{"Content-Type": "application/json"}
-                    }
+                    http(503, #{ error: "Temporary failure", attempt: attempts })
                   } else {
-                    #{ inject: false }
+                    pass()
                   }
                 }
 ```
@@ -333,7 +310,7 @@ unknown `ref:` or a `file:` that can't be read is a config-time validation error
         "_rift": {
           "script": {
             "engine": "rhai",
-            "code": "fn should_inject(request, flow_store) { let fid = \"demo\"; let counter = flow_store.get(fid, \"counter\"); if counter == () { counter = 0; }; counter += 1; flow_store.set(fid, \"counter\", counter); #{inject: true, fault: \"error\", status: 200, body: `{\"counter\":${counter}}`, headers: #{\"Content-Type\": \"application/json\"}} }"
+            "code": "fn respond(ctx) { let counter = ctx.state.incr(\"counter\"); http(200, #{ counter: counter }) }"
           }
         }
       }]
@@ -344,7 +321,7 @@ unknown `ref:` or a `file:` that can't be read is a config-time validation error
         "_rift": {
           "script": {
             "engine": "rhai",
-            "code": "fn should_inject(request, flow_store) { let fid = \"demo\"; let counter = flow_store.get(fid, \"counter\"); if counter == () { counter = 0; }; #{inject: true, fault: \"error\", status: 200, body: `{\"counter\":${counter}}`, headers: #{\"Content-Type\": \"application/json\"}} }"
+            "code": "fn respond(ctx) { let counter = ctx.state.get_or(\"counter\", 0); http(200, #{ counter: counter }) }"
           }
         }
       }]
@@ -355,7 +332,7 @@ unknown `ref:` or a `file:` that can't be read is a config-time validation error
         "_rift": {
           "script": {
             "engine": "rhai",
-            "code": "fn should_inject(request, flow_store) { let fid = \"demo\"; flow_store.delete(fid, \"counter\"); #{inject: true, fault: \"error\", status: 200, body: \"{\\\"message\\\":\\\"Counter reset\\\"}\", headers: #{\"Content-Type\": \"application/json\"}} }"
+            "code": "fn respond(ctx) { ctx.state.delete(\"counter\"); http(200, #{ message: \"Counter reset\" }) }"
           }
         }
       }]
@@ -544,32 +521,11 @@ always takes precedence over `defaultEngine`.
 
 ## Flow-Store Error Semantics
 
-The v2 `ctx.state` API and the legacy v1 `flow_store` global (the `should_inject(request,
-flow_store)` path) differ in how a backend failure (e.g. a Redis outage mid-request) surfaces:
-
-- **`ctx.state` (v2) is always fail-loud.** Every op — `get`/`set`/`incr`/`exists`/`delete` and the
-  atomic `get_or`/`incr_by`/`cas`/`ttl` — **raises** a script error on a backend failure and logs
-  it, so a store outage is never silently returned as an empty/absent value. This is unconditional
-  and not affected by `RIFT_STRICT_FLOW_STORE`.
-- **`flow_store` (legacy v1 global) is lenient by default.** A failing op returns its empty fallback
-  (`()` / `nil` / `null`, `false`, or `0`) and the script keeps running, so a v1 script can't tell
-  "key genuinely absent" from "backend down" by the return value alone — use `last_error()`:
-
-```rhai
-let v = flow_store.get("flow-1", "attempts");
-if flow_store.last_error() != () {
-  // the backend failed on the last op — v is a fallback, not real data
-}
-```
-
-`last_error()` returns the most recent backend error (or `()` / `nil` / `null` when the last op
-succeeded) and is reset at the start of every script execution. The call syntax follows each engine:
-`flow_store.last_error()` (Rhai), `flow_store.last_error()` (JS).
-
-Set the **`RIFT_STRICT_FLOW_STORE`** environment variable (truthy: `1`/`true`/`yes`/`on`) to make the
-legacy `flow_store` global **raise** on failure too (matching the v2 default) instead of returning a
-fallback. The raised error propagates to the standard script-error path (`500` with
-`x-rift-script-error`). This toggle does not change `ctx.state`, which is always fail-loud.
+`ctx.state` is always fail-loud: every op — `get`/`set`/`incr`/`exists`/`delete` and the atomic
+`get_or`/`incr_by`/`cas`/`ttl` — **raises** a script error on a backend failure (e.g. a Redis
+outage mid-request) and logs it, so a store outage is never silently returned as an empty/absent
+value. The raised error propagates to the standard script-error path (`500` with
+`x-rift-script-error`).
 
 ---
 
@@ -578,9 +534,9 @@ fallback. The raised error propagates to the standard script-error path (`500` w
 | Feature | JavaScript | Rhai |
 |:--------|:-----------|:-----|
 | Format | `inject` response | `_rift.script` |
-| State access | `state.key` | `flow_store.get(id, key)` |
+| State access | `state.key` | `ctx.state.get(key)` |
 | Flow isolation | Per imposter | Per flow_id |
-| Function wrapper | None needed | `respond(ctx)`/bare (v2, recommended) or `should_inject(request, flow_store)` (v1, deprecated) |
+| Function wrapper | None needed | `respond(ctx)`/bare |
 | Performance | Good | Excellent |
 | Mountebank compatible | Yes | No |
 
@@ -589,7 +545,8 @@ fallback. The raised error propagates to the standard script-error path (`500` w
 ## Performance Tips
 
 1. **Use Rhai for high-throughput** - it is compiled and cached for efficient reuse
-2. **Minimize flow store access** - Each get/set has overhead; batch operations when possible
+2. **Minimize `ctx.state` access** - Each get/set has overhead; batch operations when possible
 3. **Keep scripts simple** - Complex logic is harder to debug and maintain
-4. **Use flow_id wisely** - Namespace state by request ID, user ID, or session to avoid collisions
+4. **Choose `flowIdSource` wisely** - it determines what `ctx.state` isolates by (request header,
+   imposter port); pick a source that keys state per request/user/session to avoid collisions
 5. **Set appropriate TTLs** - Prevent unbounded state growth with `ttlSeconds` config

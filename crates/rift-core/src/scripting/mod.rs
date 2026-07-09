@@ -67,9 +67,7 @@ pub use stub_validator::{validate_stub, validate_stubs};
 
 // Static entrypoint/arity checking, for `rift script check` (issue #360)
 mod entrypoint_check;
-pub use entrypoint_check::{
-    EntrypointCheckError, EntrypointMatch, check_entrypoint, is_v1_should_inject,
-};
+pub use entrypoint_check::{EntrypointCheckError, EntrypointMatch, check_entrypoint};
 
 // Script decision/log tracing, for `rift script run` and the debug-mode per-request trace
 // (issue #360)
@@ -285,14 +283,13 @@ impl ScriptResult {
     }
 }
 
-/// Names of the v2 named entrypoints and the v1 back-compat wrapper (issue #357 Items 2/4).
-/// Placement determines which v2 name a hook looks for; `should_inject` always means v1.
+/// Names of the v2 named entrypoints (issue #357 Items 2/4). Placement determines which name a
+/// hook looks for (e.g. the `respond` hook calls a function named `respond`, if one is declared).
 pub mod entrypoints {
     pub const RESPOND: &str = "respond";
     pub const MATCHES: &str = "matches";
     pub const TRANSFORM: &str = "transform";
     pub const DELAY: &str = "delay";
-    pub const SHOULD_INJECT: &str = "should_inject";
 }
 
 /// Unified script engine that supports Rhai and JavaScript
@@ -322,10 +319,10 @@ impl ScriptEngine {
         }
     }
 
-    /// Execute the script and determine if a fault should be injected. Auto-detects v1
-    /// (`should_inject(request, flow_store)`) vs v2 (`respond(ctx)` or bare) scripts (issue #357
-    /// Item 4). `ctx` gets best-effort defaults ([`ScriptCtxExtras::default`]) — callers with real
-    /// flow-id/stub context should use [`Self::should_inject_fault_with_ctx`] instead.
+    /// Execute the `respond(ctx)` entrypoint (or bare-expression script) and determine if a fault
+    /// should be injected. `ctx` gets best-effort defaults ([`ScriptCtxExtras::default`]) —
+    /// callers with real flow-id/stub context should use [`Self::should_inject_fault_with_ctx`]
+    /// instead.
     pub fn should_inject_fault(
         &self,
         request: &ScriptRequest,
@@ -379,11 +376,11 @@ pub struct ScriptRequest {
 /// Uses direct synchronous calls since FlowStore is no longer async
 ///
 /// The `strict` flag decides how a backend failure surfaces (issues #322/#376/#358):
-/// - `strict == true` (the v2 `ctx.state` handle) — ALWAYS raise a script error on failure, so the
-///   whole v2 surface uniformly fails loud and a store outage is never conflated with "absent".
-/// - `strict == false` (the legacy v1 `flow_store` global, `should_inject(request, flow_store)`) —
-///   honor the process-global `RIFT_STRICT_FLOW_STORE` toggle (default lenient: return a fallback
-///   and record `last_error()`), preserving #322/#376 back-compat for v1 scripts.
+/// - `strict == true` (the v2 `ctx.state` handle, via [`Self::new_strict`]) — ALWAYS raise a
+///   script error on failure, so the whole v2 surface uniformly fails loud and a store outage is
+///   never conflated with "absent".
+/// - `strict == false` (via [`Self::new`]) — honor the process-global `RIFT_STRICT_FLOW_STORE`
+///   toggle (default lenient: return a fallback and record `last_error()`).
 #[derive(Clone)]
 pub struct ScriptFlowStore {
     store: Arc<dyn FlowStore>,
@@ -391,8 +388,8 @@ pub struct ScriptFlowStore {
 }
 
 impl ScriptFlowStore {
-    /// Legacy v1 `flow_store` global: fail-loud is gated by the `RIFT_STRICT_FLOW_STORE` toggle
-    /// (default lenient) — read once here at construction.
+    /// Lenient constructor: fail-loud is gated by the `RIFT_STRICT_FLOW_STORE` toggle (default
+    /// lenient) — read once here at construction.
     pub fn new(store: Arc<dyn FlowStore>) -> Self {
         Self {
             store,
@@ -1055,8 +1052,8 @@ mod tests {
     #[test]
     fn test_script_engine_new_rhai() {
         let script = r#"
-            fn should_inject(request, flow_store) {
-                #{ inject: false }
+            fn respond(ctx) {
+                pass()
             }
         "#;
         let engine = ScriptEngine::new("rhai", script, "test-rule");
@@ -1075,8 +1072,8 @@ mod tests {
     #[test]
     fn test_script_engine_rhai_execution() {
         let script = r#"
-            fn should_inject(request, flow_store) {
-                #{ inject: false }
+            fn respond(ctx) {
+                pass()
             }
         "#;
         let engine = ScriptEngine::new("rhai", script, "test-rule").unwrap();
@@ -1103,8 +1100,8 @@ mod tests {
     #[test]
     fn test_rhai_engine_creation_valid_script() {
         let script = r#"
-            fn should_inject(request, flow_store) {
-                #{ inject: false }
+            fn respond(ctx) {
+                pass()
             }
         "#;
         let engine = RhaiEngine::new(script, "valid-rule");
@@ -1114,7 +1111,7 @@ mod tests {
     #[test]
     fn test_rhai_engine_creation_syntax_error() {
         let script = r#"
-            fn should_inject(request {  // Missing closing paren
+            fn respond(ctx {  // Missing closing paren
                 return false;
             }
         "#;
@@ -1125,8 +1122,8 @@ mod tests {
     #[test]
     fn test_rhai_engine_ast_access() {
         let script = r#"
-            fn should_inject(request, flow_store) {
-                #{ inject: false }
+            fn respond(ctx) {
+                pass()
             }
         "#;
         let engine = RhaiEngine::new(script, "test-rule").unwrap();
@@ -1157,8 +1154,8 @@ mod tests {
         #[test]
         fn test_script_engine_new_javascript() {
             let script = r#"
-                function should_inject(request, flow_store) {
-                    return { inject: false };
+                function respond(ctx) {
+                    return pass();
                 }
             "#;
             let engine = ScriptEngine::new("javascript", script, "js-rule");
@@ -1172,8 +1169,8 @@ mod tests {
         #[test]
         fn test_script_engine_new_js_alias() {
             let script = r#"
-                function should_inject(request, flow_store) {
-                    return { inject: false };
+                function respond(ctx) {
+                    return pass();
                 }
             "#;
             let engine = ScriptEngine::new("js", script, "js-rule");
@@ -1187,8 +1184,8 @@ mod tests {
         #[test]
         fn test_compile_js_to_bytecode() {
             let script = r#"
-                function should_inject(request, flow_store) {
-                    return { inject: false };
+                function respond(ctx) {
+                    return pass();
                 }
             "#;
             let bytecode = super::super::compile_js_to_bytecode(script);

@@ -15,10 +15,11 @@ use rift_http_proxy::imposter::StubResponse;
 use rift_http_proxy::scripting::{FaultDecision, RhaiEngine, ScriptRequest};
 use std::sync::Arc;
 
-/// The retry-until-success Rhai script: fails (503) the first two attempts per `x-flow-id`, then
-/// succeeds. Kept as one constant so the JSON-inline and file-sourced configs carry byte-identical
-/// script content — proving the two authoring styles resolve to the same effective config.
-const RETRY_SCRIPT: &str = r#"fn should_inject(request, flow_store) { let flow_id = request.headers["x-flow-id"]; if flow_id == () { flow_id = "default"; }; let attempts = flow_store.get(flow_id, "attempts"); if attempts == () { attempts = 0; }; attempts += 1; flow_store.set(flow_id, "attempts", attempts); if attempts <= 2 { #{inject: true, fault: "error", status: 503, body: `{"error":"Temporary failure","attempt":${attempts}}`, headers: #{"Content-Type": "application/json"}} } else { #{inject: false} } }"#;
+/// The retry-until-success Rhai script: fails (503) the first two attempts per the resolved flow
+/// id (`ctx.state` is already scoped to it), then succeeds. Kept as one constant so the
+/// JSON-inline and file-sourced configs carry byte-identical script content — proving the two
+/// authoring styles resolve to the same effective config.
+const RETRY_SCRIPT: &str = r#"fn respond(ctx) { let attempts = ctx.state.incr("attempts"); if attempts <= 2 { http(503, #{error: "Temporary failure", attempt: attempts}) } else { pass() } }"#;
 
 fn script_config(
     config: &rift_http_proxy::imposter::ImposterConfig,

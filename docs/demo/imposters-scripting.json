@@ -21,7 +21,7 @@
             "_rift": {
               "script": {
                 "engine": "rhai",
-                "code": "fn should_inject(request, flow_store) { let fid = \"demo\"; let counter = flow_store.get(fid, \"counter\"); if counter == () { counter = 0; }; counter += 1; flow_store.set(fid, \"counter\", counter); #{inject: true, fault: \"error\", status: 200, body: `{\"counter\":${counter}}`, headers: #{\"Content-Type\": \"application/json\"}} }"
+                "code": "fn respond(ctx) { let counter = ctx.state.incr(\"counter\"); http(200, #{ counter: counter }) }"
               }
             }
           }]
@@ -35,7 +35,7 @@
             "_rift": {
               "script": {
                 "engine": "rhai",
-                "code": "fn should_inject(request, flow_store) { let fid = \"demo\"; let counter = flow_store.get(fid, \"counter\"); if counter == () { counter = 0; }; #{inject: true, fault: \"error\", status: 200, body: `{\"counter\":${counter}}`, headers: #{\"Content-Type\": \"application/json\"}} }"
+                "code": "fn respond(ctx) { let counter = ctx.state.get_or(\"counter\", 0); http(200, #{ counter: counter }) }"
               }
             }
           }]
@@ -49,7 +49,7 @@
             "_rift": {
               "script": {
                 "engine": "rhai",
-                "code": "fn should_inject(request, flow_store) { let fid = \"demo\"; flow_store.delete(fid, \"counter\"); #{inject: true, fault: \"error\", status: 200, body: \"{\\\"message\\\":\\\"Counter reset\\\"}\", headers: #{\"Content-Type\": \"application/json\"}} }"
+                "code": "fn respond(ctx) { ctx.state.delete(\"counter\"); http(200, #{ message: \"Counter reset\" }) }"
               }
             }
           }]
@@ -63,7 +63,7 @@
             "_rift": {
               "script": {
                 "engine": "rhai",
-                "code": "fn should_inject(request, flow_store) { let fid = \"ratelimit\"; let count = flow_store.get(fid, \"requests\"); if count == () { count = 0; }; count += 1; flow_store.set(fid, \"requests\", count); if count > 5 { let body = `{\"error\":\"Rate limit exceeded\",\"requests\":${count},\"limit\":5}`; #{inject: true, fault: \"error\", status: 429, body: body, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"60\"}} } else { let remaining = 5 - count; let body = `{\"message\":\"OK\",\"requests\":${count},\"remaining\":${remaining}}`; let rem = `${remaining}`; #{inject: true, fault: \"error\", status: 200, body: body, headers: #{\"Content-Type\": \"application/json\", \"X-RateLimit-Remaining\": rem}} } }"
+                "code": "fn respond(ctx) { let count = ctx.state.incr(\"requests\"); if count > 5 { http(429, #{ error: \"Rate limit exceeded\", requests: count, limit: 5 }).header(\"Retry-After\", \"60\") } else { let remaining = 5 - count; http(200, #{ message: \"OK\", requests: count, remaining: remaining }).header(\"X-RateLimit-Remaining\", `${remaining}`) } }"
               }
             }
           }]
@@ -77,7 +77,7 @@
             "_rift": {
               "script": {
                 "engine": "rhai",
-                "code": "fn should_inject(request, flow_store) { let fid = \"ratelimit\"; flow_store.delete(fid, \"requests\"); #{inject: true, fault: \"error\", status: 200, body: \"{\\\"message\\\":\\\"Rate limit reset\\\"}\", headers: #{\"Content-Type\": \"application/json\"}} }"
+                "code": "fn respond(ctx) { ctx.state.delete(\"requests\"); http(200, #{ message: \"Rate limit reset\" }) }"
               }
             }
           }]
@@ -91,7 +91,7 @@
             "_rift": {
               "script": {
                 "engine": "rhai",
-                "code": "fn should_inject(request, flow_store) { let fid = \"echo\"; let count = flow_store.get(fid, \"count\"); if count == () { count = 0; }; count += 1; flow_store.set(fid, \"count\", count); #{inject: true, fault: \"error\", status: 200, body: `{\"method\":\"${request.method}\",\"path\":\"${request.path}\",\"echoCount\":${count}}`, headers: #{\"Content-Type\": \"application/json\"}} }"
+                "code": "fn respond(ctx) { let count = ctx.state.incr(\"count\"); http(200, #{ method: ctx.request.method, path: ctx.request.path, echoCount: count }) }"
               }
             }
           }]

@@ -298,10 +298,7 @@ mod tests {
 
     #[test]
     fn test_valid_rhai_script() {
-        let stub = make_rift_script_stub(
-            "rhai",
-            r#"fn should_inject(request, flow_store) { #{ inject: false } }"#,
-        );
+        let stub = make_rift_script_stub("rhai", r#"fn respond(ctx) { pass() }"#);
         let result = validate_stub(&stub, 0);
         assert!(
             result.is_valid(),
@@ -314,7 +311,7 @@ mod tests {
     fn test_invalid_rhai_syntax() {
         let stub = make_rift_script_stub(
             "rhai",
-            r#"fn should_inject(request, flow_store) { #{ inject: "#, // Missing closing
+            r#"fn respond(ctx) { http(200, "#, // Missing closing
         );
         let result = validate_stub(&stub, 0);
         assert!(!result.is_valid(), "Invalid syntax should fail");
@@ -322,11 +319,17 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_should_inject_function() {
+    fn test_v2_script_without_should_inject_is_valid() {
+        // Issue #453: validation is syntax-only now — a script that never defines
+        // `should_inject` (the removed v1 wrapper) validates fine. Entrypoint-matching
+        // happens at request time / via `rift script check`, not here.
         let stub = make_rift_script_stub("rhai", r#"fn other_function(x) { x + 1 }"#);
         let result = validate_stub(&stub, 0);
-        assert!(!result.is_valid(), "Missing should_inject should fail");
-        assert!(result.errors[0].message.contains("should_inject"));
+        assert!(
+            result.is_valid(),
+            "Script without should_inject should validate: {:?}",
+            result.errors
+        );
     }
 
     #[test]
@@ -372,10 +375,7 @@ mod tests {
                         fault: None,
                         script: Some(RiftScriptConfig {
                             engine: Some("rhai".to_string()),
-                            code: Some(
-                                r#"fn should_inject(request, flow_store) { #{ inject: false } }"#
-                                    .to_string(),
-                            ),
+                            code: Some(r#"fn respond(ctx) { pass() }"#.to_string()),
                             file: None,
                             ref_name: None,
                         }),
@@ -399,8 +399,7 @@ mod tests {
                         script: Some(RiftScriptConfig {
                             engine: Some("rhai".to_string()),
                             code: Some(
-                                r#"fn should_inject(request, flow_store) { #{ inject: "#
-                                    .to_string(), // Invalid
+                                r#"fn respond(ctx) { http(200, "#.to_string(), // Invalid
                             ),
                             file: None,
                             ref_name: None,

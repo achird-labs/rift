@@ -1033,7 +1033,7 @@ fn e036_zero_script_sources_is_an_error() {
 #[test]
 fn e036_multiple_script_sources_is_an_error() {
     let v = make_imposter(json!([rift_script_stub(
-        json!({ "code": "fn should_inject() {}", "file": "x.rhai" })
+        json!({ "code": "fn respond() {}", "file": "x.rhai" })
     )]));
     let mut r = LintResult::new();
     validate_imposter(path(), &v, &mut r, &opts());
@@ -1043,7 +1043,7 @@ fn e036_multiple_script_sources_is_an_error() {
 #[test]
 fn inline_code_is_accepted_without_e036() {
     let v = make_imposter(json!([rift_script_stub(
-        json!({ "code": "fn should_inject() {}" })
+        json!({ "code": "fn respond() {}" })
     )]));
     let mut r = LintResult::new();
     validate_imposter(path(), &v, &mut r, &opts());
@@ -1061,7 +1061,7 @@ fn e037_unknown_ref_is_an_error() {
 #[test]
 fn ref_resolves_against_the_registry_without_e037() {
     let mut v = make_imposter(json!([rift_script_stub(json!({ "ref": "failTwice" }))]));
-    v["_rift"] = json!({ "scripts": { "failTwice": { "code": "fn should_inject() {}" } } });
+    v["_rift"] = json!({ "scripts": { "failTwice": { "code": "fn respond() {}" } } });
     let mut r = LintResult::new();
     validate_imposter(path(), &v, &mut r, &opts());
     assert!(!has_code(&r, "E037"), "got {:?}", codes(&r));
@@ -1092,7 +1092,7 @@ fn e038_missing_file_is_an_error() {
 #[test]
 fn file_resolves_relative_to_the_config_and_is_accepted() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("script.rhai"), "fn should_inject() {}").unwrap();
+    std::fs::write(dir.path().join("script.rhai"), "fn respond() {}").unwrap();
     let cfg = make_imposter(json!([rift_script_stub(json!({ "file": "script.rhai" }))]));
     let config_path = dir.path().join("imposter.json");
     std::fs::write(&config_path, serde_json::to_string(&cfg).unwrap()).unwrap();
@@ -1105,7 +1105,7 @@ fn file_resolves_relative_to_the_config_and_is_accepted() {
 #[test]
 fn ref_to_file_backed_registry_entry_resolves_relative_to_config() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("fail-twice.rhai"), "fn should_inject() {}").unwrap();
+    std::fs::write(dir.path().join("fail-twice.rhai"), "fn respond() {}").unwrap();
     let mut cfg = make_imposter(json!([rift_script_stub(json!({ "ref": "failTwice" }))]));
     cfg["_rift"] = json!({ "scripts": { "failTwice": { "file": "fail-twice.rhai" } } });
     let config_path = dir.path().join("imposter.json");
@@ -1120,87 +1120,13 @@ fn ref_to_file_backed_registry_entry_resolves_relative_to_config() {
 #[test]
 fn e040_invalid_javascript_file_syntax_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("bad.js"), "function should_inject( {").unwrap();
+    std::fs::write(dir.path().join("bad.js"), "function respnod( {").unwrap();
     let cfg = make_imposter(json!([rift_script_stub(json!({ "file": "bad.js" }))]));
     let config_path = dir.path().join("imposter.json");
     std::fs::write(&config_path, serde_json::to_string(&cfg).unwrap()).unwrap();
 
     let r = lint_file(&config_path, &opts());
     assert!(has_code(&r, "E040"), "expected E040, got {:?}", codes(&r));
-}
-
-// ─── Issue #357 Item 5: E041 deprecation lint for the v1 `should_inject` wrapper ──────
-
-#[test]
-fn e041_fires_for_v1_should_inject_wrapper_rhai() {
-    let v = make_imposter(json!([rift_script_stub(json!({
-        "code": "fn should_inject(request, flow_store) { #{ inject: false } }"
-    }))]));
-    let mut r = LintResult::new();
-    validate_imposter(path(), &v, &mut r, &opts());
-    assert!(has_code(&r, "E041"), "expected E041, got {:?}", codes(&r));
-}
-
-#[test]
-fn e041_fires_for_v1_should_inject_wrapper_js() {
-    let v = make_imposter(json!([rift_script_stub(json!({
-        "engine": "javascript",
-        "code": "function should_inject(request, flow_store) { return { inject: false }; }"
-    }))]));
-    let mut r = LintResult::new();
-    validate_imposter(path(), &v, &mut r, &opts());
-    assert!(has_code(&r, "E041"), "expected E041, got {:?}", codes(&r));
-}
-
-#[test]
-fn e041_does_not_fire_for_v2_named_respond() {
-    let v = make_imposter(json!([rift_script_stub(json!({
-        "code": "fn respond(ctx) { http(200) }"
-    }))]));
-    let mut r = LintResult::new();
-    validate_imposter(path(), &v, &mut r, &opts());
-    assert!(!has_code(&r, "E041"), "got {:?}", codes(&r));
-}
-
-#[test]
-fn e041_does_not_fire_for_v2_bare_expression() {
-    let v = make_imposter(json!([rift_script_stub(json!({
-        "code": "if ctx.request.method == \"POST\" { http(503) } else { pass() }"
-    }))]));
-    let mut r = LintResult::new();
-    validate_imposter(path(), &v, &mut r, &opts());
-    assert!(!has_code(&r, "E041"), "got {:?}", codes(&r));
-}
-
-#[test]
-fn e041_does_not_fire_for_should_inject_only_in_a_comment() {
-    // The lint anchors on a function DECLARATION (`fn`/`function should_inject`), so a mere
-    // mention of the word in a comment/string is not a v1 wrapper and must not warn.
-    let v = make_imposter(json!([rift_script_stub(json!({
-        "code": "// migrated away from should_inject\nfn respond(ctx) { http(200) }"
-    }))]));
-    let mut r = LintResult::new();
-    validate_imposter(path(), &v, &mut r, &opts());
-    assert!(!has_code(&r, "E041"), "got {:?}", codes(&r));
-}
-
-#[test]
-fn e041_is_a_warning_not_an_error() {
-    let v = make_imposter(json!([rift_script_stub(json!({
-        "code": "fn should_inject(request, flow_store) { #{ inject: false } }"
-    }))]));
-    let mut r = LintResult::new();
-    validate_imposter(path(), &v, &mut r, &opts());
-    let issue = r
-        .issues
-        .iter()
-        .find(|i| i.code == "E041")
-        .expect("E041 must fire");
-    assert_eq!(
-        issue.severity,
-        Severity::Warning,
-        "E041 must be a deprecation warning, not a hard error"
-    );
 }
 
 // ─── Issue #358: E042 — ctx.state used without _rift.flowState ──────────────
@@ -1215,10 +1141,12 @@ fn e042_fires_for_ctx_state_without_flow_state() {
     assert!(has_code(&r, "E042"), "expected E042, got {:?}", codes(&r));
 }
 
+// E042's textual check also keys on the literal `flow_store` substring (kept for scripts that
+// still reference it), independent of whether the function is named `respond` or anything else.
 #[test]
-fn e042_fires_for_v1_flow_store_without_flow_state() {
+fn e042_fires_for_flow_store_text_without_flow_state() {
     let v = make_imposter(json!([rift_script_stub(json!({
-        "code": "fn should_inject(request, flow_store) { flow_store.increment(\"f\", \"k\"); #{ inject: false } }"
+        "code": "fn legacy(ctx) { flow_store.increment(\"f\", \"k\"); }"
     }))]));
     let mut r = LintResult::new();
     validate_imposter(path(), &v, &mut r, &opts());

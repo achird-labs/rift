@@ -110,8 +110,7 @@ fn read_script_file_relative(config_file: &Path, rel: &str) -> std::io::Result<S
 /// engine. Only "javascript" has an embedded syntax checker in this crate (`js_validator`,
 /// gated behind the `javascript` feature) — rhai scripts (and any other engine string) get the
 /// structural checks above (exactly-one-source, ref resolution, file existence) but no deep
-/// syntax check here. Also flags the deprecated v1 `should_inject` wrapper (issue #357 Item 5),
-/// for every engine.
+/// syntax check here.
 fn check_script_syntax(
     file: &Path,
     code: &str,
@@ -129,42 +128,6 @@ fn check_script_syntax(
                 file.to_path_buf(),
             )
             .with_location(location),
-        );
-    }
-
-    check_script_v1_deprecation(file, code, location, result);
-}
-
-/// Matches a `should_inject` FUNCTION DECLARATION — the v1 wrapper across both engines
-/// (`fn should_inject` in Rhai, `function should_inject` in JS). Anchoring on the declaration
-/// keyword (not a bare `should_inject` word) is what the runtime's own v1 detection keys on (a
-/// defined `should_inject` function), and keeps the lint from firing on the identifier appearing
-/// in a comment or string literal.
-static SHOULD_INJECT_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-
-/// Flag the deprecated v1 `should_inject(request, flow_store)` script wrapper (issue #357 Item 5,
-/// pairing with the runtime's own v1/v2 detection in `rift-core::scripting`, which treats a
-/// defined `should_inject` as the same unambiguous v1 signal). v2 scripts (`respond(ctx)`,
-/// `matches(ctx)`, `transform(ctx)`, `delay(ctx)`, or bare-expression) never match and so never
-/// trigger this lint.
-fn check_script_v1_deprecation(file: &Path, code: &str, location: &str, result: &mut LintResult) {
-    let re = SHOULD_INJECT_RE.get_or_init(|| {
-        Regex::new(r"\b(?:fn|function)\s+should_inject\b")
-            .expect("SHOULD_INJECT_RE is a fixed, valid pattern")
-    });
-    if re.is_match(code) {
-        result.add_issue(
-            LintIssue::warning(
-                "E041",
-                "Script uses the deprecated v1 `should_inject(request, flow_store)` wrapper",
-                file.to_path_buf(),
-            )
-            .with_location(location)
-            .with_suggestion(
-                "Rewrite as v2: define `respond(ctx)` (or a bare expression) and return \
-                 http(status, body)/delay(ms)/reset()/pass() instead of \
-                 #{ inject: true, fault: ... }",
-            ),
         );
     }
 }

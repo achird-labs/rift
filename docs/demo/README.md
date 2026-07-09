@@ -265,7 +265,7 @@ docker run -p 2525:2525 -p 4560:4560 \
 # Health check - lists available engines
 curl http://localhost:4560/health
 
-# Rhai engine - counter with flow_store
+# Rhai engine - counter with ctx.state
 curl http://localhost:4560/rhai/counter
 curl http://localhost:4560/rhai/counter
 curl -X POST http://localhost:4560/rhai/echo
@@ -280,8 +280,8 @@ curl -X POST http://localhost:4560/js/echo
 
 | Engine | Format | State Access | Request Access |
 |:-------|:-------|:-------------|:---------------|
-| Rhai | `_rift.script` | `flow_store.get(id, key)` | `request.method`, `request.path` |
-| JavaScript | `inject` (Mountebank) | `state.key` | `config.request.method` |
+| Rhai | `_rift.script` (v2 `ctx`) | `ctx.state.get(key)` | `ctx.request.method`, `ctx.request.path` |
+| JavaScript | `_rift.script` (v2 `ctx`), or `inject` (Mountebank) | `ctx.state.get(key)` | `ctx.request.method` |
 
 ---
 

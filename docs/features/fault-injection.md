@@ -250,9 +250,6 @@ evaluated. If you want the top-level transport fault, the response must be a bar
 For dynamic fault injection based on request data or state, use the scripting feature. Full
 reference (the unified `ctx` object, result constructors, entrypoint placement) lives on the
 [Scripting](./scripting.md#ctx-api-v2) page; this section just shows it applied to fault injection.
-`_rift.script` accepts both the v2 forms below and the deprecated v1 `should_inject(request,
-flow_store)` wrapper — a script needs neither an `inject`/`fault` map nor a `should_inject` wrapper
-to be valid; see [Scripting](./scripting.md) for the full v1/v2 contract.
 
 ### Rhai Script - Retry Simulation
 
@@ -280,35 +277,21 @@ replaces the hand-built `#{ inject:, fault: }` map:
 }
 ```
 
-### Script Return Values (v1, deprecated)
+### Script Return Values
 
-The shapes below use the **v1** `should_inject(request, flow_store)` wrapper and its `inject`/`fault`
-return map — still supported, but superseded by the `respond(ctx)` + result-constructor contract
-shown in the Rhai example above and documented in full on the
-[Scripting](./scripting.md#ctx-api-v2) page. New scripts should prefer v2.
-
-Scripts must return a map/table with an `inject` flag:
+`respond(ctx)` returns a result constructor — see [Scripting](./scripting.md#result-constructors)
+for the full reference. The shapes used above, restated:
 
 **Rhai:**
 ```rhai
 // No injection - pass through
-#{ inject: false }
+pass()
 
 // Inject error
-#{
-  inject: true,
-  fault: "error",
-  status: 503,
-  body: "{\"error\": \"Service unavailable\"}",
-  headers: #{ "Content-Type": "application/json" }
-}
+http(503, #{ error: "Service unavailable" })
 
 // Inject latency
-#{
-  inject: true,
-  fault: "latency",
-  duration_ms: 500
-}
+delay(500)
 ```
 
 ---
@@ -343,7 +326,7 @@ Use scripting to fail a specific number of requests before succeeding:
   "port": 4545,
   "protocol": "http",
   "_rift": {
-    "flowState": {"backend": "inmemory", "ttlSeconds": 300}
+    "flowState": {"backend": "inmemory", "ttlSeconds": 300, "flowIdSource": "header:X-Request-Id"}
   },
   "stubs": [{
     "predicates": [{ "equals": { "path": "/api/resource" } }],
@@ -351,7 +334,7 @@ Use scripting to fail a specific number of requests before succeeding:
       "_rift": {
         "script": {
           "engine": "rhai",
-          "code": "let flow_id = request.headers[\"x-request-id\"]; if flow_id == () { flow_id = \"default\"; }; let attempts = flow_store.increment(flow_id, \"attempts\"); if attempts <= 2 { #{inject: true, fault: \"error\", status: 503, body: `{\"error\":\"Retry later\",\"attempt\":${attempts}}`, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"1\"}} } else { #{inject: false} }"
+          "code": "let attempts = ctx.state.incr(\"attempts\"); if attempts <= 2 { http(503, #{ error: \"Retry later\", attempt: attempts }).header(\"Retry-After\", \"1\") } else { pass() }"
         }
       }
     }]

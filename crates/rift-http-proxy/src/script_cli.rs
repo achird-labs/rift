@@ -100,16 +100,6 @@ fn check_one_script(
     if let Err(e) = crate::scripting::check_entrypoint(engine, code, hook) {
         report.errors.push(format!("{location}: {e}"));
     }
-
-    // v1-shape deprecation lint (issue #357 Item 5 / rift-lint E041), with a v2 rewrite hint.
-    if crate::scripting::is_v1_should_inject(code) {
-        report.warnings.push(format!(
-            "{location}: uses the deprecated v1 `should_inject(request, flow_store)` wrapper; \
-             rewrite as v2: define `{hook}(ctx)` (or a bare expression) and return \
-             http(status, body)/delay(ms)/reset()/pass() instead of \
-             #{{ inject: true, fault: ... }}"
-        ));
-    }
 }
 
 fn check_config(path: &Path) -> Result<CheckReport> {
@@ -149,10 +139,9 @@ fn check_config(path: &Path) -> Result<CheckReport> {
 }
 
 /// One resolved `_rift.script` config: syntax + entrypoint (always `respond` — every
-/// `_rift.script` here is response-position), v1 deprecation, and state-without-flowState
-/// (rift-lint E042's check, re-implemented here against the typed config rather than the raw
-/// JSON `Value` rift-lint walks — see the module docs on why this crate doesn't pull in
-/// rift-lint itself).
+/// `_rift.script` here is response-position), and state-without-flowState (rift-lint E042's
+/// check, re-implemented here against the typed config rather than the raw JSON `Value`
+/// rift-lint walks — see the module docs on why this crate doesn't pull in rift-lint itself).
 fn check_config_script(
     script_cfg: &RiftScriptConfig,
     has_flow_state: bool,
@@ -490,9 +479,10 @@ mod tests {
         assert!(report.is_ok(), "expected OK, got {:?}", report.errors);
     }
 
-    // AC: a valid v1 `should_inject` script passes (with a deprecation warning).
+    // Issue #453: v1 `should_inject` was removed — a script defining only `should_inject` is now
+    // just a misnamed entrypoint, the same as any other wrong function name.
     #[test]
-    fn check_raw_v1_should_inject_script_ok_with_warning() {
+    fn check_raw_should_inject_only_script_fails_as_misnamed_entrypoint() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_temp(
             &dir,
@@ -500,9 +490,35 @@ mod tests {
             "fn should_inject(request, flow_store) { #{ inject: false } }",
         );
         let report = run_check(&path, "respond").expect("check runs");
-        assert!(report.is_ok(), "expected OK, got {:?}", report.errors);
-        assert_eq!(report.warnings.len(), 1);
-        assert!(report.warnings[0].contains("deprecated v1"));
+        assert!(
+            !report.is_ok(),
+            "should_inject-only script must fail as a misnamed entrypoint"
+        );
+        assert!(
+            report.errors[0].contains("should_inject") && report.errors[0].contains("respond"),
+            "error must name should_inject/respond, got {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn check_raw_js_should_inject_only_script_fails_as_misnamed_entrypoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(
+            &dir,
+            "s.js",
+            "function should_inject(request, flow_store) { return { inject: false }; }",
+        );
+        let report = run_check(&path, "respond").expect("check runs");
+        assert!(
+            !report.is_ok(),
+            "should_inject-only JS script must fail as a misnamed entrypoint"
+        );
+        assert!(
+            report.errors[0].contains("should_inject") && report.errors[0].contains("respond"),
+            "error must name should_inject/respond, got {:?}",
+            report.errors
+        );
     }
 
     // AC (the issue's headline case): a syntax-valid script whose only function is misnamed
@@ -723,20 +739,43 @@ mod tests {
         assert_eq!(report.logs, vec!["hello from script".to_string()]);
     }
 
-    // v1 shape: `should_inject` scripts also work under `script run`.
     #[test]
-    fn run_supports_v1_should_inject_shape() {
+    fn run_supports_http_result_constructor() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_temp(
             &dir,
             "s.rhai",
-            r#"fn should_inject(request, flow_store) { #{ inject: true, fault: "error", status: 429, body: "slow down" } }"#,
+            r#"fn respond(ctx) { http(429, "slow down") }"#,
         );
         let report = run_run(&path, None, &[], "cli", None, "respond").expect("run succeeds");
         assert!(
             report.decision.starts_with("http(429)"),
             "got {}",
             report.decision
+        );
+    }
+
+    // Issue #453: v1 `should_inject` was removed — `script run` surfaces the same
+    // misnamed-entrypoint error as `script check` for a should_inject-only script.
+    #[test]
+    fn run_should_inject_only_script_errors_as_misnamed_entrypoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(
+            &dir,
+            "s.rhai",
+            r#"fn should_inject(request, flow_store) { #{ inject: true, fault: "error", status: 429, body: "slow down" } }"#,
+        );
+        let report = run_run(&path, None, &[], "cli", None, "respond")
+            .expect("run reports an error, not a hard failure");
+        assert!(
+            report.error.is_some(),
+            "expected an entrypoint error, got decision {:?}",
+            report.decision
+        );
+        let err = report.error.unwrap();
+        assert!(
+            err.contains("entrypoint") && err.contains("respond"),
+            "got {err}"
         );
     }
 

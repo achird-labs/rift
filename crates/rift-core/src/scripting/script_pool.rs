@@ -651,16 +651,14 @@ mod tests {
 
         // Compile an infinite loop script using a Rhai engine without custom functions
         // (on_progress hooks are installed on the *worker* engine; the compile engine
-        //  only needs to produce a valid AST).
+        //  only needs to produce a valid AST). A bare expression (issue #357 Item 2, no
+        // `respond` wrapper needed) so the loop actually executes as the entrypoint.
         let compile_engine = rhai::Engine::new();
         let ast = compile_engine
             .compile(
                 r#"
-                fn should_inject(request, flow) {
-                    let i = 0;
-                    loop { i += 1; }
-                    #{ inject: false }
-                }
+                let i = 0;
+                loop { i += 1; }
             "#,
             )
             .expect("infinite loop script should compile");
@@ -688,8 +686,8 @@ mod tests {
         let ast2 = compile_engine2
             .compile(
                 r#"
-                fn should_inject(request, flow) {
-                    #{ inject: false }
+                fn respond(ctx) {
+                    pass()
                 }
             "#,
             )
@@ -734,8 +732,8 @@ mod tests {
         let ast = engine
             .compile(
                 r#"
-            fn should_inject(request, flow_store) {
-                #{ inject: false }
+            fn respond(ctx) {
+                pass()
             }
         "#,
             )

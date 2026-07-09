@@ -1,5 +1,5 @@
 use super::validator::{ScriptValidationError, ScriptValidator};
-use boa_engine::{Context, Source, js_string};
+use boa_engine::{Context, Source};
 use std::error::Error;
 use std::fmt;
 
@@ -42,8 +42,9 @@ impl From<JsValidationError> for ScriptValidationError {
 
 /// Validator for JavaScript scripts.
 ///
-/// This validator checks that JavaScript scripts are syntactically valid
-/// and contain the required `should_inject` function.
+/// This validator checks that JavaScript scripts are syntactically valid.
+/// It does not require any particular function to be defined (issue #453 removed the
+/// old requirement that a script define `should_inject`, the v1 wrapper).
 pub struct JsValidator;
 
 impl JsValidator {
@@ -72,26 +73,18 @@ impl ScriptValidator for JsValidator {
     /// Validates a JavaScript script for use with Rift proxy.
     ///
     /// # Checks performed
-    /// 1. Script parses and evaluates without errors
-    /// 2. Script defines the required `should_inject` function
+    /// 1. Script parses without errors
+    ///
+    /// Validation is syntax-only, matching `JsEngine::new`: a v2 bare-expression script
+    /// (e.g. `http(503, "boom")`) references globals (`ctx`, `http`, ...) that are only bound
+    /// at real execution time, so fully evaluating it here would spuriously fail with an
+    /// unbound-identifier error. `Script::parse` catches genuine syntax errors without
+    /// executing anything.
     fn validate(&self, script: &str) -> Result<(), Self::Error> {
-        // Create a context for validation
         let mut context = Context::default();
-
-        // Try to evaluate the script (this parses and executes top-level code)
-        context
-            .eval(Source::from_bytes(script.as_bytes()))
+        boa_engine::Script::parse(Source::from_bytes(script.as_bytes()), None, &mut context)
             .map_err(|e| JsValidationError::EvaluationError(e.to_string()))?;
-
-        // Check that should_inject function exists
-        let global = context.global_object();
-        let func = global.get(js_string!("should_inject"), &mut context);
-        match func {
-            Ok(val) if val.is_callable() => Ok(()),
-            _ => Err(JsValidationError::MissingFunction(
-                "should_inject".to_string(),
-            )),
-        }
+        Ok(())
     }
 }
 
@@ -124,16 +117,15 @@ function should_inject(request, flow_store {
     }
 
     #[test]
-    fn test_missing_function() {
+    fn test_v2_script_without_should_inject_is_valid() {
+        // Issue #453: validation is syntax-only now — a script that never defines
+        // `should_inject` (the removed v1 wrapper), including a v2 bare-expression script
+        // referencing globals (`http`) only bound at real execution time, must still validate
+        // fine since we only parse, never evaluate.
         let validator = JsValidator::new();
-        let script = r#"
-function some_other_function(request, flow_store) {
-    return {inject: false};
-}
-"#;
+        let script = r#"http(503, "boom");"#;
         let result = validator.validate(script);
-        assert!(result.is_err());
-        assert!(matches!(result, Err(JsValidationError::MissingFunction(_))));
+        assert!(result.is_ok(), "v2 bare script should validate: {result:?}");
     }
 
     #[test]
@@ -171,10 +163,9 @@ function should_inject(request, flow_store) {
                 "script1",
                 r#"function should_inject(r, f) { return {inject: false}; }"#,
             ),
-            (
-                "script2",
-                r#"function other_func(r, f) { return {inject: false}; }"#,
-            ),
+            // Validation is syntax-only (issue #453) — a genuine syntax error, not a
+            // wrongly-named function, is what makes script2 invalid.
+            ("script2", r#"function other_func(r, f) { return {inject: "#),
             (
                 "script3",
                 r#"function should_inject(r, f) { return {inject: true}; }"#,

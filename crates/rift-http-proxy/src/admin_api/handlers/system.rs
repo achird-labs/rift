@@ -332,17 +332,14 @@ mod tests {
         use crate::imposter::StubResponse;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let script_path = dir.path().join("should_inject.rhai");
-        std::fs::write(
-            &script_path,
-            r#"fn should_inject(request, flow_store) { #{ inject: true, fault: "error", status: 503, body: "v1" } }"#,
-        )
-        .expect("write script v1");
+        let script_path = dir.path().join("respond.rhai");
+        std::fs::write(&script_path, r#"fn respond(ctx) { http(503, "first") }"#)
+            .expect("write script (first version)");
 
         let config_path = dir.path().join("imposter.json");
         std::fs::write(
             &config_path,
-            r#"{"port":19479,"protocol":"http","stubs":[{"responses":[{"_rift":{"script":{"file":"should_inject.rhai"}}}]}]}"#,
+            r#"{"port":19479,"protocol":"http","stubs":[{"responses":[{"_rift":{"script":{"file":"respond.rhai"}}}]}]}"#,
         )
         .expect("write config");
 
@@ -353,7 +350,7 @@ mod tests {
 
         let manager = Arc::new(ImposterManager::new());
 
-        // Initial reload creates the imposter with the v1 script content resolved.
+        // Initial reload creates the imposter with the first script version resolved.
         let resp = handle_reload(manager.clone(), Some(source.clone())).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let script_code = |manager: &ImposterManager| {
@@ -368,24 +365,17 @@ mod tests {
         };
         assert_eq!(
             script_code(&manager).as_deref(),
-            Some(
-                r#"fn should_inject(request, flow_store) { #{ inject: true, fault: "error", status: 503, body: "v1" } }"#
-            )
+            Some(r#"fn respond(ctx) { http(503, "first") }"#)
         );
 
         // Edit the referenced file (the configfile itself is untouched) and reload again.
-        std::fs::write(
-            &script_path,
-            r#"fn should_inject(request, flow_store) { #{ inject: true, fault: "error", status: 503, body: "v2" } }"#,
-        )
-        .expect("write script v2");
+        std::fs::write(&script_path, r#"fn respond(ctx) { http(503, "second") }"#)
+            .expect("write script (second version)");
         let resp = handle_reload(manager.clone(), Some(source)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             script_code(&manager).as_deref(),
-            Some(
-                r#"fn should_inject(request, flow_store) { #{ inject: true, fault: "error", status: 503, body: "v2" } }"#
-            ),
+            Some(r#"fn respond(ctx) { http(503, "second") }"#),
             "reload must pick up the edited file content"
         );
 

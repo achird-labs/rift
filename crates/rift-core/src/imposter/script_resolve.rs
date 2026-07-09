@@ -337,7 +337,7 @@ mod tests {
     fn inline_code_resolves_with_default_engine() {
         let mut config = ImposterConfig {
             stubs: vec![stub_with_script(script(
-                Some("fn should_inject() {}"),
+                Some("fn respond() {}"),
                 None,
                 None,
             ))],
@@ -345,7 +345,7 @@ mod tests {
         };
         resolve_scripts(&mut config, &ScriptBaseDir::Unconfigured).unwrap();
         let resolved = extract_script(&config);
-        assert_eq!(resolved.code.as_deref(), Some("fn should_inject() {}"));
+        assert_eq!(resolved.code.as_deref(), Some("fn respond() {}"));
         assert_eq!(resolved.engine.as_deref(), Some("rhai"));
     }
 
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn scripts_dir_within_root_is_read() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("ok.rhai"), "fn should_inject() {}").unwrap();
+        std::fs::write(dir.path().join("ok.rhai"), "fn respond() {}").unwrap();
         let mut config = ImposterConfig {
             stubs: vec![stub_with_script(script(None, Some("ok.rhai"), None))],
             ..Default::default()
@@ -451,7 +451,7 @@ mod tests {
         )
         .unwrap();
         let resolved = extract_script(&config);
-        assert_eq!(resolved.code.as_deref(), Some("fn should_inject() {}"));
+        assert_eq!(resolved.code.as_deref(), Some("fn respond() {}"));
     }
 
     #[test]
@@ -459,7 +459,7 @@ mod tests {
         let mut scripts = HashMap::new();
         scripts.insert(
             "failTwice".to_string(),
-            script(Some("fn should_inject() {}"), None, None),
+            script(Some("fn respond() {}"), None, None),
         );
         let mut config = ImposterConfig {
             rift: Some(RiftConfig {
@@ -471,14 +471,14 @@ mod tests {
         };
         resolve_scripts(&mut config, &ScriptBaseDir::Unconfigured).unwrap();
         let resolved = extract_script(&config);
-        assert_eq!(resolved.code.as_deref(), Some("fn should_inject() {}"));
+        assert_eq!(resolved.code.as_deref(), Some("fn respond() {}"));
         assert_eq!(resolved.engine.as_deref(), Some("rhai"));
     }
 
     #[test]
     fn ref_resolves_a_file_backed_registry_entry() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("fail-twice.rhai"), "fn should_inject() {}").unwrap();
+        std::fs::write(dir.path().join("fail-twice.rhai"), "fn respond() {}").unwrap();
         let mut scripts = HashMap::new();
         scripts.insert(
             "failTwice".to_string(),
@@ -488,7 +488,7 @@ mod tests {
         std::fs::create_dir(dir.path().join("scripts")).unwrap();
         std::fs::write(
             dir.path().join("scripts").join("fail-twice.rhai"),
-            "fn should_inject() {}",
+            "fn respond() {}",
         )
         .unwrap();
         let mut config = ImposterConfig {
@@ -505,7 +505,7 @@ mod tests {
         )
         .unwrap();
         let resolved = extract_script(&config);
-        assert_eq!(resolved.code.as_deref(), Some("fn should_inject() {}"));
+        assert_eq!(resolved.code.as_deref(), Some("fn respond() {}"));
         assert_eq!(resolved.engine.as_deref(), Some("rhai"));
     }
 
@@ -618,7 +618,7 @@ mod tests {
     #[test]
     fn datadir_relative_within_root_is_read() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("ok.rhai"), "fn should_inject() {}").unwrap();
+        std::fs::write(root.path().join("ok.rhai"), "fn respond() {}").unwrap();
         let mut config = ImposterConfig {
             stubs: vec![stub_with_script(script(None, Some("ok.rhai"), None))],
             ..Default::default()
@@ -630,7 +630,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             extract_script(&config).code.as_deref(),
-            Some("fn should_inject() {}")
+            Some("fn respond() {}")
         );
     }
 
@@ -640,7 +640,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("script.js"),
-            "function should_inject() { return { inject: false }; }",
+            "function respond() { return pass(); }",
         )
         .unwrap();
         let mut config = ImposterConfig {

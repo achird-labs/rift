@@ -18,7 +18,7 @@
             "_rift": {
               "script": {
                 "engine": "rhai",
-                "code": "fn should_inject(request, flow_store) { let fid = \"rhai\"; let count = flow_store.get(fid, \"count\"); if count == () { count = 0; }; count += 1; flow_store.set(fid, \"count\", count); #{inject: true, fault: \"error\", status: 200, body: `{\"engine\":\"rhai\",\"count\":${count}}`, headers: #{\"Content-Type\": \"application/json\"}} }"
+                "code": "fn respond(ctx) { let count = ctx.state.incr(\"count\"); http(200, #{ engine: \"rhai\", count: count }) }"
               }
             }
           }]
@@ -30,7 +30,7 @@
             "_rift": {
               "script": {
                 "engine": "rhai",
-                "code": "fn should_inject(request, flow_store) { #{inject: true, fault: \"error\", status: 200, body: `{\"engine\":\"rhai\",\"echo\":{\"method\":\"${request.method}\",\"path\":\"${request.path}\"}}`, headers: #{\"Content-Type\": \"application/json\"}} }"
+                "code": "fn respond(ctx) { http(200, #{ engine: \"rhai\", echo: #{ method: ctx.request.method, path: ctx.request.path } }) }"
               }
             }
           }]

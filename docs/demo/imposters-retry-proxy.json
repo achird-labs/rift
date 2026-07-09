@@ -8,7 +8,8 @@
       "_rift": {
         "flowState": {
           "backend": "inmemory",
-          "ttlSeconds": 300
+          "ttlSeconds": 300,
+          "flowIdSource": "header:X-Flow-Id"
         }
       },
       "stubs": [
@@ -26,7 +27,7 @@
               "_rift": {
                 "script": {
                   "engine": "rhai",
-                  "code": "fn should_inject(request, flow_store) { let flow_id = request.headers[\"x-flow-id\"]; if flow_id == () { flow_id = \"default\"; }; let attempts = flow_store.get(flow_id, \"attempts\"); if attempts == () { attempts = 0; }; attempts += 1; flow_store.set(flow_id, \"attempts\", attempts); if attempts <= 2 { let body = `{\"error\":\"Service temporarily unavailable\",\"attempt\":${attempts},\"message\":\"Retry after a moment\"}`; let att = `${attempts}`; #{ inject: true, fault: \"error\", status: 503, body: body, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"1\", \"X-Attempt\": att} } } else { #{ inject: false } } }"
+                  "code": "fn respond(ctx) { let attempts = ctx.state.incr(\"attempts\"); if attempts <= 2 { http(503, #{ error: \"Service temporarily unavailable\", attempt: attempts, message: \"Retry after a moment\" }).header(\"Retry-After\", \"1\").header(\"X-Attempt\", `${attempts}`) } else { pass() } }"
                 }
               },
               "_behaviors": {
@@ -53,7 +54,7 @@
               "_rift": {
                 "script": {
                   "engine": "rhai",
-                  "code": "fn should_inject(request, flow_store) { let flow_id = request.headers[\"x-flow-id\"]; if flow_id == () { flow_id = \"default\"; }; flow_store.delete(flow_id, \"attempts\"); let body = `{\"message\":\"Counter reset for flow: ${flow_id}\"}`; #{ inject: true, fault: \"error\", status: 200, body: body, headers: #{\"Content-Type\": \"application/json\"} } }"
+                  "code": "fn respond(ctx) { ctx.state.delete(\"attempts\"); http(200, #{ message: `Counter reset for flow: ${ctx.flowId}` }) }"
                 }
               }
             }
@@ -74,7 +75,7 @@
               "_rift": {
                 "script": {
                   "engine": "rhai",
-                  "code": "fn should_inject(request, flow_store) { let flow_id = request.headers[\"x-flow-id\"]; if flow_id == () { flow_id = \"default\"; }; let attempts = flow_store.get(flow_id, \"attempts\"); if attempts == () { attempts = 0; }; let body = `{\"flow_id\":\"${flow_id}\",\"attempts\":${attempts}}`; #{ inject: true, fault: \"error\", status: 200, body: body, headers: #{\"Content-Type\": \"application/json\"} } }"
+                  "code": "fn respond(ctx) { let attempts = ctx.state.get_or(\"attempts\", 0); http(200, #{ flow_id: ctx.flowId, attempts: attempts }) }"
                 }
               }
             }

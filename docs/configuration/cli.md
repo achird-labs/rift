@@ -354,7 +354,7 @@ rift-http-proxy script run scripts/echo.js --request fixtures/get-resource.json 
 |:-----|:------------|:--------|
 | `--request <FILE>` | JSON file with the request-object shape scripts see (`{method, path, headers, query, pathParams, body}`; all fields optional) | empty `GET /` |
 | `--state <KEY=VALUE>` | Seed flow state before running (repeatable); the value is parsed as JSON when it parses, else stored as a string | |
-| `--flow-id <ID>` | Flow id the seeded state and the script's `ctx.state`/`flow_store` calls use | `cli` |
+| `--flow-id <ID>` | Flow id the seeded state and the script's `ctx.state`/`ctx.store` calls use | `cli` |
 | `--engine <ENGINE>` | Script engine (`rhai`/`js`); inferred from the file extension when omitted | (from extension) |
 | `--hook <HOOK>` | Entrypoint to run; only `respond` is wired for both engines today | `respond` |
 

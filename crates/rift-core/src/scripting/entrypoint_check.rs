@@ -15,21 +15,15 @@
 //! then evaluates its top level ONCE to discover which functions it declared, by diffing the
 //! global object before and after — the same technique the runtime path uses to spot a
 //! misnamed entrypoint. Crucially that top-level eval binds the SAME host globals the real
-//! execution path binds (`ctx`/`http`/`pass`/`delay`/`reset`/`request`/`flow_store`) under the
-//! engine's runtime limits (a JS loop-iteration cap) — so a legitimate #357 bare-expression
-//! response script (`http(503, "boom")`) is neither mis-flagged as an unbound-global error nor
-//! able to hang the check with a top-level `while(true){}`. That binding-and-budgeting lives in
-//! the engine itself (`js_engine::declared_functions_js`), reusing its real ctx/result-constructor
-//! setup.
-
-use super::entrypoints;
+//! execution path binds (`ctx`/`http`/`pass`/`delay`/`reset`) under the engine's runtime limits
+//! (a JS loop-iteration cap) — so a legitimate #357 bare-expression response script
+//! (`http(503, "boom")`) is neither mis-flagged as an unbound-global error nor able to hang the
+//! check with a top-level `while(true){}`. That binding-and-budgeting lives in the engine itself
+//! (`js_engine::declared_functions_js`), reusing its real ctx/result-constructor setup.
 
 /// Which entrypoint contract a script satisfies for the checked hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntrypointMatch {
-    /// The legacy v1 `should_inject(request, flow_store)` wrapper (only possible when the
-    /// checked hook is `respond`).
-    V1ShouldInject,
     /// A v2 function declared with exactly the hook's name (e.g. `respond`, `matches`).
     Named,
     /// No functions declared at all — a legal v2 bare-expression script.
@@ -68,12 +62,9 @@ pub fn check_entrypoint(
     decide(&declared, hook)
 }
 
-/// Apply the same has-should-inject/has-named/has-any-function decision `run_entrypoint` (issue
-/// #357) makes at request time, given the set of top-level function names a script declares.
+/// Apply the same has-named/has-any-function decision `run_entrypoint` (issue #357) makes at
+/// request time, given the set of top-level function names a script declares.
 fn decide(declared: &[String], hook: &str) -> Result<EntrypointMatch, EntrypointCheckError> {
-    if hook == entrypoints::RESPOND && declared.iter().any(|n| n == entrypoints::SHOULD_INJECT) {
-        return Ok(EntrypointMatch::V1ShouldInject);
-    }
     if declared.iter().any(|n| n == hook) {
         return Ok(EntrypointMatch::Named);
     }
@@ -117,22 +108,6 @@ fn rhai_declared_functions(script: &str) -> Result<Vec<String>, EntrypointCheckE
     Ok(ast.iter_functions().map(|f| f.name.to_string()).collect())
 }
 
-/// True when `code` declares the deprecated v1 `should_inject` wrapper (`fn should_inject` in
-/// Rhai, `function should_inject` in JS) — the same signal rift-lint's E041 lint keys on
-/// (`crate::validator::check_script_v1_deprecation` there), exposed here so `rift script check`
-/// can flag a raw script file too (no imposter config for rift-lint's own config-shaped pass to
-/// run over).
-pub fn is_v1_should_inject(code: &str) -> bool {
-    // The pattern is a fixed literal (never fails to compile in practice), but `OnceLock` can
-    // only cache a value, not un-panic a `.expect()` — cache the fallible `Option` instead so a
-    // hypothetical compile failure degrades to "not detected" rather than a panic.
-    static SHOULD_INJECT_RE: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
-    SHOULD_INJECT_RE
-        .get_or_init(|| regex::Regex::new(r"\b(?:fn|function)\s+should_inject\b").ok())
-        .as_ref()
-        .is_some_and(|re| re.is_match(code))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,13 +121,20 @@ mod tests {
         );
     }
 
+    // Issue #453: v1 `should_inject` was removed — a script defining only `should_inject` is now
+    // just a script whose entrypoint isn't the requested one (the standard misnamed-entrypoint
+    // error), not a special v1 detection.
     #[test]
-    fn rhai_should_inject_is_v1() {
+    fn rhai_should_inject_only_is_misnamed_entrypoint() {
         let script = "fn should_inject(request, flow_store) { #{ inject: false } }";
-        assert_eq!(
-            check_entrypoint("rhai", script, "respond"),
-            Ok(EntrypointMatch::V1ShouldInject)
-        );
+        let err = check_entrypoint("rhai", script, "respond").unwrap_err();
+        match err {
+            EntrypointCheckError::Mismatch { hook, declared } => {
+                assert_eq!(hook, "respond");
+                assert_eq!(declared, "should_inject");
+            }
+            other => panic!("expected Mismatch, got {other:?}"),
+        }
     }
 
     #[test]
@@ -201,18 +183,6 @@ mod tests {
         assert!(matches!(err, EntrypointCheckError::UnknownEngine(e) if e == "cobol"));
     }
 
-    #[test]
-    fn v1_deprecation_detects_declaration_not_substring() {
-        assert!(is_v1_should_inject(
-            "fn should_inject(request, flow_store) { #{ inject: false } }"
-        ));
-        assert!(!is_v1_should_inject("fn respond(ctx) { pass() }"));
-        // A comment mentioning should_inject without declaring it must not false-positive.
-        assert!(!is_v1_should_inject(
-            "// migrated off should_inject\nfn respond(ctx) { pass() }"
-        ));
-    }
-
     #[cfg(feature = "javascript")]
     #[test]
     fn js_respond_named_matches() {
@@ -223,14 +193,20 @@ mod tests {
         );
     }
 
+    // Issue #453 JS variant: a script defining only `should_inject` is now just a misnamed
+    // entrypoint, not a special v1 detection.
     #[cfg(feature = "javascript")]
     #[test]
-    fn js_should_inject_is_v1() {
+    fn js_should_inject_only_is_misnamed_entrypoint() {
         let script = "function should_inject(request, flow_store) { return {inject: false}; }";
-        assert_eq!(
-            check_entrypoint("javascript", script, "respond"),
-            Ok(EntrypointMatch::V1ShouldInject)
-        );
+        let err = check_entrypoint("javascript", script, "respond").unwrap_err();
+        match err {
+            EntrypointCheckError::Mismatch { hook, declared } => {
+                assert_eq!(hook, "respond");
+                assert_eq!(declared, "should_inject");
+            }
+            other => panic!("expected Mismatch, got {other:?}"),
+        }
     }
 
     // AC (issue #360), JS variant: misnamed entrypoint fails naming `respond`.

@@ -1,4 +1,4 @@
-//! Bounded execution for the inline `_rift.script` (should_inject) path (issue #308).
+//! Bounded execution for the inline `_rift.script` (`respond(ctx)`) path (issue #308).
 //!
 //! The imposter `_rift.script` path has no script pool, so a runaway script (e.g. an
 //! infinite Rhai `loop {}`) ran unbounded on the async worker and wedged the whole engine.
@@ -32,7 +32,7 @@ pub fn resolve_script_timeout_ms(config: &ImposterConfig) -> u64 {
         .unwrap_or(DEFAULT_SCRIPT_TIMEOUT_MS)
 }
 
-/// Run a `_rift.script` `should_inject` off the async worker with a wall-clock deadline
+/// Run a `_rift.script` `respond(ctx)` off the async worker with a wall-clock deadline
 /// (issue #308). Execution happens in `spawn_blocking` so a non-yielding script cannot
 /// starve the Tokio runtime, and at `timeout` the abort flag is set so the script self-
 /// interrupts. Rhai (`on_progress`) is truly interrupted and frees its thread promptly.
@@ -175,7 +175,7 @@ pub async fn should_inject_bounded_with_ctx_traced(
     (result, entry)
 }
 
-/// Execute `should_inject` synchronously with the abort flag wired into the interpreter, so
+/// Execute `respond(ctx)` synchronously with the abort flag wired into the interpreter, so
 /// setting `abort` interrupts a runaway script. Rhai gets a real interpreter interrupt
 /// (#308/#172); other engines run without an interpreter interrupt but still off the async
 /// worker and under the request-level timeout.
@@ -241,8 +241,10 @@ mod tests {
         )
     }
 
-    const RUNAWAY_RHAI: &str =
-        "fn should_inject(request, flow_store){ let i = 0; loop { i += 1; } }";
+    // A bare-expression script (issue #357 Item 2, no `respond` wrapper needed): the whole body
+    // runs as the entrypoint, so this loop actually executes (unlike a function that's merely
+    // declared but never called), exercising the real interrupt path.
+    const RUNAWAY_RHAI: &str = "let i = 0; loop { i += 1; }";
 
     /// Run the sync interrupt path on a child thread, flip the abort flag after 200ms, and
     /// require the interpreter to unwind within 5s. Running off the test thread with a
@@ -294,22 +296,14 @@ mod tests {
     // AC4: the None and Latency decisions pass through the bounded path unchanged.
     #[tokio::test]
     async fn normal_rhai_returns_none_and_latency() {
-        let none = bounded(
-            "rhai",
-            "fn should_inject(request, flow_store){ #{ inject: false } }",
-            2000,
-        )
-        .await
-        .expect("fast script");
+        let none = bounded("rhai", "fn respond(ctx) { pass() }", 2000)
+            .await
+            .expect("fast script");
         assert!(matches!(none, FaultDecision::None), "got {none:?}");
 
-        let latency = bounded(
-            "rhai",
-            "fn should_inject(request, flow_store){ #{ inject: true, fault: `latency`, duration_ms: 7 } }",
-            2000,
-        )
-        .await
-        .expect("fast script");
+        let latency = bounded("rhai", "fn respond(ctx) { delay(7) }", 2000)
+            .await
+            .expect("fast script");
         match latency {
             FaultDecision::Latency { duration_ms, .. } => assert_eq!(duration_ms, 7),
             other => panic!("expected Latency, got {other:?}"),
@@ -399,10 +393,10 @@ mod tests {
         let _ = script.await;
     }
 
-    // AC4: a normal (fast) Rhai should_inject still returns the correct decision, unchanged.
+    // AC4: a normal (fast) Rhai respond(ctx) still returns the correct decision, unchanged.
     #[tokio::test]
     async fn normal_rhai_returns_error_decision() {
-        let code = "fn should_inject(request, flow_store){ #{ inject: true, fault: `error`, status: 503, body: `boom` } }";
+        let code = r#"fn respond(ctx) { http(503, "boom") }"#;
         let res = bounded("rhai", code, 2000)
             .await
             .expect("fast script succeeds");

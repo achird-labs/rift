@@ -382,7 +382,7 @@ async fn reflected_request_data_is_never_templated() {
                     "responses": [{
                         "_rift": { "script": {
                             "engine": "rhai",
-                            "code": "fn should_inject(request, flow_store) { flow_store.set(\"20072\", \"secret\", \"TOPSECRET\"); #{ inject: false } }"
+                            "code": "fn respond(ctx) { ctx.state.set(\"secret\", \"TOPSECRET\"); pass() }"
                         } }
                     }]
                 },
@@ -526,7 +526,7 @@ async fn state_key_present_and_missing() {
                     "responses": [{
                         "_rift": { "script": {
                             "engine": "rhai",
-                            "code": "fn should_inject(request, flow_store) { flow_store.set(\"20069\", \"attempts\", 3); #{ inject: false } }"
+                            "code": "fn respond(ctx) { ctx.state.set(\"attempts\", 3); pass() }"
                         } }
                     }]
                 },

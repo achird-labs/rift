@@ -324,7 +324,7 @@ With standard cycling, if User A triggers the first failure, User B gets the sec
   "port": 4545,
   "protocol": "http",
   "_rift": {
-    "flowState": { "backend": "inmemory", "ttlSeconds": 300 }
+    "flowState": { "backend": "inmemory", "ttlSeconds": 300, "flowIdSource": "header:X-User-Id" }
   },
   "stubs": [{
     "predicates": [{ "equals": { "path": "/api/resource" } }],
@@ -332,7 +332,7 @@ With standard cycling, if User A triggers the first failure, User B gets the sec
       "_rift": {
         "script": {
           "engine": "rhai",
-          "code": "fn should_inject(request, flow_store) { let user_id = request.headers[\"x-user-id\"]; if user_id == () { user_id = \"anonymous\"; }; let attempts = flow_store.increment(user_id, \"attempts\"); if attempts <= 2 { #{inject: true, fault: \"error\", status: 503, body: `{\"error\":\"Temporary failure\",\"attempt\":${attempts},\"user\":\"${user_id}\"}`, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"1\"}} } else { #{inject: false} } }"
+          "code": "fn respond(ctx) { let attempts = ctx.state.incr(\"attempts\"); if attempts <= 2 { http(503, #{ error: \"Temporary failure\", attempt: attempts, user: ctx.flowId }).header(\"Retry-After\", \"1\") } else { pass() } }"
         }
       },
       "is": { "statusCode": 200, "body": "{\"status\": \"success\"}" }
@@ -353,7 +353,7 @@ Now each user experiences their own retry sequence:
 ```json
 {
   "_rift": {
-    "flowState": { "backend": "inmemory", "ttlSeconds": 86400 }
+    "flowState": { "backend": "inmemory", "ttlSeconds": 86400, "flowIdSource": "header:X-Api-Key" }
   },
   "stubs": [
     {
@@ -362,7 +362,7 @@ Now each user experiences their own retry sequence:
         "_rift": {
           "script": {
             "engine": "rhai",
-            "code": "fn should_inject(request, flow_store) { let api_key = request.headers[\"x-api-key\"]; if api_key == () { return #{inject: true, fault: \"error\", status: 401, body: \"{\\\"error\\\":\\\"API key required\\\"}\", headers: #{\"Content-Type\": \"application/json\"}}; }; let used = flow_store.get(api_key, \"quota_used\"); if used == () { used = 0; }; let limit = 1000; if used >= limit { #{inject: true, fault: \"error\", status: 402, body: `{\"error\":\"Quota exceeded\",\"used\":${used},\"limit\":${limit}}`, headers: #{\"Content-Type\": \"application/json\"}} } else { flow_store.set(api_key, \"quota_used\", used + 1); #{inject: false} } }"
+            "code": "fn respond(ctx) { if ctx.request.header(\"X-Api-Key\") == () { return http(401, #{ error: \"API key required\" }); }; let used = ctx.state.get_or(\"quota_used\", 0); let limit = 1000; if used >= limit { http(402, #{ error: \"Quota exceeded\", used: used, limit: limit }) } else { ctx.state.set(\"quota_used\", used + 1); pass() } }"
           }
         },
         "is": { "statusCode": 200, "body": "{\"result\": \"expensive computation\"}" }
@@ -374,7 +374,7 @@ Now each user experiences their own retry sequence:
         "_rift": {
           "script": {
             "engine": "rhai",
-            "code": "fn should_inject(request, flow_store) { let api_key = request.headers[\"x-api-key\"]; if api_key == () { api_key = \"default\"; }; flow_store.delete(api_key, \"quota_used\"); #{inject: true, fault: \"error\", status: 200, body: \"{\\\"message\\\":\\\"Quota reset\\\"}\", headers: #{\"Content-Type\": \"application/json\"}} }"
+            "code": "fn respond(ctx) { ctx.state.delete(\"quota_used\"); http(200, #{ message: \"Quota reset\" }) }"
           }
         }
       }]

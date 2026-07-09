@@ -52,7 +52,7 @@ the store, so there is nothing to auto-provision.
 
 ### No `flowState`, but a script or scenario stub — auto-provisioned in-memory
 
-An imposter with a `_rift.script` stub (which might call `ctx.state`/`flow_store` at runtime) or a
+An imposter with a `_rift.script` stub (which might call `ctx.state` at runtime) or a
 scenario stub, but **no** `flowState` block, gets a real in-memory store auto-provisioned at the
 default TTL (300s) — a `tracing::warn!` (target `rift::script`) is logged so this doesn't go
 unnoticed, and `rift-lint` flags the same condition statically as `E042`. State works out of the
@@ -63,20 +63,26 @@ box; it just doesn't persist across restarts or get shared across a cluster the 
 
 ## Script API
 
-`ctx.state` (the v2, recommended API — see [Scripting → `ctx.state` and `ctx.store`]({{ site.baseurl }}/features/scripting/#ctxstate-and-ctxstore))
-is pre-scoped to the request's resolved flow id and includes atomic ops (`get_or`/`incr_by`/`cas`/`ttl`,
-issue #358) beyond what's listed below. The `flow_store` handle shown here is the older v1 API,
-where every call takes the flow id explicitly (Rhai shown) — it still works unchanged.
+Scripts read and write flow state through the v2 `ctx.state` handle, which is **pre-scoped to the
+request's resolved flow id** — no flow id is passed per call. See
+[Scripting → `ctx.state` and `ctx.store`]({{ site.baseurl }}/features/scripting/#ctxstate-and-ctxstore)
+for the full surface:
 
 | Call | Result |
 |:-----|:-------|
-| `flow_store.get(flow_id, key)` | value, or `()` / `nil` if absent |
-| `flow_store.set(flow_id, key, value)` | store a value |
-| `flow_store.exists(flow_id, key)` | bool |
-| `flow_store.delete(flow_id, key)` | remove a key |
-| `flow_store.increment(flow_id, key)` | atomically increment, returns the new number |
-| `flow_store.set_ttl(flow_id, ttl_seconds)` | override the TTL for a flow |
-| `flow_store.last_error()` | last backend error (or `()` / `nil` / `null` if the last op succeeded) — see [Scripting → Flow-Store Error Semantics]({{ site.baseurl }}/features/scripting/#flow-store-error-semantics) |
+| `ctx.state.get(key)` | value, or `()` / `nil` / `null` if absent |
+| `ctx.state.get_or(key, default)` | value, or `default` if absent |
+| `ctx.state.set(key, value)` | store a value |
+| `ctx.state.exists(key)` | bool |
+| `ctx.state.delete(key)` | remove a key |
+| `ctx.state.incr(key)` / `incr_by(key, n)` | atomic increment, returns the new number |
+| `ctx.state.cas(key, expected, new)` | atomic compare-and-set — `{ applied: … }` (issue #311) |
+| `ctx.state.ttl(seconds)` | override the TTL for this flow |
+| `ctx.store.flow(id)` | a handle scoped to a **different** flow id (cross-flow access) |
+
+Every `ctx.state` call is **fail-loud**: a backend error (e.g. Redis dropping mid-request) raises a
+script error and is logged — it is never silently swallowed into a default. In JavaScript the
+method names are camelCase (`getOr`/`incrBy`); `cas`/`ttl` are spelled the same in both engines.
 
 ---
 

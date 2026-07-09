@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn identical_content_shares_one_compiled_entry() {
-        let code = "fn should_inject(request, flow_store) { #{ inject: false } }";
+        let code = "fn respond(ctx) { pass() }";
         let a = cached_rhai_ast(code).unwrap();
         let b = cached_rhai_ast(code).unwrap();
         assert!(
@@ -124,10 +124,8 @@ mod tests {
 
     #[test]
     fn different_content_compiles_a_distinct_entry() {
-        let a = cached_rhai_ast("fn should_inject(request, flow_store) { #{ inject: false } }")
-            .unwrap();
-        let b = cached_rhai_ast("fn should_inject(request, flow_store) { #{ inject: true, fault: `latency`, duration_ms: 1 } }")
-            .unwrap();
+        let a = cached_rhai_ast("fn respond(ctx) { pass() }").unwrap();
+        let b = cached_rhai_ast("fn respond(ctx) { delay(1) }").unwrap();
         assert!(
             !Arc::ptr_eq(&a, &b),
             "different content must not share a cache entry"
@@ -138,10 +136,8 @@ mod tests {
     fn editing_content_busts_the_cache_key() {
         // Simulates "edit the file, reload": the resolved `code` string changes, so the second
         // call recompiles instead of reusing the first (stale) AST.
-        let original =
-            cached_rhai_ast("fn should_inject(request, flow_store) { #{ inject: false } }")
-                .unwrap();
-        let edited = cached_rhai_ast("fn should_inject(request, flow_store) { #{ inject: true, fault: `latency`, duration_ms: 2 } }").unwrap();
+        let original = cached_rhai_ast("fn respond(ctx) { pass() }").unwrap();
+        let edited = cached_rhai_ast("fn respond(ctx) { delay(2) }").unwrap();
         assert!(!Arc::ptr_eq(&original, &edited));
     }
 
@@ -153,8 +149,7 @@ mod tests {
         let cap = 8;
         let mut cache = CompiledCache::new(cap);
         for i in 0..(cap * 4) {
-            let code =
-                format!("fn should_inject(request, flow_store) {{ #{{ inject: false, n: {i} }} }}");
+            let code = format!("fn respond(ctx) {{ pass(); {i} }}");
             let key = content_key(&code);
             cache.get_or_compile(key, &code).unwrap();
             assert!(
@@ -172,8 +167,8 @@ mod tests {
     #[test]
     fn collision_guard_never_returns_wrong_ast() {
         let mut cache = CompiledCache::new(16);
-        let src_a = "fn should_inject(request, flow_store) { #{ inject: false, tag: 1 } }";
-        let src_b = "fn should_inject(request, flow_store) { #{ inject: false, tag: 2 } }";
+        let src_a = "fn respond(ctx) { pass(); 1 }";
+        let src_b = "fn respond(ctx) { pass(); 2 }";
         let forced_key = 0xC0FFEE_u64;
 
         let a = cache.get_or_compile(forced_key, src_a).unwrap();

@@ -352,9 +352,10 @@ top-level `fault` response form, and scripted faults.
 ## Scripting
 
 `_rift.script` runs a script (engine `rhai` or `javascript`) that decides whether to inject a
-response. The script defines `should_inject(request, flow_store)` and returns a map with an `inject`
-flag; when `inject` is true it also carries `fault`/`status`/`body`/`headers`. The `flow_store` handle
-is keyed by `(flow_id, key)`.
+response. The script defines `respond(ctx)` and returns a result constructor — `http(status, body)`,
+`delay(ms)`, `reset()`, or `pass()`/nothing for no injection. `ctx.state` is a key/value handle
+already scoped to the request's resolved flow id — no explicit flow id argument needed. See
+[Scripting]({{ site.baseurl }}/features/scripting/#ctx-api-v2) for the full `ctx` reference.
 
 ```json
 {
@@ -362,7 +363,7 @@ is keyed by `(flow_id, key)`.
     "flowState": { "backend": "inmemory", "ttlSeconds": 300 },
     "script": {
       "engine": "rhai",
-      "code": "fn should_inject(request, flow_store) { let n = flow_store.increment(\"demo\", \"count\"); #{ inject: true, fault: \"error\", status: 200, body: `count ${n}` } }"
+      "code": "fn respond(ctx) { let n = ctx.state.incr(\"count\"); http(200, `count ${n}`) }"
     }
   }
 }
