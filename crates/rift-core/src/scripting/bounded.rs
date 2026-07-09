@@ -6,13 +6,16 @@
 //! at a wall-clock deadline using the same abort-flag mechanism as the pooled path (#172):
 //! Rhai's `on_progress` callback, and a Lua instruction hook.
 
-use super::{FaultDecision, ScriptCtxExtras, ScriptEngine, ScriptRequest};
+use super::{
+    FaultDecision, ScriptCtxExtras, ScriptEngine, ScriptRequest, ScriptTraceEntry,
+    capture_script_logs, render_decision,
+};
 use crate::extensions::flow_state::FlowStore;
 use crate::imposter::ImposterConfig;
 use anyhow::Result;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::warn;
 
 /// Default script timeout when `_rift.scriptEngine.timeoutMs` is not configured.
@@ -100,6 +103,76 @@ pub async fn should_inject_bounded_with_ctx(
             ))
         }
     }
+}
+
+/// As [`should_inject_bounded_with_ctx`], but also builds a debug-mode script trace (issue #360
+/// Item 3): the rendered decision, wall-clock duration, and any `ctx.logger` lines this run
+/// emitted. Only called when debug mode is on — [`should_inject_bounded_with_ctx`] above is
+/// unchanged and stays the zero-cost default the rest of the time (no capturing subscriber, no
+/// extra `Instant`/allocation).
+pub async fn should_inject_bounded_with_ctx_traced(
+    engine_type: String,
+    code: String,
+    rule_id: String,
+    request: ScriptRequest,
+    flow_store: Arc<dyn FlowStore>,
+    timeout: Duration,
+    ctx_extra: ScriptCtxExtras,
+) -> (Result<FaultDecision>, ScriptTraceEntry) {
+    let abort = Arc::new(AtomicBool::new(false));
+    let run_abort = Arc::clone(&abort);
+    let start = Instant::now();
+    let handle = tokio::task::spawn_blocking(move || {
+        capture_script_logs(|| {
+            run_should_inject_with_abort(
+                &engine_type,
+                &code,
+                &rule_id,
+                &request,
+                flow_store,
+                &run_abort,
+                &ctx_extra,
+            )
+        })
+    });
+
+    let (result, logs) = match tokio::time::timeout(timeout, handle).await {
+        Ok(Ok((result, logs))) => (result, logs),
+        Ok(Err(join_err)) => (
+            Err(anyhow::anyhow!("script task panicked: {join_err}")),
+            Vec::new(),
+        ),
+        Err(_elapsed) => {
+            abort.store(true, Ordering::Relaxed);
+            warn!(
+                "_rift.script execution timed out after {}ms",
+                timeout.as_millis()
+            );
+            (
+                Err(anyhow::anyhow!(
+                    "script execution timed out after {}ms",
+                    timeout.as_millis()
+                )),
+                Vec::new(),
+            )
+        }
+    };
+    let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let decision = match &result {
+        Ok(d) => render_decision(d),
+        Err(e) => format!("error: {e}"),
+    };
+    // Raw (uncapped) logs here: `rift script run` prints them all to the terminal. The
+    // header-bound debug trace caps them at its own serialization site (issue #360) — a
+    // response header, unlike a terminal dump, must stay bounded.
+    let entry = ScriptTraceEntry {
+        hook: "respond".to_string(),
+        decision,
+        duration_ms,
+        logs,
+        cache: None,
+    };
+    (result, entry)
 }
 
 /// Execute `should_inject` synchronously with the abort flag wired into the interpreter, so
@@ -365,5 +438,57 @@ mod tests {
             FaultDecision::Error { status, .. } => assert_eq!(status, 503),
             other => panic!("expected Error decision, got {other:?}"),
         }
+    }
+
+    // Issue #360 Item 3: the traced variant captures the decision, duration, and ctx.logger
+    // lines from a single run, without changing the decision itself.
+    #[tokio::test]
+    async fn traced_variant_captures_decision_duration_and_logs() {
+        let code = r#"
+            fn respond(ctx) {
+                ctx.logger.info("about to respond");
+                http(503, "boom")
+            }
+        "#;
+        let (result, entry) = should_inject_bounded_with_ctx_traced(
+            "rhai".into(),
+            code.into(),
+            "t".into(),
+            req(),
+            store(),
+            Duration::from_millis(2000),
+            ScriptCtxExtras::default(),
+        )
+        .await;
+        match result {
+            Ok(FaultDecision::Error { status, .. }) => assert_eq!(status, 503),
+            other => panic!("expected Error decision, got {other:?}"),
+        }
+        assert_eq!(entry.hook, "respond");
+        assert_eq!(entry.decision, "http(503) body=\"boom\"");
+        assert_eq!(entry.logs, vec!["about to respond".to_string()]);
+        assert!(entry.cache.is_none());
+    }
+
+    // A timeout still produces a trace entry (best-effort: no logs, an error decision string),
+    // instead of panicking or losing the timeout error.
+    #[tokio::test]
+    async fn traced_variant_reports_timeout() {
+        let (result, entry) = should_inject_bounded_with_ctx_traced(
+            "rhai".into(),
+            RUNAWAY_RHAI.into(),
+            "t".into(),
+            req(),
+            store(),
+            Duration::from_millis(150),
+            ScriptCtxExtras::default(),
+        )
+        .await;
+        assert!(result.is_err(), "runaway must time out, not hang");
+        assert!(
+            entry.decision.starts_with("error:"),
+            "got {}",
+            entry.decision
+        );
     }
 }

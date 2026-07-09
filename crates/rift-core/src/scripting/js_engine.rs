@@ -278,6 +278,118 @@ pub(crate) fn bounded_js_context() -> Context {
     context
 }
 
+/// The top-level function names a JS script declares, for the static entrypoint check (issue
+/// #360 Item 1). Two-phase, deliberately NOT a blind `context.eval` of the raw source:
+///
+///  1. **Syntax** — `Script::parse` catches genuine syntax errors WITHOUT executing anything
+///     (exactly what [`JsEngine::new`] does). `Err` here is a real syntax error.
+///  2. **Detection** — evaluate once with the SAME host globals the real execution path binds
+///     (`request`/`flow_store`/`ctx`/`http`/`delay`/`reset`/`pass`), under the SAME
+///     loop-iteration limit ([`JS_SCRIPT_LOOP_ITERATION_LIMIT`]) that stops a top-level
+///     `while(true){}` from hanging. Binding the globals is what keeps a legitimate #357
+///     bare-expression response script (e.g. `http(503, "boom")`, or
+///     `(ctx.request.method === "POST") ? http(503) : pass()`) from spuriously throwing
+///     "http/ctx is not defined" — the very false-fail a blind unbound eval caused. The eval's
+///     own Result is intentionally ignored: JS hoists every top-level `function` declaration onto
+///     the global object BEFORE running statements, so the declared-function set is complete even
+///     if a bare expression later throws at runtime — a runtime throw is not this check's concern
+///     (matching Rhai, which never executes at all).
+///
+/// Returns the names of functions the SCRIPT itself declared (via a before/after global-key
+/// diff), never the host builtins/globals bound above.
+pub(crate) fn declared_functions_js(script: &str) -> Result<Vec<String>> {
+    // Phase 1: syntax only.
+    {
+        let mut parse_ctx = Context::default();
+        boa_engine::Script::parse(Source::from_bytes(script.as_bytes()), None, &mut parse_ctx)
+            .map_err(|e| anyhow!("Syntax error: {e}"))?;
+    }
+
+    // Phase 2: bounded eval with real globals, then diff for declared functions.
+    SCRIPT_RESULT_REGISTRY.with(|r| r.borrow_mut().clear());
+
+    let dummy_request = ScriptRequest {
+        method: "GET".to_string(),
+        path: "/".to_string(),
+        headers: std::collections::HashMap::new(),
+        body: Value::Null,
+        query: std::collections::HashMap::new(),
+        path_params: std::collections::HashMap::new(),
+        raw_body: None,
+    };
+    let ctx_input = ScriptCtxExtras::default().build_ctx_input(&dummy_request);
+    // A top-level `ctx.state.*` call needs a flow store bound; a no-op one is enough — the check
+    // never inspects state, only which functions the script declared.
+    set_current_flow_store(Arc::new(crate::extensions::flow_state::NoOpFlowStore));
+
+    let mut context = Context::default();
+    context
+        .runtime_limits_mut()
+        .set_loop_iteration_limit(JS_SCRIPT_LOOP_ITERATION_LIMIT);
+    context
+        .runtime_limits_mut()
+        .set_recursion_limit(JS_SCRIPT_RECURSION_LIMIT);
+    context
+        .runtime_limits_mut()
+        .set_stack_size_limit(JS_SCRIPT_STACK_SIZE_LIMIT);
+
+    let request_obj = create_request_object(&mut context, &dummy_request)?;
+    let flow_store_obj = create_flow_store_object(&mut context)?;
+    let ctx_obj = create_ctx_object(&mut context, &ctx_input)?;
+    register_result_constructors(&mut context)?;
+
+    let global = context.global_object();
+    global
+        .set(js_string!("request"), request_obj, false, &mut context)
+        .map_err(|e| anyhow!("Failed to set request global: {e}"))?;
+    global
+        .set(
+            js_string!("flow_store"),
+            flow_store_obj,
+            false,
+            &mut context,
+        )
+        .map_err(|e| anyhow!("Failed to set flow_store global: {e}"))?;
+    global
+        .set(js_string!("ctx"), ctx_obj, false, &mut context)
+        .map_err(|e| anyhow!("Failed to set ctx global: {e}"))?;
+
+    let pre_existing: std::collections::HashSet<String> = global
+        .own_property_keys(&mut context)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|k| match k {
+            PropertyKey::String(s) => Some(s.to_std_string_escaped()),
+            _ => None,
+        })
+        .collect();
+
+    // Ignore the eval Result: a bare-expression script may throw at runtime (that's not this
+    // check's job), while hoisted function declarations are already on the global regardless.
+    let _ = context.eval(Source::from_bytes(script.as_bytes()));
+
+    let mut names = Vec::new();
+    for key in global.own_property_keys(&mut context).unwrap_or_default() {
+        let name = match &key {
+            PropertyKey::String(s) => s.to_std_string_escaped(),
+            _ => continue,
+        };
+        if pre_existing.contains(&name) {
+            continue;
+        }
+        if global
+            .get(key, &mut context)
+            .ok()
+            .filter(JsValue::is_callable)
+            .is_some()
+        {
+            names.push(name);
+        }
+    }
+    SCRIPT_RESULT_REGISTRY.with(|r| r.borrow_mut().clear());
+    Ok(names)
+}
+
 /// Inner function that does the actual JavaScript execution
 fn execute_js_script_inner(
     script: &str,

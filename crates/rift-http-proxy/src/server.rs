@@ -156,7 +156,7 @@ pub struct Cli {
     pub intercept_ca_key: Option<PathBuf>,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
     /// Start the Rift server (default command)
     Start,
@@ -191,6 +191,66 @@ pub enum Commands {
         /// Input file path
         #[arg(long, required = true)]
         configfile: PathBuf,
+    },
+
+    /// Validate or run a script outside a running server (issue #360)
+    Script {
+        #[command(subcommand)]
+        action: ScriptAction,
+    },
+}
+
+/// `rift script <check|run>` (issue #360): scripting DX tools that need neither an admin API nor
+/// a running imposter — everything runs synchronously, in-process, against a fixture.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ScriptAction {
+    /// Statically validate a script or config file: engine syntax, entrypoint presence/arity for
+    /// the intended hook, v1-shape deprecation, and (for a config) state-used-without-flowState.
+    /// No server is started. Exits non-zero on any error.
+    Check {
+        /// A raw script file (`.rhai`/`.lua`/`.js`) or a rift config file (JSON/YAML)
+        /// containing `_rift.script` entries.
+        target: PathBuf,
+
+        /// Which entrypoint hook to check a raw script file against
+        /// (`respond`/`matches`/`transform`/`delay`). Ignored for a config file target — every
+        /// `_rift.script` there is a response-position script, i.e. always `respond`.
+        #[arg(long, default_value = "respond")]
+        hook: String,
+    },
+
+    /// Execute a script against a fixture request and seeded flow state — no server running.
+    /// Prints the decision, the mutated flow state, captured `ctx.logger` output, and the
+    /// execution duration.
+    Run {
+        /// Script file (`.rhai`/`.lua`/`.js`).
+        target: PathBuf,
+
+        /// JSON file with the request-object shape scripts see:
+        /// `{method, path, headers, query, pathParams, body}`. All fields are optional; an
+        /// empty `GET /` with no headers/body is used when this flag is omitted entirely.
+        #[arg(long)]
+        request: Option<PathBuf>,
+
+        /// Seed flow state before running: `key=value`, repeatable. The value is parsed as JSON
+        /// when it parses (numbers/bools/objects/arrays/quoted strings); otherwise it's stored
+        /// as a plain string.
+        #[arg(long = "state", value_name = "KEY=VALUE")]
+        state: Vec<String>,
+
+        /// Flow id the seeded state and the script's `ctx.state`/`flow_store` calls use.
+        #[arg(long, default_value = "cli")]
+        flow_id: String,
+
+        /// Script engine (`rhai`/`lua`/`js`). Inferred from the file extension when omitted.
+        #[arg(long)]
+        engine: Option<String>,
+
+        /// Entrypoint hook to run. Only `respond` is wired end-to-end for all three engines
+        /// today (`matches`/`transform`/`delay` are Rhai-only and not yet reachable outside the
+        /// engine's own unit tests) — any other value is a clean error, not a panic.
+        #[arg(long, default_value = "respond")]
+        hook: String,
     },
 }
 

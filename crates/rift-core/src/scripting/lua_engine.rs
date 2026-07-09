@@ -1130,6 +1130,117 @@ pub fn run_should_inject_with_abort_lua(
     call_respond_lua(&lua, &chunk_fn, request, &ctx_input, flow_store, rule_id)
 }
 
+/// The top-level function names a Lua script declares, for the static entrypoint check (issue
+/// #360 Item 1). Like the JS twin, deliberately NOT a blind `.exec()` of the raw source:
+///
+///  1. **Syntax** — `.into_function()` COMPILES without running (exactly what [`LuaEngine::new`]
+///     does). The chunk is given an explicit name so a syntax error's text reads `[string
+///     "<script>"]` rather than leaking the internal on-disk source path. `Err` here is a real
+///     syntax error.
+///  2. **Detection** — Lua has no cheap AST walk and (unlike JS) does not hoist function
+///     declarations, so the top level MUST run for `function respnod(ctx) ... end` to assign its
+///     global. It's executed with the SAME host globals the real path binds
+///     (`request`/`flow_store`/`ctx`/`http`/`delay`/`reset`/`pass`) — so a bare-expression script
+///     (`return http(503, "x")`) doesn't error on an unbound global — AND under a self-tripping
+///     instruction-count budget (LuaJIT disabled so the count hook can't be trace-compiled away,
+///     mirroring [`run_should_inject_with_abort_lua`]) so a top-level `while true do end` can't
+///     hang the check. The chunk's own run Result is ignored; we then diff the globals for any
+///     function the script assigned.
+#[cfg(feature = "lua")]
+pub(crate) fn declared_functions_lua(script: &str) -> Result<Vec<String>> {
+    // Phase 1: compile only (syntax). Named so error text doesn't leak the source path.
+    {
+        let lua = Lua::new();
+        lua.load(script)
+            .set_name("<script>")
+            .into_function()
+            .map_err(|e| anyhow!("Syntax error: {e}"))?;
+    }
+
+    // Phase 2: bounded exec with real globals, then diff for assigned functions.
+    let lua = Lua::new();
+    if let Err(e) = lua.load("if jit then jit.off() end").exec() {
+        tracing::warn!("failed to disable LuaJIT for script check budget: {e}");
+    }
+    // Self-tripping instruction budget: the hook fires every 2048 instructions; erroring after
+    // MAX_HOOK_FIRES fires caps total work at ~MAX_HOOK_FIRES * 2048 instructions (sub-second),
+    // so a runaway top-level loop terminates the check instead of hanging it.
+    const MAX_HOOK_FIRES: u64 = 5000;
+    let fires = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let budget = Arc::clone(&fires);
+    lua.set_hook(
+        mlua::HookTriggers::new().every_nth_instruction(2048),
+        move |_lua, _debug| {
+            if budget.fetch_add(1, Ordering::Relaxed) >= MAX_HOOK_FIRES {
+                Err(mlua::Error::runtime(
+                    "script exceeded instruction budget during check",
+                ))
+            } else {
+                Ok(mlua::VmState::Continue)
+            }
+        },
+    );
+
+    let chunk_fn = lua
+        .load(script)
+        .set_name("<script>")
+        .into_function()
+        .map_err(|e| anyhow!("Syntax error: {e}"))?;
+
+    let dummy_request = ScriptRequest {
+        method: "GET".to_string(),
+        path: "/".to_string(),
+        headers: std::collections::HashMap::new(),
+        body: Value::Null,
+        query: std::collections::HashMap::new(),
+        path_params: std::collections::HashMap::new(),
+        raw_body: None,
+    };
+    let ctx_input = ScriptCtxExtras::default().build_ctx_input(&dummy_request);
+    let flow_store: Arc<dyn FlowStore> = Arc::new(crate::extensions::flow_state::NoOpFlowStore);
+
+    let globals = lua.globals();
+    let request_table =
+        build_v1_request_table(&lua, &dummy_request).map_err(|e| anyhow!("build request: {e}"))?;
+    let flow_store_ud = lua
+        .create_userdata(LuaFlowStore::new(Arc::clone(&flow_store)))
+        .map_err(|e| anyhow!("build flow_store: {e}"))?;
+    let ctx_table = build_ctx_table(&lua, &ctx_input, Arc::clone(&flow_store))
+        .map_err(|e| anyhow!("build ctx: {e}"))?;
+    register_result_constructors(&lua).map_err(|e| anyhow!("register result API: {e}"))?;
+    globals
+        .set("request", request_table)
+        .map_err(|e| anyhow!("set request: {e}"))?;
+    globals
+        .set("flow_store", flow_store_ud)
+        .map_err(|e| anyhow!("set flow_store: {e}"))?;
+    globals
+        .set("ctx", ctx_table)
+        .map_err(|e| anyhow!("set ctx: {e}"))?;
+
+    let pre_existing: std::collections::HashSet<String> = globals
+        .pairs::<LuaValue, LuaValue>()
+        .filter_map(std::result::Result::ok)
+        .filter_map(|(k, _)| lua_string_key(&k))
+        .collect();
+
+    // Ignore the run Result: a bare expression may raise, and the budget hook may trip — a
+    // function assigned before either point is still visible in the global diff below.
+    let _ = chunk_fn.call::<LuaMultiValue>(());
+
+    let names = globals
+        .pairs::<LuaValue, LuaValue>()
+        .filter_map(std::result::Result::ok)
+        .filter_map(|(k, v)| {
+            if !matches!(v, LuaValue::Function(_)) {
+                return None;
+            }
+            lua_string_key(&k).filter(|name| !pre_existing.contains(name))
+        })
+        .collect();
+    Ok(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

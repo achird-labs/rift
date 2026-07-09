@@ -11,7 +11,7 @@ mod compiled_cache;
 mod rhai_engine;
 pub use bounded::{
     DEFAULT_SCRIPT_TIMEOUT_MS, resolve_script_timeout_ms, should_inject_bounded,
-    should_inject_bounded_with_ctx,
+    should_inject_bounded_with_ctx, should_inject_bounded_with_ctx_traced,
 };
 
 pub use rhai_engine::RhaiEngine;
@@ -77,6 +77,17 @@ pub use js_validator::JsValidator;
 // Stub script validation for Admin API
 mod stub_validator;
 pub use stub_validator::{validate_stub, validate_stubs};
+
+// Static entrypoint/arity checking, for `rift script check` (issue #360)
+mod entrypoint_check;
+pub use entrypoint_check::{
+    EntrypointCheckError, EntrypointMatch, check_entrypoint, is_v1_should_inject,
+};
+
+// Script decision/log tracing, for `rift script run` and the debug-mode per-request trace
+// (issue #360)
+mod trace;
+pub use trace::{ScriptTraceEntry, cap_trace_logs, capture_script_logs, render_decision};
 
 /// Script execution result for fault injection decisions
 #[derive(Debug, Clone)]

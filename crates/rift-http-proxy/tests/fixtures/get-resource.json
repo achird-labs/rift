@@ -1,0 +1,10 @@
+{
+  "method": "GET",
+  "path": "/api/resource",
+  "headers": {
+    "accept": "application/json"
+  },
+  "query": {},
+  "pathParams": {},
+  "body": null
+}

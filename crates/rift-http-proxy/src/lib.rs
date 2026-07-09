@@ -31,6 +31,9 @@ pub mod intercept_rules;
 // Imposter config loading (--configfile / --datadir), shared with hot-reload (issue #197)
 pub mod config_loader;
 
+// `rift script check` / `rift script run` (issue #360): scripting DX outside a running server
+pub mod script_cli;
+
 // ===== Embeddable server composition (issue #317) =====
 // Gateway dispatch (issue #212) callable from any listener
 pub mod gateway;
