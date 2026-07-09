@@ -169,9 +169,18 @@ jobs:
             cross build --release --package rift-http-proxy --target ${{ matrix.target }} $FEATURE_FLAGS
             cross build --release --package rift-lint --target ${{ matrix.target }}
             cross build --release --package rift-tui --target ${{ matrix.target }}
-            # No rift-ffi cdylib on musl: the static-only musl toolchain drops the `cdylib`
-            # crate type (issue #205), so a musl librift_ffi can't be produced. gnu Linux covers
-            # the JVM embedded-backend use case.
+            # librift_ffi cdylib for musl (issue #463): a cdylib is a dynamic `.so`, but musl
+            # defaults to `crt-static` (correct for the static binaries above), under which a
+            # cdylib can't be produced. Build rift-ffi in a SEPARATE invocation with crt-static
+            # OFF — scoped to this crate so the binaries stay static — yielding a `.so` that links
+            # against Alpine's musl libc. Enables embedded SDK tests on Alpine CI images.
+            # Scoped to x86_64: that's the lane the issue targets and the one the `musl cdylib`
+            # PR-CI job validates; an aarch64-musl cdylib has no PR-time gate, so it's not shipped
+            # (it would only surface a link failure at release time).
+            if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
+              RUSTFLAGS="-C target-feature=-crt-static" \
+                cross build --release --package rift-ffi --target ${{ matrix.target }} $FEATURE_FLAGS
+            fi
           else
             cargo build --release --package rift-http-proxy --target ${{ matrix.target }} $FEATURE_FLAGS
             cargo build --release --package rift-lint --target ${{ matrix.target }}
@@ -220,8 +229,10 @@ jobs:
 
           # rift-ffi cdylib as a standalone, classifier-named release asset (issue #205): the JVM
           # embedded backend loads the raw library by os/arch, so it ships outside the binary tarball.
-          # Skipped on musl, which can't produce a cdylib (the build step builds no librift_ffi there).
-          if [[ "${{ matrix.target }}" != *"musl"* ]]; then
+          # x86_64 musl now builds a crt-static-off cdylib (issue #463); the classifier carries the
+          # `-musl` suffix, so it's distinct from the gnu asset. aarch64 musl has no cdylib lane
+          # (no PR-CI gate) — the build step produces no librift_ffi there, so skip packaging it.
+          if [[ "${{ matrix.target }}" != "aarch64-unknown-linux-musl" ]]; then
             if [[ "$OSTYPE" == "darwin"* ]]; then EXT="dylib"; else EXT="so"; fi
             FFI_NAME="librift_ffi-${{ matrix.classifier }}.$EXT"
             cp "librift_ffi.$EXT" "$FFI_NAME"

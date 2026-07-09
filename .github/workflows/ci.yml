@@ -127,6 +127,42 @@ jobs:
       - name: Verify ffi-manifest generator
         run: ./scripts/gen-ffi-manifest.sh --self-test
 
+  musl-cdylib:
+    name: musl cdylib
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install cross
+        uses: taiki-e/install-action@cross
+
+      # Issue #463: the release workflow's musl matrix isn't exercised by PR CI, so this job is the
+      # gate that keeps the musl librift_ffi cdylib from silently breaking. It reproduces the
+      # release build path (cross + crt-static OFF + the same feature set) and asserts a
+      # dynamically linked shared object that exports the C-ABI — what Alpine embedded SDK tests
+      # load. crt-static is scoped to this cdylib build; the release binaries stay static.
+      - name: Build librift_ffi cdylib for musl
+        run: |
+          RUSTFLAGS="-C target-feature=-crt-static" \
+            cross build --release --package rift-ffi --target x86_64-unknown-linux-musl \
+            --no-default-features --features javascript,redis-backend
+
+      - name: Assert a shared object exporting the C-ABI
+        run: |
+          lib="target/x86_64-unknown-linux-musl/release/librift_ffi.so"
+          test -f "$lib" || { echo "[fail] musl cdylib not produced at $lib" >&2; exit 1; }
+          file "$lib"
+          file "$lib" | grep -q "shared object" || { echo "[fail] $lib is not a shared object" >&2; exit 1; }
+          for sym in rift_start rift_serve_admin rift_build_info; do
+            nm -D "$lib" | grep -qw "$sym" || { echo "[fail] missing exported C-ABI symbol: $sym" >&2; exit 1; }
+          done
+          echo "[pass] musl librift_ffi cdylib builds and exports the C-ABI"
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

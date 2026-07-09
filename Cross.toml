@@ -5,6 +5,10 @@
 passthrough = [
     "RUST_BACKTRACE",
     "CARGO_TERM_COLOR",
+    # So the release/CI musl librift_ffi cdylib build can disable crt-static
+    # (`-C target-feature=-crt-static`) inside the container — a cdylib is a dynamic .so and
+    # musl defaults to static linking (issue #463).
+    "RUSTFLAGS",
 ]
 
 # x86_64 musl target configuration

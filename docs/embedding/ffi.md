@@ -171,8 +171,9 @@ cargo build -p rift-ffi --release --no-default-features
 Every release ships the `librift_ffi` cdylib as a standalone, classifier-named asset per platform
 (`librift_ffi-<classifier>.{so,dylib,dll}`, e.g. `librift_ffi-linux-x86_64.so`,
 `librift_ffi-darwin-aarch64.dylib`, `librift_ffi-windows-x86_64.dll`) alongside a matching
-`.sha256`. Musl targets have no cdylib (the static-only musl toolchain drops the `cdylib` crate
-type), so they are not published.
+`.sha256`. The x86_64 musl target ships a cdylib too (`librift_ffi-linux-x86_64-musl.so`) — built
+with `crt-static` disabled so the `.so` links dynamically against Alpine's musl libc (the
+platform's static binaries stay statically linked), for embedded SDK tests on Alpine CI images.
 
 To let SDK consumers (rift-java's natives packaging, rift-go's fetcher/loader, spawn-transport
 binary downloads) resolve these assets without hardcoding release-URL patterns, each release also
