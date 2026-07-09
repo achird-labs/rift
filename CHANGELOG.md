@@ -11,6 +11,61 @@ record.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-09
+
+This release lands the scripting developer-experience redesign (Script API v2, file-based
+authoring, declarative templating, and `rift script` tooling) and **removes the Lua engine** —
+consolidating on Rhai and JavaScript. Removing Lua also eliminates the system-LuaJIT dynamic-link
+dependency, so the published `librift_ffi` cdylibs are now self-contained on every platform.
+
+### Added
+- **Script API v2 — a unified `ctx` object** (#442). Injects and decorates receive a single `ctx`
+  with `http(...)`, `delay(...)`, `reset()`, and `pass()` result constructors, replacing the older
+  positional calling conventions.
+- **Flow-scoped script state** (#443): `ctx.state` with `get_or` / `incr_by` / `cas` / `ttl`,
+  backed by an auto-provisioned in-memory store; a configured backend that is down fails loud
+  rather than silently dropping state.
+- **Declarative response templating** (#444): `{{ … }}` template functions in response bodies and
+  headers, behind an opt-in `templated` flag.
+- **Script tooling** (#445): `rift script check` and `rift script run` subcommands, plus a
+  debug-mode script trace showing which hook ran and its decision.
+- **File-based script authoring** (#441): `file:` / `ref:` script references and a named script
+  library resolved from `--scripts-dir` (`RIFT_SCRIPTS_DIR`).
+- **Mountebank v2 fidelity bundle** (#438): the v2 `config`-first inject convention, a native
+  `logger`, script timeouts, `--allowInjection`, error parity, wait functions, and EJS stringify.
+- **`request.pathParams`** (#435): route-pattern path-parameter extraction as a stub field, usable
+  in predicates and response templating.
+- **`ffi-manifest.json` release asset** (#459): a `{version, abi, artifacts[]}` map of the
+  `librift_ffi` cdylibs (platform / file / sha256 / url) so SDK consumers resolve natives without
+  hardcoding release-URL patterns.
+- **x86_64 musl `librift_ffi` cdylib** (#463): a dynamically-linked musl `.so`, for embedded SDK
+  tests on Alpine-based CI hosts.
+- **`rift_stub_warnings` FFI accessor** (#423): stub-overlap analysis warnings over the C-ABI, so
+  embedded consumers get the config-lint the HTTP admin plane already exposed.
+
+### Changed
+- **Stub-overlap analysis moved into the engine, cached, and bounded to O(n)** (#423). It is
+  computed once on stub mutation and cached — no per-`GET` recompute — exact-duplicate detection is
+  O(n) via predicate hashing, and warnings are capped with a `truncated` summary. A multi-tenant
+  imposter with hundreds of overlapping stubs no longer stalls admin create/read (seconds and
+  hundreds of MB → milliseconds and a few MB), and embedded and standalone share one code path.
+
+### Fixed
+- **Predicate-inject errors fail loud** (#440) with a Mountebank-shaped `400`, instead of silently
+  falling through.
+- **Per-imposter script state is keyed on the bound port** (#439), so auto-bind imposters cannot
+  collide in the process-global inject-state map.
+- **Released `librift_ffi` cdylibs are self-contained** (#469): a release-time gate asserts each
+  cdylib's dynamic imports are stock system libraries only, so they `dlopen` on stock hosts without
+  extra packages.
+
+### Removed
+- **The Lua scripting engine** (#451) — Rift consolidates on Rhai and JavaScript. This also removes
+  the system-LuaJIT dynamic-link dependency that made prior `librift_ffi` cdylibs fail to load on
+  hosts without LuaJIT installed. **Breaking:** migrate Lua scripts to Rhai or JavaScript.
+- **The v1 `should_inject` scripting contract** (#454). **Breaking:** use the v2 `ctx` API.
+- **The dead `RIFT_STRICT_FLOW_STORE` toggle** (#456).
+
 ## [0.11.3] - 2026-07-08
 
 ### Added
