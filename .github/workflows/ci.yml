@@ -115,6 +115,18 @@ jobs:
           ./scripts/verify-docs-coverage.sh --self-test
           ./scripts/verify-docs-coverage.sh
 
+  ffi-manifest:
+    name: FFI Manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Issue #459: prove the ffi-manifest.json generator (the release asset SDK consumers read to
+      # resolve librift_ffi cdylibs) works and isn't a no-op, on every PR — so it can't silently
+      # rot before the release workflow runs it for real.
+      - name: Verify ffi-manifest generator
+        run: ./scripts/gen-ffi-manifest.sh --self-test
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

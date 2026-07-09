@@ -368,6 +368,15 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f | head -50
 
+      # Issue #459: emit ffi-manifest.json — a {platform, file, sha256, url} map of the librift_ffi
+      # cdylibs in this release — so SDK consumers (rift-java natives, rift-go fetcher,
+      # spawn-transport downloads) resolve assets from the manifest instead of hardcoding URL
+      # patterns. Sourced from the librift_ffi-*.sha256 assets already downloaded above.
+      - name: Generate FFI manifest
+        run: |
+          ./scripts/gen-ffi-manifest.sh "${{ steps.version.outputs.VERSION }}" artifacts ffi-manifest.json
+          cat ffi-manifest.json
+
       - name: Generate release notes
         id: notes
         run: |
@@ -475,6 +484,7 @@ jobs:
             artifacts/**/*.so
             artifacts/**/*.dylib
             artifacts/**/*.dll
+            ffi-manifest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
