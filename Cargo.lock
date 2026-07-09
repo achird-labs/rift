@@ -3358,6 +3358,7 @@ dependencies = [
 name = "rift-ffi"
 version = "0.1.0"
 dependencies = [
+ "parking_lot",
  "rcgen",
  "reqwest",
  "rift-core",

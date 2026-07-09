@@ -145,6 +145,10 @@ const char* info = rift_build_info();
 - **`rift_last_error`.** `char* rift_last_error(void)` returns the last error message for the current
   thread (**caller frees**), or `NULL` if none. Every operation entry **clears** the thread-local
   error first and sets it on failure, so read it immediately after a sentinel return.
+- **Panic safety.** A Rust panic inside any operation is caught at the boundary and turned into that
+  function's sentinel plus a `rift_last_error` message (never unwinds across the C ABI, never crashes
+  or wedges the host runtime) — so an engine bug degrades to a normal error return you handle exactly
+  like any other failure.
 - **String ownership.** Every `char*` the ABI returns must be released with
   `void rift_free(char* p)` — **except** `rift_build_info`'s pointer, which is static and must not be
   freed. `rift_free(NULL)` is a safe no-op.

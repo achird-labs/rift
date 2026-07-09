@@ -24,10 +24,15 @@
 //!   failure sets it (v1 functions too — additive, their return values are unchanged); the pure
 //!   accessors and `rift_free` leave it untouched so read-then-free is order-independent.
 //!
-//! All `extern "C"` functions are panic-free; under edition 2021 an unexpected unwind aborts
-//! rather than crossing the boundary (defined behaviour). A failed downcall returns its sentinel,
-//! records the reason in [`rift_last_error`], and emits a `tracing` event.
+//! Every `extern "C"` function is wrapped in a panic guard ([`ffi_guard!`], issue #484): a Rust
+//! panic never unwinds across the boundary — it is caught, its message recorded in
+//! [`rift_last_error`], and the function's sentinel returned — so an engine bug degrades to a clean
+//! error instead of crashing or corrupting the host runtime. The handle's locks are non-poisoning
+//! (`parking_lot`) so a caught panic can't wedge every later call on the handle. A failed downcall
+//! (error or caught panic) returns its sentinel, records the reason in [`rift_last_error`], and
+//! emits a `tracing` event.
 
+use parking_lot::Mutex;
 use rift_core::imposter::{ApplyReport, ImposterConfig, ImposterManager, Stub};
 use rift_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
 use rift_core::proxy::truststore::{TrustStorePassword, ca_pem, export_jks, export_pkcs12};
@@ -41,9 +46,31 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 use tracing::warn;
+
+/// Run an FFI body under a panic guard (issue #484): a Rust panic must never unwind across the
+/// `extern "C"` boundary (that is undefined behaviour). A caught panic records its message in
+/// [`rift_last_error`], emits a `tracing` event, and returns the function's `$sentinel`
+/// (null / `0` / `-1` / `()`), so the host sees a clean failure instead of a corrupted runtime.
+macro_rules! ffi_guard {
+    ($name:literal, $sentinel:expr, $body:expr) => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body)) {
+            Ok(value) => value,
+            Err(payload) => {
+                let cause = payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("unknown panic");
+                set_last_error(format!("{}: panicked: {cause}", $name));
+                warn!(panic = %cause, function = $name, "rift-ffi: caught panic at the FFI boundary");
+                $sentinel
+            }
+        }
+    };
+}
 
 thread_local! {
     /// The reason the most recent `rift_*` operation on THIS thread failed, or `None`. Operation
@@ -153,20 +180,22 @@ fn parse_imposter_configs(v: &Value) -> Result<Vec<ImposterConfig>, String> {
 /// created through this handle work without the host installing a provider itself (issue #343).
 #[unsafe(no_mangle)]
 pub extern "C" fn rift_start() -> *mut RiftHandle {
-    clear_last_error();
-    rift_http_proxy::install_default_crypto_provider();
-    match Runtime::new() {
-        Ok(runtime) => Box::into_raw(Box::new(RiftHandle {
-            runtime,
-            manager: Arc::new(ImposterManager::new()),
-            admin: Mutex::new(None),
-            intercept: Mutex::new(None),
-        })),
-        Err(e) => {
-            set_last_error(format!("rift_start: runtime creation failed: {e}"));
-            std::ptr::null_mut()
+    ffi_guard!("rift_start", std::ptr::null_mut(), {
+        clear_last_error();
+        rift_http_proxy::install_default_crypto_provider();
+        match Runtime::new() {
+            Ok(runtime) => Box::into_raw(Box::new(RiftHandle {
+                runtime,
+                manager: Arc::new(ImposterManager::new()),
+                admin: Mutex::new(None),
+                intercept: Mutex::new(None),
+            })),
+            Err(e) => {
+                set_last_error(format!("rift_start: runtime creation failed: {e}"));
+                std::ptr::null_mut()
+            }
         }
-    }
+    })
 }
 
 /// Create an imposter from a JSON config. Returns its port, or `0` on any error
@@ -176,7 +205,7 @@ pub extern "C" fn rift_start() -> *mut RiftHandle {
 /// `h` must be a live handle and `json` a valid C string (or null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_create_imposter(h: *mut RiftHandle, json: *const c_char) -> u16 {
-    unsafe {
+    ffi_guard!("rift_create_imposter", 0, unsafe {
         clear_last_error();
         let (Some(handle), Some(s)) = (handle(h), c_str(json)) else {
             set_last_error("rift_create_imposter: null handle or config pointer");
@@ -202,7 +231,7 @@ pub unsafe extern "C" fn rift_create_imposter(h: *mut RiftHandle, json: *const c
                 0
             }
         }
-    }
+    })
 }
 
 /// Replace all stubs on `port` from a JSON array. Returns `0` on success, `-1` on any error.
@@ -215,7 +244,7 @@ pub unsafe extern "C" fn rift_replace_stubs(
     port: u16,
     json: *const c_char,
 ) -> i32 {
-    unsafe {
+    ffi_guard!("rift_replace_stubs", -1, unsafe {
         clear_last_error();
         let (Some(handle), Some(s)) = (handle(h), c_str(json)) else {
             set_last_error("rift_replace_stubs: null handle or stubs pointer");
@@ -241,7 +270,7 @@ pub unsafe extern "C" fn rift_replace_stubs(
                 -1
             }
         }
-    }
+    })
 }
 
 /// Remove all imposters. Returns `0` on success, `-1` if the handle is null.
@@ -250,7 +279,7 @@ pub unsafe extern "C" fn rift_replace_stubs(
 /// `h` must be a live handle (or null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_delete_all(h: *mut RiftHandle) -> i32 {
-    unsafe {
+    ffi_guard!("rift_delete_all", -1, unsafe {
         clear_last_error();
         let Some(handle) = handle(h) else {
             set_last_error("rift_delete_all: null handle");
@@ -258,7 +287,7 @@ pub unsafe extern "C" fn rift_delete_all(h: *mut RiftHandle) -> i32 {
         };
         handle.runtime.block_on(handle.manager.delete_all());
         0
-    }
+    })
 }
 
 /// Delete one imposter, freeing its port. Returns `0` on success, `-1` on any error
@@ -268,7 +297,7 @@ pub unsafe extern "C" fn rift_delete_all(h: *mut RiftHandle) -> i32 {
 /// `h` must be a live handle (or null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_delete_imposter(h: *mut RiftHandle, port: u16) -> i32 {
-    unsafe {
+    ffi_guard!("rift_delete_imposter", -1, unsafe {
         clear_last_error();
         let Some(handle) = handle(h) else {
             set_last_error("rift_delete_imposter: null handle");
@@ -285,7 +314,7 @@ pub unsafe extern "C" fn rift_delete_imposter(h: *mut RiftHandle, port: u16) -> 
                 -1
             }
         }
-    }
+    })
 }
 
 /// Return the recorded requests for `port` as a JSON array string the caller must free with
@@ -295,7 +324,7 @@ pub unsafe extern "C" fn rift_delete_imposter(h: *mut RiftHandle, port: u16) -> 
 /// `h` must be a live handle (or null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_recorded(h: *mut RiftHandle, port: u16) -> *mut c_char {
-    unsafe {
+    ffi_guard!("rift_recorded", std::ptr::null_mut(), unsafe {
         clear_last_error();
         let Some(handle) = handle(h) else {
             set_last_error("rift_recorded: null handle");
@@ -317,7 +346,7 @@ pub unsafe extern "C" fn rift_recorded(h: *mut RiftHandle, port: u16) -> *mut c_
                 std::ptr::null_mut()
             }
         }
-    }
+    })
 }
 
 /// Return the stub-overlap analysis warnings for `port` as a JSON array string the caller must free
@@ -330,7 +359,7 @@ pub unsafe extern "C" fn rift_recorded(h: *mut RiftHandle, port: u16) -> *mut c_
 /// `h` must be a live handle (or null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_stub_warnings(h: *mut RiftHandle, port: u16) -> *mut c_char {
-    unsafe {
+    ffi_guard!("rift_stub_warnings", std::ptr::null_mut(), unsafe {
         clear_last_error();
         let Some(handle) = handle(h) else {
             set_last_error("rift_stub_warnings: null handle");
@@ -352,7 +381,7 @@ pub unsafe extern "C" fn rift_stub_warnings(h: *mut RiftHandle, port: u16) -> *m
                 std::ptr::null_mut()
             }
         }
-    }
+    })
 }
 
 // ── Admin long tail over direct C-ABI: scenario state + correlated spaces (issue #411) ──────────
@@ -375,7 +404,7 @@ pub unsafe extern "C" fn rift_flow_state_get(
     flow_id: *const c_char,
     key: *const c_char,
 ) -> *mut c_char {
-    unsafe {
+    ffi_guard!("rift_flow_state_get", std::ptr::null_mut(), unsafe {
         clear_last_error();
         let (Some(handle), Some(flow_id), Some(key)) = (handle(h), c_str(flow_id), c_str(key))
         else {
@@ -402,7 +431,7 @@ pub unsafe extern "C" fn rift_flow_state_get(
                 std::ptr::null_mut()
             }
         }
-    }
+    })
 }
 
 /// Set a scenario/flow-state value from a bare JSON value (`value_json`). Returns `0` on success,
@@ -418,7 +447,7 @@ pub unsafe extern "C" fn rift_flow_state_put(
     key: *const c_char,
     value_json: *const c_char,
 ) -> i32 {
-    unsafe {
+    ffi_guard!("rift_flow_state_put", -1, unsafe {
         clear_last_error();
         let (Some(handle), Some(flow_id), Some(key), Some(value_json)) =
             (handle(h), c_str(flow_id), c_str(key), c_str(value_json))
@@ -448,7 +477,7 @@ pub unsafe extern "C" fn rift_flow_state_put(
                 -1
             }
         }
-    }
+    })
 }
 
 /// Delete a scenario/flow-state key. Returns `0` on success, `-1` on any error.
@@ -462,7 +491,7 @@ pub unsafe extern "C" fn rift_flow_state_delete(
     flow_id: *const c_char,
     key: *const c_char,
 ) -> i32 {
-    unsafe {
+    ffi_guard!("rift_flow_state_delete", -1, unsafe {
         clear_last_error();
         let (Some(handle), Some(flow_id), Some(key)) = (handle(h), c_str(flow_id), c_str(key))
         else {
@@ -484,7 +513,7 @@ pub unsafe extern "C" fn rift_flow_state_delete(
                 -1
             }
         }
-    }
+    })
 }
 
 /// Register a stub scoped to `flow_id` (its `space` is set from `flow_id`, ignoring any `space`
@@ -499,7 +528,7 @@ pub unsafe extern "C" fn rift_space_add_stub(
     flow_id: *const c_char,
     stub_json: *const c_char,
 ) -> i32 {
-    unsafe {
+    ffi_guard!("rift_space_add_stub", -1, unsafe {
         clear_last_error();
         let (Some(handle), Some(flow_id), Some(stub_json)) =
             (handle(h), c_str(flow_id), c_str(stub_json))
@@ -526,7 +555,7 @@ pub unsafe extern "C" fn rift_space_add_stub(
                 -1
             }
         }
-    }
+    })
 }
 
 /// List a space's scoped stubs as JSON `{"space","stubs":[…]}` the caller frees with
@@ -540,7 +569,7 @@ pub unsafe extern "C" fn rift_space_list_stubs(
     port: u16,
     flow_id: *const c_char,
 ) -> *mut c_char {
-    unsafe {
+    ffi_guard!("rift_space_list_stubs", std::ptr::null_mut(), unsafe {
         clear_last_error();
         let (Some(handle), Some(flow_id)) = (handle(h), c_str(flow_id)) else {
             set_last_error("rift_space_list_stubs: null handle or flow_id pointer");
@@ -556,7 +585,7 @@ pub unsafe extern "C" fn rift_space_list_stubs(
         into_c_string(
             json!({ "space": flow_id, "stubs": imposter.space_stubs(flow_id) }).to_string(),
         )
-    }
+    })
 }
 
 /// Tear down a space in one call (its scoped stubs, recorded requests, and scenario state — never
@@ -570,7 +599,7 @@ pub unsafe extern "C" fn rift_space_delete(
     port: u16,
     flow_id: *const c_char,
 ) -> i32 {
-    unsafe {
+    ffi_guard!("rift_space_delete", -1, unsafe {
         clear_last_error();
         let (Some(handle), Some(flow_id)) = (handle(h), c_str(flow_id)) else {
             set_last_error("rift_space_delete: null handle or flow_id pointer");
@@ -587,7 +616,7 @@ pub unsafe extern "C" fn rift_space_delete(
                 -1
             }
         }
-    }
+    })
 }
 
 /// The requests recorded for `flow_id` — filtered by the space's resolved flow-id, the same
@@ -602,7 +631,7 @@ pub unsafe extern "C" fn rift_space_recorded(
     port: u16,
     flow_id: *const c_char,
 ) -> *mut c_char {
-    unsafe {
+    ffi_guard!("rift_space_recorded", std::ptr::null_mut(), unsafe {
         clear_last_error();
         let (Some(handle), Some(flow_id)) = (handle(h), c_str(flow_id)) else {
             set_last_error("rift_space_recorded: null handle or flow_id pointer");
@@ -628,7 +657,7 @@ pub unsafe extern "C" fn rift_space_recorded(
                 std::ptr::null_mut()
             }
         }
-    }
+    })
 }
 
 // ── Intercept/TLS-MITM listener + control plane over FFI (issue #410) ────────────────────────────
@@ -674,7 +703,7 @@ pub unsafe extern "C" fn rift_start_intercept(
     h: *mut RiftHandle,
     options_json: *const c_char,
 ) -> *mut c_char {
-    unsafe {
+    ffi_guard!("rift_start_intercept", std::ptr::null_mut(), unsafe {
         clear_last_error();
         let Some(handle) = handle(h) else {
             set_last_error("rift_start_intercept: null handle");
@@ -700,7 +729,7 @@ pub unsafe extern "C" fn rift_start_intercept(
 
         // Hold the slot across build+set so a concurrent call can't race two listeners into
         // existence (one intercept listener per handle).
-        let mut slot = handle.intercept.lock().expect("intercept mutex poisoned");
+        let mut slot = handle.intercept.lock();
         if slot.is_some() {
             set_last_error(
                 "rift_start_intercept: already started (one intercept listener per handle)",
@@ -757,7 +786,7 @@ pub unsafe extern "C" fn rift_start_intercept(
             state: InterceptState { rules, ca },
         });
         into_c_string(response)
-    }
+    })
 }
 
 /// Add one intercept rule (a bare object) or many (a JSON array) — same shape the
@@ -770,7 +799,7 @@ pub unsafe extern "C" fn rift_intercept_add_rules(
     h: *mut RiftHandle,
     rules_json: *const c_char,
 ) -> i32 {
-    unsafe {
+    ffi_guard!("rift_intercept_add_rules", -1, unsafe {
         clear_last_error();
         let (Some(handle), Some(rules_json)) = (handle(h), c_str(rules_json)) else {
             set_last_error("rift_intercept_add_rules: null handle or rules pointer");
@@ -783,7 +812,7 @@ pub unsafe extern "C" fn rift_intercept_add_rules(
                 return -1;
             }
         };
-        let slot = handle.intercept.lock().expect("intercept mutex poisoned");
+        let slot = handle.intercept.lock();
         let Some(plane) = slot.as_ref() else {
             set_last_error("rift_intercept_add_rules: intercept not started");
             return -1;
@@ -797,7 +826,7 @@ pub unsafe extern "C" fn rift_intercept_add_rules(
             }
         }
         0
-    }
+    })
 }
 
 /// Remove all intercept rules. Returns `0` on success, `-1` on any error.
@@ -806,20 +835,20 @@ pub unsafe extern "C" fn rift_intercept_add_rules(
 /// `h` must be a live handle (or null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_intercept_clear_rules(h: *mut RiftHandle) -> i32 {
-    unsafe {
+    ffi_guard!("rift_intercept_clear_rules", -1, unsafe {
         clear_last_error();
         let Some(handle) = handle(h) else {
             set_last_error("rift_intercept_clear_rules: null handle");
             return -1;
         };
-        let slot = handle.intercept.lock().expect("intercept mutex poisoned");
+        let slot = handle.intercept.lock();
         let Some(plane) = slot.as_ref() else {
             set_last_error("rift_intercept_clear_rules: intercept not started");
             return -1;
         };
         plane.state.rules.clear();
         0
-    }
+    })
 }
 
 /// List the current intercept rules as a JSON array the caller frees with [`rift_free`], or null
@@ -829,13 +858,13 @@ pub unsafe extern "C" fn rift_intercept_clear_rules(h: *mut RiftHandle) -> i32 {
 /// `h` must be a live handle (or null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_intercept_list_rules(h: *mut RiftHandle) -> *mut c_char {
-    unsafe {
+    ffi_guard!("rift_intercept_list_rules", std::ptr::null_mut(), unsafe {
         clear_last_error();
         let Some(handle) = handle(h) else {
             set_last_error("rift_intercept_list_rules: null handle");
             return std::ptr::null_mut();
         };
-        let slot = handle.intercept.lock().expect("intercept mutex poisoned");
+        let slot = handle.intercept.lock();
         let Some(plane) = slot.as_ref() else {
             set_last_error("rift_intercept_list_rules: intercept not started");
             return std::ptr::null_mut();
@@ -847,7 +876,7 @@ pub unsafe extern "C" fn rift_intercept_list_rules(h: *mut RiftHandle) -> *mut c
                 std::ptr::null_mut()
             }
         }
-    }
+    })
 }
 
 /// The intercept CA certificate as PEM, the caller frees with [`rift_free`], or null on error
@@ -857,19 +886,19 @@ pub unsafe extern "C" fn rift_intercept_list_rules(h: *mut RiftHandle) -> *mut c
 /// `h` must be a live handle (or null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_intercept_ca_pem(h: *mut RiftHandle) -> *mut c_char {
-    unsafe {
+    ffi_guard!("rift_intercept_ca_pem", std::ptr::null_mut(), unsafe {
         clear_last_error();
         let Some(handle) = handle(h) else {
             set_last_error("rift_intercept_ca_pem: null handle");
             return std::ptr::null_mut();
         };
-        let slot = handle.intercept.lock().expect("intercept mutex poisoned");
+        let slot = handle.intercept.lock();
         let Some(plane) = slot.as_ref() else {
             set_last_error("rift_intercept_ca_pem: intercept not started");
             return std::ptr::null_mut();
         };
         into_c_string(ca_pem(&plane.state.ca))
-    }
+    })
 }
 
 /// Write a truststore for the intercept CA to `out_path` — a truststore is binary, so it is
@@ -886,7 +915,7 @@ pub unsafe extern "C" fn rift_intercept_export_truststore(
     password: *const c_char,
     out_path: *const c_char,
 ) -> i32 {
-    unsafe {
+    ffi_guard!("rift_intercept_export_truststore", -1, unsafe {
         clear_last_error();
         let (Some(handle), Some(format), Some(out_path)) =
             (handle(h), c_str(format), c_str(out_path))
@@ -906,7 +935,7 @@ pub unsafe extern "C" fn rift_intercept_export_truststore(
                 }
             }
         };
-        let slot = handle.intercept.lock().expect("intercept mutex poisoned");
+        let slot = handle.intercept.lock();
         let Some(plane) = slot.as_ref() else {
             set_last_error("rift_intercept_export_truststore: intercept not started");
             return -1;
@@ -941,7 +970,7 @@ pub unsafe extern "C" fn rift_intercept_export_truststore(
                 -1
             }
         }
-    }
+    })
 }
 
 /// Start the real admin API (and, if `metricsPort` is given, the metrics server) in-process on
@@ -964,7 +993,7 @@ pub unsafe extern "C" fn rift_serve_admin(
     h: *mut RiftHandle,
     options_json: *const c_char,
 ) -> *mut c_char {
-    unsafe {
+    ffi_guard!("rift_serve_admin", std::ptr::null_mut(), unsafe {
         clear_last_error();
         let Some(handle) = handle(h) else {
             set_last_error("rift_serve_admin: null handle");
@@ -993,7 +1022,7 @@ pub unsafe extern "C" fn rift_serve_admin(
 
         // Hold the slot across build+set so a concurrent serve_admin on the same handle can't
         // race two planes into existence (one admin plane per handle).
-        let mut slot = handle.admin.lock().expect("admin mutex poisoned");
+        let mut slot = handle.admin.lock();
         if slot.is_some() {
             set_last_error("rift_serve_admin: already serving (one admin plane per handle)");
             return std::ptr::null_mut();
@@ -1010,7 +1039,7 @@ pub unsafe extern "C" fn rift_serve_admin(
                 std::ptr::null_mut()
             }
         }
-    }
+    })
 }
 
 /// Log each imposter an `apply_config` left in `report.failed` (e.g. a port that couldn't bind), so
@@ -1136,7 +1165,7 @@ pub unsafe extern "C" fn rift_apply_config(
     h: *mut RiftHandle,
     config_json: *const c_char,
 ) -> *mut c_char {
-    unsafe {
+    ffi_guard!("rift_apply_config", std::ptr::null_mut(), unsafe {
         clear_last_error();
         let (Some(handle), Some(s)) = (handle(h), c_str(config_json)) else {
             set_last_error("rift_apply_config: null handle or config pointer");
@@ -1181,7 +1210,7 @@ pub unsafe extern "C" fn rift_apply_config(
                 std::ptr::null_mut()
             }
         }
-    }
+    })
 }
 
 /// Build identity as a STATIC JSON string — never freed; probe this symbol to detect a v2 library
@@ -1240,7 +1269,7 @@ pub unsafe extern "C" fn rift_free(p: *mut c_char) {
 /// `h` must be null or a pointer returned by [`rift_start`] and not previously stopped.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_stop(h: *mut RiftHandle) {
-    unsafe {
+    ffi_guard!("rift_stop", (), unsafe {
         clear_last_error();
         if h.is_null() {
             return;
@@ -1248,12 +1277,8 @@ pub unsafe extern "C" fn rift_stop(h: *mut RiftHandle) {
         let handle = Box::from_raw(h);
         // Ordering (issue #343/#410): admin/metrics + intercept listeners down first, then the
         // manager.
-        let plane = handle.admin.lock().expect("admin mutex poisoned").take();
-        let intercept = handle
-            .intercept
-            .lock()
-            .expect("intercept mutex poisoned")
-            .take();
+        let plane = handle.admin.lock().take();
+        let intercept = handle.intercept.lock().take();
         handle.runtime.block_on(async {
             if let Some(plane) = plane {
                 plane.admin.shutdown().await;
@@ -1266,5 +1291,60 @@ pub unsafe extern "C" fn rift_stop(h: *mut RiftHandle) {
             }
             handle.manager.shutdown().await;
         });
+    })
+}
+
+#[cfg(test)]
+mod panic_safety_tests {
+    use super::*;
+
+    // Issue #484: a panic inside an FFI body must be caught at the boundary and turned into the
+    // function's sentinel + a recorded last-error — never unwound across the C ABI.
+    #[test]
+    fn ffi_guard_catches_panic_sets_error_returns_sentinel() {
+        clear_last_error();
+        let r: i32 = ffi_guard!("panic_probe", -1i32, { panic!("boom-{}", 42) });
+        assert_eq!(r, -1, "a caught panic must return the sentinel");
+
+        let err = rift_last_error();
+        assert!(!err.is_null(), "a caught panic must record last_error");
+        let msg = unsafe { CStr::from_ptr(err).to_string_lossy().into_owned() };
+        unsafe { rift_free(err) };
+        assert!(
+            msg.contains("boom-42"),
+            "last_error must carry the panic message: {msg}"
+        );
+        assert!(
+            msg.contains("panic_probe"),
+            "last_error must name the function: {msg}"
+        );
+    }
+
+    // The guard must be transparent on the success path (returns the body's value unchanged).
+    #[test]
+    fn ffi_guard_passes_through_on_success() {
+        let v: u16 = ffi_guard!("ok_probe", 0u16, { 4545u16 });
+        assert_eq!(v, 4545);
+    }
+
+    // The pure accessors / deallocator are deliberately NOT wrapped in `ffi_guard!` (issue #484):
+    // wrapping would call `set_last_error` on panic, breaking the documented contract that
+    // `rift_build_info` and `rift_free` leave a pending last-error untouched (so "check sentinel →
+    // read rift_last_error → rift_free" is order-independent). Pin that contract so a future edit
+    // that accidentally clears last_error in one of these is caught.
+    #[test]
+    fn pure_accessors_do_not_clobber_last_error() {
+        clear_last_error();
+        set_last_error("pending-error");
+        let _ = rift_build_info();
+        unsafe { rift_free(std::ptr::null_mut()) };
+        let err = rift_last_error();
+        assert!(
+            !err.is_null(),
+            "an accessor/free must not clear a pending last_error"
+        );
+        let msg = unsafe { CStr::from_ptr(err).to_string_lossy().into_owned() };
+        unsafe { rift_free(err) };
+        assert_eq!(msg, "pending-error");
     }
 }
