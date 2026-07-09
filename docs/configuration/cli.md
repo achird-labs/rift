@@ -36,6 +36,7 @@ Options:
       --host <HOST>                Bind hostname [default: 0.0.0.0]
       --configfile <FILE>          Load imposters from a JSON/YAML file on startup
       --datadir <DIR>              Directory for persistent imposter storage
+      --scripts-dir <DIR>          Root directory for admin-API `file:`/`ref:` script resolution; references that escape it are rejected (unset ⇒ file-backed scripts via the admin API are refused)
       --allow-injection            Enable JavaScript injection in responses (alias: --allowInjection)
       --local-only                 Only accept connections from localhost
       --loglevel <LEVEL>           Log level: debug, info, warn, error [default: info]
@@ -127,6 +128,8 @@ Environment variables override CLI defaults:
 | `MB_LOCAL_ONLY` | Localhost only | `false` |
 | `MB_LOGLEVEL` | Log level | `info` |
 | `MB_APIKEY` | Admin API authorization token (see `--api-key`) | |
+| `RIFT_SCRIPTS_DIR` | Root directory for admin-API `file:`/`ref:` script resolution (env alias of `--scripts-dir`); references escaping it are rejected | |
+| `RIFT_DEBUG` | Enable debug mode (truthy: `1`/`true`/`yes`/`on`); same as `--debug`. Adds an `x-rift-script-trace` response header and makes response-template errors return a request-time error instead of an empty substitution | off |
 | `RIFT_METRICS_PORT` | Prometheus metrics port | `9090` |
 | `RIFT_DEFAULT_TLS_CERT` | Default TLS certificate (PEM) for HTTPS imposters | |
 | `RIFT_DEFAULT_TLS_KEY` | Default TLS private key (PEM) | |
@@ -316,6 +319,44 @@ Replay saved imposters from a file:
 ```bash
 rift-http-proxy replay --configfile recorded.json
 ```
+
+### script
+
+Validate and run `_rift.script` scripts outside a running server (no admin API, no imposter) — the
+authoring loop from [Scripting]({{ site.baseurl }}/features/scripting/). Two actions:
+
+**`rift script check <target>`** — statically validate a raw script file (`.rhai`/`.lua`/`.js`) or a
+config file (JSON/YAML) with `_rift.script` entries: engine syntax, entrypoint presence/arity for
+the intended hook, v1-shape deprecation, and (for a config) `state`-used-without-`flowState`. Exits
+non-zero on any error — so a script whose entrypoint is misnamed fails here instead of at request
+time.
+
+```bash
+rift-http-proxy script check scripts/fail-twice.rhai
+rift-http-proxy script check scripts/decorate.js --hook respond
+rift-http-proxy script check imposters.yaml            # every _rift.script in the config
+```
+
+| Flag | Description | Default |
+|:-----|:------------|:--------|
+| `--hook <HOOK>` | Entrypoint to check a raw script against: `respond`/`matches`/`transform`/`delay` (ignored for a config target, which is always `respond`) | `respond` |
+
+**`rift script run <target>`** — execute a script against a fixture request and seeded flow state,
+printing the decision, the mutated flow state, captured `ctx.logger` output, and the execution
+duration. No server runs.
+
+```bash
+rift-http-proxy script run scripts/fail-twice.rhai --state attempts=2
+rift-http-proxy script run scripts/echo.js --request fixtures/get-resource.json --flow-id t1
+```
+
+| Flag | Description | Default |
+|:-----|:------------|:--------|
+| `--request <FILE>` | JSON file with the request-object shape scripts see (`{method, path, headers, query, pathParams, body}`; all fields optional) | empty `GET /` |
+| `--state <KEY=VALUE>` | Seed flow state before running (repeatable); the value is parsed as JSON when it parses, else stored as a string | |
+| `--flow-id <ID>` | Flow id the seeded state and the script's `ctx.state`/`flow_store` calls use | `cli` |
+| `--engine <ENGINE>` | Script engine (`rhai`/`lua`/`js`); inferred from the file extension when omitted | (from extension) |
+| `--hook <HOOK>` | Entrypoint to run; only `respond` is wired for all three engines today | `respond` |
 
 ---
 
