@@ -193,8 +193,8 @@ aborts).
 ## Top-Level Fault Response (Mountebank Parity)
 
 Mountebank lets a stub response be a bare `fault` instead of an `is`/`proxy`/`inject` body. Rift
-supports the same shape, and a top-level fault now **resets the connection at the transport level**
-rather than returning an HTTP 502 (Mountebank parity, issue #362):
+supports the same shape, and a top-level fault **resets the connection at the transport level**,
+matching Mountebank's transport-fault semantics:
 
 ```json
 {
@@ -216,9 +216,6 @@ Like `_rift.fault.tcp`, a bare top-level `fault` also forces the whole imposter 
 only**: it is a connection-level event, and aborting a socket mid-stream is incompatible with
 HTTP/2 multiplexing — so an imposter with even one stub returning a top-level `fault` never
 negotiates HTTP/2, regardless of what its other stubs do.
-
-> **Behavior change:** before v0.8.0 a top-level `fault` returned a framed HTTP `502`. It now
-> performs a real connection reset/close, matching Mountebank's transport-fault semantics.
 
 ### Fault Precedence
 
@@ -249,13 +246,13 @@ evaluated. If you want the top-level transport fault, the response must be a bar
 
 For dynamic fault injection based on request data or state, use the scripting feature. Full
 reference (the unified `ctx` object, result constructors, entrypoint placement) lives on the
-[Scripting](./scripting.md#ctx-api-v2) page; this section just shows it applied to fault injection.
+[Scripting](./scripting.md#ctx-api) page; this section just shows it applied to fault injection.
 
 ### Rhai Script - Retry Simulation
 
-Fail the first 2 requests, pass through on the 3rd. Bare-expression form (issue #357): the whole
-script body is the `respond(ctx)` function, with `ctx` already in scope, and `http(status, body)`
-replaces the hand-built `#{ inject:, fault: }` map:
+Fail the first 2 requests, pass through on the 3rd. Bare-expression form: the whole script body is
+the `respond(ctx)` function, with `ctx` already in scope, and `http(status, body)` replaces a
+hand-built `#{ inject:, fault: }` map:
 
 ```json
 {

@@ -172,6 +172,6 @@ store becomes a clean 503 to the API caller rather than a silent fallback.
 Per-request operational metadata travels through a tokio task-local annotation scope:
 `annotate(key: &'static str, value: String)` records a `(key, value)` that a `ResponseDecorator` later
 reads. This is the same mechanism behind the script/behavior error headers — e.g. a script that hits a
-down flow-store backend records an annotation, and a v2 `ctx.state` call against that backend is
+down flow-store backend records an annotation, and a `ctx.state` call against that backend is
 **fail-loud**: it raises a script error that surfaces to the response rather than silently returning a
 default (see [Scripting → `ctx.state` and `ctx.store`]({{ site.baseurl }}/features/scripting/#ctxstate-and-ctxstore)).

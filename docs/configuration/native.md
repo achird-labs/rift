@@ -225,9 +225,7 @@ failure via an `x-rift-<behavior>-error` header. With `strictBehaviors` on, the 
 
 Strict mode can also be forced process-wide with the `RIFT_STRICT_BEHAVIORS` environment variable
 (see [CLI Reference]({{ site.baseurl }}/configuration/cli/)) — the per-imposter flag **or** the env
-var enables it. This is orthogonal to `RIFT_STRICT_FLOW_STORE` ([Scripting]({{ site.baseurl
-}}/features/scripting/)): neither implies the other, since one governs response behaviors and the
-other governs flow-store script errors.
+var enables it.
 
 See [Mountebank Behaviors → Error Semantics]({{ site.baseurl }}/mountebank/behaviors/#error-semantics)
 for the full walkthrough of `decorate`/`shellTransform`/binary failures under strict mode.
@@ -355,7 +353,7 @@ top-level `fault` response form, and scripted faults.
 response. The script defines `respond(ctx)` and returns a result constructor — `http(status, body)`,
 `delay(ms)`, `reset()`, or `pass()`/nothing for no injection. `ctx.state` is a key/value handle
 already scoped to the request's resolved flow id — no explicit flow id argument needed. See
-[Scripting]({{ site.baseurl }}/features/scripting/#ctx-api-v2) for the full `ctx` reference.
+[Scripting]({{ site.baseurl }}/features/scripting/#ctx-api) for the full `ctx` reference.
 
 ```json
 {

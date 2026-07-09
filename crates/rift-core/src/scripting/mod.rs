@@ -1,4 +1,4 @@
-use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result, strict_flow_store};
+use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result};
 use anyhow::{Result, anyhow};
 use rhai::Dynamic;
 use serde_json::Value;
@@ -375,39 +375,20 @@ pub struct ScriptRequest {
 /// Wrapper for FlowStore that can be used in scripts (Rhai and JavaScript)
 /// Uses direct synchronous calls since FlowStore is no longer async
 ///
-/// The `strict` flag decides how a backend failure surfaces (issues #322/#376/#358):
-/// - `strict == true` (the v2 `ctx.state` handle, via [`Self::new_strict`]) — ALWAYS raise a
-///   script error on failure, so the whole v2 surface uniformly fails loud and a store outage is
-///   never conflated with "absent".
-/// - `strict == false` (via [`Self::new`]) — honor the process-global `RIFT_STRICT_FLOW_STORE`
-///   toggle (default lenient: return a fallback and record `last_error()`).
+/// Every op is unconditionally fail-loud (issues #322/#358): a backend failure always raises a
+/// script error, so a store outage is never conflated with "absent"/"false"/"0".
 #[derive(Clone)]
 pub struct ScriptFlowStore {
     store: Arc<dyn FlowStore>,
-    strict: bool,
 }
 
 impl ScriptFlowStore {
-    /// Lenient constructor: fail-loud is gated by the `RIFT_STRICT_FLOW_STORE` toggle (default
-    /// lenient) — read once here at construction.
+    /// The `ctx.state` handle.
     pub fn new(store: Arc<dyn FlowStore>) -> Self {
-        Self {
-            store,
-            strict: strict_flow_store(),
-        }
+        Self { store }
     }
 
-    /// v2 `ctx.state` handle: ALWAYS fail-loud, regardless of the env toggle (issue #358).
-    pub fn new_strict(store: Arc<dyn FlowStore>) -> Self {
-        Self {
-            store,
-            strict: true,
-        }
-    }
-
-    /// Get a value from flow state. Fail-loud (v2 handle, or v1 with the toggle on) raises on a
-    /// backend failure; otherwise returns unit (the lenient #322 fallback) and records the error
-    /// for `last_error()`.
+    /// Get a value from flow state. Raises on a backend failure.
     pub fn get(
         &mut self,
         flow_id: String,
@@ -416,12 +397,11 @@ impl ScriptFlowStore {
         match flow_result("get", self.store.get(&flow_id, &key)) {
             Ok(Some(val)) => Ok(rhai_engine::json_to_dynamic(val)),
             Ok(None) => Ok(Dynamic::UNIT),
-            Err(msg) if self.strict => Err(msg.into()),
-            Err(_) => Ok(Dynamic::UNIT),
+            Err(msg) => Err(msg.into()),
         }
     }
 
-    /// Set a value in flow state. Fail-loud raises on failure; else returns false (lenient #322).
+    /// Set a value in flow state. Raises on a backend failure.
     pub fn set(
         &mut self,
         flow_id: String,
@@ -434,12 +414,11 @@ impl ScriptFlowStore {
             self.store.set(&flow_id, &key, json_val).map(|()| true),
         ) {
             Ok(v) => Ok(v),
-            Err(msg) if self.strict => Err(msg.into()),
-            Err(_) => Ok(false),
+            Err(msg) => Err(msg.into()),
         }
     }
 
-    /// Check if a key exists. Fail-loud raises on failure; else returns false (lenient #322).
+    /// Check if a key exists. Raises on a backend failure.
     pub fn exists(
         &mut self,
         flow_id: String,
@@ -447,12 +426,11 @@ impl ScriptFlowStore {
     ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
         match flow_result("exists", self.store.exists(&flow_id, &key)) {
             Ok(v) => Ok(v),
-            Err(msg) if self.strict => Err(msg.into()),
-            Err(_) => Ok(false),
+            Err(msg) => Err(msg.into()),
         }
     }
 
-    /// Delete a key. Fail-loud raises on failure; else returns false (lenient #322).
+    /// Delete a key. Raises on a backend failure.
     pub fn delete(
         &mut self,
         flow_id: String,
@@ -460,12 +438,11 @@ impl ScriptFlowStore {
     ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
         match flow_result("delete", self.store.delete(&flow_id, &key).map(|()| true)) {
             Ok(v) => Ok(v),
-            Err(msg) if self.strict => Err(msg.into()),
-            Err(_) => Ok(false),
+            Err(msg) => Err(msg.into()),
         }
     }
 
-    /// Increment a counter. Fail-loud raises on failure; else returns 0 (lenient #322).
+    /// Increment a counter. Raises on a backend failure.
     pub fn increment(
         &mut self,
         flow_id: String,
@@ -473,12 +450,11 @@ impl ScriptFlowStore {
     ) -> std::result::Result<i64, Box<rhai::EvalAltResult>> {
         match flow_result("increment", self.store.increment(&flow_id, &key)) {
             Ok(v) => Ok(v),
-            Err(msg) if self.strict => Err(msg.into()),
-            Err(_) => Ok(0),
+            Err(msg) => Err(msg.into()),
         }
     }
 
-    /// Set TTL for a flow. Fail-loud raises on failure; else returns false (lenient #322).
+    /// Set TTL for a flow. Raises on a backend failure.
     pub fn set_ttl(
         &mut self,
         flow_id: String,
@@ -489,8 +465,7 @@ impl ScriptFlowStore {
             self.store.set_ttl(&flow_id, ttl_seconds).map(|()| true),
         ) {
             Ok(v) => Ok(v),
-            Err(msg) if self.strict => Err(msg.into()),
-            Err(_) => Ok(false),
+            Err(msg) => Err(msg.into()),
         }
     }
 
@@ -504,10 +479,8 @@ impl ScriptFlowStore {
     }
 
     // ============================================================
-    // Atomic ops + ergonomic getters (issue #358). Unlike the ops above, these ALWAYS raise a
-    // script error on a backend failure — fail-loud is the entire point of the new API, so a
-    // store outage must never be conflated with "key absent"/"conflict" the way the lenient #322
-    // fallback would.
+    // Atomic ops + ergonomic getters. Like the ops above, these ALWAYS raise a script error on a
+    // backend failure — a store outage must never be conflated with "key absent"/"conflict".
     // ============================================================
 
     /// Get a value, or `default` if the key is absent. A store failure always raises.
@@ -603,23 +576,18 @@ mod tests {
         }
     }
 
-    // Issue #376 lenient contract (default, strict OFF): every Rhai ScriptFlowStore op, on a backend
-    // failure, returns its documented fallback (never raises) AND records the error for
-    // `last_error()` (issue #322). Covers all six ops — the strict/lenient branch is hand-written
-    // per op, so a wrong fallback in any one would be caught here. (The strict raise is covered
-    // end-to-end per engine in issue_376_strict_flow_store.rs; it can't be unit-tested reliably
-    // because `strict_flow_store()` caches the env read per process.)
+    // Every ScriptFlowStore op, on a backend failure, raises a script error AND records the
+    // error for `last_error()` (issue #322). Covers all six ops — a wrong result in any one
+    // would be caught here.
     #[test]
-    fn rhai_flow_store_lenient_ops_return_fallback_and_record_error() {
+    fn rhai_flow_store_ops_fail_loud_and_record_error() {
         use crate::extensions::flow_state::take_last_flow_error;
         let mut s = ScriptFlowStore::new(Arc::new(FailingStore));
 
         let _ = take_last_flow_error();
         assert!(
-            s.get("f".into(), "k".into())
-                .expect("lenient get must not raise")
-                .is_unit(),
-            "get falls back to unit"
+            s.get("f".into(), "k".into()).is_err(),
+            "get must raise on a backend failure"
         );
         assert!(
             take_last_flow_error().is_some_and(|e| e.contains("get")),
@@ -627,38 +595,32 @@ mod tests {
         );
 
         assert!(
-            !s.set("f".into(), "k".into(), Dynamic::from(1))
-                .expect("lenient set must not raise"),
-            "set falls back to false"
+            s.set("f".into(), "k".into(), Dynamic::from(1)).is_err(),
+            "set must raise on a backend failure"
         );
         assert!(take_last_flow_error().is_some_and(|e| e.contains("set")));
 
         assert!(
-            !s.exists("f".into(), "k".into())
-                .expect("lenient exists must not raise"),
-            "exists falls back to false"
+            s.exists("f".into(), "k".into()).is_err(),
+            "exists must raise on a backend failure"
         );
         assert!(take_last_flow_error().is_some_and(|e| e.contains("exists")));
 
         assert!(
-            !s.delete("f".into(), "k".into())
-                .expect("lenient delete must not raise"),
-            "delete falls back to false"
+            s.delete("f".into(), "k".into()).is_err(),
+            "delete must raise on a backend failure"
         );
         assert!(take_last_flow_error().is_some_and(|e| e.contains("delete")));
 
-        assert_eq!(
-            s.increment("f".into(), "k".into())
-                .expect("lenient increment must not raise"),
-            0,
-            "increment falls back to 0"
+        assert!(
+            s.increment("f".into(), "k".into()).is_err(),
+            "increment must raise on a backend failure"
         );
         assert!(take_last_flow_error().is_some_and(|e| e.contains("increment")));
 
         assert!(
-            !s.set_ttl("f".into(), 60)
-                .expect("lenient set_ttl must not raise"),
-            "set_ttl falls back to false"
+            s.set_ttl("f".into(), 60).is_err(),
+            "set_ttl must raise on a backend failure"
         );
         assert!(take_last_flow_error().is_some_and(|e| e.contains("setTtl")));
     }

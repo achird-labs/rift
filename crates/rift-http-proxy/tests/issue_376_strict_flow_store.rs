@@ -1,26 +1,17 @@
-//! Issue #376 gate: a script `ctx.state` op that hits a backend failure RAISES a native script
-//! error instead of returning a fallback value. The raise propagates through
-//! `should_inject_bounded` to the existing 500 (`x-rift-script-error`). Covered for both engines
-//! (Rhai / JS).
+//! A script `ctx.state` op that hits a backend failure RAISES a native script error instead of
+//! returning a fallback value. The raise propagates through `should_inject_bounded` to the
+//! existing 500 (`x-rift-script-error`). Covered for both engines (Rhai / JS).
 //!
 //! The failing backend comes from rift-core's `test-backend` feature: `_rift.flowState.backend =
 //! "failing"` installs a store whose ops fail. This needs no Docker/Redis.
 //!
-//! `ctx.state` is unconditionally fail-loud (issue #358) — unlike the removed v1 `flow_store`
-//! global, this behavior does NOT depend on `RIFT_STRICT_FLOW_STORE`. The env var is still set
-//! here for documentation continuity with the issue #376 gate, but it is a no-op for `ctx.state`.
+//! `ctx.state` is unconditionally fail-loud (issue #358).
 
 use rift_http_proxy::imposter::{ImposterConfig, ImposterManager};
 use std::time::Duration;
 
 fn cfg(v: serde_json::Value) -> ImposterConfig {
     serde_json::from_value(v).expect("test imposter config")
-}
-
-fn enable_strict() {
-    // Set before the first request (and thus the first `strict_flow_store()` read) so the process
-    // reads strict mode as ON. Idempotent: every test in this binary sets the same value.
-    unsafe { std::env::set_var("RIFT_STRICT_FLOW_STORE", "1") };
 }
 
 // A respond(ctx) script that reads ctx.state then passes through. Under a failing backend the
@@ -36,8 +27,7 @@ fn script_imposter(port: u16, engine: &str, code: &str) -> ImposterConfig {
     }))
 }
 
-async fn assert_strict_raises(port: u16, engine: &str, code: &str) {
-    enable_strict();
+async fn assert_fails_loud(port: u16, engine: &str, code: &str) {
     let manager = ImposterManager::new();
     manager
         .create_imposter(script_imposter(port, engine, code))
@@ -52,7 +42,7 @@ async fn assert_strict_raises(port: u16, engine: &str, code: &str) {
     let has_err_header = resp.headers().contains_key("x-rift-script-error");
     assert_eq!(
         status, 500,
-        "strict mode must fail loud (500) when the {engine} flow-store op fails"
+        "ctx.state must fail loud (500) when the {engine} flow-store op fails"
     );
     assert!(
         has_err_header,
@@ -63,8 +53,8 @@ async fn assert_strict_raises(port: u16, engine: &str, code: &str) {
 
 // AC1: Rhai ctx.state failure raises → 500.
 #[tokio::test]
-async fn strict_rhai_flow_store_failure_raises() {
-    assert_strict_raises(
+async fn rhai_flow_store_failure_raises() {
+    assert_fails_loud(
         19961,
         "rhai",
         r#"fn respond(ctx){ ctx.state.get("k"); pass() }"#,
@@ -74,8 +64,8 @@ async fn strict_rhai_flow_store_failure_raises() {
 
 // AC3: JS ctx.state failure raises → 500.
 #[tokio::test]
-async fn strict_js_flow_store_failure_raises() {
-    assert_strict_raises(
+async fn js_flow_store_failure_raises() {
+    assert_fails_loud(
         19963,
         "javascript",
         r#"function respond(ctx){ ctx.state.get("k"); return pass(); }"#,

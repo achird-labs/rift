@@ -42,13 +42,13 @@ An explicit `flowState` block that can't be honored now **fails imposter creatio
 `400 Bad Request` rather than silently downgrading to a no-op store:
 
 - An **unknown backend** string (anything other than `inmemory` or `redis`) is rejected at
-  construction (issue #381) — previously it logged a warning and became a no-op.
+  construction.
 - A **`redis` backend that can't be created** — no redis config block, a connection/pool failure, or
-  a binary built without the `redis-backend` feature — fails creation too (issue #369).
+  a binary built without the `redis-backend` feature — fails creation too.
 
 Only imposters with genuinely **no state surface** stay on the silent no-op store: no `flowState`
-block, no scenario stubs, and no `_rift.script` stub (issue #358). Such an imposter never touches
-the store, so there is nothing to auto-provision.
+block, no scenario stubs, and no `_rift.script` stub. Such an imposter never touches the store, so
+there is nothing to auto-provision.
 
 ### No `flowState`, but a script or scenario stub — auto-provisioned in-memory
 
@@ -63,7 +63,7 @@ box; it just doesn't persist across restarts or get shared across a cluster the 
 
 ## Script API
 
-Scripts read and write flow state through the v2 `ctx.state` handle, which is **pre-scoped to the
+Scripts read and write flow state through the `ctx.state` handle, which is **pre-scoped to the
 request's resolved flow id** — no flow id is passed per call. See
 [Scripting → `ctx.state` and `ctx.store`]({{ site.baseurl }}/features/scripting/#ctxstate-and-ctxstore)
 for the full surface:
@@ -76,7 +76,7 @@ for the full surface:
 | `ctx.state.exists(key)` | bool |
 | `ctx.state.delete(key)` | remove a key |
 | `ctx.state.incr(key)` / `incr_by(key, n)` | atomic increment, returns the new number |
-| `ctx.state.cas(key, expected, new)` | atomic compare-and-set — `{ applied: … }` (issue #311) |
+| `ctx.state.cas(key, expected, new)` | atomic compare-and-set — `{ applied: … }` |
 | `ctx.state.ttl(seconds)` | override the TTL for this flow |
 | `ctx.store.flow(id)` | a handle scoped to a **different** flow id (cross-flow access) |
 
@@ -91,7 +91,7 @@ method names are camelCase (`getOr`/`incrBy`); `cas`/`ttl` are spelled the same 
 Requires `--allow-injection`. The counter is keyed by the `X-Flow-Id` header so each caller retries
 independently.
 
-Using the v2 `ctx.state` API, `ctx.state.incr("attempts")` is already scoped to the caller's flow id
+Using the `ctx.state` API, `ctx.state.incr("attempts")` is already scoped to the caller's flow id
 (per `flowIdSource` below) — no flow-id prelude, no `if n == () { n = 0; }` default dance:
 
 ```json
@@ -138,7 +138,7 @@ curl -X DELETE http://localhost:2525/admin/imposters/4506/flow-state/t1/attempts
 ```
 
 Note: an imposter gets a real store when `_rift.flowState` is configured, or it declares scenario
-stubs, or it has a `_rift.script` stub (auto-provisioned in-memory, issue #358); only an imposter
+stubs, or it has a `_rift.script` stub (auto-provisioned in-memory); only an imposter
 with none of those uses a no-op store where values never persist.
 
 > **Embedding over the C-ABI (non-Rust)**: a non-Rust host can read, write, and delete flow-state

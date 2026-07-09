@@ -3962,10 +3962,10 @@ function respond(ctx) {
             }
         }
 
-        // Issue #358 B1 / #322: the ctx.state ops (get/incr) fail loud even with the toggle unset.
+        // Issue #358 B1 / #322: the ctx.state ops (get/incr) are unconditionally fail-loud.
         #[cfg(feature = "test-backend")]
         #[test]
-        fn v2_state_ops_fail_loud_regardless_of_strict_toggle() {
+        fn state_ops_fail_loud_on_backend_failure() {
             use crate::extensions::flow_state::FailingFlowStore;
             let request = req(HashMap::new(), None);
 

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 fn enable_debug() {
     // SAFETY (env mutation, not memory): set before any request is served, matching the
-    // established RIFT_DEBUG/RIFT_STRICT_FLOW_STORE test pattern in this crate.
+    // established RIFT_DEBUG env-cached-per-process test pattern in this crate.
     unsafe { std::env::set_var("RIFT_DEBUG", "1") };
 }
 

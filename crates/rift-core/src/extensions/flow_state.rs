@@ -448,9 +448,9 @@ pub fn clear_last_flow_error() {
 }
 
 /// Route a script flow-store op result through the shared error seam: on failure, log it and record
-/// it so `flow_store.last_error()` can surface it (issue #322), returning the error MESSAGE so a
-/// strict engine can raise it (issue #376); on success, clear the slot so `last_error()` reflects
-/// only the most recent op. [`log_flow_err`] is the lenient wrapper built on this.
+/// it so `flow_store.last_error()` can surface it (issue #322), returning the error MESSAGE so the
+/// caller can raise it as a script error; on success, clear the slot so `last_error()` reflects
+/// only the most recent op. [`log_flow_err`] is the fallback-returning wrapper built on this.
 pub fn flow_result<T>(op: &str, result: Result<T>) -> std::result::Result<T, String> {
     match result {
         Ok(value) => {
@@ -467,30 +467,9 @@ pub fn flow_result<T>(op: &str, result: Result<T>) -> std::result::Result<T, Str
 }
 
 /// Route a script flow-store op result through the shared error seam, returning the fallback on
-/// failure (recording it for `flow_store.last_error()`, issue #322). This is the lenient contract:
-/// a backend outage yields a fallback value rather than a script error. The strict alternative
-/// (issue #376, gated by [`strict_flow_store`]) uses [`flow_result`] directly to raise instead.
+/// failure (recording it for `flow_store.last_error()`, issue #322).
 pub fn log_flow_err<T>(op: &str, fallback: T, result: Result<T>) -> T {
     flow_result(op, result).unwrap_or(fallback)
-}
-
-/// Whether script flow-store ops fail loud — raise a native script error on a backend failure
-/// instead of returning a fallback value + recording `last_error()` (issue #376). Read once from
-/// the `RIFT_STRICT_FLOW_STORE` env var (`1`/`true`/`yes`/`on`). Default off preserves the lenient
-/// #322 contract. A global gate (like `RIFT_DISABLE_HTTP2`, #378) because scripts run on pooled
-/// worker threads where a per-imposter flag can't be threaded without cross-engine plumbing.
-pub fn strict_flow_store() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        strict_flow_store_from(std::env::var("RIFT_STRICT_FLOW_STORE").ok().as_deref())
-    })
-}
-
-/// Pure parse of the `RIFT_STRICT_FLOW_STORE` value, split out so it can be unit-tested without the
-/// process-global env-var races that a full end-to-end test would hit.
-fn strict_flow_store_from(val: Option<&str>) -> bool {
-    val.map(|v| v.trim().to_ascii_lowercase())
-        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
 }
 
 /// A deliberately failing flow store (feature `test-backend`): every operation annotates
@@ -539,31 +518,6 @@ impl FlowStore for FailingFlowStore {
 #[cfg(test)]
 mod last_flow_error_tests {
     use super::*;
-
-    // AC5 (issue #376): RIFT_STRICT_FLOW_STORE parsing — truthy values fail loud, everything else
-    // keeps the lenient #322 fallback.
-    #[test]
-    fn strict_flow_store_env_parsing() {
-        for on in ["1", "true", "TRUE", " yes ", "On"] {
-            assert!(
-                strict_flow_store_from(Some(on)),
-                "{on:?} should enable strict flow-store mode"
-            );
-        }
-        for off in [
-            None,
-            Some(""),
-            Some("0"),
-            Some("false"),
-            Some("no"),
-            Some("2"),
-        ] {
-            assert!(
-                !strict_flow_store_from(off),
-                "{off:?} should keep the lenient fallback"
-            );
-        }
-    }
 
     // AC1 (issue #322): log_flow_err records a failure so last_error can surface it, and a
     // subsequent success clears it — so last_error reflects only the most recent op.

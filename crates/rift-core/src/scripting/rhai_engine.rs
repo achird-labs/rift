@@ -328,9 +328,8 @@ pub struct RhaiStateHandle {
 impl RhaiStateHandle {
     fn new(store: Arc<dyn FlowStore>, flow_id: String) -> Self {
         Self {
-            // v2 `ctx.state` is always fail-loud (issue #358), independent of the env toggle that
-            // gates the legacy v1 `flow_store` global.
-            inner: ScriptFlowStore::new_strict(store),
+            // `ctx.state` is always fail-loud (issue #358).
+            inner: ScriptFlowStore::new(store),
             flow_id,
         }
     }
@@ -1675,11 +1674,10 @@ mod tests {
             assert!(ttl_result.is_err(), "ttl must propagate a store failure");
         }
 
-        // Issue #358 B1 / #322: the PRE-EXISTING v2 ops (get/incr) are also unconditionally
-        // fail-loud — they raise even with RIFT_STRICT_FLOW_STORE unset.
+        // Issue #358 B1 / #322: the `ctx.state` ops (get/incr) are unconditionally fail-loud.
         #[cfg(feature = "test-backend")]
         #[test]
-        fn v2_state_ops_fail_loud_regardless_of_strict_toggle() {
+        fn state_ops_fail_loud_on_backend_failure() {
             use crate::extensions::flow_state::FailingFlowStore;
             let request = req(HashMap::new(), None);
 

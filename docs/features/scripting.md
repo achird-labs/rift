@@ -11,14 +11,14 @@ Rift supports multiple scripting engines for dynamic behavior.
 
 ---
 
-## Script API v2: unified `ctx`, `respond(ctx)`, result constructors
+## Script API: unified `ctx`, `respond(ctx)`, result constructors
 
 `_rift.script` has a single contract that is **identical across Rhai and JavaScript**: a `ctx`
 object passed into the script, and result constructors instead of a hand-built
-`#{ inject:, fault: }` map — see [`ctx` API v2](#ctx-api-v2) below for the full reference.
+`#{ inject:, fault: }` map — see [`ctx` API](#ctx-api) below for the full reference.
 
 ```rhai
-// v2: named entrypoint
+// named entrypoint
 fn respond(ctx) {
   let n = ctx.state.incr("attempts");
   if n <= 2 {
@@ -30,7 +30,7 @@ fn respond(ctx) {
 ```
 
 ```rhai
-// v2: bare-expression form — no `fn respond(ctx) { ... }` wrapper at all. The whole script body
+// bare-expression form — no `fn respond(ctx) { ... }` wrapper at all. The whole script body
 // IS the function, with `ctx` already in scope. Equivalent to the named form above.
 let n = ctx.state.incr("attempts");
 if n <= 2 {
@@ -107,7 +107,7 @@ function(config, state) {
 ## Rhai (`_rift.script`)
 
 Rhai is a lightweight embedded scripting language optimized for Rust. Scripts define a
-`respond(ctx)` function, or the bare-expression form — see [`ctx` API v2](#ctx-api-v2) below.
+`respond(ctx)` function, or the bare-expression form — see [`ctx` API](#ctx-api) below.
 
 ### Basic Script
 
@@ -280,7 +280,7 @@ directory (`--datadir` files resolve the same way; admin-API-created imposters r
   protocol: http
   _rift:
     flowState: { backend: inmemory, ttlSeconds: 300 }
-    # Named registry (issue #356): give a script a name once, `ref:` it from any response.
+    # Named registry: give a script a name once, `ref:` it from any response.
     scripts:
       failTwice:
         file: scripts/fail-twice.rhai   # engine inferred from the extension: .rhai -> rhai
@@ -343,7 +343,7 @@ unknown `ref:` or a `file:` that can't be read is a config-time validation error
 
 ---
 
-## `ctx` API v2
+## `ctx` API
 
 `ctx` is built the same way, with the same field names and semantics, in every engine and at every
 hook placement. Placement determines which entrypoint the engine looks for:
@@ -402,7 +402,7 @@ ctx.state.exists("key");          // bool
 ctx.state.delete("key");
 ```
 
-Atomic ops and ergonomic getters (issue #358):
+Atomic ops and ergonomic getters:
 
 ```rhai
 let n = ctx.state.get_or("attempts", 0);   // value, or the default if absent — kills
@@ -418,7 +418,7 @@ if outcome.applied {
 }
 ```
 
-`cas(key, expected, new)` is Rift's atomic compare-and-set (issue #311). It always returns an
+`cas(key, expected, new)` is Rift's atomic compare-and-set. It always returns an
 **object** — `{ applied: true }` on success, or `{ applied: false, current: <value> }` on conflict —
 rather than a bare value, so a conflicting stored value that happens to equal `true` can never be
 mistaken for "applied". This shape is identical in both engines; only the method spelling
@@ -457,16 +457,17 @@ ctx.logger.info("handling request " + ctx.request.path);
 
 ### Result constructors
 
-Replace the v1 `#{ inject:, fault: }` map. Available in `respond(ctx)`/`transform(ctx)` (and as the
-return value of a bare-expression script for those placements):
+How `respond(ctx)`/`transform(ctx)` describe what should happen — no hand-built
+`#{ inject:, fault: }` map. Available in `respond(ctx)`/`transform(ctx)` (and as the return value
+of a bare-expression script for those placements):
 
-| Constructor | Meaning | Replaces (v1) |
-|:------------|:--------|:---------------|
-| `http(status)` / `http(status, body)` | respond with this status/body; chain `.header(k, v)` for extra headers | `#{inject:true, fault:"error", status, body, headers}` |
-| `delay(ms)` | inject latency, then respond normally | `#{inject:true, fault:"latency", duration_ms}` |
-| `reset()` | reset the connection (transport-level) | `fault: "tcp"` / a top-level `fault` string |
-| `pass()` | respond normally, no injection | `#{inject: false}` |
-| *(nothing)* | same as `pass()` | `#{inject: false}` |
+| Constructor | Meaning |
+|:------------|:--------|
+| `http(status)` / `http(status, body)` | respond with this status/body; chain `.header(k, v)` for extra headers |
+| `delay(ms)` | inject latency, then respond normally |
+| `reset()` | reset the connection (transport-level) |
+| `pass()` | respond normally, no injection |
+| *(nothing)* | same as `pass()` |
 
 `http`'s body is a **value**, not a hand-assembled JSON string: pass a map/array and it is
 JSON-serialized with `Content-Type: application/json` set automatically (unless you set your own

@@ -150,9 +150,7 @@ Environment variables override CLI defaults:
 [Performance → Runtime socket tuning]({{ site.baseurl }}/performance/#runtime-socket-tuning).
 
 `RIFT_STRICT_BEHAVIORS` and the per-imposter `strictBehaviors` field combine with **OR** — either
-being set enables strict mode. It is orthogonal to `RIFT_STRICT_FLOW_STORE`
-([Scripting]({{ site.baseurl }}/features/scripting/)): the two env vars gate unrelated failure
-paths (response behaviors vs. flow-store script errors), and neither implies the other. See
+being set enables strict mode. See
 [Rift Extensions → Strict Behaviors]({{ site.baseurl }}/configuration/native/#strict-behaviors-strictbehaviors)
 for the full semantics.
 
@@ -327,9 +325,8 @@ authoring loop from [Scripting]({{ site.baseurl }}/features/scripting/). Two act
 
 **`rift script check <target>`** — statically validate a raw script file (`.rhai`/`.js`) or a
 config file (JSON/YAML) with `_rift.script` entries: engine syntax, entrypoint presence/arity for
-the intended hook, v1-shape deprecation, and (for a config) `state`-used-without-`flowState`. Exits
-non-zero on any error — so a script whose entrypoint is misnamed fails here instead of at request
-time.
+the intended hook, and (for a config) `state`-used-without-`flowState`. Exits non-zero on any
+error — so a script whose entrypoint is misnamed fails here instead of at request time.
 
 ```bash
 rift-http-proxy script check scripts/fail-twice.rhai

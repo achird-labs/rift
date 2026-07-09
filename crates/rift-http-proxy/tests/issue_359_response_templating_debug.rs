@@ -3,16 +3,16 @@
 //! substituting an empty string.
 //!
 //! This needs its own process: `RIFT_DEBUG` is read once into a `OnceLock` (mirrors
-//! `RIFT_STRICT_BEHAVIORS`/`RIFT_STRICT_FLOW_STORE`), so it must be set before the very first
-//! template render in this binary.
+//! `RIFT_STRICT_BEHAVIORS`), so it must be set before the very first template render in this
+//! binary.
 
 use rift_http_proxy::imposter::{ImposterConfig, ImposterManager};
 use std::time::Duration;
 
 fn enable_debug() {
     // SAFETY (env mutation, not memory): set before any request is served, so every test in this
-    // binary reads the same (debug-on) value — matches the existing RIFT_STRICT_FLOW_STORE test
-    // pattern (issue_376_strict_flow_store.rs).
+    // binary reads the same (debug-on) value — matches the existing RIFT_DEBUG env-cached-per-
+    // process test pattern (issue_376_strict_flow_store.rs).
     unsafe { std::env::set_var("RIFT_DEBUG", "1") };
 }
 

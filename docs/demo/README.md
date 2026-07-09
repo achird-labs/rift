@@ -280,8 +280,8 @@ curl -X POST http://localhost:4560/js/echo
 
 | Engine | Format | State Access | Request Access |
 |:-------|:-------|:-------------|:---------------|
-| Rhai | `_rift.script` (v2 `ctx`) | `ctx.state.get(key)` | `ctx.request.method`, `ctx.request.path` |
-| JavaScript | `_rift.script` (v2 `ctx`), or `inject` (Mountebank) | `ctx.state.get(key)` | `ctx.request.method` |
+| Rhai | `_rift.script` (`ctx`) | `ctx.state.get(key)` | `ctx.request.method`, `ctx.request.path` |
+| JavaScript | `_rift.script` (`ctx`), or `inject` (Mountebank) | `ctx.state.get(key)` | `ctx.request.method` |
 
 ---
 
