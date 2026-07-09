@@ -1245,6 +1245,35 @@ mod tests {
         serde_json::from_value(v).expect("test imposter config")
     }
 
+    // Issue #423: imposters created through the manager (the path embedded/FFI consumers use, which
+    // previously got NO stub analysis) now carry computed stub-overlap warnings.
+    #[tokio::test]
+    async fn create_imposter_computes_stub_warnings_for_embedded() {
+        use crate::extensions::stub_analysis::WarningType;
+        let manager = ImposterManager::new();
+        let port = manager
+            .create_imposter(imposter_cfg(json!({
+                "protocol": "http",
+                "port": 0,
+                "stubs": [
+                    {"predicates": [{"equals": {"path": "/dup"}}],
+                     "responses": [{"is": {"statusCode": 200, "body": "x"}}]},
+                    {"predicates": [{"equals": {"path": "/dup"}}],
+                     "responses": [{"is": {"statusCode": 200, "body": "x"}}]}
+                ]
+            })))
+            .await
+            .expect("create");
+        let imposter = manager.get_imposter(port).expect("imposter exists");
+        assert!(
+            imposter
+                .stub_warnings()
+                .iter()
+                .any(|w| w.warning_type == WarningType::ExactDuplicate),
+            "embedded/manager-created imposter must have computed stub-analysis warnings"
+        );
+    }
+
     fn stub_json(body: &str) -> serde_json::Value {
         json!({
             "predicates": [{"equals": {"path": format!("/{body}")}}],

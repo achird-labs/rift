@@ -24,7 +24,7 @@ use crate::recording::{
     RequestSignature,
 };
 use anyhow::Context;
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -147,6 +147,10 @@ pub struct Imposter {
     pub flow_store: Arc<dyn FlowStore>,
     /// Pluggable response-cursor backend (issue #313); None = embedded per-stub cycler.
     pub(crate) sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
+    /// Cached stub-overlap analysis warnings (issue #423). `None` = dirty; recomputed lazily on the
+    /// next [`Self::stub_warnings`] read and reused until the next `mutate_stubs`. Keeps the O(n)
+    /// analysis off the per-`GET` hot path and gives HTTP and embedded/FFI one shared code path.
+    stub_warnings: ArcSwapOption<Vec<crate::extensions::stub_analysis::StubWarning>>,
 }
 
 impl Imposter {
@@ -219,6 +223,7 @@ impl Imposter {
             shutdown_tx: None,
             flow_store,
             sequencer,
+            stub_warnings: ArcSwapOption::empty(),
         })
     }
 
@@ -241,7 +246,35 @@ impl Imposter {
         let next_arc = Arc::new(next);
         self.stubs.store(Arc::clone(&next_arc));
         self.stub_index.store(Arc::new(StubIndex::build(next_arc)));
+        // Invalidate the cached stub-analysis warnings (issue #423). This is O(1) — the actual
+        // O(n) recompute is deferred to the next `stub_warnings()` read — so high-frequency
+        // mutations (e.g. proxy recording) don't pay analysis cost on every recorded stub.
+        self.stub_warnings.store(None);
         result
+    }
+
+    /// The imposter's stub-overlap analysis warnings (issue #423), computed once and cached until
+    /// the next stub mutation. The HTTP `GET /imposters/:port` handler and embedded/FFI consumers
+    /// both read this, so analysis runs off the per-read hot path and is identical for standalone
+    /// and embedded instances (which previously got no analysis at all).
+    pub fn stub_warnings(&self) -> Arc<Vec<crate::extensions::stub_analysis::StubWarning>> {
+        // Fast path: a warm cache is a wait-free load, so the request/read hot path never blocks.
+        if let Some(cached) = self.stub_warnings.load_full() {
+            return cached;
+        }
+        // Miss: compute-and-store under the same `stubs_write` lock `mutate_stubs` holds, so a
+        // mutation's invalidation can never be lost by a slow reader that computed over a stale
+        // snapshot (a store racing an invalidation would pin stale warnings). The lock is taken
+        // only on a miss — once per mutation — and the O(n) analysis is off the request hot path.
+        let _writer = self.stubs_write.lock();
+        // Re-check under the lock: another reader may have populated it while we waited.
+        if let Some(cached) = self.stub_warnings.load_full() {
+            return cached;
+        }
+        let warnings = crate::extensions::stub_analysis::analyze_stubs(&self.get_stubs()).warnings;
+        let arc = Arc::new(warnings);
+        self.stub_warnings.store(Some(Arc::clone(&arc)));
+        arc
     }
 
     /// Replace all stubs
@@ -491,6 +524,58 @@ mod tests {
             ..Default::default()
         };
         Imposter::new(config).expect("test imposter")
+    }
+
+    // Issue #423: stub-analysis warnings are computed once and cached — repeated reads return the
+    // SAME Arc (no per-read recompute) — and a stub mutation invalidates the cache so the next read
+    // reflects the new stubs.
+    #[test]
+    fn stub_warnings_cached_until_mutation() {
+        use crate::extensions::stub_analysis::WarningType;
+
+        let cfg = serde_json::from_value(json!({
+            "port": 0,
+            "protocol": "http",
+            "stubs": [
+                { "predicates": [{ "equals": { "path": "/dup" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "x" } }] },
+                { "predicates": [{ "equals": { "path": "/dup" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "x" } }] }
+            ]
+        }))
+        .unwrap();
+        let imp = Imposter::new(cfg).expect("test imposter");
+
+        let a = imp.stub_warnings();
+        assert!(
+            a.iter()
+                .any(|w| w.warning_type == WarningType::ExactDuplicate),
+            "duplicate stubs must be flagged"
+        );
+        let b = imp.stub_warnings();
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "repeated reads must return the cached Arc — no recompute on the hot path"
+        );
+
+        // Mutating the stubs invalidates the cache; the next read recomputes over the new stubs.
+        let distinct: Vec<Stub> = serde_json::from_value(json!([
+            { "predicates": [{ "equals": { "path": "/only" } }],
+              "responses": [{ "is": { "statusCode": 200, "body": "y" } }] }
+        ]))
+        .unwrap();
+        imp.replace_stubs(distinct);
+
+        let c = imp.stub_warnings();
+        assert!(
+            !std::sync::Arc::ptr_eq(&a, &c),
+            "a stub mutation must invalidate the cached warnings"
+        );
+        assert!(
+            !c.iter()
+                .any(|w| w.warning_type == WarningType::ExactDuplicate),
+            "distinct stubs must have no exact-duplicate warning"
+        );
     }
 
     #[test]

@@ -71,6 +71,18 @@ int32_t rift_delete_imposter(RiftHandle *h, uint16_t port);
 char *rift_recorded(RiftHandle *h, uint16_t port);
 
 /**
+ * Return the stub-overlap analysis warnings for `port` as a JSON array string the caller must free
+ * with [`rift_free`] (issue #423). This gives embedded / direct C-ABI consumers the config-lint
+ * warnings (duplicate/shadowed/catch-all stubs) that previously only the HTTP admin layer
+ * surfaced. The warnings are computed once on stub mutation and cached, so this is a cheap read.
+ * Returns null on any error (null/unknown handle or port, or encode failure).
+ *
+ * # Safety
+ * `h` must be a live handle (or null).
+ */
+char *rift_stub_warnings(RiftHandle *h, uint16_t port);
+
+/**
  * Get a scenario/flow-state value as a JSON envelope `{"found","flowId","key","value"}` the caller
  * frees with [`rift_free`]. `found` disambiguates an absent key from a failure: a missing key is a
  * non-error outcome (`{"found":false,"value":null}`), while a null pointer is returned **only** on a

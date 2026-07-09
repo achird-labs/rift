@@ -20,6 +20,8 @@ SYMBOLS=(
   rift_delete_imposter
   rift_build_info
   rift_last_error
+  # issue #423: stub-analysis warnings over the C-ABI
+  rift_stub_warnings
 )
 
 # Issue #344: the checked-in C header is the ABI's source of truth — assert it matches a fresh

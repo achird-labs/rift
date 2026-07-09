@@ -16,6 +16,16 @@ use crate::imposter::{Predicate, PredicateOperation};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// Cap on the number of stub-analysis warnings retained in a single result (issue #423). Beyond
+/// this, a single [`WarningType::Truncated`] summary records how many were suppressed, so a
+/// pathological config (thousands of overlapping stubs) can't allocate unbounded memory.
+pub const MAX_STUB_WARNINGS: usize = 100;
+
+/// Above this stub count the O(n²) subset-shadowing heuristic is skipped (issue #423): it is
+/// advisory only, and quadratic pairwise comparison is not worth its cost on large imposters.
+/// Exact-duplicate detection stays O(n) (hash-based) at any size.
+const SHADOW_HEURISTIC_MAX_STUBS: usize = 200;
+
 /// Warning types for stub analysis (Rift extension)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +59,9 @@ pub enum WarningType {
     CatchAll,
     /// Catch-all stub is not at the end of the list
     CatchAllNotLast,
+    /// Analysis produced more warnings than the retained cap; the summary records how many were
+    /// suppressed (issue #423).
+    Truncated,
 }
 
 /// Result of stub analysis
@@ -78,110 +91,183 @@ impl StubAnalysisResult {
 /// This is a Rift extension - Mountebank does not provide this functionality.
 pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
     let mut result = StubAnalysisResult::new();
+    // Count of every warning the analysis *would* emit; `result.warnings` retains at most
+    // MAX_STUB_WARNINGS of them, and the gap becomes the Truncated summary (issue #423).
+    let mut total: usize = 0;
+    let mut push = |warnings: &mut Vec<StubWarning>, w: StubWarning| {
+        total += 1;
+        if warnings.len() < MAX_STUB_WARNINGS {
+            warnings.push(w);
+        }
+    };
 
-    // Track IDs for duplicate detection
     let mut seen_ids: HashMap<String, usize> = HashMap::new();
-
-    // Track catch-all stubs
-    let mut catch_all_indices: Vec<usize> = vec![];
+    // Canonical predicate-set key -> first stub index carrying it. Exact-duplicate detection is
+    // O(n) instead of the old O(n²) pairwise scan (issue #423): the key encodes exactly what
+    // `predicates_equal` compares — the predicate count plus the order-independent, de-duplicated
+    // set of canonicalized predicates — so a hash hit means the same match set.
+    let mut seen_predicates: HashMap<String, usize> = HashMap::new();
+    // Index of the first catch-all (empty-predicate) stub seen so far.
+    let mut first_catch_all: Option<usize> = None;
+    // The subset-shadowing heuristic is the only remaining quadratic scan; gate it by size.
+    let run_shadow_heuristic = stubs.len() <= SHADOW_HEURISTIC_MAX_STUBS;
 
     for (index, stub) in stubs.iter().enumerate() {
-        // Check for duplicate IDs
+        // Duplicate IDs.
         if let Some(id) = &stub.id {
             if let Some(&existing_index) = seen_ids.get(id) {
-                result.add_warning(StubWarning {
-                    warning_type: WarningType::DuplicateId,
-                    message: format!(
-                        "Stub at index {index} has duplicate ID '{id}' (same as stub at index {existing_index})"
-                    ),
-                    stub_index: Some(index),
-                    stub_id: Some(id.clone()),
-                    shadowed_by_index: Some(existing_index),
-                });
+                push(
+                    &mut result.warnings,
+                    StubWarning {
+                        warning_type: WarningType::DuplicateId,
+                        message: format!(
+                            "Stub at index {index} has duplicate ID '{id}' (same as stub at index {existing_index})"
+                        ),
+                        stub_index: Some(index),
+                        stub_id: Some(id.clone()),
+                        shadowed_by_index: Some(existing_index),
+                    },
+                );
             } else {
                 seen_ids.insert(id.clone(), index);
             }
         }
 
-        // Check for catch-all stubs (empty predicates)
+        // Catch-all (empty predicates).
         if stub.predicates.is_empty() {
-            catch_all_indices.push(index);
-            result.add_warning(StubWarning {
-                warning_type: WarningType::CatchAll,
-                message: format!(
-                    "Stub at index {index} has empty predicates and will match ALL requests"
-                ),
-                stub_index: Some(index),
-                stub_id: stub.id.clone(),
-                shadowed_by_index: None,
-            });
-        }
-
-        // Check for exact predicate duplicates
-        for (earlier_index, earlier_stub) in stubs[..index].iter().enumerate() {
-            if predicates_equal(&stub.predicates, &earlier_stub.predicates) {
-                result.add_warning(StubWarning {
-                    warning_type: WarningType::ExactDuplicate,
+            if first_catch_all.is_none() {
+                first_catch_all = Some(index);
+            }
+            push(
+                &mut result.warnings,
+                StubWarning {
+                    warning_type: WarningType::CatchAll,
                     message: format!(
-                        "Stub at index {index} has identical predicates to stub at index {earlier_index} and will never match"
+                        "Stub at index {index} has empty predicates and will match ALL requests"
                     ),
                     stub_index: Some(index),
                     stub_id: stub.id.clone(),
-                    shadowed_by_index: Some(earlier_index),
-                });
+                    shadowed_by_index: None,
+                },
+            );
+        }
+
+        // Exact predicate duplicates — O(1) hash lookup against the first stub with this key.
+        let key = predicate_key(&stub.predicates);
+        match seen_predicates.get(&key) {
+            Some(&first_index) => push(
+                &mut result.warnings,
+                StubWarning {
+                    warning_type: WarningType::ExactDuplicate,
+                    message: format!(
+                        "Stub at index {index} has identical predicates to stub at index {first_index} and will never match"
+                    ),
+                    stub_index: Some(index),
+                    stub_id: stub.id.clone(),
+                    shadowed_by_index: Some(first_index),
+                },
+            ),
+            None => {
+                seen_predicates.insert(key, index);
             }
         }
 
-        // Check for potential shadowing by earlier stubs
-        // This is a heuristic check for common shadowing scenarios
+        // Potential shadowing of a specific (non-empty) stub by an earlier one.
         if !stub.predicates.is_empty() {
-            for (earlier_index, earlier_stub) in stubs[..index].iter().enumerate() {
-                if earlier_stub.predicates.is_empty() {
-                    // Catch-all before this stub
-                    result.add_warning(StubWarning {
+            // Any earlier catch-all shadows this stub — O(1) via the first-catch-all index.
+            if let Some(catch_all_index) = first_catch_all {
+                push(
+                    &mut result.warnings,
+                    StubWarning {
                         warning_type: WarningType::PotentiallyShadowed,
                         message: format!(
-                            "Stub at index {index} may be shadowed by catch-all stub at index {earlier_index}"
+                            "Stub at index {index} may be shadowed by catch-all stub at index {catch_all_index}"
                         ),
                         stub_index: Some(index),
                         stub_id: stub.id.clone(),
-                        shadowed_by_index: Some(earlier_index),
-                    });
-                } else if is_subset_predicates(&stub.predicates, &earlier_stub.predicates) {
-                    // Earlier stub has more specific predicates that are a subset
-                    // This means the earlier stub will match first for overlapping requests
-                    result.add_warning(StubWarning {
-                        warning_type: WarningType::PotentiallyShadowed,
-                        message: format!(
-                            "Stub at index {index} may be partially shadowed by stub at index {earlier_index} which has overlapping predicates"
-                        ),
-                        stub_index: Some(index),
-                        stub_id: stub.id.clone(),
-                        shadowed_by_index: Some(earlier_index),
-                    });
+                        shadowed_by_index: Some(catch_all_index),
+                    },
+                );
+            }
+            // Subset-overlap heuristic — the remaining O(n²) scan, skipped on large imposters.
+            if run_shadow_heuristic {
+                for (earlier_index, earlier_stub) in stubs[..index].iter().enumerate() {
+                    if !earlier_stub.predicates.is_empty()
+                        && is_subset_predicates(&stub.predicates, &earlier_stub.predicates)
+                    {
+                        push(
+                            &mut result.warnings,
+                            StubWarning {
+                                warning_type: WarningType::PotentiallyShadowed,
+                                message: format!(
+                                    "Stub at index {index} may be partially shadowed by stub at index {earlier_index} which has overlapping predicates"
+                                ),
+                                stub_index: Some(index),
+                                stub_id: stub.id.clone(),
+                                shadowed_by_index: Some(earlier_index),
+                            },
+                        );
+                    }
                 }
             }
         }
     }
 
-    // Warn if catch-all is not at the end
-    if let Some(&catch_all_idx) = catch_all_indices.first()
+    // Warn if a catch-all is not at the end.
+    if let Some(catch_all_idx) = first_catch_all
         && catch_all_idx < stubs.len() - 1
     {
-        result.add_warning(StubWarning {
-            warning_type: WarningType::CatchAllNotLast,
+        push(
+            &mut result.warnings,
+            StubWarning {
+                warning_type: WarningType::CatchAllNotLast,
+                message: format!(
+                    "Catch-all stub at index {} will shadow {} stub(s) after it",
+                    catch_all_idx,
+                    stubs.len() - catch_all_idx - 1
+                ),
+                stub_index: Some(catch_all_idx),
+                stub_id: stubs[catch_all_idx].id.clone(),
+                shadowed_by_index: None,
+            },
+        );
+    }
+
+    // Record how many warnings were suppressed by the cap rather than silently dropping them.
+    let retained = result.warnings.len();
+    if total > retained {
+        result.warnings.push(StubWarning {
+            warning_type: WarningType::Truncated,
             message: format!(
-                "Catch-all stub at index {} will shadow {} stub(s) after it",
-                catch_all_idx,
-                stubs.len() - catch_all_idx - 1
+                "{} additional stub warning(s) suppressed (showing first {retained})",
+                total - retained
             ),
-            stub_index: Some(catch_all_idx),
-            stub_id: stubs[catch_all_idx].id.clone(),
+            stub_index: None,
+            stub_id: None,
             shadowed_by_index: None,
         });
     }
 
     result
+}
+
+/// Canonical key for a predicate list that matches [`predicates_equal`] semantics: two lists share
+/// a key iff they have the same length and the same order-independent set of canonicalized
+/// predicates. Used for O(n) exact-duplicate detection (issue #423).
+fn predicate_key(predicates: &[Predicate]) -> String {
+    let mut set: Vec<String> = predicates
+        .iter()
+        .map(|pred| {
+            let mut value =
+                serde_json::to_value(pred).expect("predicate can be serialized to json");
+            value.sort_all_objects();
+            value.to_string()
+        })
+        .collect();
+    set.sort();
+    set.dedup();
+    // Length prefix so `[P, P]` and `[P]` (equal sets, different lengths) stay distinct.
+    format!("{}\u{1e}{}", predicates.len(), set.join("\u{1e}"))
 }
 
 /// Analyzes adding a new stub to existing stubs.
@@ -510,6 +596,104 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| w.warning_type == WarningType::ExactDuplicate)
+        );
+    }
+
+    // Issue #423: N identical-predicate stubs must be analyzed in O(N) with a bounded warning set
+    // (the old O(N²) exact-duplicate loop emitted ≈N²/2 warnings — hundreds of MB at N=1000).
+    #[test]
+    fn analyze_stubs_linear_capped_on_overlap() {
+        let stubs: Vec<Stub> = (0..500)
+            .map(|_| stub_with_predicates(vec![json!({"equals": {"path": "/data"}})]))
+            .collect();
+
+        let result = analyze_stubs(&stubs);
+
+        // Bounded: at most the cap plus the single Truncated summary — never O(N²).
+        assert!(
+            result.warnings.len() <= MAX_STUB_WARNINGS + 1,
+            "warnings must be bounded, got {}",
+            result.warnings.len()
+        );
+        // The overlap is still detected...
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::ExactDuplicate)
+        );
+        // ...and truncation is reported rather than silently dropped, with the exact count.
+        // 500 identical stubs => 499 ExactDuplicate warnings (stubs 1..=499); 100 retained,
+        // 399 suppressed (the shadow heuristic is gated off at N=500, so nothing else fires).
+        let summary = result
+            .warnings
+            .iter()
+            .find(|w| w.warning_type == WarningType::Truncated)
+            .expect("a Truncated summary must record the suppressed warnings");
+        assert!(
+            summary.message.contains("399 additional"),
+            "wrong suppressed count: {}",
+            summary.message
+        );
+    }
+
+    // Issue #423: exact-duplicate detection is now O(n) and points every duplicate at the FIRST
+    // occurrence — three identical stubs yield exactly two warnings (not one per earlier pair).
+    #[test]
+    fn exact_duplicate_points_at_first_occurrence() {
+        let stubs: Vec<Stub> = (0..3)
+            .map(|_| stub_with_predicates(vec![json!({"equals": {"path": "/same"}})]))
+            .collect();
+
+        let result = analyze_stubs(&stubs);
+        let dups: Vec<&StubWarning> = result
+            .warnings
+            .iter()
+            .filter(|w| w.warning_type == WarningType::ExactDuplicate)
+            .collect();
+        assert_eq!(
+            dups.len(),
+            2,
+            "one warning per later duplicate, not per pair"
+        );
+        assert!(
+            dups.iter().all(|w| w.shadowed_by_index == Some(0)),
+            "each duplicate must point at the first occurrence"
+        );
+    }
+
+    // Issue #423: the O(n²) subset-shadowing heuristic is gated off above the threshold, so a
+    // general stub followed by many specifics doesn't reintroduce quadratic work — while the same
+    // shape below the threshold still produces the advisory warning.
+    #[test]
+    fn subset_shadow_heuristic_gated_above_threshold() {
+        let mut stubs = vec![stub_with_predicates(vec![
+            json!({"startsWith": {"path": "/api"}}),
+        ])];
+        for i in 0..SHADOW_HEURISTIC_MAX_STUBS {
+            stubs.push(stub_with_predicates(vec![
+                json!({"equals": {"path": format!("/api/{i}")}}),
+            ]));
+        }
+        assert!(stubs.len() > SHADOW_HEURISTIC_MAX_STUBS);
+        assert!(
+            !analyze_stubs(&stubs)
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::PotentiallyShadowed),
+            "subset-shadowing heuristic must be skipped above the threshold"
+        );
+
+        let small = vec![
+            stub_with_predicates(vec![json!({"startsWith": {"path": "/api"}})]),
+            stub_with_predicates(vec![json!({"equals": {"path": "/api/users"}})]),
+        ];
+        assert!(
+            analyze_stubs(&small)
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::PotentiallyShadowed),
+            "below the threshold the heuristic still runs"
         );
     }
 

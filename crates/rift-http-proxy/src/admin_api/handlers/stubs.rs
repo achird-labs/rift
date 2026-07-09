@@ -8,7 +8,7 @@ use crate::admin_api::types::{
     AddStubRequest, ReplaceStubsRequest, StubWithLinks, collect_body, error_response,
     json_response, make_stub_links,
 };
-use crate::extensions::stub_analysis::{analyze_new_stub, analyze_stubs};
+use crate::extensions::stub_analysis::analyze_new_stub;
 use crate::imposter::{ImposterManager, Stub, resolve_stub_scripts};
 use crate::scripting::{validate_stub, validate_stubs};
 use bytes::Bytes;
@@ -180,17 +180,8 @@ pub async fn handle_replace_all(
         );
     }
 
-    // Analyze the new stubs (Rift extension)
-    let analysis = analyze_stubs(&replace_req.stubs);
-    for warning in &analysis.warnings {
-        warn!(
-            port = port,
-            warning_type = ?warning.warning_type,
-            "Stub replacement warning: {}",
-            warning.message
-        );
-    }
-
+    // Stub-overlap analysis is computed once in core on the replace (issue #423) and surfaced by
+    // the GET render below via the imposter's cached warnings — no redundant recompute here.
     if let Err(e) = manager.replace_stubs(port, replace_req.stubs).await {
         return e.into();
     }

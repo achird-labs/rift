@@ -7,7 +7,6 @@ use crate::admin_api::types::{
     error_response, json_response, make_imposter_links, make_stub_links,
 };
 use crate::extensions::decorate::backend_error_response;
-use crate::extensions::stub_analysis::analyze_stubs;
 use crate::imposter::{
     Imposter, ImposterConfig, ImposterError, ImposterManager, Predicate, PredicateOperation,
     RecordedRequest, ScriptBaseDir, Stub, StubResponse, resolve_scripts,
@@ -372,9 +371,12 @@ pub async fn handle_get(
                 stubs = filter_proxy_stubs(stubs);
             }
 
-            let analysis = analyze_stubs(&stubs);
-            if analysis.has_warnings() {
-                for warning in &analysis.warnings {
+            // Cached stub-overlap analysis (issue #423): computed once in core on stub mutation,
+            // not recomputed here on every read. Reflects the imposter's real stubs regardless of
+            // the `removeProxies` view (the warnings are advisory).
+            let warnings = imposter.stub_warnings();
+            if !warnings.is_empty() {
+                for warning in warnings.iter() {
                     warn!(
                         port = port,
                         warning_type = ?warning.warning_type,
@@ -391,9 +393,9 @@ pub async fn handle_get(
                 .as_ref()
                 .and_then(|r| r.flow_state.as_ref())
                 .map(expose_flow_state);
-            let rift_extensions = if analysis.has_warnings() || flow_state.is_some() {
+            let rift_extensions = if !warnings.is_empty() || flow_state.is_some() {
                 Some(RiftImposterExtensions {
-                    warnings: analysis.warnings,
+                    warnings: (*warnings).clone(),
                     flow_state,
                 })
             } else {

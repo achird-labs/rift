@@ -320,6 +320,41 @@ pub unsafe extern "C" fn rift_recorded(h: *mut RiftHandle, port: u16) -> *mut c_
     }
 }
 
+/// Return the stub-overlap analysis warnings for `port` as a JSON array string the caller must free
+/// with [`rift_free`] (issue #423). This gives embedded / direct C-ABI consumers the config-lint
+/// warnings (duplicate/shadowed/catch-all stubs) that previously only the HTTP admin layer
+/// surfaced. The warnings are computed once on stub mutation and cached, so this is a cheap read.
+/// Returns null on any error (null/unknown handle or port, or encode failure).
+///
+/// # Safety
+/// `h` must be a live handle (or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_stub_warnings(h: *mut RiftHandle, port: u16) -> *mut c_char {
+    unsafe {
+        clear_last_error();
+        let Some(handle) = handle(h) else {
+            set_last_error("rift_stub_warnings: null handle");
+            return std::ptr::null_mut();
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_stub_warnings: {e}"));
+                warn!(error = %e, port, "rift_stub_warnings: no such imposter");
+                return std::ptr::null_mut();
+            }
+        };
+        match serde_json::to_string(&*imposter.stub_warnings()) {
+            Ok(json) => into_c_string(json),
+            Err(e) => {
+                set_last_error(format!("rift_stub_warnings: encode failed: {e}"));
+                warn!(error = %e, port, "rift_stub_warnings: failed to encode warnings");
+                std::ptr::null_mut()
+            }
+        }
+    }
+}
+
 // ── Admin long tail over direct C-ABI: scenario state + correlated spaces (issue #411) ──────────
 // Each function calls the same `ImposterManager`/`Imposter` methods the admin-HTTP handlers call
 // and returns the same JSON, so an embedder can drive scenario state and correlated spaces with

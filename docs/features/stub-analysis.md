@@ -174,6 +174,32 @@ A catch-all stub appears before other stubs, shadowing them:
 }
 ```
 
+### truncated
+
+Analysis retains at most 100 warnings per imposter. If more are produced (e.g. hundreds of
+overlapping stubs), a single `truncated` summary records how many were suppressed instead of
+returning an unbounded list:
+
+```json
+{
+  "warningType": "truncated",
+  "message": "412 additional stub warning(s) suppressed (showing first 100)"
+}
+```
+
+---
+
+## Performance & availability
+
+Analysis is computed **once when the stubs change** (on create and stub replace/add) and cached on
+the imposter; `GET /imposters/:port` returns the cached warnings without recomputing. Exact-duplicate
+detection is O(n) (hash-based), and warnings are capped (see `truncated`), so even a pathological
+config with thousands of overlapping stubs stays cheap and bounded.
+
+Because the analysis now lives in the engine, **embedded consumers get it too**: over the C-ABI,
+call `rift_stub_warnings(handle, port)` to retrieve the same warnings as a JSON array (see
+[Embedding — FFI](../embedding/ffi.md)).
+
 ---
 
 ## Stub ID Field
