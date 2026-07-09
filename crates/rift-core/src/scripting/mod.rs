@@ -1,4 +1,4 @@
-use crate::extensions::flow_state::{FlowStore, flow_result, strict_flow_store};
+use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result, strict_flow_store};
 use anyhow::{Result, anyhow};
 use rhai::Dynamic;
 use serde_json::Value;
@@ -386,19 +386,40 @@ pub struct ScriptRequest {
 
 /// Wrapper for FlowStore that can be used in scripts (both Rhai and Lua)
 /// Uses direct synchronous calls since FlowStore is no longer async
+///
+/// The `strict` flag decides how a backend failure surfaces (issues #322/#376/#358):
+/// - `strict == true` (the v2 `ctx.state` handle) — ALWAYS raise a script error on failure, so the
+///   whole v2 surface uniformly fails loud and a store outage is never conflated with "absent".
+/// - `strict == false` (the legacy v1 `flow_store` global, `should_inject(request, flow_store)`) —
+///   honor the process-global `RIFT_STRICT_FLOW_STORE` toggle (default lenient: return a fallback
+///   and record `last_error()`), preserving #322/#376 back-compat for v1 scripts.
 #[derive(Clone)]
-
 pub struct ScriptFlowStore {
     store: Arc<dyn FlowStore>,
+    strict: bool,
 }
 
 impl ScriptFlowStore {
+    /// Legacy v1 `flow_store` global: fail-loud is gated by the `RIFT_STRICT_FLOW_STORE` toggle
+    /// (default lenient) — read once here at construction.
     pub fn new(store: Arc<dyn FlowStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            strict: strict_flow_store(),
+        }
     }
 
-    /// Get a value from flow state. In strict mode (issue #376) a backend failure raises; otherwise
-    /// it returns unit (the lenient #322 fallback) and records the error for `last_error()`.
+    /// v2 `ctx.state` handle: ALWAYS fail-loud, regardless of the env toggle (issue #358).
+    pub fn new_strict(store: Arc<dyn FlowStore>) -> Self {
+        Self {
+            store,
+            strict: true,
+        }
+    }
+
+    /// Get a value from flow state. Fail-loud (v2 handle, or v1 with the toggle on) raises on a
+    /// backend failure; otherwise returns unit (the lenient #322 fallback) and records the error
+    /// for `last_error()`.
     pub fn get(
         &mut self,
         flow_id: String,
@@ -407,12 +428,12 @@ impl ScriptFlowStore {
         match flow_result("get", self.store.get(&flow_id, &key)) {
             Ok(Some(val)) => Ok(rhai_engine::json_to_dynamic(val)),
             Ok(None) => Ok(Dynamic::UNIT),
-            Err(msg) if strict_flow_store() => Err(msg.into()),
+            Err(msg) if self.strict => Err(msg.into()),
             Err(_) => Ok(Dynamic::UNIT),
         }
     }
 
-    /// Set a value in flow state. Strict mode raises on failure; else returns false (lenient #322).
+    /// Set a value in flow state. Fail-loud raises on failure; else returns false (lenient #322).
     pub fn set(
         &mut self,
         flow_id: String,
@@ -425,12 +446,12 @@ impl ScriptFlowStore {
             self.store.set(&flow_id, &key, json_val).map(|()| true),
         ) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(msg.into()),
+            Err(msg) if self.strict => Err(msg.into()),
             Err(_) => Ok(false),
         }
     }
 
-    /// Check if a key exists. Strict mode raises on failure; else returns false (lenient #322).
+    /// Check if a key exists. Fail-loud raises on failure; else returns false (lenient #322).
     pub fn exists(
         &mut self,
         flow_id: String,
@@ -438,12 +459,12 @@ impl ScriptFlowStore {
     ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
         match flow_result("exists", self.store.exists(&flow_id, &key)) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(msg.into()),
+            Err(msg) if self.strict => Err(msg.into()),
             Err(_) => Ok(false),
         }
     }
 
-    /// Delete a key. Strict mode raises on failure; else returns false (lenient #322).
+    /// Delete a key. Fail-loud raises on failure; else returns false (lenient #322).
     pub fn delete(
         &mut self,
         flow_id: String,
@@ -451,12 +472,12 @@ impl ScriptFlowStore {
     ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
         match flow_result("delete", self.store.delete(&flow_id, &key).map(|()| true)) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(msg.into()),
+            Err(msg) if self.strict => Err(msg.into()),
             Err(_) => Ok(false),
         }
     }
 
-    /// Increment a counter. Strict mode raises on failure; else returns 0 (lenient #322).
+    /// Increment a counter. Fail-loud raises on failure; else returns 0 (lenient #322).
     pub fn increment(
         &mut self,
         flow_id: String,
@@ -464,12 +485,12 @@ impl ScriptFlowStore {
     ) -> std::result::Result<i64, Box<rhai::EvalAltResult>> {
         match flow_result("increment", self.store.increment(&flow_id, &key)) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(msg.into()),
+            Err(msg) if self.strict => Err(msg.into()),
             Err(_) => Ok(0),
         }
     }
 
-    /// Set TTL for a flow. Strict mode raises on failure; else returns false (lenient #322).
+    /// Set TTL for a flow. Fail-loud raises on failure; else returns false (lenient #322).
     pub fn set_ttl(
         &mut self,
         flow_id: String,
@@ -480,7 +501,7 @@ impl ScriptFlowStore {
             self.store.set_ttl(&flow_id, ttl_seconds).map(|()| true),
         ) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(msg.into()),
+            Err(msg) if self.strict => Err(msg.into()),
             Err(_) => Ok(false),
         }
     }
@@ -492,6 +513,75 @@ impl ScriptFlowStore {
             Some(msg) => Dynamic::from(msg),
             None => Dynamic::UNIT,
         }
+    }
+
+    // ============================================================
+    // Atomic ops + ergonomic getters (issue #358). Unlike the ops above, these ALWAYS raise a
+    // script error on a backend failure — fail-loud is the entire point of the new API, so a
+    // store outage must never be conflated with "key absent"/"conflict" the way the lenient #322
+    // fallback would.
+    // ============================================================
+
+    /// Get a value, or `default` if the key is absent. A store failure always raises.
+    pub fn get_or(
+        &mut self,
+        flow_id: String,
+        key: String,
+        default: Dynamic,
+    ) -> std::result::Result<Dynamic, Box<rhai::EvalAltResult>> {
+        match flow_result("getOr", self.store.get(&flow_id, &key)) {
+            Ok(Some(val)) => Ok(rhai_engine::json_to_dynamic(val)),
+            Ok(None) => Ok(default),
+            Err(msg) => Err(msg.into()),
+        }
+    }
+
+    /// Atomically increment by `by`, starting at 0 when absent. Always fail-loud.
+    pub fn increment_by(
+        &mut self,
+        flow_id: String,
+        key: String,
+        by: i64,
+    ) -> std::result::Result<i64, Box<rhai::EvalAltResult>> {
+        flow_result("incrementBy", self.store.increment_by(&flow_id, &key, by)).map_err(Into::into)
+    }
+
+    /// Atomic compare-and-set (issues #358, #311): `key` is set to `new` iff its current value
+    /// equals `expected` (unit means "not present"). Returns the raw [`CasOutcome`]; the caller
+    /// (the Rhai-specific `RhaiStateHandle`) converts it to the engine's object-map return shape.
+    /// Always fail-loud.
+    pub fn cas(
+        &mut self,
+        flow_id: String,
+        key: String,
+        expected: Dynamic,
+        new: Dynamic,
+    ) -> std::result::Result<CasOutcome, Box<rhai::EvalAltResult>> {
+        let expected_json = if expected.is_unit() {
+            None
+        } else {
+            Some(rhai_engine::dynamic_to_json(expected))
+        };
+        let new_json = rhai_engine::dynamic_to_json(new);
+        flow_result(
+            "cas",
+            self.store
+                .compare_and_set(&flow_id, &key, expected_json.as_ref(), new_json),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Set a per-flow TTL override. Always fail-loud.
+    pub fn ttl(
+        &mut self,
+        flow_id: String,
+        ttl_seconds: i64,
+    ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
+        flow_result(
+            "ttl",
+            self.store.set_ttl(&flow_id, ttl_seconds).map(|()| true),
+        )
+        .map_err(Into::into)
     }
 }
 

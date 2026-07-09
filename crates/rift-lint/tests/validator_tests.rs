@@ -1213,3 +1213,99 @@ fn e041_is_a_warning_not_an_error() {
         "E041 must be a deprecation warning, not a hard error"
     );
 }
+
+// ─── Issue #358: E042 — ctx.state used without _rift.flowState ──────────────
+
+#[test]
+fn e042_fires_for_ctx_state_without_flow_state() {
+    let v = make_imposter(json!([rift_script_stub(json!({
+        "code": "fn respond(ctx) { let n = ctx.state.incr(\"attempts\"); http(200) }"
+    }))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(has_code(&r, "E042"), "expected E042, got {:?}", codes(&r));
+}
+
+#[test]
+fn e042_fires_for_v1_flow_store_without_flow_state() {
+    let v = make_imposter(json!([rift_script_stub(json!({
+        "code": "fn should_inject(request, flow_store) { flow_store.increment(\"f\", \"k\"); #{ inject: false } }"
+    }))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(has_code(&r, "E042"), "expected E042, got {:?}", codes(&r));
+}
+
+#[test]
+fn e042_does_not_fire_when_flow_state_is_configured() {
+    let mut v = make_imposter(json!([rift_script_stub(json!({
+        "code": "fn respond(ctx) { let n = ctx.state.incr(\"attempts\"); http(200) }"
+    }))]));
+    v["_rift"] = json!({ "flowState": { "backend": "inmemory" } });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(
+        !has_code(&r, "E042"),
+        "flowState is configured, E042 must not fire, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn e042_does_not_fire_for_scripts_that_never_touch_state() {
+    let v = make_imposter(json!([rift_script_stub(json!({
+        "code": "fn respond(ctx) { http(200) }"
+    }))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(
+        !has_code(&r, "E042"),
+        "no ctx.state/flow_store usage, E042 must not fire, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn e042_does_not_fire_for_non_script_imposters() {
+    let v = make_imposter(json!([minimal_stub()]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(!has_code(&r, "E042"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e042_resolves_file_backed_scripts() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("stateful.rhai"),
+        "fn respond(ctx) { ctx.state.incr(\"n\"); http(200) }",
+    )
+    .unwrap();
+    let cfg = make_imposter(json!([rift_script_stub(
+        json!({ "file": "stateful.rhai" })
+    )]));
+    let config_path = dir.path().join("imposter.json");
+    std::fs::write(&config_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+    let r = lint_file(&config_path, &opts());
+    assert!(has_code(&r, "E042"), "expected E042, got {:?}", codes(&r));
+}
+
+#[test]
+fn e042_is_a_warning_not_an_error() {
+    let v = make_imposter(json!([rift_script_stub(json!({
+        "code": "fn respond(ctx) { ctx.state.incr(\"n\"); http(200) }"
+    }))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    let issue = r
+        .issues
+        .iter()
+        .find(|i| i.code == "E042")
+        .expect("E042 must fire");
+    assert_eq!(
+        issue.severity,
+        Severity::Warning,
+        "E042 must be a hint, not a hard error"
+    );
+}

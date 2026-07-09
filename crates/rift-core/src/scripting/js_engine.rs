@@ -1,4 +1,4 @@
-use crate::extensions::flow_state::{FlowStore, flow_result, strict_flow_store};
+use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result, strict_flow_store};
 use crate::scripting::{
     FaultDecision, ScriptCtxExtras, ScriptCtxInput, ScriptRequest, ScriptResponseContext,
     ScriptResult, ScriptResultBody, ScriptStubContext, entrypoints,
@@ -525,6 +525,21 @@ fn js_flow_outcome<T: Into<JsValue>>(
     }
 }
 
+/// Map a NEW (issue #358) atomic `ctx.state` op outcome to a JS value: unlike the #357 ops above,
+/// these ALWAYS raise a native error on a backend failure (fail-loud is the whole point of the new
+/// atomic ops) rather than the lenient `RIFT_STRICT_FLOW_STORE`-gated fallback.
+fn js_flow_outcome_strict<T: Into<JsValue>>(
+    outcome: Option<std::result::Result<T, String>>,
+) -> JsResult<JsValue> {
+    match outcome {
+        Some(Ok(v)) => Ok(v.into()),
+        Some(Err(msg)) => Err(JsNativeError::error().with_message(msg).into()),
+        None => Err(JsNativeError::error()
+            .with_message("no flow store bound on this thread")
+            .into()),
+    }
+}
+
 fn flow_store_get(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let flow_id = args
         .first()
@@ -921,14 +936,16 @@ fn state_get(
         .and_then(|v| v.as_string())
         .map(|s| s.to_std_string_escaped())
         .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
+    // v2 `ctx.state` is ALWAYS fail-loud (issue #358): a backend failure raises regardless of the
+    // `RIFT_STRICT_FLOW_STORE` toggle (which only gates the legacy v1 `flow_store` global).
     let outcome = with_current_flow_store(|store| flow_result("get", store.get(flow_id, &key)));
     match outcome {
         Some(Ok(Some(value))) => json_to_js_result(ctx, &value),
         Some(Ok(None)) => Ok(JsValue::null()),
-        Some(Err(msg)) if strict_flow_store() => {
-            Err(JsNativeError::error().with_message(msg).into())
-        }
-        Some(Err(_)) | None => Ok(JsValue::null()),
+        Some(Err(msg)) => Err(JsNativeError::error().with_message(msg).into()),
+        None => Err(JsNativeError::error()
+            .with_message("no flow store bound on this thread")
+            .into()),
     }
 }
 
@@ -948,7 +965,7 @@ fn state_set(
     let outcome = with_current_flow_store(|store| {
         flow_result("set", store.set(flow_id, &key, json_value).map(|()| true))
     });
-    js_flow_outcome(outcome, false)
+    js_flow_outcome_strict(outcome)
 }
 
 fn state_incr(
@@ -964,7 +981,7 @@ fn state_incr(
         .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
     let outcome =
         with_current_flow_store(|store| flow_result("increment", store.increment(flow_id, &key)));
-    js_flow_outcome(outcome, 0i64)
+    js_flow_outcome_strict(outcome)
 }
 
 fn state_exists(
@@ -980,7 +997,7 @@ fn state_exists(
         .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
     let outcome =
         with_current_flow_store(|store| flow_result("exists", store.exists(flow_id, &key)));
-    js_flow_outcome(outcome, false)
+    js_flow_outcome_strict(outcome)
 }
 
 fn state_delete(
@@ -997,22 +1014,158 @@ fn state_delete(
     let outcome = with_current_flow_store(|store| {
         flow_result("delete", store.delete(flow_id, &key).map(|()| true))
     });
-    js_flow_outcome(outcome, false)
+    js_flow_outcome_strict(outcome)
 }
 
-/// `ctx.state` — a flow-state handle bound to one flow id (issue #357 Item 1). Exposes the subset
-/// of `flow_store` that doesn't need a `flow_id` argument per call (full get_or/incr-with-args/cas
-/// is P3b, issue #358).
+/// Get a value, or `default` if the key is absent (issue #358) — kills the
+/// `state.x = state.x || 0` idiom. A store failure ALWAYS raises (fail-loud), never conflated with
+/// "absent" the way `state_get`'s lenient fallback would.
+fn state_get_or(
+    _this: &JsValue,
+    args: &[JsValue],
+    flow_id: &StateCaptures,
+    ctx: &mut Context,
+) -> JsResult<JsValue> {
+    let key = args
+        .first()
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_std_string_escaped())
+        .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
+    let default = args.get(1).cloned().unwrap_or(JsValue::null());
+    let outcome = with_current_flow_store(|store| flow_result("getOr", store.get(flow_id, &key)));
+    match outcome {
+        Some(Ok(Some(value))) => json_to_js_result(ctx, &value),
+        Some(Ok(None)) => Ok(default),
+        Some(Err(msg)) => Err(JsNativeError::error().with_message(msg).into()),
+        None => Err(JsNativeError::error()
+            .with_message("no flow store bound on this thread")
+            .into()),
+    }
+}
+
+/// Atomic increment by `n`, starting at 0 when absent (issue #358). Always fail-loud.
+fn state_incr_by(
+    _this: &JsValue,
+    args: &[JsValue],
+    flow_id: &StateCaptures,
+    _ctx: &mut Context,
+) -> JsResult<JsValue> {
+    let key = args
+        .first()
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_std_string_escaped())
+        .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
+    let by = args
+        .get(1)
+        .and_then(|v| v.as_number())
+        .map(|n| n as i64)
+        .ok_or_else(|| JsNativeError::typ().with_message("n must be a number"))?;
+    let outcome = with_current_flow_store(|store| {
+        flow_result("incrementBy", store.increment_by(flow_id, &key, by))
+    });
+    js_flow_outcome_strict(outcome)
+}
+
+/// Convert a [`CasOutcome`] to the JS return shape for `ctx.state.cas()` (issue #358): an object —
+/// `{ applied: true, current: null }` on success, or `{ applied: false, current: <value> }` on
+/// conflict — deliberately an object rather than a bare value so "conflict, current value happens
+/// to be `true`" can never be confused with "applied".
+fn cas_outcome_to_js(context: &mut Context, outcome: CasOutcome) -> JsResult<JsValue> {
+    let obj = create_js_object(context);
+    let (applied, current_js) = match outcome {
+        CasOutcome::Applied => (true, JsValue::null()),
+        CasOutcome::Conflict(current) => {
+            let current_js = match &current {
+                Some(v) => json_to_js_result(context, v)?,
+                None => JsValue::null(),
+            };
+            (false, current_js)
+        }
+    };
+    obj.set(
+        js_string!("applied"),
+        JsValue::from(applied),
+        false,
+        context,
+    )
+    .map_err(|e| JsNativeError::error().with_message(e.to_string()))?;
+    obj.set(js_string!("current"), current_js, false, context)
+        .map_err(|e| JsNativeError::error().with_message(e.to_string()))?;
+    Ok(obj.into())
+}
+
+/// Atomic compare-and-set (issue #358, #311): `key` is set to `new` iff its current value equals
+/// `expected` (`null`/`undefined` means "not present"). Always fail-loud.
+fn state_cas(
+    _this: &JsValue,
+    args: &[JsValue],
+    flow_id: &StateCaptures,
+    ctx: &mut Context,
+) -> JsResult<JsValue> {
+    let key = args
+        .first()
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_std_string_escaped())
+        .ok_or_else(|| JsNativeError::typ().with_message("key must be a string"))?;
+    let expected_js = args.get(1).cloned().unwrap_or(JsValue::null());
+    let expected_json = js_to_json(ctx, &expected_js)?;
+    let expected = if expected_json.is_null() {
+        None
+    } else {
+        Some(expected_json)
+    };
+    let new_js = args.get(2).cloned().unwrap_or(JsValue::null());
+    let new_json = js_to_json(ctx, &new_js)?;
+
+    let outcome = with_current_flow_store(|store| {
+        flow_result(
+            "cas",
+            store.compare_and_set(flow_id, &key, expected.as_ref(), new_json),
+        )
+    });
+    match outcome {
+        Some(Ok(cas_outcome)) => cas_outcome_to_js(ctx, cas_outcome),
+        Some(Err(msg)) => Err(JsNativeError::error().with_message(msg).into()),
+        None => Err(JsNativeError::error()
+            .with_message("no flow store bound on this thread")
+            .into()),
+    }
+}
+
+/// Per-flow TTL override in seconds (issue #358). Always fail-loud.
+fn state_ttl(
+    _this: &JsValue,
+    args: &[JsValue],
+    flow_id: &StateCaptures,
+    _ctx: &mut Context,
+) -> JsResult<JsValue> {
+    let ttl_seconds = args
+        .first()
+        .and_then(|v| v.as_number())
+        .map(|n| n as i64)
+        .ok_or_else(|| JsNativeError::typ().with_message("seconds must be a number"))?;
+    let outcome = with_current_flow_store(|store| {
+        flow_result("ttl", store.set_ttl(flow_id, ttl_seconds).map(|()| true))
+    });
+    js_flow_outcome_strict(outcome)
+}
+
+/// `ctx.state` — a flow-state handle bound to one flow id (issue #357 Item 1; atomic ops
+/// `getOr`/`incrBy`/`cas`/`ttl` added by issue #358).
 type StateMethodFn = fn(&JsValue, &[JsValue], &StateCaptures, &mut Context) -> JsResult<JsValue>;
 
 fn create_state_object(context: &mut Context, flow_id: String) -> Result<JsValue> {
     let obj = create_js_object(context);
-    let methods: [(&str, StateMethodFn); 5] = [
+    let methods: [(&str, StateMethodFn); 9] = [
         ("get", state_get),
         ("set", state_set),
         ("incr", state_incr),
         ("exists", state_exists),
         ("delete", state_delete),
+        ("getOr", state_get_or),
+        ("incrBy", state_incr_by),
+        ("cas", state_cas),
+        ("ttl", state_ttl),
     ];
     for (name, func) in methods {
         let native_fn = NativeFunction::from_copy_closure_with_captures(func, flow_id.clone())
@@ -1565,9 +1718,17 @@ fn js_to_json(context: &mut Context, value: &JsValue) -> JsResult<Value> {
     }
 
     if let Some(n) = value.as_number() {
-        return Ok(Value::Number(
-            serde_json::Number::from_f64(n).unwrap_or(serde_json::Number::from(0)),
-        ));
+        // JS has a single number type, so a whole number like `5` arrives as the f64 `5.0`.
+        // Encoding it via `from_f64` would store `5.0` (JSON `is_i64() == false`), which the
+        // integer-only `increment`/`increment_by` and Redis `INCRBY` can't accumulate — a later
+        // `incr` would silently start from 0 (issue #358 B2). So when the value is integral and in
+        // i64 range, emit an integer `Number` to keep counters usable across set→incr.
+        let number = if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+            serde_json::Number::from(n as i64)
+        } else {
+            serde_json::Number::from_f64(n).unwrap_or(serde_json::Number::from(0))
+        };
+        return Ok(Value::Number(number));
     }
 
     if let Some(s) = value.as_string() {
@@ -4034,6 +4195,215 @@ function should_inject(request, flow_store) {
                 }
                 other => panic!("expected 200 on third attempt, got {other:?}"),
             }
+        }
+
+        // --- ctx.state atomic ops (issue #358) ---
+
+        #[test]
+        fn get_or_returns_default_when_absent_then_stored_value() {
+            let script = r#"
+                function respond(ctx) {
+                    var first = ctx.state.getOr("count", 0);
+                    ctx.state.set("count", 7);
+                    var second = ctx.state.getOr("count", 0);
+                    return http(200, { first: first, second: second });
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"first\":0"), "got {body}");
+                    assert!(body.contains("\"second\":7"), "got {body}");
+                }
+                other => panic!("expected Error(200), got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn incr_by_is_atomic_and_starts_at_zero() {
+            let script = r#"
+                function respond(ctx) {
+                    var n = ctx.state.incrBy("hits", 5);
+                    return http(200, { n: n });
+                }
+            "#;
+            let engine = JsEngine::new(script, "incr-by-rule").unwrap();
+            let shared_store = store();
+            let request = req(HashMap::new(), None);
+
+            let d1 = engine
+                .should_inject(&request, Arc::clone(&shared_store))
+                .unwrap();
+            match d1 {
+                FaultDecision::Error { body, .. } => assert!(body.contains("\"n\":5")),
+                other => panic!("expected Error(200), got {other:?}"),
+            }
+
+            let d2 = engine.should_inject(&request, shared_store).unwrap();
+            match d2 {
+                FaultDecision::Error { body, .. } => assert!(body.contains("\"n\":10")),
+                other => panic!("expected Error(200), got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn cas_distinguishes_applied_from_conflict() {
+            let shared_store = store();
+            let request = req(HashMap::new(), None);
+
+            // First call: key "status" absent, expected null matches -> applied, sets "paid".
+            let applied_script = r#"
+                function respond(ctx) {
+                    var outcome = ctx.state.cas("status", null, "paid");
+                    return http(200, { applied: outcome.applied, current: outcome.current });
+                }
+            "#;
+            let applied_engine = JsEngine::new(applied_script, "cas-applied").unwrap();
+            let d1 = applied_engine
+                .should_inject(&request, Arc::clone(&shared_store))
+                .unwrap();
+            match d1 {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"applied\":true"), "got {body}");
+                }
+                other => panic!("expected 200, got {other:?}"),
+            }
+
+            // Second call: current is now "paid"; expecting "pending" must conflict and report the
+            // winning current value, distinguishing it from the Applied case above.
+            let conflict_script = r#"
+                function respond(ctx) {
+                    var outcome = ctx.state.cas("status", "pending", "shipped");
+                    return http(200, { applied: outcome.applied, current: outcome.current });
+                }
+            "#;
+            let conflict_engine = JsEngine::new(conflict_script, "cas-conflict").unwrap();
+            let d2 = conflict_engine
+                .should_inject(&request, shared_store)
+                .unwrap();
+            match d2 {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"applied\":false"), "got {body}");
+                    assert!(body.contains("\"current\":\"paid\""), "got {body}");
+                }
+                other => panic!("expected 200, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn ttl_sets_per_flow_expiry() {
+            let script = r#"
+                function respond(ctx) {
+                    ctx.state.set("k", 1);
+                    var applied = ctx.state.ttl(3600);
+                    return http(200, { applied: applied });
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"applied\":true"), "got {body}");
+                }
+                other => panic!("expected 200, got {other:?}"),
+            }
+        }
+
+        // Issue #358 B2: JS has one number type, so `set("count", 5)` arrives as f64 5.0. The
+        // js_to_json integer fix stores it as an integer so a following incr_by/incr accumulates
+        // instead of silently restarting from 0.
+        #[test]
+        fn set_whole_number_then_incr_by_accumulates() {
+            let script = r#"
+                function respond(ctx) {
+                    ctx.state.set("count", 5);
+                    var a = ctx.state.incrBy("count", 1);
+                    var b = ctx.state.incr("count");
+                    return http(200, { a: a, b: b });
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { body, .. } => {
+                    assert!(
+                        body.contains("\"a\":6"),
+                        "expected incr_by to yield 6, got {body}"
+                    );
+                    assert!(
+                        body.contains("\"b\":7"),
+                        "expected incr to yield 7, got {body}"
+                    );
+                }
+                other => panic!("expected 200, got {other:?}"),
+            }
+        }
+
+        // Issue #358 B3 (AC4): a backend failure on any atomic op must propagate as a script error.
+        #[cfg(feature = "test-backend")]
+        #[test]
+        fn atomic_ops_propagate_store_errors_fail_loud() {
+            use crate::extensions::flow_state::FailingFlowStore;
+            let request = req(HashMap::new(), None);
+
+            for (name, script) in [
+                (
+                    "get_or",
+                    r#"function respond(ctx) { return http(200, { v: ctx.state.getOr("k", 0) }); }"#,
+                ),
+                (
+                    "incr_by",
+                    r#"function respond(ctx) { return http(200, { v: ctx.state.incrBy("k", 1) }); }"#,
+                ),
+                (
+                    "cas",
+                    r#"function respond(ctx) { return http(200, { v: ctx.state.cas("k", null, "v").applied }); }"#,
+                ),
+                (
+                    "ttl",
+                    r#"function respond(ctx) { return http(200, { v: ctx.state.ttl(60) }); }"#,
+                ),
+            ] {
+                let result = JsEngine::new(script, "fail")
+                    .unwrap()
+                    .should_inject(&request, Arc::new(FailingFlowStore));
+                assert!(result.is_err(), "{name} must propagate a store failure");
+            }
+        }
+
+        // Issue #358 B1 / #322: pre-existing v2 ops (get/incr) fail loud even with the toggle
+        // unset, while the legacy v1 `flow_store` global stays lenient under the default toggle.
+        #[cfg(feature = "test-backend")]
+        #[test]
+        fn v2_state_ops_fail_loud_while_v1_flow_store_lenient() {
+            use crate::extensions::flow_state::FailingFlowStore;
+            let request = req(HashMap::new(), None);
+
+            let get_err = JsEngine::new(
+                r#"function respond(ctx) { return http(200, { v: ctx.state.get("k") }); }"#,
+                "v2-get",
+            )
+            .unwrap()
+            .should_inject(&request, Arc::new(FailingFlowStore));
+            assert!(get_err.is_err(), "v2 ctx.state.get must fail loud");
+
+            let incr_err = JsEngine::new(
+                r#"function respond(ctx) { return http(200, { v: ctx.state.incr("k") }); }"#,
+                "v2-incr",
+            )
+            .unwrap()
+            .should_inject(&request, Arc::new(FailingFlowStore));
+            assert!(incr_err.is_err(), "v2 ctx.state.incr must fail loud");
+
+            // v1 flow_store.get stays lenient under the default (unset) toggle — no raise.
+            let v1 = JsEngine::new(
+                r#"function should_inject(request, flow_store) { flow_store.get("f", "k"); return { inject: false }; }"#,
+                "v1-get",
+            )
+            .unwrap()
+            .should_inject(&request, Arc::new(FailingFlowStore));
+            assert!(
+                matches!(v1, Ok(FaultDecision::None)),
+                "v1 flow_store.get must stay lenient under the default toggle, got {v1:?}"
+            );
         }
 
         // B1 (issue #357): a script defining ONLY a misnamed entrypoint must Err, not None.

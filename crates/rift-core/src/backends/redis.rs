@@ -188,6 +188,13 @@ impl FlowStore for RedisFlowStore {
     }
 
     fn increment(&self, flow_id: &str, key: &str) -> Result<i64> {
+        self.increment_by(flow_id, key, 1)
+    }
+
+    /// Atomic via Redis's own `INCRBY` (issue #358) — a single round trip, so there's no
+    /// interleaving window with a concurrent increment/set the way a get-then-set fallback would
+    /// have.
+    fn increment_by(&self, flow_id: &str, key: &str, by: i64) -> Result<i64> {
         let key_str = self.make_key(flow_id, key);
         let conn = self
             .pool
@@ -195,12 +202,12 @@ impl FlowStore for RedisFlowStore {
             .map_err(|e| backend_err("flowStore.pool", e))?;
         let mut conn_guard = conn.lock().unwrap();
 
-        // INCR returns the new value
+        // INCRBY returns the new value
         let new_value: i64 = conn_guard
-            .incr(&key_str, 1)
-            .map_err(|e| backend_err("flowStore.increment", e))?;
+            .incr(&key_str, by)
+            .map_err(|e| backend_err("flowStore.incrementBy", e))?;
 
-        // Set TTL on the key (INCR doesn't reset TTL)
+        // Set TTL on the key (INCRBY doesn't reset TTL)
         let _: () = redis::cmd("EXPIRE")
             .arg(&key_str)
             .arg(self.default_ttl_seconds)

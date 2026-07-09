@@ -1,4 +1,4 @@
-use crate::extensions::flow_state::{FlowStore, flow_result, strict_flow_store};
+use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result, strict_flow_store};
 use crate::scripting::{
     FaultDecision, ScriptCtxExtras, ScriptCtxInput, ScriptRequest, ScriptResponseContext,
     ScriptResult, ScriptResultBody, ScriptStubContext, entrypoints,
@@ -432,7 +432,8 @@ fn build_stub_ctx_table(lua: &Lua, stub: &ScriptStubContext) -> LuaResult<LuaTab
 }
 
 /// Flow-state handle bound to one flow id — `ctx.state` and the value returned by
-/// `ctx.store:flow(id)` (issue #357 Item 1).
+/// `ctx.store:flow(id)` (issue #357 Item 1); atomic ops `get_or`/`incr_by`/`cas`/`ttl` added by
+/// issue #358.
 struct LuaStateHandle {
     inner: LuaFlowStore,
     flow_id: String,
@@ -441,7 +442,9 @@ struct LuaStateHandle {
 impl LuaStateHandle {
     fn new(store: Arc<dyn FlowStore>, flow_id: String) -> Self {
         Self {
-            inner: LuaFlowStore::new(store),
+            // v2 `ctx.state` is always fail-loud (issue #358), independent of the env toggle that
+            // gates the legacy v1 `flow_store` global.
+            inner: LuaFlowStore::new_strict(store),
             flow_id,
         }
     }
@@ -463,6 +466,23 @@ impl LuaUserData for LuaStateHandle {
         });
         methods.add_method("delete", |_lua, this, key: String| {
             this.inner.delete(this.flow_id.clone(), key)
+        });
+        // Atomic ops + ergonomic getters (issue #358).
+        methods.add_method("get_or", |lua, this, (key, default): (String, LuaValue)| {
+            this.inner.get_or(lua, this.flow_id.clone(), key, default)
+        });
+        methods.add_method("incr_by", |_lua, this, (key, by): (String, i64)| {
+            this.inner.increment_by(this.flow_id.clone(), key, by)
+        });
+        methods.add_method(
+            "cas",
+            |lua, this, (key, expected, new): (String, LuaValue, LuaValue)| {
+                this.inner
+                    .cas(lua, this.flow_id.clone(), key, expected, new)
+            },
+        );
+        methods.add_method("ttl", |_lua, this, seconds: i64| {
+            this.inner.ttl(this.flow_id.clone(), seconds)
         });
     }
 }
@@ -764,18 +784,36 @@ fn call_respond_lua(
     }
 }
 
-/// Wrapper for FlowStore that can be used in Lua scripts
+/// Wrapper for FlowStore that can be used in Lua scripts.
+///
+/// The `strict` flag decides how a backend failure surfaces (issues #322/#376/#358):
+/// - `strict == true` (the v2 `ctx.state` handle) — ALWAYS raise a Lua error on failure.
+/// - `strict == false` (the legacy v1 `flow_store` global) — honor the `RIFT_STRICT_FLOW_STORE`
+///   toggle (default lenient), preserving #322/#376 back-compat for v1 scripts.
 struct LuaFlowStore {
     store: Arc<dyn FlowStore>,
+    strict: bool,
 }
 
 impl LuaFlowStore {
+    /// Legacy v1 `flow_store` global: fail-loud gated by the `RIFT_STRICT_FLOW_STORE` toggle.
     fn new(store: Arc<dyn FlowStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            strict: strict_flow_store(),
+        }
     }
 
-    /// Get a value from flow state. Strict mode (issue #376) raises on a backend failure; otherwise
-    /// returns nil (the lenient #322 fallback) and records the error for `last_error()`.
+    /// v2 `ctx.state` handle: ALWAYS fail-loud regardless of the env toggle (issue #358).
+    fn new_strict(store: Arc<dyn FlowStore>) -> Self {
+        Self {
+            store,
+            strict: true,
+        }
+    }
+
+    /// Get a value from flow state. Fail-loud raises on a backend failure; otherwise returns nil
+    /// (the lenient #322 fallback) and records the error for `last_error()`.
     fn get(&self, lua: &Lua, flow_id: String, key: String) -> LuaResult<LuaValue> {
         let store = Arc::clone(&self.store);
 
@@ -783,12 +821,12 @@ impl LuaFlowStore {
         match flow_result("get", store.get(&flow_id, &key)) {
             Ok(Some(value)) => json_to_lua(lua, &value),
             Ok(None) => Ok(LuaValue::Nil),
-            Err(msg) if strict_flow_store() => Err(mlua::Error::runtime(msg)),
+            Err(msg) if self.strict => Err(mlua::Error::runtime(msg)),
             Err(_) => Ok(LuaValue::Nil),
         }
     }
 
-    /// Set a value in flow state. Strict mode raises on failure; else returns false (lenient #322).
+    /// Set a value in flow state. Fail-loud raises on failure; else returns false (lenient #322).
     fn set(&self, lua: &Lua, flow_id: String, key: String, value: LuaValue) -> LuaResult<bool> {
         // Convert Lua value to JSON
         let json_value = lua_to_json(lua, value)?;
@@ -797,45 +835,45 @@ impl LuaFlowStore {
 
         match flow_result("set", store.set(&flow_id, &key, json_value).map(|()| true)) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(mlua::Error::runtime(msg)),
+            Err(msg) if self.strict => Err(mlua::Error::runtime(msg)),
             Err(_) => Ok(false),
         }
     }
 
-    /// Check if a key exists. Strict mode raises on failure; else returns false (lenient #322).
+    /// Check if a key exists. Fail-loud raises on failure; else returns false (lenient #322).
     fn exists(&self, flow_id: String, key: String) -> LuaResult<bool> {
         let store = Arc::clone(&self.store);
 
         match flow_result("exists", store.exists(&flow_id, &key)) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(mlua::Error::runtime(msg)),
+            Err(msg) if self.strict => Err(mlua::Error::runtime(msg)),
             Err(_) => Ok(false),
         }
     }
 
-    /// Delete a key. Strict mode raises on failure; else returns false (lenient #322).
+    /// Delete a key. Fail-loud raises on failure; else returns false (lenient #322).
     fn delete(&self, flow_id: String, key: String) -> LuaResult<bool> {
         let store = Arc::clone(&self.store);
 
         match flow_result("delete", store.delete(&flow_id, &key).map(|()| true)) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(mlua::Error::runtime(msg)),
+            Err(msg) if self.strict => Err(mlua::Error::runtime(msg)),
             Err(_) => Ok(false),
         }
     }
 
-    /// Increment a counter. Strict mode raises on failure; else returns 0 (lenient #322).
+    /// Increment a counter. Fail-loud raises on failure; else returns 0 (lenient #322).
     fn increment(&self, flow_id: String, key: String) -> LuaResult<i64> {
         let store = Arc::clone(&self.store);
 
         match flow_result("increment", store.increment(&flow_id, &key)) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(mlua::Error::runtime(msg)),
+            Err(msg) if self.strict => Err(mlua::Error::runtime(msg)),
             Err(_) => Ok(0),
         }
     }
 
-    /// Set TTL for a flow. Strict mode raises on failure; else returns false (lenient #322).
+    /// Set TTL for a flow. Fail-loud raises on failure; else returns false (lenient #322).
     fn set_ttl(&self, flow_id: String, ttl_seconds: i64) -> LuaResult<bool> {
         let store = Arc::clone(&self.store);
 
@@ -844,7 +882,7 @@ impl LuaFlowStore {
             store.set_ttl(&flow_id, ttl_seconds).map(|()| true),
         ) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(mlua::Error::runtime(msg)),
+            Err(msg) if self.strict => Err(mlua::Error::runtime(msg)),
             Err(_) => Ok(false),
         }
     }
@@ -854,6 +892,93 @@ impl LuaFlowStore {
     fn last_error(&self) -> LuaResult<Option<String>> {
         Ok(crate::extensions::flow_state::take_last_flow_error())
     }
+
+    // ============================================================
+    // Atomic ops + ergonomic getters (issue #358). Unlike the ops above, these ALWAYS raise a Lua
+    // error on a backend failure — fail-loud is the whole point of the new API, so a store outage
+    // must never be conflated with "key absent"/"conflict" the way the lenient #322 fallback would.
+    // ============================================================
+
+    /// Get a value, or `default` if the key is absent. A store failure always raises.
+    fn get_or(
+        &self,
+        lua: &Lua,
+        flow_id: String,
+        key: String,
+        default: LuaValue,
+    ) -> LuaResult<LuaValue> {
+        let store = Arc::clone(&self.store);
+        match flow_result("getOr", store.get(&flow_id, &key)) {
+            Ok(Some(value)) => json_to_lua(lua, &value),
+            Ok(None) => Ok(default),
+            Err(msg) => Err(mlua::Error::runtime(msg)),
+        }
+    }
+
+    /// Atomically increment by `by`, starting at 0 when absent. Always fail-loud.
+    fn increment_by(&self, flow_id: String, key: String, by: i64) -> LuaResult<i64> {
+        let store = Arc::clone(&self.store);
+        flow_result("incrementBy", store.increment_by(&flow_id, &key, by))
+            .map_err(mlua::Error::runtime)
+    }
+
+    /// Atomic compare-and-set (issue #358, #311). Returns a table `{ applied = true }` on success
+    /// or `{ applied = false, current = <value-or-nil> }` on conflict — deliberately a table
+    /// rather than a bare value so "conflict, current value happens to be `true`" can never be
+    /// confused with "applied". Always fail-loud.
+    fn cas(
+        &self,
+        lua: &Lua,
+        flow_id: String,
+        key: String,
+        expected: LuaValue,
+        new: LuaValue,
+    ) -> LuaResult<LuaTable> {
+        let expected_json = if matches!(expected, LuaValue::Nil) {
+            None
+        } else {
+            Some(lua_to_json(lua, expected)?)
+        };
+        let new_json = lua_to_json(lua, new)?;
+        let store = Arc::clone(&self.store);
+        match flow_result(
+            "cas",
+            store.compare_and_set(&flow_id, &key, expected_json.as_ref(), new_json),
+        ) {
+            Ok(outcome) => cas_outcome_to_lua(lua, outcome),
+            Err(msg) => Err(mlua::Error::runtime(msg)),
+        }
+    }
+
+    /// Set a per-flow TTL override in seconds. Always fail-loud.
+    fn ttl(&self, flow_id: String, ttl_seconds: i64) -> LuaResult<bool> {
+        let store = Arc::clone(&self.store);
+        flow_result("ttl", store.set_ttl(&flow_id, ttl_seconds).map(|()| true))
+            .map_err(mlua::Error::runtime)
+    }
+}
+
+/// Convert a [`CasOutcome`] to the Lua return shape for `ctx.state:cas()` (issue #358): a table
+/// with an `applied` flag and (on conflict) the winning `current` value, so success and conflict
+/// are always structurally distinguishable — never just a bare value that could coincidentally
+/// equal a "success" sentinel.
+fn cas_outcome_to_lua(lua: &Lua, outcome: CasOutcome) -> LuaResult<LuaTable> {
+    let t = lua.create_table()?;
+    match outcome {
+        CasOutcome::Applied => {
+            t.set("applied", true)?;
+            t.set("current", LuaValue::Nil)?;
+        }
+        CasOutcome::Conflict(current) => {
+            t.set("applied", false)?;
+            let current_lua = match &current {
+                Some(v) => json_to_lua(lua, v)?,
+                None => LuaValue::Nil,
+            };
+            t.set("current", current_lua)?;
+        }
+    }
+    Ok(t)
 }
 
 impl LuaUserData for LuaFlowStore {
@@ -2045,6 +2170,186 @@ end
                 }
                 other => panic!("expected 200 on third attempt, got {other:?}"),
             }
+        }
+
+        // --- ctx.state atomic ops (issue #358) ---
+
+        #[tokio::test]
+        async fn get_or_returns_default_when_absent_then_stored_value() {
+            let script = r#"
+                function respond(ctx)
+                    local first = ctx.state:get_or("count", 0)
+                    ctx.state:set("count", 7)
+                    local second = ctx.state:get_or("count", 0)
+                    return http(200, { first = first, second = second })
+                end
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"first\":0"), "got {body}");
+                    assert!(body.contains("\"second\":7"), "got {body}");
+                }
+                other => panic!("expected Error(200), got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn incr_by_is_atomic_and_starts_at_zero() {
+            let script = r#"
+                function respond(ctx)
+                    local n = ctx.state:incr_by("hits", 5)
+                    return http(200, { n = n })
+                end
+            "#;
+            let engine = LuaEngine::new(script, "incr-by-rule").unwrap();
+            let shared_store = store();
+            let request = req(HashMap::new(), None);
+
+            let d1 = engine
+                .should_inject(&request, Arc::clone(&shared_store))
+                .unwrap();
+            match d1 {
+                FaultDecision::Error { body, .. } => assert!(body.contains("\"n\":5")),
+                other => panic!("expected Error(200), got {other:?}"),
+            }
+
+            let d2 = engine.should_inject(&request, shared_store).unwrap();
+            match d2 {
+                FaultDecision::Error { body, .. } => assert!(body.contains("\"n\":10")),
+                other => panic!("expected Error(200), got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn cas_distinguishes_applied_from_conflict() {
+            let shared_store = store();
+            let request = req(HashMap::new(), None);
+
+            // First call: key "status" absent, expected nil matches -> applied, sets "paid".
+            let applied_script = r#"
+                function respond(ctx)
+                    local outcome = ctx.state:cas("status", nil, "paid")
+                    return http(200, { applied = outcome.applied, current = outcome.current })
+                end
+            "#;
+            let applied_engine = LuaEngine::new(applied_script, "cas-applied").unwrap();
+            let d1 = applied_engine
+                .should_inject(&request, Arc::clone(&shared_store))
+                .unwrap();
+            match d1 {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"applied\":true"), "got {body}");
+                }
+                other => panic!("expected 200, got {other:?}"),
+            }
+
+            // Second call: current is now "paid"; expecting "pending" must conflict and report the
+            // winning current value, distinguishing it from the Applied case above.
+            let conflict_script = r#"
+                function respond(ctx)
+                    local outcome = ctx.state:cas("status", "pending", "shipped")
+                    return http(200, { applied = outcome.applied, current = outcome.current })
+                end
+            "#;
+            let conflict_engine = LuaEngine::new(conflict_script, "cas-conflict").unwrap();
+            let d2 = conflict_engine
+                .should_inject(&request, shared_store)
+                .unwrap();
+            match d2 {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"applied\":false"), "got {body}");
+                    assert!(body.contains("\"current\":\"paid\""), "got {body}");
+                }
+                other => panic!("expected 200, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn ttl_sets_per_flow_expiry() {
+            let script = r#"
+                function respond(ctx)
+                    ctx.state:set("k", 1)
+                    local applied = ctx.state:ttl(3600)
+                    return http(200, { applied = applied })
+                end
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"applied\":true"), "got {body}");
+                }
+                other => panic!("expected 200, got {other:?}"),
+            }
+        }
+
+        // Issue #358 B3 (AC4): a backend failure on any atomic op must propagate as a script error.
+        #[cfg(feature = "test-backend")]
+        #[tokio::test]
+        async fn atomic_ops_propagate_store_errors_fail_loud() {
+            use crate::extensions::flow_state::FailingFlowStore;
+            let request = req(HashMap::new(), None);
+
+            for (name, script) in [
+                (
+                    "get_or",
+                    r#"function respond(ctx) return http(200, { v = ctx.state:get_or("k", 0) }) end"#,
+                ),
+                (
+                    "incr_by",
+                    r#"function respond(ctx) return http(200, { v = ctx.state:incr_by("k", 1) }) end"#,
+                ),
+                (
+                    "cas",
+                    r#"function respond(ctx) return http(200, { v = ctx.state:cas("k", nil, "v").applied }) end"#,
+                ),
+                (
+                    "ttl",
+                    r#"function respond(ctx) return http(200, { v = ctx.state:ttl(60) }) end"#,
+                ),
+            ] {
+                let result = LuaEngine::new(script, "fail")
+                    .unwrap()
+                    .should_inject(&request, Arc::new(FailingFlowStore));
+                assert!(result.is_err(), "{name} must propagate a store failure");
+            }
+        }
+
+        // Issue #358 B1 / #322: pre-existing v2 ops (get/incr) fail loud even with the toggle
+        // unset, while the legacy v1 `flow_store` global stays lenient under the default toggle.
+        #[cfg(feature = "test-backend")]
+        #[tokio::test]
+        async fn v2_state_ops_fail_loud_while_v1_flow_store_lenient() {
+            use crate::extensions::flow_state::FailingFlowStore;
+            let request = req(HashMap::new(), None);
+
+            let get_err = LuaEngine::new(
+                r#"function respond(ctx) return http(200, { v = ctx.state:get("k") }) end"#,
+                "v2-get",
+            )
+            .unwrap()
+            .should_inject(&request, Arc::new(FailingFlowStore));
+            assert!(get_err.is_err(), "v2 ctx.state:get must fail loud");
+
+            let incr_err = LuaEngine::new(
+                r#"function respond(ctx) return http(200, { v = ctx.state:incr("k") }) end"#,
+                "v2-incr",
+            )
+            .unwrap()
+            .should_inject(&request, Arc::new(FailingFlowStore));
+            assert!(incr_err.is_err(), "v2 ctx.state:incr must fail loud");
+
+            // v1 flow_store:get stays lenient under the default (unset) toggle — no raise.
+            let v1 = LuaEngine::new(
+                r#"function should_inject(request, flow_store) flow_store:get("f", "k"); return { inject = false } end"#,
+                "v1-get",
+            )
+            .unwrap()
+            .should_inject(&request, Arc::new(FailingFlowStore));
+            assert!(
+                matches!(v1, Ok(FaultDecision::None)),
+                "v1 flow_store:get must stay lenient under the default toggle, got {v1:?}"
+            );
         }
 
         // B1 (issue #357): a script defining ONLY a misnamed entrypoint must Err, not None.

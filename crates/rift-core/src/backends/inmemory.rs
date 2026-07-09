@@ -96,6 +96,12 @@ impl FlowStore for InMemoryFlowStore {
     }
 
     fn increment(&self, flow_id: &str, key: &str) -> Result<i64> {
+        self.increment_by(flow_id, key, 1)
+    }
+
+    /// Atomic under the single write lock (issue #358), like `increment`: the read-modify-write
+    /// happens with the lock held, so no interleaving window with a concurrent increment/set.
+    fn increment_by(&self, flow_id: &str, key: &str, by: i64) -> Result<i64> {
         let key_str = self.make_key(flow_id, key);
         let expiry = SystemTime::now() + self.default_ttl;
         let mut data = self.data.write();
@@ -103,10 +109,15 @@ impl FlowStore for InMemoryFlowStore {
         // Opportunistically clean up this specific key if expired
         Self::cleanup_on_write(&mut data, &key_str, |exp| self.is_expired(exp));
 
-        let new_value = match data.get(&key_str) {
-            Some((Value::Number(n), _)) if n.is_i64() => n.as_i64().unwrap_or(0) + 1,
-            _ => 1,
+        let current = match data.get(&key_str) {
+            Some((Value::Number(n), _)) if n.is_i64() => n.as_i64().unwrap_or(0),
+            _ => 0,
         };
+        // `checked_add` so an overflow near i64::MAX errors (fail-loud) instead of panicking in
+        // debug / wrapping in release — matching Redis's INCRBY, which also errors on overflow.
+        let new_value = current.checked_add(by).ok_or_else(|| {
+            anyhow::anyhow!("increment_by overflow: {current} + {by} exceeds i64 range")
+        })?;
 
         data.insert(key_str, (Value::Number(new_value.into()), Some(expiry)));
         Ok(new_value)
@@ -312,6 +323,42 @@ mod tests {
             Some(json!(expected)),
             "Concurrent increments lost updates: expected {expected}, got {final_value:?}"
         );
+    }
+
+    // ===== increment_by (issue #358) =====
+
+    #[test]
+    fn increment_by_starts_at_zero_and_accumulates() {
+        let store = InMemoryFlowStore::new(300);
+        assert_eq!(store.increment_by("f", "k", 5).unwrap(), 5);
+        assert_eq!(store.increment_by("f", "k", 5).unwrap(), 10);
+    }
+
+    #[test]
+    fn increment_by_negative_decrements() {
+        let store = InMemoryFlowStore::new(300);
+        store.increment_by("f", "k", 10).unwrap();
+        assert_eq!(store.increment_by("f", "k", -3).unwrap(), 7);
+    }
+
+    #[test]
+    fn increment_delegates_to_increment_by_one() {
+        let store = InMemoryFlowStore::new(300);
+        assert_eq!(store.increment("f", "k").unwrap(), 1);
+        assert_eq!(store.increment_by("f", "k", 1).unwrap(), 2);
+    }
+
+    #[test]
+    fn increment_by_overflow_errors_not_panics() {
+        let store = InMemoryFlowStore::new(300);
+        store.set("f", "k", json!(i64::MAX)).unwrap();
+        let result = store.increment_by("f", "k", 1);
+        assert!(
+            result.is_err(),
+            "increment_by past i64::MAX must error, not panic/wrap"
+        );
+        // The stored value must be untouched by the failed op.
+        assert_eq!(store.get("f", "k").unwrap(), Some(json!(i64::MAX)));
     }
 
     // ===== compare_and_set (issue #311) =====

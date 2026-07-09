@@ -31,6 +31,27 @@ pub trait FlowStore: Send + Sync {
     /// Increment a numeric value (returns new value)
     fn increment(&self, flow_id: &str, key: &str) -> Result<i64>;
 
+    /// Atomically increment a numeric value by `by` (which may be negative), returning the new
+    /// value. Starts at 0 when the key is absent, so `increment_by(id, "k", 5)` on an absent key
+    /// yields 5 (issue #358).
+    ///
+    /// The provided default is a NON-ATOMIC get-then-set fallback kept so existing third-party
+    /// `FlowStore` impls keep compiling; real backends should override with a genuinely atomic
+    /// implementation (see `InMemoryFlowStore`/`RedisFlowStore`).
+    fn increment_by(&self, flow_id: &str, key: &str, by: i64) -> Result<i64> {
+        let current = match self.get(flow_id, key)? {
+            Some(Value::Number(n)) if n.is_i64() => n.as_i64().unwrap_or(0),
+            _ => 0,
+        };
+        // `checked_add` so an overflow near i64::MAX errors (fail-loud) instead of panicking in
+        // debug / wrapping in release — matching Redis's INCRBY, which also errors on overflow.
+        let new_value = current
+            .checked_add(by)
+            .ok_or_else(|| anyhow!("increment_by overflow: {current} + {by} exceeds i64 range"))?;
+        self.set(flow_id, key, Value::Number(new_value.into()))?;
+        Ok(new_value)
+    }
+
     /// Set TTL for all keys under a flow_id
     fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> Result<()>;
 
@@ -664,5 +685,24 @@ mod cas_tests {
             .compare_and_set("f", "k", None, json!("new"))
             .expect("cas");
         assert!(matches!(outcome, CasOutcome::Conflict(Some(_))));
+    }
+
+    // Issue #358 B4: the trait's default (non-atomic) increment_by must error on i64 overflow via
+    // checked_add, never panic (debug) or wrap (release).
+    #[test]
+    fn default_increment_by_overflow_errors() {
+        let store = MinimalStore::new();
+        store.set("f", "k", json!(i64::MAX)).expect("set");
+        assert!(
+            store.increment_by("f", "k", 1).is_err(),
+            "default increment_by past i64::MAX must error"
+        );
+    }
+
+    #[test]
+    fn default_increment_by_starts_at_zero_and_accumulates() {
+        let store = MinimalStore::new();
+        assert_eq!(store.increment_by("f", "k", 5).expect("incr"), 5);
+        assert_eq!(store.increment_by("f", "k", 5).expect("incr"), 10);
     }
 }

@@ -1,4 +1,4 @@
-use crate::extensions::flow_state::FlowStore;
+use crate::extensions::flow_state::{CasOutcome, FlowStore};
 use anyhow::{Result, anyhow};
 use rhai::{AST, Dynamic, Engine, Map, Scope};
 use serde_json::Value;
@@ -285,7 +285,11 @@ fn register_v2_api(engine: &mut Engine) {
         .register_fn("set", RhaiStateHandle::set)
         .register_fn("incr", RhaiStateHandle::incr)
         .register_fn("exists", RhaiStateHandle::exists)
-        .register_fn("delete", RhaiStateHandle::delete);
+        .register_fn("delete", RhaiStateHandle::delete)
+        .register_fn("get_or", RhaiStateHandle::get_or)
+        .register_fn("incr_by", RhaiStateHandle::incr_by)
+        .register_fn("cas", RhaiStateHandle::cas)
+        .register_fn("ttl", RhaiStateHandle::ttl);
 
     engine
         .register_type::<RhaiStoreHandle>()
@@ -349,8 +353,8 @@ fn dynamic_to_script_result_body(value: Dynamic) -> ScriptResultBody {
 }
 
 /// Flow-state handle bound to one flow id — `ctx.state` and the value returned by
-/// `ctx.store.flow(id)` (issue #357 Item 1). Exposes the subset of `ScriptFlowStore` that doesn't
-/// need a `flow_id` argument per call (full get_or/incr-with-args/cas is P3b, issue #358).
+/// `ctx.store.flow(id)` (issue #357 Item 1). Wraps `ScriptFlowStore` so every call omits the
+/// `flow_id` argument; also carries the atomic ops (`get_or`/`incr_by`/`cas`/`ttl`, issue #358).
 #[derive(Clone)]
 pub struct RhaiStateHandle {
     inner: ScriptFlowStore,
@@ -360,7 +364,9 @@ pub struct RhaiStateHandle {
 impl RhaiStateHandle {
     fn new(store: Arc<dyn FlowStore>, flow_id: String) -> Self {
         Self {
-            inner: ScriptFlowStore::new(store),
+            // v2 `ctx.state` is always fail-loud (issue #358), independent of the env toggle that
+            // gates the legacy v1 `flow_store` global.
+            inner: ScriptFlowStore::new_strict(store),
             flow_id,
         }
     }
@@ -388,6 +394,66 @@ impl RhaiStateHandle {
     pub fn delete(&mut self, key: String) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
         self.inner.delete(self.flow_id.clone(), key)
     }
+
+    /// Value or `default` if the key is absent (issue #358) — kills the
+    /// `if v == () { v = 0; }` idiom. A store failure always raises (fail-loud).
+    pub fn get_or(
+        &mut self,
+        key: String,
+        default: Dynamic,
+    ) -> std::result::Result<Dynamic, Box<rhai::EvalAltResult>> {
+        self.inner.get_or(self.flow_id.clone(), key, default)
+    }
+
+    /// Atomic increment by `by`, starting at 0 when absent (issue #358). Always fail-loud.
+    pub fn incr_by(
+        &mut self,
+        key: String,
+        by: i64,
+    ) -> std::result::Result<i64, Box<rhai::EvalAltResult>> {
+        self.inner.increment_by(self.flow_id.clone(), key, by)
+    }
+
+    /// Atomic compare-and-set (issue #358, #311). Returns an object map — `#{"applied": true}` on
+    /// success, or `#{"applied": false, "current": <value-or-unit>}` on conflict — deliberately an
+    /// object rather than a bare value so "conflict, current value happens to be `true`" can never
+    /// be confused with "applied". Always fail-loud.
+    pub fn cas(
+        &mut self,
+        key: String,
+        expected: Dynamic,
+        new: Dynamic,
+    ) -> std::result::Result<Dynamic, Box<rhai::EvalAltResult>> {
+        let outcome = self.inner.cas(self.flow_id.clone(), key, expected, new)?;
+        Ok(cas_outcome_to_dynamic(outcome))
+    }
+
+    /// Per-flow TTL override in seconds (issue #358). Always fail-loud.
+    pub fn ttl(&mut self, seconds: i64) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
+        self.inner.ttl(self.flow_id.clone(), seconds)
+    }
+}
+
+/// Convert a [`CasOutcome`] to the Rhai return shape for `ctx.state.cas()` (issue #358): an object
+/// map with an `applied` flag and (on conflict) the winning `current` value, so success and
+/// conflict are always structurally distinguishable — never just a bare value that could
+/// coincidentally equal a "success" sentinel.
+fn cas_outcome_to_dynamic(outcome: CasOutcome) -> Dynamic {
+    let mut map = Map::new();
+    match outcome {
+        CasOutcome::Applied => {
+            map.insert("applied".into(), Dynamic::from(true));
+            map.insert("current".into(), Dynamic::UNIT);
+        }
+        CasOutcome::Conflict(current) => {
+            map.insert("applied".into(), Dynamic::from(false));
+            map.insert(
+                "current".into(),
+                current.map(json_to_dynamic).unwrap_or(Dynamic::UNIT),
+            );
+        }
+    }
+    Dynamic::from(map)
 }
 
 /// `ctx.store`: the flow-store escape hatch (issue #357 Item 1) — `.flow(id)` returns a handle
@@ -1688,6 +1754,196 @@ mod tests {
                 }
                 other => panic!("expected 200, got {other:?}"),
             }
+        }
+
+        // --- ctx.state atomic ops (issue #358) ---
+
+        #[test]
+        fn get_or_returns_default_when_absent_then_stored_value() {
+            let script = r#"
+                fn respond(ctx) {
+                    let n = ctx.state.get_or("count", 0);
+                    ctx.state.set("count", 7);
+                    let n2 = ctx.state.get_or("count", 0);
+                    http(200, #{ first: n, second: n2 })
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"first\":0"), "got {body}");
+                    assert!(body.contains("\"second\":7"), "got {body}");
+                }
+                other => panic!("expected Error(200), got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn incr_by_is_atomic_and_starts_at_zero() {
+            let script = r#"
+                fn respond(ctx) {
+                    let n = ctx.state.incr_by("hits", 5);
+                    http(200, #{ n: n })
+                }
+            "#;
+            let engine = RhaiEngine::new(script, "incr-by-rule").unwrap();
+            let shared_store = store();
+            let request = req(HashMap::new(), None);
+
+            let d1 = engine
+                .should_inject_fault(&request, Arc::clone(&shared_store))
+                .unwrap();
+            match d1 {
+                FaultDecision::Error { body, .. } => assert!(body.contains("\"n\":5")),
+                other => panic!("expected Error(200), got {other:?}"),
+            }
+
+            let d2 = engine.should_inject_fault(&request, shared_store).unwrap();
+            match d2 {
+                FaultDecision::Error { body, .. } => assert!(body.contains("\"n\":10")),
+                other => panic!("expected Error(200), got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn cas_distinguishes_applied_from_conflict() {
+            let shared_store = store();
+            let request = req(HashMap::new(), None);
+
+            // First call: key "status" absent, expected () (unit) matches -> Applied, sets "paid".
+            let applied_script = r#"
+                fn respond(ctx) {
+                    let outcome = ctx.state.cas("status", (), "paid");
+                    http(200, #{ applied: outcome.applied, current: outcome.current })
+                }
+            "#;
+            let applied_engine = RhaiEngine::new(applied_script, "cas-applied").unwrap();
+            let d1 = applied_engine
+                .should_inject_fault(&request, Arc::clone(&shared_store))
+                .unwrap();
+            match d1 {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"applied\":true"), "got {body}");
+                }
+                other => panic!("expected 200, got {other:?}"),
+            }
+
+            // Second call: current is now "paid"; asking for expected "pending" must conflict and
+            // report the winning current value, distinguishing it from the Applied case above.
+            let conflict_script = r#"
+                fn respond(ctx) {
+                    let outcome = ctx.state.cas("status", "pending", "shipped");
+                    http(200, #{ applied: outcome.applied, current: outcome.current })
+                }
+            "#;
+            let conflict_engine = RhaiEngine::new(conflict_script, "cas-conflict").unwrap();
+            let d2 = conflict_engine
+                .should_inject_fault(&request, shared_store)
+                .unwrap();
+            match d2 {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"applied\":false"), "got {body}");
+                    assert!(body.contains("\"current\":\"paid\""), "got {body}");
+                }
+                other => panic!("expected 200, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn ttl_sets_per_flow_expiry() {
+            let script = r#"
+                fn respond(ctx) {
+                    ctx.state.set("k", 1);
+                    let applied = ctx.state.ttl(3600);
+                    http(200, #{ applied: applied })
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"applied\":true"), "got {body}");
+                }
+                other => panic!("expected 200, got {other:?}"),
+            }
+        }
+
+        // Issue #358 (fail-loud) / #322: a backend failure on any atomic op must propagate as a
+        // script error, never a silently-returned default — unlike the lenient #322 fallback the
+        // older get/set/incr/exists/delete ops use.
+        #[cfg(feature = "test-backend")]
+        #[test]
+        fn atomic_ops_propagate_store_errors_fail_loud() {
+            use crate::extensions::flow_state::FailingFlowStore;
+            let failing_store: Arc<dyn FlowStore> = Arc::new(FailingFlowStore);
+            let request = req(HashMap::new(), None);
+
+            let get_or_result = RhaiEngine::new(
+                r#"fn respond(ctx) { ctx.state.get_or("k", 0) }"#,
+                "fail-get-or",
+            )
+            .unwrap()
+            .should_inject_fault(&request, Arc::clone(&failing_store));
+            assert!(
+                get_or_result.is_err(),
+                "get_or must propagate a store failure, not a default"
+            );
+
+            let incr_by_result = RhaiEngine::new(
+                r#"fn respond(ctx) { ctx.state.incr_by("k", 1) }"#,
+                "fail-incr-by",
+            )
+            .unwrap()
+            .should_inject_fault(&request, Arc::clone(&failing_store));
+            assert!(
+                incr_by_result.is_err(),
+                "incr_by must propagate a store failure"
+            );
+
+            let cas_result = RhaiEngine::new(
+                r#"fn respond(ctx) { ctx.state.cas("k", (), "v") }"#,
+                "fail-cas",
+            )
+            .unwrap()
+            .should_inject_fault(&request, Arc::clone(&failing_store));
+            assert!(cas_result.is_err(), "cas must propagate a store failure");
+
+            let ttl_result =
+                RhaiEngine::new(r#"fn respond(ctx) { ctx.state.ttl(60) }"#, "fail-ttl")
+                    .unwrap()
+                    .should_inject_fault(&request, failing_store);
+            assert!(ttl_result.is_err(), "ttl must propagate a store failure");
+        }
+
+        // Issue #358 B1 / #322: the PRE-EXISTING v2 ops (get/incr) are also unconditionally
+        // fail-loud — they raise even with RIFT_STRICT_FLOW_STORE unset — while the legacy v1
+        // `flow_store` global stays lenient under the default toggle (returns a fallback, no raise).
+        #[cfg(feature = "test-backend")]
+        #[test]
+        fn v2_state_ops_fail_loud_while_v1_flow_store_lenient() {
+            use crate::extensions::flow_state::FailingFlowStore;
+            let request = req(HashMap::new(), None);
+
+            let get_err = RhaiEngine::new(r#"fn respond(ctx) { ctx.state.get("k") }"#, "v2-get")
+                .unwrap()
+                .should_inject_fault(&request, Arc::new(FailingFlowStore));
+            assert!(get_err.is_err(), "v2 ctx.state.get must fail loud");
+
+            let incr_err = RhaiEngine::new(r#"fn respond(ctx) { ctx.state.incr("k") }"#, "v2-incr")
+                .unwrap()
+                .should_inject_fault(&request, Arc::new(FailingFlowStore));
+            assert!(incr_err.is_err(), "v2 ctx.state.incr must fail loud");
+
+            // v1 flow_store.get stays lenient under the default (unset) toggle — no raise.
+            let v1 = RhaiEngine::new(
+                r#"fn should_inject(request, flow_store) { flow_store.get("f", "k"); #{ inject: false } }"#,
+                "v1-get",
+            )
+            .unwrap()
+            .should_inject_fault(&request, Arc::new(FailingFlowStore));
+            assert!(
+                matches!(v1, Ok(FaultDecision::None)),
+                "v1 flow_store.get must stay lenient under the default toggle, got {v1:?}"
+            );
         }
 
         // --- ctx.stub ---

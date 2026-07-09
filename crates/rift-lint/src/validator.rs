@@ -60,6 +60,7 @@ pub fn validate_imposter(
     check_required_fields(file, imposter, result);
     check_protocol(file, imposter, result);
     check_port_range(file, imposter, result);
+    check_state_without_flow_state(file, imposter, result);
 
     // Named script registry (`_rift.scripts`, issue #356): validated once up front (each entry
     // must be a `code:`/`file:` leaf, not a `ref:`), then handed to every response so a
@@ -373,6 +374,76 @@ fn check_port_range(file: &Path, imposter: &Value, result: &mut LintResult) {
                 .with_location("port")
                 .with_suggestion("Consider using a port >= 1024"),
             );
+        }
+    }
+}
+
+/// Best-effort resolve of a `{ engine?, code?, file?, ref? }` script object's source text, for the
+/// E042 heuristic below. Unlike [`validate_script_source`] this doesn't itself report issues on a
+/// resolution failure (unreadable file, unknown ref) — those are already reported elsewhere by the
+/// real validation pass; here an unresolvable script is simply skipped.
+fn resolve_script_text(config_file: &Path, script: &Value, registry: &Value) -> Option<String> {
+    if let Some(code) = script.get("code").and_then(|v| v.as_str()) {
+        return Some(code.to_string());
+    }
+    if let Some(f) = script.get("file").and_then(|v| v.as_str()) {
+        return read_script_file_relative(config_file, f).ok();
+    }
+    if let Some(r) = script.get("ref").and_then(|v| v.as_str()) {
+        let target = registry.get(r)?;
+        return resolve_script_text(config_file, target, &Value::Null);
+    }
+    None
+}
+
+/// Issue #358: a script that calls `ctx.state` (or the v1 `flow_store`) needs a flow store to
+/// persist its writes. Without `_rift.flowState` configured, `Imposter::create_flow_store`
+/// auto-provisions an in-memory store instead of a silent no-op — state works, but only for this
+/// process's lifetime and isn't shared across a cluster. Warn so that's a deliberate choice, not a
+/// surprise at scale.
+fn check_state_without_flow_state(file: &Path, imposter: &Value, result: &mut LintResult) {
+    let has_flow_state = imposter
+        .get("_rift")
+        .and_then(|r| r.get("flowState"))
+        .is_some();
+    if has_flow_state {
+        return;
+    }
+
+    let registry = imposter
+        .get("_rift")
+        .and_then(|r| r.get("scripts"))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    let Some(stubs) = imposter.get("stubs").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for (idx, stub) in stubs.iter().enumerate() {
+        let Some(responses) = stub.get("responses").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for (resp_idx, response) in responses.iter().enumerate() {
+            let Some(script) = response.get("_rift").and_then(|rift| rift.get("script")) else {
+                continue;
+            };
+            let Some(code) = resolve_script_text(file, script, &registry) else {
+                continue;
+            };
+            if code.contains("ctx.state") || code.contains("flow_store") {
+                result.add_issue(
+                    LintIssue::warning(
+                        "E042",
+                        "Script uses ctx.state (or flow_store) but no _rift.flowState is configured",
+                        file.to_path_buf(),
+                    )
+                    .with_location(format!("stubs[{idx}].responses[{resp_idx}]._rift.script"))
+                    .with_suggestion(
+                        "State will be auto-provisioned in-memory (won't persist across restarts \
+                         or be shared across a cluster) — configure _rift.flowState for production",
+                    ),
+                );
+            }
         }
     }
 }

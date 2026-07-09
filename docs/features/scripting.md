@@ -527,8 +527,33 @@ ctx.state.exists("key");          // bool
 ctx.state.delete("key");
 ```
 
-(Full `get_or`/parameterized `incr`/CAS support is a separate, upcoming addition — this covers the
-common get/set/incr/exists/delete case today.)
+Atomic ops and ergonomic getters (issue #358):
+
+```rhai
+let n = ctx.state.get_or("attempts", 0);   // value, or the default if absent — kills
+                                            // the `if v == () { v = 0; }` idiom
+let n = ctx.state.incr_by("attempts", 5);  // atomic +5, starts at 0 when absent
+ctx.state.ttl(60);                         // per-flow TTL override, in seconds
+
+let outcome = ctx.state.cas("status", "pending", "paid");
+if outcome.applied {
+  // this call won the race
+} else {
+  // outcome.current is who won instead (unit/nil/null if the key was absent)
+}
+```
+
+`cas(key, expected, new)` is Rift's atomic compare-and-set (issue #311). It always returns an
+**object** — `{ applied: true }` on success, or `{ applied: false, current: <value> }` on conflict —
+rather than a bare value, so a conflicting stored value that happens to equal `true` can never be
+mistaken for "applied". This shape is identical in all three engines; only the method spelling
+differs to match each engine's naming convention — Rhai/Lua use `get_or`/`incr_by` (snake_case), JS
+uses `getOr`/`incrBy` (camelCase); `cas` and `ttl` are spelled the same everywhere.
+
+Every `ctx.state` call is fail-loud: a store failure (a Redis connection dropping mid-request, for
+example) raises a script error and is logged — it is never silently swallowed into a default value.
+See [Flow State]({{ site.baseurl }}/features/flow-state/) for how the underlying store is selected,
+including the in-memory auto-provisioning that lets `ctx.state` work with zero configuration.
 
 `ctx.store` is the escape hatch for touching a *different* flow's state — `ctx.store.flow(id)`
 returns a handle just like `ctx.state`, but scoped to `id` instead of the request's own flow:
@@ -621,10 +646,16 @@ always takes precedence over `defaultEngine`.
 
 ## Flow-Store Error Semantics
 
-By **default** a flow-store backend failure (e.g. a Redis outage mid-request) is **lenient**: the
-failing op returns its empty fallback (`()` / `nil` / `null`, `false`, or `0`) and the script keeps
-running. So a script can't tell "key genuinely absent" from "backend down" by the return value
-alone — use `last_error()` for that:
+The v2 `ctx.state` API and the legacy v1 `flow_store` global (the `should_inject(request,
+flow_store)` path) differ in how a backend failure (e.g. a Redis outage mid-request) surfaces:
+
+- **`ctx.state` (v2) is always fail-loud.** Every op — `get`/`set`/`incr`/`exists`/`delete` and the
+  atomic `get_or`/`incr_by`/`cas`/`ttl` — **raises** a script error on a backend failure and logs
+  it, so a store outage is never silently returned as an empty/absent value. This is unconditional
+  and not affected by `RIFT_STRICT_FLOW_STORE`.
+- **`flow_store` (legacy v1 global) is lenient by default.** A failing op returns its empty fallback
+  (`()` / `nil` / `null`, `false`, or `0`) and the script keeps running, so a v1 script can't tell
+  "key genuinely absent" from "backend down" by the return value alone — use `last_error()`:
 
 ```rhai
 let v = flow_store.get("flow-1", "attempts");
@@ -637,9 +668,10 @@ if flow_store.last_error() != () {
 succeeded) and is reset at the start of every script execution. The call syntax follows each engine:
 `flow_store.last_error()` (Rhai), `flow_store:last_error()` (Lua), `flow_store.last_error()` (JS).
 
-Set the **`RIFT_STRICT_FLOW_STORE`** environment variable (truthy: `1`/`true`/`yes`/`on`) to make a
-flow-store op failure **raise** a script error in all three engines instead of returning a fallback.
-The raised error propagates to the standard script-error path (`500` with `x-rift-script-error`).
+Set the **`RIFT_STRICT_FLOW_STORE`** environment variable (truthy: `1`/`true`/`yes`/`on`) to make the
+legacy `flow_store` global **raise** on failure too (matching the v2 default) instead of returning a
+fallback. The raised error propagates to the standard script-error path (`500` with
+`x-rift-script-error`). This toggle does not change `ctx.state`, which is always fail-loud.
 
 ---
 
