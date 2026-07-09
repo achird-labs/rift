@@ -236,6 +236,9 @@ jobs:
             if [[ "$OSTYPE" == "darwin"* ]]; then EXT="dylib"; else EXT="so"; fi
             FFI_NAME="librift_ffi-${{ matrix.classifier }}.$EXT"
             cp "librift_ffi.$EXT" "$FFI_NAME"
+            # Issue #469: fail the release if the cdylib dynamically links a non-stock library
+            # (e.g. system LuaJIT) — that made the v0.11.3 artifacts fail to dlopen on stock hosts.
+            "$GITHUB_WORKSPACE/scripts/check-ffi-selfcontained.sh" "$FFI_NAME"
             shasum -a 256 "$FFI_NAME" > "$FFI_NAME.sha256"
             echo "FFI_ASSET_PATH=target/${{ matrix.target }}/release/$FFI_NAME" >> $GITHUB_ENV
             echo "FFI_CHECKSUM_PATH=target/${{ matrix.target }}/release/$FFI_NAME.sha256" >> $GITHUB_ENV

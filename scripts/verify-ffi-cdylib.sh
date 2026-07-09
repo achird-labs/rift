@@ -82,3 +82,7 @@ if [ "$missing" -ne 0 ]; then
   exit 1
 fi
 echo "[pass] all ${#SYMBOLS[@]} C-ABI symbols exported by $lib"
+
+# Issue #469: exporting the C-ABI is necessary but not sufficient — the cdylib must also be
+# self-contained (no system-LuaJIT / Homebrew leaks) so it can dlopen on stock hosts.
+"$(dirname "${BASH_SOURCE[0]}")/check-ffi-selfcontained.sh" "$lib"

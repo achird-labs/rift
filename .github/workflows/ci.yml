@@ -197,6 +197,11 @@ jobs:
           done
           echo "[pass] musl librift_ffi cdylib builds and exports the C-ABI"
 
+      # Issue #469: the musl cdylib must also be self-contained (no non-stock dynamic deps), so the
+      # release self-containment gate's musl allowlist is validated here on a real musl artifact.
+      - name: Assert the musl cdylib is self-contained
+        run: ./scripts/check-ffi-selfcontained.sh target/x86_64-unknown-linux-musl/release/librift_ffi.so
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
