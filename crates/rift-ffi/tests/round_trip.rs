@@ -309,9 +309,6 @@ fn ffi_build_info_reports_version_and_features() {
                 "javascript feature reported"
             );
         }
-        if cfg!(feature = "lua") {
-            assert!(features.contains(&"lua"), "lua feature reported");
-        }
         if cfg!(feature = "redis-backend") {
             assert!(
                 features.contains(&"redis-backend"),

@@ -966,7 +966,7 @@ fn default_idle_timeout() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RiftScriptEngineConfig {
-    /// Default script engine: "rhai", "lua", or "javascript"
+    /// Default script engine: "rhai" or "javascript"
     #[serde(default = "default_script_engine")]
     pub default_engine: String,
     /// Script execution timeout in milliseconds
@@ -1069,9 +1069,10 @@ fn default_error_status() -> u16 {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RiftScriptConfig {
-    /// Script engine: "rhai", "lua", or "javascript". When absent, the resolver infers it from
-    /// `file`'s extension (`.rhai`/`.lua`/`.js`), falling back to "rhai" — the legacy default —
-    /// when neither `engine` nor an inferable extension is present (back-compat with `code:`).
+    /// Script engine: "rhai" or "javascript". When absent, the resolver infers it from
+    /// `file`'s extension (`.rhai`/`.js`; a `.lua` file still resolves to the now-removed "lua"
+    /// engine so it is rejected with a clear error rather than silently mis-run), falling back to
+    /// "rhai" — the legacy default — when neither `engine` nor an inferable extension is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<String>,
     /// Inline script code.
@@ -1191,12 +1192,12 @@ mod tests {
     #[test]
     fn script_config_back_compat_engine_and_code() {
         let cfg: RiftScriptConfig = serde_json::from_value(json!({
-            "engine": "lua",
-            "code": "function should_inject() end"
+            "engine": "rhai",
+            "code": "fn should_inject() {}"
         }))
         .unwrap();
-        assert_eq!(cfg.engine.as_deref(), Some("lua"));
-        assert_eq!(cfg.code.as_deref(), Some("function should_inject() end"));
+        assert_eq!(cfg.engine.as_deref(), Some("rhai"));
+        assert_eq!(cfg.code.as_deref(), Some("fn should_inject() {}"));
         assert!(cfg.has_valid_source());
     }
 

@@ -145,7 +145,7 @@ See the [Node.js Integration Guide]({{ site.baseurl }}/getting-started/nodejs/) 
 
 ### Features
 - [Fault Injection]({{ site.baseurl }}/features/fault-injection/) - Latency and error simulation
-- [Scripting]({{ site.baseurl }}/features/scripting/) - Rhai, Lua, and JavaScript engines
+- [Scripting]({{ site.baseurl }}/features/scripting/) - Rhai and JavaScript engines
 - [TLS/HTTPS]({{ site.baseurl }}/features/tls/) - Secure connections
 - [Metrics]({{ site.baseurl }}/features/metrics/) - Prometheus integration
 

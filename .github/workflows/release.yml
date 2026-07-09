@@ -37,7 +37,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             archive: tar.gz
-            features: lua,javascript,redis-backend
+            features: javascript,redis-backend
             classifier: linux-x86_64
 
           # Linux ARM64 (glibc)
@@ -68,7 +68,6 @@ jobs:
             classifier: linux-aarch64-musl
 
           # macOS x86_64 (Intel) - cross-compiled on ARM64 runner
-          # Note: Lua disabled because LuaJIT can't be cross-compiled via pkg-config
           - target: x86_64-apple-darwin
             os: macos-14
             archive: tar.gz
@@ -80,7 +79,7 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-14
             archive: tar.gz
-            features: lua,javascript,redis-backend
+            features: javascript,redis-backend
             classifier: darwin-aarch64
 
           # Windows x86_64
@@ -138,14 +137,9 @@ jobs:
         if: matrix.cross && contains(matrix.target, 'musl')
         uses: taiki-e/install-action@cross
 
-      # Install LuaJIT on native Linux/macOS builds
-      - name: Install LuaJIT (Ubuntu)
-        if: matrix.os == 'ubuntu-22.04' && !matrix.cross
-        run: sudo apt-get update && sudo apt-get install -y libluajit-5.1-dev
-
-      - name: Install LuaJIT (macOS)
+      - name: Install pkg-config (macOS)
         if: startsWith(matrix.os, 'macos')
-        run: brew install luajit pkg-config
+        run: brew install pkg-config
 
       # Cache
       - name: Cache cargo registry
@@ -324,9 +318,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install LuaJIT
-        run: sudo apt-get update && sudo apt-get install -y libluajit-5.1-dev
-
       - name: Cache cargo registry
         uses: actions/cache@v5
         with:
@@ -446,9 +437,6 @@ jobs:
           - **Rhai scripting** (built-in)
           - **JavaScript scripting** (Boa engine)
           - **Redis backend** for distributed state
-
-          Native builds (Linux glibc x86_64, macOS, Windows) additionally include:
-          - **Lua scripting** (LuaJIT)
 
           ### Verification
 

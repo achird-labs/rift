@@ -1142,17 +1142,6 @@ fn e041_fires_for_v1_should_inject_wrapper_rhai() {
 }
 
 #[test]
-fn e041_fires_for_v1_should_inject_wrapper_lua() {
-    let v = make_imposter(json!([rift_script_stub(json!({
-        "engine": "lua",
-        "code": "function should_inject(request, flow_store) return { inject = false } end"
-    }))]));
-    let mut r = LintResult::new();
-    validate_imposter(path(), &v, &mut r, &opts());
-    assert!(has_code(&r, "E041"), "expected E041, got {:?}", codes(&r));
-}
-
-#[test]
 fn e041_fires_for_v1_should_inject_wrapper_js() {
     let v = make_imposter(json!([rift_script_stub(json!({
         "engine": "javascript",

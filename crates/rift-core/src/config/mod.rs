@@ -169,22 +169,10 @@ impl Config {
                             )
                         })?;
                 }
-                #[cfg(feature = "lua")]
                 "lua" => {
-                    use crate::scripting::{LuaValidator, ScriptValidator};
-                    LuaValidator::new()
-                        .validate(&script_rule.script)
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "Invalid Lua script in rule '{}': {}",
-                                script_rule.id,
-                                e
-                            )
-                        })?;
-                }
-                #[cfg(not(feature = "lua"))]
-                "lua" => {
-                    anyhow::bail!("Lua engine specified but 'lua' feature is not enabled");
+                    anyhow::bail!(
+                        "the Lua scripting engine was removed (issue #450); use engine \"rhai\" or \"javascript\""
+                    );
                 }
                 #[cfg(feature = "javascript")]
                 "javascript" | "js" => {

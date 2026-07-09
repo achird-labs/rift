@@ -39,7 +39,7 @@ impl CheckReport {
     }
 }
 
-/// Statically validate `target` — a raw script file (`.rhai`/`.lua`/`.js`) or a rift config file
+/// Statically validate `target` — a raw script file (`.rhai`/`.js`) or a rift config file
 /// (`.json`/`.yaml`/`.yml`) — with no server running. `hook` is only used for a raw script file
 /// (a config's `_rift.script` entries are always response-position, i.e. `respond`).
 pub fn run_check(target: &Path, hook: &str) -> Result<CheckReport> {
@@ -60,11 +60,14 @@ enum TargetKind {
 fn target_kind(path: &Path) -> Result<TargetKind> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("rhai") => Ok(TargetKind::Script("rhai".to_string())),
-        Some("lua") => Ok(TargetKind::Script("lua".to_string())),
         Some("js") => Ok(TargetKind::Script("javascript".to_string())),
+        Some("lua") => Err(anyhow!(
+            "the Lua scripting engine was removed (issue #450); rewrite {} as a .rhai or .js script",
+            path.display()
+        )),
         Some("json") | Some("yaml") | Some("yml") => Ok(TargetKind::Config),
         other => Err(anyhow!(
-            "cannot determine target kind from extension {:?} of {}; expected .rhai/.lua/.js \
+            "cannot determine target kind from extension {:?} of {}; expected .rhai/.js \
              (script) or .json/.yaml/.yml (config)",
             other,
             path.display()
@@ -236,12 +239,11 @@ fn fixture_to_script_request(fixture: RequestFixture) -> crate::scripting::Scrip
     }
 }
 
-/// Infer the script engine from `path`'s extension (`.rhai`/`.lua`/`.js`); `None` when it isn't
-/// one of the three recognized extensions.
+/// Infer the script engine from `path`'s extension (`.rhai`/`.js`); `None` when it isn't
+/// one of the two recognized extensions.
 fn infer_engine_from_extension(path: &Path) -> Option<String> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("rhai") => Some("rhai".to_string()),
-        Some("lua") => Some("lua".to_string()),
         Some("js") => Some("javascript".to_string()),
         _ => None,
     }
@@ -275,7 +277,7 @@ pub fn run_run(
     if hook != "respond" {
         bail!(
             "`rift script run --hook {hook}` is not supported: only `respond` is wired \
-             end-to-end across all three engines today"
+             end-to-end across both engines today"
         );
     }
 
@@ -285,7 +287,7 @@ pub fn run_run(
         Some(e) => e.to_string(),
         None => infer_engine_from_extension(target).ok_or_else(|| {
             anyhow!(
-                "cannot infer script engine from extension of {}; pass --engine rhai|lua|js",
+                "cannot infer script engine from extension of {}; pass --engine rhai|js",
                 target.display()
             )
         })?,
@@ -325,8 +327,7 @@ pub fn run_run(
     };
 
     // Run through the SAME bounded path the real proxy uses (issue #360): `spawn_blocking` +
-    // wall-clock timeout with the Rhai/Lua abort flag wired in, so an infinite-loop script (a
-    // Lua `while true do end` in particular, whose direct engine path has no instruction hook)
+    // wall-clock timeout with the Rhai abort flag wired in, so an infinite-loop script
     // TERMINATES the CLI at the deadline instead of hanging it. This also captures `ctx.logger`
     // output and the duration for free. A fresh current-thread runtime is built here because the
     // `script` subcommand runs before/without the server's tokio runtime.
@@ -548,16 +549,6 @@ mod tests {
     fn check_raw_js_misnamed_entrypoint_fails() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_temp(&dir, "s.js", "function respnod(ctx) { return pass(); }");
-        let report = run_check(&path, "respond").expect("check runs");
-        assert!(!report.is_ok());
-        assert!(report.errors[0].contains("respond"));
-    }
-
-    #[cfg(feature = "lua")]
-    #[test]
-    fn check_raw_lua_misnamed_entrypoint_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_temp(&dir, "s.lua", "function respnod(ctx) return pass() end");
         let report = run_check(&path, "respond").expect("check runs");
         assert!(!report.is_ok());
         assert!(report.errors[0].contains("respond"));
@@ -809,35 +800,6 @@ mod tests {
                     }
                     return pass();
                 }
-            "#,
-        );
-        let report = run_run(
-            &path,
-            None,
-            &["attempts=2".to_string()],
-            "cli",
-            None,
-            "respond",
-        )
-        .expect("run succeeds");
-        assert_eq!(report.decision, "pass()");
-    }
-
-    #[cfg(feature = "lua")]
-    #[test]
-    fn run_lua_fail_twice_fixture() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_temp(
-            &dir,
-            "fail-twice.lua",
-            r#"
-                function respond(ctx)
-                    local attempts = ctx.state:get_or("attempts", 0)
-                    if attempts < 2 then
-                        return http(503, "attempt " .. attempts)
-                    end
-                    return pass()
-                end
             "#,
         );
         let report = run_run(

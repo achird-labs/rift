@@ -111,9 +111,8 @@ tracing-test = "0.2"
 port_check = "0.2"
 
 [features]
-default = ["redis-backend", "lua", "javascript", "mimalloc"]
+default = ["redis-backend", "javascript", "mimalloc"]
 redis-backend = ["rift-core/redis-backend"]
-lua = ["rift-core/lua"]
 javascript = ["rift-core/javascript"]
 # High-throughput global allocator for the server binary; drop it (e.g.
 # `--no-default-features`) for FFI/cross-compile builds that must not link it.

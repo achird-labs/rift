@@ -41,7 +41,6 @@ rift-types = { path = "../rift-types" }
 
 # Scripting engines
 rhai.workspace = true
-mlua = { version = "0.10", features = ["luajit", "serialize"], optional = true }
 boa_engine = { version = "0.20", optional = true }
 
 # State storage
@@ -99,9 +98,8 @@ name = "imposter_matcher_bench"
 harness = false
 
 [features]
-default = ["redis-backend", "lua", "javascript"]
+default = ["redis-backend", "javascript"]
 redis-backend = ["redis", "r2d2"]
-lua = ["mlua"]
 javascript = ["boa_engine"]
 # Deliberately failing flow-store backend for backend-outage tests (issue #318)
 test-backend = []

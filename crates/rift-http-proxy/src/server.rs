@@ -208,7 +208,7 @@ pub enum ScriptAction {
     /// the intended hook, v1-shape deprecation, and (for a config) state-used-without-flowState.
     /// No server is started. Exits non-zero on any error.
     Check {
-        /// A raw script file (`.rhai`/`.lua`/`.js`) or a rift config file (JSON/YAML)
+        /// A raw script file (`.rhai`/`.js`) or a rift config file (JSON/YAML)
         /// containing `_rift.script` entries.
         target: PathBuf,
 
@@ -223,7 +223,7 @@ pub enum ScriptAction {
     /// Prints the decision, the mutated flow state, captured `ctx.logger` output, and the
     /// execution duration.
     Run {
-        /// Script file (`.rhai`/`.lua`/`.js`).
+        /// Script file (`.rhai`/`.js`).
         target: PathBuf,
 
         /// JSON file with the request-object shape scripts see:
@@ -242,11 +242,11 @@ pub enum ScriptAction {
         #[arg(long, default_value = "cli")]
         flow_id: String,
 
-        /// Script engine (`rhai`/`lua`/`js`). Inferred from the file extension when omitted.
+        /// Script engine (`rhai`/`js`). Inferred from the file extension when omitted.
         #[arg(long)]
         engine: Option<String>,
 
-        /// Entrypoint hook to run. Only `respond` is wired end-to-end for all three engines
+        /// Entrypoint hook to run. Only `respond` is wired end-to-end for both engines
         /// today (`matches`/`transform`/`delay` are Rhai-only and not yet reachable outside the
         /// engine's own unit tests) — any other value is a clean error, not a panic.
         #[arg(long, default_value = "respond")]

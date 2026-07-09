@@ -15,12 +15,8 @@ ARG BUILD_DATE=unknown
 ARG TARGETARCH
 
 # Install CA certificates and curl for health checks
-# Note: LuaJIT is only available on amd64 builds
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl && \
-    if [ "$TARGETARCH" = "amd64" ]; then \
-        apt-get install -y --no-install-recommends libluajit-5.1-2; \
-    fi && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy pre-built binary (provided via build context)

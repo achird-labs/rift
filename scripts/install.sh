@@ -62,7 +62,7 @@ detect_platform() {
         if ldd --version 2>&1 | grep -q musl; then
             os="unknown-linux-musl"
         else
-            # Default to glibc for better feature support (Lua, JS)
+            # Default to glibc for better feature support (JS)
             os="unknown-linux-gnu"
         fi
     fi

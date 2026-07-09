@@ -13,7 +13,7 @@ pub enum CasOutcome {
 /// Backend-agnostic trait for flow state storage
 ///
 /// This trait is intentionally synchronous to avoid async bridging issues
-/// when called from Lua scripts or other synchronous contexts.
+/// when called from scripts or other synchronous contexts.
 /// Redis operations are performed using a blocking client with connection pooling.
 pub trait FlowStore: Send + Sync {
     /// Get a value from flow state

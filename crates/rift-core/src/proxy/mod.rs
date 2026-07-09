@@ -2,7 +2,7 @@
 //!
 //! This module provides the proxy server implementation with support for:
 //! - Fault injection (latency, error, TCP faults)
-//! - Script-based fault decisions (Rhai, Lua, JavaScript)
+//! - Script-based fault decisions (Rhai, JavaScript)
 //! - Mountebank-compatible response behaviors (wait, copy, lookup, decorate)
 //! - Request recording and replay (proxyOnce, proxyAlways modes)
 //! - Multi-upstream routing

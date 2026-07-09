@@ -2,7 +2,7 @@
 //!
 //! Rift provides a Mountebank-compatible API with advanced features like:
 //! - Probabilistic fault injection via `_rift.fault` extensions
-//! - Multi-engine scripting (Rhai, Lua, JavaScript) via `_rift.script`
+//! - Multi-engine scripting (Rhai, JavaScript) via `_rift.script`
 //! - Stateful testing with flow store via `_rift.flowState`
 //!
 //! # Examples

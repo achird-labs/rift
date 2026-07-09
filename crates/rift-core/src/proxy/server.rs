@@ -17,13 +17,11 @@ use crate::recording::{ProxyMode, RecordingStore};
 use crate::scripting::RhaiEngine;
 #[cfg(feature = "javascript")]
 use crate::scripting::compile_js_to_bytecode;
-#[cfg(feature = "lua")]
-use crate::scripting::compile_to_bytecode;
 use crate::scripting::{
     CompiledScript, DecisionCache, DecisionCacheConfig, ScriptPool, ScriptPoolConfig,
 };
 
-#[cfg(any(feature = "lua", feature = "javascript"))]
+#[cfg(feature = "javascript")]
 use anyhow::Context;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Bytes;
@@ -143,23 +141,10 @@ impl ProxyServer {
                             rule_id: script_rule.id.clone(),
                         }
                     }
-                    #[cfg(feature = "lua")]
                     "lua" => {
-                        let bytecode =
-                            compile_to_bytecode(&script_rule.script).with_context(|| {
-                                format!(
-                                    "Failed to compile Lua script for rule '{}'",
-                                    script_rule.id
-                                )
-                            })?;
-                        CompiledScript::Lua {
-                            bytecode: Arc::new(bytecode),
-                            rule_id: script_rule.id.clone(),
-                        }
-                    }
-                    #[cfg(not(feature = "lua"))]
-                    "lua" => {
-                        anyhow::bail!("Lua engine not enabled. Enable the 'lua' feature flag")
+                        anyhow::bail!(
+                            "the Lua scripting engine was removed (issue #450); use engine \"rhai\" or \"javascript\""
+                        )
                     }
                     #[cfg(feature = "javascript")]
                     "javascript" | "js" => {

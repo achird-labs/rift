@@ -3844,43 +3844,6 @@ async fn test_path_params_script_rhai() {
     );
 }
 
-#[cfg(feature = "lua")]
-#[tokio::test]
-async fn test_path_params_script_lua() {
-    let script = "function should_inject(request, flow_store) \
-         return { inject = true, fault = \"error\", status = 200, body = request.pathParams.id } end";
-    let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": 19743,
-        "protocol": "http",
-        "stubs": [{
-            "routePattern": "/users/:id",
-            "predicates": [{ "equals": { "path": "/users/123" } }],
-            "responses": [{ "_rift": { "script": { "engine": "lua", "code": script } } }]
-        }]
-    }))
-    .expect("config");
-
-    let manager = ImposterManager::new();
-    manager
-        .create_imposter(config)
-        .await
-        .expect("create imposter");
-    let body = reqwest::Client::new()
-        .get("http://127.0.0.1:19743/users/123")
-        .send()
-        .await
-        .expect("GET failed")
-        .text()
-        .await
-        .expect("body");
-    let _ = manager.delete_imposter(19743).await;
-
-    assert_eq!(
-        body, "123",
-        "lua script must read a populated request.pathParams.id, got: {body}"
-    );
-}
-
 #[cfg(feature = "javascript")]
 #[tokio::test]
 async fn test_path_params_script_js() {

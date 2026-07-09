@@ -4,7 +4,7 @@
 //! infinite Rhai `loop {}`) ran unbounded on the async worker and wedged the whole engine.
 //! This module runs the script off the async worker via `spawn_blocking` and interrupts it
 //! at a wall-clock deadline using the same abort-flag mechanism as the pooled path (#172):
-//! Rhai's `on_progress` callback, and a Lua instruction hook.
+//! Rhai's `on_progress` callback.
 
 use super::{
     FaultDecision, ScriptCtxExtras, ScriptEngine, ScriptRequest, ScriptTraceEntry,
@@ -35,11 +35,11 @@ pub fn resolve_script_timeout_ms(config: &ImposterConfig) -> u64 {
 /// Run a `_rift.script` `should_inject` off the async worker with a wall-clock deadline
 /// (issue #308). Execution happens in `spawn_blocking` so a non-yielding script cannot
 /// starve the Tokio runtime, and at `timeout` the abort flag is set so the script self-
-/// interrupts. Rhai (`on_progress`) and Lua (instruction hook) are truly interrupted and
-/// free their thread promptly. JavaScript can't observe the deadline flag mid-run (Boa has no
-/// per-instruction interrupt), but its context caps loop iterations (issue #327), so a runaway
-/// loop terminates by throwing instead of leaking its blocking thread forever. Returns `Err` on
-/// timeout, a compile/exec error, or a panic.
+/// interrupts. Rhai (`on_progress`) is truly interrupted and frees its thread promptly.
+/// JavaScript can't observe the deadline flag mid-run (Boa has no per-instruction interrupt),
+/// but its context caps loop iterations (issue #327), so a runaway loop terminates by throwing
+/// instead of leaking its blocking thread forever. Returns `Err` on timeout, a compile/exec
+/// error, or a panic.
 pub async fn should_inject_bounded(
     engine_type: String,
     code: String,
@@ -90,8 +90,8 @@ pub async fn should_inject_bounded_with_ctx(
         Ok(Ok(result)) => result,
         Ok(Err(join_err)) => Err(anyhow::anyhow!("script task panicked: {join_err}")),
         Err(_elapsed) => {
-            // Signal the deadline: Rhai/Lua self-interrupt and free their thread promptly;
-            // for other engines this is a best-effort flag they never observe.
+            // Signal the deadline: Rhai self-interrupts and frees its thread promptly; for
+            // other engines this is a best-effort flag they never observe.
             abort.store(true, Ordering::Relaxed);
             warn!(
                 "_rift.script execution timed out after {}ms",
@@ -176,7 +176,7 @@ pub async fn should_inject_bounded_with_ctx_traced(
 }
 
 /// Execute `should_inject` synchronously with the abort flag wired into the interpreter, so
-/// setting `abort` interrupts a runaway script. Rhai and Lua get a real interpreter interrupt
+/// setting `abort` interrupts a runaway script. Rhai gets a real interpreter interrupt
 /// (#308/#172); other engines run without an interpreter interrupt but still off the async
 /// worker and under the request-level timeout.
 fn run_should_inject_with_abort(
@@ -193,10 +193,6 @@ fn run_should_inject_with_abort(
     crate::extensions::flow_state::clear_last_flow_error();
     match engine_type {
         "rhai" => super::rhai_engine::run_should_inject_with_abort_rhai(
-            code, rule_id, request, flow_store, abort, ctx_extra,
-        ),
-        #[cfg(feature = "lua")]
-        "lua" => super::lua_engine::run_should_inject_with_abort_lua(
             code, rule_id, request, flow_store, abort, ctx_extra,
         ),
         other => {
@@ -247,7 +243,6 @@ mod tests {
 
     const RUNAWAY_RHAI: &str =
         "fn should_inject(request, flow_store){ let i = 0; loop { i += 1; } }";
-    const RUNAWAY_LUA: &str = "function should_inject(request, flow_store) while true do end end";
 
     /// Run the sync interrupt path on a child thread, flip the abort flag after 200ms, and
     /// require the interpreter to unwind within 5s. Running off the test thread with a
@@ -286,14 +281,7 @@ mod tests {
         assert_interrupts("rhai", RUNAWAY_RHAI);
     }
 
-    // AC5: same for Lua.
-    #[cfg(feature = "lua")]
-    #[test]
-    fn runaway_lua_interrupted_by_abort() {
-        assert_interrupts("lua", RUNAWAY_LUA);
-    }
-
-    // The non-rhai/non-lua dispatch branch: an unknown engine returns an error promptly.
+    // The non-rhai dispatch branch: an unknown engine returns an error promptly.
     #[tokio::test]
     async fn unknown_engine_returns_error() {
         let res = bounded("no-such-engine", "whatever", 500).await;
@@ -423,19 +411,6 @@ mod tests {
                 assert_eq!(status, 503);
                 assert_eq!(body, "boom");
             }
-            other => panic!("expected Error decision, got {other:?}"),
-        }
-    }
-
-    #[cfg(feature = "lua")]
-    #[tokio::test]
-    async fn normal_lua_returns_decision() {
-        let code = "function should_inject(request, flow_store) return { inject = true, fault = 'error', status = 503, body = 'boom' } end";
-        let res = bounded("lua", code, 2000)
-            .await
-            .expect("fast lua script succeeds");
-        match res {
-            FaultDecision::Error { status, .. } => assert_eq!(status, 503),
             other => panic!("expected Error decision, got {other:?}"),
         }
     }

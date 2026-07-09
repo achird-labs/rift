@@ -20,8 +20,8 @@ crate-type = ["cdylib", "rlib"]
 workspace = true
 
 [dependencies]
-# Features are forwarded (not hard-coded) so the per-platform cdylib build can drop engines that
-# can't cross-compile for a given target (e.g. LuaJIT for x86_64-apple-darwin) — issue #205.
+# Features are forwarded (not hard-coded) so the per-platform cdylib build can drop optional
+# features that can't cross-compile for a given target — issue #205.
 rift-core = { path = "../rift-core", default-features = false }
 # The admin control plane (issue #343): rift_serve_admin spawns the real AdminApiServer over the
 # handle's manager. default-features=false so `mimalloc` is NOT pulled — a cdylib must never
@@ -40,9 +40,8 @@ reqwest.workspace = true
 rcgen = "0.13"
 
 [features]
-default = ["redis-backend", "lua", "javascript"]
+default = ["redis-backend", "javascript"]
 # Engine features are forwarded to BOTH rift-core and rift-http-proxy so the two share one
 # feature set (mimalloc is deliberately never forwarded — see the dependency note above).
 redis-backend = ["rift-core/redis-backend", "rift-http-proxy/redis-backend"]
-lua = ["rift-core/lua", "rift-http-proxy/lua"]
 javascript = ["rift-core/javascript", "rift-http-proxy/javascript"]

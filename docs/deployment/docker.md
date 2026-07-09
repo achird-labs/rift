@@ -253,7 +253,7 @@ docker run -p 2525:2525 -p 4545:4545 my-rift:latest
 
 ### Feature flags for a custom build
 
-`crates/rift-http-proxy/Dockerfile` builds with `ARG FEATURES=lua,javascript,redis-backend` by
+`crates/rift-http-proxy/Dockerfile` builds with `ARG FEATURES=javascript,redis-backend` by
 default. If you're building a slimmer image (or embedding Rift as a `cdylib` instead of running the
 container), see the Cargo feature table in [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/#cargo-features)
 and the [Embedding & SPI]({{ site.baseurl }}/embedding/) overview — the same features gate both the

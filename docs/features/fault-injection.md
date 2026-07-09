@@ -280,31 +280,11 @@ replaces the hand-built `#{ inject:, fault: }` map:
 }
 ```
 
-### Lua Script - Rate Limiting
-
-```json
-{
-  "_rift": {
-    "flowState": {"backend": "inmemory", "ttlSeconds": 60}
-  },
-  "stubs": [{
-    "responses": [{
-      "_rift": {
-        "script": {
-          "engine": "lua",
-          "code": "function should_inject(request, flow_store)\n  local fid = 'ratelimit'\n  local count = flow_store:increment(fid, 'requests')\n  if count > 100 then\n    return {\n      inject = true,\n      fault = 'error',\n      status = 429,\n      body = '{\"error\":\"Rate limit exceeded\"}',\n      headers = {['Content-Type'] = 'application/json', ['Retry-After'] = '60'}\n    }\n  end\n  return {inject = false}\nend"
-        }
-      }
-    }]
-  }]
-}
-```
-
 ### Script Return Values (v1, deprecated)
 
-The Lua example above, and the shapes below, use the **v1** `should_inject(request, flow_store)`
-wrapper and its `inject`/`fault` return map — still supported, but superseded by the `respond(ctx)`
-+ result-constructor contract shown in the Rhai example above and documented in full on the
+The shapes below use the **v1** `should_inject(request, flow_store)` wrapper and its `inject`/`fault`
+return map — still supported, but superseded by the `respond(ctx)` + result-constructor contract
+shown in the Rhai example above and documented in full on the
 [Scripting](./scripting.md#ctx-api-v2) page. New scripts should prefer v2.
 
 Scripts must return a map/table with an `inject` flag:
@@ -328,28 +308,6 @@ Scripts must return a map/table with an `inject` flag:
   inject: true,
   fault: "latency",
   duration_ms: 500
-}
-```
-
-**Lua:**
-```lua
--- No injection
-return { inject = false }
-
--- Inject error
-return {
-  inject = true,
-  fault = "error",
-  status = 503,
-  body = '{"error": "Service unavailable"}',
-  headers = { ["Content-Type"] = "application/json" }
-}
-
--- Inject latency
-return {
-  inject = true,
-  fault = "latency",
-  duration_ms = 500
 }
 ```
 

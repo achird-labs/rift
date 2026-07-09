@@ -80,8 +80,10 @@ pub fn validate_imposter(
 }
 
 /// Infer a script's effective engine: explicit `engine`, else inferred from a `file` path's
-/// extension (`.rhai`/`.lua`/`.js`), else the "rhai" default — mirrors
-/// `rift_core::imposter::RiftScriptConfig`'s resolution rule.
+/// extension (`.rhai`/`.js`), else the "rhai" default — mirrors
+/// `rift_core::imposter::RiftScriptConfig`'s resolution rule. A `.lua`/`"lua"` engine still
+/// infers as `"lua"` here (structural checks only; rift-core rejects it at validate/run time —
+/// issue #450).
 fn infer_script_engine(explicit: Option<&str>, file_field: Option<&str>) -> String {
     if let Some(e) = explicit {
         return e.to_string();
@@ -106,9 +108,10 @@ fn read_script_file_relative(config_file: &Path, rel: &str) -> std::io::Result<S
 
 /// Syntax-check a resolved script's content at the same level inline `code:` would get for its
 /// engine. Only "javascript" has an embedded syntax checker in this crate (`js_validator`,
-/// gated behind the `javascript` feature) — rhai/lua scripts get the structural checks above
-/// (exactly-one-source, ref resolution, file existence) but no deep syntax check here. Also flags
-/// the deprecated v1 `should_inject` wrapper (issue #357 Item 5), for every engine.
+/// gated behind the `javascript` feature) — rhai scripts (and any other engine string) get the
+/// structural checks above (exactly-one-source, ref resolution, file existence) but no deep
+/// syntax check here. Also flags the deprecated v1 `should_inject` wrapper (issue #357 Item 5),
+/// for every engine.
 fn check_script_syntax(
     file: &Path,
     code: &str,
@@ -132,8 +135,8 @@ fn check_script_syntax(
     check_script_v1_deprecation(file, code, location, result);
 }
 
-/// Matches a `should_inject` FUNCTION DECLARATION — the v1 wrapper across all three engines
-/// (`fn should_inject` in Rhai, `function should_inject` in Lua/JS). Anchoring on the declaration
+/// Matches a `should_inject` FUNCTION DECLARATION — the v1 wrapper across both engines
+/// (`fn should_inject` in Rhai, `function should_inject` in JS). Anchoring on the declaration
 /// keyword (not a bare `should_inject` word) is what the runtime's own v1 detection keys on (a
 /// defined `should_inject` function), and keeps the lint from firing on the identifier appearing
 /// in a comment or string literal.

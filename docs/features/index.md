@@ -25,7 +25,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 ### Rift Extensions (`_rift` Namespace)
 
 - **Fault Injection** - Probabilistic latency, error, and TCP fault injection
-- **Scripting** - Rhai, Lua, and JavaScript engines for dynamic behavior
+- **Scripting** - Rhai and JavaScript engines for dynamic behavior
 - **Flow State** - Stateful scenarios with InMemory or Redis backends
 - **Stub Analysis** - Overlap detection and conflict warnings
 - **Debug Mode** - Request matching diagnostics with `X-Rift-Debug` header
@@ -43,7 +43,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 | Proxy Recording | ✅ | — |
 | JavaScript Injection | ✅ | — |
 | Probabilistic Faults | Via injection | ✅ `_rift.fault` |
-| Rhai/Lua Scripting | — | ✅ `_rift.script` |
+| Rhai/JS Scripting | — | ✅ `_rift.script` |
 | Flow State | Via injection | ✅ `_rift.flowState` |
 | Stub Analysis | — | ✅ `_rift.warnings` |
 | Stub IDs | — | ✅ `id` field |

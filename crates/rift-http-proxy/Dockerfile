@@ -4,9 +4,8 @@ FROM rustlang/rust:nightly AS builder
 
 WORKDIR /build
 
-# Install LuaJIT dependencies for lua feature
 RUN apt-get update && \
-    apt-get install -y libluajit-5.1-dev pkg-config git ca-certificates && \
+    apt-get install -y pkg-config git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # Build args for metadata
@@ -15,8 +14,8 @@ ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
 
 # Features to build (all features enabled by default for full functionality)
-# Available features: lua, javascript, redis-backend
-ARG FEATURES=lua,javascript,redis-backend
+# Available features: javascript, redis-backend
+ARG FEATURES=javascript,redis-backend
 
 # Ensure broad ARM64 compatibility for M1/M2/M3 Macs
 # This prevents "Illegal instruction" errors on Apple Silicon and other ARM64 CPUs
@@ -64,9 +63,9 @@ RUN find crates/rift-http-proxy/src -name '*.rs' -exec touch {} \; && \
 # Using debian:trixie-slim (Debian 13/testing) for GLIBC_2.39+ compatibility with nightly Rust build
 FROM debian:trixie-slim
 
-# Install CA certificates, curl and LuaJIT runtime
+# Install CA certificates and curl
 RUN apt-get update && \
-    apt-get install -y ca-certificates curl libluajit-5.1-2 && \
+    apt-get install -y ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy binary from builder
@@ -76,10 +75,10 @@ COPY --from=builder /build/target/release/rift-http-proxy /usr/local/bin/rift
 ARG VERSION=dev
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
-ARG FEATURES=lua,javascript,redis-backend
+ARG FEATURES=javascript,redis-backend
 LABEL \
   org.opencontainers.image.title="Rift HTTP Proxy" \
-  org.opencontainers.image.description="Mountebank-compatible HTTP chaos engineering proxy with Lua/Rhai/JavaScript scripting and Redis state backend." \
+  org.opencontainers.image.description="Mountebank-compatible HTTP chaos engineering proxy with Rhai/JavaScript scripting and Redis state backend." \
   org.opencontainers.image.url="https://github.com/EtaCassiopeia/rift" \
   org.opencontainers.image.source="https://github.com/EtaCassiopeia/rift" \
   org.opencontainers.image.version="$VERSION" \
@@ -148,9 +147,8 @@ ENV RIFT_METRICS_PORT=9090
 # ============================================================
 # Scripting Features (enabled by default)
 # ============================================================
-# This image includes all scripting engines:
+# This image includes both scripting engines:
 # - Rhai: Built-in, always available
-# - Lua (LuaJIT): Enabled via --features lua
 # - JavaScript (Boa): Enabled via --features javascript
 #
 # Flow state storage:
@@ -160,7 +158,7 @@ ENV RIFT_METRICS_PORT=9090
 # Rift Extensions (_rift namespace):
 # - Flow state for stateful testing scenarios
 # - Probabilistic fault injection (latency, error, TCP faults)
-# - Multi-engine scripting (Rhai, Lua, JavaScript)
+# - Multi-engine scripting (Rhai, JavaScript)
 
 # Default command: Start Mountebank-compatible server
 #

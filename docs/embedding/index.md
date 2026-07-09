@@ -47,7 +47,6 @@ The engines and allocator are feature-gated. Relevant features:
 | Feature | Default (`rift-http-proxy`) | Default (`rift-ffi`) | Effect |
 |:--------|:----------------------------|:---------------------|:-------|
 | `redis-backend` | on | on | Redis flow-store backend |
-| `lua` | on | on | Lua scripting engine (mlua) |
 | `javascript` | on | on | JavaScript scripting engine (Boa) |
 | `mimalloc` | on | **never forwarded** | mimalloc global allocator (a `cdylib` must not impose an allocator on its host, so `rift-ffi` deliberately never enables it) |
 

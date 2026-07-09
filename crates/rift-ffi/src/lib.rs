@@ -1160,9 +1160,6 @@ pub extern "C" fn rift_build_info() -> *const c_char {
         if cfg!(feature = "redis-backend") {
             features.push("redis-backend");
         }
-        if cfg!(feature = "lua") {
-            features.push("lua");
-        }
         if cfg!(feature = "javascript") {
             features.push("javascript");
         }

@@ -129,7 +129,7 @@ which engines are compiled in:
 
 ```c
 const char* info = rift_build_info();
-// {"version":"0.11.3","commit":"<sha>|null","builtAt":"<iso8601>|null","features":["redis-backend","lua","javascript"]}
+// {"version":"0.11.3","commit":"<sha>|null","builtAt":"<iso8601>|null","features":["redis-backend","javascript"]}
 // Do NOT call rift_free on this pointer.
 ```
 
@@ -154,7 +154,7 @@ const char* info = rift_build_info();
 ## Cargo features
 
 `rift-ffi` forwards engine features rather than hard-coding them, so a per-platform build can drop
-engines it doesn't need: `default = ["redis-backend", "lua", "javascript"]`. The `mimalloc` allocator
+engines it doesn't need: `default = ["redis-backend", "javascript"]`. The `mimalloc` allocator
 feature is **deliberately never forwarded** — a `cdylib` must not impose a global allocator on its
 host process.
 

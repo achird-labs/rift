@@ -7,7 +7,7 @@ use std::sync::Mutex;
 /// Redis implementation of FlowStore using synchronous blocking client
 ///
 /// This implementation uses a blocking Redis client with r2d2 connection pooling.
-/// The synchronous nature avoids async bridging deadlocks when called from Lua scripts.
+/// The synchronous nature avoids async bridging deadlocks when called from scripts.
 ///
 /// # Compatibility
 ///

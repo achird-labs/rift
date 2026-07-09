@@ -87,7 +87,7 @@ Extend Mountebank configurations with advanced chaos engineering features:
 Available `_rift` features:
 - **Flow State**: Stateful testing with in-memory or Redis backends
 - **Fault Injection**: Probabilistic latency, error, and TCP faults
-- **Scripting**: Multi-engine scripting (Rhai, Lua, JavaScript)
+- **Scripting**: Multi-engine scripting (Rhai, JavaScript)
 
 [Full Rift Extensions Reference]({{ site.baseurl }}/configuration/native/)
 

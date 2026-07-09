@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ScriptEngineConfig {
     #[serde(default = "default_engine_type")]
-    pub engine: String, // "rhai" or "lua"
+    pub engine: String, // "rhai" or "javascript"
 }
 
 fn default_engine_type() -> String {

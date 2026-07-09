@@ -10,9 +10,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
-#[cfg(feature = "lua")]
-use mlua::Lua;
-
 /// Configuration for the script thread pool
 #[derive(Clone, Debug)]
 
@@ -43,11 +40,6 @@ impl Default for ScriptPoolConfig {
 pub enum CompiledScript {
     Rhai {
         ast: Arc<AST>,
-        rule_id: String,
-    },
-    #[cfg(feature = "lua")]
-    Lua {
-        bytecode: Arc<Vec<u8>>,
         rule_id: String,
     },
     #[cfg(feature = "javascript")]
@@ -100,9 +92,6 @@ impl ScriptWorker {
                     }
                 });
 
-                #[cfg(feature = "lua")]
-                let lua = Lua::new();
-
                 loop {
                     // Check for shutdown signal (non-blocking)
                     if shutdown_rx.try_recv().is_ok() {
@@ -148,14 +137,6 @@ impl ScriptWorker {
                                 CompiledScript::Rhai { ast, rule_id } => Self::execute_rhai(
                                     &rhai_engine,
                                     ast,
-                                    &task.request,
-                                    task.flow_store.clone(),
-                                    rule_id,
-                                ),
-                                #[cfg(feature = "lua")]
-                                CompiledScript::Lua { bytecode, rule_id } => Self::execute_lua(
-                                    &lua,
-                                    bytecode,
                                     &task.request,
                                     task.flow_store.clone(),
                                     rule_id,
@@ -228,20 +209,6 @@ impl ScriptWorker {
         use crate::scripting::rhai_engine::execute_rhai_with_engine;
 
         execute_rhai_with_engine(engine, ast, request, flow_store, rule_id)
-    }
-
-    #[cfg(feature = "lua")]
-    fn execute_lua(
-        lua: &Lua,
-        bytecode: &Arc<Vec<u8>>,
-        request: &ScriptRequest,
-        flow_store: Arc<dyn FlowStore>,
-        rule_id: &str,
-    ) -> Result<FaultDecision> {
-        // Import necessary types from lua_engine module
-        use crate::scripting::lua_engine::execute_lua_bytecode;
-
-        execute_lua_bytecode(lua, bytecode.as_slice(), request, flow_store, rule_id)
     }
 
     #[cfg(feature = "javascript")]
@@ -602,23 +569,6 @@ mod tests {
         let cloned = compiled.clone();
         if let CompiledScript::Rhai { rule_id, .. } = cloned {
             assert_eq!(rule_id, "clone-test");
-        }
-    }
-
-    #[cfg(feature = "lua")]
-    #[test]
-    fn test_compiled_script_lua_creation() {
-        let compiled = CompiledScript::Lua {
-            bytecode: Arc::new(vec![1, 2, 3, 4]),
-            rule_id: "lua-rule".to_string(),
-        };
-
-        match compiled {
-            CompiledScript::Lua { rule_id, bytecode } => {
-                assert_eq!(rule_id, "lua-rule");
-                assert_eq!(bytecode.len(), 4);
-            }
-            _ => panic!("Expected Lua variant"),
         }
     }
 

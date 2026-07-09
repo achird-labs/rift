@@ -351,7 +351,7 @@ top-level `fault` response form, and scripted faults.
 
 ## Scripting
 
-`_rift.script` runs a script (engine `rhai`, `lua`, or `javascript`) that decides whether to inject a
+`_rift.script` runs a script (engine `rhai` or `javascript`) that decides whether to inject a
 response. The script defines `should_inject(request, flow_store)` and returns a map with an `inject`
 flag; when `inject` is true it also carries `fault`/`status`/`body`/`headers`. The `flow_store` handle
 is keyed by `(flow_id, key)`.
@@ -368,8 +368,8 @@ is keyed by `(flow_id, key)`.
 }
 ```
 
-- `rhai` is built in; `lua` requires the `lua` feature; `javascript` requires the `javascript`
-  feature. JavaScript can also use the Mountebank `inject` response format directly.
+- `rhai` is built in; `javascript` requires the `javascript` feature. JavaScript can also use the
+  Mountebank `inject` response format directly.
 - Scripts require `--allow-injection` and are bounded by a wall-clock timeout
   (`_rift.scriptEngine.timeoutMs`, default 5000 ms).
 

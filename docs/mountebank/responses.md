@@ -345,41 +345,6 @@ Now each user experiences their own retry sequence:
 - User A: Fail → Fail → Success
 - User B: Fail → Fail → Success (independent of User A)
 
-### Time-Window Rate Limiting
-
-{: .rift-only }
-> **Rift-Only**: Mountebank cannot implement time-based rate limiting. Cycling only counts requests, not time.
-
-Limit requests per time window with automatic reset:
-
-```json
-{
-  "port": 4545,
-  "protocol": "http",
-  "_rift": {
-    "flowState": { "backend": "inmemory", "ttlSeconds": 60 }
-  },
-  "stubs": [{
-    "predicates": [{ "startsWith": { "path": "/api" } }],
-    "responses": [{
-      "_rift": {
-        "script": {
-          "engine": "lua",
-          "code": "function should_inject(request, flow_store)\n  local client_ip = request.headers['x-forwarded-for'] or 'default'\n  local window_key = client_ip .. ':' .. math.floor(os.time() / 60)\n  local count = flow_store:increment(window_key, 'requests')\n  flow_store:set_ttl(window_key, 60)\n  \n  if count > 100 then\n    return {\n      inject = true,\n      fault = 'error',\n      status = 429,\n      body = '{\"error\":\"Rate limit: 100 requests per minute\",\"count\":' .. count .. '}',\n      headers = {\n        ['Content-Type'] = 'application/json',\n        ['Retry-After'] = tostring(60 - (os.time() % 60)),\n        ['X-RateLimit-Limit'] = '100',\n        ['X-RateLimit-Remaining'] = '0'\n      }\n    }\n  end\n  return { inject = false }\nend"
-        }
-      },
-      "is": { "statusCode": 200, "body": "{\"status\": \"ok\"}" }
-    }]
-  }]
-}
-```
-
-Features not possible with Mountebank:
-- Rate limit resets every 60 seconds automatically
-- Per-client tracking via IP or header
-- Dynamic `Retry-After` header with remaining time
-- `X-RateLimit-*` headers with actual counts
-
 ### Quota Exhaustion with Reset
 
 {: .rift-only }
@@ -415,31 +380,6 @@ Features not possible with Mountebank:
       }]
     }
   ]
-}
-```
-
-### Circuit Breaker Pattern
-
-{: .rift-only }
-> **Rift-Only**: Implement circuit breaker with failure counting, open/closed states, and recovery.
-
-```json
-{
-  "_rift": {
-    "flowState": { "backend": "inmemory", "ttlSeconds": 300 }
-  },
-  "stubs": [{
-    "predicates": [{ "equals": { "path": "/api/backend" } }],
-    "responses": [{
-      "_rift": {
-        "script": {
-          "engine": "lua",
-          "code": "function should_inject(request, flow_store)\n  local fid = 'circuit'\n  local state = flow_store:get(fid, 'state') or 'closed'\n  local failures = flow_store:get(fid, 'failures') or 0\n  local last_failure = flow_store:get(fid, 'last_failure') or 0\n  local now = os.time()\n  \n  -- Half-open: allow one request after 30s recovery\n  if state == 'open' and (now - last_failure) > 30 then\n    flow_store:set(fid, 'state', 'half-open')\n    return { inject = false }  -- Allow probe request\n  end\n  \n  -- Open: reject immediately\n  if state == 'open' then\n    return {\n      inject = true,\n      fault = 'error',\n      status = 503,\n      body = '{\"error\":\"Circuit breaker open\",\"retry_after\":' .. (30 - (now - last_failure)) .. '}',\n      headers = { ['Content-Type'] = 'application/json' }\n    }\n  end\n  \n  -- Simulate 20% backend failure rate\n  if math.random() < 0.2 then\n    failures = failures + 1\n    flow_store:set(fid, 'failures', failures)\n    flow_store:set(fid, 'last_failure', now)\n    \n    -- Trip circuit after 5 failures\n    if failures >= 5 then\n      flow_store:set(fid, 'state', 'open')\n    end\n    \n    return {\n      inject = true,\n      fault = 'error',\n      status = 500,\n      body = '{\"error\":\"Backend failure\",\"failures\":' .. failures .. '}',\n      headers = { ['Content-Type'] = 'application/json' }\n    }\n  end\n  \n  -- Success: reset failures, close circuit\n  flow_store:set(fid, 'failures', 0)\n  flow_store:set(fid, 'state', 'closed')\n  return { inject = false }\nend"
-        }
-      },
-      "is": { "statusCode": 200, "body": "{\"status\": \"ok\"}" }
-    }]
-  }]
 }
 ```
 

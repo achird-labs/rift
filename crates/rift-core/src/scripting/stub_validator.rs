@@ -161,20 +161,11 @@ fn validate_rift_script(
             stub_id,
             response_index,
         ),
-        #[cfg(feature = "lua")]
-        "lua" => validate_with_validator(
-            &super::LuaValidator::new(),
-            code,
-            "lua",
-            stub_id,
-            response_index,
-        ),
-        #[cfg(not(feature = "lua"))]
         "lua" => Some(StubValidationError {
             stub_id: stub_id.to_string(),
             response_index,
             engine: "lua".to_string(),
-            message: "Lua engine is not enabled (requires 'lua' feature)".to_string(),
+            message: "the Lua scripting engine was removed (issue #450); use engine \"rhai\" or \"javascript\"".to_string(),
         }),
         #[cfg(feature = "javascript")]
         "javascript" | "js" => validate_with_validator(
@@ -435,29 +426,18 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "lua")]
+    // Issue #450: Lua was removed; a `_rift.script` engine of "lua" always fails validation
+    // with an actionable message pointing at the two remaining engines.
     #[test]
-    fn test_valid_lua_script() {
+    fn test_lua_engine_removed() {
         let stub = make_rift_script_stub(
             "lua",
             r#"function should_inject(request, flow_store) return { inject = false } end"#,
         );
         let result = validate_stub(&stub, 0);
-        assert!(
-            result.is_valid(),
-            "Valid Lua script should pass: {:?}",
-            result.errors
-        );
-    }
-
-    #[cfg(feature = "lua")]
-    #[test]
-    fn test_invalid_lua_syntax() {
-        let stub = make_rift_script_stub(
-            "lua",
-            r#"function should_inject(request, flow_store) return { inject = "#, // Missing closing
-        );
-        let result = validate_stub(&stub, 0);
-        assert!(!result.is_valid(), "Invalid Lua syntax should fail");
+        assert!(!result.is_valid(), "lua engine must fail validation");
+        assert!(result.errors[0].message.contains("removed"));
+        assert!(result.errors[0].message.contains("rhai"));
+        assert!(result.errors[0].message.contains("javascript"));
     }
 }

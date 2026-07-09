@@ -1,7 +1,7 @@
 //! Issue #376 gate (strict ON): with `RIFT_STRICT_FLOW_STORE` enabled, a script flow-store op that
 //! hits a backend failure RAISES a native script error instead of returning a fallback value +
 //! recording `last_error()`. The raise propagates through `should_inject_bounded` to the existing
-//! 500 (`x-rift-script-error`). Covered for all three engines (Rhai / Lua / JS).
+//! 500 (`x-rift-script-error`). Covered for both engines (Rhai / JS).
 //!
 //! The failing backend comes from rift-core's `test-backend` feature: `_rift.flowState.backend =
 //! "failing"` installs a store whose ops fail. This needs no Docker/Redis.
@@ -67,17 +67,6 @@ async fn strict_rhai_flow_store_failure_raises() {
         19961,
         "rhai",
         r#"fn should_inject(request, flow_store){ flow_store.get("f","k"); #{ inject: false } }"#,
-    )
-    .await;
-}
-
-// AC2: Lua strict flow-store failure raises → 500.
-#[tokio::test]
-async fn strict_lua_flow_store_failure_raises() {
-    assert_strict_raises(
-        19962,
-        "lua",
-        r#"function should_inject(request, flow_store) flow_store:get("f","k") return { inject = false } end"#,
     )
     .await;
 }

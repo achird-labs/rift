@@ -4,23 +4,23 @@
 //! module answers "does the script actually define the entrypoint the given hook will call at
 //! request time?" — issue #357 already added detection for exactly this ("script defines
 //! function(s) but none is the `respond` entrypoint...") inside each engine's runtime dispatch
-//! (`run_entrypoint` in `rhai_engine.rs`, and its JS/Lua equivalents in `js_engine.rs`/
-//! `lua_engine.rs`), but only as a request-time error. This module exposes the same
+//! (`run_entrypoint` in `rhai_engine.rs`, and its JS equivalent in `js_engine.rs`), but only as
+//! a request-time error. This module exposes the same
 //! function-name-based detection statically, so `rift script check` can catch a misnamed
 //! entrypoint (e.g. `fn respnod(ctx)`) before any request ever exercises it.
 //!
 //! "Static" here means never calling the entrypoint function itself. Rhai needs no evaluation at
 //! all — `rhai::AST::iter_functions()` lists declared functions straight from the parsed AST.
-//! JS/Lua have no cheap public AST walk, so they compile the script (syntax check, WITHOUT
-//! running), then evaluate its top level ONCE to discover which functions it declared, by diffing
-//! the global object/table before and after — the same technique the runtime path uses to spot a
+//! JS has no cheap public AST walk, so it compiles the script (syntax check, WITHOUT running),
+//! then evaluates its top level ONCE to discover which functions it declared, by diffing the
+//! global object before and after — the same technique the runtime path uses to spot a
 //! misnamed entrypoint. Crucially that top-level eval binds the SAME host globals the real
 //! execution path binds (`ctx`/`http`/`pass`/`delay`/`reset`/`request`/`flow_store`) under the
-//! engine's runtime limits (a JS loop-iteration cap; a Lua instruction budget) — so a legitimate
-//! #357 bare-expression response script (`http(503, "boom")`) is neither mis-flagged as an
-//! unbound-global error nor able to hang the check with a top-level `while(true){}`. That
-//! binding-and-budgeting lives in the engines themselves (`js_engine::declared_functions_js`,
-//! `lua_engine::declared_functions_lua`), reusing their real ctx/result-constructor setup.
+//! engine's runtime limits (a JS loop-iteration cap) — so a legitimate #357 bare-expression
+//! response script (`http(503, "boom")`) is neither mis-flagged as an unbound-global error nor
+//! able to hang the check with a top-level `while(true){}`. That binding-and-budgeting lives in
+//! the engine itself (`js_engine::declared_functions_js`), reusing its real ctx/result-constructor
+//! setup.
 
 use super::entrypoints;
 
@@ -43,6 +43,10 @@ pub enum EntrypointCheckError {
     UnknownEngine(String),
     #[error("{engine} engine is not enabled (requires the '{feature}' feature)")]
     EngineDisabled { engine: String, feature: String },
+    #[error(
+        "the {0} scripting engine was removed (issue #450); use engine \"rhai\" or \"javascript\""
+    )]
+    EngineRemoved(String),
     #[error("Syntax error: {0}")]
     Syntax(String),
     #[error(
@@ -90,16 +94,6 @@ fn declared_functions(
 ) -> Result<Vec<String>, EntrypointCheckError> {
     match engine_type {
         "rhai" => rhai_declared_functions(script),
-        #[cfg(feature = "lua")]
-        // The engine owns the compile-only syntax check + bounded, host-globals-bound top-level
-        // exec — its only `Err` is a compile/syntax failure, mapped to `Syntax` here.
-        "lua" => super::lua_engine::declared_functions_lua(script)
-            .map_err(|e| EntrypointCheckError::Syntax(e.to_string())),
-        #[cfg(not(feature = "lua"))]
-        "lua" => Err(EntrypointCheckError::EngineDisabled {
-            engine: "lua".to_string(),
-            feature: "lua".to_string(),
-        }),
         #[cfg(feature = "javascript")]
         "javascript" | "js" => super::js_engine::declared_functions_js(script)
             .map_err(|e| EntrypointCheckError::Syntax(e.to_string())),
@@ -108,12 +102,13 @@ fn declared_functions(
             engine: "javascript".to_string(),
             feature: "javascript".to_string(),
         }),
+        "lua" => Err(EntrypointCheckError::EngineRemoved("Lua".to_string())),
         other => Err(EntrypointCheckError::UnknownEngine(other.to_string())),
     }
 }
 
 /// Pure AST introspection — `compile` only parses, it never runs top-level statements, so this
-/// has zero execution side effects (unlike the JS/Lua paths, which have no public AST walk).
+/// has zero execution side effects (unlike the JS path, which has no public AST walk).
 fn rhai_declared_functions(script: &str) -> Result<Vec<String>, EntrypointCheckError> {
     let engine = rhai::Engine::new();
     let ast = engine
@@ -123,7 +118,7 @@ fn rhai_declared_functions(script: &str) -> Result<Vec<String>, EntrypointCheckE
 }
 
 /// True when `code` declares the deprecated v1 `should_inject` wrapper (`fn should_inject` in
-/// Rhai, `function should_inject` in Lua/JS) — the same signal rift-lint's E041 lint keys on
+/// Rhai, `function should_inject` in JS) — the same signal rift-lint's E041 lint keys on
 /// (`crate::validator::check_script_v1_deprecation` there), exposed here so `rift script check`
 /// can flag a raw script file too (no imposter config for rift-lint's own config-shaped pass to
 /// run over).
@@ -291,77 +286,5 @@ mod tests {
         let script = "while (true) {}";
         // Returns (bounded) rather than hanging; the exact classification is immaterial.
         let _ = check_entrypoint("javascript", script, "respond");
-    }
-
-    #[cfg(feature = "lua")]
-    #[test]
-    fn lua_respond_named_matches() {
-        let script = "function respond(ctx) return pass() end";
-        assert_eq!(
-            check_entrypoint("lua", script, "respond"),
-            Ok(EntrypointMatch::Named)
-        );
-    }
-
-    #[cfg(feature = "lua")]
-    #[test]
-    fn lua_should_inject_is_v1() {
-        let script = "function should_inject(request, flow_store) return { inject = false } end";
-        assert_eq!(
-            check_entrypoint("lua", script, "respond"),
-            Ok(EntrypointMatch::V1ShouldInject)
-        );
-    }
-
-    // AC (issue #360), Lua variant: misnamed entrypoint fails naming `respond`.
-    #[cfg(feature = "lua")]
-    #[test]
-    fn lua_misnamed_entrypoint_fails_naming_respond() {
-        let script = "function respnod(ctx) return pass() end";
-        let err = check_entrypoint("lua", script, "respond").unwrap_err();
-        match err {
-            EntrypointCheckError::Mismatch { hook, declared } => {
-                assert_eq!(hook, "respond");
-                assert_eq!(declared, "respnod");
-            }
-            other => panic!("expected Mismatch, got {other:?}"),
-        }
-    }
-
-    #[cfg(feature = "lua")]
-    #[test]
-    fn lua_syntax_error_is_syntax_variant() {
-        let err = check_entrypoint("lua", "function respond(ctx", "respond").unwrap_err();
-        assert!(matches!(err, EntrypointCheckError::Syntax(_)));
-    }
-
-    // B1 regression (issue #360): a bare-expression Lua response script must NOT false-fail — the
-    // top-level `http(...)` resolves against the bound host global.
-    #[cfg(feature = "lua")]
-    #[test]
-    fn lua_bare_expression_calling_http_is_ok() {
-        assert_eq!(
-            check_entrypoint("lua", r#"return http(503, "x")"#, "respond"),
-            Ok(EntrypointMatch::Bare)
-        );
-    }
-
-    #[cfg(feature = "lua")]
-    #[test]
-    fn lua_bare_expression_reading_ctx_request_is_ok() {
-        let script =
-            r#"if ctx.request.method == "POST" then return http(503) else return pass() end"#;
-        assert_eq!(
-            check_entrypoint("lua", script, "respond"),
-            Ok(EntrypointMatch::Bare)
-        );
-    }
-
-    // B1 regression: a top-level `while true do end` must TERMINATE the check (via the
-    // instruction budget), not hang.
-    #[cfg(feature = "lua")]
-    #[test]
-    fn lua_top_level_infinite_loop_terminates() {
-        let _ = check_entrypoint("lua", "while true do end", "respond");
     }
 }

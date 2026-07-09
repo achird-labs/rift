@@ -228,7 +228,7 @@ Cargo feature named `mimalloc`, enabled in the binary's default feature set:
 cargo build --release
 
 # Drop it (e.g. for a cross-compile or FFI build) by opting out of default features
-cargo build --release --no-default-features --features redis-backend,lua,javascript
+cargo build --release --no-default-features --features redis-backend,javascript
 ```
 
 Only the `rift-http-proxy` binary is affected; `rift-core` and the FFI crate use the system
@@ -279,7 +279,7 @@ locally, set `lto = "fat"` under `[profile.release]`.
 ### `panic = "abort"` — not adopted
 
 `panic = "abort"` removes unwinding machinery (smaller binary, marginally faster). It is
-**deliberately not used**: Rift runs each script (Boa / mlua) on a `spawn_blocking` worker so a
+**deliberately not used**: Rift runs each script (Boa) on a `spawn_blocking` worker so a
 buggy or non-yielding script is isolated, and a panic there is contained by the async runtime as a
 `JoinError` rather than crashing the server — which relies on unwinding. Under `panic = "abort"` a
 single bad script would abort the whole process. Adopting it would require re-validating the

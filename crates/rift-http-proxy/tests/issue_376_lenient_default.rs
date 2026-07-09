@@ -53,17 +53,6 @@ async fn lenient_rhai_flow_store_failure_serves_200() {
     .await;
 }
 
-// AC4 (Lua): default lenient.
-#[tokio::test]
-async fn lenient_lua_flow_store_failure_serves_200() {
-    assert_lenient_serves_200(
-        19972,
-        "lua",
-        r#"function should_inject(request, flow_store) flow_store:get("f","k") return { inject = false } end"#,
-    )
-    .await;
-}
-
 // AC4 (JS): default lenient.
 #[tokio::test]
 async fn lenient_js_flow_store_failure_serves_200() {

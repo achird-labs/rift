@@ -66,8 +66,7 @@ box; it just doesn't persist across restarts or get shared across a cluster the 
 `ctx.state` (the v2, recommended API — see [Scripting → `ctx.state` and `ctx.store`]({{ site.baseurl }}/features/scripting/#ctxstate-and-ctxstore))
 is pre-scoped to the request's resolved flow id and includes atomic ops (`get_or`/`incr_by`/`cas`/`ttl`,
 issue #358) beyond what's listed below. The `flow_store` handle shown here is the older v1 API,
-where every call takes the flow id explicitly (Rhai shown; Lua uses `flow_store:get(...)` method
-syntax) — it still works unchanged.
+where every call takes the flow id explicitly (Rhai shown) — it still works unchanged.
 
 | Call | Result |
 |:-----|:-------|

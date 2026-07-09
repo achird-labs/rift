@@ -13,7 +13,7 @@ Rift supports multiple scripting engines for dynamic behavior.
 
 ## Script API v2: unified `ctx`, `respond(ctx)`, result constructors
 
-As of this release, `_rift.script` has a single contract that is **identical across Rhai, Lua, and
+As of this release, `_rift.script` has a single contract that is **identical across Rhai and
 JavaScript**: a `ctx` object passed into the script, and result constructors instead of a hand-built
 `#{ inject:, fault: }` map. This is the recommended way to write new scripts — see
 [`ctx` API v2](#ctx-api-v2) below for the full reference.
@@ -57,7 +57,6 @@ script is attached — see the table below.
 |:-------|:-------|:---------|
 | **JavaScript** | `inject` response | Mountebank-compatible injection responses |
 | **Rhai** | `_rift.script` | Lightweight fault logic with flow state |
-| **Lua** | `_rift.script` | High-performance scripting with flow state |
 
 ---
 
@@ -85,7 +84,7 @@ config.request.headers     // { "content-type": "application/json" }
 config.request.body        // Request body (string or parsed object)
 ```
 
-> Path parameters (`request.pathParams`, from a stub's [`routePattern`](../configuration/native/#route-patterns-routepattern)) are exposed to the `_rift.script` engines — Rhai, Lua, and JavaScript — not to this Mountebank `inject` `config.request` object.
+> Path parameters (`request.pathParams`, from a stub's [`routePattern`](../configuration/native/#route-patterns-routepattern)) are exposed to the `_rift.script` engines — Rhai and JavaScript — not to this Mountebank `inject` `config.request` object.
 
 ### State Object
 
@@ -211,107 +210,6 @@ Scripts must return a map with an `inject` flag:
 
 ---
 
-## Lua (`_rift.script`)
-
-Lua provides high-performance scripting. Scripts must define a `should_inject(request, flow_store)` function.
-
-### Basic Script
-
-```json
-{
-  "port": 4545,
-  "protocol": "http",
-  "_rift": {
-    "flowState": {"backend": "inmemory", "ttlSeconds": 600}
-  },
-  "stubs": [{
-    "responses": [{
-      "_rift": {
-        "script": {
-          "engine": "lua",
-          "code": "function should_inject(request, flow_store)\n  local fid = 'lua'\n  local count = flow_store:get(fid, 'count') or 0\n  count = count + 1\n  flow_store:set(fid, 'count', count)\n  return {\n    inject = true,\n    fault = 'error',\n    status = 200,\n    body = '{\"count\":' .. count .. '}',\n    headers = {['Content-Type'] = 'application/json'}\n  }\nend"
-        }
-      }
-    }]
-  }]
-}
-```
-
-### Available Variables
-
-```lua
--- Request information (passed as first argument)
-request.method          -- String
-request.path            -- String
-request.headers         -- Table: request.headers["header-name"]
-request.query           -- Table: request.query["param"]
-request.pathParams      -- Table: request.pathParams["name"]
-request.body            -- Parsed body (table or string)
-
--- Standard Lua functions
-math.random()           -- Float 0.0 to 1.0
-math.random(n)          -- Integer 1 to n
-math.random(m, n)       -- Integer m to n
-os.time()               -- Unix timestamp
-os.date("*t")           -- Date table
-```
-
-### Flow Store
-
-Lua uses colon syntax for method calls:
-
-```lua
--- Get value (returns nil if not set)
-local value = flow_store:get("flow-id", "key")
-local count = flow_store:get("flow-id", "counter") or 0
-
--- Set value
-flow_store:set("flow-id", "key", "value")
-flow_store:set("flow-id", "counter", count + 1)
-
--- Increment counter (returns new value)
-local attempts = flow_store:increment("flow-id", "attempts")
-
--- Check existence
-if flow_store:exists("flow-id", "key") then
-  -- key exists
-end
-
--- Delete value
-flow_store:delete("flow-id", "key")
-
--- Set TTL for entire flow (seconds)
-flow_store:set_ttl("flow-id", 300)
-```
-
-### Return Values
-
-```lua
--- No injection
-return { inject = false }
-
--- Inject error response
-return {
-  inject = true,
-  fault = "error",
-  status = 503,
-  body = '{"error": "Service unavailable"}',
-  headers = {
-    ["Content-Type"] = "application/json",
-    ["Retry-After"] = "30"
-  }
-}
-
--- Inject latency
-return {
-  inject = true,
-  fault = "latency",
-  duration_ms = 500
-}
-```
-
----
-
 ## Script Examples
 
 ### Rate Limiting
@@ -416,7 +314,7 @@ directory (`--datadir` files resolve the same way; admin-API-created imposters r
               ref: failTwice
 ```
 
-`engine` is inferred from `file`'s extension (`.rhai` -> `rhai`, `.lua` -> `lua`, `.js` ->
+`engine` is inferred from `file`'s extension (`.rhai` -> `rhai`, `.js` ->
 `javascript`) when omitted; a `ref:` may not itself point at another `ref:` (no chains), and an
 unknown `ref:` or a `file:` that can't be read is a config-time validation error — surfaced at
 `rift --configfile` load, at `POST /imposters` as a `400`, and by `rift-lint`.
@@ -546,8 +444,8 @@ if outcome.applied {
 `cas(key, expected, new)` is Rift's atomic compare-and-set (issue #311). It always returns an
 **object** — `{ applied: true }` on success, or `{ applied: false, current: <value> }` on conflict —
 rather than a bare value, so a conflicting stored value that happens to equal `true` can never be
-mistaken for "applied". This shape is identical in all three engines; only the method spelling
-differs to match each engine's naming convention — Rhai/Lua use `get_or`/`incr_by` (snake_case), JS
+mistaken for "applied". This shape is identical in both engines; only the method spelling
+differs to match each engine's naming convention — Rhai uses `get_or`/`incr_by` (snake_case), JS
 uses `getOr`/`incrBy` (camelCase); `cas` and `ttl` are spelled the same everywhere.
 
 Every `ctx.state` call is fail-loud: a store failure (a Redis connection dropping mid-request, for
@@ -615,7 +513,7 @@ http(429, #{ error: "rate limited" }).header("Retry-After", "60")
 `_rift.script` execution is bounded so a runaway script cannot wedge the engine.
 
 - **Wall-clock timeout.** Each script runs under a deadline — `_rift.scriptEngine.timeoutMs` if
-  configured, otherwise **5000 ms**. Rhai and Lua are interrupted mid-run when the deadline passes.
+  configured, otherwise **5000 ms**. Rhai is interrupted mid-run when the deadline passes.
 - **JavaScript (Boa) bounds.** The Boa interpreter cannot be interrupted per-instruction, so it is
   bounded structurally instead: a loop-iteration limit of **10,000,000 iterations per call frame**
   and a recursion limit of **512**. The client is still released at the wall-clock timeout with an
@@ -633,13 +531,13 @@ http(429, #{ error: "rate limited" }).header("Retry-After", "60")
 ```
 
 `_rift.scriptEngine.defaultEngine` sets which engine runs a `_rift.script` block when the block
-itself omits `engine`: `"rhai"` (default), `"lua"`, or `"javascript"`. A per-script `engine` field
+itself omits `engine`: `"rhai"` (default) or `"javascript"`. A per-script `engine` field
 always takes precedence over `defaultEngine`.
 
 ```json
 {
   "_rift": {
-    "scriptEngine": { "defaultEngine": "lua" }
+    "scriptEngine": { "defaultEngine": "javascript" }
   }
 }
 ```
@@ -666,7 +564,7 @@ if flow_store.last_error() != () {
 
 `last_error()` returns the most recent backend error (or `()` / `nil` / `null` when the last op
 succeeded) and is reset at the start of every script execution. The call syntax follows each engine:
-`flow_store.last_error()` (Rhai), `flow_store:last_error()` (Lua), `flow_store.last_error()` (JS).
+`flow_store.last_error()` (Rhai), `flow_store.last_error()` (JS).
 
 Set the **`RIFT_STRICT_FLOW_STORE`** environment variable (truthy: `1`/`true`/`yes`/`on`) to make the
 legacy `flow_store` global **raise** on failure too (matching the v2 default) instead of returning a
@@ -677,20 +575,20 @@ fallback. The raised error propagates to the standard script-error path (`500` w
 
 ## Engine Comparison
 
-| Feature | JavaScript | Rhai | Lua |
-|:--------|:-----------|:-----|:----|
-| Format | `inject` response | `_rift.script` | `_rift.script` |
-| State access | `state.key` | `flow_store.get(id, key)` | `flow_store:get(id, key)` |
-| Flow isolation | Per imposter | Per flow_id | Per flow_id |
-| Function wrapper | None needed | `respond(ctx)`/bare (v2, recommended) or `should_inject(request, flow_store)` (v1, deprecated) | same as Rhai |
-| Performance | Good | Excellent | Excellent |
-| Mountebank compatible | Yes | No | No |
+| Feature | JavaScript | Rhai |
+|:--------|:-----------|:-----|
+| Format | `inject` response | `_rift.script` |
+| State access | `state.key` | `flow_store.get(id, key)` |
+| Flow isolation | Per imposter | Per flow_id |
+| Function wrapper | None needed | `respond(ctx)`/bare (v2, recommended) or `should_inject(request, flow_store)` (v1, deprecated) |
+| Performance | Good | Excellent |
+| Mountebank compatible | Yes | No |
 
 ---
 
 ## Performance Tips
 
-1. **Use Rhai/Lua for high-throughput** - Both are compiled and cached for efficient reuse
+1. **Use Rhai for high-throughput** - it is compiled and cached for efficient reuse
 2. **Minimize flow store access** - Each get/set has overhead; batch operations when possible
 3. **Keep scripts simple** - Complex logic is harder to debug and maintain
 4. **Use flow_id wisely** - Namespace state by request ID, user ID, or session to avoid collisions

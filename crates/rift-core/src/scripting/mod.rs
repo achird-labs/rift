@@ -24,11 +24,6 @@ pub use script_pool::{CompiledScript, ScriptPool, ScriptPoolConfig};
 mod decision_cache;
 pub use decision_cache::{CacheKey, DecisionCache, DecisionCacheConfig};
 
-#[cfg(feature = "lua")]
-mod lua_engine;
-#[cfg(feature = "lua")]
-pub use lua_engine::{LuaEngine, compile_to_bytecode};
-
 #[cfg(feature = "javascript")]
 mod js_engine;
 /// Exposed so other modules (e.g. `behaviors::wait`) that run a standalone JS snippet outside the
@@ -57,14 +52,6 @@ mod rhai_validator;
 #[allow(unused_imports)]
 pub use rhai_validator::RhaiValidationError;
 pub use rhai_validator::RhaiValidator;
-
-#[cfg(feature = "lua")]
-mod lua_validator;
-#[cfg(feature = "lua")]
-#[allow(unused_imports)]
-pub use lua_validator::LuaValidationError;
-#[cfg(feature = "lua")]
-pub use lua_validator::LuaValidator;
 
 #[cfg(feature = "javascript")]
 mod js_validator;
@@ -133,7 +120,7 @@ pub struct ScriptResponseContext {
 }
 
 /// Everything the shared `ctx` builder (issue #357 Item 1) needs, engine-agnostic. Each engine
-/// (`rhai_engine`, `lua_engine`, `js_engine`) turns this into its own native `ctx` value; the
+/// (`rhai_engine`, `js_engine`) turns this into its own native `ctx` value; the
 /// field names/semantics are identical across engines by contract — keep them that way.
 #[derive(Debug, Clone)]
 pub struct ScriptCtxInput<'a> {
@@ -308,13 +295,11 @@ pub mod entrypoints {
     pub const SHOULD_INJECT: &str = "should_inject";
 }
 
-/// Unified script engine that supports Rhai, Lua, and JavaScript
+/// Unified script engine that supports Rhai and JavaScript
 #[derive(Clone)]
 
 pub enum ScriptEngine {
     Rhai(RhaiEngine),
-    #[cfg(feature = "lua")]
-    Lua(LuaEngine),
     #[cfg(feature = "javascript")]
     JavaScript(JsEngine),
 }
@@ -324,11 +309,8 @@ impl ScriptEngine {
     pub fn new(engine_type: &str, script: &str, rule_id: &str) -> Result<Self> {
         match engine_type {
             "rhai" => Ok(ScriptEngine::Rhai(RhaiEngine::new(script, rule_id)?)),
-            #[cfg(feature = "lua")]
-            "lua" => Ok(ScriptEngine::Lua(LuaEngine::new(script, rule_id)?)),
-            #[cfg(not(feature = "lua"))]
             "lua" => Err(anyhow!(
-                "Lua engine is not enabled. Enable the 'lua' feature flag"
+                "the Lua scripting engine was removed (issue #450); use engine \"rhai\" or \"javascript\""
             )),
             #[cfg(feature = "javascript")]
             "javascript" | "js" => Ok(ScriptEngine::JavaScript(JsEngine::new(script, rule_id)?)),
@@ -365,8 +347,6 @@ impl ScriptEngine {
             ScriptEngine::Rhai(engine) => {
                 engine.should_inject_fault_with_ctx(request, flow_store, extra)
             }
-            #[cfg(feature = "lua")]
-            ScriptEngine::Lua(engine) => engine.should_inject_with_ctx(request, flow_store, extra),
             #[cfg(feature = "javascript")]
             ScriptEngine::JavaScript(engine) => {
                 engine.should_inject_with_ctx(request, flow_store, extra)
@@ -395,7 +375,7 @@ pub struct ScriptRequest {
     pub raw_body: Option<String>,
 }
 
-/// Wrapper for FlowStore that can be used in scripts (both Rhai and Lua)
+/// Wrapper for FlowStore that can be used in scripts (Rhai and JavaScript)
 /// Uses direct synchronous calls since FlowStore is no longer async
 ///
 /// The `strict` flag decides how a backend failure surfaces (issues #322/#376/#358):
@@ -1158,35 +1138,16 @@ mod tests {
     // Feature-gated tests
     // ============================================
 
-    #[cfg(feature = "lua")]
-    mod lua_tests {
-        use super::*;
-
-        #[test]
-        fn test_script_engine_new_lua() {
-            let script = r#"
-                function should_inject(request, flow_store)
-                    return { inject = false }
-                end
-            "#;
-            let engine = ScriptEngine::new("lua", script, "lua-rule");
-            assert!(
-                engine.is_ok(),
-                "Lua engine creation failed: {:?}",
-                engine.err()
-            );
-        }
-
-        #[test]
-        fn test_compile_to_bytecode() {
-            let script = r#"
-                function should_inject(request, flow_store)
-                    return { inject = false }
-                end
-            "#;
-            let bytecode = super::super::compile_to_bytecode(script);
-            assert!(bytecode.is_ok());
-        }
+    // Issue #450: Lua was removed; "lua" now always fails with an actionable error pointing at
+    // the two remaining engines, rather than a feature-flag message.
+    #[test]
+    fn test_script_engine_new_lua_removed() {
+        let engine = ScriptEngine::new("lua", "return false", "test-rule");
+        assert!(engine.is_err());
+        let err_msg = engine.err().unwrap().to_string();
+        assert!(err_msg.contains("removed"), "unexpected message: {err_msg}");
+        assert!(err_msg.contains("rhai"));
+        assert!(err_msg.contains("javascript"));
     }
 
     #[cfg(feature = "javascript")]
@@ -1238,15 +1199,6 @@ mod tests {
     // ============================================
     // Tests for disabled features
     // ============================================
-
-    #[cfg(not(feature = "lua"))]
-    #[test]
-    fn test_lua_engine_disabled() {
-        let engine = ScriptEngine::new("lua", "return false", "test");
-        assert!(engine.is_err());
-        let err_msg = engine.err().unwrap().to_string();
-        assert!(err_msg.contains("not enabled") || err_msg.contains("feature"));
-    }
 
     #[cfg(not(feature = "javascript"))]
     #[test]
