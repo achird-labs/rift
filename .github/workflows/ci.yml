@@ -115,6 +115,40 @@ jobs:
           ./scripts/verify-docs-coverage.sh --self-test
           ./scripts/verify-docs-coverage.sh
 
+  docs-examples:
+    name: Docs Examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-docs-examples-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build rift
+        run: cargo build -p rift-http-proxy
+
+      # Issue #436 (Section E2 of #280): boot the built rift against each documented example config
+      # and assert the documented response over HTTP, so documented examples can't silently rot.
+      # E1 (verify-docs-coverage) only proves flags/keys are mentioned; this proves configs load and
+      # serve. --self-test first proves the gate isn't a no-op.
+      - name: Run documented-example gate
+        run: |
+          export RIFT_BIN="$PWD/target/debug/rift-http-proxy"
+          ./scripts/verify-docs-examples.sh --self-test
+          ./scripts/verify-docs-examples.sh
+
   ffi-manifest:
     name: FFI Manifest
     runs-on: ubuntu-latest
