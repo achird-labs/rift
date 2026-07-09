@@ -108,6 +108,31 @@ fn inject_cors_headers(headers: &mut hyper::HeaderMap) {
     }
 }
 
+/// Make a `{{ }}`-templated header value safe to emit (issue #359 B3, header injection).
+///
+/// A templated header value can resolve to attacker-controlled request data (a header/query/json
+/// value) containing CR, LF, or other control characters — a classic HTTP header-injection vector.
+/// Strip every control character so the value can never terminate the header line early or smuggle
+/// a second header. If anything was removed (or the sanitized value still isn't a valid header
+/// value), emit a `tracing::warn!` so the rejection is visible rather than silent.
+fn sanitize_header_value(value: &str) -> String {
+    let sanitized: String = value.chars().filter(|c| !c.is_control()).collect();
+    if sanitized.len() != value.len() {
+        tracing::warn!(
+            target: "rift::template",
+            original = %value,
+            "stripped control characters from a templated header value (possible header-injection attempt)"
+        );
+    } else if hyper::header::HeaderValue::from_str(&sanitized).is_err() {
+        tracing::warn!(
+            target: "rift::template",
+            value = %value,
+            "templated header value is not a representable header value"
+        );
+    }
+    sanitized
+}
+
 async fn handle_request_inner(
     req: Request<Incoming>,
     imposter: Arc<Imposter>,
@@ -609,11 +634,84 @@ async fn handle_request_inner(
             let strict_behaviors =
                 imposter.config.strict_behaviors || crate::util::strict_behaviors_env();
 
+            // Declarative response templating (issue #359): opt-in via `_rift.templated`. This
+            // `{{ }}` render runs FIRST — on the *config-authored* body/headers — and BEFORE the
+            // `${request.*}` reflection substitution below (issue #359 B1, security). Ordering is
+            // load-bearing: because `${request.*}` injects reflected request data only *after* this
+            // pass, any `{{ }}` that arrives inside reflected request data is never scanned or
+            // evaluated here — it is served verbatim. Evaluating reflected `{{ }}` would be a
+            // template-injection hole (an unauthenticated caller could reach `state.*`/force errors)
+            // and would also break the module's "a literal `{{` is served verbatim" promise for
+            // reflected text. Off by default so recorded fixtures with a literal `{{` are untouched.
+            if rift_ext.as_ref().is_some_and(|r| r.templated) {
+                let request_data = RequestData::new(
+                    method_str,
+                    path_str,
+                    query_opt,
+                    &headers_for_context,
+                    body_string.as_deref(),
+                )
+                .with_route_pattern(stub_state.stub.route_pattern.as_deref());
+                // In debug mode (`RIFT_DEBUG`), a malformed/unknown/failed `{{ }}` token fails the
+                // request loudly instead of silently degrading to an empty string (issue #359 AC3).
+                let template_debug = crate::util::rift_debug_env();
+                let template_ctx = crate::extensions::template_fn::TemplateContext {
+                    request: &request_data,
+                    flow_id: &scenario_flow_id,
+                    flow_store: imposter.flow_store.as_ref(),
+                };
+
+                let template_error = match crate::extensions::template_fn::render_templated(
+                    &body,
+                    &template_ctx,
+                    template_debug,
+                ) {
+                    Ok(rendered) => {
+                        body = rendered;
+                        None
+                    }
+                    Err(e) => Some(e),
+                };
+                let template_error = template_error.or_else(|| {
+                    for values in headers.values_mut() {
+                        for v in values.iter_mut() {
+                            match crate::extensions::template_fn::render_templated(
+                                v,
+                                &template_ctx,
+                                template_debug,
+                            ) {
+                                // Issue #359 B3 (header injection): a templated value can resolve to
+                                // attacker-controlled request data containing CR/LF/control chars.
+                                // Strip control characters before the value ever reaches the header
+                                // map so it cannot inject an extra header line; warn (never silently)
+                                // if anything had to be removed.
+                                Ok(rendered) => *v = sanitize_header_value(&rendered),
+                                Err(e) => return Some(e),
+                            }
+                        }
+                    }
+                    None
+                });
+                if let Some(e) = template_error {
+                    warn!("Response template rendering failed: {e}");
+                    return Ok(build_response_with_headers(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [
+                            ("x-rift-imposter", "true"),
+                            ("x-rift-template-error", "true"),
+                        ],
+                        format!(r#"{{"error": "template rendering failed: {e}"}}"#),
+                    ));
+                }
+            }
+
             // Expand `${request.*}` request templates (issue #269) BEFORE behaviors — matching the
             // proxy path's ordering so `shellTransform`/`decorate` operate on the expanded body.
             // Header values are templated too (the static path's AC1 requirement; the proxy path
             // templates only the body). Serve-time date templates ({{NOW}}/{{DAYS+N}}) are expanded
-            // later, at body finalization.
+            // later, at body finalization. Runs AFTER the `{{ }}` pass above (issue #359 B1): this
+            // pass only substitutes `${...}` and never re-scans for `{{ }}`, so reflected request
+            // data injected here is never templated.
             {
                 let need_body = has_template_variables(&body);
                 let need_headers = headers

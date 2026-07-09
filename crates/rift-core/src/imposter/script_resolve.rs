@@ -314,6 +314,7 @@ mod tests {
                 rift: RiftResponseExtension {
                     fault: None,
                     script: Some(script_config),
+                    templated: false,
                 },
             }],
             scenario_name: None,

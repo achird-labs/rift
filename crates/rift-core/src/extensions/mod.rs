@@ -11,6 +11,8 @@
 //! - **Rule Indexing** (`rule_index`): High-performance rule lookup using radix tries
 //! - **Stub Analysis** (`stub_analysis`): Conflict detection and overlap warnings
 //! - **Template** (`template`): Response body templating with request data
+//! - **Template Functions** (`template_fn`): Declarative `{{ function args | filter }}`
+//!   response templating (issue #359)
 //! - **Routing** (`routing`): Multi-upstream routing for reverse proxy mode
 
 pub mod decorate;
@@ -22,6 +24,7 @@ pub mod routing;
 pub mod rule_index;
 pub mod stub_analysis;
 pub mod template;
+pub mod template_fn;
 
 // Re-export commonly used types for library consumers
 #[allow(unused_imports)]
@@ -42,3 +45,5 @@ pub use stub_analysis::{
 };
 #[allow(unused_imports)]
 pub use template::{RequestData, apply_date_templates, process_template};
+#[allow(unused_imports)]
+pub use template_fn::{TemplateContext, render_templated};

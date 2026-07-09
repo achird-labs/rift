@@ -43,6 +43,23 @@ fn strict_behaviors_from(val: Option<&str>) -> bool {
         .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
 }
 
+/// Whether Rift is running in debug mode, read once from the `RIFT_DEBUG` env var (issue #359).
+/// Response templating (`_rift.templated`) uses this to decide its error policy: a malformed or
+/// failed `{{ }}` token is a request-time error in debug mode, or an empty-string substitution
+/// plus a `tracing::warn!` otherwise. Follows the same on-values (`1`/`true`/`yes`/`on`) as
+/// `RIFT_STRICT_BEHAVIORS`/`RIFT_DISABLE_HTTP2`.
+pub fn rift_debug_env() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| rift_debug_from(std::env::var("RIFT_DEBUG").ok().as_deref()))
+}
+
+/// Pure parse of the `RIFT_DEBUG` value, split out so it can be unit-tested without the
+/// process-global env-var races that a full end-to-end test would hit.
+fn rift_debug_from(val: Option<&str>) -> bool {
+    val.map(|v| v.trim().to_ascii_lowercase())
+        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+}
+
 /// Build an HTTP response with the given status and body. Falls back to a minimal 500 if the
 /// builder fails (which should not happen with a valid `StatusCode`).
 pub fn build_response(status: StatusCode, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
@@ -127,7 +144,7 @@ pub fn unix_timestamp() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{http2_disabled_from, strict_behaviors_from};
+    use super::{http2_disabled_from, rift_debug_from, strict_behaviors_from};
 
     // Issue #375: RIFT_STRICT_BEHAVIORS parsing — truthy values force strict, everything else lenient.
     #[test]
@@ -174,6 +191,24 @@ mod tests {
                 !http2_disabled_from(off),
                 "{off:?} should keep HTTP/2 enabled"
             );
+        }
+    }
+
+    // Issue #359: RIFT_DEBUG parsing — truthy values enable request-time template errors.
+    #[test]
+    fn rift_debug_env_parsing() {
+        for on in ["1", "true", "TRUE", " yes ", "On"] {
+            assert!(rift_debug_from(Some(on)), "{on:?} should enable debug mode");
+        }
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("2"),
+        ] {
+            assert!(!rift_debug_from(off), "{off:?} should keep debug mode off");
         }
     }
 }

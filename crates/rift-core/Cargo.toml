@@ -74,6 +74,8 @@ libc = "0.2"
 parking_lot = "0.12"
 arc-swap = "1.7"
 crossbeam = "0.8"
+# Response templating `{{uuid}}` (issue #359); already a workspace dep (previously dev-only here).
+uuid.workspace = true
 
 # XML/XPath support
 sxd-document = "0.3"
@@ -89,7 +91,6 @@ ring = "0.17"
 tempfile = "3.8"
 reqwest.workspace = true
 tokio-test = "0.4"
-uuid.workspace = true
 serial_test = "3.0"
 criterion = { version = "0.5", features = ["html_reports"] }
 

@@ -993,6 +993,12 @@ pub struct RiftResponseExtension {
     /// Script-based response generation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub script: Option<RiftScriptConfig>,
+    /// Opt-in declarative response templating (issue #359): when `true`, `{{ function args |
+    /// filter }}` tokens in the response body and every header value are evaluated (see
+    /// `crate::extensions::template_fn`). Off by default so recorded fixtures containing a
+    /// literal `{{` are served verbatim.
+    #[serde(default)]
+    pub templated: bool,
 }
 
 /// Fault injection configuration for responses
