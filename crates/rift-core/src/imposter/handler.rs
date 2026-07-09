@@ -404,7 +404,7 @@ async fn handle_request_inner(
             match execute_mountebank_inject(
                 &inject_fn,
                 &mb_request,
-                imposter.config.port.unwrap_or(0),
+                imposter.script_state_key(),
                 stub_state.stub.id.as_deref(),
             ) {
                 Ok(inject_response) => {
@@ -893,7 +893,7 @@ async fn handle_request_inner(
                             &body,
                             status,
                             &mut single,
-                            imposter.config.port.unwrap_or(0),
+                            imposter.script_state_key(),
                             stub_state.stub.id.as_deref(),
                         ) {
                             Ok((new_body, new_status)) => {

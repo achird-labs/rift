@@ -390,6 +390,21 @@ impl Imposter {
             })
     }
 
+    /// The key under which this imposter's Mountebank inject/decorate script state is stored in
+    /// the process-global `IMPOSTER_STATE` map — the imposter's bound listener port.
+    ///
+    /// `config.port` is `Some(bound_port)` for the entire life of a live imposter: the manager
+    /// assigns and records the real, distinct bound port in `create_imposter_inner` *before* the
+    /// imposter is constructed or serves a request, so distinct imposters (including auto-bind
+    /// ones) always get distinct keys and never clobber each other's script state (issue #439).
+    /// The `unwrap_or(0)` fallback is therefore unreachable for a live imposter — `0` is the
+    /// documented "no live imposter" sentinel (see `rift-ffi`); it exists only to keep this
+    /// total. Centralised here so the invariant has one greppable home rather than a scattered
+    /// magic `config.port.unwrap_or(0)` at every script call site.
+    pub(crate) fn script_state_key(&self) -> u16 {
+        self.config.port.unwrap_or(0)
+    }
+
     /// Create Redis flow store if configured and available.
     ///
     /// An explicitly-requested `"redis"` backend that cannot be built must fail imposter

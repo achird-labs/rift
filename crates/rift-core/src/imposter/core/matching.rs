@@ -48,7 +48,7 @@ impl Imposter {
         // Parse form data if Content-Type is application/x-www-form-urlencoded
         let form = Self::parse_form_data(headers_map, body);
 
-        let imposter_port = self.config.port.unwrap_or(0);
+        let imposter_port = self.script_state_key();
         let flow_id = self.resolve_flow_id(headers_map);
         // Parse the request body as JSON once per request and reuse it across every stub's
         // predicates, instead of re-parsing per predicate per stub (issue #290).
@@ -116,7 +116,7 @@ impl Imposter {
     ) -> anyhow::Result<Option<(Arc<StubState>, usize)>> {
         let stubs = self.stubs.load();
         let form = Self::parse_form_data(headers_map, body);
-        let imposter_port = self.config.port.unwrap_or(0);
+        let imposter_port = self.script_state_key();
         let flow_id = self.resolve_flow_id(headers_map);
         let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
         for (index, stub_state) in stubs.iter().enumerate() {

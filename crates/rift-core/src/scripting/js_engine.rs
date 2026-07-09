@@ -3467,6 +3467,40 @@ function respond(ctx) {
         );
     }
 
+    // Complement of the sharing contract: two DISTINCT imposters (distinct state keys) must NOT
+    // share Mountebank inject state (issue #439). State written under one imposter's key is
+    // invisible to a response inject running under another's — auto-bind imposters, which the
+    // manager gives distinct bound ports, therefore never clobber each other's script state.
+    #[test]
+    fn mountebank_inject_state_isolated_between_distinct_imposters() {
+        let port_a = test_port();
+        let port_b = test_port();
+        assert_ne!(
+            port_a, port_b,
+            "distinct imposters must have distinct state keys"
+        );
+
+        // Imposter A writes state via a predicate inject.
+        let writer = r#"function(config) { config.state.marker = "from-A"; return true; }"#;
+        assert!(execute_predicate_inject(writer, &mb_req("GET", "/iso"), port_a).unwrap());
+
+        // Imposter B reads state via a response inject: it must see its own (empty) state, not A's.
+        let reader = r#"function(config) { return { statusCode: 200, body: config.state.marker || "isolated" }; }"#;
+        let resp_b = execute_mountebank_inject(reader, &mb_req("GET", "/iso"), port_b, None)
+            .expect("response inject should run");
+        assert_eq!(
+            resp_b.body, "isolated",
+            "state written under imposter A's key must be invisible to imposter B (issue #439)"
+        );
+
+        // Sanity: A still sees its own state — isolation didn't wipe it.
+        let resp_a = execute_mountebank_inject(reader, &mb_req("GET", "/iso"), port_a, None)
+            .expect("response inject should run");
+        assert_eq!(resp_a.body, "from-A");
+        // (Decorate keys the SAME `IMPOSTER_STATE` map via the identical `imposter_port`, so its
+        // isolation follows from the same mechanism proven here.)
+    }
+
     // =========================================================================================
     // Issue #355 Item 1: native logger routes to `tracing`.
     // =========================================================================================
