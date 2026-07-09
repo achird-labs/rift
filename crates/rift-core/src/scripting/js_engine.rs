@@ -1473,30 +1473,33 @@ pub struct MountebankInjectResponse {
     pub body: String,
 }
 
-/// Per-imposter state storage for inject functions
-/// This is used to share state between inject function calls
-use std::sync::{LazyLock, Mutex};
+/// Per-imposter script state for Mountebank inject/decorate functions, shared across a port's
+/// predicate injects, response injects, and decorate (issue #355 Item 0).
+///
+/// Sharded by port, and each port's cell is a `parking_lot::Mutex` held across the *whole*
+/// get→run→save of a single inject/decorate call (issue #477): concurrent same-imposter script
+/// runs therefore serialize — matching Mountebank's single-threaded state semantics, so no update
+/// is lost — while unrelated imposters never contend, and parking_lot never poisons, so a
+/// panicking script can't wedge the map. The outer mutex is taken only briefly, to look up or
+/// create a port's cell.
+use std::sync::LazyLock;
+
+/// One imposter's script-state map behind its own lock (issue #477).
+type ImposterStateCell = std::sync::Arc<parking_lot::Mutex<serde_json::Map<String, Value>>>;
 
 static IMPOSTER_STATE: LazyLock<
-    Mutex<std::collections::HashMap<u16, serde_json::Map<String, Value>>>,
-> = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+    parking_lot::Mutex<std::collections::HashMap<u16, ImposterStateCell>>,
+> = LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
-/// Get or create state for an imposter
-fn get_imposter_state(port: u16) -> serde_json::Map<String, Value> {
-    let states = IMPOSTER_STATE.lock().unwrap();
-    states.get(&port).cloned().unwrap_or_default()
+/// The state cell for `port`, creating an empty one on first use. Lock the returned cell to read
+/// and write the port's state atomically across a script run.
+fn imposter_state_cell(port: u16) -> ImposterStateCell {
+    std::sync::Arc::clone(IMPOSTER_STATE.lock().entry(port).or_default())
 }
 
-/// Save state for an imposter
-fn save_imposter_state(port: u16, state: serde_json::Map<String, Value>) {
-    let mut states = IMPOSTER_STATE.lock().unwrap();
-    states.insert(port, state);
-}
-
-/// Clear state for an imposter (called when imposter is deleted)
+/// Clear state for an imposter (called when imposter is deleted).
 pub fn clear_imposter_state(port: u16) {
-    let mut states = IMPOSTER_STATE.lock().unwrap();
-    states.remove(&port);
+    IMPOSTER_STATE.lock().remove(&port);
 }
 
 /// Execute a Mountebank-style inject function.
@@ -1536,7 +1539,12 @@ pub fn execute_mountebank_inject(
 
     // Get current (persisted, per-port) state for this imposter — shared across predicate
     // injects, response injects, and decorate for the same imposter (issue #355 Item 0).
-    let state_map = get_imposter_state(imposter_port);
+    // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
+    // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
+    // guard is written back at the end of this call.
+    let cell = imposter_state_cell(imposter_port);
+    let mut imposter_state = cell.lock();
+    let state_map = imposter_state.clone();
     let state_obj = json_to_js(&mut context, &Value::Object(state_map))?;
 
     let logger_obj =
@@ -1620,7 +1628,7 @@ pub fn execute_mountebank_inject(
         .map_err(|e| anyhow!("Failed to get updated state: {e}"))?;
 
     if let Ok(Value::Object(map)) = js_to_json(&mut context, &updated_state) {
-        save_imposter_state(imposter_port, map);
+        *imposter_state = map;
     }
 
     // Parse the response
@@ -1664,7 +1672,12 @@ pub fn execute_predicate_inject(
         }
     };
 
-    let state_map = get_imposter_state(imposter_port);
+    // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
+    // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
+    // guard is written back at the end of this call.
+    let cell = imposter_state_cell(imposter_port);
+    let mut imposter_state = cell.lock();
+    let state_map = imposter_state.clone();
     let state_obj = match json_to_js(&mut context, &Value::Object(state_map)) {
         Ok(obj) => obj,
         Err(e) => {
@@ -1744,7 +1757,7 @@ pub fn execute_predicate_inject(
     if let Ok(updated_state) = global.get(js_string!("__imposterState"), &mut context)
         && let Ok(Value::Object(map)) = js_to_json(&mut context, &updated_state)
     {
-        save_imposter_state(imposter_port, map);
+        *imposter_state = map;
     }
 
     Ok(result.to_boolean())
@@ -2177,7 +2190,12 @@ pub fn execute_mountebank_config_decorate(
 
     // Get current (persisted, per-port) state for this imposter — shared with predicate/response
     // injects for the same imposter (issue #355 Item 0).
-    let state_map = get_imposter_state(imposter_port);
+    // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
+    // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
+    // guard is written back at the end of this call.
+    let cell = imposter_state_cell(imposter_port);
+    let mut imposter_state = cell.lock();
+    let state_map = imposter_state.clone();
     let state_obj = json_to_js(&mut context, &Value::Object(state_map))?;
     let logger_obj =
         create_script_logger_object(&mut context, imposter_port, stub_id.map(str::to_owned))?;
@@ -2299,7 +2317,7 @@ pub fn execute_mountebank_config_decorate(
 
     // Persist any mutation the decorate made to the shared, per-port state.
     if let Ok(Value::Object(map)) = js_to_json(&mut context, &state_obj) {
-        save_imposter_state(imposter_port, map);
+        *imposter_state = map;
     }
 
     Ok(MountebankDecorateResponse {
@@ -2386,7 +2404,12 @@ pub fn execute_mountebank_decorate(
 
     // Get current (persisted, per-port) state for this imposter — shared with predicate/response
     // injects for the same imposter (previously a throwaway `{}` per call; issue #355 Item 0).
-    let state_map = get_imposter_state(imposter_port);
+    // Hold this port's state cell across the whole get→run→save so a concurrent same-imposter
+    // inject can't lose our update (issue #477). `state_map` seeds the JS `state` object; the
+    // guard is written back at the end of this call.
+    let cell = imposter_state_cell(imposter_port);
+    let mut imposter_state = cell.lock();
+    let state_map = imposter_state.clone();
     let state_obj = json_to_js(&mut context, &Value::Object(state_map))?;
     let logger_obj =
         create_script_logger_object(&mut context, imposter_port, stub_id.map(str::to_owned))?;
@@ -2437,7 +2460,7 @@ pub fn execute_mountebank_decorate(
 
     // Persist any mutation the decorate made to the shared, per-port state.
     if let Ok(Value::Object(map)) = js_to_json(&mut context, &state_obj) {
-        save_imposter_state(imposter_port, map);
+        *imposter_state = map;
     }
 
     // Parse the modified response
@@ -2504,6 +2527,7 @@ mod tests {
     use crate::backends::InMemoryFlowStore;
     use serde_json::json;
     use std::collections::HashMap;
+    use std::sync::Mutex;
 
     #[test]
     fn test_js_engine_compiles() {
@@ -3499,6 +3523,50 @@ function respond(ctx) {
         assert_eq!(resp_a.body, "from-A");
         // (Decorate keys the SAME `IMPOSTER_STATE` map via the identical `imposter_port`, so its
         // isolation follows from the same mechanism proven here.)
+    }
+
+    // Issue #477: concurrent injects on the SAME imposter must not lose state updates. With the old
+    // read-clone-mutate-overwrite (lock released across script execution) N racing increments lose
+    // updates; holding a per-port lock across the whole get→run→save section makes the final count
+    // exactly N.
+    #[test]
+    fn concurrent_injects_do_not_lose_state_updates() {
+        let port = test_port();
+        let incr = r#"function(config) {
+            config.state.count = (config.state.count || 0) + 1;
+            return { statusCode: 200, body: String(config.state.count) };
+        }"#;
+        // A predicate inject that increments the same shared counter — so the test races TWO exec
+        // fns (response inject + predicate inject) contending on the same port's cell.
+        let pred_incr = r#"function(config) {
+            config.state.count = (config.state.count || 0) + 1;
+            return true;
+        }"#;
+        let n: usize = 40;
+        std::thread::scope(|s| {
+            for i in 0..n {
+                s.spawn(move || {
+                    if i % 2 == 0 {
+                        execute_mountebank_inject(incr, &mb_req("POST", "/count"), port, None)
+                            .expect("inject should run");
+                    } else {
+                        execute_predicate_inject(pred_incr, &mb_req("POST", "/count"), port)
+                            .expect("predicate inject should run");
+                    }
+                });
+            }
+        });
+
+        let read = r#"function(config) {
+            return { statusCode: 200, body: String(config.state.count || 0) };
+        }"#;
+        let final_resp = execute_mountebank_inject(read, &mb_req("GET", "/count"), port, None)
+            .expect("read inject should run");
+        assert_eq!(
+            final_resp.body,
+            n.to_string(),
+            "every concurrent increment must persist (no lost updates)"
+        );
     }
 
     // =========================================================================================
