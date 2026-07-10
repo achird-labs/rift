@@ -191,30 +191,38 @@ impl FlowStore for RedisFlowStore {
         self.increment_by(flow_id, key, 1)
     }
 
-    /// Atomic via Redis's own `INCRBY` (issue #358) — a single round trip, so there's no
-    /// interleaving window with a concurrent increment/set the way a get-then-set fallback would
-    /// have.
+    /// Atomic INCRBY + EXPIRE in a single round trip via a server-side Lua script (issue #475),
+    /// mirroring `compare_and_set`. `INCRBY` alone doesn't (re)set the TTL, and issuing a separate
+    /// `EXPIRE` cost a second RTT per increment; folding both into one `EVAL` halves the round
+    /// trips while staying atomic.
     fn increment_by(&self, flow_id: &str, key: &str, by: i64) -> Result<i64> {
+        const INCR_SCRIPT: &str = r#"
+local v = redis.call('INCRBY', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ARGV[2])
+return v
+"#;
         let key_str = self.make_key(flow_id, key);
         let conn = self
             .pool
             .get()
             .map_err(|e| backend_err("flowStore.pool", e))?;
-        let mut conn_guard = conn.lock().unwrap();
 
-        // INCRBY returns the new value
-        let new_value: i64 = conn_guard
-            .incr(&key_str, by)
+        let new_value: i64 = redis::cmd("EVAL")
+            .arg(INCR_SCRIPT)
+            .arg(1)
+            .arg(&key_str)
+            .arg(by)
+            .arg(self.default_ttl_seconds)
+            .query(&mut *conn.lock().unwrap())
             .map_err(|e| backend_err("flowStore.incrementBy", e))?;
 
-        // Set TTL on the key (INCRBY doesn't reset TTL)
-        let _: () = redis::cmd("EXPIRE")
-            .arg(&key_str)
-            .arg(self.default_ttl_seconds)
-            .query(&mut *conn_guard)
-            .map_err(|e| backend_err("flowStore.expire", e))?;
-
         Ok(new_value)
+    }
+
+    /// The synchronous r2d2/`redis::Connection` client blocks the calling thread, so the request
+    /// path must offload these calls to `spawn_blocking` (issue #475).
+    fn is_blocking(&self) -> bool {
+        true
     }
 
     /// Single-round-trip atomic CAS via a server-side Lua script (issue #311): compare

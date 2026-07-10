@@ -176,6 +176,25 @@ mod tests {
         );
     }
 
+    // Issue #475: increment_by folds INCRBY + EXPIRE into one EVAL. Mirror the CAS-expiry test to
+    // pin that the EXPIRE arg isn't dropped — a lost EXPIRE would mean unbounded key growth.
+    #[tokio::test]
+    async fn test_redis_increment_by_key_expires() {
+        let Some((_container, store)) = setup(2).await else {
+            return;
+        };
+
+        assert_eq!(store.increment_by("incttl", "n", 5).unwrap(), 5);
+        assert!(store.exists("incttl", "n").unwrap());
+
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert_eq!(
+            store.get("incttl", "n").unwrap(),
+            None,
+            "increment_by key must expire with the store TTL (EXPIRE folded into the EVAL)"
+        );
+    }
+
     #[tokio::test]
     async fn test_redis_cas_expected_present_and_conflict() {
         let Some((_container, store)) = setup(300).await else {

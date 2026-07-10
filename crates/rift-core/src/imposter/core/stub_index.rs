@@ -70,6 +70,11 @@ pub(crate) struct StubIndex {
     /// nested under `and`/`or`/`not`). Computed once per snapshot so the request hot path can
     /// gate the bounded (spawn_blocking) matching route on it for free (issue #476).
     has_inject: bool,
+    /// Whether any stub is scenario-gated (`requiredScenarioState`). The eligibility gate reads
+    /// flow state during matching; on a blocking backend (Redis) that read must run off the tokio
+    /// worker, so the bounded matcher offloads only when this is set — a scenario-free snapshot
+    /// keeps the inline fast path even on a blocking backend (issue #475).
+    has_scenario_gate: bool,
 }
 
 /// Does this predicate tree contain an `inject` predicate anywhere?
@@ -105,6 +110,9 @@ impl StubIndex {
         let has_inject = stubs
             .iter()
             .any(|s| s.stub.predicates.iter().any(predicate_contains_inject));
+        let has_scenario_gate = stubs
+            .iter()
+            .any(|s| s.stub.required_scenario_state.is_some());
 
         StubIndex {
             stubs,
@@ -113,12 +121,18 @@ impl StubIndex {
             contains: contains.into_iter().collect(),
             fallback,
             has_inject,
+            has_scenario_gate,
         }
     }
 
     /// Whether any stub in this snapshot uses an `inject` predicate (issue #476).
     pub(crate) fn has_inject(&self) -> bool {
         self.has_inject
+    }
+
+    /// Whether any stub in this snapshot is scenario-gated (`requiredScenarioState`, issue #475).
+    pub(crate) fn has_scenario_gate(&self) -> bool {
+        self.has_scenario_gate
     }
 
     /// The stub snapshot this index describes.
@@ -401,6 +415,40 @@ mod tests {
             Some(0),
             "the earlier match-all stub must win over the anchored stub"
         );
+    }
+
+    // Issue #475: the has_scenario_gate flag — computed once at index build — detects a
+    // `requiredScenarioState` stub so the bounded matcher offloads the gate's flow-store read to
+    // spawn_blocking on a blocking backend, while a scenario-free set keeps the inline fast path.
+    #[test]
+    fn has_scenario_gate_detects_required_scenario_state() {
+        let build = |v: Value| {
+            let states: Vec<Arc<StubState>> = v
+                .as_array()
+                .expect("array")
+                .iter()
+                .map(|s| {
+                    Arc::new(StubState::new(
+                        serde_json::from_value(s.clone()).expect("stub"),
+                    ))
+                })
+                .collect();
+            StubIndex::build(Arc::new(states))
+        };
+        let ungated = build(json!([
+            { "predicates": [{"equals": {"path": "/a"}}], "responses": [{"is": {"statusCode": 200}}] }
+        ]));
+        assert!(!ungated.has_scenario_gate());
+
+        let gated = build(json!([
+            {
+                "predicates": [{"equals": {"path": "/a"}}],
+                "scenarioName": "sc",
+                "requiredScenarioState": "started",
+                "responses": [{"is": {"statusCode": 200}}]
+            }
+        ]));
+        assert!(gated.has_scenario_gate());
     }
 
     // Issue #476: the has_inject gate — computed once at index build — detects an inject

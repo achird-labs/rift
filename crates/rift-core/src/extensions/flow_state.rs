@@ -28,6 +28,15 @@ pub trait FlowStore: Send + Sync {
     /// Delete a key from flow state
     fn delete(&self, flow_id: &str, key: &str) -> Result<()>;
 
+    /// Whether calls to this store block the calling thread on synchronous network I/O. The
+    /// request path consults this to decide whether to offload flow-store calls to
+    /// `spawn_blocking`, so a slow or pool-exhausted backend can't stall a tokio worker and
+    /// head-of-line-block every task multiplexed on it (issue #475). In-memory stores never
+    /// block, so the default is `false`; the Redis backend overrides it.
+    fn is_blocking(&self) -> bool {
+        false
+    }
+
     /// Increment a numeric value (returns new value)
     fn increment(&self, flow_id: &str, key: &str) -> Result<i64>;
 

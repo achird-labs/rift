@@ -120,7 +120,15 @@ impl Imposter {
         client_ip: Option<&str>,
         timeout: std::time::Duration,
     ) -> anyhow::Result<Option<(Arc<StubState>, usize)>> {
-        if !self.stub_index.load().has_inject() {
+        let snapshot = self.stub_index.load();
+        let has_inject = snapshot.has_inject();
+        // A scenario-gated stub reads flow state inside the matching pass; on a blocking backend
+        // (Redis) that read must not run on the tokio worker either (issue #475). A scenario-free
+        // snapshot on a blocking backend still takes the inline fast path — no gate read happens.
+        let needs_offload =
+            has_inject || (snapshot.has_scenario_gate() && self.flow_store.is_blocking());
+        drop(snapshot);
+        if !needs_offload {
             return self.find_matching_stub_with_client(
                 method,
                 path,
@@ -151,6 +159,15 @@ impl Imposter {
                 client_ip.as_deref(),
             )
         });
+        // The wall-clock deadline exists to bound a runaway inject *script*. A blocking flow-store
+        // read is bounded by the backend's own connection/command timeout, so when the offload is
+        // purely for the scenario gate (no inject) we await the task without the script deadline.
+        if !has_inject {
+            return match handle.await {
+                Ok(result) => result,
+                Err(join_err) => Err(anyhow::anyhow!("matching task panicked: {join_err}")),
+            };
+        }
         match tokio::time::timeout(timeout, handle).await {
             Ok(Ok(result)) => result,
             Ok(Err(join_err)) => Err(anyhow::anyhow!("matching task panicked: {join_err}")),
@@ -275,6 +292,26 @@ impl Imposter {
                 .and_then(|(_, v)| v.first().cloned())
                 .unwrap_or_else(|| port.to_string()),
             None => port.to_string(),
+        }
+    }
+
+    /// Run a blocking flow-store closure off the tokio worker when the backend actually blocks
+    /// (Redis), otherwise inline. This keeps a slow or pool-exhausted backend from
+    /// head-of-line-blocking the worker thread every request is multiplexed on (issue #475),
+    /// while adding zero overhead for the non-blocking in-memory store (the common case — the
+    /// closure runs directly on the caller with no task hop).
+    pub(crate) async fn run_flow_blocking<T, F>(self: &Arc<Self>, f: F) -> anyhow::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Self) -> anyhow::Result<T> + Send + 'static,
+    {
+        if self.flow_store.is_blocking() {
+            let imp = Arc::clone(self);
+            tokio::task::spawn_blocking(move || f(&imp))
+                .await
+                .map_err(|e| anyhow::anyhow!("flow-store task panicked: {e}"))?
+        } else {
+            f(self)
         }
     }
 
@@ -510,6 +547,162 @@ mod bounded_matching_tests {
 
     fn no_headers() -> HashMap<String, String> {
         HashMap::new()
+    }
+
+    // Issue #475: run_flow_blocking must be transparent — on the default (non-blocking) backend it
+    // runs the closure inline and returns its result faithfully (Ok value, Err propagated), and it
+    // hands the closure a usable &Imposter so a real flow-store call works through it.
+    #[tokio::test]
+    async fn run_flow_blocking_is_transparent_inline() {
+        let imp = imposter(json!([]));
+        assert!(
+            !imp.flow_store.is_blocking(),
+            "default backend is non-blocking"
+        );
+
+        let value = imp
+            .run_flow_blocking(|_| Ok(42_i64))
+            .await
+            .expect("closure ok");
+        assert_eq!(value, 42);
+
+        let err = imp
+            .run_flow_blocking(|_| Err::<i64, _>(anyhow::anyhow!("boom")))
+            .await
+            .expect_err("closure err propagates");
+        assert!(err.to_string().contains("boom"));
+
+        // The closure receives a working &Imposter: an unset scenario reads the initial state.
+        let state = imp
+            .run_flow_blocking(|i| i.scenario_state("flow-1", "sc"))
+            .await
+            .expect("scenario_state through helper");
+        assert_eq!(state, INITIAL_SCENARIO_STATE);
+    }
+
+    /// A FlowStore that reports `is_blocking() == true` (delegating storage to an in-memory store)
+    /// so the spawn_blocking dispatch path and the blocking-backend offload decision are exercised
+    /// without a real Redis (issue #475).
+    struct BlockingProbeStore {
+        inner: crate::backends::inmemory::InMemoryFlowStore,
+    }
+
+    impl BlockingProbeStore {
+        fn new() -> Self {
+            Self {
+                inner: crate::backends::inmemory::InMemoryFlowStore::new(300),
+            }
+        }
+    }
+
+    impl crate::extensions::flow_state::FlowStore for BlockingProbeStore {
+        fn is_blocking(&self) -> bool {
+            true
+        }
+        fn get(&self, flow_id: &str, key: &str) -> anyhow::Result<Option<serde_json::Value>> {
+            self.inner.get(flow_id, key)
+        }
+        fn set(&self, flow_id: &str, key: &str, value: serde_json::Value) -> anyhow::Result<()> {
+            self.inner.set(flow_id, key, value)
+        }
+        fn exists(&self, flow_id: &str, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(flow_id, key)
+        }
+        fn delete(&self, flow_id: &str, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(flow_id, key)
+        }
+        fn increment(&self, flow_id: &str, key: &str) -> anyhow::Result<i64> {
+            self.inner.increment(flow_id, key)
+        }
+        fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> anyhow::Result<()> {
+            self.inner.set_ttl(flow_id, ttl_seconds)
+        }
+        fn compare_and_set(
+            &self,
+            flow_id: &str,
+            key: &str,
+            expected: Option<&serde_json::Value>,
+            new: serde_json::Value,
+        ) -> anyhow::Result<crate::extensions::flow_state::CasOutcome> {
+            self.inner.compare_and_set(flow_id, key, expected, new)
+        }
+    }
+
+    fn imposter_with_store(
+        stubs: serde_json::Value,
+        store: Arc<dyn crate::extensions::flow_state::FlowStore>,
+    ) -> Arc<Imposter> {
+        let cfg = serde_json::from_value(json!({ "port": 0, "protocol": "http", "stubs": stubs }))
+            .expect("valid imposter config");
+        let mut imp = Imposter::new(cfg).expect("test imposter");
+        imp.flow_store = store;
+        Arc::new(imp)
+    }
+
+    // Issue #475: on a blocking backend, run_flow_blocking must dispatch the closure to a
+    // spawn_blocking pool thread (off the caller) and still round-trip its result / propagate a
+    // panic as a JoinError-shaped error. This covers the spawn_blocking arm the inline test can't.
+    #[tokio::test]
+    async fn run_flow_blocking_dispatches_off_thread_on_blocking_backend() {
+        let imp = imposter_with_store(json!([]), Arc::new(BlockingProbeStore::new()));
+        assert!(imp.flow_store.is_blocking());
+
+        let caller_thread = std::thread::current().id();
+        let ran_on = imp
+            .run_flow_blocking(|_| Ok(std::thread::current().id()))
+            .await
+            .expect("ok");
+        assert_ne!(
+            ran_on, caller_thread,
+            "a blocking backend must run the closure off the caller thread"
+        );
+
+        assert_eq!(imp.run_flow_blocking(|_| Ok(7_i64)).await.expect("ok"), 7);
+
+        let err = imp
+            .run_flow_blocking(|_| -> anyhow::Result<i64> { panic!("boom-in-task") })
+            .await
+            .expect_err("panic in the blocking task must surface as an error");
+        assert!(
+            err.to_string().contains("flow-store task panicked"),
+            "got: {err}"
+        );
+    }
+
+    // Issue #475: a scenario-gated stub on a blocking backend must still match — the bounded
+    // matcher's `has_scenario_gate && is_blocking` decision offloads the whole pass (incl. the gate
+    // read) to spawn_blocking, taking the no-deadline branch. This is the crux the fix protects.
+    #[tokio::test]
+    async fn scenario_gated_stub_matches_through_blocking_offload() {
+        let imp = imposter_with_store(
+            json!([{
+                "predicates": [{ "equals": { "path": "/x" } }],
+                "scenarioName": "sc",
+                "requiredScenarioState": INITIAL_SCENARIO_STATE,
+                "responses": [{ "is": { "statusCode": 200 } }]
+            }]),
+            Arc::new(BlockingProbeStore::new()),
+        );
+        assert!(imp.stub_index.load().has_scenario_gate());
+        assert!(imp.flow_store.is_blocking());
+
+        let matched = imp
+            .find_matching_stub_with_client_bounded(
+                "GET",
+                "/x",
+                &no_headers(),
+                None,
+                None,
+                None,
+                None,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect("matching ok");
+        assert!(
+            matched.is_some(),
+            "scenario-gated stub at its initial state must match via the blocking offload path"
+        );
     }
 
     // AC3 (happy): an inject predicate matches/misses correctly through the bounded path.

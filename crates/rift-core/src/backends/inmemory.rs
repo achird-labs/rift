@@ -594,6 +594,13 @@ mod tests {
         );
     }
 
+    // Issue #475: the in-memory store never blocks, so the request path must NOT offload its
+    // calls to spawn_blocking (that hop would be pure overhead on the common backend).
+    #[test]
+    fn in_memory_store_is_not_blocking() {
+        assert!(!InMemoryFlowStore::new(300).is_blocking());
+    }
+
     // A conflicting CAS on a brand-new flow_id must not leak the empty flow map that
     // `entry().or_default()` transiently created.
     #[test]

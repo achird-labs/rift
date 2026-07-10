@@ -360,7 +360,18 @@ async fn handle_request_inner(
         // Resolve flow_id from the same single-value header map the matcher used (headers_clone)
         // so the transition writes the exact key the gate read.
         let scenario_flow_id = imposter.resolve_flow_id(&headers_clone);
-        if let Err(e) = imposter.apply_scenario_transition(&scenario_flow_id, &stub_state.stub) {
+        // Offload the FSM transition to spawn_blocking on a blocking backend (Redis) so it can't
+        // stall the tokio worker; inline on the in-memory backend (issue #475).
+        let transition = {
+            let flow_id = scenario_flow_id.clone();
+            let stub_state = Arc::clone(&stub_state);
+            imposter
+                .run_flow_blocking(move |imp| {
+                    imp.apply_scenario_transition(&flow_id, &stub_state.stub)
+                })
+                .await
+        };
+        if let Err(e) = transition {
             return Ok(backend_error_response(&e));
         }
 
@@ -556,10 +567,18 @@ async fn handle_request_inner(
             // already does. A backend failure here must surface, not silently drop to `None`
             // (this epic's "nothing fails silently" principle).
             let scenario_state = match &stub_state.stub.scenario_name {
-                Some(name) => match imposter.scenario_state(&scenario_flow_id, name) {
-                    Ok(s) => Some(s),
-                    Err(e) => return Ok(backend_error_response(&e)),
-                },
+                Some(name) => {
+                    // Same spawn_blocking offload as the FSM gate/transition (issue #475).
+                    let flow_id = scenario_flow_id.clone();
+                    let name = name.clone();
+                    match imposter
+                        .run_flow_blocking(move |imp| imp.scenario_state(&flow_id, &name))
+                        .await
+                    {
+                        Ok(s) => Some(s),
+                        Err(e) => return Ok(backend_error_response(&e)),
+                    }
+                }
                 None => None,
             };
             let ctx_extra = ScriptCtxExtras {
