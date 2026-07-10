@@ -85,9 +85,15 @@ rift_free(result);
 ```
 
 - **Options JSON** (pass `NULL` or `{}` for all defaults; every field optional):
-  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"config":null}`.
+  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"config":null,"allowInjection":false}`.
   `port: 0` binds an ephemeral port; `configFile` is loaded as the reload source (like `--configfile`);
   `config` is an inline `{"imposters":[...]}`. `configFile` and `config` do not compose — pass one.
+- **`allowInjection`** (default `false`): whether the admin plane accepts script/`inject` imposters
+  submitted **through it** (`POST /imposters` etc.), mirroring the `--allowInjection` CLI flag.
+  Note the deliberate asymmetry: **direct FFI calls** (`rift_create_imposter`, `rift_replace_stubs`,
+  …) are **ungated** — the host process is already trusted, so script imposters always work over the
+  C-ABI. `allowInjection` only governs the in-process HTTP admin surface; leave it `false` unless you
+  expose that surface to less-trusted callers and want script imposters permitted there too.
 - **Returns** (caller frees): `{"adminPort":...,"adminUrl":"...","metricsPort":...}`, or `NULL` on
   error (bad JSON, bind failure, or already serving — one admin plane per handle).
 

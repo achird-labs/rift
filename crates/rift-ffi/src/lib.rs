@@ -166,6 +166,10 @@ struct ServeOptions {
     metrics_port: Option<u16>,
     config_file: Option<String>,
     config: Option<Value>,
+    /// Gate script/inject imposters submitted THROUGH the admin plane (issue #492). Default false,
+    /// preserving the previous behavior. Direct FFI calls (`rift_create_imposter`, …) are ungated
+    /// by design — the host process is already trusted; this only governs the in-process admin API.
+    allow_injection: Option<bool>,
 }
 
 /// Parse `{"imposters":[...]}` or a bare `[...]` into imposter configs (the reload input shape).
@@ -1125,7 +1129,8 @@ async fn build_admin_plane(
         None => None,
     };
 
-    let mut server = AdminApiServer::new(addr, Arc::clone(&handle.manager), api_key);
+    let mut server = AdminApiServer::new(addr, Arc::clone(&handle.manager), api_key)
+        .with_allow_injection(opts.allow_injection.unwrap_or(false));
     if let Some(source) = config_source {
         server = server.with_config_source(source);
     }
@@ -1346,5 +1351,36 @@ mod panic_safety_tests {
         let msg = unsafe { CStr::from_ptr(err).to_string_lossy().into_owned() };
         unsafe { rift_free(err) };
         assert_eq!(msg, "pending-error");
+    }
+}
+
+#[cfg(test)]
+mod serve_options_tests {
+    use super::*;
+
+    // Issue #492: rift_serve_admin gains an `allowInjection` option (camelCase) that gates
+    // script imposters on the embedded admin plane. It must parse to the typed field and default
+    // to None (→ false at the call site) when absent, preserving prior behavior.
+    #[test]
+    fn serve_options_parses_allow_injection() {
+        let on: ServeOptions =
+            serde_json::from_str(r#"{"allowInjection": true}"#).expect("parse allowInjection");
+        assert_eq!(on.allow_injection, Some(true));
+
+        let off: ServeOptions =
+            serde_json::from_str(r#"{"allowInjection": false}"#).expect("parse allowInjection");
+        assert_eq!(off.allow_injection, Some(false));
+
+        let absent: ServeOptions = serde_json::from_str("{}").expect("parse empty options");
+        assert_eq!(
+            absent.allow_injection, None,
+            "absent allowInjection must default to None (false at the call site)"
+        );
+
+        // A wrong-type value is a surfaced serde error, not a silent coercion (like the other opts).
+        assert!(
+            serde_json::from_str::<ServeOptions>(r#"{"allowInjection": "yes"}"#).is_err(),
+            "a non-bool allowInjection must be a parse error, not silently coerced"
+        );
     }
 }

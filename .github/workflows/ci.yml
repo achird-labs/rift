@@ -59,6 +59,12 @@ jobs:
       - name: Run handler error-response integration tests
         run: cargo test -p rift-core --all-features --test handler_error_responses
 
+      # Issue #492: the C-ABI round-trip integration tests (including the allowInjection admin-plane
+      # gate) live in a tests/*.rs binary the `--lib` step skips, so run them explicitly — otherwise
+      # the FFI option wiring has no CI regression signal.
+      - name: Run rift-ffi C-ABI round-trip tests
+        run: cargo test -p rift-ffi --all-features --test round_trip
+
       # Issue #344: a pinned cbindgen so the header regenerate-diff in the smoke test is
       # deterministic (cbindgen output varies across versions) and actually runs (the step
       # skips the diff when cbindgen is absent). Keep the version in sync with the header's.
