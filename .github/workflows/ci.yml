@@ -52,6 +52,13 @@ jobs:
       - name: Run unit tests
         run: cargo test --workspace --all-features --lib
 
+      # Issue #500: the handler script-failure contract tests run in their own integration binary
+      # (a separate process with its own MB JS script pool) rather than in the `--lib` set, so they
+      # don't contend for the shared pool with the timing-sensitive bounded-matcher unit tests. The
+      # `--lib` step above skips every `tests/*.rs` binary, so run this one explicitly.
+      - name: Run handler error-response integration tests
+        run: cargo test -p rift-core --all-features --test handler_error_responses
+
       # Issue #344: a pinned cbindgen so the header regenerate-diff in the smoke test is
       # deterministic (cbindgen output varies across versions) and actually runs (the step
       # skips the diff when cbindgen is absent). Keep the version in sync with the header's.
