@@ -373,11 +373,18 @@ impl Imposter {
         Ok(Arc::new(NoOpFlowStore))
     }
 
-    /// Whether any stub declares the declarative scenario FSM (`requiredScenarioState`/`newScenarioState`).
+    /// Whether any stub references a scenario — via the declarative FSM fields
+    /// (`requiredScenarioState`/`newScenarioState`) or by merely naming one (`scenarioName`, #514).
     fn uses_scenario_fsm(stubs: &[Stub]) -> bool {
-        stubs
-            .iter()
-            .any(|s| s.required_scenario_state.is_some() || s.new_scenario_state.is_some())
+        // A stub that merely names a scenario (`scenarioName`, no gate/transition) still needs a
+        // real flow store (issue #514): the admin/FFI scenario surface reads and writes the store
+        // directly, outside request matching, so landing on the NoOp store makes set-state/reset a
+        // silent no-op. Triggering on `scenario_name` too is a strict superset of the FSM fields.
+        stubs.iter().any(|s| {
+            s.scenario_name.is_some()
+                || s.required_scenario_state.is_some()
+                || s.new_scenario_state.is_some()
+        })
     }
 
     /// Whether any stub can execute a Rift script (`_rift.script` on an `Is` response, or the
@@ -535,6 +542,34 @@ mod tests {
             ..Default::default()
         };
         Imposter::new(config).expect("test imposter")
+    }
+
+    // Issue #514: a stub declaring only `scenarioName` (no requiredScenarioState/newScenarioState)
+    // is a valid Mountebank config — it names a scenario without gating on it. It must still get a
+    // real flow store, or the admin/FFI scenario surface (set-state/list/reset) silently no-ops: the
+    // write vanishes into the NoOp store and a read still shows the initial state.
+    #[test]
+    fn bare_scenario_name_provisions_a_real_flow_store() {
+        let cfg: ImposterConfig = serde_json::from_value(json!({
+            "port": 0,
+            "protocol": "http",
+            "stubs": [{
+                "scenarioName": "order",
+                "responses": [{ "is": { "statusCode": 200 } }]
+            }]
+        }))
+        .unwrap();
+        let imp = Imposter::new(cfg).expect("test imposter");
+        let flow = imp.resolve_flow_id(&std::collections::HashMap::new());
+
+        imp.set_scenario_state(&flow, "order", "paid")
+            .expect("set scenario state");
+        assert_eq!(
+            imp.scenario_state(&flow, "order")
+                .expect("read scenario state"),
+            "paid",
+            "a bare-scenarioName stub must persist scenario state (real flow store, not NoOp)"
+        );
     }
 
     // Issue #423: stub-analysis warnings are computed once and cached — repeated reads return the

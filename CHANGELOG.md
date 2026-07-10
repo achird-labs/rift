@@ -24,6 +24,12 @@ record.
   instead of being rebuilt and re-validated per request.
 
 ### Fixed
+- **A stub that only names a scenario (`scenarioName`) now gets a real flow store** (#514). Previously
+  a stub declaring `scenarioName` without `requiredScenarioState`/`newScenarioState` landed on the
+  no-op flow store, so `PUT /imposters/{port}/scenarios/{name}/state`, `POST .../scenarios/reset`
+  (and the `rift_set_scenario_state`/`rift_reset_scenarios` FFI symbols) silently discarded the write
+  and a subsequent read still showed the initial state. Any stub referencing a scenario now
+  provisions an in-memory flow store, so the scenario surface behaves as documented.
 - **Proxy `predicateGenerators.inject` failures no longer record a match-all stub** (#498). When an
   inject predicate generator fails (script error, invalid output, script-pool failure, or timeout),
   Rift now skips auto-stub creation instead of silently recording a stub with empty predicates that
