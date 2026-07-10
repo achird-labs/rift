@@ -205,6 +205,109 @@ fn ffi_serve_admin_exposes_manager_and_control_plane() {
     }
 }
 
+// Issue #492: `allowInjection` in the rift_serve_admin options gates script imposters submitted
+// THROUGH the admin plane. With it set, an inject imposter POSTed to the admin API is accepted;
+// with the default (off), the same POST is rejected with the Mountebank "invalid injection" error.
+// (Direct FFI creation is ungated by design and is not exercised here.)
+#[test]
+fn ffi_serve_admin_allow_injection_gates_the_admin_plane() {
+    unsafe {
+        let inject_imposter = serde_json::json!({
+            "port": 19972, "protocol": "http",
+            "stubs": [{ "responses": [{ "inject": "function (config) { return { statusCode: 200, body: 'hi' }; }" }] }]
+        });
+
+        // allowInjection: true → the admin plane accepts the script imposter.
+        let h_on = rift_start();
+        let admin_on = serve_admin(h_on, r#"{"allowInjection": true}"#);
+        let url_on = admin_on["adminUrl"].as_str().expect("adminUrl").to_string();
+        rt().block_on(async {
+            let resp = reqwest::Client::new()
+                .post(format!("{url_on}/imposters"))
+                .json(&inject_imposter)
+                .send()
+                .await
+                .expect("admin POST reachable");
+            assert!(
+                resp.status().is_success(),
+                "allowInjection=true must accept a script imposter over the admin plane, got {}",
+                resp.status()
+            );
+        });
+        rift_stop(h_on);
+
+        // Default (allowInjection absent → false) → the same POST is rejected as invalid injection.
+        let h_off = rift_start();
+        let admin_off = serve_admin(h_off, "{}");
+        let url_off = admin_off["adminUrl"]
+            .as_str()
+            .expect("adminUrl")
+            .to_string();
+        rt().block_on(async {
+            let mut reject = inject_imposter.clone();
+            reject["port"] = serde_json::json!(19973);
+            let resp = reqwest::Client::new()
+                .post(format!("{url_off}/imposters"))
+                .json(&reject)
+                .send()
+                .await
+                .expect("admin POST reachable");
+            assert_eq!(
+                resp.status(),
+                400,
+                "default (no allowInjection) must reject a script imposter"
+            );
+            let body: serde_json::Value = resp.json().await.expect("json error body");
+            assert_eq!(
+                body["errors"][0]["code"], "invalid injection",
+                "rejection must be the Mountebank invalid-injection error, got: {body}"
+            );
+        });
+        rift_stop(h_off);
+    }
+}
+
+// Issue #492: `allowInjection` gates only imposters submitted THROUGH the running admin plane.
+// A script imposter supplied via rift_serve_admin's own `config` (startup) is applied directly by
+// the manager — the trusted host path — so it is created even with allowInjection off. This pins
+// that intentional asymmetry so a future change can't silently start gating the startup path.
+#[test]
+fn ffi_serve_admin_inline_config_inject_is_ungated() {
+    unsafe {
+        let h = rift_start();
+        let admin = serve_admin(
+            h,
+            r#"{"allowInjection": false, "config": {"imposters": [
+                {"port": 19974, "protocol": "http",
+                 "stubs": [{"responses": [{"inject": "function (config) { return { statusCode: 200, body: 'hi' }; }"}]}]}
+            ]}}"#,
+        );
+        let admin_url = admin["adminUrl"].as_str().expect("adminUrl").to_string();
+
+        rt().block_on(async {
+            let imps: serde_json::Value = reqwest::get(format!("{admin_url}/imposters"))
+                .await
+                .expect("admin /imposters reachable")
+                .json()
+                .await
+                .expect("json");
+            let ports: Vec<u64> = imps["imposters"]
+                .as_array()
+                .expect("imposters array")
+                .iter()
+                .filter_map(|i| i["port"].as_u64())
+                .collect();
+            assert!(
+                ports.contains(&19974),
+                "an inject imposter from the startup `config` must be created even with \
+                 allowInjection off (the trusted host path is ungated), got ports: {ports:?}"
+            );
+        });
+
+        rift_stop(h);
+    }
+}
+
 // AC2: rift_apply_config returns the reload report field names; failed is [{port,error}]; an
 // up-front validation failure returns NULL, sets last_error, and mutates nothing.
 #[test]
