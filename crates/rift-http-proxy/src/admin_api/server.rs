@@ -4,7 +4,7 @@ use crate::admin_api::router::route_request;
 use crate::config_loader::ConfigSource;
 use crate::extensions::decorate::{ResponsePhase, with_annotation_scope};
 use crate::imposter::ImposterManager;
-use crate::intercept_rules::InterceptState;
+use crate::intercept_control::InterceptControl;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::service::service_fn;
@@ -30,7 +30,7 @@ pub struct AdminApiServer {
     api_key: Option<Arc<String>>,
     config_source: Option<Arc<ConfigSource>>,
     allow_injection: bool,
-    intercept: Option<Arc<InterceptState>>,
+    intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
 }
 
@@ -64,12 +64,14 @@ impl AdminApiServer {
         self
     }
 
-    /// Wire the `/intercept/...` admin routes (rule CRUD + CA/truststore export, epic #394 slice
-    /// 4) to `state`. Without this, `/intercept/...` responds `404` — the admin server has no
-    /// intercept surface unless an embedder explicitly opts in.
+    /// Wire the `/intercept` admin routes to the shared [`InterceptControl`] slot: the runtime
+    /// lifecycle verbs (`POST`/`GET`/`DELETE /intercept`, issue #493) plus rule CRUD + CA/truststore
+    /// export (epic #394 slice 4). The control may be empty (no listener yet) — the lifecycle
+    /// endpoints still work and can start one. Without this call, all of `/intercept*` responds
+    /// `404` — the admin server has no intercept surface unless an embedder explicitly opts in.
     #[must_use]
-    pub fn with_intercept(mut self, state: Arc<InterceptState>) -> Self {
-        self.intercept = Some(state);
+    pub fn with_intercept(mut self, control: InterceptControl) -> Self {
+        self.intercept = Some(control);
         self
     }
 
@@ -202,7 +204,7 @@ async fn accept_loop(
     api_key: Option<Arc<String>>,
     config_source: Option<Arc<ConfigSource>>,
     allow_injection: bool,
-    intercept: Option<Arc<InterceptState>>,
+    intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
     cancel: CancellationToken,
     tracker: TaskTracker,

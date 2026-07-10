@@ -1335,6 +1335,92 @@ fn ffi_stop_shuts_down_intercept() {
     }
 }
 
+/// Issue #493 (AC8): `rift_stop_intercept` stops the listener started by `rift_start_intercept`,
+/// frees the port, is idempotent (a second stop with nothing running still returns 0), and rejects
+/// a null handle with -1.
+#[test]
+fn ffi_stop_intercept_symbol() {
+    unsafe {
+        let h = rift_start();
+        let started: serde_json::Value =
+            serde_json::from_str(&take_json(rift_start_intercept(h, std::ptr::null()))).unwrap();
+        let port = started["interceptPort"].as_u64().unwrap() as u16;
+
+        assert_eq!(rift_stop_intercept(h), 0, "stop a running listener -> 0");
+        assert!(
+            rt().block_on(admin_refused(port)),
+            "intercept port is freed after rift_stop_intercept"
+        );
+        // Control calls now report "not started" again.
+        assert!(rift_intercept_ca_pem(h).is_null());
+        // Idempotent: stopping with nothing running is still success.
+        assert_eq!(rift_stop_intercept(h), 0, "idempotent stop -> 0");
+        // Null handle -> -1.
+        assert_eq!(rift_stop_intercept(std::ptr::null_mut()), -1);
+
+        rift_stop(h);
+    }
+}
+
+/// Issue #493 (AC8): the embedded admin plane (`rift_serve_admin`) shares the handle's intercept
+/// slot — a listener started over the C-ABI is visible to `GET /intercept`, and a second start over
+/// the admin `POST /intercept` conflicts (409). Previously `/intercept*` always 404'd there.
+#[test]
+fn ffi_serve_admin_shares_intercept_slot() {
+    unsafe {
+        let h = rift_start();
+        let info = serve_admin(h, "{}");
+        let admin_url = info["adminUrl"].as_str().expect("adminUrl").to_string();
+
+        // Before any start, GET /intercept over the embedded admin plane -> 404 (served, not the
+        // old "no intercept surface" 404-everything).
+        let before = rt().block_on(async {
+            reqwest::get(format!("{admin_url}/intercept"))
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        });
+        assert_eq!(before, 404, "GET /intercept before start -> 404");
+
+        // Start over the C-ABI.
+        let started: serde_json::Value =
+            serde_json::from_str(&take_json(rift_start_intercept(h, std::ptr::null()))).unwrap();
+        let port = started["interceptPort"].as_u64().unwrap() as u16;
+
+        // The admin plane now sees the FFI-started listener (shared slot).
+        let (status, body): (u16, serde_json::Value) = rt().block_on(async {
+            let r = reqwest::get(format!("{admin_url}/intercept"))
+                .await
+                .unwrap();
+            let s = r.status().as_u16();
+            (s, r.json().await.unwrap())
+        });
+        assert_eq!(
+            status, 200,
+            "GET /intercept sees the C-ABI-started listener"
+        );
+        assert_eq!(body["interceptPort"].as_u64().unwrap() as u16, port);
+
+        // A double-start across surfaces conflicts: POST /intercept over admin -> 409.
+        let conflict = rt().block_on(async {
+            reqwest::Client::new()
+                .post(format!("{admin_url}/intercept"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        });
+        assert_eq!(
+            conflict, 409,
+            "POST /intercept while C-ABI listener runs -> 409"
+        );
+
+        rift_stop(h);
+    }
+}
+
 /// Issue #425: the start response's interceptUrl reflects the ACTUAL bound host, not a hardcoded
 /// 127.0.0.1. A non-loopback bind (0.0.0.0) must surface as the bound address; the loopback default
 /// is unchanged.

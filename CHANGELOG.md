@@ -11,6 +11,17 @@ record.
 
 ## [Unreleased]
 
+### Added
+- **Runtime intercept lifecycle over the admin API** (#493): `POST /intercept` starts the TLS-MITM
+  intercept listener at runtime (201 with `{interceptPort, interceptUrl}`, 409 if already running),
+  `GET /intercept` reports it (404 when not running), and `DELETE /intercept` stops it (204,
+  idempotent). The endpoints are available on every server — a server started **without**
+  `--intercept-port` can now enable intercept at runtime (SDK connect/spawn transport parity). The
+  CLI flag, the FFI, and these routes all drive one shared listener, so a listener started by any
+  surface is visible to the others. New FFI symbol `rift_stop_intercept` mirrors `DELETE /intercept`,
+  and `rift_serve_admin` now serves the full `/intercept*` surface against the handle's listener
+  (previously it 404'd). All endpoints are gated by `--apikey` like other admin routes.
+
 ### Changed
 - **Case-insensitive `contains`/`startsWith`/`endsWith` predicates now fold ASCII only** (#480), for
   consistency with `equals` (already ASCII case-insensitive) and to avoid a per-request allocation on

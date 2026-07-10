@@ -28,6 +28,10 @@ pub mod intercept;
 // Intercept rules (predicate match -> serve/forward) + admin control state (epic #394 slice 4)
 pub mod intercept_rules;
 
+// Shared runtime lifecycle (start/stop/status) for the intercept listener, driven by the CLI
+// flag, the admin `/intercept` routes, and the FFI over one cloneable slot (issue #493)
+pub mod intercept_control;
+
 // Imposter config loading (--configfile / --datadir), shared with hot-reload (issue #197)
 pub mod config_loader;
 

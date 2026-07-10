@@ -123,11 +123,12 @@ rift_free(result);
 
 Start the [intercept/TLS-MITM proxy]({{ site.baseurl }}/features/intercept-proxy/) on the handle and
 drive its whole control plane over C-ABI — no in-process admin HTTP needed. One intercept listener
-per handle; `rift_stop` shuts it down.
+per handle; `rift_stop_intercept` stops it, and `rift_stop` shuts it down with the handle.
 
 | Function | Signature | Returns |
 |---|---|---|
 | `rift_start_intercept` | `char* rift_start_intercept(RiftHandle* h, const char* options_json)` | JSON `{"interceptPort","interceptUrl"}` (**caller frees**), or `NULL` on error (bad JSON, bind failure, half-configured CA pair, CA load failure, already started). `options_json`: `{"host":"127.0.0.1","port":0,"caCertPath":null,"caKeyPath":null}` (port 0 = OS-assigned); `NULL`/`{}` for defaults. |
+| `rift_stop_intercept` | `int rift_stop_intercept(RiftHandle* h)` | `0` on success (**including** the idempotent nothing-running case), `-1` only on a null handle / caught panic. Stops the listener, releases its port, and drops its rules + CA — RFC-003 parity with `DELETE /intercept`. A later `rift_start_intercept` without CA paths mints a fresh CA. |
 | `rift_intercept_add_rules` | `int rift_intercept_add_rules(RiftHandle* h, const char* rules_json)` | `0`/`-1`. One rule (object) or many (array), same shape as `/intercept/rules`. |
 | `rift_intercept_list_rules` | `char* rift_intercept_list_rules(RiftHandle* h)` | The current rules as a JSON array (**caller frees**), or `NULL` on error. |
 | `rift_intercept_clear_rules` | `int rift_intercept_clear_rules(RiftHandle* h)` | `0`/`-1`. |
@@ -139,6 +140,12 @@ truststore (all over FFI), then points a CA-trusting SUT's HTTPS proxy at `inter
 loopback HTTP. `Forward { port }` rules reach any imposter on that localhost port, including
 FFI-created ones. Errors set `rift_last_error`. A handle that never calls `rift_start_intercept` is
 unaffected.
+
+The intercept listener and the handle's embedded admin plane share one slot (#493): if you also call
+`rift_serve_admin`, its `/intercept*` routes operate on the **same** listener the C-ABI functions
+drive. `rift_start_intercept` then `GET /intercept` reports it; `POST /intercept` feeds
+`rift_intercept_add_rules`; and a double-start across the two surfaces conflicts consistently
+(`409` / `-1`). (Previously `rift_serve_admin` served no `/intercept` routes at all.)
 
 By default (no `caCertPath`/`caKeyPath`) `rift_start_intercept` generates a fresh ephemeral intercept
 CA, unchanged from earlier releases. As of v0.11.3 (#429), passing both `caCertPath` and `caKeyPath`

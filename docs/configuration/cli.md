@@ -67,6 +67,11 @@ Options:
 expansion), which is otherwise applied on load. `--formatter` and `--protofile` are accepted for
 Mountebank command-line compatibility but have no effect in Rift.
 
+`--intercept-port` eagerly starts the [intercept/TLS-MITM proxy]({{ site.baseurl }}/features/intercept-proxy/)
+at boot. It is no longer the only way to enable it: a server started without the flag still exposes
+the runtime lifecycle endpoints (`POST`/`GET`/`DELETE /intercept`), so intercept can be turned on at
+runtime over the admin API. The flag and the endpoints drive the same single listener.
+
 ### API-key authentication
 
 `--api-key` (or `MB_APIKEY`) requires every admin API request to carry the token in the

@@ -317,6 +317,18 @@ char *rift_space_recorded(RiftHandle *h, uint16_t port, const char *flow_id);
 char *rift_start_intercept(RiftHandle *h, const char *options_json);
 
 /**
+ * Stop the intercept listener started by [`rift_start_intercept`] (or over the embedded admin
+ * plane's `POST /intercept`), releasing its port and dropping its rules + CA — RFC-003 parity with
+ * `DELETE /intercept`. Idempotent: stopping when nothing is running is a successful no-op. Returns
+ * `0` on success, `-1` only on a null handle or a caught panic. A subsequent
+ * [`rift_start_intercept`] without CA paths mints a fresh CA, so re-export the CA afterwards.
+ *
+ * # Safety
+ * `h` must be a live handle (or null).
+ */
+int32_t rift_stop_intercept(RiftHandle *h);
+
+/**
  * Add one intercept rule (a bare object) or many (a JSON array) — same shape the
  * `/intercept/rules` admin route accepts. Returns `0` on success, `-1` on any error.
  *

@@ -1,10 +1,17 @@
-//! Intercept rule CRUD + CA/truststore export admin handlers (epic #394, slice 4/5).
+//! Intercept runtime lifecycle + rule CRUD + CA/truststore export admin handlers (epic #394 slice
+//! 4/5; runtime lifecycle issue #493).
 //!
-//! Everything here lives under `/intercept/...` and is only reachable when the server was built
-//! `with_intercept(...)` (i.e. the intercept listener is actually running) — see
-//! `admin_api::router::route_request`.
+//! Everything here lives under `/intercept`. The lifecycle verbs (`POST`/`GET`/`DELETE /intercept`)
+//! start, report, and stop the listener over the shared [`InterceptControl`] slot, so intercept can
+//! be enabled at runtime on any server — not only one started with `--intercept-port`. The rule
+//! CRUD + CA/truststore sub-routes operate on the running listener's [`InterceptState`] and keep
+//! `404`-ing when no listener is running. All of this is only reachable when the server was built
+//! `with_intercept(...)` — see `admin_api::router::route_request`.
 
 use crate::admin_api::types::{collect_body, error_response, json_response};
+use crate::intercept_control::{
+    InterceptControl, InterceptStartError, InterceptStartOptions, InterceptStatus,
+};
 use crate::intercept_rules::{InterceptRule, InterceptState};
 use bytes::Bytes;
 use http_body_util::Full;
@@ -15,27 +22,123 @@ use serde::Serialize;
 
 const DEFAULT_TRUSTSTORE_PASSWORD: &str = "changeit";
 
-/// Dispatch a `/intercept/...` admin request. Returns `None` for any other path so the caller
-/// falls through to its normal routing (e.g. `404`).
+/// Dispatch a `/intercept...` admin request. Returns `None` for any unmatched path/method so the
+/// caller falls through to its normal `404` handling — including the rule/CA sub-routes when no
+/// listener is running (`control.state()` is `None`).
 pub async fn route(
     method: &Method,
     path: &str,
     query: Option<&str>,
     req: Request<Incoming>,
-    state: &InterceptState,
+    control: &InterceptControl,
 ) -> Option<Response<Full<Bytes>>> {
     let rest = path.strip_prefix("/intercept")?;
     let resp = match (method, rest) {
-        (&Method::POST, "/rules") => handle_add_rules(req, state).await,
-        (&Method::GET, "/rules") => handle_list_rules(state),
-        (&Method::DELETE, "/rules") => handle_clear_rules(state),
-        (&Method::GET, "/ca.pem") => handle_ca_pem(state),
-        (&Method::GET, "/truststore.p12") => handle_truststore_p12(query, state),
-        (&Method::GET, "/truststore.jks") => handle_truststore_jks(query, state),
-        // Unmatched `/intercept/...` sub-path: let the caller apply its own 404 handling.
+        // Runtime lifecycle (issue #493) — operate on the shared slot, listener or not.
+        (&Method::POST, "") => handle_start(req, control).await,
+        (&Method::GET, "") => handle_status(control),
+        (&Method::DELETE, "") => handle_stop(control).await,
+        // Rule CRUD + CA/truststore — need a running listener's state. When none is running these
+        // are a known route with an actionable body ("not running"), not the generic 404 an unknown
+        // sub-path gets below — mirroring `GET /intercept`.
+        (&Method::POST, "/rules") => match control.state() {
+            Some(state) => handle_add_rules(req, &state).await,
+            None => not_running(),
+        },
+        (&Method::GET, "/rules") => match control.state() {
+            Some(state) => handle_list_rules(&state),
+            None => not_running(),
+        },
+        (&Method::DELETE, "/rules") => match control.state() {
+            Some(state) => handle_clear_rules(&state),
+            None => not_running(),
+        },
+        (&Method::GET, "/ca.pem") => match control.state() {
+            Some(state) => handle_ca_pem(&state),
+            None => not_running(),
+        },
+        (&Method::GET, "/truststore.p12") => match control.state() {
+            Some(state) => handle_truststore_p12(query, &state),
+            None => not_running(),
+        },
+        (&Method::GET, "/truststore.jks") => match control.state() {
+            Some(state) => handle_truststore_jks(query, &state),
+            None => not_running(),
+        },
+        // Unmatched `/intercept...` path/method: let the caller apply its own 404 handling.
         _ => return None,
     };
     Some(resp)
+}
+
+/// The `404` an intercept sub-route returns when no listener is running — the same actionable body
+/// `GET /intercept` uses, rather than a bare "Not Found".
+fn not_running() -> Response<Full<Bytes>> {
+    error_response(StatusCode::NOT_FOUND, "intercept listener not running")
+}
+
+/// `POST /intercept` — start the listener. Body is optional: absent, empty, or `{}` all mean
+/// defaults (`127.0.0.1:0`, fresh in-memory CA). `201` with the [`InterceptStatus`] body on
+/// success, `409` when already running, `400` for a bad body / options / CA / bind.
+async fn handle_start(req: Request<Incoming>, control: &InterceptControl) -> Response<Full<Bytes>> {
+    let body = match collect_body(req).await {
+        Ok(b) => b,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+    };
+    start_from_bytes(&body, control).await
+}
+
+/// Parse start options from a (possibly empty) JSON body and drive `control.start`. Split out from
+/// `handle_start` so the `201`/`409`/`400` mapping is unit-testable without a `Request<Incoming>`.
+async fn start_from_bytes(body: &[u8], control: &InterceptControl) -> Response<Full<Bytes>> {
+    let opts: InterceptStartOptions = if body.is_empty() {
+        InterceptStartOptions::default()
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(o) => o,
+            Err(e) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Invalid intercept start options: {e}"),
+                );
+            }
+        }
+    };
+    match control.start(opts).await {
+        Ok(addr) => json_response(StatusCode::CREATED, &InterceptStatus::from_addr(addr)),
+        Err(e) => {
+            let status = match e {
+                InterceptStartError::AlreadyRunning => StatusCode::CONFLICT,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            error_response(status, &e.to_string())
+        }
+    }
+}
+
+/// `GET /intercept` — `200` with the [`InterceptStatus`] of the running listener (whatever surface
+/// started it), or `404` when none is running.
+fn handle_status(control: &InterceptControl) -> Response<Full<Bytes>> {
+    match control.status() {
+        Some(addr) => json_response(StatusCode::OK, &InterceptStatus::from_addr(addr)),
+        None => not_running(),
+    }
+}
+
+/// `DELETE /intercept` — stop the listener and drop its rules + CA. Always `204`, idempotent: a
+/// delete with nothing running is a successful no-op. A subsequent `POST` without CA paths mints a
+/// fresh CA, so clients must re-export `/intercept/ca.pem` after a restart.
+async fn handle_stop(control: &InterceptControl) -> Response<Full<Bytes>> {
+    control.stop().await;
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(Full::new(Bytes::new()))
+        .unwrap_or_else(|_| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to build response",
+            )
+        })
 }
 
 /// A single rule or a batch — `POST /intercept/rules` accepts either shape.
@@ -319,6 +422,86 @@ mod tests {
         assert_eq!(resp.text().await.unwrap(), "admin-brewed");
 
         listener.shutdown().await;
+    }
+
+    // ── Runtime lifecycle handlers (issue #493) ────────────────────────────────────────────────
+
+    // A #[tokio::test]-safe body reader (the sync `body_string` spins its own runtime, which panics
+    // inside an async test).
+    async fn read_body(resp: Response<Full<Bytes>>) -> String {
+        use http_body_util::BodyExt;
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    /// The status body of a running listener — deserialized so the parts under test read cleanly.
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StatusBody {
+        intercept_port: u16,
+        intercept_url: String,
+    }
+
+    #[tokio::test]
+    async fn start_status_stop_handler_matrix() {
+        let control = InterceptControl::default();
+
+        // GET before start → 404.
+        assert_eq!(handle_status(&control).status(), StatusCode::NOT_FOUND);
+
+        // POST empty body → 201 with an OS-assigned port.
+        let started = start_from_bytes(b"", &control).await;
+        assert_eq!(started.status(), StatusCode::CREATED);
+        let body: StatusBody = serde_json::from_str(&read_body(started).await).unwrap();
+        assert!(body.intercept_port > 0);
+        assert!(body.intercept_url.starts_with("http://"));
+
+        // GET while running → 200, same port.
+        let status = handle_status(&control);
+        assert_eq!(status.status(), StatusCode::OK);
+        let got: StatusBody = serde_json::from_str(&read_body(status).await).unwrap();
+        assert_eq!(got.intercept_port, body.intercept_port);
+
+        // POST while running → 409.
+        assert_eq!(
+            start_from_bytes(b"{}", &control).await.status(),
+            StatusCode::CONFLICT
+        );
+
+        // DELETE → 204, then GET → 404 (idempotent second DELETE also 204).
+        assert_eq!(handle_stop(&control).await.status(), StatusCode::NO_CONTENT);
+        assert_eq!(handle_status(&control).status(), StatusCode::NOT_FOUND);
+        assert_eq!(handle_stop(&control).await.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn start_rejects_unknown_field_and_bad_json() {
+        let control = InterceptControl::default();
+        assert_eq!(
+            start_from_bytes(br#"{"caCertpath":"x"}"#, &control)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            start_from_bytes(b"{not json", &control).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert!(
+            control.status().is_none(),
+            "a rejected start must not leave a listener"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_serialized_body_is_deserializable_status() {
+        // AC8/parity: the 201 body round-trips through the same shape the FFI returns.
+        let control = InterceptControl::default();
+        let resp = start_from_bytes(b"", &control).await;
+        let json = read_body(resp).await;
+        assert!(json.contains("interceptPort"));
+        assert!(json.contains("interceptUrl"));
+        control.stop().await;
     }
 
     fn body_bytes(resp: Response<Full<Bytes>>) -> Vec<u8> {

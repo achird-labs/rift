@@ -10,10 +10,8 @@ use crate::extensions::metrics;
 use crate::imposter::{
     ImposterConfig, ImposterManager, ScriptBaseDir, TlsDefaults, resolve_scripts,
 };
-use crate::intercept::InterceptListener;
-use crate::intercept_rules::{InterceptRules, InterceptState};
+use crate::intercept_control::{InterceptControl, InterceptStartOptions};
 use clap::{Parser, Subcommand};
-use rift_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -377,39 +375,43 @@ impl ServerBuilder {
             server = server.with_config_source(ConfigSource::Dir(datadir));
         }
 
-        // Optional intercept/TLS-MITM listener (epic #394). The rule store and CA are shared with
-        // the admin server so `/intercept/*` verbs configure the same listener.
-        let intercept = match cli.intercept_port {
-            Some(intercept_port) => {
-                let ca = Arc::new(CertificateAuthority::load_or_generate(
-                    cli.intercept_ca_cert.as_deref(),
-                    cli.intercept_ca_key.as_deref(),
-                )?);
-                let rules = InterceptRules::new();
-                server = server.with_intercept(Arc::new(InterceptState {
-                    rules: rules.clone(),
-                    ca: ca.clone(),
-                }));
-                let intercept_addr: SocketAddr = format!("{host}:{intercept_port}").parse()?;
-                let resolver = Arc::new(SniCertResolver::new(ca));
-                let listener = InterceptListener::bind(intercept_addr, resolver, rules).await?;
-                info!(
-                    "Rift intercept proxy listening (HTTPS forward-proxy) on {}",
-                    listener.local_addr()
-                );
-                Some(listener)
-            }
-            None => None,
-        };
+        // Intercept/TLS-MITM listener (epic #394 + runtime lifecycle #493). The control slot is
+        // always created and handed to the admin server, so `POST/GET/DELETE /intercept` work on
+        // every standalone server — flag or no flag (the issue's goal for the connect transport).
+        // `--intercept-port` just eagerly starts the same listener the API would; a start error
+        // still aborts startup, as before.
+        let intercept = InterceptControl::default();
+        if let Some(intercept_port) = cli.intercept_port {
+            intercept
+                .start(InterceptStartOptions {
+                    host: Some(host.to_string()),
+                    port: Some(intercept_port),
+                    ca_cert_path: cli
+                        .intercept_ca_cert
+                        .as_deref()
+                        .map(|p| p.to_string_lossy().into_owned()),
+                    ca_key_path: cli
+                        .intercept_ca_key
+                        .as_deref()
+                        .map(|p| p.to_string_lossy().into_owned()),
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("intercept: {e}"))?;
+            info!(
+                "Rift intercept proxy listening (HTTPS forward-proxy) on {}",
+                intercept
+                    .status()
+                    .expect("intercept listener bound after a successful start")
+            );
+        }
+        server = server.with_intercept(intercept.clone());
 
         let admin = match server.bind().await {
             Ok(admin) => admin,
             Err(e) => {
                 // Don't orphan the listeners already started if the admin bind fails — start() is
                 // an embedding seam and callers may retry after an error.
-                if let Some(intercept) = intercept {
-                    intercept.shutdown().await;
-                }
+                intercept.stop().await;
                 if let Some(metrics) = metrics {
                     metrics.shutdown().await;
                 }
@@ -429,7 +431,7 @@ impl ServerBuilder {
 pub struct RunningServer {
     admin: RunningAdminApi,
     metrics: Option<RunningMetrics>,
-    intercept: Option<InterceptListener>,
+    intercept: InterceptControl,
 }
 
 impl RunningServer {
@@ -443,10 +445,11 @@ impl RunningServer {
         self.metrics.as_ref().map(RunningMetrics::local_addr)
     }
 
-    /// The bound intercept-proxy address, if an intercept listener was started
-    /// (resolves a `:0` request to the assigned port).
+    /// The bound intercept-proxy address, if an intercept listener is running — whether started by
+    /// `--intercept-port` or later over `POST /intercept` (resolves a `:0` request to the assigned
+    /// port).
     pub fn intercept_addr(&self) -> Option<SocketAddr> {
-        self.intercept.as_ref().map(InterceptListener::local_addr)
+        self.intercept.status()
     }
 
     /// Run until the admin API accept loop exits — the binary's `run()` behavior. The metrics
@@ -455,15 +458,15 @@ impl RunningServer {
         self.admin.join().await
     }
 
-    /// Stop accepting on both listeners, giving in-flight connections a bounded grace.
+    /// Stop accepting on all listeners, giving in-flight connections a bounded grace. Stops
+    /// whatever intercept listener is running at shutdown time, including one started over the API
+    /// after this server was bound.
     pub async fn shutdown(self) {
         self.admin.shutdown().await;
         if let Some(metrics) = self.metrics {
             metrics.shutdown().await;
         }
-        if let Some(intercept) = self.intercept {
-            intercept.shutdown().await;
-        }
+        self.intercept.stop().await;
     }
 }
 
@@ -701,6 +704,9 @@ async fn load_imposters_from_datadir(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The CA load/generate logic now lives behind `InterceptControl::start`; these tests still
+    // exercise `CertificateAuthority` directly (its contract is unchanged).
+    use rift_core::proxy::intercept_ca::CertificateAuthority;
 
     #[test]
     fn test_no_parse_flag_accepted() {

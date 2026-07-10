@@ -6,7 +6,7 @@ use crate::admin_api::handlers::{imposters, intercept, scenarios, stubs, system}
 use crate::admin_api::types::{error_response, get_base_url, not_found};
 use crate::config_loader::ConfigSource;
 use crate::imposter::ImposterManager;
-use crate::intercept_rules::InterceptState;
+use crate::intercept_control::InterceptControl;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -77,7 +77,7 @@ pub async fn route_request(
     manager: Arc<ImposterManager>,
     config_source: Option<Arc<ConfigSource>>,
     allow_injection: bool,
-    intercept: Option<Arc<InterceptState>>,
+    intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let method = req.method().clone();
@@ -87,13 +87,14 @@ pub async fn route_request(
 
     debug!("Admin API: {} {}", method, path);
 
-    // Intercept control-plane routes (epic #394 slice 4): only reachable when an intercept
-    // listener is actually running (i.e. the server was built `with_intercept(...)`). Nothing
-    // else in `route_by_path` handles `/intercept`, so an unmatched sub-path or a missing
-    // intercept state both fall through to the ordinary 404.
+    // Intercept routes (epic #394 slice 4 + runtime lifecycle #493): reachable whenever the server
+    // was built `with_intercept(...)`. The lifecycle verbs (`POST`/`GET`/`DELETE /intercept`)
+    // operate on the shared control slot listener-or-not; the rule/CA sub-routes 404 until a
+    // listener is running. Nothing else in `route_by_path` handles `/intercept`, so an unmatched
+    // sub-path/method or a control-less server both fall through to the ordinary 404.
     if path == "/intercept" || path.starts_with("/intercept/") {
         let resp = match intercept.as_ref() {
-            Some(state) => intercept::route(&method, &path, query.as_deref(), req, state)
+            Some(control) => intercept::route(&method, &path, query.as_deref(), req, control)
                 .await
                 .unwrap_or_else(not_found),
             None => not_found(),

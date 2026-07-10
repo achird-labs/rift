@@ -59,8 +59,10 @@ let listener = InterceptListener::bind("127.0.0.1:0".parse()?, resolver, rules.c
 // Point the SUT at `listener.local_addr()` as its HTTPS proxy, trusting `ca`.
 ```
 
-To expose rule configuration and CA export over the admin API, build the admin server
-`with_intercept(Arc::new(InterceptState { rules, ca }))`.
+To expose the `/intercept` routes over the admin API, build the admin server
+`with_intercept(control)` where `control: InterceptControl` is the shared lifecycle slot (see
+[Runtime lifecycle](#runtime-lifecycle-admin-api) below). The standalone `rift` binary always wires
+one in, so those routes are available on every server.
 
 ### Standalone binary
 
@@ -76,14 +78,58 @@ rift --intercept-port 8443 --intercept-ca-cert ca.pem --intercept-ca-key ca.key
 
 (Equivalently `RIFT_INTERCEPT_PORT` / `RIFT_INTERCEPT_CA_CERT` / `RIFT_INTERCEPT_CA_KEY`.)
 
+`--intercept-port` is just an *eager* start of the same listener the admin API can start at runtime
+— it is no longer the only way to enable intercept. A server started **without** the flag still
+serves the lifecycle endpoints below, so a client can turn intercept on later.
+
+### Runtime lifecycle (admin API)
+
+Start, inspect, and stop the intercept listener at runtime over the admin API — no restart, and no
+`--intercept-port` required (issue #493). This is what lets an SDK enable intercept against a server
+it merely *connected* to.
+
+```
+POST   /intercept   body (optional): { "host"?: "127.0.0.1", "port"?: 0,
+                                        "caCertPath"?: "...", "caKeyPath"?: "..." }
+                    → 201 { "interceptPort": N, "interceptUrl": "http://127.0.0.1:N" }
+                    → 409 if a listener is already running (flag, FFI, or a prior POST)
+GET    /intercept   → 200 { "interceptPort": N, "interceptUrl": "..." }  |  404 when not running
+DELETE /intercept   → 204 always (idempotent); stops the listener and drops its rules + CA
+```
+
+- The body is optional: absent, empty, or `{}` all mean defaults (`127.0.0.1:0`, a fresh in-memory
+  CA). Port `0` is OS-assigned; read the real port back from the response.
+- The default bind host is `127.0.0.1` — **not** the admin server's host. A containerized,
+  connect-transport caller that needs the proxy reachable off-box must pass `"host": "0.0.0.0"`
+  explicitly.
+- CA paths are both-or-neither. A half-supplied pair, an unknown field, a bad CA file, or an
+  occupied port is a `400` with the standard error envelope; the private key is never echoed.
+- `DELETE` discards the CA along with the listener, so a later `POST` without CA paths mints a
+  **fresh** CA — re-export `/intercept/ca.pem` (below) after any restart.
+- All three verbs are gated by `--apikey` like every other admin route.
+
+```bash
+# Enable intercept on an already-running server, then read back the proxy port:
+curl -sX POST http://localhost:2525/intercept
+# {"interceptPort":49711,"interceptUrl":"http://127.0.0.1:49711"}
+
+# ...configure rules / export the CA (see below), point the SUT at the proxy...
+
+# Tear it down when done (safe to call unconditionally):
+curl -sX DELETE http://localhost:2525/intercept
+```
+
 ### Embedding over the C-ABI (non-Rust)
 
 > A non-Rust host (JVM, Node, Go, Python, …) can start and drive the intercept listener with **no
 > loopback HTTP and no Rust code** — see [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/#intercept-proxy-over-ffi).
-> `rift_start_intercept` starts the listener, and the `rift_intercept_*` control-plane functions —
-> `rift_intercept_add_rules`, `rift_intercept_list_rules`, `rift_intercept_clear_rules`,
-> `rift_intercept_export_truststore`, and `rift_intercept_ca_pem` — add rules, list them, export a
-> truststore, and fetch the CA PEM, all over C-ABI.
+> `rift_start_intercept` starts the listener, `rift_stop_intercept` stops it, and the
+> `rift_intercept_*` control-plane functions — `rift_intercept_add_rules`,
+> `rift_intercept_list_rules`, `rift_intercept_clear_rules`, `rift_intercept_export_truststore`, and
+> `rift_intercept_ca_pem` — add rules, list them, export a truststore, and fetch the CA PEM, all
+> over C-ABI. The listener started this way is the *same* one `rift_serve_admin`'s `/intercept`
+> routes see: `rift_start_intercept` then `GET /intercept` reports it, and a double-start across the
+> two surfaces conflicts consistently (409 / `-1`).
 
 ---
 
@@ -177,5 +223,7 @@ private keys**, and it works identically for the container and embedded adapters
 - **Request bodies are read only when `Content-Length`-framed** — chunked / streamed request bodies
   are not decoded and are treated as empty for matching and forwarding (logged at `warn`).
 - **Forward-proxy (`CONNECT`) only** — transparent interception is not implemented.
-- The listener is started either by an **embedder** (or the zio-bdd adapter) or from the standalone
-  `rift` binary via `--intercept-port` (see [Standalone binary](#standalone-binary)).
+- The listener is started by an **embedder** (or the zio-bdd adapter), from the standalone `rift`
+  binary via `--intercept-port` (see [Standalone binary](#standalone-binary)), or at runtime over
+  the admin API (see [Runtime lifecycle](#runtime-lifecycle-admin-api)) — one listener at a time
+  either way.
