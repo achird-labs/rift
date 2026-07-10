@@ -14,6 +14,7 @@ mod router;
 mod server;
 pub mod types;
 
+pub use handlers::imposters::{filter_proxy_responses, filter_proxy_stubs};
 pub use server::{AdminApiServer, RunningAdminApi};
 
 /// Default port for the Mountebank-compatible admin API.

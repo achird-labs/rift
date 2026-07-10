@@ -47,11 +47,12 @@ rift_stop(h);                     // stop and free
 | `rift_stub_warnings` | `char* rift_stub_warnings(RiftHandle* h, uint16_t port)` | [Stub-analysis warnings](../features/stub-analysis.md) (duplicate/shadowed/catch-all) as a JSON array (**caller frees**), or `NULL` on error. |
 | `rift_apply_config` | `char* rift_apply_config(RiftHandle* h, const char* json)` | Reconcile the full imposter set (like `POST /admin/reload`); returns the apply report JSON (caller frees). |
 
-## Admin long tail over FFI (scenario state + correlated spaces)
+## Admin long tail over FFI
 
-The admin "long tail" — scenario/flow-state and the correlated per-space stub plane — has direct
-C-ABI entry points, so an embedder can drive it with **zero loopback HTTP** (no `rift_serve_admin`).
-Each mirrors the corresponding admin-HTTP handler exactly (same `ImposterManager` calls, same JSON):
+The admin "long tail" — scenario/flow-state, the correlated per-space stub plane, imposter list/get,
+stub surgery, and scenario management — has direct C-ABI entry points, so an embedder can drive it
+with **zero loopback HTTP** (no `rift_serve_admin`). Each mirrors the corresponding admin-HTTP
+handler exactly (same `ImposterManager`/`Imposter` calls, same JSON):
 
 | Function | Signature | Returns |
 |---|---|---|
@@ -67,6 +68,26 @@ Each mirrors the corresponding admin-HTTP handler exactly (same `ImposterManager
 with `found:false` (a normal outcome, `rift_last_error` untouched), and `NULL` is reserved strictly
 for a genuine error — so a consumer treats `found:false` as "unset" and `NULL` as a read failure,
 with no need to parse `rift_last_error`.
+
+The rest of the admin long tail — imposter list/get, stub surgery (add/get/update/delete, by index
+or id), clearing recorded/proxy recordings, enable/disable, and scenario list/set-state/reset — is
+likewise direct C-ABI, each calling the same `ImposterManager`/`Imposter` method the corresponding
+admin-HTTP handler calls:
+
+| Function | Signature | Returns |
+|---|---|---|
+| `rift_list_imposters` | `char* rift_list_imposters(RiftHandle* h, const char* options_json)` | JSON `{"imposters":[...]}` (**caller frees**), or `NULL` on error. `options_json` (`NULL` = defaults): `{"replayable":false,"removeProxies":false}`. `replayable` returns full `ImposterConfig`s (the same `removeProxies` projection the admin `?replayable=true` route serves); otherwise a summary shape `{"protocol","port","name"?,"numberOfRequests","enabled"}` per imposter (imposters with no assigned port are skipped). |
+| `rift_get_imposter` | `char* rift_get_imposter(RiftHandle* h, uint16_t port, const char* options_json)` | Same `options_json` shape as `rift_list_imposters`. Replayable returns the single `ImposterConfig`; otherwise a detail object `{"protocol","port","name"?,"numberOfRequests","enabled","recordRequests","stubs","requests"}` (**caller frees**), or `NULL` on error. |
+| `rift_add_stub` | `int rift_add_stub(RiftHandle* h, uint16_t port, const char* stub_json, int32_t index)` | `0` on success, `-1` on error. `index < 0` appends; otherwise inserts at that position. No stub id is auto-generated; no injection gating (the direct C-ABI is the trusted embedder, like `rift_replace_stubs`). |
+| `rift_get_stub` | `char* rift_get_stub(RiftHandle* h, uint16_t port, const char* ref_json)` | The bare `Stub` JSON (**caller frees**), or `NULL` on error (out-of-range index, unknown id, or malformed ref). `ref_json` is `{"index":N}` or `{"id":"..."}`. |
+| `rift_update_stub` | `int rift_update_stub(RiftHandle* h, uint16_t port, const char* ref_json, const char* stub_json)` | `0` on success, `-1` on error. Replaces the stub addressed by `ref_json` with `stub_json`. |
+| `rift_delete_stub` | `int rift_delete_stub(RiftHandle* h, uint16_t port, const char* ref_json)` | `0` on success, `-1` on error. |
+| `rift_clear_recorded` | `int rift_clear_recorded(RiftHandle* h, uint16_t port)` | `0` on success, `-1` on error. Clears all recorded requests for the imposter. |
+| `rift_clear_proxy_recordings` | `int rift_clear_proxy_recordings(RiftHandle* h, uint16_t port)` | `0` on success, `-1` on error. Clears saved proxy responses. |
+| `rift_set_imposter_enabled` | `int rift_set_imposter_enabled(RiftHandle* h, uint16_t port, int32_t enabled)` | `0` on success, `-1` on error. `enabled != 0` enables; `0` disables. |
+| `rift_scenarios` | `char* rift_scenarios(RiftHandle* h, uint16_t port, const char* flow_id)` | JSON `{"flowId","scenarios":[{"name","state"}]}` (**caller frees**), or `NULL` on error. `flow_id` may be `NULL` for the imposter's default flow. |
+| `rift_set_scenario_state` | `int rift_set_scenario_state(RiftHandle* h, uint16_t port, const char* name, const char* state_json)` | `0` on success, `-1` on error (including a missing `state` field). `state_json`: `{"state":"...","flowId":"..."?}` (`flowId` optional → default flow). |
+| `rift_reset_scenarios` | `int rift_reset_scenarios(RiftHandle* h, uint16_t port, const char* flow_id)` | `0` on success, `-1` on error. Resets every scenario for `flow_id` (`NULL` → default flow) back to its initial state. |
 
 Errors set `rift_last_error` like the data-plane functions. Together with the data plane
 (`rift_create_imposter`/`rift_replace_stubs`/`rift_recorded`/`rift_delete_imposter`), these cover the

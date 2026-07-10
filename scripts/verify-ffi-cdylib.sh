@@ -24,6 +24,19 @@ SYMBOLS=(
   rift_stub_warnings
   # issue #494: server-side verification (predicate-count + closest-match)
   rift_verify
+  # issue #491: admin long tail — list/get imposters, stub surgery, clear/enable, scenarios
+  rift_list_imposters
+  rift_get_imposter
+  rift_add_stub
+  rift_get_stub
+  rift_update_stub
+  rift_delete_stub
+  rift_clear_recorded
+  rift_clear_proxy_recordings
+  rift_set_imposter_enabled
+  rift_scenarios
+  rift_set_scenario_state
+  rift_reset_scenarios
 )
 
 # Issue #344: the checked-in C header is the ABI's source of truth — assert it matches a fresh

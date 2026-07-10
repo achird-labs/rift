@@ -33,10 +33,14 @@
 //! emits a `tracing` event.
 
 use parking_lot::Mutex;
-use rift_core::imposter::{ApplyReport, ImposterConfig, ImposterManager, Stub, VerifyOptions};
+use rift_core::imposter::{
+    ApplyReport, Imposter, ImposterConfig, ImposterManager, Stub, VerifyOptions,
+};
 use rift_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
 use rift_core::proxy::truststore::{TrustStorePassword, ca_pem, export_jks, export_pkcs12};
-use rift_http_proxy::admin_api::{AdminApiServer, RunningAdminApi};
+use rift_http_proxy::admin_api::{
+    AdminApiServer, RunningAdminApi, filter_proxy_responses, filter_proxy_stubs,
+};
 use rift_http_proxy::config_loader::{self, ConfigSource};
 use rift_http_proxy::intercept::InterceptListener;
 use rift_http_proxy::intercept_rules::{InterceptRule, InterceptRules, InterceptState};
@@ -150,6 +154,60 @@ fn into_c_string(s: String) -> *mut c_char {
                 "internal error: response contained an interior NUL byte ({e})"
             ));
             std::ptr::null_mut()
+        }
+    }
+}
+
+/// Parse an optional JSON options object: `p` null yields `T::default()`; a non-null pointer is
+/// parsed and any failure (invalid UTF-8 or invalid JSON) sets `last_error` (prefixed with
+/// `fn_name`) and returns `None`. Shared by the `rift_list_imposters`/`rift_get_imposter`
+/// `{"replayable","removeProxies"}` projection (issue #491).
+///
+/// # Safety
+/// `p` must be null or a valid NUL-terminated C string.
+unsafe fn parse_opts<T: serde::de::DeserializeOwned + Default>(
+    p: *const c_char,
+    fn_name: &str,
+) -> Option<T> {
+    unsafe {
+        if p.is_null() {
+            return Some(T::default());
+        }
+        let Some(s) = c_str(p) else {
+            set_last_error(format!("{fn_name}: options is not valid UTF-8"));
+            return None;
+        };
+        match serde_json::from_str(s) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                set_last_error(format!("{fn_name}: invalid options JSON: {e}"));
+                None
+            }
+        }
+    }
+}
+
+/// Resolve a nullable `flow_id` C-string arg (issue #491): null → the imposter's default flow; a
+/// valid string → itself; a non-null but invalid-UTF-8 pointer → `None` after recording an error,
+/// so the caller surfaces a sentinel rather than silently acting on the WRONG (default) flow.
+///
+/// # Safety
+/// `flow_id` must be null or a valid NUL-terminated C string.
+unsafe fn resolve_flow_arg(
+    flow_id: *const c_char,
+    imposter: &Imposter,
+    fn_name: &str,
+) -> Option<String> {
+    unsafe {
+        if flow_id.is_null() {
+            return Some(imposter.resolve_flow_id(&std::collections::HashMap::new()));
+        }
+        match c_str(flow_id) {
+            Some(s) => Some(s.to_string()),
+            None => {
+                set_last_error(format!("{fn_name}: flow_id is not valid UTF-8"));
+                None
+            }
         }
     }
 }
@@ -447,6 +505,583 @@ pub unsafe extern "C" fn rift_verify(
                 std::ptr::null_mut()
             }
         }
+    })
+}
+
+// ── Admin long tail over direct C-ABI: imposter list/get, stub surgery, clear/enable, scenarios
+// (issue #491) ────────────────────────────────────────────────────────────────────────────────
+// Each function calls the same `ImposterManager`/`Imposter` method the corresponding admin-HTTP
+// handler calls (`crates/rift-http-proxy/src/admin_api/handlers/imposters.rs`/`scenarios.rs`) and
+// builds the same JSON shape, so an embedder gets full admin parity with zero loopback HTTP.
+
+/// A stub reference: `{"index":N}` (position) or `{"id":"..."}` (stable id) — the two ways
+/// `rift_get_stub`/`rift_update_stub`/`rift_delete_stub` address a stub.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum StubRef {
+    Index { index: usize },
+    Id { id: String },
+}
+
+/// `rift_list_imposters`/`rift_get_imposter` options (all optional, default `false`): `replayable`
+/// returns the full `ImposterConfig` projection instead of the summary/detail shape;
+/// `removeProxies` (with `replayable`) strips proxy responses via the SAME
+/// [`filter_proxy_responses`] the admin `?replayable=true&removeProxies=true` route uses.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct ImposterProjection {
+    replayable: bool,
+    remove_proxies: bool,
+}
+
+/// List imposters. `options_json` (null = defaults): `{"replayable":bool,"removeProxies":bool}`.
+/// Replayable returns `{"imposters":[<ImposterConfig>,...]}` (the same projection the admin
+/// `?replayable=true` route serves); otherwise a Mountebank-style summary
+/// `{"imposters":[{"protocol","port","name"?,"numberOfRequests","enabled"},...]}`, skipping any
+/// imposter with no assigned port (mirroring `handle_list`'s summary branch). Returns (caller
+/// frees with [`rift_free`]) null on any error (null handle or malformed options JSON).
+///
+/// # Safety
+/// `h` must be a live handle (or null); `options_json` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_list_imposters(
+    h: *mut RiftHandle,
+    options_json: *const c_char,
+) -> *mut c_char {
+    ffi_guard!("rift_list_imposters", std::ptr::null_mut(), unsafe {
+        clear_last_error();
+        let Some(handle) = handle(h) else {
+            set_last_error("rift_list_imposters: null handle");
+            return std::ptr::null_mut();
+        };
+        let Some(opts) = parse_opts::<ImposterProjection>(options_json, "rift_list_imposters")
+        else {
+            return std::ptr::null_mut();
+        };
+        let imposters = handle.manager.list_imposters();
+        let body = if opts.replayable {
+            let configs: Vec<ImposterConfig> = imposters
+                .iter()
+                .map(|i| {
+                    if opts.remove_proxies {
+                        filter_proxy_responses(&i.config)
+                    } else {
+                        i.config.clone()
+                    }
+                })
+                .collect();
+            json!({ "imposters": configs })
+        } else {
+            let summaries: Vec<Value> = imposters
+                .iter()
+                .filter_map(|i| {
+                    i.config.port.map(|port| {
+                        let mut entry = json!({
+                            "protocol": i.config.protocol,
+                            "port": port,
+                            "numberOfRequests": i.get_request_count(),
+                            "enabled": i.is_enabled(),
+                        });
+                        if let Some(name) = &i.config.name {
+                            entry["name"] = json!(name);
+                        }
+                        entry
+                    })
+                })
+                .collect();
+            json!({ "imposters": summaries })
+        };
+        match serde_json::to_string(&body) {
+            Ok(json) => into_c_string(json),
+            Err(e) => {
+                set_last_error(format!("rift_list_imposters: encode failed: {e}"));
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Get one imposter. `options_json` — same shape as [`rift_list_imposters`]. Replayable returns
+/// the single `ImposterConfig` (same `removeProxies` projection); otherwise a detail object
+/// `{"protocol","port","name"?,"numberOfRequests","enabled","recordRequests","stubs","requests"}`.
+/// Returns (caller frees) null on any error (null handle, unknown port, or malformed options).
+///
+/// # Safety
+/// `h` must be a live handle (or null); `options_json` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_get_imposter(
+    h: *mut RiftHandle,
+    port: u16,
+    options_json: *const c_char,
+) -> *mut c_char {
+    ffi_guard!("rift_get_imposter", std::ptr::null_mut(), unsafe {
+        clear_last_error();
+        let Some(handle) = handle(h) else {
+            set_last_error("rift_get_imposter: null handle");
+            return std::ptr::null_mut();
+        };
+        let Some(opts) = parse_opts::<ImposterProjection>(options_json, "rift_get_imposter") else {
+            return std::ptr::null_mut();
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_get_imposter: {e}"));
+                warn!(error = %e, port, "rift_get_imposter: no such imposter");
+                return std::ptr::null_mut();
+            }
+        };
+        let body = if opts.replayable {
+            let config = if opts.remove_proxies {
+                filter_proxy_responses(&imposter.config)
+            } else {
+                imposter.config.clone()
+            };
+            match serde_json::to_value(&config) {
+                Ok(v) => v,
+                Err(e) => {
+                    set_last_error(format!("rift_get_imposter: encode failed: {e}"));
+                    return std::ptr::null_mut();
+                }
+            }
+        } else {
+            // Honor `removeProxies` on the detail view too, filtering the LIVE stubs — the admin
+            // `GET /imposters/{port}?removeProxies=true` applies it regardless of `replayable`.
+            let stubs = if opts.remove_proxies {
+                filter_proxy_stubs(imposter.get_stubs())
+            } else {
+                imposter.get_stubs()
+            };
+            let mut detail = json!({
+                "protocol": imposter.config.protocol,
+                "port": port,
+                "numberOfRequests": imposter.get_request_count(),
+                "enabled": imposter.is_enabled(),
+                "recordRequests": imposter.config.record_requests,
+                "stubs": stubs,
+                "requests": imposter.get_recorded_requests(),
+            });
+            if let Some(name) = &imposter.config.name {
+                detail["name"] = json!(name);
+            }
+            detail
+        };
+        match serde_json::to_string(&body) {
+            Ok(json) => into_c_string(json),
+            Err(e) => {
+                set_last_error(format!("rift_get_imposter: encode failed: {e}"));
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Add a stub to `port`. `index < 0` appends; otherwise it is inserted at that position (mirrors
+/// the admin route's `index` query param). No injection gating — direct FFI is the trusted
+/// embedder, like [`rift_replace_stubs`] — and no stub id is auto-generated. Returns `0` on
+/// success, `-1` on any error (null handle/pointer, invalid stub JSON, or the manager's own error,
+/// e.g. a duplicate id).
+///
+/// # Safety
+/// `h` must be a live handle (or null); `stub_json` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_add_stub(
+    h: *mut RiftHandle,
+    port: u16,
+    stub_json: *const c_char,
+    index: i32,
+) -> i32 {
+    ffi_guard!("rift_add_stub", -1, unsafe {
+        clear_last_error();
+        let (Some(handle), Some(s)) = (handle(h), c_str(stub_json)) else {
+            set_last_error("rift_add_stub: null handle or stub pointer");
+            return -1;
+        };
+        let stub = match serde_json::from_str::<Stub>(s) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(format!("rift_add_stub: invalid stub JSON: {e}"));
+                return -1;
+            }
+        };
+        let idx = if index < 0 {
+            None
+        } else {
+            Some(index as usize)
+        };
+        match handle
+            .runtime
+            .block_on(handle.manager.add_stub(port, stub, idx))
+        {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(format!("rift_add_stub: {e}"));
+                warn!(error = %e, port, "rift_add_stub failed");
+                -1
+            }
+        }
+    })
+}
+
+/// Get a single stub by ref: `{"index":N}` or `{"id":"..."}`. Returns (caller frees) the bare
+/// `Stub` JSON, or null on any error (null handle/pointer, malformed ref JSON, out-of-range index,
+/// or unknown id).
+///
+/// # Safety
+/// `h` must be a live handle (or null); `ref_json` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_get_stub(
+    h: *mut RiftHandle,
+    port: u16,
+    ref_json: *const c_char,
+) -> *mut c_char {
+    ffi_guard!("rift_get_stub", std::ptr::null_mut(), unsafe {
+        clear_last_error();
+        let (Some(handle), Some(s)) = (handle(h), c_str(ref_json)) else {
+            set_last_error("rift_get_stub: null handle or ref pointer");
+            return std::ptr::null_mut();
+        };
+        let stub_ref = match serde_json::from_str::<StubRef>(s) {
+            Ok(r) => r,
+            Err(e) => {
+                set_last_error(format!("rift_get_stub: invalid ref JSON: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        let result = match stub_ref {
+            StubRef::Index { index } => handle.manager.get_stub(port, index),
+            StubRef::Id { id } => handle.manager.get_stub_by_id(port, &id),
+        };
+        match result {
+            Ok(stub) => match serde_json::to_string(&stub) {
+                Ok(json) => into_c_string(json),
+                Err(e) => {
+                    set_last_error(format!("rift_get_stub: encode failed: {e}"));
+                    std::ptr::null_mut()
+                }
+            },
+            Err(e) => {
+                set_last_error(format!("rift_get_stub: {e}"));
+                warn!(error = %e, port, "rift_get_stub failed");
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Update (replace) a stub addressed by ref (`{"index":N}` or `{"id":"..."}`) with `stub_json`.
+/// Returns `0` on success, `-1` on any error.
+///
+/// # Safety
+/// `h` must be a live handle (or null); `ref_json`/`stub_json` must be null or valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_update_stub(
+    h: *mut RiftHandle,
+    port: u16,
+    ref_json: *const c_char,
+    stub_json: *const c_char,
+) -> i32 {
+    ffi_guard!("rift_update_stub", -1, unsafe {
+        clear_last_error();
+        let (Some(handle), Some(rs), Some(ss)) = (handle(h), c_str(ref_json), c_str(stub_json))
+        else {
+            set_last_error("rift_update_stub: null handle or string pointer");
+            return -1;
+        };
+        let stub_ref = match serde_json::from_str::<StubRef>(rs) {
+            Ok(r) => r,
+            Err(e) => {
+                set_last_error(format!("rift_update_stub: invalid ref JSON: {e}"));
+                return -1;
+            }
+        };
+        let stub = match serde_json::from_str::<Stub>(ss) {
+            Ok(s) => s,
+            Err(e) => {
+                set_last_error(format!("rift_update_stub: invalid stub JSON: {e}"));
+                return -1;
+            }
+        };
+        let result = match stub_ref {
+            StubRef::Index { index } => handle
+                .runtime
+                .block_on(handle.manager.replace_stub(port, index, stub)),
+            StubRef::Id { id } => handle
+                .runtime
+                .block_on(handle.manager.replace_stub_by_id(port, &id, stub)),
+        };
+        match result {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(format!("rift_update_stub: {e}"));
+                warn!(error = %e, port, "rift_update_stub failed");
+                -1
+            }
+        }
+    })
+}
+
+/// Delete a stub addressed by ref (`{"index":N}` or `{"id":"..."}`). Returns `0` on success, `-1`
+/// on any error.
+///
+/// # Safety
+/// `h` must be a live handle (or null); `ref_json` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_delete_stub(
+    h: *mut RiftHandle,
+    port: u16,
+    ref_json: *const c_char,
+) -> i32 {
+    ffi_guard!("rift_delete_stub", -1, unsafe {
+        clear_last_error();
+        let (Some(handle), Some(s)) = (handle(h), c_str(ref_json)) else {
+            set_last_error("rift_delete_stub: null handle or ref pointer");
+            return -1;
+        };
+        let stub_ref = match serde_json::from_str::<StubRef>(s) {
+            Ok(r) => r,
+            Err(e) => {
+                set_last_error(format!("rift_delete_stub: invalid ref JSON: {e}"));
+                return -1;
+            }
+        };
+        let result = match stub_ref {
+            StubRef::Index { index } => handle
+                .runtime
+                .block_on(handle.manager.delete_stub(port, index)),
+            StubRef::Id { id } => handle
+                .runtime
+                .block_on(handle.manager.delete_stub_by_id(port, &id)),
+        };
+        match result {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(format!("rift_delete_stub: {e}"));
+                warn!(error = %e, port, "rift_delete_stub failed");
+                -1
+            }
+        }
+    })
+}
+
+/// Clear all recorded requests for `port`. Returns `0` on success, `-1` on any error (null handle
+/// or unknown port).
+///
+/// # Safety
+/// `h` must be a live handle (or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_clear_recorded(h: *mut RiftHandle, port: u16) -> i32 {
+    ffi_guard!("rift_clear_recorded", -1, unsafe {
+        clear_last_error();
+        let Some(handle) = handle(h) else {
+            set_last_error("rift_clear_recorded: null handle");
+            return -1;
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_clear_recorded: {e}"));
+                return -1;
+            }
+        };
+        match imposter.clear_recorded_requests() {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(format!("rift_clear_recorded: {e}"));
+                warn!(error = %e, port, "rift_clear_recorded failed");
+                -1
+            }
+        }
+    })
+}
+
+/// Clear saved proxy responses for `port`. Returns `0` on success, `-1` on any error (null handle
+/// or unknown port).
+///
+/// # Safety
+/// `h` must be a live handle (or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_clear_proxy_recordings(h: *mut RiftHandle, port: u16) -> i32 {
+    ffi_guard!("rift_clear_proxy_recordings", -1, unsafe {
+        clear_last_error();
+        let Some(handle) = handle(h) else {
+            set_last_error("rift_clear_proxy_recordings: null handle");
+            return -1;
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_clear_proxy_recordings: {e}"));
+                return -1;
+            }
+        };
+        imposter.clear_proxy_responses();
+        0
+    })
+}
+
+/// Enable (`enabled != 0`) or disable an imposter. Returns `0` on success, `-1` on any error (null
+/// handle or unknown port).
+///
+/// # Safety
+/// `h` must be a live handle (or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_set_imposter_enabled(
+    h: *mut RiftHandle,
+    port: u16,
+    enabled: i32,
+) -> i32 {
+    ffi_guard!("rift_set_imposter_enabled", -1, unsafe {
+        clear_last_error();
+        let Some(handle) = handle(h) else {
+            set_last_error("rift_set_imposter_enabled: null handle");
+            return -1;
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_set_imposter_enabled: {e}"));
+                return -1;
+            }
+        };
+        imposter.set_enabled(enabled != 0);
+        0
+    })
+}
+
+/// List scenario states for `flow_id` (null → the imposter's default flow) as JSON
+/// `{"flowId","scenarios":[{"name","state"}]}`. Returns (caller frees) null on any error (null
+/// handle, unknown port, or a scenario-state backend error).
+///
+/// # Safety
+/// `h` must be a live handle (or null); `flow_id` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_scenarios(
+    h: *mut RiftHandle,
+    port: u16,
+    flow_id: *const c_char,
+) -> *mut c_char {
+    ffi_guard!("rift_scenarios", std::ptr::null_mut(), unsafe {
+        clear_last_error();
+        let Some(handle) = handle(h) else {
+            set_last_error("rift_scenarios: null handle");
+            return std::ptr::null_mut();
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_scenarios: {e}"));
+                warn!(error = %e, port, "rift_scenarios: no such imposter");
+                return std::ptr::null_mut();
+            }
+        };
+        let Some(flow) = resolve_flow_arg(flow_id, &imposter, "rift_scenarios") else {
+            return std::ptr::null_mut();
+        };
+        let mut scenarios = Vec::new();
+        for name in imposter.scenario_names() {
+            match imposter.scenario_state(&flow, &name) {
+                Ok(state) => scenarios.push(json!({ "name": name, "state": state })),
+                Err(e) => {
+                    set_last_error(format!("rift_scenarios: {e}"));
+                    warn!(error = %e, port, "rift_scenarios failed");
+                    return std::ptr::null_mut();
+                }
+            }
+        }
+        into_c_string(json!({ "flowId": flow, "scenarios": scenarios }).to_string())
+    })
+}
+
+/// Set a scenario's state from JSON `{"state":"...","flowId":"..."?}` (`flowId` optional → the
+/// imposter's default flow). Returns `0` on success, `-1` on any error (null handle/pointers,
+/// missing `state`, unknown port, or a backend error).
+///
+/// # Safety
+/// `h` must be a live handle (or null); `name`/`state_json` must be null or valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_set_scenario_state(
+    h: *mut RiftHandle,
+    port: u16,
+    name: *const c_char,
+    state_json: *const c_char,
+) -> i32 {
+    ffi_guard!("rift_set_scenario_state", -1, unsafe {
+        clear_last_error();
+        let (Some(handle), Some(name), Some(s)) = (handle(h), c_str(name), c_str(state_json))
+        else {
+            set_last_error("rift_set_scenario_state: null handle or string pointer");
+            return -1;
+        };
+        let payload = match serde_json::from_str::<Value>(s) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(format!("rift_set_scenario_state: invalid state JSON: {e}"));
+                return -1;
+            }
+        };
+        let Some(state) = payload.get("state").and_then(|v| v.as_str()) else {
+            set_last_error("rift_set_scenario_state: missing required field: state");
+            return -1;
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_set_scenario_state: {e}"));
+                return -1;
+            }
+        };
+        let flow = payload
+            .get("flowId")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| imposter.resolve_flow_id(&std::collections::HashMap::new()));
+        match imposter.set_scenario_state(&flow, name, state) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(format!("rift_set_scenario_state: {e}"));
+                warn!(error = %e, port, "rift_set_scenario_state failed");
+                -1
+            }
+        }
+    })
+}
+
+/// Reset all scenario states for `flow_id` (null → the imposter's default flow) back to their
+/// initial state. Returns `0` on success, `-1` on any error.
+///
+/// # Safety
+/// `h` must be a live handle (or null); `flow_id` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_reset_scenarios(
+    h: *mut RiftHandle,
+    port: u16,
+    flow_id: *const c_char,
+) -> i32 {
+    ffi_guard!("rift_reset_scenarios", -1, unsafe {
+        clear_last_error();
+        let Some(handle) = handle(h) else {
+            set_last_error("rift_reset_scenarios: null handle");
+            return -1;
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_reset_scenarios: {e}"));
+                return -1;
+            }
+        };
+        let Some(flow) = resolve_flow_arg(flow_id, &imposter, "rift_reset_scenarios") else {
+            return -1;
+        };
+        for name in imposter.scenario_names() {
+            if let Err(e) = imposter.delete_scenario_state(&flow, &name) {
+                set_last_error(format!("rift_reset_scenarios: {e}"));
+                warn!(error = %e, port, "rift_reset_scenarios failed");
+                return -1;
+            }
+        }
+        0
     })
 }
 

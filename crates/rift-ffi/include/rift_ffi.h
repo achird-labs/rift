@@ -101,6 +101,129 @@ char *rift_stub_warnings(RiftHandle *h, uint16_t port);
 char *rift_verify(RiftHandle *h, uint16_t port, const char *body_json);
 
 /**
+ * List imposters. `options_json` (null = defaults): `{"replayable":bool,"removeProxies":bool}`.
+ * Replayable returns `{"imposters":[<ImposterConfig>,...]}` (the same projection the admin
+ * `?replayable=true` route serves); otherwise a Mountebank-style summary
+ * `{"imposters":[{"protocol","port","name"?,"numberOfRequests","enabled"},...]}`, skipping any
+ * imposter with no assigned port (mirroring `handle_list`'s summary branch). Returns (caller
+ * frees with [`rift_free`]) null on any error (null handle or malformed options JSON).
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `options_json` must be null or a valid C string.
+ */
+char *rift_list_imposters(RiftHandle *h, const char *options_json);
+
+/**
+ * Get one imposter. `options_json` — same shape as [`rift_list_imposters`]. Replayable returns
+ * the single `ImposterConfig` (same `removeProxies` projection); otherwise a detail object
+ * `{"protocol","port","name"?,"numberOfRequests","enabled","recordRequests","stubs","requests"}`.
+ * Returns (caller frees) null on any error (null handle, unknown port, or malformed options).
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `options_json` must be null or a valid C string.
+ */
+char *rift_get_imposter(RiftHandle *h, uint16_t port, const char *options_json);
+
+/**
+ * Add a stub to `port`. `index < 0` appends; otherwise it is inserted at that position (mirrors
+ * the admin route's `index` query param). No injection gating — direct FFI is the trusted
+ * embedder, like [`rift_replace_stubs`] — and no stub id is auto-generated. Returns `0` on
+ * success, `-1` on any error (null handle/pointer, invalid stub JSON, or the manager's own error,
+ * e.g. a duplicate id).
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `stub_json` must be null or a valid C string.
+ */
+int32_t rift_add_stub(RiftHandle *h, uint16_t port, const char *stub_json, int32_t index);
+
+/**
+ * Get a single stub by ref: `{"index":N}` or `{"id":"..."}`. Returns (caller frees) the bare
+ * `Stub` JSON, or null on any error (null handle/pointer, malformed ref JSON, out-of-range index,
+ * or unknown id).
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `ref_json` must be null or a valid C string.
+ */
+char *rift_get_stub(RiftHandle *h, uint16_t port, const char *ref_json);
+
+/**
+ * Update (replace) a stub addressed by ref (`{"index":N}` or `{"id":"..."}`) with `stub_json`.
+ * Returns `0` on success, `-1` on any error.
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `ref_json`/`stub_json` must be null or valid C strings.
+ */
+int32_t rift_update_stub(RiftHandle *h, uint16_t port, const char *ref_json, const char *stub_json);
+
+/**
+ * Delete a stub addressed by ref (`{"index":N}` or `{"id":"..."}`). Returns `0` on success, `-1`
+ * on any error.
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `ref_json` must be null or a valid C string.
+ */
+int32_t rift_delete_stub(RiftHandle *h, uint16_t port, const char *ref_json);
+
+/**
+ * Clear all recorded requests for `port`. Returns `0` on success, `-1` on any error (null handle
+ * or unknown port).
+ *
+ * # Safety
+ * `h` must be a live handle (or null).
+ */
+int32_t rift_clear_recorded(RiftHandle *h, uint16_t port);
+
+/**
+ * Clear saved proxy responses for `port`. Returns `0` on success, `-1` on any error (null handle
+ * or unknown port).
+ *
+ * # Safety
+ * `h` must be a live handle (or null).
+ */
+int32_t rift_clear_proxy_recordings(RiftHandle *h, uint16_t port);
+
+/**
+ * Enable (`enabled != 0`) or disable an imposter. Returns `0` on success, `-1` on any error (null
+ * handle or unknown port).
+ *
+ * # Safety
+ * `h` must be a live handle (or null).
+ */
+int32_t rift_set_imposter_enabled(RiftHandle *h, uint16_t port, int32_t enabled);
+
+/**
+ * List scenario states for `flow_id` (null → the imposter's default flow) as JSON
+ * `{"flowId","scenarios":[{"name","state"}]}`. Returns (caller frees) null on any error (null
+ * handle, unknown port, or a scenario-state backend error).
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `flow_id` must be null or a valid C string.
+ */
+char *rift_scenarios(RiftHandle *h, uint16_t port, const char *flow_id);
+
+/**
+ * Set a scenario's state from JSON `{"state":"...","flowId":"..."?}` (`flowId` optional → the
+ * imposter's default flow). Returns `0` on success, `-1` on any error (null handle/pointers,
+ * missing `state`, unknown port, or a backend error).
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `name`/`state_json` must be null or valid C strings.
+ */
+int32_t rift_set_scenario_state(RiftHandle *h,
+                                uint16_t port,
+                                const char *name,
+                                const char *state_json);
+
+/**
+ * Reset all scenario states for `flow_id` (null → the imposter's default flow) back to their
+ * initial state. Returns `0` on success, `-1` on any error.
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `flow_id` must be null or a valid C string.
+ */
+int32_t rift_reset_scenarios(RiftHandle *h, uint16_t port, const char *flow_id);
+
+/**
  * Get a scenario/flow-state value as a JSON envelope `{"found","flowId","key","value"}` the caller
  * frees with [`rift_free`]. `found` disambiguates an absent key from a failure: a missing key is a
  * non-error outcome (`{"found":false,"value":null}`), while a null pointer is returned **only** on a

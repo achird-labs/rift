@@ -1559,3 +1559,360 @@ fn ffi_intercept_rejects_unknown_ca_option() {
         rift_stop(h);
     }
 }
+
+// ===========================================================================
+// Issue #491: admin long-tail symbols over the direct C-ABI — list/get imposters,
+// stub surgery (add/get/update/delete by index or id), clear recorded / proxy
+// recordings, enable/disable, and scenario list/set-state/reset. Each mirrors an
+// admin route by calling the same ImposterManager/Imposter method.
+// ===========================================================================
+
+#[test]
+fn ffi_admin_longtail_round_trip() {
+    unsafe {
+        let h = rift_start();
+        assert!(!h.is_null());
+
+        let config = cstr(
+            r#"{ "port": 19960, "protocol": "http", "recordRequests": true,
+                 "stubs": [ { "id": "s1", "scenarioName": "order",
+                              "requiredScenarioState": "Started",
+                              "predicates": [{ "equals": { "path": "/a" } }],
+                              "responses": [{ "is": { "statusCode": 200, "body": "a" } }] } ] }"#,
+        );
+        let port = rift_create_imposter(h, config.as_ptr());
+        assert_eq!(port, 19960);
+
+        // 1. list imposters (summary form) — no _links, just the domain projection
+        let list = take_json(rift_list_imposters(h, std::ptr::null()));
+        let lv: serde_json::Value = serde_json::from_str(&list).unwrap();
+        assert_eq!(lv["imposters"][0]["port"], 19960);
+        assert_eq!(lv["imposters"][0]["enabled"], true);
+        assert!(lv["imposters"][0]["numberOfRequests"].is_number());
+
+        // 1b. list imposters (replayable) — full configs carrying stubs
+        let opts = cstr(r#"{"replayable":true}"#);
+        let listr = take_json(rift_list_imposters(h, opts.as_ptr()));
+        let lrv: serde_json::Value = serde_json::from_str(&listr).unwrap();
+        assert!(lrv["imposters"][0]["stubs"].is_array());
+
+        // 2. get one imposter (detail) + replayable projection
+        let det = take_json(rift_get_imposter(h, port, std::ptr::null()));
+        let dv: serde_json::Value = serde_json::from_str(&det).unwrap();
+        assert_eq!(dv["port"], 19960);
+        assert_eq!(dv["recordRequests"], true);
+        assert_eq!(dv["stubs"].as_array().unwrap().len(), 1);
+        let repl_opts = cstr(r#"{"replayable":true}"#);
+        let rep = take_json(rift_get_imposter(h, port, repl_opts.as_ptr()));
+        let rv: serde_json::Value = serde_json::from_str(&rep).unwrap();
+        assert_eq!(rv["port"], 19960);
+        assert!(rv["stubs"].is_array());
+
+        // 3. add one stub (append, index -1)
+        let new_stub = cstr(
+            r#"{ "id": "s2", "predicates": [{ "equals": { "path": "/b" } }],
+                 "responses": [{ "is": { "statusCode": 201, "body": "b" } }] }"#,
+        );
+        assert_eq!(rift_add_stub(h, port, new_stub.as_ptr(), -1), 0);
+        let det2 = take_json(rift_get_imposter(h, port, std::ptr::null()));
+        let dv2: serde_json::Value = serde_json::from_str(&det2).unwrap();
+        assert_eq!(dv2["stubs"].as_array().unwrap().len(), 2, "stub appended");
+
+        // 4. get stub by index and by id
+        let by_idx = take_json(rift_get_stub(h, port, cstr(r#"{"index":1}"#).as_ptr()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&by_idx).unwrap()["id"],
+            "s2"
+        );
+        let by_id = take_json(rift_get_stub(h, port, cstr(r#"{"id":"s1"}"#).as_ptr()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&by_id).unwrap()["id"],
+            "s1"
+        );
+
+        // 5. update stub (by id)
+        let updated = cstr(
+            r#"{ "id": "s2", "predicates": [{ "equals": { "path": "/b2" } }],
+                 "responses": [{ "is": { "statusCode": 202, "body": "b2" } }] }"#,
+        );
+        assert_eq!(
+            rift_update_stub(h, port, cstr(r#"{"id":"s2"}"#).as_ptr(), updated.as_ptr()),
+            0
+        );
+
+        // 6. delete stub (by index) → back to one stub
+        assert_eq!(
+            rift_delete_stub(h, port, cstr(r#"{"index":1}"#).as_ptr()),
+            0
+        );
+        let det3 = take_json(rift_get_imposter(h, port, std::ptr::null()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&det3).unwrap()["stubs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // 7. record a request, then clear recorded
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            reqwest::get("http://127.0.0.1:19960/a").await.expect("get");
+        });
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&take_json(rift_recorded(h, port)))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(rift_clear_recorded(h, port), 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&take_json(rift_recorded(h, port)))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            0,
+            "recorded cleared"
+        );
+
+        // 8. clear proxy recordings (no-op here, but must succeed)
+        assert_eq!(rift_clear_proxy_recordings(h, port), 0);
+
+        // 9. enable/disable
+        assert_eq!(rift_set_imposter_enabled(h, port, 0), 0);
+        let disabled = take_json(rift_get_imposter(h, port, std::ptr::null()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&disabled).unwrap()["enabled"],
+            false
+        );
+        assert_eq!(rift_set_imposter_enabled(h, port, 1), 0);
+
+        // 10-12. scenarios: set state, list, reset
+        assert_eq!(
+            rift_set_scenario_state(
+                h,
+                port,
+                cstr("order").as_ptr(),
+                cstr(r#"{"state":"paid"}"#).as_ptr()
+            ),
+            0
+        );
+        let scen = take_json(rift_scenarios(h, port, std::ptr::null()));
+        let sv: serde_json::Value = serde_json::from_str(&scen).unwrap();
+        let order = sv["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "order")
+            .expect("order scenario present");
+        assert_eq!(order["state"], "paid");
+        assert_eq!(rift_reset_scenarios(h, port, std::ptr::null()), 0);
+        let scen2 = take_json(rift_scenarios(h, port, std::ptr::null()));
+        let sv2: serde_json::Value = serde_json::from_str(&scen2).unwrap();
+        let order2 = sv2["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "order")
+            .expect("order scenario present");
+        assert_eq!(order2["state"], "Started", "reset returns to initial state");
+
+        rift_stop(h);
+    }
+}
+
+#[test]
+fn ffi_admin_longtail_error_paths() {
+    unsafe {
+        // null handle → sentinels + last_error
+        assert!(rift_list_imposters(std::ptr::null_mut(), std::ptr::null()).is_null());
+        assert!(rift_get_imposter(std::ptr::null_mut(), 1, std::ptr::null()).is_null());
+        assert_eq!(
+            rift_add_stub(std::ptr::null_mut(), 1, std::ptr::null(), -1),
+            -1
+        );
+        assert_eq!(rift_clear_recorded(std::ptr::null_mut(), 1), -1);
+        assert_eq!(rift_set_imposter_enabled(std::ptr::null_mut(), 1, 1), -1);
+
+        let h = rift_start();
+        // unknown port → sentinels
+        assert!(rift_get_imposter(h, 12345, std::ptr::null()).is_null());
+        assert_eq!(rift_clear_recorded(h, 12345), -1);
+        assert_eq!(rift_set_imposter_enabled(h, 12345, 1), -1);
+
+        // create an imposter with no stubs for ref/JSON error paths
+        let cfg = cstr(r#"{ "port": 19961, "protocol": "http", "stubs": [] }"#);
+        assert_eq!(rift_create_imposter(h, cfg.as_ptr()), 19961);
+        // out-of-range stub index → null
+        assert!(rift_get_stub(h, 19961, cstr(r#"{"index":99}"#).as_ptr()).is_null());
+        // malformed ref JSON → null
+        assert!(rift_get_stub(h, 19961, cstr("not json").as_ptr()).is_null());
+        // malformed stub JSON on add → -1
+        assert_eq!(rift_add_stub(h, 19961, cstr("not json").as_ptr(), -1), -1);
+        rift_stop(h);
+    }
+}
+
+#[test]
+fn ffi_admin_longtail_projections_and_edges() {
+    unsafe {
+        let h = rift_start();
+        // Imposter with a pure-proxy stub + a regular stub, to exercise removeProxies stripping.
+        let cfg = cstr(
+            r#"{ "port": 19962, "protocol": "http", "recordRequests": true, "stubs": [
+                 { "id": "p", "predicates": [{ "equals": { "path": "/px" } }],
+                   "responses": [{ "proxy": { "to": "http://127.0.0.1:1", "mode": "proxyOnce" } }] },
+                 { "id": "r", "responses": [{ "is": { "statusCode": 200, "body": "r" } }] } ] }"#,
+        );
+        let port = rift_create_imposter(h, cfg.as_ptr());
+        assert_eq!(port, 19962);
+
+        let stub_count = |json: &str, replayable_wrapper: bool| -> usize {
+            let v: serde_json::Value = serde_json::from_str(json).unwrap();
+            if replayable_wrapper {
+                v["imposters"][0]["stubs"].as_array().unwrap().len()
+            } else {
+                v["stubs"].as_array().unwrap().len()
+            }
+        };
+
+        // list, replayable: both stubs present; +removeProxies: the pure-proxy stub is dropped.
+        let l_all = take_json(rift_list_imposters(
+            h,
+            cstr(r#"{"replayable":true}"#).as_ptr(),
+        ));
+        assert_eq!(stub_count(&l_all, true), 2);
+        let l_np = take_json(rift_list_imposters(
+            h,
+            cstr(r#"{"replayable":true,"removeProxies":true}"#).as_ptr(),
+        ));
+        assert_eq!(
+            stub_count(&l_np, true),
+            1,
+            "removeProxies strips the proxy stub (list)"
+        );
+
+        // get, replayable + removeProxies — replayable returns the bare config (top-level stubs).
+        let g_np = take_json(rift_get_imposter(
+            h,
+            port,
+            cstr(r#"{"replayable":true,"removeProxies":true}"#).as_ptr(),
+        ));
+        assert_eq!(stub_count(&g_np, false), 1);
+        // get, DETAIL (non-replayable) + removeProxies — must ALSO strip, matching the admin route.
+        let g_detail_np = take_json(rift_get_imposter(
+            h,
+            port,
+            cstr(r#"{"removeProxies":true}"#).as_ptr(),
+        ));
+        assert_eq!(
+            stub_count(&g_detail_np, false),
+            1,
+            "removeProxies strips on the detail view too"
+        );
+        let g_detail = take_json(rift_get_imposter(h, port, std::ptr::null()));
+        assert_eq!(
+            stub_count(&g_detail, false),
+            2,
+            "no removeProxies keeps both"
+        );
+
+        // A misspelled option key is a hard error (deny_unknown_fields), not a silent default.
+        assert!(rift_list_imposters(h, cstr(r#"{"repayable":true}"#).as_ptr()).is_null());
+        assert!(rift_get_imposter(h, port, cstr(r#"{"bogus":true}"#).as_ptr()).is_null());
+
+        // Stub addressing: exercise the OTHER StubRef branch of update/delete than the main test.
+        // update by INDEX (main test does update by id):
+        let upd =
+            cstr(r#"{ "id": "r", "responses": [{ "is": { "statusCode": 204, "body": "" } }] }"#);
+        assert_eq!(
+            rift_update_stub(h, port, cstr(r#"{"index":1}"#).as_ptr(), upd.as_ptr()),
+            0
+        );
+        // add at an EXPLICIT index 0 (main test appends with -1), then confirm order:
+        let ins = cstr(r#"{ "id": "first", "responses": [{ "is": { "statusCode": 200 } }] }"#);
+        assert_eq!(rift_add_stub(h, port, ins.as_ptr(), 0), 0);
+        let after = take_json(rift_get_stub(h, port, cstr(r#"{"index":0}"#).as_ptr()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&after).unwrap()["id"],
+            "first",
+            "explicit index 0 inserts at the front"
+        );
+        // delete by ID (main test deletes by index):
+        assert_eq!(
+            rift_delete_stub(h, port, cstr(r#"{"id":"first"}"#).as_ptr()),
+            0
+        );
+        // unknown id → null
+        assert!(rift_get_stub(h, port, cstr(r#"{"id":"nope"}"#).as_ptr()).is_null());
+
+        rift_stop(h);
+    }
+}
+
+#[test]
+fn ffi_admin_longtail_scenario_and_flow_edges() {
+    unsafe {
+        let h = rift_start();
+        let cfg = cstr(
+            r#"{ "port": 19963, "protocol": "http", "stubs": [
+                 { "scenarioName": "order", "requiredScenarioState": "Started",
+                   "responses": [{ "is": { "statusCode": 200 } }] } ] }"#,
+        );
+        let port = rift_create_imposter(h, cfg.as_ptr());
+        assert_eq!(port, 19963);
+
+        // missing "state" field → -1 with a specific message.
+        assert_eq!(
+            rift_set_scenario_state(h, port, cstr("order").as_ptr(), cstr("{}").as_ptr()),
+            -1
+        );
+
+        // Explicit flowId isolates state from the default flow.
+        assert_eq!(
+            rift_set_scenario_state(
+                h,
+                port,
+                cstr("order").as_ptr(),
+                cstr(r#"{"state":"paid","flowId":"tenant-a"}"#).as_ptr(),
+            ),
+            0
+        );
+        let scen_a = take_json(rift_scenarios(h, port, cstr("tenant-a").as_ptr()));
+        let va: serde_json::Value = serde_json::from_str(&scen_a).unwrap();
+        assert_eq!(va["flowId"], "tenant-a");
+        assert_eq!(va["scenarios"][0]["state"], "paid");
+        // The default flow is untouched (still initial "Started").
+        let scen_def = take_json(rift_scenarios(h, port, std::ptr::null()));
+        let vd: serde_json::Value = serde_json::from_str(&scen_def).unwrap();
+        assert_eq!(
+            vd["scenarios"][0]["state"], "Started",
+            "default flow isolated from tenant-a"
+        );
+
+        // Error-path coverage for the symbols the happy-path test only exercises positively.
+        assert!(
+            rift_update_stub(std::ptr::null_mut(), 1, std::ptr::null(), std::ptr::null()) == -1
+        );
+        assert!(rift_delete_stub(std::ptr::null_mut(), 1, std::ptr::null()) == -1);
+        assert_eq!(rift_clear_proxy_recordings(std::ptr::null_mut(), 1), -1);
+        assert!(rift_scenarios(std::ptr::null_mut(), 1, std::ptr::null()).is_null());
+        assert_eq!(
+            rift_set_scenario_state(std::ptr::null_mut(), 1, std::ptr::null(), std::ptr::null()),
+            -1
+        );
+        assert_eq!(
+            rift_reset_scenarios(std::ptr::null_mut(), 1, std::ptr::null()),
+            -1
+        );
+        // unknown port
+        assert!(rift_scenarios(h, 12345, std::ptr::null()).is_null());
+        assert_eq!(rift_clear_proxy_recordings(h, 12345), -1);
+        assert_eq!(rift_reset_scenarios(h, 12345, std::ptr::null()), -1);
+
+        rift_stop(h);
+    }
+}

@@ -666,15 +666,19 @@ pub async fn handle_clear_proxy_responses(
 // Helper functions
 // =============================================================================
 
-/// Filter out proxy responses from stubs
-fn filter_proxy_responses(config: &ImposterConfig) -> ImposterConfig {
+/// Filter out proxy responses from stubs. `pub` (not just `pub(crate)`) so the FFI layer
+/// (issue #491) can apply the SAME `removeProxies` projection the admin handlers use, instead of
+/// re-implementing it and risking drift.
+pub fn filter_proxy_responses(config: &ImposterConfig) -> ImposterConfig {
     let mut filtered = config.clone();
     filtered.stubs = filter_proxy_stubs(config.stubs.clone());
     filtered
 }
 
-/// Filter proxy responses from a list of stubs
-fn filter_proxy_stubs(stubs: Vec<crate::imposter::Stub>) -> Vec<crate::imposter::Stub> {
+/// Filter proxy responses from a list of stubs. `pub` so the FFI `rift_get_imposter` detail view
+/// (issue #491) applies the SAME `removeProxies` projection this crate's `handle_get` applies to
+/// its live `get_stubs()`, rather than re-implementing it.
+pub fn filter_proxy_stubs(stubs: Vec<crate::imposter::Stub>) -> Vec<crate::imposter::Stub> {
     stubs
         .into_iter()
         .filter_map(|stub| {
