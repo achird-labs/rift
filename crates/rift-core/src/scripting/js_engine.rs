@@ -2449,6 +2449,7 @@ pub fn execute_mountebank_config_decorate(
     })?
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_mountebank_config_decorate_in(
     thread: &mut MbJsThread,
     decorate_fn: &str,
@@ -2676,6 +2677,7 @@ pub fn execute_mountebank_decorate(
     })?
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_mountebank_decorate_in(
     thread: &mut MbJsThread,
     decorate_fn: &str,
