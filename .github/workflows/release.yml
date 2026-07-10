@@ -120,8 +120,14 @@ jobs:
           # path crate and `cargo build` fails. Bump the `version = "..."` that follows each internal
           # path dep so the requirement matches. (Mirrors the publish job — must run here too, else the
           # build fails before publish is ever reached.)
-          find crates -name Cargo.toml -exec sed -i -E \
+          #
+          # Use the attached-suffix `-i.bak` form: this job's matrix includes macOS runners whose BSD
+          # sed does not accept the GNU space-separated `-i -E` (no suffix) form — it would leave the
+          # files un-edited and trip the assertion below. `-i.bak` works on both GNU and BSD sed (the
+          # workspace-version line above relies on the same form). Clean up the backups afterward.
+          find crates -name Cargo.toml -exec sed -i.bak -E \
             's|(path = "\.\./rift-[a-z-]+", version = ")[^"]*|\1'"$VERSION"'|g' {} +
+          find crates -name 'Cargo.toml.bak' -delete
           # Verify the change
           grep 'version = ' Cargo.toml | head -1
           grep -R 'path = "\.\./rift-' crates/*/Cargo.toml || true
