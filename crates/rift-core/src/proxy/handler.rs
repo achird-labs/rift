@@ -578,12 +578,26 @@ async fn handle_yaml_rule(
             if let Some(ref bhvs) = behaviors {
                 for cmd in &bhvs.shell_transform {
                     debug!("Applying shell transform: {}", cmd);
-                    match apply_shell_transform(cmd, &request_context, &processed_body, status) {
-                        Ok(transformed) => {
+                    // Off the tokio worker (issue #478): the synchronous subprocess would
+                    // otherwise stall the worker for its whole lifetime.
+                    let shell_result = {
+                        let cmd = cmd.clone();
+                        let rc = request_context.clone();
+                        let body_in = processed_body.clone();
+                        tokio::task::spawn_blocking(move || {
+                            apply_shell_transform(&cmd, &rc, &body_in, status)
+                        })
+                        .await
+                    };
+                    match shell_result {
+                        Ok(Ok(transformed)) => {
                             processed_body = transformed;
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             warn!("Shell transform failed: {}", e);
+                        }
+                        Err(join_err) => {
+                            warn!("Shell transform task panicked: {}", join_err);
                         }
                     }
                 }
