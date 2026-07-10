@@ -33,7 +33,7 @@
 //! emits a `tracing` event.
 
 use parking_lot::Mutex;
-use rift_core::imposter::{ApplyReport, ImposterConfig, ImposterManager, Stub};
+use rift_core::imposter::{ApplyReport, ImposterConfig, ImposterManager, Stub, VerifyOptions};
 use rift_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
 use rift_core::proxy::truststore::{TrustStorePassword, ca_pem, export_jks, export_pkcs12};
 use rift_http_proxy::admin_api::{AdminApiServer, RunningAdminApi};
@@ -382,6 +382,68 @@ pub unsafe extern "C" fn rift_stub_warnings(h: *mut RiftHandle, port: u16) -> *m
             Err(e) => {
                 set_last_error(format!("rift_stub_warnings: encode failed: {e}"));
                 warn!(error = %e, port, "rift_stub_warnings: failed to encode warnings");
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Verify recorded requests against a predicate set server-side (issue #494), returning the JSON
+/// `{"matched","total","requests"?,"closest"?}` envelope the caller frees with [`rift_free`]. The
+/// `body_json` is the same `POST /imposters/{port}/verify` body:
+/// `{"predicates":[…],"flowId"?,"includeRequests"?,"includeClosest"?}`. This lets an embedded SDK
+/// count matches through the engine's one true predicate evaluator (including `xpath`/`inject`,
+/// impractical client-side) instead of shipping the whole journal over the wire. Unlike the admin
+/// HTTP endpoint, an `inject` predicate is NOT gated here: the direct C-ABI caller is the trusted
+/// in-process embedder, matching how `rift_replace_stubs` accepts inject stubs.
+///
+/// Returns null on any error (null/unknown handle or port, invalid JSON, a failing `inject`
+/// predicate, or encode failure), with the reason in `rift_last_error`.
+///
+/// # Safety
+/// `h` must be a live handle (or null); `body_json` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_verify(
+    h: *mut RiftHandle,
+    port: u16,
+    body_json: *const c_char,
+) -> *mut c_char {
+    ffi_guard!("rift_verify", std::ptr::null_mut(), unsafe {
+        clear_last_error();
+        let (Some(handle), Some(s)) = (handle(h), c_str(body_json)) else {
+            set_last_error("rift_verify: null handle or body pointer");
+            warn!("rift_verify: null handle or body pointer");
+            return std::ptr::null_mut();
+        };
+        let opts = match serde_json::from_str::<VerifyOptions>(s) {
+            Ok(o) => o,
+            Err(e) => {
+                set_last_error(format!("rift_verify: invalid verify JSON: {e}"));
+                warn!(error = %e, "rift_verify: invalid verify JSON");
+                return std::ptr::null_mut();
+            }
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                set_last_error(format!("rift_verify: {e}"));
+                warn!(error = %e, port, "rift_verify: no such imposter");
+                return std::ptr::null_mut();
+            }
+        };
+        let outcome = match imposter.verify(&opts) {
+            Ok(o) => o,
+            Err(e) => {
+                set_last_error(format!("rift_verify: {e}"));
+                warn!(error = %e, port, "rift_verify: predicate evaluation failed");
+                return std::ptr::null_mut();
+            }
+        };
+        match serde_json::to_string(&outcome) {
+            Ok(json) => into_c_string(json),
+            Err(e) => {
+                set_last_error(format!("rift_verify: encode failed: {e}"));
+                warn!(error = %e, port, "rift_verify: failed to encode outcome");
                 std::ptr::null_mut()
             }
         }

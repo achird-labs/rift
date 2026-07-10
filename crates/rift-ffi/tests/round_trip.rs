@@ -68,6 +68,74 @@ fn ffi_round_trip() {
     }
 }
 
+/// Issue #494: server-side verification over the C-ABI — record two requests, then count matches
+/// through `rift_verify` (the engine's one true predicate evaluator) and inspect the closest
+/// non-match diff.
+#[test]
+fn ffi_verify_round_trip() {
+    unsafe {
+        let h = rift_start();
+        assert!(!h.is_null());
+
+        let config =
+            cstr(r#"{ "port": 19997, "protocol": "http", "recordRequests": true, "stubs": [] }"#);
+        let port = rift_create_imposter(h, config.as_ptr());
+        assert_eq!(port, 19997);
+
+        let stubs = cstr(
+            r#"[{ "predicates": [], "responses": [{ "is": { "statusCode": 200, "body": "ok" } }] }]"#,
+        );
+        assert_eq!(rift_replace_stubs(h, port, stubs.as_ptr()), 0);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            reqwest::get("http://127.0.0.1:19997/wanted")
+                .await
+                .expect("get");
+            reqwest::get("http://127.0.0.1:19997/other")
+                .await
+                .expect("get");
+        });
+
+        // Count requests to /wanted, asking for the closest non-match diff.
+        let body = cstr(
+            r#"{"predicates":[{"equals":{"path":"/wanted"}}],"includeRequests":true,"includeClosest":true}"#,
+        );
+        let out = take_json(rift_verify(h, port, body.as_ptr()));
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["matched"], 1);
+        assert_eq!(v["total"], 2);
+        assert_eq!(v["requests"].as_array().unwrap().len(), 1);
+        assert_eq!(v["requests"][0]["path"], "/wanted");
+        // The closest non-match is /other, failing the single path clause.
+        assert_eq!(v["closest"]["request"]["path"], "/other");
+        assert_eq!(
+            v["closest"]["failedPredicates"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            v["closest"]["failedPredicates"][0]["actual"]["path"],
+            "/other"
+        );
+
+        // Error paths: null handle/body, unknown port, malformed JSON → null (+ last_error).
+        assert!(rift_verify(std::ptr::null_mut(), port, body.as_ptr()).is_null());
+        assert!(rift_verify(h, port, std::ptr::null()).is_null());
+        assert!(
+            rift_verify(h, 12345, body.as_ptr()).is_null(),
+            "unknown port → null"
+        );
+        let bad = cstr("not json");
+        assert!(
+            rift_verify(h, port, bad.as_ptr()).is_null(),
+            "malformed JSON → null"
+        );
+
+        assert_eq!(rift_delete_all(h), 0);
+        rift_stop(h);
+    }
+}
+
 #[test]
 fn ffi_null_and_error_paths() {
     unsafe {

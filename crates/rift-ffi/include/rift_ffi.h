@@ -83,6 +83,24 @@ char *rift_recorded(RiftHandle *h, uint16_t port);
 char *rift_stub_warnings(RiftHandle *h, uint16_t port);
 
 /**
+ * Verify recorded requests against a predicate set server-side (issue #494), returning the JSON
+ * `{"matched","total","requests"?,"closest"?}` envelope the caller frees with [`rift_free`]. The
+ * `body_json` is the same `POST /imposters/{port}/verify` body:
+ * `{"predicates":[…],"flowId"?,"includeRequests"?,"includeClosest"?}`. This lets an embedded SDK
+ * count matches through the engine's one true predicate evaluator (including `xpath`/`inject`,
+ * impractical client-side) instead of shipping the whole journal over the wire. Unlike the admin
+ * HTTP endpoint, an `inject` predicate is NOT gated here: the direct C-ABI caller is the trusted
+ * in-process embedder, matching how `rift_replace_stubs` accepts inject stubs.
+ *
+ * Returns null on any error (null/unknown handle or port, invalid JSON, a failing `inject`
+ * predicate, or encode failure), with the reason in `rift_last_error`.
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `body_json` must be null or a valid C string.
+ */
+char *rift_verify(RiftHandle *h, uint16_t port, const char *body_json);
+
+/**
  * Get a scenario/flow-state value as a JSON envelope `{"found","flowId","key","value"}` the caller
  * frees with [`rift_free`]. `found` disambiguates an absent key from a failure: a missing key is a
  * non-error outcome (`{"found":false,"value":null}`), while a null pointer is returned **only** on a

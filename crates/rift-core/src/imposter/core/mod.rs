@@ -512,6 +512,8 @@ use stub_index::StubIndex;
 mod proxy;
 mod recording;
 mod responses;
+mod verify;
+pub use verify::{ClosestMatch, FailedPredicate, VerifyOptions, VerifyOutcome};
 
 #[cfg(test)]
 mod tests {

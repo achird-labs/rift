@@ -363,6 +363,55 @@ Multiple `match` clauses are AND-ed together.
 
 ---
 
+### POST /imposters/{port}/verify
+
+Count — and optionally return — recorded requests matching a predicate set, evaluated by the
+engine's own predicate engine rather than re-implemented per client. This is what an SDK's
+`verify(match, times(n))` calls instead of fetching `savedRequests` and re-evaluating predicates
+locally (where operators like `xpath`/`inject` are impractical) or shipping the whole journal over
+the wire just to count it.
+
+**Request body:**
+```json
+{
+  "predicates": [ { "equals": { "path": "/api/users" } } ],
+  "flowId": "tenant-a",
+  "includeRequests": false,
+  "includeClosest": false
+}
+```
+- `predicates` — standard Mountebank/Rift predicate objects, AND-ed together (same semantics as a
+  stub's `predicates`).
+- `flowId` *(optional)* — scope the count to one space, resolved via the imposter's
+  `flow_id_source` (the same scoping as `match=flow_id=<Value>` on `savedRequests`).
+- `includeRequests` *(optional, default `false`)* — return the matching requests, not just the count.
+- `includeClosest` *(optional, default `false`)* — return the best-scoring non-match — the request
+  satisfying the most predicate clauses (ties resolve to the most recent) — with per-clause failure
+  details, for rendering a readable diff on a failed verification.
+
+An `inject` predicate requires the server to be started with `--allowInjection`; otherwise the
+request is rejected with `400 invalid injection` (the same gate the stub endpoints apply).
+
+**Response:**
+```json
+{
+  "matched": 2,
+  "total": 17,
+  "requests": [ /* present only with includeRequests */ ],
+  "closest": {
+    "request": { /* the closest non-matching recorded request */ },
+    "failedPredicates": [
+      { "predicate": { "equals": { "path": "/api/users" } }, "actual": { "path": "/api/orders" } }
+    ]
+  }
+}
+```
+`matched` counts requests matching every predicate; `total` is the number of recorded requests in
+scope (after any `flowId` filter). `requests`/`closest` are present only when the corresponding
+option is set.
+
+---
+
 ### DELETE /imposters/{port}/savedRequests
 
 Clear recorded requests. Also available under the alias `DELETE /imposters/{port}/requests`.

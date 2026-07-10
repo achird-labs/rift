@@ -43,6 +43,7 @@ rift_stop(h);                     // stop and free
 | `rift_delete_imposter` | `int rift_delete_imposter(RiftHandle* h, uint16_t port)` | `0` on success, `-1` on error. |
 | `rift_delete_all` | `int rift_delete_all(RiftHandle* h)` | `0` on success, `-1` on error. |
 | `rift_recorded` | `char* rift_recorded(RiftHandle* h, uint16_t port)` | Recorded requests as a JSON string (**caller frees** with `rift_free`), or `NULL` on error. |
+| `rift_verify` | `char* rift_verify(RiftHandle* h, uint16_t port, const char* body_json)` | Server-side verification: given `{"predicates":[…],"flowId"?,"includeRequests"?,"includeClosest"?}` (the [`POST /verify`](../api/index.md#post-impostersportverify) body), returns `{"matched","total","requests"?,"closest"?}` as JSON (**caller frees**), or `NULL` on error. Unlike the HTTP endpoint, `inject` predicates are **not** gated — the in-process embedder is trusted. |
 | `rift_stub_warnings` | `char* rift_stub_warnings(RiftHandle* h, uint16_t port)` | [Stub-analysis warnings](../features/stub-analysis.md) (duplicate/shadowed/catch-all) as a JSON array (**caller frees**), or `NULL` on error. |
 | `rift_apply_config` | `char* rift_apply_config(RiftHandle* h, const char* json)` | Reconcile the full imposter set (like `POST /admin/reload`); returns the apply report JSON (caller frees). |
 

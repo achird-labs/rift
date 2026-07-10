@@ -27,6 +27,8 @@ enum ImposterRoute {
     StubById(String),
     /// DELETE /imposters/:port/savedRequests
     SavedRequests,
+    /// POST /imposters/:port/verify (issue #494)
+    Verify,
     /// DELETE /imposters/:port/savedProxyResponses
     SavedProxyResponses,
     /// POST /imposters/:port/enable
@@ -54,6 +56,7 @@ impl ImposterRoute {
             ["stubs", "by-id", id] => Some(ImposterRoute::StubById((*id).to_string())),
             ["stubs", index_str] => index_str.parse().ok().map(ImposterRoute::StubByIndex),
             ["savedRequests"] | ["requests"] => Some(ImposterRoute::SavedRequests),
+            ["verify"] => Some(ImposterRoute::Verify),
             ["savedProxyResponses"] => Some(ImposterRoute::SavedProxyResponses),
             ["enable"] => Some(ImposterRoute::Enable),
             ["disable"] => Some(ImposterRoute::Disable),
@@ -353,6 +356,11 @@ async fn route_imposter(
         }
         (&Method::DELETE, ImposterRoute::SavedRequests) => {
             imposters::handle_clear_requests(port, query, base_url, manager).await
+        }
+
+        // /imposters/:port/verify (issue #494)
+        (&Method::POST, ImposterRoute::Verify) => {
+            imposters::handle_verify(port, req, manager, allow_injection).await
         }
 
         // /imposters/:port/savedProxyResponses

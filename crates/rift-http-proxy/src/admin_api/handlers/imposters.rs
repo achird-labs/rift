@@ -9,7 +9,7 @@ use crate::admin_api::types::{
 use crate::extensions::decorate::backend_error_response;
 use crate::imposter::{
     Imposter, ImposterConfig, ImposterError, ImposterManager, Predicate, PredicateOperation,
-    ScriptBaseDir, Stub, StubResponse, resolve_scripts,
+    ScriptBaseDir, Stub, StubResponse, VerifyOptions, resolve_scripts,
 };
 // `RecordedRequest` is only named in tests now that the `/requests` handler filters before
 // cloning via `get_recorded_requests_filtered` (issue #485).
@@ -127,6 +127,12 @@ pub(crate) fn reject_stubs_if_injection_disallowed(
     if allow_injection || !stubs_contain_script_surface(stubs) {
         return None;
     }
+    Some(injection_disallowed_response())
+}
+
+/// The Mountebank-compatible `400 invalid injection` response returned when a request carries a
+/// scripting surface (`inject`, decorate, …) but `--allowInjection` is off.
+fn injection_disallowed_response() -> Response<Full<Bytes>> {
     let body = serde_json::json!({
         "errors": [{
             "code": "invalid injection",
@@ -135,11 +141,11 @@ pub(crate) fn reject_stubs_if_injection_disallowed(
         }]
     })
     .to_string();
-    Some(build_response_with_headers(
+    build_response_with_headers(
         StatusCode::BAD_REQUEST,
         [("Content-Type", "application/json")],
         body,
-    ))
+    )
 }
 
 /// Reject a whole imposter config when its stubs carry a scripting surface and `--allowInjection`
@@ -574,6 +580,69 @@ pub async fn handle_clear_requests(
             }
             handle_get(port, None, base_url, manager).await
         }
+        Err(e) => e.into(),
+    }
+}
+
+/// POST /imposters/:port/verify - count (and optionally return) recorded requests matching a
+/// predicate set, with an optional closest non-match diff (issue #494). The engine owns the one
+/// true predicate evaluator, so every SDK's `verify(match, times(n))` defers here instead of
+/// re-implementing matching (and shipping the whole journal over the wire just to count it).
+pub async fn handle_verify(
+    port: u16,
+    req: Request<Incoming>,
+    manager: Arc<ImposterManager>,
+    allow_injection: bool,
+) -> Response<Full<Bytes>> {
+    let body = match collect_body(req).await {
+        Ok(b) => b,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+    };
+    // An `inject` predicate evaluates synchronous Boa JavaScript that can run away (issue #476);
+    // evaluate the whole verify on the blocking pool so it never head-of-line-blocks a tokio
+    // worker. Like the live matcher (#476) there's no abort flag — Boa's loop-iteration cap (#327)
+    // eventually frees the blocking thread. A non-inject verify pays only a cheap task hop, fine
+    // since verify is not a per-request hot path.
+    tokio::task::spawn_blocking(move || verify_response(port, &body, &manager, allow_injection))
+        .await
+        .unwrap_or_else(|e| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("verify task failed: {e}"),
+            )
+        })
+}
+
+/// The body of [`handle_verify`] over already-collected bytes, so the parse/gate/evaluate path is
+/// unit-testable without a `Request<Incoming>`.
+fn verify_response(
+    port: u16,
+    body: &[u8],
+    manager: &ImposterManager,
+    allow_injection: bool,
+) -> Response<Full<Bytes>> {
+    let opts: VerifyOptions = match serde_json::from_slice(body) {
+        Ok(o) => o,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid verify JSON: {e}"),
+            );
+        }
+    };
+    // An `inject` predicate evaluates Boa JavaScript — a scripting surface gated by
+    // `--allowInjection` for untrusted admin clients (issue #355), the same gate the stub
+    // endpoints apply before accepting an inject predicate.
+    if !allow_injection && opts.predicates.iter().any(predicate_has_inject) {
+        return injection_disallowed_response();
+    }
+    match manager.get_imposter(port) {
+        Ok(imposter) => match imposter.verify(&opts) {
+            Ok(outcome) => json_response(StatusCode::OK, &outcome),
+            // A failing `inject` predicate is the only error path (issue #440); it is caused by the
+            // caller-supplied predicate, so it maps to 400 rather than a server fault.
+            Err(e) => error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        },
         Err(e) => e.into(),
     }
 }
@@ -1150,5 +1219,98 @@ mod requests_filter_tests {
             "malformed DELETE must not clear anything"
         );
         let _ = m.delete_imposter(19741).await;
+    }
+}
+
+#[cfg(test)]
+mod verify_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    use std::collections::HashMap;
+
+    fn rec(method: &str, path: &str) -> RecordedRequest {
+        RecordedRequest {
+            request_from: "127.0.0.1:5000".to_string(),
+            method: method.to_string(),
+            path: path.to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    async fn manager_with(port: u16, recorded: &[RecordedRequest]) -> Arc<ImposterManager> {
+        let manager = Arc::new(ImposterManager::new());
+        let cfg = serde_json::json!({
+            "port": port, "protocol": "http", "recordRequests": true, "stubs": []
+        });
+        let config = serde_json::from_value(cfg).expect("config");
+        manager.create_imposter(config).await.expect("create");
+        let imposter = manager.get_imposter(port).expect("imposter");
+        for r in recorded {
+            imposter.record_request(r);
+        }
+        manager
+    }
+
+    async fn body_json(resp: Response<Full<Bytes>>) -> serde_json::Value {
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    #[tokio::test]
+    async fn verify_counts_matched_and_total() {
+        let m = manager_with(
+            19751,
+            &[rec("GET", "/a"), rec("POST", "/a"), rec("GET", "/b")],
+        )
+        .await;
+        let body = br#"{"predicates":[{"equals":{"method":"GET"}}]}"#;
+        let resp = verify_response(19751, body, &m, false);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["matched"], 2);
+        assert_eq!(json["total"], 3);
+        assert!(json.get("requests").is_none());
+        let _ = m.delete_imposter(19751).await;
+    }
+
+    #[tokio::test]
+    async fn verify_include_requests_and_closest() {
+        let m = manager_with(19752, &[rec("GET", "/a"), rec("DELETE", "/z")]).await;
+        let body = br#"{"predicates":[{"equals":{"method":"GET"}}],"includeRequests":true,"includeClosest":true}"#;
+        let resp = verify_response(19752, body, &m, false);
+        let json = body_json(resp).await;
+        assert_eq!(json["matched"], 1);
+        assert_eq!(json["requests"].as_array().expect("requests").len(), 1);
+        assert_eq!(json["closest"]["request"]["path"], "/z");
+        let _ = m.delete_imposter(19752).await;
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_inject_predicate_without_allow_injection() {
+        let m = manager_with(19753, &[rec("GET", "/a")]).await;
+        let body = br#"{"predicates":[{"inject":"function(){return true;}"}]}"#;
+        let resp = verify_response(19753, body, &m, false);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["errors"][0]["code"], "invalid injection");
+        let _ = m.delete_imposter(19753).await;
+    }
+
+    #[tokio::test]
+    async fn verify_bad_json_is_400() {
+        let m = manager_with(19754, &[]).await;
+        let resp = verify_response(19754, b"not json", &m, false);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let _ = m.delete_imposter(19754).await;
+    }
+
+    #[tokio::test]
+    async fn verify_unknown_imposter_is_404() {
+        let m = Arc::new(ImposterManager::new());
+        let resp = verify_response(19755, br#"{"predicates":[]}"#, &m, false);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

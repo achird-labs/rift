@@ -52,6 +52,7 @@ pub mod journal;
 pub use journal::{JournalRead, LocalJournal, RequestJournal};
 
 pub use core::Imposter;
+pub use core::{ClosestMatch, FailedPredicate, VerifyOptions, VerifyOutcome};
 
 // Re-export the imposter request handler (single-port gateway dispatch, issue #212)
 pub use handler::{handle_imposter_request, handle_imposter_request_decorated};

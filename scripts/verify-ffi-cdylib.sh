@@ -22,6 +22,8 @@ SYMBOLS=(
   rift_last_error
   # issue #423: stub-analysis warnings over the C-ABI
   rift_stub_warnings
+  # issue #494: server-side verification (predicate-count + closest-match)
+  rift_verify
 )
 
 # Issue #344: the checked-in C header is the ABI's source of truth — assert it matches a fresh
