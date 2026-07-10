@@ -77,11 +77,20 @@ async fn runaway_script_times_out_and_sibling_stays_responsive() {
         sibling_start.elapsed()
     );
 
-    // The runaway request itself is bounded: it returns a 500 near the 500ms timeout,
-    // not after the client's 10s ceiling.
+    // The runaway request itself is bounded: it returns near the 500ms timeout, not after the
+    // client's 10s ceiling. A deadline miss is a 504 carrying `x-rift-script-timeout` (issue #499),
+    // distinct from the 500 a genuinely broken script returns.
     let (elapsed, resp) = hang.await.expect("hang task");
     let resp = resp.expect("runaway request returns a response, not a hang");
-    assert_eq!(resp.status(), 500, "runaway script yields a 500");
+    assert_eq!(
+        resp.status(),
+        504,
+        "a runaway script is a deadline miss (504), not a broken-script 500"
+    );
+    assert!(
+        resp.headers().contains_key("x-rift-script-timeout"),
+        "the 504 must carry the script-timeout marker"
+    );
     assert!(
         elapsed < Duration::from_secs(5),
         "runaway must be interrupted near timeoutMs, took {elapsed:?}"

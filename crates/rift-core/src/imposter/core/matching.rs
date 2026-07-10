@@ -175,23 +175,19 @@ impl Imposter {
             Ok(Ok(result)) => result,
             Ok(Err(join_err)) => Err(anyhow::anyhow!("matching task panicked: {join_err}")),
             Err(_elapsed) => {
-                let msg = format!(
+                tracing::warn!(
                     "predicate inject matching timed out after {}ms",
                     timeout.as_millis()
                 );
-                tracing::warn!("{msg}");
                 // This route is only taken when the snapshot contains an inject predicate, so
                 // the deadline firing is attributable to predicate injection — shape it as
-                // `PredicateInjectionError` so the handler serves the same Mountebank-style 400
-                // as any other failing predicate inject (not a backend 500).
-                #[cfg(feature = "javascript")]
-                {
-                    Err(crate::scripting::PredicateInjectionError(msg).into())
+                // `ScriptTimeoutError` (issue #499) so the handler serves a 504 that a client can
+                // tell apart from a genuinely broken predicate (which stays a Mountebank-style 400).
+                Err(crate::scripting::ScriptTimeoutError {
+                    hook: "predicate inject",
+                    timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
                 }
-                #[cfg(not(feature = "javascript"))]
-                {
-                    Err(anyhow::anyhow!(msg))
-                }
+                .into())
             }
         }
     }
@@ -825,12 +821,16 @@ mod bounded_matching_tests {
         let Err(err) = res else {
             panic!("a runaway inject predicate must error, not hang the matching pass")
         };
-        assert!(
-            err.downcast_ref::<crate::scripting::PredicateInjectionError>()
-                .is_some(),
-            "a matching timeout must be shaped as PredicateInjectionError so the handler \
-             serves the Mountebank-style 400, not a backend 500; got: {err}"
-        );
+        let timeout = err
+            .downcast_ref::<crate::scripting::ScriptTimeoutError>()
+            .unwrap_or_else(|| {
+                panic!(
+                    "a matching timeout must be shaped as ScriptTimeoutError so the handler \
+                     serves a 504 the client can tell apart from a broken predicate; got: {err}"
+                )
+            });
+        assert_eq!(timeout.hook, "predicate inject");
+        assert_eq!(timeout.timeout_ms, 25, "reports the configured deadline");
         assert!(
             start.elapsed() < Duration::from_secs(3),
             "must return near the configured deadline, not after the loop cap"

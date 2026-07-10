@@ -48,15 +48,45 @@ fn csv_cache() -> &'static CsvCache {
     CSV_CACHE.get_or_init(CsvCache::new)
 }
 
+/// Marker header (issue #499) attached to every timeout-mapped response: a 504 carrying this
+/// header means a script hook exceeded its wall-clock deadline (transient/retry-worthy), as
+/// distinct from a broken-script 400/500 (a permanent config error).
+const SCRIPT_TIMEOUT_HEADER: &str = "x-rift-script-timeout";
+
+/// Build the 504 response for a timed-out response/predicate `inject` (issue #499): the Mountebank
+/// `{"errors":[{code,message}]}` envelope with a timeout-specific `code`, plus the shared
+/// `x-rift-inject-error` marker and the [`SCRIPT_TIMEOUT_HEADER`] that tells a timeout apart from a
+/// genuinely broken inject (which stays a 400).
+fn inject_timeout_response(code: &str, message: &str) -> Response<Full<Bytes>> {
+    let body = serde_json::json!({
+        "errors": [{ "code": code, "message": message }]
+    })
+    .to_string();
+    build_response_with_headers(
+        StatusCode::GATEWAY_TIMEOUT,
+        [
+            ("x-rift-imposter", "true"),
+            ("x-rift-inject-error", "true"),
+            (SCRIPT_TIMEOUT_HEADER, "true"),
+        ],
+        body,
+    )
+}
+
 /// Map a matcher error (`find_matching_stub_with_client`) to its response.
 ///
 /// A predicate-`inject` failure (issue #440 — an object-build failure or the script itself
 /// throwing) is Mountebank-shaped error parity with the response-inject case just below: a 400
 /// with `{"errors":[{"code":"invalid predicate injection","message":"..."}]}`, not a bare 500 —
 /// the script failed to produce a valid match decision, a client (config) problem, not a server
-/// fault. Every other matcher error (e.g. a scenario-state backend failure, issue #318) keeps
-/// the existing [`backend_error_response`] 5xx mapping.
+/// fault. A predicate-matching *deadline* (issue #499) is instead a 504 `predicate injection
+/// timeout` a client can retry — checked first, since it too surfaces during matching. Every other
+/// matcher error (e.g. a scenario-state backend failure, issue #318) keeps the existing
+/// [`backend_error_response`] 5xx mapping.
 fn matcher_error_response(e: &anyhow::Error) -> Response<Full<Bytes>> {
+    if let Some(t) = e.downcast_ref::<crate::scripting::ScriptTimeoutError>() {
+        return inject_timeout_response("predicate injection timeout", &t.to_string());
+    }
     #[cfg(feature = "javascript")]
     {
         if let Some(pred_err) = e.downcast_ref::<crate::scripting::PredicateInjectionError>() {
@@ -481,6 +511,11 @@ async fn handle_request_inner(
                 }
                 Err(e) => {
                     warn!("Inject function failed: {}", e);
+                    // A deadline miss (issue #499) is a transient 504 a client can retry, not the
+                    // permanent-config 400 below — distinguish it before the parity mapping.
+                    if let Some(t) = e.downcast_ref::<crate::scripting::ScriptTimeoutError>() {
+                        return Ok(inject_timeout_response("injection timeout", &t.to_string()));
+                    }
                     // Mountebank-shaped error parity (issue #355 Item 5): a failing inject is a
                     // 400 with `{"errors":[{"code":"invalid injection","message":"..."}]}`, not a
                     // bare 500 — the script failed to produce a valid response, which is a client
@@ -723,18 +758,33 @@ async fn handle_request_inner(
                 }
                 Err(e) => {
                     warn!("Rift script execution failed: {}", e);
+                    // A deadline miss (issue #499) is a transient 504 + `x-rift-script-timeout`,
+                    // distinct from the permanent 500 a broken script produces.
+                    let timed_out = e
+                        .downcast_ref::<crate::scripting::ScriptTimeoutError>()
+                        .is_some();
                     let mut headers = vec![
                         ("x-rift-imposter".to_string(), "true".to_string()),
                         ("x-rift-script-error".to_string(), "true".to_string()),
                     ];
+                    if timed_out {
+                        headers.push((SCRIPT_TIMEOUT_HEADER.to_string(), "true".to_string()));
+                    }
                     if let Some(trace) = trace_header {
                         headers.push(("x-rift-script-trace".to_string(), trace));
                     }
-                    return Ok(build_response_with_headers(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        headers,
-                        format!(r#"{{"error": "Script error: {e}"}}"#),
-                    ));
+                    let (status, body) = if timed_out {
+                        (
+                            StatusCode::GATEWAY_TIMEOUT,
+                            format!(r#"{{"error": "Script timeout: {e}"}}"#),
+                        )
+                    } else {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!(r#"{{"error": "Script error: {e}"}}"#),
+                        )
+                    };
+                    return Ok(build_response_with_headers(status, headers, body));
                 }
             }
         }
@@ -970,13 +1020,27 @@ async fn handle_request_inner(
                         // isn't a silent success (issue #323); the body is still served (#269).
                         Err(e) => {
                             warn!("Decorate script error: {e}");
+                            // A deadline miss (issue #499) carries `x-rift-script-timeout` and,
+                            // under strict mode, a 504 rather than the broken-script 500 — so a
+                            // retry-worthy timeout is distinguishable from a permanent failure.
+                            let timed_out =
+                                matches!(e, crate::behaviors::DecorateError::Timeout(_));
                             if strict_behaviors {
+                                let status = if timed_out {
+                                    StatusCode::GATEWAY_TIMEOUT
+                                } else {
+                                    StatusCode::INTERNAL_SERVER_ERROR
+                                };
+                                let mut hdrs = vec![
+                                    ("x-rift-imposter", "true"),
+                                    ("x-rift-decorate-error", "true"),
+                                ];
+                                if timed_out {
+                                    hdrs.push((SCRIPT_TIMEOUT_HEADER, "true"));
+                                }
                                 return Ok(build_response_with_headers(
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    [
-                                        ("x-rift-imposter", "true"),
-                                        ("x-rift-decorate-error", "true"),
-                                    ],
+                                    status,
+                                    hdrs,
                                     format!(
                                         r#"{{"error": "decorate failed (strictBehaviors): {e}"}}"#
                                     ),
@@ -986,6 +1050,12 @@ async fn handle_request_inner(
                                 "x-rift-decorate-error".to_string(),
                                 vec!["true".to_string()],
                             );
+                            if timed_out {
+                                headers.insert(
+                                    SCRIPT_TIMEOUT_HEADER.to_string(),
+                                    vec!["true".to_string()],
+                                );
+                            }
                         }
                     }
                 }
@@ -1452,6 +1522,27 @@ mod matcher_error_response_tests {
         assert!(
             !resp.headers().contains_key("x-rift-inject-error"),
             "a generic backend error is not an inject error"
+        );
+    }
+
+    // Issue #499: a predicate-matching deadline is a 504 with the timeout marker, distinct from
+    // the broken-predicate 400 above — so a client can tell a retry-worthy timeout apart.
+    #[test]
+    fn predicate_inject_timeout_maps_to_504() {
+        let err: anyhow::Error = crate::scripting::ScriptTimeoutError {
+            hook: "predicate inject",
+            timeout_ms: 50,
+        }
+        .into();
+        let resp = matcher_error_response(&err);
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert!(
+            resp.headers().contains_key("x-rift-script-timeout"),
+            "a matching timeout must carry the script-timeout marker"
+        );
+        assert!(
+            resp.headers().contains_key("x-rift-inject-error"),
+            "a predicate-inject timeout keeps the inject-error marker"
         );
     }
 }

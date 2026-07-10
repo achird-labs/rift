@@ -1769,10 +1769,11 @@ pub async fn execute_mountebank_inject_bounded(
                 "Mountebank inject execution timed out after {}ms",
                 timeout.as_millis()
             );
-            Err(anyhow!(
-                "inject execution timed out after {}ms",
-                timeout.as_millis()
-            ))
+            Err(crate::scripting::ScriptTimeoutError {
+                hook: "inject",
+                timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            }
+            .into())
         }
     }
 }

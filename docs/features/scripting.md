@@ -500,12 +500,19 @@ predicate `inject`, and the `decorate` behavior — all of which run off the asy
   and a recursion limit of **512**. The client is still released at the wall-clock timeout with an
   error; a pathological nested loop may keep a background worker busy a little longer, but it cannot
   run unbounded.
-- **On timeout or error** — a compile error, a runtime error, or exceeding a bound — a
-  `_rift.script` failure is a `500 Internal Server Error` carrying an
+- **On a genuine error** — a compile error, a runtime error, or exceeding the loop/recursion
+  bound — a `_rift.script` failure is a `500 Internal Server Error` carrying an
   `x-rift-script-error: true` header; a failing Mountebank `inject` (response or predicate) is a
-  `400` with a Mountebank-shaped `{"errors": [...]}` body, and a failing `decorate` serves the
-  undecorated response with an `x-rift-decorate-error: true` header (or a `500` under
-  `strictBehaviors`).
+  `400` with a Mountebank-shaped `{"errors": [...]}` body (code `invalid injection` /
+  `invalid predicate injection`), and a failing `decorate` serves the undecorated response with an
+  `x-rift-decorate-error: true` header (or a `500` under `strictBehaviors`).
+- **On a wall-clock timeout** the response is instead a **`504 Gateway Timeout`** carrying an
+  `x-rift-script-timeout: true` marker on top of the hook's usual signal header, so a transient,
+  retry-worthy deadline miss is distinguishable from a permanent config error. Concretely: a
+  response inject → `504` with code `injection timeout`; a predicate inject → `504` with code
+  `predicate injection timeout`; a `_rift.script` → `504` with `x-rift-script-error`; a `decorate`
+  → the undecorated response (`200`) with `x-rift-decorate-error` (or `504` under
+  `strictBehaviors`). All four also carry `x-rift-script-timeout: true`.
 - **Amortized JavaScript startup.** The Mountebank hooks reuse a per-worker-thread Boa context and
   a parsed-script cache keyed by source content, so steady-state execution skips both JS realm
   construction and re-parsing. Like Mountebank itself — which evaluates every injection in one

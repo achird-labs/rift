@@ -10,8 +10,8 @@ mod bounded;
 mod compiled_cache;
 mod rhai_engine;
 pub use bounded::{
-    DEFAULT_SCRIPT_TIMEOUT_MS, resolve_script_timeout_ms, should_inject_bounded,
-    should_inject_bounded_with_ctx, should_inject_bounded_with_ctx_traced,
+    DEFAULT_SCRIPT_TIMEOUT_MS, ScriptTimeoutError, resolve_script_timeout_ms,
+    should_inject_bounded, should_inject_bounded_with_ctx, should_inject_bounded_with_ctx_traced,
 };
 
 pub use rhai_engine::RhaiEngine;

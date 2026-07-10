@@ -18,6 +18,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tracing::warn;
 
+/// A script hook exceeded its wall-clock deadline (issue #499).
+///
+/// A timeout is a transient load condition, not a broken script — the handler recovers this via
+/// `downcast_ref` and maps it to a distinct 504 + `x-rift-script-timeout` response, so monitoring
+/// and clients can tell a retry-worthy deadline miss from a permanent config error. Deliberately
+/// not feature-gated: the `_rift.script` and predicate-matching deadlines exist regardless of the
+/// `javascript` feature, so both paths return the same type.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{hook} timed out after {timeout_ms}ms")]
+pub struct ScriptTimeoutError {
+    /// Which hook hit the deadline: `"inject"`, `"predicate inject"`, or `"_rift.script"`.
+    pub hook: &'static str,
+    pub timeout_ms: u64,
+}
+
 /// Default script timeout when `_rift.scriptEngine.timeoutMs` is not configured.
 pub const DEFAULT_SCRIPT_TIMEOUT_MS: u64 = 5000;
 
@@ -97,10 +112,11 @@ pub async fn should_inject_bounded_with_ctx(
                 "_rift.script execution timed out after {}ms",
                 timeout.as_millis()
             );
-            Err(anyhow::anyhow!(
-                "script execution timed out after {}ms",
-                timeout.as_millis()
-            ))
+            Err(ScriptTimeoutError {
+                hook: "_rift.script",
+                timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            }
+            .into())
         }
     }
 }
@@ -149,10 +165,11 @@ pub async fn should_inject_bounded_with_ctx_traced(
                 timeout.as_millis()
             );
             (
-                Err(anyhow::anyhow!(
-                    "script execution timed out after {}ms",
-                    timeout.as_millis()
-                )),
+                Err(ScriptTimeoutError {
+                    hook: "_rift.script",
+                    timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                }
+                .into()),
                 Vec::new(),
             )
         }
@@ -351,7 +368,14 @@ mod tests {
     async fn should_inject_bounded_times_out_runaway_rhai() {
         let start = Instant::now();
         let res = bounded("rhai", RUNAWAY_RHAI, 200).await;
-        assert!(res.is_err(), "runaway must yield an error, not hang");
+        let err = res.expect_err("runaway must yield an error, not hang");
+        let timeout = err
+            .downcast_ref::<crate::scripting::ScriptTimeoutError>()
+            .unwrap_or_else(|| {
+                panic!("a runaway _rift.script must yield a ScriptTimeoutError; got: {err}")
+            });
+        assert_eq!(timeout.hook, "_rift.script");
+        assert_eq!(timeout.timeout_ms, 200, "reports the configured deadline");
         assert!(
             start.elapsed() < Duration::from_secs(3),
             "must return near the configured timeout, not hang"
@@ -522,11 +546,16 @@ mod tests {
                 Duration::from_millis(25),
             )
             .await;
-            let err = match res {
-                Err(e) => e.to_string(),
-                Ok(_) => panic!("runaway inject must yield an error, not a response"),
+            let Err(err) = res else {
+                panic!("runaway inject must yield an error, not a response")
             };
-            assert!(err.contains("timed out"), "got: {err}");
+            let timeout = err
+                .downcast_ref::<crate::scripting::ScriptTimeoutError>()
+                .unwrap_or_else(|| {
+                    panic!("a runaway inject must yield a ScriptTimeoutError; got: {err}")
+                });
+            assert_eq!(timeout.hook, "inject");
+            assert_eq!(timeout.timeout_ms, 25, "reports the configured deadline");
             assert!(
                 start.elapsed() < Duration::from_secs(3),
                 "must return near the configured deadline, not after the loop cap"
