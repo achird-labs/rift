@@ -49,28 +49,12 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
+      # `--lib` runs only library unit tests; every `tests/*.rs` integration binary (the handler
+      # contract tests, the FFI round-trip, the corpus-replay gate, admin_api_integration, …) runs
+      # in the dedicated `integration-tests` job below (issue #510). This job stays fast and matrixed
+      # over stable+beta for the unit surface; the integration surface runs once on stable.
       - name: Run unit tests
         run: cargo test --workspace --all-features --lib
-
-      # Issue #500: the handler script-failure contract tests run in their own integration binary
-      # (a separate process with its own MB JS script pool) rather than in the `--lib` set, so they
-      # don't contend for the shared pool with the timing-sensitive bounded-matcher unit tests. The
-      # `--lib` step above skips every `tests/*.rs` binary, so run this one explicitly.
-      - name: Run handler error-response integration tests
-        run: cargo test -p rift-core --all-features --test handler_error_responses
-
-      # Issue #492: the C-ABI round-trip integration tests (including the allowInjection admin-plane
-      # gate) live in a tests/*.rs binary the `--lib` step skips, so run them explicitly — otherwise
-      # the FFI option wiring has no CI regression signal.
-      - name: Run rift-ffi C-ABI round-trip tests
-        run: cargo test -p rift-ffi --all-features --test round_trip
-
-      # Issue #460: the published sdk-conformance-<ver>.tar.gz corpus must serve and its `_verify`
-      # transcripts must hold on this commit (and `manifest.json` must match the fixtures on disk).
-      # This gate binary is also skipped by the `--lib` step, so run it explicitly — it's what keeps
-      # the release artifact verified rather than hoped, and catches DSL/engine drift at the source.
-      - name: Run SDK conformance corpus replay gate
-        run: cargo test -p rift-http-proxy --all-features --test corpus_replay
 
       # Issue #460: prove the corpus packager (release step) works end-to-end — version stamping,
       # tar structure, fixture-count round-trip — without needing an engine build.
@@ -87,6 +71,45 @@ jobs:
       # and that the checked-in header matches, before the per-platform release matrix relies on it.
       - name: rift-ffi C-ABI smoke test
         run: ./scripts/verify-ffi-cdylib.sh
+
+  # Issue #510: the matrix `test` job runs `--lib` only, so every `tests/*.rs` integration binary
+  # (admin_api_integration, verify_dynamic, the issue_* handler contracts, the FFI round-trip, the
+  # corpus-replay gate, …) never ran in CI — a regression in those contracts would ship green. This
+  # job runs the whole integration surface with `--tests`. `--workspace` covers only the six
+  # `crates/*` members, so the docker-bound `rift-compatibility-tests` crate and the benchmark are
+  # excluded automatically (they keep their own dedicated jobs); redis_backend self-provisions a
+  # container via testcontainers and mountebank_compatibility spawns its own server, so both run on
+  # the Docker-enabled runner without extra setup. Runs on stable only (the unit surface already
+  # covers beta) to keep the heavier integration run off the critical path.
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run integration tests (tests/*.rs binaries)
+        run: cargo test --workspace --all-features --tests
 
   # Issue #420: the truststore keytool tests are #[ignore]d (they need a JDK on PATH), so the
   # matrix `test` job never runs them and the PKCS#12/JKS JVM-loadability guarantee has no CI

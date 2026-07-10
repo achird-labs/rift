@@ -168,7 +168,10 @@ fn manifest_is_consistent() {
     }
 }
 
+// Serialized against `packaged_corpus_serves_and_verify_holds`: both serve the whole corpus on its
+// fixtures' fixed ports (4501–4520), so running them concurrently races on those binds and flakes.
 #[tokio::test]
+#[serial_test::serial(corpus)]
 async fn corpus_serves_and_verify_holds() {
     let corpus = sdk_conformance_dir().join("corpus");
     serve_and_verify(&corpus).await;
@@ -179,6 +182,7 @@ async fn corpus_serves_and_verify_holds() {
 /// version-prefixed root — any of which could silently drop a fixture or a `data/`/injection file.
 /// Run the packager, extract, and replay against the extracted `corpus/`.
 #[tokio::test]
+#[serial_test::serial(corpus)]
 async fn packaged_corpus_serves_and_verify_holds() {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/gen-sdk-conformance.sh");
     let work = tempfile::tempdir().expect("tempdir");
