@@ -324,10 +324,29 @@ jobs:
 
       - name: Update Cargo.toml version
         run: |
-          # Update workspace version in root Cargo.toml
-          sed -i 's/^version = ".*"/version = "'"${{ steps.version.outputs.VERSION }}"'"/' Cargo.toml
-          # Verify the change
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          # Workspace package version (inherited by every member via `version.workspace = true`).
+          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
+          # Keep internal path-dependency version requirements in lockstep (issue #474): bump the
+          # `version = "..."` that follows each `path = "../rift-*"`, so `cargo publish` sees a
+          # matching, published version for every internal dependency instead of an unversioned
+          # (rejected) or stale-versioned (unresolvable) path dep.
+          find crates -name Cargo.toml -exec sed -i -E \
+            's|(path = "\.\./rift-[a-z-]+", version = ")[^"]*|\1'"$VERSION"'|g' {} +
+          echo "Set workspace + internal dep versions to $VERSION:"
           grep 'version = ' Cargo.toml | head -1
+          grep -R 'path = "\.\./rift-' crates/*/Cargo.toml || true
+          # Assert the lockstep bump actually covered every internal path dep (issue #474): sed
+          # exits 0 even when it matches nothing, so a reformatted dep line could silently keep a
+          # stale — but still crates.io-resolvable — version and publish a wrong artifact GREEN.
+          # Fail loudly instead if any internal path dep carries a version other than $VERSION.
+          STALE=$(grep -RE 'path = "\.\./rift-[a-z-]+"' crates/*/Cargo.toml \
+            | grep 'version = "' | grep -v "version = \"$VERSION\"" || true)
+          if [ -n "$STALE" ]; then
+            echo "::error::internal dependency version(s) not bumped to $VERSION:"
+            echo "$STALE"
+            exit 1
+          fi
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -338,19 +357,33 @@ jobs:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Publish rift-lint
+      # Publish in dependency order: rift-types -> rift-core -> rift-http-proxy (rift-lint is a
+      # leaf and independent). Failures are LOUD (issue #474): the old `|| echo` masked a broken
+      # rift-http-proxy publish so releases went green while the crate stayed frozen at 0.4.0.
+      - name: Publish to crates.io (in dependency order)
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          cargo publish -p rift-lint --allow-dirty || echo "rift-lint may already be published"
-
-      - name: Publish rift-http-proxy
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          # Wait a bit for crates.io to index rift-lint if it was just published
-          sleep 30
-          cargo publish -p rift-http-proxy --allow-dirty || echo "rift-http-proxy may already be published"
+          set -euo pipefail
+          publish_crate() {
+            local crate="$1"
+            # Idempotent re-runs: skip ONLY if this exact version is already on crates.io. Any
+            # real failure (bad manifest, missing owner, unpublished/unresolvable dep) still fails
+            # the job loudly — it is not swallowed.
+            if curl -sf "https://crates.io/api/v1/crates/${crate}/${VERSION}" >/dev/null 2>&1; then
+              echo "${crate} ${VERSION} already on crates.io — skipping"
+              return 0
+            fi
+            echo "Publishing ${crate} ${VERSION}..."
+            cargo publish -p "${crate}" --allow-dirty
+            # Let crates.io index the new version before a dependent crate tries to resolve it.
+            sleep 30
+          }
+          publish_crate rift-lint
+          publish_crate rift-types
+          publish_crate rift-core
+          publish_crate rift-http-proxy
 
   # =============================================================================
   # Create GitHub Release

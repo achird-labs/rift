@@ -44,8 +44,8 @@ serde_yaml.workspace = true
 serde_json.workspace = true
 
 # Shared workspace types + CLI-free engine (issue #203)
-rift-types = { path = "../rift-types" }
-rift-core = { path = "../rift-core", default-features = false }
+rift-types = { path = "../rift-types", version = "0.1.0" }
+rift-core = { path = "../rift-core", version = "0.1.0", default-features = false }
 
 # Stable stub id generation for id-addressed stub ops (issue #202)
 uuid.workspace = true
@@ -95,7 +95,7 @@ serde_json_path = "0.7"
 
 [dev-dependencies]
 # Turn on the failing flow-store backend for backend-outage tests (issue #318)
-rift-core = { path = "../rift-core", default-features = false, features = ["test-backend"] }
+rift-core = { path = "../rift-core", version = "0.1.0", default-features = false, features = ["test-backend"] }
 tempfile = "3.8"
 rcgen = "0.13"
 criterion = { version = "0.5", features = ["html_reports"] }

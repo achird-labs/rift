@@ -37,7 +37,7 @@ serde_yaml.workspace = true
 serde_json.workspace = true
 
 # Shared workspace types
-rift-types = { path = "../rift-types" }
+rift-types = { path = "../rift-types", version = "0.1.0" }
 
 # Scripting engines
 rhai.workspace = true
