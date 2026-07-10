@@ -11,7 +11,12 @@
         "_behaviors": {
           "decorate": "config => { config.response.headers['X-Decorated-By'] = 'config-arrow'; config.response.statusCode = 202; }"
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/js-arrow" }, "expect": { "status": 202, "bodyContains": "\"v\":1" } }
+        ]
+      }
     },
     {
       "name": "Mountebank JS function(config) form — reads config.request",
@@ -21,7 +26,12 @@
         "_behaviors": {
           "decorate": "function(config) { config.response.body = 'method-was-' + config.request.method; }"
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/js-fn" }, "expect": { "status": 200, "bodyContains": "method-was-GET" } }
+        ]
+      }
     },
     {
       "name": "Rhai decorate (Rift-native) — unchanged",
@@ -29,7 +39,12 @@
       "responses": [{
         "is": { "statusCode": 200, "body": "orig" },
         "_behaviors": { "decorate": "response.body = \"rhai-\" + request.path;" }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/rhai" }, "expect": { "status": 200, "bodyContains": "rhai-/rhai" } }
+        ]
+      }
     }
   ]
 }

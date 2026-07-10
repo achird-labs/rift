@@ -10,7 +10,12 @@
       "responses": [{
         "is": { "statusCode": 200, "body": { "note": "delayed 1.5s" } },
         "_behaviors": { "wait": 1500 }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/slow" }, "expect": { "status": 200, "bodyContains": "delayed 1.5s" } }
+        ]
+      }
     },
     {
       "name": "wait — random delay between 200ms and 1200ms",
@@ -18,7 +23,12 @@
       "responses": [{
         "is": { "statusCode": 200, "body": { "note": "delayed 200-1200ms" } },
         "_behaviors": { "wait": { "min": 200, "max": 1200 } }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/slow-range" }, "expect": { "status": 200, "bodyContains": "delayed 200-1200ms" } }
+        ]
+      }
     },
     {
       "name": "repeat — fail 503 twice, then 200 (sequence cycles)",
@@ -29,7 +39,15 @@
           "_behaviors": { "repeat": 2 }
         },
         { "is": { "statusCode": 200, "body": { "ok": true } } }
-      ]
+      ],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/retry-me" }, "expect": { "status": 503, "bodyContains": "try again" } },
+          { "request": { "path": "/retry-me" }, "expect": { "status": 503, "bodyContains": "try again" } },
+          { "request": { "path": "/retry-me" }, "expect": { "status": 200, "bodyContains": "\"ok\":true" } },
+          { "request": { "path": "/retry-me" }, "expect": { "status": 503, "bodyContains": "try again" } }
+        ]
+      }
     },
     {
       "name": "decorate — JS post-processes the response (adds a header) [needs --allow-injection]",
@@ -43,7 +61,12 @@
         "_behaviors": {
           "decorate": "function (request, response) { response.headers['X-Decorated-By'] = 'rift'; response.body = response.body.replace('false', 'true'); }"
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/decorated" }, "expect": { "status": 200, "bodyContains": "\"decorated\":true" } }
+        ]
+      }
     },
     {
       "name": "copy — pull the numeric id out of the path into the body",
@@ -61,7 +84,12 @@
             "using": { "method": "regex", "selector": "/orders/(\\d+)" }
           }
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/orders/42" }, "expect": { "status": 200, "bodyContains": "\"orderId\":\"42\"" } }
+        ]
+      }
     },
     {
       "name": "copy — pull a query parameter (?user=) into the response",
@@ -79,7 +107,12 @@
             "using": { "method": "regex", "selector": "(.*)" }
           }
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/greet?user=Bob" }, "expect": { "status": 200, "bodyContains": "hello Bob" } }
+        ]
+      }
     },
     {
       "name": "lookup — enrich the response from data/products.csv by id in the path",
@@ -102,7 +135,12 @@
             "into": "${row}"
           }
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/catalog/123" }, "expect": { "status": 200, "bodyContains": "\"name\":\"Widget\"" } }
+        ]
+      }
     }
   ]
 }

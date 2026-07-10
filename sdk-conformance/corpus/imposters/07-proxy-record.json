@@ -13,7 +13,13 @@
           "mode": "proxyOnce",
           "predicateGenerators": [{ "matches": { "method": true, "path": true } }]
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/api/products" }, "expect": { "status": 200, "bodyContains": "\"name\":\"Widget\"" } },
+          { "request": { "path": "/api/products" }, "expect": { "status": 200, "bodyContains": "\"name\":\"Widget\"" } }
+        ]
+      }
     },
     {
       "name": "Local info route (not proxied)",
@@ -28,7 +34,12 @@
             "tip": "After a few calls, GET http://localhost:2525/imposters/4507 to see the auto-generated stubs."
           }
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/info" }, "expect": { "status": 200, "bodyContains": "auto-generated stubs" } }
+        ]
+      }
     }
   ]
 }

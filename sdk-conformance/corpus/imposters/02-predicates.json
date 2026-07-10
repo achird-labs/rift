@@ -12,42 +12,82 @@
     {
       "name": "equals — exact path + method",
       "predicates": [{ "equals": { "method": "GET", "path": "/eq" } }],
-      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "equals" } } }]
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "equals" } } }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/eq" }, "expect": { "status": 200, "bodyContains": "\"matched\":\"equals\"" } }
+        ]
+      }
     },
     {
       "name": "equals caseSensitive=false — /CaSe matches /case",
       "predicates": [{ "equals": { "path": "/case" }, "caseSensitive": false }],
-      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "equals-caseInsensitive" } } }]
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "equals-caseInsensitive" } } }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/CaSe" }, "expect": { "status": 200, "bodyContains": "equals-caseInsensitive" } }
+        ]
+      }
     },
     {
       "name": "deepEquals — query must be EXACTLY {a:1}",
       "predicates": [{ "deepEquals": { "query": { "a": "1" } }, "caseSensitive": true }],
-      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "deepEquals" } } }]
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "deepEquals" } } }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/anything?a=1" }, "expect": { "status": 200, "bodyContains": "deepEquals" } }
+        ]
+      }
     },
     {
       "name": "contains — body contains 'needle'",
       "predicates": [{ "contains": { "body": "needle" } }],
-      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "contains" } } }]
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "contains" } } }],
+      "_verify": {
+        "sequence": [
+          { "request": { "method": "POST", "path": "/whatever", "body": "hasneedleinside" }, "expect": { "status": 200, "bodyContains": "\"matched\":\"contains\"" } }
+        ]
+      }
     },
     {
       "name": "startsWith — path starts with /start",
       "predicates": [{ "startsWith": { "path": "/start" } }],
-      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "startsWith" } } }]
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "startsWith" } } }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/start/foo" }, "expect": { "status": 200, "bodyContains": "startsWith" } }
+        ]
+      }
     },
     {
       "name": "endsWith — path ends with /end",
       "predicates": [{ "endsWith": { "path": "/end" } }],
-      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "endsWith" } } }]
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "endsWith" } } }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/foo/end" }, "expect": { "status": 200, "bodyContains": "endsWith" } }
+        ]
+      }
     },
     {
       "name": "matches — regex path /id/<digits>",
       "predicates": [{ "matches": { "path": "^/id/[0-9]+$" } }],
-      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "matches" } } }]
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "matches" } } }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/id/123" }, "expect": { "status": 200, "bodyContains": "\"matched\":\"matches\"" } }
+        ]
+      }
     },
     {
       "name": "exists — Authorization header present",
       "predicates": [{ "exists": { "headers": { "Authorization": true } } }],
-      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "exists-header" } } }]
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "exists-header" } } }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/anyroute", "headers": { "Authorization": "Bearer x" } }, "expect": { "status": 200, "bodyContains": "exists-header" } }
+        ]
+      }
     },
     {
       "name": "or — path is /red OR /blue",
@@ -57,7 +97,13 @@
           { "equals": { "path": "/blue" } }
         ]
       }],
-      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "or" } } }]
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "or" } } }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/red" }, "expect": { "status": 200, "bodyContains": "\"matched\":\"or\"" } },
+          { "request": { "path": "/blue" }, "expect": { "status": 200, "bodyContains": "\"matched\":\"or\"" } }
+        ]
+      }
     },
     {
       "name": "not — path is /open and has NO Authorization header",
@@ -67,7 +113,12 @@
           { "not": { "exists": { "headers": { "Authorization": true } } } }
         ]
       }],
-      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "not" } } }]
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "not" } } }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/open" }, "expect": { "status": 200, "bodyContains": "\"matched\":\"not\"" } }
+        ]
+      }
     },
     {
       "name": "jsonpath — JSON body where $.type == 'order'",
@@ -75,7 +126,12 @@
         "equals": { "body": "order" },
         "jsonpath": { "selector": "$.type" }
       }],
-      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "jsonpath" } } }]
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "jsonpath" } } }],
+      "_verify": {
+        "sequence": [
+          { "request": { "method": "POST", "path": "/jsonthing", "body": "{\"type\":\"order\"}" }, "expect": { "status": 200, "bodyContains": "jsonpath" } }
+        ]
+      }
     },
     {
       "name": "xpath — XML body where //user/@role == 'admin'",
@@ -83,7 +139,12 @@
         "equals": { "body": "admin" },
         "xpath": { "selector": "string(//user/@role)" }
       }],
-      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "xpath" } } }]
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "xpath" } } }],
+      "_verify": {
+        "sequence": [
+          { "request": { "method": "POST", "path": "/xmlthing", "body": "<user role=\"admin\"/>" }, "expect": { "status": 200, "bodyContains": "\"matched\":\"xpath\"" } }
+        ]
+      }
     }
   ]
 }

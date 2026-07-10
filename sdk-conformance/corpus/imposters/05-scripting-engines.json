@@ -17,21 +17,38 @@
             "code": "fn respond(ctx) { let count = ctx.state.incr_by(\"count\", 1); http(200, #{engine: \"rhai\", count: count}) }"
           }
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/rhai/counter" }, "expect": { "status": 200, "bodyContains": "\"count\":1" } },
+          { "request": { "path": "/rhai/counter" }, "expect": { "status": 200, "bodyContains": "\"count\":2" } }
+        ]
+      }
     },
     {
       "name": "JavaScript inject — counter [needs --allow-injection]",
       "predicates": [{ "equals": { "method": "GET", "path": "/js/counter" } }],
       "responses": [{
         "inject": "function (config, state) { state.count = (state.count || 0) + 1; return { statusCode: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ engine: 'javascript', count: state.count }) }; }"
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/js/counter" }, "expect": { "status": 200, "bodyContains": "\"count\":1" } },
+          { "request": { "path": "/js/counter" }, "expect": { "status": 200, "bodyContains": "\"count\":2" } }
+        ]
+      }
     },
     {
       "name": "JavaScript inject — echo the request [needs --allow-injection]",
       "predicates": [{ "equals": { "method": "POST", "path": "/js/echo" } }],
       "responses": [{
         "inject": "function (config, state) { var req = config.request || config; return { statusCode: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ engine: 'javascript', method: req.method, path: req.path, body: req.body }) }; }"
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "method": "POST", "path": "/js/echo", "body": "{\"hello\":\"world\"}" }, "expect": { "status": 200, "bodyContains": "\"body\":\"{\\\"hello\\\":\\\"world\\\"}\"" } }
+        ]
+      }
     },
     {
       "name": "Health — lists the engines this imposter exercises",
@@ -42,7 +59,12 @@
           "headers": { "Content-Type": "application/json" },
           "body": { "status": "ok", "engines": ["rhai", "javascript"] }
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/health" }, "expect": { "status": 200, "bodyContains": "\"engines\":[\"rhai\",\"javascript\"]" } }
+        ]
+      }
     }
   ]
 }

@@ -14,7 +14,7 @@
       "port": 4502,
       "name": "02 \u00b7 Predicate Showcase",
       "requires": [],
-      "hasVerify": false
+      "hasVerify": true
     },
     {
       "file": "corpus/imposters/03-behaviors.json",
@@ -23,7 +23,7 @@
       "requires": [
         "injection"
       ],
-      "hasVerify": false
+      "hasVerify": true
     },
     {
       "file": "corpus/imposters/04-fault-injection.json",
@@ -39,7 +39,7 @@
       "requires": [
         "injection"
       ],
-      "hasVerify": false
+      "hasVerify": true
     },
     {
       "file": "corpus/imposters/06-stateful-retry.json",
@@ -48,7 +48,7 @@
       "requires": [
         "injection"
       ],
-      "hasVerify": false
+      "hasVerify": true
     },
     {
       "file": "corpus/imposters/07-proxy-record.json",
@@ -57,21 +57,21 @@
       "requires": [
         "proxy"
       ],
-      "hasVerify": false
+      "hasVerify": true
     },
     {
       "file": "corpus/imposters/10-correlated-isolation.json",
       "port": 4510,
       "name": "10 \u00b7 Correlated isolation (one port, partitioned by a header)",
       "requires": [],
-      "hasVerify": false
+      "hasVerify": true
     },
     {
       "file": "corpus/imposters/11-headers-and-templates.json",
       "port": 4511,
       "name": "11 \u00b7 Multi-value headers, date templates, defaultResponse/defaultForward, CORS",
       "requires": [],
-      "hasVerify": false
+      "hasVerify": true
     },
     {
       "file": "corpus/imposters/13-js-config-decorate.json",
@@ -80,7 +80,7 @@
       "requires": [
         "injection"
       ],
-      "hasVerify": false
+      "hasVerify": true
     },
     {
       "file": "corpus/imposters/14-verify-annotations.json",
@@ -103,7 +103,7 @@
       "requires": [
         "injection"
       ],
-      "hasVerify": false
+      "hasVerify": true
     },
     {
       "file": "corpus/imposters/17-faults-and-binary.json",

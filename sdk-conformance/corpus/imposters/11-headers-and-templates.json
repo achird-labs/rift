@@ -14,7 +14,12 @@
           "headers": { "Set-Cookie": ["sessionId=abc", "theme=dark"], "X-Single": "one" },
           "body": "two cookies set"
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/cookies" }, "expect": { "status": 200, "bodyContains": "two cookies set" } }
+        ]
+      }
     },
     {
       "name": "serve-time date templates — {{DAYS+N}}/{{MONTHS+N}}/{{NOW}} (#195)",
@@ -25,7 +30,12 @@
           "headers": { "Content-Type": "application/json" },
           "body": "{\"issued\":\"{{NOW}}\",\"expires\":\"{{DAYS+30}}\",\"renewal\":\"{{MONTHS+12}}\"}"
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/token" }, "expect": { "status": 200, "bodyContains": "\"expires\":\"" } }
+        ]
+      }
     }
   ]
 }

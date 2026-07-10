@@ -10,7 +10,12 @@
       "responses": [{
         "is": { "statusCode": 200, "headers": { "Content-Type": "application/json" }, "body": { "requestId": "${rid}" } },
         "_behaviors": { "copy": { "from": { "headers": "X-Request-Id" }, "into": "${rid}", "using": { "method": "regex", "selector": ".*" } } }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/from-header", "headers": { "X-Request-Id": "abc-123" } }, "expect": { "status": 200, "bodyContains": "\"requestId\":\"abc-123\"" } }
+        ]
+      }
     },
     {
       "name": "copy — extract a JSON field from the body via jsonpath",
@@ -18,7 +23,12 @@
       "responses": [{
         "is": { "statusCode": 200, "body": "who=${who}" },
         "_behaviors": { "copy": { "from": "body", "into": "${who}", "using": { "method": "jsonpath", "selector": "$.user.name" } } }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "method": "POST", "path": "/from-json", "body": "{\"user\":{\"name\":\"Alice\"}}" }, "expect": { "status": 200, "bodyContains": "who=Alice" } }
+        ]
+      }
     },
     {
       "name": "lookup — enrich the response from products.csv by id",
@@ -26,7 +36,12 @@
       "responses": [{
         "is": { "statusCode": 200, "headers": { "Content-Type": "application/json" }, "body": { "name": "${row}[name]", "price": "${row}[price]" } },
         "_behaviors": { "lookup": { "key": { "from": "path", "using": { "method": "regex", "selector": "/catalog/([0-9]+)" } }, "fromDataSource": { "csv": { "path": "data/products.csv", "keyColumn": "id" } }, "into": "${row}" } }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/catalog/456" }, "expect": { "status": 200, "bodyContains": "\"name\":\"Gadget\"" } }
+        ]
+      }
     },
     {
       "name": "wait — JS function returning a fixed delay",
@@ -34,7 +49,12 @@
       "responses": [{
         "is": { "statusCode": 200, "body": "waited" },
         "_behaviors": { "wait": "function(){ return 400; }" }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/slow-fn" }, "expect": { "status": 200, "bodyContains": "waited" } }
+        ]
+      }
     },
     {
       "name": "decorate — Rhai native, mutate response body in place",
@@ -42,7 +62,12 @@
       "responses": [{
         "is": { "statusCode": 200, "body": "orig" },
         "_behaviors": { "decorate": "response.body = \"rhai-decorated\";" }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/decorate-rhai" }, "expect": { "status": 200, "bodyContains": "rhai-decorated" } }
+        ]
+      }
     }
   ]
 }

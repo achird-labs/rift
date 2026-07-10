@@ -17,7 +17,15 @@
             "code": "fn respond(ctx) { let attempts = ctx.state.incr_by(\"attempts\", 1); if attempts <= 2 { http(503, #{error: \"service unavailable\", attempt: attempts}).header(\"Retry-After\", \"1\").header(\"X-Attempt\", `${attempts}`) } else { http(200, #{ok: true, succeededOnAttempt: attempts}).header(\"X-Attempt\", `${attempts}`) } }"
           }
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/api/resource", "headers": { "X-Flow-Id": "verify-resource" } }, "expect": { "status": 503, "bodyContains": "\"attempt\":1" } },
+          { "request": { "path": "/api/resource", "headers": { "X-Flow-Id": "verify-resource" } }, "expect": { "status": 503, "bodyContains": "\"attempt\":2" } },
+          { "request": { "path": "/api/resource", "headers": { "X-Flow-Id": "verify-resource" } }, "expect": { "status": 200, "bodyContains": "\"succeededOnAttempt\":3" } },
+          { "request": { "path": "/api/resource", "headers": { "X-Flow-Id": "verify-resource" } }, "expect": { "status": 200, "bodyContains": "\"succeededOnAttempt\":4" } }
+        ]
+      }
     },
     {
       "name": "Inspect the current attempt count for a flow",
@@ -29,7 +37,14 @@
             "code": "fn respond(ctx) { let flow_id = ctx.request.header(\"x-flow-id\"); if flow_id == () { flow_id = \"default\"; }; let attempts = ctx.state.get_or(\"attempts\", 0); http(200, #{flowId: flow_id, attempts: attempts}) }"
           }
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/api/resource", "headers": { "X-Flow-Id": "verify-attempts" } }, "expect": { "status": 503 } },
+          { "request": { "path": "/api/resource", "headers": { "X-Flow-Id": "verify-attempts" } }, "expect": { "status": 503 } },
+          { "request": { "path": "/api/attempts", "headers": { "X-Flow-Id": "verify-attempts" } }, "expect": { "status": 200, "bodyContains": "\"attempts\":2" } }
+        ]
+      }
     },
     {
       "name": "Reset the attempt counter for a flow",
@@ -41,7 +56,14 @@
             "code": "fn respond(ctx) { let flow_id = ctx.request.header(\"x-flow-id\"); if flow_id == () { flow_id = \"default\"; }; ctx.state.delete(\"attempts\"); http(200, #{message: \"reset\", flowId: flow_id}) }"
           }
         }
-      }]
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/api/resource", "headers": { "X-Flow-Id": "verify-reset" } }, "expect": { "status": 503 } },
+          { "request": { "method": "DELETE", "path": "/api/reset", "headers": { "X-Flow-Id": "verify-reset" } }, "expect": { "status": 200, "bodyContains": "\"message\":\"reset\"" } },
+          { "request": { "path": "/api/attempts", "headers": { "X-Flow-Id": "verify-reset" } }, "expect": { "status": 200, "bodyContains": "\"attempts\":0" } }
+        ]
+      }
     }
   ]
 }
