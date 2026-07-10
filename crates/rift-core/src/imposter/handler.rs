@@ -1000,7 +1000,24 @@ async fn handle_request_inner(
                 // stdout becomes the new body. Runs on the static `is` path too, not only the
                 // proxy path, and independently of copy/lookup/decorate.
                 for cmd in &parsed_behaviors.shell_transform {
-                    match apply_shell_transform(cmd, &request_context, &body, status) {
+                    // Run the fork/exec/wait off the tokio worker (issue #478): a synchronous
+                    // subprocess run inline would stall the worker for its whole lifetime,
+                    // starving unrelated requests multiplexed on it.
+                    let shell_result = {
+                        let cmd = cmd.clone();
+                        let rc = request_context.clone();
+                        let body_in = body.clone();
+                        tokio::task::spawn_blocking(move || {
+                            apply_shell_transform(&cmd, &rc, &body_in, status)
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(std::io::Error::other(format!(
+                                "shellTransform task panicked: {e}"
+                            )))
+                        })
+                    };
+                    match shell_result {
                         Ok(transformed) => body = transformed,
                         // Keep the body unchanged (issue #269) but signal the failure so it
                         // isn't a silent success (issue #323).
