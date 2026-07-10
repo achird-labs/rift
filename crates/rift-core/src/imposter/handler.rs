@@ -10,8 +10,8 @@ use super::types::{
     DebugMatchResult, DebugRequest, DebugResponse, ProxyResponse, RecordedRequest, ResponseMode,
 };
 use crate::behaviors::{
-    CsvCache, RequestContext, ResponseBehaviors, apply_copy_behaviors, apply_lookup_behaviors,
-    apply_shell_transform, header_to_title_case,
+    CsvCache, RequestContext, apply_copy_behaviors, apply_lookup_behaviors, apply_shell_transform,
+    header_to_title_case,
 };
 use crate::extensions::decorate::{
     ResponseDecorator, ResponsePhase, backend_error_response, with_annotation_scope,
@@ -821,150 +821,146 @@ async fn handle_request_inner(
                 }
             }
 
-            // Apply behaviors if present
-            if let Some(ref behaviors_json) = behaviors {
-                // Parse behaviors
-                if let Ok(parsed_behaviors) =
-                    serde_json::from_value::<ResponseBehaviors>(behaviors_json.clone())
-                {
-                    // Apply wait behavior
-                    if let Some(ref wait) = parsed_behaviors.wait {
-                        let wait_ms = wait.get_duration_ms();
-                        if wait_ms > 0 {
-                            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-                        }
+            // Apply behaviors if present. Issue #479: `behaviors` is now the precomputed
+            // `Option<Arc<ResponseBehaviors>>` (parsed once at stub construction, see
+            // `StubResponse::new_is`) — no more re-parsing `_behaviors` JSON on every request.
+            if let Some(ref parsed_behaviors) = behaviors {
+                // Apply wait behavior
+                if let Some(ref wait) = parsed_behaviors.wait {
+                    let wait_ms = wait.get_duration_ms();
+                    if wait_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
                     }
+                }
 
-                    // copy/lookup are pure token substitution — apply them across each value of
-                    // multi-value headers so multiplicity survives (e.g. multiple Set-Cookie;
-                    // RFC 7230 §3.2.2 forbids folding Set-Cookie). decorate uses a single-value
-                    // JS/Rhai object model, so only that path collapses — and even there Set-Cookie
-                    // is held aside, never comma-folded.
-                    if !parsed_behaviors.copy.is_empty() {
-                        body = apply_copy_behaviors(
-                            &body,
-                            &mut headers,
-                            &parsed_behaviors.copy,
-                            &request_context,
-                        );
-                    }
-                    if !parsed_behaviors.lookup.is_empty() {
-                        body = apply_lookup_behaviors(
-                            &body,
-                            &mut headers,
-                            &parsed_behaviors.lookup,
-                            &request_context,
-                            csv_cache(),
-                        );
-                    }
-                    if let Some(ref decorate_script) = parsed_behaviors.decorate {
-                        // decorate uses a single-value JS/Rhai object model. Set-Cookie is held
-                        // aside and never folded (RFC 7230 §3.2.2); other multi-value headers
-                        // degrade to single-value for the script (issue #238 boundary) — warn so
-                        // the collapse is not silent (e.g. WWW-Authenticate is also corrupted by
-                        // comma-folding).
-                        let is_set_cookie = |k: &str| k.eq_ignore_ascii_case("set-cookie");
-                        let folded: Vec<&String> = headers
-                            .iter()
-                            .filter(|(k, v)| v.len() > 1 && !is_set_cookie(k))
-                            .map(|(k, _)| k)
-                            .collect();
-                        if !folded.is_empty() {
-                            warn!(
-                                "decorate uses a single-value object model; multi-value headers \
+                // copy/lookup are pure token substitution — apply them across each value of
+                // multi-value headers so multiplicity survives (e.g. multiple Set-Cookie;
+                // RFC 7230 §3.2.2 forbids folding Set-Cookie). decorate uses a single-value
+                // JS/Rhai object model, so only that path collapses — and even there Set-Cookie
+                // is held aside, never comma-folded.
+                if !parsed_behaviors.copy.is_empty() {
+                    body = apply_copy_behaviors(
+                        &body,
+                        &mut headers,
+                        &parsed_behaviors.copy,
+                        &request_context,
+                    );
+                }
+                if !parsed_behaviors.lookup.is_empty() {
+                    body = apply_lookup_behaviors(
+                        &body,
+                        &mut headers,
+                        &parsed_behaviors.lookup,
+                        &request_context,
+                        csv_cache(),
+                    );
+                }
+                if let Some(ref decorate_script) = parsed_behaviors.decorate {
+                    // decorate uses a single-value JS/Rhai object model. Set-Cookie is held
+                    // aside and never folded (RFC 7230 §3.2.2); other multi-value headers
+                    // degrade to single-value for the script (issue #238 boundary) — warn so
+                    // the collapse is not silent (e.g. WWW-Authenticate is also corrupted by
+                    // comma-folding).
+                    let is_set_cookie = |k: &str| k.eq_ignore_ascii_case("set-cookie");
+                    let folded: Vec<&String> = headers
+                        .iter()
+                        .filter(|(k, v)| v.len() > 1 && !is_set_cookie(k))
+                        .map(|(k, _)| k)
+                        .collect();
+                    if !folded.is_empty() {
+                        warn!(
+                            "decorate uses a single-value object model; multi-value headers \
                                  {folded:?} are comma-folded (issue #238 boundary). Set-Cookie is \
                                  exempt; other headers that forbid list-folding will be corrupted."
-                            );
-                        }
-
-                        let set_cookie: Vec<(String, Vec<String>)> = headers
-                            .iter()
-                            .filter(|(k, _)| is_set_cookie(k))
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        let mut single: HashMap<String, String> = headers
-                            .iter()
-                            .filter(|(k, _)| !is_set_cookie(k))
-                            .map(|(k, v)| (k.clone(), v.join(", ")))
-                            .collect();
-                        match apply_js_or_rhai_decorate(
-                            decorate_script,
-                            &request_context,
-                            &body,
-                            status,
-                            &mut single,
-                            imposter.script_state_key(),
-                            stub_state.stub.id.as_deref(),
-                        ) {
-                            Ok((new_body, new_status)) => {
-                                body = new_body;
-                                status = new_status;
-                                // Restore the held-aside Set-Cookie lines unless the script set its
-                                // own (case-insensitively) — a script override wins deterministically.
-                                let script_set_cookie = single.keys().any(|k| is_set_cookie(k));
-                                headers = single.into_iter().map(|(k, v)| (k, vec![v])).collect();
-                                if !script_set_cookie {
-                                    headers.extend(set_cookie);
-                                }
-                            }
-                            // Behave as if decorate was absent: keep the original multi-value
-                            // `headers` and pre-decorate body/status rather than serving a folded,
-                            // undecorated response. Attach a visible signal so the skipped behavior
-                            // isn't a silent success (issue #323); the body is still served (#269).
-                            Err(e) => {
-                                warn!("Decorate script error: {e}");
-                                if strict_behaviors {
-                                    return Ok(build_response_with_headers(
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        [
-                                            ("x-rift-imposter", "true"),
-                                            ("x-rift-decorate-error", "true"),
-                                        ],
-                                        format!(
-                                            r#"{{"error": "decorate failed (strictBehaviors): {e}"}}"#
-                                        ),
-                                    ));
-                                }
-                                headers.insert(
-                                    "x-rift-decorate-error".to_string(),
-                                    vec!["true".to_string()],
-                                );
-                            }
-                        }
+                        );
                     }
 
-                    // shellTransform (issue #269): pipe the body through external command(s);
-                    // stdout becomes the new body. Runs on the static `is` path too, not only the
-                    // proxy path, and independently of copy/lookup/decorate.
-                    for cmd in &parsed_behaviors.shell_transform {
-                        match apply_shell_transform(cmd, &request_context, &body, status) {
-                            Ok(transformed) => body = transformed,
-                            // Keep the body unchanged (issue #269) but signal the failure so it
-                            // isn't a silent success (issue #323).
-                            Err(e) => {
-                                warn!("shellTransform command {cmd:?} failed: {e}");
-                                if strict_behaviors {
-                                    return Ok(build_response_with_headers(
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        [
-                                            ("x-rift-imposter", "true"),
-                                            ("x-rift-shelltransform-error", "true"),
-                                        ],
-                                        format!(
-                                            r#"{{"error": "shellTransform failed (strictBehaviors): {e}"}}"#
-                                        ),
-                                    ));
-                                }
-                                headers.insert(
-                                    "x-rift-shelltransform-error".to_string(),
-                                    vec!["true".to_string()],
-                                );
+                    let set_cookie: Vec<(String, Vec<String>)> = headers
+                        .iter()
+                        .filter(|(k, _)| is_set_cookie(k))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    let mut single: HashMap<String, String> = headers
+                        .iter()
+                        .filter(|(k, _)| !is_set_cookie(k))
+                        .map(|(k, v)| (k.clone(), v.join(", ")))
+                        .collect();
+                    match apply_js_or_rhai_decorate(
+                        decorate_script,
+                        &request_context,
+                        &body,
+                        status,
+                        &mut single,
+                        imposter.script_state_key(),
+                        stub_state.stub.id.as_deref(),
+                    ) {
+                        Ok((new_body, new_status)) => {
+                            body = new_body;
+                            status = new_status;
+                            // Restore the held-aside Set-Cookie lines unless the script set its
+                            // own (case-insensitively) — a script override wins deterministically.
+                            let script_set_cookie = single.keys().any(|k| is_set_cookie(k));
+                            headers = single.into_iter().map(|(k, v)| (k, vec![v])).collect();
+                            if !script_set_cookie {
+                                headers.extend(set_cookie);
                             }
+                        }
+                        // Behave as if decorate was absent: keep the original multi-value
+                        // `headers` and pre-decorate body/status rather than serving a folded,
+                        // undecorated response. Attach a visible signal so the skipped behavior
+                        // isn't a silent success (issue #323); the body is still served (#269).
+                        Err(e) => {
+                            warn!("Decorate script error: {e}");
+                            if strict_behaviors {
+                                return Ok(build_response_with_headers(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    [
+                                        ("x-rift-imposter", "true"),
+                                        ("x-rift-decorate-error", "true"),
+                                    ],
+                                    format!(
+                                        r#"{{"error": "decorate failed (strictBehaviors): {e}"}}"#
+                                    ),
+                                ));
+                            }
+                            headers.insert(
+                                "x-rift-decorate-error".to_string(),
+                                vec!["true".to_string()],
+                            );
+                        }
+                    }
+                }
+
+                // shellTransform (issue #269): pipe the body through external command(s);
+                // stdout becomes the new body. Runs on the static `is` path too, not only the
+                // proxy path, and independently of copy/lookup/decorate.
+                for cmd in &parsed_behaviors.shell_transform {
+                    match apply_shell_transform(cmd, &request_context, &body, status) {
+                        Ok(transformed) => body = transformed,
+                        // Keep the body unchanged (issue #269) but signal the failure so it
+                        // isn't a silent success (issue #323).
+                        Err(e) => {
+                            warn!("shellTransform command {cmd:?} failed: {e}");
+                            if strict_behaviors {
+                                return Ok(build_response_with_headers(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    [
+                                        ("x-rift-imposter", "true"),
+                                        ("x-rift-shelltransform-error", "true"),
+                                    ],
+                                    format!(
+                                        r#"{{"error": "shellTransform failed (strictBehaviors): {e}"}}"#
+                                    ),
+                                ));
+                            }
+                            headers.insert(
+                                "x-rift-shelltransform-error".to_string(),
+                                vec!["true".to_string()],
+                            );
                         }
                     }
                 }
             }
-
             let mut response = Response::builder().status(status);
 
             // One header line per value (issue #238 multi-value headers, e.g. multiple Set-Cookie).

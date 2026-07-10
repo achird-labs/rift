@@ -139,7 +139,7 @@ impl Imposter {
             u16,
             HashMap<String, Vec<String>>,
             String,
-            Option<serde_json::Value>,
+            Option<std::sync::Arc<crate::behaviors::ResponseBehaviors>>,
             Option<RiftResponseExtension>,
             ResponseMode,
             bool,

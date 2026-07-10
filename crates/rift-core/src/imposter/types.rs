@@ -317,6 +317,7 @@ fn inject_wait_behavior(response: StubResponse, wait_val: serde_json::Value) -> 
             is,
             behaviors,
             rift,
+            ..
         } => {
             let behaviors = Some(match behaviors {
                 Some(serde_json::Value::Object(mut obj)) => {
@@ -326,11 +327,9 @@ fn inject_wait_behavior(response: StubResponse, wait_val: serde_json::Value) -> 
                 Some(other) => other,
                 None => serde_json::json!({ "wait": wait_val }),
             });
-            StubResponse::Is {
-                is,
-                behaviors,
-                rift,
-            }
+            // Behaviors changed (the `wait` entry was injected) — recompute via `new_is` rather
+            // than reusing the stale `behaviors_parsed`/`rendered_body` that were dropped above.
+            StubResponse::new_is(is, behaviors, rift)
         }
         other => other,
     }
@@ -351,6 +350,16 @@ pub enum StubResponse {
         behaviors: Option<serde_json::Value>,
         #[serde(rename = "_rift", skip_serializing_if = "Option::is_none")]
         rift: Option<RiftResponseExtension>,
+        /// Issue #479: `_behaviors` parsed ONCE at construction so the request hot path never
+        /// re-deserializes it. Not serde-driven (see the `from`/`into` attributes on this enum) —
+        /// purely a precomputed cache alongside `behaviors`.
+        #[serde(skip)]
+        behaviors_parsed: Option<std::sync::Arc<crate::behaviors::ResponseBehaviors>>,
+        /// Issue #479: pre-rendered JSON string for a non-string `is.body`, computed ONCE at
+        /// construction so the request hot path never re-serializes it. `None` for a string body
+        /// (served as-is) or no body at all.
+        #[serde(skip)]
+        rendered_body: Option<std::sync::Arc<str>>,
     },
     Proxy {
         proxy: ProxyResponse,
@@ -365,6 +374,38 @@ pub enum StubResponse {
     RiftScript {
         rift: RiftResponseExtension,
     },
+}
+
+impl StubResponse {
+    /// Build an `Is` response, precomputing (issue #479) the parsed `_behaviors` and — for a
+    /// non-string body only — the rendered JSON string, so the request hot path never
+    /// re-deserializes/re-serializes them on every request. This is the ONLY place an `Is`
+    /// variant should be constructed; callers that need to rebuild one after mutating `behaviors`
+    /// (e.g. `inject_wait_behavior`) must go through here too, to keep the caches consistent.
+    pub(crate) fn new_is(
+        is: IsResponse,
+        behaviors: Option<serde_json::Value>,
+        rift: Option<RiftResponseExtension>,
+    ) -> StubResponse {
+        let behaviors_parsed = behaviors
+            .as_ref()
+            .and_then(|v| {
+                serde_json::from_value::<crate::behaviors::ResponseBehaviors>(v.clone()).ok()
+            })
+            .map(std::sync::Arc::new);
+        // Only a non-string body needs rendering; a string body is served as-is.
+        let rendered_body =
+            is.body.as_ref().filter(|b| !b.is_string()).map(|b| {
+                std::sync::Arc::from(serde_json::to_string(b).unwrap_or_default().as_str())
+            });
+        StubResponse::Is {
+            is,
+            behaviors,
+            rift,
+            behaviors_parsed,
+            rendered_body,
+        }
+    }
 }
 
 /// Raw deserialization type that handles multiple JSON formats for stub responses
@@ -523,16 +564,16 @@ impl From<StubResponseRaw> for StubResponse {
                 // Convert array format to object format if needed
                 raw.behaviors.and_then(normalize_behaviors)
             });
-            StubResponse::Is {
-                is: IsResponse {
+            StubResponse::new_is(
+                IsResponse {
                     status_code: is_raw.status_code,
                     headers: is_raw.headers,
                     body: is_raw.body,
                     mode: is_raw.mode,
                 },
                 behaviors,
-                rift: raw.rift,
-            }
+                raw.rift,
+            )
         } else if let Some(proxy) = raw.proxy {
             StubResponse::Proxy { proxy }
         } else if let Some(inject) = raw.inject {
@@ -548,28 +589,28 @@ impl From<StubResponseRaw> for StubResponse {
             let behaviors = raw
                 .underscore_behaviors
                 .or_else(|| raw.behaviors.and_then(normalize_behaviors));
-            StubResponse::Is {
-                is: IsResponse {
+            StubResponse::new_is(
+                IsResponse {
                     status_code: raw.status_code.unwrap_or_else(default_status_code),
                     headers: raw.headers,
                     body: raw.body,
                     mode: raw.mode,
                 },
                 behaviors,
-                rift: None,
-            }
+                None,
+            )
         } else {
             // Default to empty Is response
-            StubResponse::Is {
-                is: IsResponse {
+            StubResponse::new_is(
+                IsResponse {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
                     mode: ResponseMode::Text,
                 },
-                behaviors: None,
-                rift: None,
-            }
+                None,
+                None,
+            )
         }
     }
 }
@@ -581,6 +622,7 @@ impl From<StubResponse> for StubResponseOut {
                 is,
                 behaviors,
                 rift,
+                ..
             } => StubResponseOut {
                 is: Some(IsResponseOut {
                     status_code: is.status_code,
@@ -1145,6 +1187,51 @@ pub enum ImposterError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // Issue #479: `_behaviors` are parsed and a non-string body is rendered ONCE at construction,
+    // so the request hot path reads cached values instead of re-deserializing/re-serializing.
+    #[test]
+    fn is_response_precomputes_behaviors_and_rendered_body() {
+        let resp: StubResponse = serde_json::from_value(json!({
+            "is": { "statusCode": 200, "body": { "id": 1, "name": "x" } },
+            "_behaviors": { "wait": 25 }
+        }))
+        .unwrap();
+        match resp {
+            StubResponse::Is {
+                behaviors_parsed,
+                rendered_body,
+                ..
+            } => {
+                assert!(
+                    behaviors_parsed.is_some(),
+                    "_behaviors must be parsed once at construction"
+                );
+                assert_eq!(
+                    rendered_body.as_deref(),
+                    Some(r#"{"id":1,"name":"x"}"#),
+                    "a non-string body must be pre-rendered once at construction"
+                );
+            }
+            other => panic!("expected Is, got {other:?}"),
+        }
+
+        // A string body needs no rendering, and no _behaviors means no parsed behaviors.
+        let plain: StubResponse =
+            serde_json::from_value(json!({ "is": { "statusCode": 200, "body": "hello" } }))
+                .unwrap();
+        match plain {
+            StubResponse::Is {
+                behaviors_parsed,
+                rendered_body,
+                ..
+            } => {
+                assert!(behaviors_parsed.is_none());
+                assert!(rendered_body.is_none(), "a string body is not pre-rendered");
+            }
+            other => panic!("expected Is, got {other:?}"),
+        }
+    }
 
     // Issue #266: `flowIdSource` is flat under `flowState` and survives a serialize round-trip.
     #[test]
