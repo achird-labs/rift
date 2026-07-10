@@ -488,7 +488,10 @@ http(429, #{ error: "rate limited" }).header("Retry-After", "60")
 
 ## Execution Limits
 
-`_rift.script` execution is bounded so a runaway script cannot wedge the engine.
+Script execution is bounded so a runaway script cannot wedge the engine. This applies to
+`_rift.script` **and** to the Mountebank-compatible JavaScript hooks — response `inject`,
+predicate `inject`, and the `decorate` behavior — all of which run off the async workers
+(on a dedicated script-worker pool) under the same deadline.
 
 - **Wall-clock timeout.** Each script runs under a deadline — `_rift.scriptEngine.timeoutMs` if
   configured, otherwise **5000 ms**. Rhai is interrupted mid-run when the deadline passes.
@@ -497,8 +500,17 @@ http(429, #{ error: "rate limited" }).header("Retry-After", "60")
   and a recursion limit of **512**. The client is still released at the wall-clock timeout with an
   error; a pathological nested loop may keep a background worker busy a little longer, but it cannot
   run unbounded.
-- **On timeout or error** — a compile error, a runtime error, or exceeding a bound — the response is
-  `500 Internal Server Error` carrying an `x-rift-script-error: true` header.
+- **On timeout or error** — a compile error, a runtime error, or exceeding a bound — a
+  `_rift.script` failure is a `500 Internal Server Error` carrying an
+  `x-rift-script-error: true` header; a failing Mountebank `inject` (response or predicate) is a
+  `400` with a Mountebank-shaped `{"errors": [...]}` body, and a failing `decorate` serves the
+  undecorated response with an `x-rift-decorate-error: true` header (or a `500` under
+  `strictBehaviors`).
+- **Amortized JavaScript startup.** The Mountebank hooks reuse a per-worker-thread Boa context and
+  a parsed-script cache keyed by source content, so steady-state execution skips both JS realm
+  construction and re-parsing. Like Mountebank itself — which evaluates every injection in one
+  shared Node.js process — scripts on the same worker thread share JS globals; per-imposter
+  `state` isolation is unaffected.
 
 ```json
 {

@@ -417,6 +417,49 @@ pub fn apply_js_or_rhai_decorate(
     }
 }
 
+/// Run [`apply_js_or_rhai_decorate`] off the async worker with a wall-clock deadline
+/// (issue #476) — the same `spawn_blocking` + `tokio::time::timeout` shape as
+/// `scripting::bounded`. Takes and returns the header map by value because the execution moves
+/// to a blocking thread. No abort flag: Boa has no per-instruction interrupt, so after a timeout
+/// the loop-iteration cap (issue #327) is what eventually frees the blocking thread; the client
+/// is released at the deadline either way. The deadline is the imposter's
+/// `resolve_script_timeout_ms` budget, shared with `_rift.script`.
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_decorate_bounded(
+    script: String,
+    request: RequestContext,
+    body: String,
+    status: u16,
+    mut headers: HashMap<String, String>,
+    imposter_port: u16,
+    stub_id: Option<String>,
+    timeout: std::time::Duration,
+) -> Result<(String, u16, HashMap<String, String>), DecorateError> {
+    let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+    let handle = tokio::task::spawn_blocking(move || {
+        apply_js_or_rhai_decorate(
+            &script,
+            &request,
+            &body,
+            status,
+            &mut headers,
+            imposter_port,
+            stub_id.as_deref(),
+        )
+        .map(|(body, status)| (body, status, headers))
+    });
+    match tokio::time::timeout(timeout, handle).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(join_err)) => Err(DecorateError::JavaScript(format!(
+            "decorate task panicked: {join_err}"
+        ))),
+        Err(_elapsed) => {
+            tracing::warn!("decorate script timed out after {timeout_ms}ms");
+            Err(DecorateError::Timeout(timeout_ms))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -927,5 +970,58 @@ mod tests {
     fn test_create_stub_recorded_from_none_when_not_provided() {
         let stub = create_stub_from_proxy_response(vec![], 200, &[], b"OK", None, None, None);
         assert!(stub.recorded_from.is_none());
+    }
+
+    // =====================================================================================
+    // Issue #476: decorate runs off the async worker with a wall-clock deadline.
+    // =====================================================================================
+
+    // AC2 (happy): a fast decorate mutates the response through the bounded path.
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn mb_decorate_bounded_applies() {
+        let (body, status, _headers) = apply_decorate_bounded(
+            "function (request, response) { response.body = response.body + '-decorated'; }"
+                .to_string(),
+            decorate_req(),
+            "orig".to_string(),
+            200,
+            std::collections::HashMap::new(),
+            test_port(),
+            None,
+            std::time::Duration::from_millis(60_000),
+        )
+        .await
+        .expect("fast decorate");
+        assert_eq!(body, "orig-decorated");
+        assert_eq!(status, 200);
+    }
+
+    // AC2: a runaway decorate yields DecorateError::Timeout near the deadline instead of
+    // blocking a runtime worker for its full duration.
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn mb_decorate_bounded_times_out() {
+        let start = std::time::Instant::now();
+        let res = apply_decorate_bounded(
+            "function (request, response) { var i = 0; while (i < 100000000) { i += 1; } }"
+                .to_string(),
+            decorate_req(),
+            "orig".to_string(),
+            200,
+            std::collections::HashMap::new(),
+            test_port(),
+            None,
+            std::time::Duration::from_millis(25),
+        )
+        .await;
+        match res {
+            Err(DecorateError::Timeout(ms)) => assert_eq!(ms, 25),
+            other => panic!("expected DecorateError::Timeout, got {other:?}"),
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "must return near the configured deadline, not after the loop cap"
+        );
     }
 }

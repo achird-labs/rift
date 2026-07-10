@@ -12,6 +12,9 @@ pub enum DecorateError {
     JavaScript(String),
     #[error("Could not parse JavaScript decorate function")]
     JsParseFailure,
+    /// The script exceeded its wall-clock deadline on the bounded execution path (issue #476).
+    #[error("decorate script timed out after {0}ms")]
+    Timeout(u64),
 }
 
 /// Execute shell transform command

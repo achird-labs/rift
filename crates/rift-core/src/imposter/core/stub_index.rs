@@ -66,6 +66,22 @@ pub(crate) struct StubIndex {
     prefix: Vec<(String, Vec<usize>)>,
     contains: Vec<(String, Vec<usize>)>,
     fallback: Vec<usize>,
+    /// Whether any stub's predicate tree contains an `inject` predicate, anywhere (including
+    /// nested under `and`/`or`/`not`). Computed once per snapshot so the request hot path can
+    /// gate the bounded (spawn_blocking) matching route on it for free (issue #476).
+    has_inject: bool,
+}
+
+/// Does this predicate tree contain an `inject` predicate anywhere?
+fn predicate_contains_inject(pred: &Predicate) -> bool {
+    match &pred.operation {
+        PredicateOperation::Inject(_) => true,
+        PredicateOperation::Not(inner) => predicate_contains_inject(inner),
+        PredicateOperation::And(children) | PredicateOperation::Or(children) => {
+            children.iter().any(predicate_contains_inject)
+        }
+        _ => false,
+    }
 }
 
 impl StubIndex {
@@ -86,13 +102,23 @@ impl StubIndex {
             }
         }
 
+        let has_inject = stubs
+            .iter()
+            .any(|s| s.stub.predicates.iter().any(predicate_contains_inject));
+
         StubIndex {
             stubs,
             exact,
             prefix: prefix.into_iter().collect(),
             contains: contains.into_iter().collect(),
             fallback,
+            has_inject,
         }
+    }
+
+    /// Whether any stub in this snapshot uses an `inject` predicate (issue #476).
+    pub(crate) fn has_inject(&self) -> bool {
+        self.has_inject
     }
 
     /// The stub snapshot this index describes.
@@ -375,5 +401,33 @@ mod tests {
             Some(0),
             "the earlier match-all stub must win over the anchored stub"
         );
+    }
+
+    // Issue #476: the has_inject gate — computed once at index build — detects an inject
+    // predicate anywhere in a stub's predicate tree, including nested under and/or/not, and
+    // stays false for scriptless stub sets so they keep the inline matching fast path.
+    #[test]
+    fn has_inject_detects_top_level_and_nested() {
+        let scriptless = StubIndex::build(stub_states(&[
+            json!([{"equals": {"path": "/a"}}]),
+            json!([{"and": [{"equals": {"path": "/b"}}, {"exists": {"query": {"q": true}}}]}]),
+        ]));
+        assert!(!scriptless.has_inject());
+
+        let top_level = StubIndex::build(stub_states(&[
+            json!([{"equals": {"path": "/a"}}]),
+            json!([{"inject": "function (config) { return true; }"}]),
+        ]));
+        assert!(top_level.has_inject());
+
+        let under_and = StubIndex::build(stub_states(&[json!([
+            {"and": [{"equals": {"path": "/a"}}, {"inject": "function (config) { return true; }"}]}
+        ])]));
+        assert!(under_and.has_inject());
+
+        let under_not_in_or = StubIndex::build(stub_states(&[json!([
+            {"or": [{"equals": {"path": "/a"}}, {"not": {"inject": "function (config) { return true; }"}}]}
+        ])]));
+        assert!(under_not_in_or.has_inject());
     }
 }

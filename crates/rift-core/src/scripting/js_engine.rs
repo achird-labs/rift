@@ -274,6 +274,197 @@ pub(crate) fn bounded_js_context() -> Context {
     context
 }
 
+/// Cap on distinct parsed scripts retained per MB pool worker (issue #476). Same clear-when-full
+/// policy as the Rhai `compiled_cache` (#356 B3): comfortably above any realistic imposter
+/// working set, while bounding memory against a churny one.
+const MB_SCRIPT_CACHE_CAPACITY: usize = 64;
+
+/// Per-worker reused Boa realm + parsed-`Script` cache for the Mountebank JS hooks (issue #476).
+///
+/// Building a fresh `Context::default()` constructs the entire JS realm (intrinsics, prototypes)
+/// and `context.eval` re-parses the source — per call, previously the dominant cost of a trivial
+/// MB hook. Boa has no bytecode serialization and a parsed [`boa_engine::Script`] is a `Gc`
+/// handle tied to the realm it was parsed in, so the amortization unit is the pair: one context
+/// per pool worker, plus that context's parsed scripts keyed by source hash.
+///
+/// Owned by each MB pool worker as a **loop local**, never as a Rust `thread_local` — a Boa
+/// `Context` must not be dropped from a TLS destructor: `boa_gc`'s own thread-local heap can be
+/// destroyed first, and the `Gc` handles inside the context then panic in a destructor (process
+/// abort). The worker loop drops it on a live thread instead.
+///
+/// Reusing a realm means one script's writes to JS globals are visible to later scripts on the
+/// same worker — Mountebank parity: MB evals every injection in one shared Node process, so
+/// injected globals leak there too. Every global the hooks *contract* on is re-set per run
+/// (`__config`/`__logger`/state globals; config-decorate re-registers `require()` with a fresh
+/// module cache each run), and the per-imposter state object is rebuilt per run from the
+/// port-keyed `IMPOSTER_STATE` map, so cross-imposter isolation of *state* is unaffected. One
+/// worker-history quirk: only config-decorate registers `require`, so after a worker has run
+/// one, a later inject on the same worker sees a live (stale-cache) `require` global where a
+/// fresh worker would throw `ReferenceError` — inject scripts were never promised `require`,
+/// and MB itself exposes it everywhere, so this is tolerated rather than scrubbed per run.
+struct MbJsThread {
+    context: Context,
+    scripts: MbScriptCache,
+}
+
+impl MbJsThread {
+    fn new() -> Self {
+        Self {
+            context: bounded_js_context(),
+            scripts: std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// Script-source → parsed-`Script` cache for one worker's MB context.
+type MbScriptCache = std::collections::HashMap<u64, (String, boa_engine::Script)>;
+
+/// Test-only observable proving the parsed-`Script` cache works (issue #476 AC5): total parses
+/// (cache misses) per source, across all pool workers.
+#[cfg(test)]
+static MB_PARSE_LOG: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<String, u64>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+/// Total parses of every cached source containing `fragment` (test observable; the fragment
+/// avoids coupling the test to the exact executor wrapper text).
+#[cfg(test)]
+pub(crate) fn mb_script_parse_count_containing(fragment: &str) -> u64 {
+    MB_PARSE_LOG
+        .lock()
+        .iter()
+        .filter(|(source, _)| source.contains(fragment))
+        .map(|(_, n)| n)
+        .sum()
+}
+
+/// Evaluate `source` against a worker's reused context, parsing at most once per distinct
+/// source. A hit is source-verified (like `compiled_cache` #356 B4): a `u64` collision would
+/// otherwise evaluate the WRONG script, so a mismatch re-parses instead.
+fn eval_mb_script(
+    context: &mut Context,
+    scripts: &mut MbScriptCache,
+    source: &str,
+) -> JsResult<JsValue> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hasher);
+    let key = hasher.finish();
+
+    if let Some((cached_source, script)) = scripts.get(&key)
+        && cached_source == source
+    {
+        let script = script.clone();
+        return script.evaluate(context);
+    }
+
+    let script = boa_engine::Script::parse(Source::from_bytes(source.as_bytes()), None, context)?;
+    #[cfg(test)]
+    {
+        *MB_PARSE_LOG.lock().entry(source.to_string()).or_insert(0) += 1;
+    }
+    if scripts.len() >= MB_SCRIPT_CACHE_CAPACITY {
+        scripts.clear();
+    }
+    scripts.insert(key, (source.to_string(), script.clone()));
+    script.evaluate(context)
+}
+
+/// A unit of work for the MB script pool: runs on a worker with that worker's reused context.
+type MbJob = Box<dyn FnOnce(&mut MbJsThread) + Send>;
+
+thread_local! {
+    /// Set on MB pool worker threads, so a reentrant executor call (a native hook re-entering
+    /// an executor mid-job) runs inline on a fresh context instead of deadlocking on its own
+    /// worker's queue.
+    static IS_MB_WORKER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The dedicated worker pool that executes every Mountebank JS hook (issue #476). Workers own
+/// their [`MbJsThread`] as a loop local (see its doc for why TLS is unsound here) and are reused
+/// for the process lifetime, so realm construction and script parsing amortize across requests.
+/// Sized like the `_rift.script` pool (`script_pool.rs`): half the cores, clamped to [2, 16] —
+/// these are CPU-bound interpreter jobs.
+///
+/// A runaway script occupies its worker until the loop-iteration cap (#327) throws — the same
+/// thread-lingering trade-off as the `spawn_blocking` path (#308), but bounded by the pool size;
+/// callers are released at their wall-clock deadline regardless.
+fn mb_js_pool() -> &'static crossbeam::channel::Sender<MbJob> {
+    static POOL: std::sync::OnceLock<crossbeam::channel::Sender<MbJob>> =
+        std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        // Minimum 4 (not the script pool's 2): a runaway script parks its worker until the loop
+        // cap throws, so with only 2 workers two concurrent runaways would stall ALL MB
+        // scripting on small machines.
+        let workers = (num_cpus::get() / 2).clamp(4, 16);
+        let (tx, rx) = crossbeam::channel::unbounded::<MbJob>();
+        for worker_id in 0..workers {
+            let rx = rx.clone();
+            let spawned = std::thread::Builder::new()
+                .name(format!("mb-js-worker-{worker_id}"))
+                .spawn(move || {
+                    IS_MB_WORKER.set(true);
+                    let mut state = MbJsThread::new();
+                    while let Ok(job) = rx.recv() {
+                        // A panicking job (an engine bug — scripts themselves error, not panic)
+                        // must not kill the worker; its context may be mid-mutation, so rebuild.
+                        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            job(&mut state)
+                        }));
+                        if run.is_err() {
+                            tracing::error!("MB script job panicked; rebuilding worker context");
+                            state = MbJsThread::new();
+                        }
+                    }
+                });
+            if let Err(e) = spawned {
+                tracing::error!("failed to spawn MB script worker {worker_id}: {e}");
+            }
+        }
+        tx
+    })
+}
+
+/// Submit a job to the MB script pool. `Err` only if the pool is gone (never in practice: the
+/// sender is a process-lifetime static).
+///
+/// The caller's `tracing` dispatcher travels with the job, so script-logger events (issue #355)
+/// keep routing to whatever subscriber was active at the call site — a thread-scoped capture
+/// included — exactly as they did when the hooks ran inline. (Span *parentage* does not cross
+/// the pool boundary, like any thread hop; the logger events carry the imposter port and stub
+/// id as explicit fields.)
+fn submit_mb_job(job: MbJob) -> Result<()> {
+    let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+    let wrapped: MbJob = Box::new(move |state| {
+        tracing::dispatcher::with_default(&dispatcher, || job(state));
+    });
+    mb_js_pool()
+        .send(wrapped)
+        .map_err(|_| anyhow!("MB script pool is unavailable"))
+}
+
+/// Run `f` on an MB pool worker's reused context and block until it completes. The caller is
+/// always off the async runtime already (a `spawn_blocking` matcher thread, a bounded decorate
+/// thread, or a test); the pool hop is what buys context/parse reuse. `Err` means the job
+/// infrastructure failed (worker panicked mid-job, pool unavailable) — script errors travel
+/// inside `R`. On a reentrant call from a worker itself, runs inline on a fresh context
+/// (dropped safely on the live thread).
+fn with_mb_js_thread<R, F>(f: F) -> Result<R>
+where
+    R: Send + 'static,
+    F: FnOnce(&mut MbJsThread) -> R + Send + 'static,
+{
+    if IS_MB_WORKER.get() {
+        return Ok(f(&mut MbJsThread::new()));
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    submit_mb_job(Box::new(move |state| {
+        let _ = tx.send(f(state));
+    }))?;
+    rx.recv()
+        .map_err(|_| anyhow!("MB script job failed (worker panicked)"))
+}
+
 /// The top-level function names a JS script declares, for the static entrypoint check (issue
 /// #360 Item 1). Two-phase, deliberately NOT a blind `context.eval` of the raw source:
 ///
@@ -1532,10 +1723,71 @@ pub fn execute_mountebank_inject(
     imposter_port: u16,
     stub_id: Option<&str>,
 ) -> Result<MountebankInjectResponse> {
-    let mut context = bounded_js_context();
+    let inject_fn = inject_fn.to_string();
+    let request = request.clone();
+    let stub_id = stub_id.map(str::to_string);
+    with_mb_js_thread(move |thread| {
+        execute_mountebank_inject_in(
+            thread,
+            &inject_fn,
+            &request,
+            imposter_port,
+            stub_id.as_deref(),
+        )
+    })?
+}
+
+/// Run a Mountebank response-`inject` on the MB script pool with a wall-clock deadline
+/// (issue #476) — the async counterpart of [`execute_mountebank_inject`], mirroring the
+/// `spawn_blocking` + `tokio::time::timeout` shape of `bounded::should_inject_bounded` but
+/// submitting straight to the pool (no blocking thread is parked while the script runs). No
+/// abort flag: Boa exposes no per-instruction interrupt, so after a timeout the loop-iteration
+/// cap (issue #327) is what eventually frees the worker. The deadline is the imposter's
+/// `resolve_script_timeout_ms` budget, shared with `_rift.script`.
+pub async fn execute_mountebank_inject_bounded(
+    inject_fn: String,
+    request: MountebankRequest,
+    imposter_port: u16,
+    stub_id: Option<String>,
+    timeout: std::time::Duration,
+) -> Result<MountebankInjectResponse> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    submit_mb_job(Box::new(move |thread| {
+        let _ = tx.send(execute_mountebank_inject_in(
+            thread,
+            &inject_fn,
+            &request,
+            imposter_port,
+            stub_id.as_deref(),
+        ));
+    }))?;
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_recv)) => Err(anyhow!("inject task failed (script worker panicked)")),
+        Err(_elapsed) => {
+            tracing::warn!(
+                "Mountebank inject execution timed out after {}ms",
+                timeout.as_millis()
+            );
+            Err(anyhow!(
+                "inject execution timed out after {}ms",
+                timeout.as_millis()
+            ))
+        }
+    }
+}
+
+fn execute_mountebank_inject_in(
+    thread: &mut MbJsThread,
+    inject_fn: &str,
+    request: &MountebankRequest,
+    imposter_port: u16,
+    stub_id: Option<&str>,
+) -> Result<MountebankInjectResponse> {
+    let MbJsThread { context, scripts } = thread;
 
     // Create request object
-    let request_obj = create_mountebank_request_object(&mut context, request)?;
+    let request_obj = create_mountebank_request_object(&mut *context, request)?;
 
     // Get current (persisted, per-port) state for this imposter — shared across predicate
     // injects, response injects, and decorate for the same imposter (issue #355 Item 0).
@@ -1545,41 +1797,41 @@ pub fn execute_mountebank_inject(
     let cell = imposter_state_cell(imposter_port);
     let mut imposter_state = cell.lock();
     let state_map = imposter_state.clone();
-    let state_obj = json_to_js(&mut context, &Value::Object(state_map))?;
+    let state_obj = json_to_js(&mut *context, &Value::Object(state_map))?;
 
     let logger_obj =
-        create_script_logger_object(&mut context, imposter_port, stub_id.map(str::to_owned))?;
+        create_script_logger_object(&mut *context, imposter_port, stub_id.map(str::to_owned))?;
 
     // Build config = { request, state, logger } and flatten request fields onto config itself.
-    let config_obj = create_js_object(&context);
+    let config_obj = create_js_object(&*context);
     config_obj
         .set(
             js_string!("request"),
             request_obj.clone(),
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set config.request: {e}"))?;
     config_obj
-        .set(js_string!("state"), state_obj.clone(), false, &mut context)
+        .set(js_string!("state"), state_obj.clone(), false, &mut *context)
         .map_err(|e| anyhow!("Failed to set config.state: {e}"))?;
     config_obj
         .set(
             js_string!("logger"),
             logger_obj.clone(),
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set config.logger: {e}"))?;
-    flatten_request_onto(&config_obj, &request_obj, &mut context)?;
+    flatten_request_onto(&config_obj, &request_obj, &mut *context)?;
 
     // Set global variables consumed by the wrapper script below.
     let global = context.global_object();
     global
-        .set(js_string!("__config"), config_obj, false, &mut context)
+        .set(js_string!("__config"), config_obj, false, &mut *context)
         .map_err(|e| anyhow!("Failed to set config: {e}"))?;
     global
-        .set(js_string!("__logger"), logger_obj, false, &mut context)
+        .set(js_string!("__logger"), logger_obj, false, &mut *context)
         .map_err(|e| anyhow!("Failed to set logger: {e}"))?;
     // injectState and imposterState are the SAME shared, persisted state object as config.state.
     global
@@ -1587,7 +1839,7 @@ pub fn execute_mountebank_inject(
             js_string!("__injectState"),
             state_obj.clone(),
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set injectState: {e}"))?;
     global
@@ -1595,7 +1847,7 @@ pub fn execute_mountebank_inject(
             js_string!("__imposterState"),
             state_obj,
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set imposterState: {e}"))?;
 
@@ -1618,21 +1870,20 @@ pub fn execute_mountebank_inject(
     );
 
     // Execute the script
-    let result = context
-        .eval(Source::from_bytes(wrapper_script.as_bytes()))
+    let result = eval_mb_script(context, scripts, &wrapper_script)
         .map_err(|e| anyhow!("Failed to execute inject function: {e}"))?;
 
     // Save updated state back (config.state/injectState/imposterState all alias the same object).
     let updated_state = global
-        .get(js_string!("__imposterState"), &mut context)
+        .get(js_string!("__imposterState"), &mut *context)
         .map_err(|e| anyhow!("Failed to get updated state: {e}"))?;
 
-    if let Ok(Value::Object(map)) = js_to_json(&mut context, &updated_state) {
+    if let Ok(Value::Object(map)) = js_to_json(&mut *context, &updated_state) {
         *imposter_state = map;
     }
 
     // Parse the response
-    parse_mountebank_response(&mut context, result)
+    parse_mountebank_response(&mut *context, result)
 }
 
 /// A Mountebank predicate `inject` function failed — an object-build failure or the script
@@ -1660,9 +1911,22 @@ pub fn execute_predicate_inject(
     request: &MountebankRequest,
     imposter_port: u16,
 ) -> anyhow::Result<bool> {
-    let mut context = bounded_js_context();
+    let inject_fn = inject_fn.to_string();
+    let request = request.clone();
+    with_mb_js_thread(move |thread| {
+        execute_predicate_inject_in(thread, &inject_fn, &request, imposter_port)
+    })?
+}
 
-    let request_obj = match create_mountebank_request_object(&mut context, request) {
+fn execute_predicate_inject_in(
+    thread: &mut MbJsThread,
+    inject_fn: &str,
+    request: &MountebankRequest,
+    imposter_port: u16,
+) -> anyhow::Result<bool> {
+    let MbJsThread { context, scripts } = thread;
+
+    let request_obj = match create_mountebank_request_object(&mut *context, request) {
         Ok(obj) => obj,
         Err(e) => {
             tracing::warn!("inject predicate: failed to build request object: {e}");
@@ -1678,7 +1942,7 @@ pub fn execute_predicate_inject(
     let cell = imposter_state_cell(imposter_port);
     let mut imposter_state = cell.lock();
     let state_map = imposter_state.clone();
-    let state_obj = match json_to_js(&mut context, &Value::Object(state_map)) {
+    let state_obj = match json_to_js(&mut *context, &Value::Object(state_map)) {
         Ok(obj) => obj,
         Err(e) => {
             tracing::warn!("inject predicate: failed to build state object: {e}");
@@ -1691,7 +1955,7 @@ pub fn execute_predicate_inject(
     // stub_id is left None here: predicate matching operates on a `PredicateOperation` tree and
     // the owning stub's id is not threaded through the matcher without an invasive change to the
     // predicate-matching signatures (issue #355 AC1 note).
-    let logger_obj = match create_script_logger_object(&mut context, imposter_port, None) {
+    let logger_obj = match create_script_logger_object(&mut *context, imposter_port, None) {
         Ok(obj) => obj,
         Err(e) => {
             tracing::warn!("inject predicate: failed to build logger object: {e}");
@@ -1701,40 +1965,40 @@ pub fn execute_predicate_inject(
         }
     };
 
-    let config_obj = create_js_object(&context);
+    let config_obj = create_js_object(&*context);
     if config_obj
         .set(
             js_string!("request"),
             request_obj.clone(),
             false,
-            &mut context,
+            &mut *context,
         )
         .is_err()
         || config_obj
-            .set(js_string!("state"), state_obj.clone(), false, &mut context)
+            .set(js_string!("state"), state_obj.clone(), false, &mut *context)
             .is_err()
         || config_obj
             .set(
                 js_string!("logger"),
                 logger_obj.clone(),
                 false,
-                &mut context,
+                &mut *context,
             )
             .is_err()
-        || flatten_request_onto(&config_obj, &request_obj, &mut context).is_err()
+        || flatten_request_onto(&config_obj, &request_obj, &mut *context).is_err()
     {
         tracing::warn!("inject predicate: failed to build config object");
         return Err(PredicateInjectionError("failed to build config object".to_string()).into());
     }
 
     let global = context.global_object();
-    let _ = global.set(js_string!("__config"), config_obj, false, &mut context);
-    let _ = global.set(js_string!("__logger"), logger_obj, false, &mut context);
+    let _ = global.set(js_string!("__config"), config_obj, false, &mut *context);
+    let _ = global.set(js_string!("__logger"), logger_obj, false, &mut *context);
     let _ = global.set(
         js_string!("__imposterState"),
         state_obj,
         false,
-        &mut context,
+        &mut *context,
     );
 
     let wrapper_script = format!(
@@ -1745,7 +2009,7 @@ pub fn execute_predicate_inject(
         "#
     );
 
-    let result = match context.eval(Source::from_bytes(wrapper_script.as_bytes())) {
+    let result = match eval_mb_script(context, scripts, &wrapper_script) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("inject predicate: script execution error: {e}");
@@ -1754,8 +2018,8 @@ pub fn execute_predicate_inject(
     };
 
     // Update the persisted, shared per-port state.
-    if let Ok(updated_state) = global.get(js_string!("__imposterState"), &mut context)
-        && let Ok(Value::Object(map)) = js_to_json(&mut context, &updated_state)
+    if let Ok(updated_state) = global.get(js_string!("__imposterState"), &mut *context)
+        && let Ok(Value::Object(map)) = js_to_json(&mut *context, &updated_state)
     {
         *imposter_state = map;
     }
@@ -1773,9 +2037,29 @@ pub fn execute_predicate_generator_inject(
     request: &MountebankRequest,
     existing_predicates: &[serde_json::Value],
 ) -> Vec<serde_json::Value> {
-    let mut context = bounded_js_context();
+    let inject_fn = inject_fn.to_string();
+    let request = request.clone();
+    let existing_predicates = existing_predicates.to_vec();
+    match with_mb_js_thread(move |thread| {
+        execute_predicate_generator_inject_in(thread, &inject_fn, &request, &existing_predicates)
+    }) {
+        Ok(predicates) => predicates,
+        Err(e) => {
+            tracing::warn!("predicateGenerator inject: script pool failure: {e}");
+            Vec::new()
+        }
+    }
+}
 
-    let request_obj = match create_mountebank_request_object(&mut context, request) {
+fn execute_predicate_generator_inject_in(
+    thread: &mut MbJsThread,
+    inject_fn: &str,
+    request: &MountebankRequest,
+    existing_predicates: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
+    let MbJsThread { context, scripts } = thread;
+
+    let request_obj = match create_mountebank_request_object(&mut *context, request) {
         Ok(obj) => obj,
         Err(e) => {
             tracing::warn!("predicateGenerator inject: failed to build request object: {e}");
@@ -1783,18 +2067,18 @@ pub fn execute_predicate_generator_inject(
         }
     };
 
-    let predicates_val = match json_to_js(&mut context, &Value::Array(existing_predicates.to_vec()))
-    {
-        Ok(obj) => obj,
-        Err(e) => {
-            tracing::warn!("predicateGenerator inject: failed to build predicates array: {e}");
-            return Vec::new();
-        }
-    };
+    let predicates_val =
+        match json_to_js(&mut *context, &Value::Array(existing_predicates.to_vec())) {
+            Ok(obj) => obj,
+            Err(e) => {
+                tracing::warn!("predicateGenerator inject: failed to build predicates array: {e}");
+                return Vec::new();
+            }
+        };
 
     // No imposter is running yet during proxy recording, so there is no per-port state to tag
     // the logger with (port 0 placeholder) and no stub id exists yet (stub_id left None).
-    let logger_obj = match create_script_logger_object(&mut context, 0, None) {
+    let logger_obj = match create_script_logger_object(&mut *context, 0, None) {
         Ok(obj) => obj,
         Err(e) => {
             tracing::warn!("predicateGenerator inject: failed to build logger object: {e}");
@@ -1803,13 +2087,13 @@ pub fn execute_predicate_generator_inject(
     };
 
     let global = context.global_object();
-    let _ = global.set(js_string!("__request"), request_obj, false, &mut context);
-    let _ = global.set(js_string!("__logger"), logger_obj, false, &mut context);
+    let _ = global.set(js_string!("__request"), request_obj, false, &mut *context);
+    let _ = global.set(js_string!("__logger"), logger_obj, false, &mut *context);
     let _ = global.set(
         js_string!("__predicates"),
         predicates_val,
         false,
-        &mut context,
+        &mut *context,
     );
 
     let wrapper_script = format!(
@@ -1821,7 +2105,7 @@ pub fn execute_predicate_generator_inject(
         "#
     );
 
-    let result = match context.eval(Source::from_bytes(wrapper_script.as_bytes())) {
+    let result = match eval_mb_script(context, scripts, &wrapper_script) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("predicateGenerator inject: script execution error: {e}");
@@ -2146,20 +2430,50 @@ pub fn execute_mountebank_config_decorate(
     imposter_port: u16,
     stub_id: Option<&str>,
 ) -> Result<MountebankDecorateResponse> {
-    let mut context = bounded_js_context();
+    let decorate_fn = decorate_fn.to_string();
+    let request = request.clone();
+    let response_body = response_body.to_string();
+    let response_headers = response_headers.clone();
+    let stub_id = stub_id.map(str::to_string);
+    with_mb_js_thread(move |thread| {
+        execute_mountebank_config_decorate_in(
+            thread,
+            &decorate_fn,
+            &request,
+            &response_body,
+            response_status,
+            &response_headers,
+            imposter_port,
+            stub_id.as_deref(),
+        )
+    })?
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_mountebank_config_decorate_in(
+    thread: &mut MbJsThread,
+    decorate_fn: &str,
+    request: &MountebankRequest,
+    response_body: &str,
+    response_status: u16,
+    response_headers: &std::collections::HashMap<String, String>,
+    imposter_port: u16,
+    stub_id: Option<&str>,
+) -> Result<MountebankDecorateResponse> {
+    let MbJsThread { context, scripts } = thread;
 
     // Create request object
-    let request_obj = create_mountebank_request_object(&mut context, request)?;
+    let request_obj = create_mountebank_request_object(&mut *context, request)?;
 
     // Create response object
-    let response_obj = create_js_object(&context);
+    let response_obj = create_js_object(&*context);
 
     response_obj
         .set(
             js_string!("statusCode"),
             JsValue::from(response_status as i32),
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set statusCode: {e}"))?;
 
@@ -2168,24 +2482,24 @@ pub fn execute_mountebank_config_decorate(
             js_string!("body"),
             JsValue::from(js_string!(response_body.to_string())),
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set body: {e}"))?;
 
     // Create headers object for response
-    let headers_obj = create_js_object(&context);
+    let headers_obj = create_js_object(&*context);
     for (k, v) in response_headers {
         headers_obj
             .set(
                 js_string!(k.clone()),
                 JsValue::from(js_string!(v.clone())),
                 false,
-                &mut context,
+                &mut *context,
             )
             .map_err(|e| anyhow!("Failed to set header: {e}"))?;
     }
     response_obj
-        .set(js_string!("headers"), headers_obj, false, &mut context)
+        .set(js_string!("headers"), headers_obj, false, &mut *context)
         .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
 
     // Get current (persisted, per-port) state for this imposter — shared with predicate/response
@@ -2196,18 +2510,18 @@ pub fn execute_mountebank_config_decorate(
     let cell = imposter_state_cell(imposter_port);
     let mut imposter_state = cell.lock();
     let state_map = imposter_state.clone();
-    let state_obj = json_to_js(&mut context, &Value::Object(state_map))?;
+    let state_obj = json_to_js(&mut *context, &Value::Object(state_map))?;
     let logger_obj =
-        create_script_logger_object(&mut context, imposter_port, stub_id.map(str::to_owned))?;
+        create_script_logger_object(&mut *context, imposter_port, stub_id.map(str::to_owned))?;
 
     // Build the config object: { request, response, path, state, logger } + flattened request.
-    let config_obj = create_js_object(&context);
+    let config_obj = create_js_object(&*context);
     config_obj
         .set(
             js_string!("request"),
             request_obj.clone(),
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set config.request: {e}"))?;
     config_obj
@@ -2215,7 +2529,7 @@ pub fn execute_mountebank_config_decorate(
             js_string!("response"),
             JsValue::from(response_obj),
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set config.response: {e}"))?;
     config_obj
@@ -2223,20 +2537,20 @@ pub fn execute_mountebank_config_decorate(
             js_string!("path"),
             JsValue::from(js_string!(request.path.clone())),
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set config.path: {e}"))?;
     config_obj
-        .set(js_string!("state"), state_obj.clone(), false, &mut context)
+        .set(js_string!("state"), state_obj.clone(), false, &mut *context)
         .map_err(|e| anyhow!("Failed to set config.state: {e}"))?;
     config_obj
-        .set(js_string!("logger"), logger_obj, false, &mut context)
+        .set(js_string!("logger"), logger_obj, false, &mut *context)
         .map_err(|e| anyhow!("Failed to set config.logger: {e}"))?;
-    flatten_request_onto(&config_obj, &request_obj, &mut context)?;
+    flatten_request_onto(&config_obj, &request_obj, &mut *context)?;
 
     // Register the CommonJS `require()` global before evaluating the decorate so it (and any
     // module it loads) can use it.
-    register_require(&mut context)?;
+    register_require(&mut *context)?;
 
     // Set global variable
     let global = context.global_object();
@@ -2245,7 +2559,7 @@ pub fn execute_mountebank_config_decorate(
             js_string!("__config"),
             config_obj.clone(),
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set config: {e}"))?;
 
@@ -2260,8 +2574,7 @@ pub fn execute_mountebank_config_decorate(
     );
 
     // Execute the script
-    let result = context
-        .eval(Source::from_bytes(wrapper_script.as_bytes()))
+    let result = eval_mb_script(context, scripts, &wrapper_script)
         .map_err(|e| anyhow!("Failed to execute config decorate function: {e}"))?;
 
     // Parse the modified response
@@ -2271,7 +2584,7 @@ pub fn execute_mountebank_config_decorate(
 
     // Get statusCode
     let status_code = obj
-        .get(js_string!("statusCode"), &mut context)
+        .get(js_string!("statusCode"), &mut *context)
         .ok()
         .and_then(|v| v.as_number())
         .map(|n| n as u16)
@@ -2279,9 +2592,9 @@ pub fn execute_mountebank_config_decorate(
 
     // Get headers
     let mut headers = response_headers.clone();
-    if let Ok(headers_val) = obj.get(js_string!("headers"), &mut context)
+    if let Ok(headers_val) = obj.get(js_string!("headers"), &mut *context)
         && let Some(headers_obj) = headers_val.as_object()
-        && let Ok(keys) = headers_obj.own_property_keys(&mut context)
+        && let Ok(keys) = headers_obj.own_property_keys(&mut *context)
     {
         for key in keys {
             let key_str = match &key {
@@ -2289,7 +2602,7 @@ pub fn execute_mountebank_config_decorate(
                 PropertyKey::Index(i) => i.get().to_string(),
                 PropertyKey::Symbol(_) => continue,
             };
-            if let Ok(val) = headers_obj.get(key.clone(), &mut context)
+            if let Ok(val) = headers_obj.get(key.clone(), &mut *context)
                 && let Some(s) = val.as_string()
             {
                 headers.insert(key_str, s.to_std_string_escaped());
@@ -2299,13 +2612,13 @@ pub fn execute_mountebank_config_decorate(
 
     // Get body
     let body = obj
-        .get(js_string!("body"), &mut context)
+        .get(js_string!("body"), &mut *context)
         .ok()
         .map(|v| {
             if let Some(s) = v.as_string() {
                 s.to_std_string_escaped()
             } else if v.is_object() {
-                let json = js_to_json(&mut context, &v).unwrap_or(Value::Null);
+                let json = js_to_json(&mut *context, &v).unwrap_or(Value::Null);
                 serde_json::to_string(&json).unwrap_or_default()
             } else if v.is_null() || v.is_undefined() {
                 String::new()
@@ -2316,7 +2629,7 @@ pub fn execute_mountebank_config_decorate(
         .unwrap_or_else(|| response_body.to_string());
 
     // Persist any mutation the decorate made to the shared, per-port state.
-    if let Ok(Value::Object(map)) = js_to_json(&mut context, &state_obj) {
+    if let Ok(Value::Object(map)) = js_to_json(&mut *context, &state_obj) {
         *imposter_state = map;
     }
 
@@ -2345,20 +2658,50 @@ pub fn execute_mountebank_decorate(
     imposter_port: u16,
     stub_id: Option<&str>,
 ) -> Result<MountebankDecorateResponse> {
-    let mut context = bounded_js_context();
+    let decorate_fn = decorate_fn.to_string();
+    let request = request.clone();
+    let response_body = response_body.to_string();
+    let response_headers = response_headers.clone();
+    let stub_id = stub_id.map(str::to_string);
+    with_mb_js_thread(move |thread| {
+        execute_mountebank_decorate_in(
+            thread,
+            &decorate_fn,
+            &request,
+            &response_body,
+            response_status,
+            &response_headers,
+            imposter_port,
+            stub_id.as_deref(),
+        )
+    })?
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_mountebank_decorate_in(
+    thread: &mut MbJsThread,
+    decorate_fn: &str,
+    request: &MountebankRequest,
+    response_body: &str,
+    response_status: u16,
+    response_headers: &std::collections::HashMap<String, String>,
+    imposter_port: u16,
+    stub_id: Option<&str>,
+) -> Result<MountebankDecorateResponse> {
+    let MbJsThread { context, scripts } = thread;
 
     // Create request object
-    let request_obj = create_mountebank_request_object(&mut context, request)?;
+    let request_obj = create_mountebank_request_object(&mut *context, request)?;
 
     // Create response object
-    let response_obj = create_js_object(&context);
+    let response_obj = create_js_object(&*context);
 
     response_obj
         .set(
             js_string!("statusCode"),
             JsValue::from(response_status as i32),
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set statusCode: {e}"))?;
 
@@ -2367,40 +2710,40 @@ pub fn execute_mountebank_decorate(
             js_string!("body"),
             JsValue::from(js_string!(response_body.to_string())),
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set body: {e}"))?;
 
     // Create headers object for response
-    let headers_obj = create_js_object(&context);
+    let headers_obj = create_js_object(&*context);
     for (k, v) in response_headers {
         headers_obj
             .set(
                 js_string!(k.clone()),
                 JsValue::from(js_string!(v.clone())),
                 false,
-                &mut context,
+                &mut *context,
             )
             .map_err(|e| anyhow!("Failed to set header: {e}"))?;
     }
     response_obj
-        .set(js_string!("headers"), headers_obj, false, &mut context)
+        .set(js_string!("headers"), headers_obj, false, &mut *context)
         .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
 
     // Config-first convention (issue #355 Item 0): config stands in for the legacy `request` arg,
     // with request fields flattened onto it, and carries the shared per-port state + native
     // logger. Built even though this entrypoint's legacy convention doesn't take a `config`
     // param, so `function(config, response, ...)`-style scripts also work through this path.
-    let config_obj = create_js_object(&context);
+    let config_obj = create_js_object(&*context);
     config_obj
         .set(
             js_string!("request"),
             request_obj.clone(),
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set config.request: {e}"))?;
-    flatten_request_onto(&config_obj, &request_obj, &mut context)?;
+    flatten_request_onto(&config_obj, &request_obj, &mut *context)?;
 
     // Get current (persisted, per-port) state for this imposter — shared with predicate/response
     // injects for the same imposter (previously a throwaway `{}` per call; issue #355 Item 0).
@@ -2410,35 +2753,35 @@ pub fn execute_mountebank_decorate(
     let cell = imposter_state_cell(imposter_port);
     let mut imposter_state = cell.lock();
     let state_map = imposter_state.clone();
-    let state_obj = json_to_js(&mut context, &Value::Object(state_map))?;
+    let state_obj = json_to_js(&mut *context, &Value::Object(state_map))?;
     let logger_obj =
-        create_script_logger_object(&mut context, imposter_port, stub_id.map(str::to_owned))?;
+        create_script_logger_object(&mut *context, imposter_port, stub_id.map(str::to_owned))?;
 
     // Set global variables
     let global = context.global_object();
     global
-        .set(js_string!("__request"), request_obj, false, &mut context)
+        .set(js_string!("__request"), request_obj, false, &mut *context)
         .map_err(|e| anyhow!("Failed to set request: {e}"))?;
     global
-        .set(js_string!("__config"), config_obj, false, &mut context)
+        .set(js_string!("__config"), config_obj, false, &mut *context)
         .map_err(|e| anyhow!("Failed to set config: {e}"))?;
     global
         .set(
             js_string!("__response"),
             JsValue::from(response_obj),
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set response: {e}"))?;
     global
-        .set(js_string!("__logger"), logger_obj, false, &mut context)
+        .set(js_string!("__logger"), logger_obj, false, &mut *context)
         .map_err(|e| anyhow!("Failed to set logger: {e}"))?;
     global
         .set(
             js_string!("__state"),
             state_obj.clone(),
             false,
-            &mut context,
+            &mut *context,
         )
         .map_err(|e| anyhow!("Failed to set state: {e}"))?;
 
@@ -2454,12 +2797,11 @@ pub fn execute_mountebank_decorate(
     );
 
     // Execute the script
-    let result = context
-        .eval(Source::from_bytes(wrapper_script.as_bytes()))
+    let result = eval_mb_script(context, scripts, &wrapper_script)
         .map_err(|e| anyhow!("Failed to execute decorate function: {e}"))?;
 
     // Persist any mutation the decorate made to the shared, per-port state.
-    if let Ok(Value::Object(map)) = js_to_json(&mut context, &state_obj) {
+    if let Ok(Value::Object(map)) = js_to_json(&mut *context, &state_obj) {
         *imposter_state = map;
     }
 
@@ -2470,7 +2812,7 @@ pub fn execute_mountebank_decorate(
 
     // Get statusCode
     let status_code = obj
-        .get(js_string!("statusCode"), &mut context)
+        .get(js_string!("statusCode"), &mut *context)
         .ok()
         .and_then(|v| v.as_number())
         .map(|n| n as u16)
@@ -2478,9 +2820,9 @@ pub fn execute_mountebank_decorate(
 
     // Get headers
     let mut headers = response_headers.clone();
-    if let Ok(headers_val) = obj.get(js_string!("headers"), &mut context)
+    if let Ok(headers_val) = obj.get(js_string!("headers"), &mut *context)
         && let Some(headers_obj) = headers_val.as_object()
-        && let Ok(keys) = headers_obj.own_property_keys(&mut context)
+        && let Ok(keys) = headers_obj.own_property_keys(&mut *context)
     {
         for key in keys {
             let key_str = match &key {
@@ -2488,7 +2830,7 @@ pub fn execute_mountebank_decorate(
                 PropertyKey::Index(i) => i.get().to_string(),
                 PropertyKey::Symbol(_) => continue,
             };
-            if let Ok(val) = headers_obj.get(key.clone(), &mut context)
+            if let Ok(val) = headers_obj.get(key.clone(), &mut *context)
                 && let Some(s) = val.as_string()
             {
                 headers.insert(key_str, s.to_std_string_escaped());
@@ -2498,13 +2840,13 @@ pub fn execute_mountebank_decorate(
 
     // Get body
     let body = obj
-        .get(js_string!("body"), &mut context)
+        .get(js_string!("body"), &mut *context)
         .ok()
         .map(|v| {
             if let Some(s) = v.as_string() {
                 s.to_std_string_escaped()
             } else if v.is_object() {
-                let json = js_to_json(&mut context, &v).unwrap_or(Value::Null);
+                let json = js_to_json(&mut *context, &v).unwrap_or(Value::Null);
                 serde_json::to_string(&json).unwrap_or_default()
             } else if v.is_null() || v.is_undefined() {
                 String::new()
@@ -3278,6 +3620,28 @@ function respond(ctx) {
         let resp = execute_mountebank_inject(script, &mb_req("GET", "/a-path"), test_port(), None)
             .expect("v2 config convention should run");
         assert_eq!(resp.body, "/a-path");
+    }
+
+    // Issue #476 AC5: the MB wrapper script is parsed at most once per pool worker per source —
+    // reruns of the SAME source hit the parsed-Script cache. The pool has at most 16 workers, so
+    // 64 runs parse at most 16 times with the cache and exactly 64 times without it. The body
+    // marker is unique per run (port-derived), so concurrent tests can't touch this count.
+    #[test]
+    fn mb_script_parse_cached_across_calls() {
+        let port = test_port();
+        let marker = format!("parse-cache-{port}");
+        let script =
+            format!("function(config) {{ return {{ statusCode: 200, body: '{marker}' }}; }}");
+        for _ in 0..64 {
+            let resp = execute_mountebank_inject(&script, &mb_req("GET", "/c"), port, None)
+                .expect("inject run");
+            assert_eq!(resp.body, marker);
+        }
+        let parses = mb_script_parse_count_containing(&marker);
+        assert!(
+            (1..=16).contains(&parses),
+            "64 same-source runs must parse at most once per pool worker (≤16), got {parses}"
+        );
     }
 
     // (b) legacy positional: function(request, state, logger) { ...request.path... }

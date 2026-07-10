@@ -99,6 +99,83 @@ impl Imposter {
         Ok(None)
     }
 
+    /// As [`Self::find_matching_stub_with_client`], but bounded (issue #476): when the stub
+    /// snapshot contains an `inject` predicate — synchronous Boa JavaScript evaluated deep inside
+    /// the matcher — the whole matching pass runs on `spawn_blocking` under a wall-clock deadline,
+    /// so a slow or runaway predicate script cannot stall a tokio worker. Scriptless snapshots
+    /// (the overwhelmingly common case, gated by the precomputed `StubIndex::has_inject` flag)
+    /// take the exact inline path — no clones, no blocking-pool hop, no deadline.
+    ///
+    /// No abort flag: Boa has no per-instruction interrupt, so after a timeout the loop-iteration
+    /// cap (issue #327) is what eventually frees the blocking thread.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn find_matching_stub_with_client_bounded(
+        self: &Arc<Self>,
+        method: &str,
+        path: &str,
+        headers_map: &HashMap<String, String>,
+        query: Option<&str>,
+        body: Option<&str>,
+        request_from: Option<&str>,
+        client_ip: Option<&str>,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<Option<(Arc<StubState>, usize)>> {
+        if !self.stub_index.load().has_inject() {
+            return self.find_matching_stub_with_client(
+                method,
+                path,
+                headers_map,
+                query,
+                body,
+                request_from,
+                client_ip,
+            );
+        }
+
+        let this = Arc::clone(self);
+        let method = method.to_string();
+        let path = path.to_string();
+        let headers_map = headers_map.clone();
+        let query = query.map(str::to_string);
+        let body = body.map(str::to_string);
+        let request_from = request_from.map(str::to_string);
+        let client_ip = client_ip.map(str::to_string);
+        let handle = tokio::task::spawn_blocking(move || {
+            this.find_matching_stub_with_client(
+                &method,
+                &path,
+                &headers_map,
+                query.as_deref(),
+                body.as_deref(),
+                request_from.as_deref(),
+                client_ip.as_deref(),
+            )
+        });
+        match tokio::time::timeout(timeout, handle).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(join_err)) => Err(anyhow::anyhow!("matching task panicked: {join_err}")),
+            Err(_elapsed) => {
+                let msg = format!(
+                    "predicate inject matching timed out after {}ms",
+                    timeout.as_millis()
+                );
+                tracing::warn!("{msg}");
+                // This route is only taken when the snapshot contains an inject predicate, so
+                // the deadline firing is attributable to predicate injection — shape it as
+                // `PredicateInjectionError` so the handler serves the same Mountebank-style 400
+                // as any other failing predicate inject (not a backend 500).
+                #[cfg(feature = "javascript")]
+                {
+                    Err(crate::scripting::PredicateInjectionError(msg).into())
+                }
+                #[cfg(not(feature = "javascript"))]
+                {
+                    Err(anyhow::anyhow!(msg))
+                }
+            }
+        }
+    }
+
     /// Reference implementation: the pre-#292 linear scan over *all* stubs. Shares every request
     /// derivation and gate with the indexed path above; only the iteration differs. Used solely by
     /// the differential test to prove the index preserves Mountebank first-match-wins exactly.
@@ -410,5 +487,138 @@ impl Imposter {
             return Some(map);
         }
         None
+    }
+}
+
+// =============================================================================================
+// Issue #476: predicate `inject` runs deep inside the synchronous matcher, so the bounded path
+// wraps the WHOLE matching pass in spawn_blocking + timeout — but only for imposters whose stub
+// set actually contains an inject predicate (StubIndex::has_inject), so scriptless imposters
+// keep the exact inline fast path.
+// =============================================================================================
+#[cfg(test)]
+mod bounded_matching_tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::Duration;
+
+    fn imposter(stubs: serde_json::Value) -> Arc<Imposter> {
+        let cfg = serde_json::from_value(json!({ "port": 0, "protocol": "http", "stubs": stubs }))
+            .expect("valid imposter config");
+        Arc::new(Imposter::new(cfg).expect("test imposter"))
+    }
+
+    fn no_headers() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    // AC3 (happy): an inject predicate matches/misses correctly through the bounded path.
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn inject_predicate_matching_bounded_matches() {
+        let imp = imposter(json!([{
+            "predicates": [{ "inject": "function (config) { return config.request.path === '/hit'; }" }],
+            "responses": [{ "is": { "statusCode": 200 } }]
+        }]));
+        let matched = imp
+            .find_matching_stub_with_client_bounded(
+                "GET",
+                "/hit",
+                &no_headers(),
+                None,
+                None,
+                None,
+                None,
+                Duration::from_millis(60_000),
+            )
+            .await
+            .expect("matcher must not error");
+        assert!(
+            matched.is_some(),
+            "inject predicate returning true must match"
+        );
+
+        let missed = imp
+            .find_matching_stub_with_client_bounded(
+                "GET",
+                "/miss",
+                &no_headers(),
+                None,
+                None,
+                None,
+                None,
+                Duration::from_millis(60_000),
+            )
+            .await
+            .expect("matcher must not error");
+        assert!(
+            missed.is_none(),
+            "inject predicate returning false must not match"
+        );
+    }
+
+    // AC3: a runaway inject predicate times out near the deadline instead of blocking a
+    // runtime worker for its full duration.
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn inject_predicate_matching_times_out() {
+        let imp = imposter(json!([{
+            "predicates": [{ "inject": "function (config) { var i = 0; while (i < 100000000) { i += 1; } return true; }" }],
+            "responses": [{ "is": { "statusCode": 200 } }]
+        }]));
+        let start = std::time::Instant::now();
+        let res = imp
+            .find_matching_stub_with_client_bounded(
+                "GET",
+                "/hang",
+                &no_headers(),
+                None,
+                None,
+                None,
+                None,
+                Duration::from_millis(25),
+            )
+            .await;
+        let Err(err) = res else {
+            panic!("a runaway inject predicate must error, not hang the matching pass")
+        };
+        assert!(
+            err.downcast_ref::<crate::scripting::PredicateInjectionError>()
+                .is_some(),
+            "a matching timeout must be shaped as PredicateInjectionError so the handler \
+             serves the Mountebank-style 400, not a backend 500; got: {err}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "must return near the configured deadline, not after the loop cap"
+        );
+    }
+
+    // AC3 (fast path): a scriptless imposter never routes through spawn_blocking — the gate is
+    // the precomputed has_inject flag, and matching succeeds through the bounded entry point.
+    #[tokio::test]
+    async fn scriptless_matching_bounded_stays_inline() {
+        let imp = imposter(json!([{
+            "predicates": [{ "equals": { "path": "/plain" } }],
+            "responses": [{ "is": { "statusCode": 200 } }]
+        }]));
+        assert!(
+            !imp.stub_index.load().has_inject(),
+            "a scriptless stub set must not set the has_inject gate"
+        );
+        let matched = imp
+            .find_matching_stub_with_client_bounded(
+                "GET",
+                "/plain",
+                &no_headers(),
+                None,
+                None,
+                None,
+                None,
+                Duration::from_millis(60_000),
+            )
+            .await
+            .expect("matcher must not error");
+        assert!(matched.is_some());
     }
 }

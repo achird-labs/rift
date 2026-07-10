@@ -5,7 +5,7 @@
 
 use super::core::Imposter;
 use super::predicates::parse_query_string;
-use super::response::apply_js_or_rhai_decorate;
+use super::response::apply_decorate_bounded;
 use super::types::{
     DebugMatchResult, DebugRequest, DebugResponse, ProxyResponse, RecordedRequest, ResponseMode,
 };
@@ -22,7 +22,7 @@ use crate::scripting::{
     should_inject_bounded_with_ctx, should_inject_bounded_with_ctx_traced,
 };
 #[cfg(feature = "javascript")]
-use crate::scripting::{MountebankRequest, execute_mountebank_inject};
+use crate::scripting::{MountebankRequest, execute_mountebank_inject_bounded};
 use crate::util::{build_response, build_response_with_headers};
 use base64::Engine;
 use bytes::Bytes;
@@ -285,30 +285,70 @@ async fn handle_request_inner(
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
         .unwrap_or(false);
 
+    // Every script execution below (debug-mode matching, predicate inject during matching,
+    // response inject, decorate) shares the imposter's `_rift.scriptEngine.timeoutMs`
+    // wall-clock budget (issue #476), like `_rift.script`.
+    let script_timeout = std::time::Duration::from_millis(
+        crate::scripting::resolve_script_timeout_ms(&imposter.config),
+    );
+
     if is_debug_mode {
-        return handle_debug_request(
-            &imposter,
-            &method,
-            &path,
-            &query_str,
-            &headers_clone,
-            &body_string,
-            client_addr,
-        );
+        // Debug matching evaluates the full predicate set — inject predicates included — so it
+        // runs off the async worker under the script deadline like the data-plane matcher
+        // (issue #476). Unconditional spawn_blocking: this is an opt-in diagnostic path.
+        let debug_imposter = Arc::clone(&imposter);
+        let (dbg_method, dbg_path, dbg_query) = (method.clone(), path.clone(), query_str.clone());
+        let dbg_headers = headers_clone.clone();
+        let dbg_body = body_string.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            handle_debug_request(
+                &debug_imposter,
+                &dbg_method,
+                &dbg_path,
+                &dbg_query,
+                &dbg_headers,
+                &dbg_body,
+                client_addr,
+            )
+        });
+        return match tokio::time::timeout(script_timeout, handle).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(join_err)) => {
+                warn!("debug matching task panicked: {join_err}");
+                Ok(build_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Debug matching failed",
+                ))
+            }
+            Err(_elapsed) => {
+                warn!(
+                    "debug matching timed out after {}ms",
+                    script_timeout.as_millis()
+                );
+                Ok(build_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Debug matching timed out",
+                ))
+            }
+        };
     }
 
     // Get client address info for requestFrom, ip predicates
     let request_from = client_addr.to_string();
     let client_ip = client_addr.ip().to_string();
-    let matched = match imposter.find_matching_stub_with_client(
-        method_str,
-        path_str,
-        &headers_clone,
-        query_opt,
-        body_string.as_deref(),
-        Some(&request_from),
-        Some(&client_ip),
-    ) {
+    let matched = match imposter
+        .find_matching_stub_with_client_bounded(
+            method_str,
+            path_str,
+            &headers_clone,
+            query_opt,
+            body_string.as_deref(),
+            Some(&request_from),
+            Some(&client_ip),
+            script_timeout,
+        )
+        .await
+    {
         Ok(matched) => matched,
         // A backend consulted during matching failed (issue #318), or a predicate-`inject`
         // errored (issue #440): surface it, never fall through to "no match" (which would
@@ -401,12 +441,15 @@ async fn handle_request_inner(
                 body: body_string.clone(),
             };
 
-            match execute_mountebank_inject(
-                &inject_fn,
-                &mb_request,
+            match execute_mountebank_inject_bounded(
+                inject_fn,
+                mb_request,
                 imposter.script_state_key(),
-                stub_state.stub.id.as_deref(),
-            ) {
+                stub_state.stub.id.clone(),
+                script_timeout,
+            )
+            .await
+            {
                 Ok(inject_response) => {
                     // Advance the cycler for this inject response
                     if let Err(e) = imposter.advance_cycler_for_inject(&stub_state) {
@@ -880,21 +923,24 @@ async fn handle_request_inner(
                         .filter(|(k, _)| is_set_cookie(k))
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
-                    let mut single: HashMap<String, String> = headers
+                    let single: HashMap<String, String> = headers
                         .iter()
                         .filter(|(k, _)| !is_set_cookie(k))
                         .map(|(k, v)| (k.clone(), v.join(", ")))
                         .collect();
-                    match apply_js_or_rhai_decorate(
-                        decorate_script,
-                        &request_context,
-                        &body,
+                    match apply_decorate_bounded(
+                        decorate_script.clone(),
+                        request_context.clone(),
+                        body.clone(),
                         status,
-                        &mut single,
+                        single,
                         imposter.script_state_key(),
-                        stub_state.stub.id.as_deref(),
-                    ) {
-                        Ok((new_body, new_status)) => {
+                        stub_state.stub.id.clone(),
+                        script_timeout,
+                    )
+                    .await
+                    {
+                        Ok((new_body, new_status, single)) => {
                             body = new_body;
                             status = new_status;
                             // Restore the held-aside Set-Cookie lines unless the script set its

@@ -35,7 +35,8 @@ pub(crate) use js_engine::bounded_js_context;
 pub use js_engine::{
     JsEngine, MountebankRequest, PredicateInjectionError, clear_imposter_state,
     compile_js_to_bytecode, execute_mountebank_config_decorate, execute_mountebank_decorate,
-    execute_mountebank_inject, execute_predicate_generator_inject, execute_predicate_inject,
+    execute_mountebank_inject, execute_mountebank_inject_bounded,
+    execute_predicate_generator_inject, execute_predicate_inject,
 };
 #[cfg(feature = "javascript")]
 #[allow(unused_imports)]

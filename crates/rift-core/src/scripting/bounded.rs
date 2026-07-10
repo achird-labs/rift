@@ -460,4 +460,108 @@ mod tests {
             entry.decision
         );
     }
+
+    // =====================================================================================
+    // Issue #476: Mountebank response-inject hook runs off the async worker with a
+    // wall-clock deadline, through the same spawn_blocking + timeout shape as `_rift.script`.
+    // =====================================================================================
+    #[cfg(feature = "javascript")]
+    mod mb_inject {
+        use super::*;
+        use crate::scripting::{MountebankRequest, execute_mountebank_inject_bounded};
+        use std::collections::HashMap;
+        use std::sync::atomic::AtomicU32;
+
+        // Fresh port per test so parallel tests never share `IMPOSTER_STATE`; range disjoint
+        // from js_engine.rs and imposter/response.rs test ranges.
+        fn test_port() -> u16 {
+            static NEXT: AtomicU32 = AtomicU32::new(42_500);
+            NEXT.fetch_add(1, Ordering::Relaxed) as u16
+        }
+
+        fn mb_req(path: &str) -> MountebankRequest {
+            MountebankRequest {
+                method: "GET".to_string(),
+                path: path.to_string(),
+                query: HashMap::new(),
+                headers: HashMap::new(),
+                body: None,
+            }
+        }
+
+        // Busy-loops long enough that a small wall-clock deadline always fires first; the
+        // loop-iteration cap (#327) later frees the blocking thread.
+        const SLOW_INJECT: &str = "function (config) { var i = 0; while (i < 100000000) { i += 1; } return { statusCode: 200 }; }";
+
+        // AC1 (happy): a fast inject returns its response through the bounded path.
+        #[tokio::test]
+        async fn mb_inject_bounded_returns_response() {
+            let resp = execute_mountebank_inject_bounded(
+                "function (config) { return { statusCode: 201, body: 'from-inject' }; }".into(),
+                mb_req("/a"),
+                test_port(),
+                None,
+                Duration::from_millis(60_000),
+            )
+            .await
+            .expect("fast inject");
+            assert_eq!(resp.status_code, 201);
+            assert_eq!(resp.body, "from-inject");
+        }
+
+        // AC1: a runaway inject yields a timeout error near the deadline instead of blocking
+        // a runtime worker for its full duration.
+        #[tokio::test]
+        async fn mb_inject_bounded_times_out() {
+            let start = Instant::now();
+            let res = execute_mountebank_inject_bounded(
+                SLOW_INJECT.into(),
+                mb_req("/hang"),
+                test_port(),
+                None,
+                Duration::from_millis(25),
+            )
+            .await;
+            let err = match res {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("runaway inject must yield an error, not a response"),
+            };
+            assert!(err.contains("timed out"), "got: {err}");
+            assert!(
+                start.elapsed() < Duration::from_secs(3),
+                "must return near the configured deadline, not after the loop cap"
+            );
+        }
+
+        // AC4: per-imposter script state persists across bounded runs — the get→run→save
+        // plumbing (issue #477 locking included) follows execution to the blocking thread.
+        #[tokio::test]
+        async fn mb_inject_bounded_state_persists_across_calls() {
+            let port = test_port();
+            let incr = "function (config) { config.state.count = (config.state.count || 0) + 1; return { statusCode: 200, body: String(config.state.count) }; }";
+            let first = execute_mountebank_inject_bounded(
+                incr.into(),
+                mb_req("/count"),
+                port,
+                None,
+                Duration::from_millis(60_000),
+            )
+            .await
+            .expect("first run");
+            let second = execute_mountebank_inject_bounded(
+                incr.into(),
+                mb_req("/count"),
+                port,
+                None,
+                Duration::from_millis(60_000),
+            )
+            .await
+            .expect("second run");
+            assert_eq!(first.body, "1");
+            assert_eq!(
+                second.body, "2",
+                "imposter state must persist across pool-thread runs"
+            );
+        }
+    }
 }

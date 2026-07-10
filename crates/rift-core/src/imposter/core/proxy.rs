@@ -20,6 +20,20 @@ impl Imposter {
         body: Option<&str>,
         query: Option<&str>,
     ) -> Vec<serde_json::Value> {
+        Self::generate_predicates_impl(generators, method, path, headers, body, query)
+    }
+
+    /// [`Self::generate_predicates_from_request`] without `&self`, so the proxy-recording path
+    /// can run it on `spawn_blocking` (issue #476) — a `predicateGenerators.inject` script must
+    /// not execute (and block on the MB script pool) on a tokio async worker.
+    fn generate_predicates_impl(
+        generators: &[serde_json::Value],
+        method: &str,
+        path: &str,
+        headers: &HashMap<String, String>,
+        body: Option<&str>,
+        query: Option<&str>,
+    ) -> Vec<serde_json::Value> {
         let mut predicates = Vec::new();
 
         for r#gen in generators {
@@ -460,15 +474,61 @@ impl Imposter {
             || proxy_config.add_wait_behavior
             || proxy_config.add_decorate_behavior.is_some()
         {
+            // An `inject` generator executes a JS script; run the generator pass off the async
+            // worker under the script deadline (issue #476). Script-free generator lists (the
+            // common case) keep the inline path — pure predicate building, no script pool.
+            let has_inject_generator = proxy_config
+                .predicate_generators
+                .iter()
+                .any(|g| g.as_object().is_some_and(|o| o.contains_key("inject")));
             let predicates = if !proxy_config.predicate_generators.is_empty() {
-                self.generate_predicates_from_request(
-                    &proxy_config.predicate_generators,
-                    method,
-                    uri.path(),
-                    headers,
-                    body,
-                    uri.query(),
-                )
+                if has_inject_generator {
+                    let generators = proxy_config.predicate_generators.clone();
+                    let method = method.to_string();
+                    let path = uri.path().to_string();
+                    let headers = headers.clone();
+                    let body = body.map(str::to_string);
+                    let query = uri.query().map(str::to_string);
+                    let timeout = std::time::Duration::from_millis(
+                        crate::scripting::resolve_script_timeout_ms(&self.config),
+                    );
+                    let handle = tokio::task::spawn_blocking(move || {
+                        Self::generate_predicates_impl(
+                            &generators,
+                            &method,
+                            &path,
+                            &headers,
+                            body.as_deref(),
+                            query.as_deref(),
+                        )
+                    });
+                    match tokio::time::timeout(timeout, handle).await {
+                        Ok(Ok(preds)) => preds,
+                        // Degrade like a failing generator script (warn + skip its output)
+                        // rather than failing the proxied response the client is waiting on.
+                        Ok(Err(join_err)) => {
+                            warn!("predicate generator task panicked: {join_err}");
+                            vec![]
+                        }
+                        Err(_elapsed) => {
+                            warn!(
+                                "predicate generators timed out after {}ms; recording stub \
+                                 without generated predicates",
+                                timeout.as_millis()
+                            );
+                            vec![]
+                        }
+                    }
+                } else {
+                    self.generate_predicates_from_request(
+                        &proxy_config.predicate_generators,
+                        method,
+                        uri.path(),
+                        headers,
+                        body,
+                        uri.query(),
+                    )
+                }
             } else {
                 // No predicateGenerators, generate empty predicates (matches all requests)
                 vec![]
