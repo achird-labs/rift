@@ -19,14 +19,23 @@ mod js_validator {
     pub fn validate_javascript(script: &str) -> Result<(), super::JsSyntaxError> {
         let mut context = Context::default();
 
-        // Mountebank uses function expressions that need to be wrapped
+        // Mountebank inject/decorate scripts are anonymous function *expressions*
+        // (`function(args){…}` or `function (args){…}`), which are a syntax error when Boa parses
+        // them as a top-level statement (a function *declaration* needs a name). Wrap them as an
+        // expression so Boa parses them. An anonymous function is `function` followed by optional
+        // whitespace and then `(` — the earlier `!contains("function ")` heuristic wrongly treated
+        // the common `function (args)` form (a space before the parens) as named, leaving it
+        // unwrapped and mis-flagged as a syntax error.
         let script_trimmed = script.trim();
-        let wrapped =
-            if script_trimmed.starts_with("function") && !script_trimmed.contains("function ") {
-                format!("var __fn = ({script_trimmed})")
-            } else {
-                script_trimmed.to_string()
-            };
+        let is_anonymous_function_expr = script_trimmed
+            .strip_prefix("function")
+            .map(str::trim_start)
+            .is_some_and(|rest| rest.starts_with('('));
+        let wrapped = if is_anonymous_function_expr {
+            format!("var __fn = ({script_trimmed})")
+        } else {
+            script_trimmed.to_string()
+        };
 
         match context.eval(Source::from_bytes(&wrapped)) {
             Ok(_) => Ok(()),
@@ -1253,6 +1262,26 @@ mod js_behavior_tests {
             assert!(
                 !has_code(&lint_decorate(script), "W009"),
                 "W009 fired for: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn e028_not_fired_for_anonymous_function_expressions() {
+        // Mountebank inject/decorate scripts are anonymous function expressions. Both the
+        // no-space and space-before-parens forms are valid and the engine runs them; the JS
+        // syntax validator must wrap them as expressions rather than mis-flag `function (args)`
+        // as a nameless declaration (E028). Meaningful under the `javascript` feature; a no-op
+        // otherwise.
+        for script in [
+            "function(config, state) { state.n = (state.n||0)+1; return { statusCode: 200 }; }",
+            "function (config, state) { state.n = (state.n||0)+1; return { statusCode: 200 }; }",
+            "function (request, response) { response.headers['X-D'] = 'r'; }",
+            "function(){ return 0; }",
+        ] {
+            assert!(
+                !has_code(&lint(script), "E028"),
+                "E028 (JS syntax error) wrongly fired for a valid anonymous function: {script}"
             );
         }
     }
