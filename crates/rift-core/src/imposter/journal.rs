@@ -37,6 +37,16 @@ pub trait RequestJournal: Send + Sync {
     /// replacing an imposter clears its port slice.
     fn record(&self, port: u16, flow_id: &str, req: RecordedRequest);
     fn read(&self, port: u16) -> JournalRead;
+    /// Like [`read`](Self::read) but keeps only entries matching `keep`. The default filters the
+    /// full read; backends should override to filter over references BEFORE cloning, so a
+    /// `?match=` query does not deep-clone the whole journal just to discard most of it (#485).
+    fn read_filtered(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) -> JournalRead {
+        let read = self.read(port);
+        JournalRead {
+            entries: read.entries.into_iter().filter(|r| keep(r)).collect(),
+            complete: read.complete,
+        }
+    }
     /// Clears entries AND resets the request count (documented contract, as today).
     ///
     /// Fallible: clearing is a correctness operation whose postcondition ("the data is gone")
@@ -108,6 +118,21 @@ impl RequestJournal for LocalJournal {
         }
     }
 
+    fn read_filtered(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) -> JournalRead {
+        // Filter over references under the read lock so only matching entries are cloned (#485).
+        JournalRead {
+            entries: self
+                .slot(port)
+                .entries
+                .read()
+                .iter()
+                .filter(|(_, req)| keep(req))
+                .map(|(_, req)| req.clone())
+                .collect(),
+            complete: true,
+        }
+    }
+
     fn clear(&self, port: u16) -> anyhow::Result<()> {
         let slot = self.slot(port);
         slot.entries.write().clear();
@@ -159,6 +184,35 @@ mod tests {
         assert_eq!(read.entries.len(), MAX_RECORDED_REQUESTS);
         assert_eq!(read.entries[0].path, "/10", "oldest entries evicted first");
         assert!(read.complete, "the local backend is always complete");
+    }
+
+    // Issue #485: read_filtered returns only entries matching the predicate (same result as
+    // read().filter, but the LocalJournal override clones only the matches).
+    #[test]
+    fn local_read_filtered_keeps_only_matches() {
+        let j = LocalJournal::default();
+        j.record(1, "f", req("/keep/1"));
+        j.record(1, "f", req("/drop/1"));
+        j.record(1, "f", req("/keep/2"));
+
+        let read = j.read_filtered(1, &|r| r.path.starts_with("/keep"));
+        let paths: Vec<&str> = read.entries.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, vec!["/keep/1", "/keep/2"]);
+        assert!(read.complete);
+
+        // Parity with read().filter(...) over the same predicate.
+        let via_read: Vec<String> = j
+            .read(1)
+            .entries
+            .into_iter()
+            .filter(|r| r.path.starts_with("/keep"))
+            .map(|r| r.path)
+            .collect();
+        assert_eq!(paths, via_read);
+
+        // An always-false predicate yields nothing; always-true yields all.
+        assert!(j.read_filtered(1, &|_| false).entries.is_empty());
+        assert_eq!(j.read_filtered(1, &|_| true).entries.len(), 3);
     }
 
     // AC1: note_request counts even when nothing is recorded (recording off).
