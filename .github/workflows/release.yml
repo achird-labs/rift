@@ -114,8 +114,26 @@ jobs:
           # Update workspace version in root Cargo.toml
           sed -i.bak 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
           rm -f Cargo.toml.bak
+          # Keep internal path-dependency version requirements in lockstep (issue #474). The build
+          # bumps the workspace version, so every internal crate becomes $VERSION; a `path = "../rift-*",
+          # version = "..."` requirement left at the old version can no longer resolve the now-$VERSION
+          # path crate and `cargo build` fails. Bump the `version = "..."` that follows each internal
+          # path dep so the requirement matches. (Mirrors the publish job — must run here too, else the
+          # build fails before publish is ever reached.)
+          find crates -name Cargo.toml -exec sed -i -E \
+            's|(path = "\.\./rift-[a-z-]+", version = ")[^"]*|\1'"$VERSION"'|g' {} +
           # Verify the change
           grep 'version = ' Cargo.toml | head -1
+          grep -R 'path = "\.\./rift-' crates/*/Cargo.toml || true
+          # Assert the lockstep bump covered every internal path dep: sed exits 0 even on no match,
+          # so a reformatted dep line could silently keep a stale version and break the build.
+          STALE=$(grep -RE 'path = "\.\./rift-[a-z-]+"' crates/*/Cargo.toml \
+            | grep 'version = "' | grep -v "version = \"$VERSION\"" || true)
+          if [ -n "$STALE" ]; then
+            echo "::error::internal dependency version(s) not bumped to $VERSION:"
+            echo "$STALE"
+            exit 1
+          fi
 
       # Select Xcode 15.x to avoid ring 0.17.14 compilation issues with Xcode 16.x
       - name: Select Xcode (macOS 14)
