@@ -17,6 +17,7 @@
 //! - `core`: Core Imposter struct and implementation
 
 mod core;
+pub mod events;
 mod fault_io;
 mod handler;
 mod manager;
@@ -67,6 +68,7 @@ pub use crate::extensions::flow_state::FlowStoreProvider;
 pub use manager::{ImposterManager, TlsDefaults};
 
 // Re-export incremental reconciliation types (issue #316)
+pub use events::{AdminEvent, AdminEventBus, AdminEventKind, ImposterAction};
 pub use reconcile::{ApplyReport, ImposterEvent, ImposterEventListener, stub_key};
 
 // Re-export predicate utilities (used in tests and for external consumers)

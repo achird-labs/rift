@@ -13,6 +13,18 @@ record.
 
 ### Added
 
+- **Admin SSE stream — push request tails instead of polling.** `GET /events` (and the
+  handle-scoped alias `GET /imposters/{port}/savedRequests/stream`) streams recorded requests and
+  imposter lifecycle changes as Server-Sent Events, so an SDK request tail (`ZStream`/`fs2.Stream`,
+  Go channels, async iterators) gets pushed events instead of paying a poll interval. Filterable by
+  `types=requests,lifecycle`, `port=`, and the same `match=` clauses as `savedRequests`; gated by
+  the admin API key like every other admin route; heartbeat comments keep idle streams alive.
+  Publishing is a no-op when nobody is subscribed, so the request hot path is untouched unless a
+  client is connected. Lossy-but-loud under backpressure: a slow consumer gets a `lagged` event
+  rather than stalling the engine. Each `request` event carries its journal `index`, so a client
+  that lagged or reconnected reconciles with `savedRequests?since=<index>` instead of re-polling the
+  whole journal. Older engines return `404`, which is the SDK's capability probe — polling remains
+  the supported fallback and the source of truth (v1 does not replay).
 - **`savedRequests` cursor — tail an imposter's recorded requests without re-fetching the journal.**
   `GET /imposters/{port}/savedRequests?since=<index>` now serves only the requests newer than a
   cursor, so an SDK request-tail costs O(new entries) per poll instead of O(journal) with

@@ -20,8 +20,19 @@ impl Imposter {
             return None;
         }
         let flow_id = self.resolve_flow_id_recorded(&req.headers);
-        self.journal
-            .record_indexed(self.journal_port(), &flow_id, req.clone())
+        let index = self
+            .journal
+            .record_indexed(self.journal_port(), &flow_id, req.clone());
+        // Fan the recorded request out to the admin SSE stream (issue #461). Guard on an active
+        // subscriber first so the hot path never clones the request for nobody. The journal
+        // index rides along (issue #603) so a client that reconnects or lags can reconcile with
+        // `?since=<index>` instead of re-polling the whole journal.
+        if let Some(bus) = &self.event_bus
+            && bus.has_subscribers()
+        {
+            bus.publish_request(self.journal_port(), flow_id, index, req.clone());
+        }
+        index
     }
 
     /// Read recorded requests with the backend's completeness flag intact, so embedders

@@ -134,6 +134,9 @@ pub struct Imposter {
     /// [`LocalProxyStore`] for this imposter's mode, or the embedder's shared store injected
     /// via [`ImposterManager::with_proxy_store`](crate::imposter::ImposterManager::with_proxy_store).
     pub(crate) proxy_store: Arc<dyn ProxyRecordingStore>,
+    /// Admin SSE event bus (issue #461), shared from the manager so recorded requests fan out to
+    /// streaming clients. `None` for a standalone imposter (no manager) — then nothing is published.
+    pub(crate) event_bus: Option<Arc<super::events::AdminEventBus>>,
     /// Recorded-request storage (issue #314); defaults to a private LocalJournal,
     /// or the embedder's shared journal injected via the manager.
     pub(crate) journal: Arc<dyn crate::imposter::journal::RequestJournal>,
@@ -224,6 +227,7 @@ impl Imposter {
             stub_index,
             stubs_write: Mutex::new(()),
             proxy_store: Arc::new(LocalProxyStore::new(proxy_mode)),
+            event_bus: None,
             journal: journal
                 .unwrap_or_else(|| Arc::new(crate::imposter::journal::LocalJournal::default())),
             enabled: AtomicBool::new(true),

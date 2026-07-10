@@ -139,6 +139,10 @@ pub struct ImposterManager {
     /// drain before returning anyway with a warning (issue #596). Never configurable at runtime;
     /// overridable only in tests via [`Self::with_conn_drain`].
     conn_drain: Duration,
+    /// Broadcast of lifecycle + recorded-request events for the admin SSE stream (issue #461).
+    /// Created unconditionally (a `broadcast::Sender` with no receivers is ~free); publishing is a
+    /// no-op until a client subscribes.
+    event_bus: Arc<super::events::AdminEventBus>,
 }
 
 /// Default bound for the post-delete connection drain (issue #596). Generous: normal graceful
@@ -167,6 +171,7 @@ impl ImposterManager {
             request_journal: None,
             proxy_store: None,
             conn_drain: DEFAULT_CONN_DRAIN,
+            event_bus: Arc::new(super::events::AdminEventBus::new()),
         }
     }
 
@@ -268,6 +273,23 @@ impl ImposterManager {
         if let Some(listener) = &self.event_listener {
             listener.on_event(&event);
         }
+        // Additionally fan the event out to the admin SSE bus (issue #461) — separate from the
+        // single-slot embedder listener above, which callers may already hold.
+        use super::events::ImposterAction;
+        let (action, port) = match event {
+            ImposterEvent::Created(p) => (ImposterAction::Created, Some(p)),
+            ImposterEvent::Replaced(p) => (ImposterAction::Replaced, Some(p)),
+            ImposterEvent::StubsChanged(p) => (ImposterAction::StubsChanged, Some(p)),
+            ImposterEvent::Deleted(p) => (ImposterAction::Deleted, Some(p)),
+            ImposterEvent::AllDeleted => (ImposterAction::AllDeleted, None),
+        };
+        self.event_bus.publish_lifecycle(action, port);
+    }
+
+    /// The admin event bus (issue #461), for the SSE stream handler to subscribe to.
+    #[must_use]
+    pub fn event_bus(&self) -> &Arc<super::events::AdminEventBus> {
+        &self.event_bus
     }
 
     /// Resolve the TLS acceptor for an HTTPS imposter by precedence: inline imposter cert/key →
@@ -382,6 +404,9 @@ impl ImposterManager {
         if let Some(store) = &self.proxy_store {
             imposter.proxy_store = Arc::clone(store);
         }
+
+        // Share the admin event bus so recorded requests fan out to the SSE stream (issue #461).
+        imposter.event_bus = Some(Arc::clone(&self.event_bus));
 
         // Create shutdown channel for this imposter
         let (shutdown_tx, _) = broadcast::channel(1);
