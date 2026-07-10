@@ -9,8 +9,12 @@ use crate::admin_api::types::{
 use crate::extensions::decorate::backend_error_response;
 use crate::imposter::{
     Imposter, ImposterConfig, ImposterError, ImposterManager, Predicate, PredicateOperation,
-    RecordedRequest, ScriptBaseDir, Stub, StubResponse, resolve_scripts,
+    ScriptBaseDir, Stub, StubResponse, resolve_scripts,
 };
+// `RecordedRequest` is only named in tests now that the `/requests` handler filters before
+// cloning via `get_recorded_requests_filtered` (issue #485).
+#[cfg(test)]
+use crate::imposter::RecordedRequest;
 use crate::scripting::validate_stubs;
 use bytes::Bytes;
 use http_body_util::Full;
@@ -535,11 +539,10 @@ pub async fn handle_get_requests(
     match manager.get_imposter(port) {
         Ok(imposter) => {
             let source = flow_id_source(&imposter);
-            let filtered: Vec<RecordedRequest> = imposter
-                .get_recorded_requests()
-                .into_iter()
-                .filter(|r| request_matches(r, &clauses, &source, port))
-                .collect();
+            // Filter over references before cloning so an unmatched journal entry is never
+            // deep-cloned (issue #485).
+            let filtered = imposter
+                .get_recorded_requests_filtered(|r| request_matches(r, &clauses, &source, port));
             json_response(StatusCode::OK, &filtered)
         }
         Err(e) => e.into(),

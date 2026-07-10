@@ -41,6 +41,23 @@ impl Imposter {
         read.entries
     }
 
+    /// Recorded requests matching `keep`, filtered over references before cloning so a `?match=`
+    /// query does not deep-clone the whole journal just to discard most of it (issue #485).
+    pub fn get_recorded_requests_filtered<F: Fn(&RecordedRequest) -> bool>(
+        &self,
+        keep: F,
+    ) -> Vec<RecordedRequest> {
+        let read = self.journal.read_filtered(self.journal_port(), &keep);
+        if !read.complete {
+            tracing::warn!(
+                port = self.journal_port(),
+                entries_served = read.entries.len(),
+                "request journal returned an incomplete read; serving partial results"
+            );
+        }
+        read.entries
+    }
+
     /// Clear recorded requests. Also resets the request count to match Mountebank behavior.
     /// Propagates a backend clear failure (issue #330) so callers never report a clean clear
     /// over stale recorded state.
