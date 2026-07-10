@@ -110,7 +110,16 @@ impl InterceptListener {
     /// Signal the accept loop to stop and wait for it to finish.
     pub async fn shutdown(self) {
         let _ = self.shutdown_tx.send(true);
-        let _ = self.handle.await;
+        log_accept_loop_exit(self.handle.await);
+    }
+}
+
+/// Surface an abnormal exit of the accept-loop task (issue #522). The loop returns `()` and is
+/// never aborted, so a `JoinError` here means it panicked — log it instead of silently discarding
+/// the join result, which would let `shutdown`/`stop` report success over a crashed listener.
+fn log_accept_loop_exit(result: Result<(), tokio::task::JoinError>) {
+    if let Err(e) = result {
+        tracing::warn!(error = %e, "intercept listener accept loop ended abnormally");
     }
 }
 
@@ -506,6 +515,31 @@ mod tests {
     use super::*;
     use crate::intercept_rules::{ForwardTarget, InterceptRule};
     use rift_core::proxy::intercept_ca::CertificateAuthority;
+
+    // Issue #522: a panicked accept loop must not be swallowed by `shutdown`/`stop` — its
+    // `JoinError` is logged rather than discarded.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn log_accept_loop_exit_warns_on_panic() {
+        // A genuine `JoinError` from a panicked task (its only real source here).
+        let joined = tokio::spawn(async { panic!("accept loop boom") }).await;
+        assert!(joined.is_err(), "a panicked task yields a JoinError");
+        log_accept_loop_exit(joined);
+        assert!(
+            logs_contain("intercept listener accept loop ended abnormally"),
+            "an abnormal accept-loop exit is warned, not swallowed"
+        );
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn log_accept_loop_exit_silent_on_normal_exit() {
+        log_accept_loop_exit(Ok(()));
+        assert!(
+            !logs_contain("accept loop ended abnormally"),
+            "a clean shutdown logs nothing"
+        );
+    }
 
     #[test]
     fn parse_connect_accepts_authority() {
