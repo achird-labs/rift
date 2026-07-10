@@ -4,6 +4,11 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
+/// Hard cap on a computed wait delay (issues #355, #490): a wait function that returns a huge
+/// value must not sleep the worker unbounded. Applied at the `get_duration_ms` boundary so BOTH
+/// the Boa path and the no-`javascript` regex fallback share one bound.
+const MAX_WAIT_MS: u64 = 60_000;
+
 // Fixed patterns for the no-`javascript`-feature wait fallback (issue #481): compile once at
 // first use instead of on every request. These are compile-time-constant patterns, so a compile
 // failure is a programming error caught immediately by tests, not a data-dependent runtime error.
@@ -55,13 +60,17 @@ impl WaitBehavior {
                 // Format: "function() { return Math.floor(Math.random() * 100) + 50; }"
                 // A failed/unusable wait function falls back to 100ms — but loudly, so it is
                 // distinguishable from a genuine 100ms wait (B4, issue #355).
-                Self::execute_js_wait_function(js_func).unwrap_or_else(|| {
-                    tracing::warn!(
-                        target: "rift::script",
-                        "wait function produced no usable delay; falling back to 100ms"
-                    );
-                    100
-                })
+                // Cap here (issue #490) so both the Boa path and the no-`javascript` regex
+                // fallback share the one bound — the fallback used to return the raw parsed value.
+                Self::execute_js_wait_function(js_func)
+                    .map(|ms| ms.min(MAX_WAIT_MS))
+                    .unwrap_or_else(|| {
+                        tracing::warn!(
+                            target: "rift::script",
+                            "wait function produced no usable delay; falling back to 100ms"
+                        );
+                        100
+                    })
             }
         }
     }
@@ -94,7 +103,6 @@ impl WaitBehavior {
     /// pathological/negative/huge result can't turn into an enormous or nonsensical sleep.
     #[cfg(feature = "javascript")]
     fn execute_js_wait_function_boa(js_func: &str) -> Option<u64> {
-        const MAX_WAIT_MS: u64 = 60_000;
         let mut context = crate::scripting::bounded_js_context();
         let wrapped = format!("({js_func})()");
         // A script/runtime error must not be swallowed silently (B4, issue #355): log it, then
@@ -161,8 +169,10 @@ impl WaitBehavior {
                 }
             }
 
-            // Try to parse as simple number
-            body.trim().parse::<u64>().ok()
+            // Try to parse as a simple number. Parse signed so a negative literal clamps to 0
+            // (matching the Boa path) instead of failing to parse and dropping to the 100ms
+            // fallback (issue #490).
+            body.trim().parse::<i64>().ok().map(|v| v.max(0) as u64)
         } else {
             None
         }
@@ -325,5 +335,14 @@ mod tests {
             "function() { var min = Math.ceil(50); var max = Math.floor(100); var num = Math.floor(Math.random() * (max - min + 1)); var wait = (num + min); return wait; }",
         );
         assert!(matches!(solo, Some(d) if (50..=100).contains(&d)));
+
+        // Issue #490: a negative literal clamps to 0 in the regex fallback (was: parse::<u64> ->
+        // None -> 100ms), matching the Boa path. The huge-value cap is applied at the
+        // get_duration_ms boundary (see wait_function_huge_value_is_capped, which exercises this
+        // fallback under --no-default-features).
+        assert_eq!(
+            WaitBehavior::execute_js_wait_function_regex("function() { return -5; }"),
+            Some(0)
+        );
     }
 }
