@@ -1418,6 +1418,44 @@ async fn apply_rift_fault(
     None
 }
 
+// Issue #500: `matcher_error_response` splits a matcher failure two ways — a predicate-`inject`
+// error (`PredicateInjectionError`) is a Mountebank-shaped 400, while every other matcher error
+// (e.g. a scenario-state backend failure) keeps the 5xx backend mapping. The end-to-end handler
+// tests exercise the 400 branch over the wire; this pins the "other error → 5xx" branch directly,
+// since it needs a non-predicate error that a listener test can't easily provoke.
+#[cfg(all(test, feature = "javascript"))]
+mod matcher_error_response_tests {
+    use super::matcher_error_response;
+    use hyper::StatusCode;
+
+    #[test]
+    fn predicate_inject_error_maps_to_400() {
+        let err: anyhow::Error =
+            crate::scripting::PredicateInjectionError("bad predicate".to_string()).into();
+        let resp = matcher_error_response(&err);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            resp.headers().contains_key("x-rift-inject-error"),
+            "a predicate-inject error must carry the inject-error marker"
+        );
+    }
+
+    #[test]
+    fn other_matcher_error_maps_to_5xx() {
+        let err = anyhow::anyhow!("scenario-state backend read failed");
+        let resp = matcher_error_response(&err);
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a non-predicate matcher error keeps the 5xx backend mapping, not a 400"
+        );
+        assert!(
+            !resp.headers().contains_key("x-rift-inject-error"),
+            "a generic backend error is not an inject error"
+        );
+    }
+}
+
 #[cfg(test)]
 mod fault_precedence_tests {
     use super::super::fault_io::TcpFaultKind;
