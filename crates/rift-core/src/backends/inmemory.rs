@@ -4,16 +4,34 @@ use parking_lot::RwLock;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
+
+/// A single stored entry: its value and optional expiry instant.
+type Entry = (Value, Option<SystemTime>);
+/// One flow's key→entry map.
+type FlowMap = HashMap<String, Entry>;
+/// The whole store, keyed by `flow_id` then `key`. Nesting (vs. a flat `flow:{id}:{key}` map,
+/// issue #483) lets `set_ttl` touch only the target flow's keys instead of scanning every entry,
+/// and lets the reaper drop a whole expired flow in one step.
+type Store = HashMap<String, FlowMap>;
+
+/// Run a full expired-entry sweep once every this many write operations (issue #483). Amortizes
+/// the O(total) reap to O(1) per write while bounding how long an expired entry lingers.
+const SWEEP_INTERVAL: usize = 256;
 
 /// In-memory implementation of FlowStore
 ///
-/// This implementation stores flow state in a HashMap with automatic TTL expiration.
+/// This implementation stores flow state in a nested HashMap with automatic TTL expiration.
 /// Useful for testing, development, and single-instance deployments.
 pub struct InMemoryFlowStore {
-    #[allow(clippy::type_complexity)]
-    data: Arc<RwLock<HashMap<String, (Value, Option<SystemTime>)>>>,
+    data: Arc<RwLock<Store>>,
     default_ttl: Duration,
+    /// Store-growing writes since the last sweep; drives the amortized reaper (issue #483). Only
+    /// `set`/`increment_by`/applied-CAS count — the paths that can add an entry. `delete`, `set_ttl`,
+    /// and a conflicting CAS never grow the store, so they deliberately don't advance the counter
+    /// (delete reclaims directly; a conflicting CAS wrote nothing).
+    writes_since_sweep: AtomicUsize,
 }
 
 impl InMemoryFlowStore {
@@ -21,11 +39,8 @@ impl InMemoryFlowStore {
         Self {
             data: Arc::new(RwLock::new(HashMap::new())),
             default_ttl: Duration::from_secs(default_ttl_seconds),
+            writes_since_sweep: AtomicUsize::new(0),
         }
-    }
-
-    fn make_key(&self, flow_id: &str, key: &str) -> String {
-        format!("flow:{flow_id}:{key}")
     }
 
     /// List every non-expired key currently stored under `flow_id`, for `rift script run`'s
@@ -33,78 +48,102 @@ impl InMemoryFlowStore {
     /// enumeration method (a real backend like Redis may not make that cheap), but the CLI works
     /// with a concrete `InMemoryFlowStore` fixture, so an inherent method here is enough.
     pub fn keys_for_flow(&self, flow_id: &str) -> Vec<String> {
-        let prefix = format!("flow:{flow_id}:");
         let data = self.data.read();
-        data.iter()
-            .filter(|(_, (_, expiry))| !self.is_expired(expiry))
-            .filter_map(|(key, _)| key.strip_prefix(&prefix).map(str::to_string))
-            .collect()
-    }
-
-    fn is_expired(&self, expiry: &Option<SystemTime>) -> bool {
-        if let Some(exp) = expiry {
-            SystemTime::now() > *exp
-        } else {
-            false
+        match data.get(flow_id) {
+            Some(flow) => flow
+                .iter()
+                .filter(|(_, (_, expiry))| !Self::is_expired(expiry))
+                .map(|(key, _)| key.clone())
+                .collect(),
+            None => Vec::new(),
         }
     }
 
-    /// Opportunistically clean up a specific expired key during write operations.
-    /// This is called with the lock already held to avoid separate cleanup passes.
-    ///
-    /// Note: `data` parameter must be a mutable reference acquired from self.data.lock()
-    fn cleanup_on_write(
-        data: &mut HashMap<String, (Value, Option<SystemTime>)>,
-        key: &str,
-        is_expired_fn: impl Fn(&Option<SystemTime>) -> bool,
-    ) {
-        if let Some((_, expiry)) = data.get(key)
-            && is_expired_fn(expiry)
+    fn is_expired(expiry: &Option<SystemTime>) -> bool {
+        matches!(expiry, Some(exp) if SystemTime::now() > *exp)
+    }
+
+    /// Remove a flow's entry for `key` if it has expired, so a subsequent read sees it as absent.
+    /// Called with the write lock held; mirrors the pre-#483 opportunistic same-key cleanup.
+    fn remove_if_expired(flow: &mut FlowMap, key: &str) {
+        if let Some((_, expiry)) = flow.get(key)
+            && Self::is_expired(expiry)
         {
-            data.remove(key);
+            flow.remove(key);
         }
+    }
+
+    /// Count one write toward the amortized reaper and, every [`SWEEP_INTERVAL`] writes, drop
+    /// every expired entry (and any flow left empty). Called with the write lock already held.
+    fn maybe_sweep(&self, data: &mut Store) {
+        if self.writes_since_sweep.fetch_add(1, Ordering::Relaxed) + 1 >= SWEEP_INTERVAL {
+            self.writes_since_sweep.store(0, Ordering::Relaxed);
+            Self::sweep_expired(data);
+        }
+    }
+
+    /// Drop every expired entry across all flows, and remove any flow map left empty. O(total),
+    /// but run only once per [`SWEEP_INTERVAL`] writes.
+    fn sweep_expired(data: &mut Store) {
+        data.retain(|_flow_id, flow| {
+            flow.retain(|_key, (_, expiry)| !Self::is_expired(expiry));
+            !flow.is_empty()
+        });
+    }
+
+    /// Total entries currently held (including any expired-but-not-yet-swept), for reaper tests.
+    #[cfg(test)]
+    fn stored_entry_count(&self) -> usize {
+        self.data.read().values().map(HashMap::len).sum()
+    }
+
+    /// Number of flow maps currently held, for reaper tests — the real high-cardinality growth
+    /// vector is the outer map's key count, which `stored_entry_count` (a sum of inner lens) can't
+    /// see (an empty flow map contributes 0).
+    #[cfg(test)]
+    fn stored_flow_count(&self) -> usize {
+        self.data.read().len()
     }
 }
 
 impl FlowStore for InMemoryFlowStore {
     fn get(&self, flow_id: &str, key: &str) -> Result<Option<Value>> {
         // Use read lock for concurrent read access
-        let key_str = self.make_key(flow_id, key);
         let data = self.data.read();
-
-        match data.get(&key_str) {
-            Some((value, expiry)) if !self.is_expired(expiry) => Ok(Some(value.clone())),
+        match data.get(flow_id).and_then(|flow| flow.get(key)) {
+            Some((value, expiry)) if !Self::is_expired(expiry) => Ok(Some(value.clone())),
             _ => Ok(None),
         }
     }
 
     fn set(&self, flow_id: &str, key: &str, value: Value) -> Result<()> {
-        let key_str = self.make_key(flow_id, key);
         let expiry = SystemTime::now() + self.default_ttl;
         let mut data = self.data.write();
 
-        // Opportunistically clean up this specific key if expired
-        Self::cleanup_on_write(&mut data, &key_str, |exp| self.is_expired(exp));
-
-        data.insert(key_str, (value, Some(expiry)));
+        data.entry(flow_id.to_string())
+            .or_default()
+            .insert(key.to_string(), (value, Some(expiry)));
+        self.maybe_sweep(&mut data);
         Ok(())
     }
 
     fn exists(&self, flow_id: &str, key: &str) -> Result<bool> {
         // Use read lock for concurrent read access
-        let key_str = self.make_key(flow_id, key);
         let data = self.data.read();
-
-        match data.get(&key_str) {
-            Some((_, expiry)) if !self.is_expired(expiry) => Ok(true),
+        match data.get(flow_id).and_then(|flow| flow.get(key)) {
+            Some((_, expiry)) if !Self::is_expired(expiry) => Ok(true),
             _ => Ok(false),
         }
     }
 
     fn delete(&self, flow_id: &str, key: &str) -> Result<()> {
-        let key_str = self.make_key(flow_id, key);
         let mut data = self.data.write();
-        data.remove(&key_str);
+        if let Some(flow) = data.get_mut(flow_id) {
+            flow.remove(key);
+            if flow.is_empty() {
+                data.remove(flow_id);
+            }
+        }
         Ok(())
     }
 
@@ -115,14 +154,14 @@ impl FlowStore for InMemoryFlowStore {
     /// Atomic under the single write lock (issue #358), like `increment`: the read-modify-write
     /// happens with the lock held, so no interleaving window with a concurrent increment/set.
     fn increment_by(&self, flow_id: &str, key: &str, by: i64) -> Result<i64> {
-        let key_str = self.make_key(flow_id, key);
         let expiry = SystemTime::now() + self.default_ttl;
         let mut data = self.data.write();
+        let flow = data.entry(flow_id.to_string()).or_default();
 
-        // Opportunistically clean up this specific key if expired
-        Self::cleanup_on_write(&mut data, &key_str, |exp| self.is_expired(exp));
+        // Opportunistically clean up this specific key if expired, so a stale value isn't summed.
+        Self::remove_if_expired(flow, key);
 
-        let current = match data.get(&key_str) {
+        let current = match flow.get(key) {
             Some((Value::Number(n), _)) if n.is_i64() => n.as_i64().unwrap_or(0),
             _ => 0,
         };
@@ -132,18 +171,22 @@ impl FlowStore for InMemoryFlowStore {
             anyhow::anyhow!("increment_by overflow: {current} + {by} exceeds i64 range")
         })?;
 
-        data.insert(key_str, (Value::Number(new_value.into()), Some(expiry)));
+        flow.insert(
+            key.to_string(),
+            (Value::Number(new_value.into()), Some(expiry)),
+        );
+        self.maybe_sweep(&mut data);
         Ok(new_value)
     }
 
     fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> Result<()> {
-        let prefix = format!("flow:{flow_id}:");
         let new_expiry =
             SystemTime::now() + Duration::from_secs(u64::try_from(ttl_seconds).unwrap_or(0));
         let mut data = self.data.write();
 
-        for (key, (_, expiry)) in data.iter_mut() {
-            if key.starts_with(&prefix) {
+        // Nested keying (issue #483): touch only this flow's entries, not the whole store.
+        if let Some(flow) = data.get_mut(flow_id) {
+            for (_, expiry) in flow.values_mut() {
                 *expiry = Some(new_expiry);
             }
         }
@@ -160,17 +203,24 @@ impl FlowStore for InMemoryFlowStore {
         expected: Option<&Value>,
         new: Value,
     ) -> Result<CasOutcome> {
-        let key_str = self.make_key(flow_id, key);
         let mut data = self.data.write();
-        Self::cleanup_on_write(&mut data, &key_str, |exp| self.is_expired(exp));
+        let flow = data.entry(flow_id.to_string()).or_default();
+        Self::remove_if_expired(flow, key);
 
-        let current = data.get(&key_str).map(|(value, _)| value);
+        let current = flow.get(key).map(|(value, _)| value);
         if current == expected {
             let expiry = SystemTime::now() + self.default_ttl;
-            data.insert(key_str, (new, Some(expiry)));
+            flow.insert(key.to_string(), (new, Some(expiry)));
+            self.maybe_sweep(&mut data);
             Ok(CasOutcome::Applied)
         } else {
-            Ok(CasOutcome::Conflict(current.cloned()))
+            let conflict = current.cloned();
+            // A CAS that didn't write can still have created an empty flow via `entry().or_default()`
+            // above; drop it so a failed compare never leaks a flow map.
+            if flow.is_empty() {
+                data.remove(flow_id);
+            }
+            Ok(CasOutcome::Conflict(conflict))
         }
     }
 }
@@ -488,5 +538,99 @@ mod tests {
         let final_state = store.get("f", "state").expect("get").expect("present");
         let s = final_state.as_str().expect("string state");
         assert!(s.starts_with("paid-by-"), "final state legal, got {s}");
+    }
+
+    // ===== reaping + targeted set_ttl (issue #483) =====
+
+    // The amortized sweeper must actually reclaim expired entries across many short-lived flows,
+    // so a long-running store doesn't grow without bound. Before this fix expired entries were
+    // only ever removed on a same-key rewrite, so high-cardinality flow ids leaked forever.
+    #[test]
+    fn sweeper_reaps_expired_entries_across_flows() {
+        let store = InMemoryFlowStore::new(1); // 1s TTL
+
+        // One entry in each of many distinct, never-rewritten flows.
+        for i in 0..300 {
+            store.set(&format!("flow-{i}"), "k", json!(i)).unwrap();
+        }
+        assert_eq!(store.stored_entry_count(), 300);
+
+        // Let them all expire.
+        std::thread::sleep(Duration::from_secs(2));
+
+        // Drive enough writes (to a single overwritten key) to trigger at least one sweep now
+        // that the 300 are expired.
+        for _ in 0..(SWEEP_INTERVAL * 2) {
+            store.set("sink", "k", json!(1)).unwrap();
+        }
+
+        // Only the live sink entry survives; the 300 expired flows were reaped — asserted on both
+        // the entry count AND the outer flow-map count (the real high-cardinality growth vector:
+        // an empty flow map left in the outer HashMap contributes 0 to stored_entry_count).
+        assert_eq!(
+            store.stored_entry_count(),
+            1,
+            "expired entries across distinct flows must be reaped, leaving only the live one"
+        );
+        assert_eq!(
+            store.stored_flow_count(),
+            1,
+            "empty flow maps for the expired flows must be dropped from the outer map"
+        );
+    }
+
+    // delete of a flow's sole key must drop the flow map from the outer store immediately, not
+    // leave an empty map to accumulate (issue #483's growth vector).
+    #[test]
+    fn delete_last_key_removes_the_flow_map() {
+        let store = InMemoryFlowStore::new(300);
+        store.set("f", "k", json!("v")).unwrap();
+        assert_eq!(store.stored_flow_count(), 1);
+        store.delete("f", "k").unwrap();
+        assert_eq!(
+            store.stored_flow_count(),
+            0,
+            "deleting a flow's last key must remove its flow map, not leave it empty"
+        );
+    }
+
+    // A conflicting CAS on a brand-new flow_id must not leak the empty flow map that
+    // `entry().or_default()` transiently created.
+    #[test]
+    fn cas_conflict_on_new_flow_leaves_no_flow_map() {
+        let store = InMemoryFlowStore::new(300);
+        // Expect a value on a flow that doesn't exist -> current None != expected -> Conflict.
+        let outcome = store
+            .compare_and_set("ghost", "k", Some(&json!("nope")), json!("x"))
+            .expect("cas");
+        assert!(matches!(outcome, CasOutcome::Conflict(None)));
+        assert_eq!(
+            store.stored_flow_count(),
+            0,
+            "a conflicting CAS on a new flow must not leak an empty flow map"
+        );
+    }
+
+    // set_ttl must extend only the target flow's entries — and, per #483, do so without scanning
+    // unrelated flows. Verified behaviorally: a sibling flow keeps its short TTL and expires.
+    #[test]
+    fn set_ttl_only_affects_target_flow() {
+        let store = InMemoryFlowStore::new(1); // 1s default TTL
+        store.set("keep", "k", json!("v")).unwrap();
+        store.set("drop", "k", json!("v")).unwrap();
+
+        // Extend only "keep" well past the sleep below.
+        store.set_ttl("keep", 100).unwrap();
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        assert!(
+            store.exists("keep", "k").unwrap(),
+            "set_ttl should have extended the target flow"
+        );
+        assert!(
+            !store.exists("drop", "k").unwrap(),
+            "a sibling flow must keep its original (now expired) TTL"
+        );
     }
 }
