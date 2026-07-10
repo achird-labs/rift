@@ -579,9 +579,8 @@ mod bounded_matching_tests {
                 Duration::from_millis(25),
             )
             .await;
-        let err = match res {
-            Err(e) => e,
-            Ok(_) => panic!("a runaway inject predicate must error, not hang the matching pass"),
+        let Err(err) = res else {
+            panic!("a runaway inject predicate must error, not hang the matching pass")
         };
         assert!(
             err.downcast_ref::<crate::scripting::PredicateInjectionError>()
