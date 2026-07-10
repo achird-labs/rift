@@ -34,7 +34,7 @@ pub struct ScriptTimeoutError {
 }
 
 /// Default script timeout when `_rift.scriptEngine.timeoutMs` is not configured.
-pub const DEFAULT_SCRIPT_TIMEOUT_MS: u64 = 5000;
+pub const DEFAULT_SCRIPT_TIMEOUT_MS: u64 = 10000;
 
 /// The `_rift.script` wall-clock deadline for an imposter: `_rift.scriptEngine.timeoutMs`
 /// if configured, else [`DEFAULT_SCRIPT_TIMEOUT_MS`] (issue #308).
