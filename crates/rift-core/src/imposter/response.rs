@@ -123,7 +123,7 @@ pub fn execute_stub_response_with_rift(
     u16,
     HashMap<String, Vec<String>>,
     String,
-    Option<serde_json::Value>,
+    Option<std::sync::Arc<crate::behaviors::ResponseBehaviors>>,
     Option<RiftResponseExtension>,
     ResponseMode,
     bool,
@@ -131,37 +131,41 @@ pub fn execute_stub_response_with_rift(
     match response {
         StubResponse::Is {
             is,
-            behaviors,
+            behaviors_parsed,
             rift,
+            rendered_body,
+            ..
         } => {
             let mut headers = is.headers.clone();
             let mode = is.mode.clone();
 
-            let body = is
-                .body
-                .as_ref()
-                .map(|b| {
-                    if b.is_string() {
-                        b.as_str().unwrap_or("").to_string()
-                    } else {
-                        if !headers.contains_key("content-type")
-                            && !headers.contains_key("Content-Type")
-                        {
-                            headers.insert(
-                                "Content-Type".to_string(),
-                                vec!["application/json".to_string()],
-                            );
-                        }
-                        serde_json::to_string(b).unwrap_or_default()
+            // Issue #479: `rendered_body` is precomputed once at construction (see
+            // `StubResponse::new_is`) for a non-string body — no more re-serializing on every
+            // request. A string body (or no body) has no `rendered_body` and is used as-is.
+            let body = match rendered_body {
+                Some(rb) => {
+                    if !headers.contains_key("content-type")
+                        && !headers.contains_key("Content-Type")
+                    {
+                        headers.insert(
+                            "Content-Type".to_string(),
+                            vec!["application/json".to_string()],
+                        );
                     }
-                })
-                .unwrap_or_default();
+                    rb.to_string()
+                }
+                None => is
+                    .body
+                    .as_ref()
+                    .map(|b| b.as_str().unwrap_or("").to_string())
+                    .unwrap_or_default(),
+            };
 
             Some((
                 is.status_code,
                 headers,
                 body,
-                behaviors.clone(),
+                behaviors_parsed.clone(),
                 rift.clone(),
                 mode,
                 false,
@@ -266,11 +270,7 @@ pub fn create_stub_from_proxy_response(
         id: None,
         route_pattern: None,
         predicates,
-        responses: vec![StubResponse::Is {
-            is: is_response,
-            behaviors,
-            rift: None,
-        }],
+        responses: vec![StubResponse::new_is(is_response, behaviors, None)],
         scenario_name: None,
         required_scenario_state: None,
         new_scenario_state: None,

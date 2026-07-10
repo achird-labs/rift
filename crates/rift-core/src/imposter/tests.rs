@@ -47,16 +47,16 @@ fn test_predicate_matching() {
                 "path": "/test"
             }
         })]),
-        responses: vec![StubResponse::Is {
-            is: IsResponse {
+        responses: vec![StubResponse::new_is(
+            IsResponse {
                 status_code: 200,
                 headers: HashMap::new(),
                 body: Some(serde_json::json!({"message": "hello"})),
                 ..Default::default()
             },
-            behaviors: None,
-            rift: None,
-        }],
+            None,
+            None,
+        )],
         scenario_name: None,
         required_scenario_state: None,
         new_scenario_state: None,
@@ -153,16 +153,16 @@ fn test_execute_stub() {
         id: None,
         route_pattern: None,
         predicates: vec![],
-        responses: vec![StubResponse::Is {
-            is: IsResponse {
+        responses: vec![StubResponse::new_is(
+            IsResponse {
                 status_code: 201,
                 headers: HashMap::new(),
                 body: Some(serde_json::json!({"created": true})),
                 ..Default::default()
             },
-            behaviors: None,
-            rift: None,
-        }],
+            None,
+            None,
+        )],
         scenario_name: None,
         required_scenario_state: None,
         new_scenario_state: None,
@@ -2716,16 +2716,16 @@ async fn test_cors_headers_on_stub_response() {
         predicates: predicates_from_jsons(vec![serde_json::json!({
             "equals": {"method": "GET", "path": "/test"}
         })]),
-        responses: vec![StubResponse::Is {
-            is: IsResponse {
+        responses: vec![StubResponse::new_is(
+            IsResponse {
                 status_code: 200,
                 headers: HashMap::new(),
                 body: Some(serde_json::json!("ok")),
                 ..Default::default()
             },
-            behaviors: None,
-            rift: None,
-        }],
+            None,
+            None,
+        )],
         scenario_name: None,
         required_scenario_state: None,
         new_scenario_state: None,
