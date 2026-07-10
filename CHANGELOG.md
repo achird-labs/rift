@@ -11,7 +11,29 @@ record.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-10
+
+This release lands the engine-side surface the official language SDKs build on — server-side
+verification, the C-ABI admin long tail, a published conformance corpus, and runtime intercept —
+plus a broad round of hot-path performance work and scripting/proxy fixes.
+
 ### Added
+- **Server-side verification endpoint** (#494): `POST /imposters/{port}/verify` counts (and
+  optionally returns) recorded requests matching a predicate set, evaluated by the engine's own
+  predicate engine, and can return the closest non-match with per-clause `failedPredicates` for a
+  readable diff. `flowId` scopes the count like `savedRequests`. A matching FFI symbol `rift_verify`
+  gives embedded parity. This lets every SDK's `verify(match, times(n))` defer to the one true
+  evaluator instead of re-implementing predicate matching (or shipping the whole journal over the
+  wire), including operators impractical client-side (`xpath`, `inject`).
+- **C-ABI admin long-tail symbols** (#491): twelve additive v2 FFI symbols — `rift_list_imposters`,
+  `rift_get_imposter`, `rift_add_stub`, `rift_get_stub`, `rift_update_stub`, `rift_delete_stub`,
+  `rift_clear_recorded`, `rift_clear_proxy_recordings`, `rift_set_imposter_enabled`,
+  `rift_scenarios`, `rift_set_scenario_state`, `rift_reset_scenarios` — so an embedded SDK can drive
+  the full admin surface without lazily booting an in-process admin plane over loopback HTTP. Each
+  delegates to the same manager/imposter method its admin route uses.
+- **`allowInjection` option for `rift_serve_admin`** (#492): the embedded admin plane now gates
+  script/inject imposters submitted through it behind an explicit `allowInjection` flag (default
+  off), mirroring the `--allowInjection` CLI gate.
 - **Runtime intercept lifecycle over the admin API** (#493): `POST /intercept` starts the TLS-MITM
   intercept listener at runtime (201 with `{interceptPort, interceptUrl}`, 409 if already running),
   `GET /intercept` reports it (404 when not running), and `DELETE /intercept` stops it (204,
@@ -21,6 +43,12 @@ record.
   surface is visible to the others. New FFI symbol `rift_stop_intercept` mirrors `DELETE /intercept`,
   and `rift_serve_admin` now serves the full `/intercept*` surface against the handle's listener
   (previously it 404'd). All endpoints are gated by `--apikey` like other admin routes.
+- **SDK conformance corpus release artifact** (#460, #516, #517): each release now publishes
+  `sdk-conformance-<version>.tar.gz` — imposter fixtures with `_verify` transcripts, `data/`, and
+  injection modules, plus a README replay contract and a `manifest.json` index — so every SDK's CI
+  replays the same fixtures for the engine version it pins and catches DSL/engine drift. An
+  engine-side gate replays the whole corpus on every commit, and the SDK-relevant fixtures carry
+  self-describing `_verify` sequences so SDKs assert behavior, not just DSL-expressibility.
 
 ### Changed
 - **Case-insensitive `contains`/`startsWith`/`endsWith` predicates now fold ASCII only** (#480), for
@@ -29,10 +57,28 @@ record.
   folding (e.g. `É` vs `é`) now require exact non-ASCII bytes; pure-ASCII matching is unchanged.
 
 ### Performance
-- **Fewer per-request allocations in the imposter matching hot path** (#480): the query string is
-  parsed once per request (not once per predicate), case-insensitive string compares no longer
+- **Fewer per-request allocations in the imposter matching hot path** (#480, #508): the query string
+  is parsed once per request (not once per predicate), case-insensitive string compares no longer
   allocate a lowercased copy of each side, and the request-context header map is captured directly
   instead of being rebuilt and re-validated per request.
+- **Scripting hooks run inline on the async worker** (#501): Mountebank `inject`/`decorate`/predicate
+  hooks no longer hop to `spawn_blocking` with a per-call timeout; each runs inline with a fresh Boa
+  context, removing the blocking-pool round-trip on the scripted hot path.
+- **Scenario-FSM Redis I/O offloaded off the tokio worker** (#503): the scenario state machine's
+  Redis reads/writes run on `spawn_blocking` and fold `INCRBY`/`EXPIRE` into one round-trip, so a
+  slow Redis backend no longer stalls a request worker.
+- **HTTP connection pooling re-enabled for proxying** (#496): the proxy client reuses connections
+  again (no fresh TCP+TLS handshake per proxied request) and drops a wasted clone of the recorded
+  response body.
+- **`InMemoryFlowStore` reaps expired entries** (#495): the in-memory flow store now evicts expired
+  keys instead of growing unbounded, and `set_ttl` avoids a full-store scan.
+- **Request-path regexes routed through the shared cache** (#489): path predicates and route anchors
+  reuse cached/`LazyLock` regexes instead of recompiling per request.
+- **Per-stub response work precomputed once** (#488): `_behaviors` and non-string bodies are parsed
+  and precomputed once per stub rather than re-derived on every matching request.
+- **`GET /imposters/{port}/savedRequests?match=` filters before cloning** (#485, #506): a `match=`
+  query filters recorded requests over references before cloning, so it no longer deep-clones the
+  whole journal to discard most of it.
 
 ### Fixed
 - **A stub that only names a scenario (`scenarioName`) now gets a real flow store** (#514). Previously
@@ -41,12 +87,30 @@ record.
   (and the `rift_set_scenario_state`/`rift_reset_scenarios` FFI symbols) silently discarded the write
   and a subsequent read still showed the initial state. Any stub referencing a scenario now
   provisions an in-memory flow store, so the scenario surface behaves as documented.
-- **Proxy `predicateGenerators.inject` failures no longer record a match-all stub** (#498). When an
-  inject predicate generator fails (script error, invalid output, script-pool failure, or timeout),
-  Rift now skips auto-stub creation instead of silently recording a stub with empty predicates that
-  would shadow every future request. The proxied response is still returned and carries an
-  `x-rift-generator-error` header naming the failure. A generator that legitimately returns `[]` is
-  unchanged.
+- **Proxy `predicateGenerators.inject` failures no longer record a match-all stub** (#498, #507). When
+  an inject predicate generator fails (script error, invalid output, script-pool failure, or
+  timeout), Rift now skips auto-stub creation instead of silently recording a stub with empty
+  predicates that would shadow every future request. The proxied response is still returned and
+  carries an `x-rift-generator-error` header naming the failure. A generator that legitimately
+  returns `[]` is unchanged.
+- **Script timeouts are distinguished from broken-script errors in the response** (#499, #515): an
+  `inject`/`decorate` script that times out now maps to `504` while a genuine script error stays
+  `400`/`500`, so a slow script and a broken script are no longer conflated in the served response.
+- **Per-imposter script state updates are atomic under concurrency** (#477, #486): concurrent
+  requests mutating the same imposter's script/flow state no longer lose updates to a read-modify-
+  write race.
+- **`shellTransform` runs on the blocking pool, not a tokio worker** (#478, #505): the
+  `shellTransform` behavior spawns its host subprocess on `spawn_blocking`, so a slow shell command
+  can't stall a request worker.
+- **Function-form `wait` behavior is clamped/capped like the Boa path** (#490, #504): the regex
+  fallback for a JS-function `wait` now clamps and caps the delay the same way the Boa-evaluated path
+  does.
+- **Every `extern "C"` FFI entry point guards against panic-unwind across the C ABI** (#484, #487): a
+  panic inside any FFI symbol is caught and converted to the symbol's error sentinel + `last_error`
+  rather than unwinding across the C boundary (undefined behavior).
+- **Abnormal intercept accept-loop exits are logged, not swallowed** (#523): a panicked intercept
+  accept loop now surfaces its `JoinError` in a warning instead of letting `shutdown`/`stop` report
+  success over a crashed listener.
 
 ## [0.12.0] - 2026-07-09
 
@@ -277,7 +341,9 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.11.3...HEAD
+[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/EtaCassiopeia/rift/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/EtaCassiopeia/rift/compare/v0.11.3...v0.12.0
 [0.11.3]: https://github.com/EtaCassiopeia/rift/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/EtaCassiopeia/rift/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/EtaCassiopeia/rift/compare/v0.11.0...v0.11.1

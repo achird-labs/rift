@@ -5,7 +5,7 @@
 #        git log --oneline --merges <commit>..origin/master
 #   2. Update the affected pages.
 #   3. Bump this file AND the version in _config.yml footer_content in the same PR.
-release: v0.12.0
-commit: 16d875bd7104236df01073b7f2c98c9bfed97775
-date: 2026-07-09
+release: v0.13.0
+commit: dcc927b92296848a0de3299540b16299b202fac3
+date: 2026-07-10
 tracking_issue: 280
