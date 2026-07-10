@@ -1,0 +1,34 @@
+{
+  "port": 4517,
+  "protocol": "http",
+  "name": "17 · Extended faults — error body/headers, latency range (issue #254 §D5)",
+  "recordRequests": true,
+  "stubs": [
+    {
+      "name": "error fault — custom status, body and headers",
+      "predicates": [{ "equals": { "path": "/err" } }],
+      "responses": [{
+        "is": { "statusCode": 200 },
+        "_rift": { "fault": { "error": { "probability": 1.0, "status": 503, "body": "DOWN", "headers": { "Retry-After": "30" } } } }
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/err" }, "expect": { "status": 503, "bodyContains": "DOWN" } }
+        ]
+      }
+    },
+    {
+      "name": "latency fault — random range 300-600ms",
+      "predicates": [{ "equals": { "path": "/slow" } }],
+      "responses": [{
+        "is": { "statusCode": 200, "body": "slow" },
+        "_rift": { "fault": { "latency": { "probability": 1.0, "minMs": 300, "maxMs": 600 } } }
+      }],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/slow" }, "expect": { "status": 200, "bodyContains": "slow" } }
+        ]
+      }
+    }
+  ]
+}

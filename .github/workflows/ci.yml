@@ -65,6 +65,18 @@ jobs:
       - name: Run rift-ffi C-ABI round-trip tests
         run: cargo test -p rift-ffi --all-features --test round_trip
 
+      # Issue #460: the published sdk-conformance-<ver>.tar.gz corpus must serve and its `_verify`
+      # transcripts must hold on this commit (and `manifest.json` must match the fixtures on disk).
+      # This gate binary is also skipped by the `--lib` step, so run it explicitly — it's what keeps
+      # the release artifact verified rather than hoped, and catches DSL/engine drift at the source.
+      - name: Run SDK conformance corpus replay gate
+        run: cargo test -p rift-http-proxy --all-features --test corpus_replay
+
+      # Issue #460: prove the corpus packager (release step) works end-to-end — version stamping,
+      # tar structure, fixture-count round-trip — without needing an engine build.
+      - name: SDK conformance packager self-test
+        run: ./scripts/gen-sdk-conformance.sh --self-test
+
       # Issue #344: a pinned cbindgen so the header regenerate-diff in the smoke test is
       # deterministic (cbindgen output varies across versions) and actually runs (the step
       # skips the diff when cbindgen is absent). Keep the version in sync with the header's.

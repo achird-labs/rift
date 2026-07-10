@@ -1,0 +1,38 @@
+{
+  "port": 4514,
+  "protocol": "http",
+  "name": "14 · _verify annotations (rift-verify --verify-dynamic)",
+  "stubs": [
+    {
+      "name": "repeat:2 cycle, asserted by a _verify sequence",
+      "predicates": [{ "equals": { "path": "/retry" } }],
+      "responses": [
+        { "is": { "statusCode": 503, "body": "unavailable" }, "_behaviors": { "repeat": 2 } },
+        { "is": { "statusCode": 200, "body": "ok" } }
+      ],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/retry" }, "expect": { "status": 503, "bodyContains": "unavailable" } },
+          { "request": { "path": "/retry" }, "expect": { "status": 503 } },
+          { "request": { "path": "/retry" }, "expect": { "status": 200, "bodyContains": "ok" } },
+          { "request": { "path": "/retry" }, "expect": { "status": 503 } }
+        ]
+      }
+    },
+    {
+      "name": "copy (request-derived) decorate, asserted by _verify",
+      "predicates": [{ "matches": { "path": "^/orders/[0-9]+$" } }],
+      "responses": [
+        {
+          "is": { "statusCode": 200, "body": "id=${ID}" },
+          "_behaviors": { "copy": { "from": "path", "into": "${ID}", "using": { "method": "regex", "selector": "/orders/([0-9]+)" } } }
+        }
+      ],
+      "_verify": {
+        "sequence": [
+          { "request": { "path": "/orders/77" }, "expect": { "status": 200, "bodyContains": "id=77" } }
+        ]
+      }
+    }
+  ]
+}

@@ -3400,6 +3400,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rift-core",
+ "rift-lint",
  "rift-types",
  "rustls",
  "rustls-pemfile",

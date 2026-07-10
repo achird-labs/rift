@@ -1,0 +1,35 @@
+{
+  "port": 4513,
+  "protocol": "http",
+  "name": "13 · decorate conventions — Mountebank JS `config =>` and Rhai (#191)",
+  "stubs": [
+    {
+      "name": "Mountebank JS arrow: config => { config.response... }",
+      "predicates": [{ "equals": { "path": "/js-arrow" } }],
+      "responses": [{
+        "is": { "statusCode": 200, "body": "{\"v\":1}" },
+        "_behaviors": {
+          "decorate": "config => { config.response.headers['X-Decorated-By'] = 'config-arrow'; config.response.statusCode = 202; }"
+        }
+      }]
+    },
+    {
+      "name": "Mountebank JS function(config) form — reads config.request",
+      "predicates": [{ "equals": { "path": "/js-fn" } }],
+      "responses": [{
+        "is": { "statusCode": 200, "body": "replaced" },
+        "_behaviors": {
+          "decorate": "function(config) { config.response.body = 'method-was-' + config.request.method; }"
+        }
+      }]
+    },
+    {
+      "name": "Rhai decorate (Rift-native) — unchanged",
+      "predicates": [{ "equals": { "path": "/rhai" } }],
+      "responses": [{
+        "is": { "statusCode": 200, "body": "orig" },
+        "_behaviors": { "decorate": "response.body = \"rhai-\" + request.path;" }
+      }]
+    }
+  ]
+}

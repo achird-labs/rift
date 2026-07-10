@@ -1,0 +1,78 @@
+{
+  "port": 4501,
+  "protocol": "http",
+  "name": "01 · Basic REST API",
+  "recordRequests": true,
+  "defaultResponse": {
+    "statusCode": 404,
+    "headers": { "Content-Type": "application/json" },
+    "body": { "error": "not found", "hint": "see README for the route list" }
+  },
+  "stubs": [
+    {
+      "name": "Health check",
+      "predicates": [{ "equals": { "method": "GET", "path": "/health" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "OK" } }]
+    },
+    {
+      "name": "List products (JSON array body)",
+      "predicates": [{ "equals": { "method": "GET", "path": "/api/products" } }],
+      "responses": [{
+        "is": {
+          "statusCode": 200,
+          "headers": { "Content-Type": "application/json" },
+          "body": [
+            { "id": 123, "name": "Widget", "price": 9.99 },
+            { "id": 456, "name": "Gadget", "price": 19.99 }
+          ]
+        }
+      }]
+    },
+    {
+      "name": "Get one product by numeric id (regex path)",
+      "predicates": [{
+        "and": [
+          { "equals": { "method": "GET" } },
+          { "matches": { "path": "^/api/products/\\d+$" } }
+        ]
+      }],
+      "responses": [{
+        "is": {
+          "statusCode": 200,
+          "headers": { "Content-Type": "application/json" },
+          "body": { "id": 123, "name": "Widget", "price": 9.99 }
+        }
+      }]
+    },
+    {
+      "name": "Create product",
+      "predicates": [{ "equals": { "method": "POST", "path": "/api/products" } }],
+      "responses": [{
+        "is": {
+          "statusCode": 201,
+          "headers": { "Content-Type": "application/json", "Location": "/api/products/999" },
+          "body": { "id": 999, "message": "created" }
+        }
+      }]
+    },
+    {
+      "name": "Delete product (no content)",
+      "predicates": [{
+        "and": [
+          { "equals": { "method": "DELETE" } },
+          { "matches": { "path": "^/api/products/\\d+$" } }
+        ]
+      }],
+      "responses": [{ "is": { "statusCode": 204 } }]
+    },
+    {
+      "name": "Response cycling — three responses served round-robin",
+      "predicates": [{ "equals": { "method": "GET", "path": "/api/rotating" } }],
+      "responses": [
+        { "is": { "statusCode": 200, "body": { "served": "first" } } },
+        { "is": { "statusCode": 200, "body": { "served": "second" } } },
+        { "is": { "statusCode": 200, "body": { "served": "third" } } }
+      ]
+    }
+  ]
+}

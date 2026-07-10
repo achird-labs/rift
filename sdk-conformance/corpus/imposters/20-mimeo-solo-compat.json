@@ -1,0 +1,137 @@
+{
+  "port": 4520,
+  "protocol": "http",
+  "name": "20 · mimeo-solo migration compat — Mountebank forms real cof-primary repos use",
+  "allowCORS": true,
+  "recordRequests": true,
+  "stubs": [
+    {
+      "scenarioName": "OAuth2 Token (ledger/bank-debit) — matches predicate, string body, _mode:text",
+      "predicates": [{ "matches": { "path": "/oauth2/token", "method": "POST" } }],
+      "responses": [{
+        "is": {
+          "statusCode": 200,
+          "headers": { "Content-Type": "application/json" },
+          "body": "{\"token_type\":\"Bearer\",\"access_token\":\"dummyToken\",\"expires_in\":1296000}",
+          "_mode": "text"
+        }
+      }]
+    },
+    {
+      "scenarioName": "THub Transactions (ledger) — anchored regex path (rift-verify-synthesizable; the raw [a-zA-Z0-9+=%/]+ char-class variant is driven dynamically in conformance-migration.sh)",
+      "predicates": [{ "matches": { "path": "^/deposits/accounts/[0-9]+/transactions$", "method": "GET" } }],
+      "responses": [{
+        "is": {
+          "statusCode": 200,
+          "headers": { "Content-Type": "application/json" },
+          "body": "{\"entries\":[{\"transactionId\":\"11037\",\"transactionAmount\":50000,\"currencyCode\":\"USD\"}]}",
+          "_mode": "text"
+        }
+      }]
+    },
+    {
+      "scenarioName": "Transaction Recorder (bank-transaction) — STRING statusCode + _behaviors object wait-fn",
+      "predicates": [
+        { "deepEquals": { "method": "POST" } },
+        { "deepEquals": { "path": "/transaction" } }
+      ],
+      "responses": [{
+        "is": {
+          "statusCode": "200",
+          "headers": { "Content-Type": "application/json" },
+          "body": "{\"message\":\"Transaction recorded successfully\"}"
+        },
+        "_behaviors": {
+          "wait": "function(){var min = Math.ceil(0); var max = Math.floor(0); var num = Math.floor(Math.random() * (max - min + 1)); return num + min;}"
+        }
+      }]
+    },
+    {
+      "scenarioName": "LLDS retrieve (saffron) — rooted jsonpath selector routing",
+      "predicates": [
+        { "equals": { "body": "3U5mJmLnK" }, "jsonpath": { "selector": "$.searchValue" } },
+        { "deepEquals": { "method": "POST" } },
+        { "equals": { "path": "/llds/retrieve-dataset" } }
+      ],
+      "responses": [{
+        "is": {
+          "statusCode": "200",
+          "headers": { "Content-Type": "application/json" },
+          "body": "{\"requestCorrelationId\":\"test\",\"datasetRecords\":[]}"
+        }
+      }]
+    },
+    {
+      "scenarioName": "Valuation (Inventory/RENUW) — rules alias + rooted jsonpath + equals-on-headers routing + delayRange + inline decorate (real rules+decorate shape)",
+      "rules": [
+        { "equals": { "body": "4T1BF3EK5BU211477" }, "jsonpath": { "selector": "$.bookValueRequests[0].valuationByVin.vin" } },
+        { "equals": { "method": "POST" } },
+        { "equals": { "headers": { "Client-Correlation-ID": "79a89f32-122a-4c85-bbcd-3da069d25f28" } } }
+      ],
+      "responses": [{
+        "is": {
+          "statusCode": 200,
+          "headers": { "Content-Type": "application/json;v=3" },
+          "body": "{\"status\":\"SUCCESS\",\"maximumLimit\":50}"
+        },
+        "_behaviors": {
+          "decorate": "config => { config.response.headers['X-Valuation-Source'] = 'NADA'; }"
+        }
+      }],
+      "delayRange": [{ "min": "0", "max": "0" }],
+      "_verify": {
+        "sequence": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/valuation",
+              "headers": { "Client-Correlation-ID": "79a89f32-122a-4c85-bbcd-3da069d25f28" },
+              "body": "{\"bookValueRequests\":[{\"valuationByVin\":{\"vin\":\"4T1BF3EK5BU211477\"}}]}"
+            },
+            "expect": { "status": 200, "bodyContains": "SUCCESS" }
+          }
+        ]
+      }
+    },
+    {
+      "scenarioName": "hello-world (RENUW scaffold) — behaviors ARRAY [wait, decorate] + proxy:null alongside is",
+      "predicates": [
+        { "deepEquals": { "path": "/hello-world" } },
+        { "deepEquals": { "method": "GET" } }
+      ],
+      "responses": [{
+        "behaviors": [
+          { "wait": "function(){ return 0; }" },
+          { "decorate": "config => { config.response.headers['X-Injected-By'] = 'behaviors-array'; }" }
+        ],
+        "is": {
+          "statusCode": "200",
+          "headers": { "Content-type": "application/json", "Accept": "application/json;v=1" },
+          "body": "{\"message\": \"Hello world from Mimeo Solo!\"}"
+        },
+        "proxy": null
+      }]
+    },
+    {
+      "scenarioName": "Promote offer 204 (auto-digital) — contains predicate + STRING statusCode 204 + empty body",
+      "predicates": [
+        { "contains": { "path": "204204" } },
+        { "deepEquals": { "method": "POST" } }
+      ],
+      "responses": [{
+        "behaviors": [{ "wait": "function(){ return 0; }" }],
+        "is": {
+          "statusCode": "204",
+          "headers": { "Content-Type": "application/json" },
+          "body": ""
+        },
+        "proxy": null
+      }]
+    },
+    {
+      "scenarioName": "418 catch-all (ledger) — matches:/*",
+      "predicates": [{ "matches": { "path": "/*" } }],
+      "responses": [{ "is": { "statusCode": 418, "body": "No matching scenario found." } }]
+    }
+  ]
+}

@@ -96,6 +96,8 @@ serde_json_path = "0.7"
 [dev-dependencies]
 # Turn on the failing flow-store backend for backend-outage tests (issue #318)
 rift-core = { path = "../rift-core", version = "0.1.0", default-features = false, features = ["test-backend"] }
+# Corpus lint gate (issue #460): lint every vendored fixture via the library API.
+rift-lint = { path = "../rift-lint", version = "0.1.0" }
 tempfile = "3.8"
 rcgen = "0.13"
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "engineVersion": "0.0.0-dev",
+  "fixtures": [
+    {
+      "file": "corpus/imposters/01-basic-rest.json",
+      "port": 4501,
+      "name": "01 \u00b7 Basic REST API",
+      "requires": [],
+      "hasVerify": false
+    },
+    {
+      "file": "corpus/imposters/02-predicates.json",
+      "port": 4502,
+      "name": "02 \u00b7 Predicate Showcase",
+      "requires": [],
+      "hasVerify": false
+    },
+    {
+      "file": "corpus/imposters/03-behaviors.json",
+      "port": 4503,
+      "name": "03 \u00b7 Behaviors (wait, repeat, decorate, copy, lookup)",
+      "requires": [
+        "injection"
+      ],
+      "hasVerify": false
+    },
+    {
+      "file": "corpus/imposters/04-fault-injection.json",
+      "port": 4504,
+      "name": "04 \u00b7 Fault Injection (_rift.fault)",
+      "requires": [],
+      "hasVerify": false
+    },
+    {
+      "file": "corpus/imposters/05-scripting-engines.json",
+      "port": 4505,
+      "name": "05 \u00b7 Scripting Engines (rhai, javascript)",
+      "requires": [
+        "injection"
+      ],
+      "hasVerify": false
+    },
+    {
+      "file": "corpus/imposters/06-stateful-retry.json",
+      "port": 4506,
+      "name": "06 \u00b7 Stateful Retry Simulation (flow state)",
+      "requires": [
+        "injection"
+      ],
+      "hasVerify": false
+    },
+    {
+      "file": "corpus/imposters/07-proxy-record.json",
+      "port": 4507,
+      "name": "07 \u00b7 Proxy + Record/Replay",
+      "requires": [
+        "proxy"
+      ],
+      "hasVerify": false
+    },
+    {
+      "file": "corpus/imposters/10-correlated-isolation.json",
+      "port": 4510,
+      "name": "10 \u00b7 Correlated isolation (one port, partitioned by a header)",
+      "requires": [],
+      "hasVerify": false
+    },
+    {
+      "file": "corpus/imposters/11-headers-and-templates.json",
+      "port": 4511,
+      "name": "11 \u00b7 Multi-value headers, date templates, defaultResponse/defaultForward, CORS",
+      "requires": [],
+      "hasVerify": false
+    },
+    {
+      "file": "corpus/imposters/13-js-config-decorate.json",
+      "port": 4513,
+      "name": "13 \u00b7 decorate conventions \u2014 Mountebank JS `config =>` and Rhai (#191)",
+      "requires": [
+        "injection"
+      ],
+      "hasVerify": false
+    },
+    {
+      "file": "corpus/imposters/14-verify-annotations.json",
+      "port": 4514,
+      "name": "14 \u00b7 _verify annotations (rift-verify --verify-dynamic)",
+      "requires": [],
+      "hasVerify": true
+    },
+    {
+      "file": "corpus/imposters/15-predicate-modifiers.json",
+      "port": 4515,
+      "name": "15 \u00b7 Predicate modifiers (issue #254 \u00a7D1)",
+      "requires": [],
+      "hasVerify": false
+    },
+    {
+      "file": "corpus/imposters/16-behaviors-advanced.json",
+      "port": 4516,
+      "name": "16 \u00b7 Advanced behaviors (issue #254 \u00a7D3)",
+      "requires": [
+        "injection"
+      ],
+      "hasVerify": false
+    },
+    {
+      "file": "corpus/imposters/17-faults-and-binary.json",
+      "port": 4517,
+      "name": "17 \u00b7 Extended faults \u2014 error body/headers, latency range (issue #254 \u00a7D5)",
+      "requires": [],
+      "hasVerify": true
+    },
+    {
+      "file": "corpus/imposters/20-mimeo-solo-compat.json",
+      "port": 4520,
+      "name": "20 \u00b7 mimeo-solo migration compat \u2014 Mountebank forms real cof-primary repos use",
+      "requires": [
+        "injection",
+        "proxy"
+      ],
+      "hasVerify": true
+    }
+  ]
+}

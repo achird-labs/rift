@@ -1,0 +1,48 @@
+{
+  "port": 4516,
+  "protocol": "http",
+  "name": "16 · Advanced behaviors (issue #254 §D3)",
+  "recordRequests": true,
+  "stubs": [
+    {
+      "name": "copy — from a request header into the body",
+      "predicates": [{ "equals": { "path": "/from-header" } }],
+      "responses": [{
+        "is": { "statusCode": 200, "headers": { "Content-Type": "application/json" }, "body": { "requestId": "${rid}" } },
+        "_behaviors": { "copy": { "from": { "headers": "X-Request-Id" }, "into": "${rid}", "using": { "method": "regex", "selector": ".*" } } }
+      }]
+    },
+    {
+      "name": "copy — extract a JSON field from the body via jsonpath",
+      "predicates": [{ "equals": { "path": "/from-json" } }],
+      "responses": [{
+        "is": { "statusCode": 200, "body": "who=${who}" },
+        "_behaviors": { "copy": { "from": "body", "into": "${who}", "using": { "method": "jsonpath", "selector": "$.user.name" } } }
+      }]
+    },
+    {
+      "name": "lookup — enrich the response from products.csv by id",
+      "predicates": [{ "matches": { "path": "^/catalog/[0-9]+$" } }],
+      "responses": [{
+        "is": { "statusCode": 200, "headers": { "Content-Type": "application/json" }, "body": { "name": "${row}[name]", "price": "${row}[price]" } },
+        "_behaviors": { "lookup": { "key": { "from": "path", "using": { "method": "regex", "selector": "/catalog/([0-9]+)" } }, "fromDataSource": { "csv": { "path": "data/products.csv", "keyColumn": "id" } }, "into": "${row}" } }
+      }]
+    },
+    {
+      "name": "wait — JS function returning a fixed delay",
+      "predicates": [{ "equals": { "path": "/slow-fn" } }],
+      "responses": [{
+        "is": { "statusCode": 200, "body": "waited" },
+        "_behaviors": { "wait": "function(){ return 400; }" }
+      }]
+    },
+    {
+      "name": "decorate — Rhai native, mutate response body in place",
+      "predicates": [{ "equals": { "path": "/decorate-rhai" } }],
+      "responses": [{
+        "is": { "statusCode": 200, "body": "orig" },
+        "_behaviors": { "decorate": "response.body = \"rhai-decorated\";" }
+      }]
+    }
+  ]
+}

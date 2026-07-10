@@ -1,0 +1,34 @@
+{
+  "port": 4507,
+  "protocol": "http",
+  "name": "07 · Proxy + Record/Replay",
+  "recordRequests": true,
+  "stubs": [
+    {
+      "name": "Proxy everything to the 01-basic-rest imposter and record each first response",
+      "predicates": [{ "matches": { "path": "^/api/.*" } }],
+      "responses": [{
+        "proxy": {
+          "to": "http://localhost:4501",
+          "mode": "proxyOnce",
+          "predicateGenerators": [{ "matches": { "method": true, "path": true } }]
+        }
+      }]
+    },
+    {
+      "name": "Local info route (not proxied)",
+      "predicates": [{ "equals": { "method": "GET", "path": "/info" } }],
+      "responses": [{
+        "is": {
+          "statusCode": 200,
+          "headers": { "Content-Type": "application/json" },
+          "body": {
+            "note": "GET /api/* is proxied to http://localhost:4501 (imposter 01).",
+            "mode": "proxyOnce — first call hits upstream and is recorded; later calls replay the recorded stub.",
+            "tip": "After a few calls, GET http://localhost:2525/imposters/4507 to see the auto-generated stubs."
+          }
+        }
+      }]
+    }
+  ]
+}

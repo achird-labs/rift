@@ -1,0 +1,108 @@
+{
+  "port": 4503,
+  "protocol": "http",
+  "name": "03 · Behaviors (wait, repeat, decorate, copy, lookup)",
+  "recordRequests": true,
+  "stubs": [
+    {
+      "name": "wait — fixed 1500ms delay",
+      "predicates": [{ "equals": { "path": "/slow" } }],
+      "responses": [{
+        "is": { "statusCode": 200, "body": { "note": "delayed 1.5s" } },
+        "_behaviors": { "wait": 1500 }
+      }]
+    },
+    {
+      "name": "wait — random delay between 200ms and 1200ms",
+      "predicates": [{ "equals": { "path": "/slow-range" } }],
+      "responses": [{
+        "is": { "statusCode": 200, "body": { "note": "delayed 200-1200ms" } },
+        "_behaviors": { "wait": { "min": 200, "max": 1200 } }
+      }]
+    },
+    {
+      "name": "repeat — fail 503 twice, then 200 (sequence cycles)",
+      "predicates": [{ "equals": { "path": "/retry-me" } }],
+      "responses": [
+        {
+          "is": { "statusCode": 503, "body": { "error": "try again" } },
+          "_behaviors": { "repeat": 2 }
+        },
+        { "is": { "statusCode": 200, "body": { "ok": true } } }
+      ]
+    },
+    {
+      "name": "decorate — JS post-processes the response (adds a header) [needs --allow-injection]",
+      "predicates": [{ "equals": { "path": "/decorated" } }],
+      "responses": [{
+        "is": {
+          "statusCode": 200,
+          "headers": { "Content-Type": "application/json" },
+          "body": { "decorated": false }
+        },
+        "_behaviors": {
+          "decorate": "function (request, response) { response.headers['X-Decorated-By'] = 'rift'; response.body = response.body.replace('false', 'true'); }"
+        }
+      }]
+    },
+    {
+      "name": "copy — pull the numeric id out of the path into the body",
+      "predicates": [{ "matches": { "path": "^/orders/\\d+$" } }],
+      "responses": [{
+        "is": {
+          "statusCode": 200,
+          "headers": { "Content-Type": "application/json", "X-Order-Id": "${orderId}" },
+          "body": { "orderId": "${orderId}", "status": "shipped" }
+        },
+        "_behaviors": {
+          "copy": {
+            "from": "path",
+            "into": "${orderId}",
+            "using": { "method": "regex", "selector": "/orders/(\\d+)" }
+          }
+        }
+      }]
+    },
+    {
+      "name": "copy — pull a query parameter (?user=) into the response",
+      "predicates": [{ "equals": { "path": "/greet" } }],
+      "responses": [{
+        "is": {
+          "statusCode": 200,
+          "headers": { "Content-Type": "application/json" },
+          "body": { "greeting": "hello ${user}" }
+        },
+        "_behaviors": {
+          "copy": {
+            "from": { "query": "user" },
+            "into": "${user}",
+            "using": { "method": "regex", "selector": "(.*)" }
+          }
+        }
+      }]
+    },
+    {
+      "name": "lookup — enrich the response from data/products.csv by id in the path",
+      "predicates": [{ "matches": { "path": "^/catalog/\\d+$" } }],
+      "responses": [{
+        "is": {
+          "statusCode": 200,
+          "headers": { "Content-Type": "application/json" },
+          "body": {
+            "id": "${row}[id]",
+            "name": "${row}[name]",
+            "price": "${row}[price]",
+            "category": "${row}[category]"
+          }
+        },
+        "_behaviors": {
+          "lookup": {
+            "key": { "from": "path", "using": { "method": "regex", "selector": "/catalog/(\\d+)" } },
+            "fromDataSource": { "csv": { "path": "data/products.csv", "keyColumn": "id" } },
+            "into": "${row}"
+          }
+        }
+      }]
+    }
+  ]
+}

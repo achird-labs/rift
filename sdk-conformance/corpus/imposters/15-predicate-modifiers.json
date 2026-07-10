@@ -1,0 +1,38 @@
+{
+  "port": 4515,
+  "protocol": "http",
+  "name": "15 · Predicate modifiers (issue #254 §D1)",
+  "recordRequests": true,
+  "defaultResponse": {
+    "statusCode": 404,
+    "headers": { "Content-Type": "application/json" },
+    "body": { "error": "no predicate matched" }
+  },
+  "stubs": [
+    {
+      "name": "contains — body contains 'needle'",
+      "predicates": [{ "contains": { "body": "needle" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "contains" } }]
+    },
+    {
+      "name": "endsWith — path ends with /end",
+      "predicates": [{ "endsWith": { "path": "/end" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "endsWith" } }]
+    },
+    {
+      "name": "except — strip digits before comparing path to /v",
+      "predicates": [{ "equals": { "path": "/v" }, "except": "[0-9]+" }],
+      "responses": [{ "is": { "statusCode": 200, "body": "except" } }]
+    },
+    {
+      "name": "deepEquals — query must be EXACTLY {a:1} (extra keys rejected)",
+      "predicates": [{ "deepEquals": { "query": { "a": "1" } } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "deep" } }]
+    },
+    {
+      "name": "exists:false — header X-Skip must be ABSENT",
+      "predicates": [{ "exists": { "headers": { "X-Skip": false } } }, { "equals": { "path": "/noskip" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "absent" } }]
+    }
+  ]
+}

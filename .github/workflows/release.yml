@@ -424,6 +424,17 @@ jobs:
           ./scripts/gen-ffi-manifest.sh "${{ steps.version.outputs.VERSION }}" artifacts ffi-manifest.json
           cat ffi-manifest.json
 
+      # Issue #460: package sdk-conformance-<version>.tar.gz — the corpus every Rift SDK's CI
+      # replays over embedded and remote transports (imposter fixtures + `_verify` transcripts +
+      # README replay contract), version-locked to this engine release. The corpus is proven to
+      # serve + verify on this commit by `tests/corpus_replay.rs`; here we just stamp the version
+      # and package it (with a .sha256) so SDKs download the exact fixtures for the engine they pin.
+      - name: Generate SDK conformance corpus
+        run: |
+          ./scripts/gen-sdk-conformance.sh "${{ steps.version.outputs.VERSION }}" \
+            "sdk-conformance-${{ steps.version.outputs.VERSION }}.tar.gz"
+          ls -l sdk-conformance-*.tar.gz*
+
       - name: Generate release notes
         id: notes
         run: |
@@ -532,6 +543,8 @@ jobs:
             artifacts/**/*.dylib
             artifacts/**/*.dll
             ffi-manifest.json
+            sdk-conformance-*.tar.gz
+            sdk-conformance-*.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

@@ -1,0 +1,48 @@
+{
+  "port": 4505,
+  "protocol": "http",
+  "name": "05 · Scripting Engines (rhai, javascript)",
+  "recordRequests": true,
+  "_rift": {
+    "flowState": { "backend": "inmemory", "ttlSeconds": 600 }
+  },
+  "stubs": [
+    {
+      "name": "Rhai — stateful counter (ctx.state)",
+      "predicates": [{ "equals": { "method": "GET", "path": "/rhai/counter" } }],
+      "responses": [{
+        "_rift": {
+          "script": {
+            "engine": "rhai",
+            "code": "fn respond(ctx) { let count = ctx.state.incr_by(\"count\", 1); http(200, #{engine: \"rhai\", count: count}) }"
+          }
+        }
+      }]
+    },
+    {
+      "name": "JavaScript inject — counter [needs --allow-injection]",
+      "predicates": [{ "equals": { "method": "GET", "path": "/js/counter" } }],
+      "responses": [{
+        "inject": "function (config, state) { state.count = (state.count || 0) + 1; return { statusCode: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ engine: 'javascript', count: state.count }) }; }"
+      }]
+    },
+    {
+      "name": "JavaScript inject — echo the request [needs --allow-injection]",
+      "predicates": [{ "equals": { "method": "POST", "path": "/js/echo" } }],
+      "responses": [{
+        "inject": "function (config, state) { var req = config.request || config; return { statusCode: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ engine: 'javascript', method: req.method, path: req.path, body: req.body }) }; }"
+      }]
+    },
+    {
+      "name": "Health — lists the engines this imposter exercises",
+      "predicates": [{ "equals": { "method": "GET", "path": "/health" } }],
+      "responses": [{
+        "is": {
+          "statusCode": 200,
+          "headers": { "Content-Type": "application/json" },
+          "body": { "status": "ok", "engines": ["rhai", "javascript"] }
+        }
+      }]
+    }
+  ]
+}

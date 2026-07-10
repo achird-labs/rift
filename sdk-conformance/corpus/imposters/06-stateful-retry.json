@@ -1,0 +1,47 @@
+{
+  "port": 4506,
+  "protocol": "http",
+  "name": "06 · Stateful Retry Simulation (flow state)",
+  "recordRequests": true,
+  "_rift": {
+    "flowState": { "backend": "inmemory", "ttlSeconds": 300, "flowIdSource": "header:X-Flow-Id" }
+  },
+  "stubs": [
+    {
+      "name": "Fail the first 2 attempts with 503, succeed on the 3rd (keyed by X-Flow-Id)",
+      "predicates": [{ "equals": { "method": "GET", "path": "/api/resource" } }],
+      "responses": [{
+        "_rift": {
+          "script": {
+            "engine": "rhai",
+            "code": "fn respond(ctx) { let attempts = ctx.state.incr_by(\"attempts\", 1); if attempts <= 2 { http(503, #{error: \"service unavailable\", attempt: attempts}).header(\"Retry-After\", \"1\").header(\"X-Attempt\", `${attempts}`) } else { http(200, #{ok: true, succeededOnAttempt: attempts}).header(\"X-Attempt\", `${attempts}`) } }"
+          }
+        }
+      }]
+    },
+    {
+      "name": "Inspect the current attempt count for a flow",
+      "predicates": [{ "equals": { "method": "GET", "path": "/api/attempts" } }],
+      "responses": [{
+        "_rift": {
+          "script": {
+            "engine": "rhai",
+            "code": "fn respond(ctx) { let flow_id = ctx.request.header(\"x-flow-id\"); if flow_id == () { flow_id = \"default\"; }; let attempts = ctx.state.get_or(\"attempts\", 0); http(200, #{flowId: flow_id, attempts: attempts}) }"
+          }
+        }
+      }]
+    },
+    {
+      "name": "Reset the attempt counter for a flow",
+      "predicates": [{ "equals": { "method": "DELETE", "path": "/api/reset" } }],
+      "responses": [{
+        "_rift": {
+          "script": {
+            "engine": "rhai",
+            "code": "fn respond(ctx) { let flow_id = ctx.request.header(\"x-flow-id\"); if flow_id == () { flow_id = \"default\"; }; ctx.state.delete(\"attempts\"); http(200, #{message: \"reset\", flowId: flow_id}) }"
+          }
+        }
+      }]
+    }
+  ]
+}

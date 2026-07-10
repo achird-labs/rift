@@ -1,0 +1,89 @@
+{
+  "port": 4502,
+  "protocol": "http",
+  "name": "02 · Predicate Showcase",
+  "recordRequests": true,
+  "defaultResponse": {
+    "statusCode": 400,
+    "headers": { "Content-Type": "application/json" },
+    "body": { "error": "no predicate matched", "hint": "see README §02 for matching requests" }
+  },
+  "stubs": [
+    {
+      "name": "equals — exact path + method",
+      "predicates": [{ "equals": { "method": "GET", "path": "/eq" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "equals" } } }]
+    },
+    {
+      "name": "equals caseSensitive=false — /CaSe matches /case",
+      "predicates": [{ "equals": { "path": "/case" }, "caseSensitive": false }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "equals-caseInsensitive" } } }]
+    },
+    {
+      "name": "deepEquals — query must be EXACTLY {a:1}",
+      "predicates": [{ "deepEquals": { "query": { "a": "1" } }, "caseSensitive": true }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "deepEquals" } } }]
+    },
+    {
+      "name": "contains — body contains 'needle'",
+      "predicates": [{ "contains": { "body": "needle" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "contains" } } }]
+    },
+    {
+      "name": "startsWith — path starts with /start",
+      "predicates": [{ "startsWith": { "path": "/start" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "startsWith" } } }]
+    },
+    {
+      "name": "endsWith — path ends with /end",
+      "predicates": [{ "endsWith": { "path": "/end" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "endsWith" } } }]
+    },
+    {
+      "name": "matches — regex path /id/<digits>",
+      "predicates": [{ "matches": { "path": "^/id/[0-9]+$" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "matches" } } }]
+    },
+    {
+      "name": "exists — Authorization header present",
+      "predicates": [{ "exists": { "headers": { "Authorization": true } } }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "exists-header" } } }]
+    },
+    {
+      "name": "or — path is /red OR /blue",
+      "predicates": [{
+        "or": [
+          { "equals": { "path": "/red" } },
+          { "equals": { "path": "/blue" } }
+        ]
+      }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "or" } } }]
+    },
+    {
+      "name": "not — path is /open and has NO Authorization header",
+      "predicates": [{
+        "and": [
+          { "equals": { "path": "/open" } },
+          { "not": { "exists": { "headers": { "Authorization": true } } } }
+        ]
+      }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "not" } } }]
+    },
+    {
+      "name": "jsonpath — JSON body where $.type == 'order'",
+      "predicates": [{
+        "equals": { "body": "order" },
+        "jsonpath": { "selector": "$.type" }
+      }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "jsonpath" } } }]
+    },
+    {
+      "name": "xpath — XML body where //user/@role == 'admin'",
+      "predicates": [{
+        "equals": { "body": "admin" },
+        "xpath": { "selector": "string(//user/@role)" }
+      }],
+      "responses": [{ "is": { "statusCode": 200, "body": { "matched": "xpath" } } }]
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "port": 4511,
+  "protocol": "http",
+  "name": "11 · Multi-value headers, date templates, defaultResponse/defaultForward, CORS",
+  "allowCORS": true,
+  "defaultForward": "http://localhost:4501",
+  "stubs": [
+    {
+      "name": "multi-value headers — two Set-Cookie lines on the wire (#238)",
+      "predicates": [{ "equals": { "path": "/cookies" } }],
+      "responses": [{
+        "is": {
+          "statusCode": 200,
+          "headers": { "Set-Cookie": ["sessionId=abc", "theme=dark"], "X-Single": "one" },
+          "body": "two cookies set"
+        }
+      }]
+    },
+    {
+      "name": "serve-time date templates — {{DAYS+N}}/{{MONTHS+N}}/{{NOW}} (#195)",
+      "predicates": [{ "equals": { "path": "/token" } }],
+      "responses": [{
+        "is": {
+          "statusCode": 200,
+          "headers": { "Content-Type": "application/json" },
+          "body": "{\"issued\":\"{{NOW}}\",\"expires\":\"{{DAYS+30}}\",\"renewal\":\"{{MONTHS+12}}\"}"
+        }
+      }]
+    }
+  ]
+}
