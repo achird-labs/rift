@@ -238,7 +238,7 @@ pub async fn forward_with_recording(
         timestamp_secs: crate::util::unix_timestamp(),
     };
 
-    recording_store.record(signature, recorded_response.clone());
+    recording_store.record(signature, recorded_response);
     debug!(
         "Recorded response for {} {} (status: {}, latency: {}ms)",
         method,

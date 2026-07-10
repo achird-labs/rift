@@ -50,7 +50,9 @@ fn get_http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(PROXY_HTTP_CLIENT_TIMEOUT)
-            .pool_max_idle_per_host(0) // Disable connection pooling to avoid stale connections
+            // Keep connection pooling on (issue #482): every proxied request otherwise paid a
+            // fresh TCP + TLS handshake. Staleness is bounded by reqwest's default
+            // `pool_idle_timeout` (90s) — the standard reqwest pooling tradeoff.
             .build()
             .expect("Failed to create HTTP client: check system TLS/DNS configuration")
     })
@@ -516,6 +518,13 @@ mod tests {
     use super::*;
     use crate::imposter::types::ImposterConfig;
     use serde_json::json;
+
+    // Issue #482: removing `pool_max_idle_per_host(0)` (re-enabling connection pooling) must keep
+    // the client builder valid — a bad builder config would panic in the `.expect` on first use.
+    #[test]
+    fn proxy_http_client_builds() {
+        let _client = get_http_client();
+    }
 
     fn make_test_imposter() -> Imposter {
         let config = ImposterConfig {
