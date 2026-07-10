@@ -75,6 +75,39 @@ pub use entrypoint_check::{EntrypointCheckError, EntrypointMatch, check_entrypoi
 mod trace;
 pub use trace::{ScriptTraceEntry, cap_trace_logs, capture_script_logs, render_decision};
 
+/// Failure of a `predicateGenerators.inject` pass during proxy recording (issue #498).
+///
+/// Distinguishes "predicates could NOT be generated" (infrastructure, script, or malformed
+/// output) from a generator legitimately returning an empty list. Without this distinction the
+/// proxy-recording path collapsed every failure to an empty predicate list and silently recorded
+/// a match-all stub; carrying the failure as an error lets the caller skip auto-stub creation.
+/// Defined unconditionally so the proxy signature resolves without the `javascript` feature.
+#[derive(Debug, thiserror::Error)]
+pub enum PredicateGeneratorError {
+    /// The MB script pool could not run the generator (infrastructure failure).
+    #[error("script pool failure: {0}")]
+    Pool(String),
+    /// The generator script errored while executing.
+    #[error("script execution error: {0}")]
+    Script(String),
+    /// The generator ran but did not return a usable predicate array.
+    #[error("generator produced invalid output: {0}")]
+    Output(String),
+}
+
+impl PredicateGeneratorError {
+    /// Short, stable, header-safe token for the `x-rift-generator-error` response header
+    /// (the full detail goes to the server log, not to the client).
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Pool(_) => "pool-failure",
+            Self::Script(_) => "script-error",
+            Self::Output(_) => "invalid-output",
+        }
+    }
+}
+
 /// Script execution result for fault injection decisions
 #[derive(Debug, Clone)]
 

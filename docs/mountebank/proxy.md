@@ -137,6 +137,21 @@ This generates stubs that match method and path, ignoring query and body.
 }
 ```
 
+### Generation Failures
+
+A predicate generator can also be an [`inject`](../features/scripting.md) function that builds
+predicates in JavaScript. If that generation **fails** — the script throws, returns something other
+than a predicate array, the script pool is unavailable, or it exceeds the script timeout — Rift does
+**not** record a stub. Recording a stub with the empty/partial predicate list would produce a
+match-all stub that shadows every future request, so the failure is surfaced instead of hidden:
+
+- **no stub is recorded** for that request (the proxied response is still returned to the client), and
+- the proxied response carries an `x-rift-generator-error` header whose value names the failure —
+  `script-error`, `invalid-output`, `pool-failure`, `timeout`, or `task-panic`.
+
+A generator that legitimately returns an empty array (`[]`) is **not** a failure — it records a
+match-all stub as before. Only genuine generation failures skip recording and set the header.
+
 ---
 
 ## Recording Workflow

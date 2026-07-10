@@ -11,6 +11,14 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+- **Proxy `predicateGenerators.inject` failures no longer record a match-all stub** (#498). When an
+  inject predicate generator fails (script error, invalid output, script-pool failure, or timeout),
+  Rift now skips auto-stub creation instead of silently recording a stub with empty predicates that
+  would shadow every future request. The proxied response is still returned and carries an
+  `x-rift-generator-error` header naming the failure. A generator that legitimately returns `[]` is
+  unchanged.
+
 ## [0.12.0] - 2026-07-09
 
 This release lands the scripting developer-experience redesign (Script API v2, file-based

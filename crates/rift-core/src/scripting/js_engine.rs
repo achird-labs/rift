@@ -1,7 +1,7 @@
 use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result};
 use crate::scripting::{
-    FaultDecision, ScriptCtxExtras, ScriptCtxInput, ScriptRequest, ScriptResponseContext,
-    ScriptResult, ScriptResultBody, ScriptStubContext, entrypoints,
+    FaultDecision, PredicateGeneratorError, ScriptCtxExtras, ScriptCtxInput, ScriptRequest,
+    ScriptResponseContext, ScriptResult, ScriptResultBody, ScriptStubContext, entrypoints,
 };
 use anyhow::{Result, anyhow};
 use boa_engine::{
@@ -2036,18 +2036,15 @@ pub fn execute_predicate_generator_inject(
     inject_fn: &str,
     request: &MountebankRequest,
     existing_predicates: &[serde_json::Value],
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, PredicateGeneratorError> {
     let inject_fn = inject_fn.to_string();
     let request = request.clone();
     let existing_predicates = existing_predicates.to_vec();
     match with_mb_js_thread(move |thread| {
         execute_predicate_generator_inject_in(thread, &inject_fn, &request, &existing_predicates)
     }) {
-        Ok(predicates) => predicates,
-        Err(e) => {
-            tracing::warn!("predicateGenerator inject: script pool failure: {e}");
-            Vec::new()
-        }
+        Ok(result) => result,
+        Err(e) => Err(PredicateGeneratorError::Pool(e.to_string())),
     }
 }
 
@@ -2056,35 +2053,23 @@ fn execute_predicate_generator_inject_in(
     inject_fn: &str,
     request: &MountebankRequest,
     existing_predicates: &[serde_json::Value],
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, PredicateGeneratorError> {
     let MbJsThread { context, scripts } = thread;
 
-    let request_obj = match create_mountebank_request_object(&mut *context, request) {
-        Ok(obj) => obj,
-        Err(e) => {
-            tracing::warn!("predicateGenerator inject: failed to build request object: {e}");
-            return Vec::new();
-        }
-    };
+    let request_obj = create_mountebank_request_object(&mut *context, request).map_err(|e| {
+        PredicateGeneratorError::Script(format!("failed to build request object: {e}"))
+    })?;
 
-    let predicates_val =
-        match json_to_js(&mut *context, &Value::Array(existing_predicates.to_vec())) {
-            Ok(obj) => obj,
-            Err(e) => {
-                tracing::warn!("predicateGenerator inject: failed to build predicates array: {e}");
-                return Vec::new();
-            }
-        };
+    let predicates_val = json_to_js(&mut *context, &Value::Array(existing_predicates.to_vec()))
+        .map_err(|e| {
+            PredicateGeneratorError::Script(format!("failed to build predicates array: {e}"))
+        })?;
 
     // No imposter is running yet during proxy recording, so there is no per-port state to tag
     // the logger with (port 0 placeholder) and no stub id exists yet (stub_id left None).
-    let logger_obj = match create_script_logger_object(&mut *context, 0, None) {
-        Ok(obj) => obj,
-        Err(e) => {
-            tracing::warn!("predicateGenerator inject: failed to build logger object: {e}");
-            return Vec::new();
-        }
-    };
+    let logger_obj = create_script_logger_object(&mut *context, 0, None).map_err(|e| {
+        PredicateGeneratorError::Script(format!("failed to build logger object: {e}"))
+    })?;
 
     let global = context.global_object();
     let _ = global.set(js_string!("__request"), request_obj, false, &mut *context);
@@ -2105,31 +2090,21 @@ fn execute_predicate_generator_inject_in(
         "#
     );
 
-    let result = match eval_mb_script(context, scripts, &wrapper_script) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("predicateGenerator inject: script execution error: {e}");
-            return Vec::new();
-        }
-    };
+    let result = eval_mb_script(context, scripts, &wrapper_script)
+        .map_err(|e| PredicateGeneratorError::Script(format!("script execution error: {e}")))?;
 
-    let json_str = match result.as_string() {
-        Some(s) => s.to_std_string_lossy(),
-        None => {
-            tracing::warn!(
-                "predicateGenerator inject: function did not return a stringifiable value"
-            );
-            return Vec::new();
-        }
-    };
+    let json_str = result
+        .as_string()
+        .map(|s| s.to_std_string_lossy())
+        .ok_or_else(|| {
+            PredicateGeneratorError::Output(
+                "function did not return a stringifiable value".to_string(),
+            )
+        })?;
 
-    match serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
-        Ok(preds) => preds,
-        Err(e) => {
-            tracing::warn!("predicateGenerator inject: failed to parse returned predicates: {e}");
-            Vec::new()
-        }
-    }
+    serde_json::from_str::<Vec<serde_json::Value>>(&json_str).map_err(|e| {
+        PredicateGeneratorError::Output(format!("failed to parse returned predicates: {e}"))
+    })
 }
 
 /// Request structure for Mountebank inject functions
@@ -3406,6 +3381,67 @@ function respond(ctx) {
             result.err()
         );
         assert_eq!(result.unwrap().body, "logged");
+    }
+
+    // Issue #498: a `predicateGenerators.inject` script error must return `Err(Script)` — NOT a
+    // silent empty Vec that the proxy path would turn into a match-all stub.
+    #[test]
+    fn predicate_generator_inject_script_error_returns_err() {
+        let request = MountebankRequest {
+            method: "GET".to_string(),
+            path: "/api/users".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let throwing = r#"function(config, logger, predicates) { throw new Error("boom"); }"#;
+        let err = execute_predicate_generator_inject(throwing, &request, &[])
+            .expect_err("a throwing generator must return Err, not empty predicates");
+        assert!(
+            matches!(err, PredicateGeneratorError::Script(_)),
+            "expected Script error, got {err:?}"
+        );
+
+        let ok_fn = r#"function(config, logger, predicates) {
+            return [{ equals: { path: config.request.path } }];
+        }"#;
+        let preds = execute_predicate_generator_inject(ok_fn, &request, &[])
+            .expect("a valid generator returns Ok");
+        assert_eq!(preds.len(), 1);
+    }
+
+    // Issue #498: a generator that EVALUATES fine but returns garbage (a non-array, or nothing) must
+    // map to `Err(Output)` — the pre-fix code degraded both to an empty Vec, silently recording a
+    // match-all stub. Same failure class as a thrown error, via a different arm.
+    #[test]
+    fn predicate_generator_inject_invalid_output_returns_err() {
+        let request = MountebankRequest {
+            method: "GET".to_string(),
+            path: "/api/users".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        // Returns a number → JSON.stringify gives "5", which does not parse as a predicate array.
+        let non_array = r#"function(config, logger, predicates) { return 5; }"#;
+        let err = execute_predicate_generator_inject(non_array, &request, &[])
+            .expect_err("a non-array return must fail, not silently produce empty predicates");
+        assert!(
+            matches!(err, PredicateGeneratorError::Output(_)),
+            "expected Output error, got {err:?}"
+        );
+
+        // Returns undefined → not stringifiable at all.
+        let no_return = r#"function(config, logger, predicates) { return undefined; }"#;
+        let err = execute_predicate_generator_inject(no_return, &request, &[]).expect_err(
+            "a non-stringifiable return must fail, not silently produce empty predicates",
+        );
+        assert!(
+            matches!(err, PredicateGeneratorError::Output(_)),
+            "expected Output error, got {err:?}"
+        );
     }
 
     #[test]

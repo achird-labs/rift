@@ -1069,14 +1069,16 @@ mod tests {
         })];
 
         let headers = HashMap::new();
-        let predicates = imposter.generate_predicates_from_request(
-            &generators,
-            "GET",
-            "/API/Users",
-            &headers,
-            None,
-            None,
-        );
+        let predicates = imposter
+            .generate_predicates_from_request(
+                &generators,
+                "GET",
+                "/API/Users",
+                &headers,
+                None,
+                None,
+            )
+            .expect("predicate generation succeeds");
 
         assert_eq!(predicates.len(), 1);
         let pred_json = &predicates[0];
@@ -1110,14 +1112,9 @@ mod tests {
         })];
 
         let headers = HashMap::new();
-        let predicates = imposter.generate_predicates_from_request(
-            &generators,
-            "POST",
-            "/test",
-            &headers,
-            None,
-            None,
-        );
+        let predicates = imposter
+            .generate_predicates_from_request(&generators, "POST", "/test", &headers, None, None)
+            .expect("predicate generation succeeds");
 
         assert_eq!(predicates.len(), 1);
         let pred_json = &predicates[0];
@@ -1141,14 +1138,16 @@ mod tests {
         })];
 
         let headers = HashMap::new();
-        let predicates = imposter.generate_predicates_from_request(
-            &generators,
-            "GET",
-            "/orders/123",
-            &headers,
-            None,
-            None,
-        );
+        let predicates = imposter
+            .generate_predicates_from_request(
+                &generators,
+                "GET",
+                "/orders/123",
+                &headers,
+                None,
+                None,
+            )
+            .expect("predicate generation succeeds");
 
         assert_eq!(predicates.len(), 1);
         let path_val = predicates[0]["equals"]["path"].as_str().unwrap();
@@ -1169,14 +1168,16 @@ mod tests {
         })];
 
         let headers = HashMap::new();
-        let predicates = imposter.generate_predicates_from_request(
-            &generators,
-            "POST",
-            "/test",
-            &headers,
-            Some("token=abc123"),
-            None,
-        );
+        let predicates = imposter
+            .generate_predicates_from_request(
+                &generators,
+                "POST",
+                "/test",
+                &headers,
+                Some("token=abc123"),
+                None,
+            )
+            .expect("predicate generation succeeds");
 
         assert_eq!(predicates.len(), 1);
         let body_val = predicates[0]["equals"]["body"].as_str().unwrap();
@@ -1196,14 +1197,16 @@ mod tests {
         })];
 
         let headers = HashMap::new();
-        let predicates = imposter.generate_predicates_from_request(
-            &generators,
-            "GET",
-            "/search",
-            &headers,
-            None,
-            Some("q=hello&page=1"),
-        );
+        let predicates = imposter
+            .generate_predicates_from_request(
+                &generators,
+                "GET",
+                "/search",
+                &headers,
+                None,
+                Some("q=hello&page=1"),
+            )
+            .expect("predicate generation succeeds");
 
         assert_eq!(predicates.len(), 1);
         let pred_json = &predicates[0];
@@ -1240,14 +1243,16 @@ mod tests {
         let generators = vec![json!({ "inject": inject_fn })];
         let headers = HashMap::new();
 
-        let predicates = imposter.generate_predicates_from_request(
-            &generators,
-            "GET",
-            "/api/users",
-            &headers,
-            None,
-            None,
-        );
+        let predicates = imposter
+            .generate_predicates_from_request(
+                &generators,
+                "GET",
+                "/api/users",
+                &headers,
+                None,
+                None,
+            )
+            .expect("predicate generation succeeds");
 
         assert_eq!(predicates.len(), 1);
         let equals = predicates[0].get("equals").expect("should have equals key");
@@ -1272,17 +1277,50 @@ mod tests {
         ];
         let headers = HashMap::new();
 
-        let predicates = imposter.generate_predicates_from_request(
-            &generators,
-            "POST",
-            "/orders",
-            &headers,
-            None,
-            None,
-        );
+        let predicates = imposter
+            .generate_predicates_from_request(&generators, "POST", "/orders", &headers, None, None)
+            .expect("predicate generation succeeds");
 
         // matches generator produces 1, inject generator returns 2 (original + new path)
         assert_eq!(predicates.len(), 3);
+    }
+
+    // Issue #498: a failing inject generator must be DISTINGUISHABLE from one that legitimately
+    // produced no predicates. A script error surfaces as `Err` (so the caller can skip auto-stub
+    // creation), while an inject that returns `[]` is `Ok(empty)` (a real, intended empty list).
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn generator_inject_failure_is_distinguishable_from_empty() {
+        let imposter = make_test_imposter();
+        let headers = HashMap::new();
+
+        // A throwing inject → Err, NOT an empty predicate list.
+        let throwing = r#"function(config, logger, predicates) { throw new Error("boom"); }"#;
+        let err = imposter
+            .generate_predicates_from_request(
+                &[json!({ "inject": throwing })],
+                "GET",
+                "/api/users",
+                &headers,
+                None,
+                None,
+            )
+            .expect_err("a throwing generator must fail, not silently return empty predicates");
+        assert_eq!(err.kind(), "script-error");
+
+        // An inject that explicitly returns [] is a legitimate empty result → Ok(empty).
+        let empty = r#"function(config, logger, predicates) { return []; }"#;
+        let preds = imposter
+            .generate_predicates_from_request(
+                &[json!({ "inject": empty })],
+                "GET",
+                "/api/users",
+                &headers,
+                None,
+                None,
+            )
+            .expect("an inject returning [] is a valid empty result, not a failure");
+        assert!(preds.is_empty());
     }
 
     #[test]
@@ -1372,23 +1410,19 @@ mod tests {
         );
     }
 
+    // Issue #498: a malformed inject generator (here, a non-function body) must FAIL rather than
+    // silently return an empty predicate list — the empty list is what produced the match-all stub.
     #[cfg(feature = "javascript")]
     #[test]
-    fn test_generator_inject_bad_function_returns_empty() {
+    fn test_generator_inject_bad_function_returns_err() {
         let imposter = make_test_imposter();
 
         let generators = vec![json!({ "inject": "not a function" })];
         let headers = HashMap::new();
 
-        let predicates = imposter.generate_predicates_from_request(
-            &generators,
-            "GET",
-            "/test",
-            &headers,
-            None,
-            None,
-        );
-
-        assert!(predicates.is_empty());
+        let err = imposter
+            .generate_predicates_from_request(&generators, "GET", "/test", &headers, None, None)
+            .expect_err("a malformed inject generator must fail, not return empty predicates");
+        assert_eq!(err.kind(), "script-error");
     }
 }

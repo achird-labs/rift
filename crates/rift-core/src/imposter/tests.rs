@@ -4269,3 +4269,126 @@ fn script_bearing_stub_forces_http1_only() {
         "a plain is-response stub must not be forced HTTP/1-only"
     );
 }
+
+// Issue #498: a failing `predicateGenerators.inject` during proxy recording must NOT silently
+// record a match-all stub; instead the auto-stub is skipped and the proxied response is tagged
+// with an `x-rift-generator-error` header so the failure is client-visible.
+#[cfg(all(test, feature = "javascript"))]
+mod proxy_generator_failure_tests {
+    use super::*;
+
+    async fn get(port: u16, path: &str) -> reqwest::Response {
+        reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}{path}"))
+            .send()
+            .await
+            .expect("send")
+    }
+
+    /// Upstream imposter that returns 200 for `/gen`.
+    async fn upstream(manager: &ImposterManager, port: u16) {
+        let config = serde_json::from_value(serde_json::json!({
+            "port": port, "protocol": "http", "stubs": [
+                { "predicates": [{ "equals": { "path": "/gen" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "OK" } }] }
+            ]
+        }))
+        .unwrap();
+        manager
+            .create_imposter(config)
+            .await
+            .expect("create upstream");
+    }
+
+    /// Proxy imposter (proxyOnce) whose single stub proxies to `upstream_port` with one inject
+    /// predicate generator. Starts with exactly one stub (the proxy stub itself).
+    async fn proxy_with_generator(
+        manager: &ImposterManager,
+        port: u16,
+        upstream_port: u16,
+        inject_fn: &str,
+    ) {
+        let config = serde_json::from_value(serde_json::json!({
+            "port": port, "protocol": "http",
+            "stubs": [{ "responses": [{ "proxy": {
+                "to": format!("http://127.0.0.1:{upstream_port}"),
+                "mode": "proxyOnce",
+                "predicateGenerators": [{ "inject": inject_fn }]
+            }}]}]
+        }))
+        .unwrap();
+        manager.create_imposter(config).await.expect("create proxy");
+    }
+
+    #[tokio::test]
+    async fn proxy_generator_failure_skips_stub_and_tags_response() {
+        let manager = ImposterManager::new();
+        upstream(&manager, 19820).await;
+        // A throwing generator: predicates cannot be produced.
+        let throwing = r#"function(config, logger, predicates) { throw new Error("boom"); }"#;
+        proxy_with_generator(&manager, 19821, 19820, throwing).await;
+
+        let resp = get(19821, "/gen").await;
+        assert_eq!(
+            resp.status(),
+            200,
+            "proxied response still returned to client"
+        );
+        assert_eq!(
+            resp.headers()
+                .get("x-rift-generator-error")
+                .and_then(|v| v.to_str().ok()),
+            Some("script-error"),
+            "a generator failure must be surfaced to the client, not only logged"
+        );
+        assert_eq!(resp.text().await.unwrap(), "OK");
+
+        // The proxy imposter must still have ONLY its original proxy stub — no match-all stub
+        // was recorded from the failed generation.
+        let stubs = manager.get_imposter(19821).unwrap().get_stubs();
+        assert_eq!(
+            stubs.len(),
+            1,
+            "no auto-stub may be recorded when predicate generation fails (issue #498)"
+        );
+
+        let _ = manager.delete_imposter(19820).await;
+        let _ = manager.delete_imposter(19821).await;
+    }
+
+    #[tokio::test]
+    async fn proxy_generator_success_records_stub() {
+        let manager = ImposterManager::new();
+        upstream(&manager, 19822).await;
+        // Control: a valid generator produces a real predicate → stub IS recorded, no error header.
+        let ok_fn = r#"function(config, logger, predicates) {
+            return [{ equals: { path: config.request.path } }];
+        }"#;
+        proxy_with_generator(&manager, 19823, 19822, ok_fn).await;
+
+        let resp = get(19823, "/gen").await;
+        assert_eq!(resp.status(), 200);
+        assert!(
+            resp.headers().get("x-rift-generator-error").is_none(),
+            "a successful generator must not tag the response with an error header"
+        );
+        assert_eq!(resp.text().await.unwrap(), "OK");
+
+        // proxyOnce inserts the generated stub before the proxy stub → 2 stubs total, and the
+        // generated stub carries the intended path predicate (not a match-all).
+        let stubs = manager.get_imposter(19823).unwrap().get_stubs();
+        assert_eq!(
+            stubs.len(),
+            2,
+            "a valid generator records exactly one new stub"
+        );
+        let generated = serde_json::to_value(&stubs[0]).unwrap();
+        assert_eq!(
+            generated["predicates"][0]["equals"]["path"], "/gen",
+            "recorded stub matches the generated predicate, not everything"
+        );
+
+        let _ = manager.delete_imposter(19822).await;
+        let _ = manager.delete_imposter(19823).await;
+    }
+}

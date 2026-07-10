@@ -10,7 +10,11 @@ use crate::imposter::predicates::regex_cache::cached_regex;
 type ForwardedResponse = (u16, Vec<(String, String)>, bytes::Bytes, u64);
 
 impl Imposter {
-    /// Generate predicates from request based on predicateGenerators config
+    /// Generate predicates from request based on predicateGenerators config.
+    ///
+    /// Returns `Err` when an `inject` generator could not produce predicates (script/pool/output
+    /// failure) so the caller can skip auto-stub creation instead of silently recording a match-all
+    /// stub (issue #498). An `Ok(empty)` list means the generators legitimately produced nothing.
     pub(crate) fn generate_predicates_from_request(
         &self,
         generators: &[serde_json::Value],
@@ -19,7 +23,7 @@ impl Imposter {
         headers: &HashMap<String, String>,
         body: Option<&str>,
         query: Option<&str>,
-    ) -> Vec<serde_json::Value> {
+    ) -> Result<Vec<serde_json::Value>, crate::scripting::PredicateGeneratorError> {
         Self::generate_predicates_impl(generators, method, path, headers, body, query)
     }
 
@@ -33,7 +37,7 @@ impl Imposter {
         headers: &HashMap<String, String>,
         body: Option<&str>,
         query: Option<&str>,
-    ) -> Vec<serde_json::Value> {
+    ) -> Result<Vec<serde_json::Value>, crate::scripting::PredicateGeneratorError> {
         let mut predicates = Vec::new();
 
         for r#gen in generators {
@@ -58,7 +62,7 @@ impl Imposter {
                         body: body.map(|b| b.to_string()),
                     };
                     let inject_preds =
-                        execute_predicate_generator_inject(inject_fn, &mb_request, &predicates);
+                        execute_predicate_generator_inject(inject_fn, &mb_request, &predicates)?;
                     predicates.extend(inject_preds);
                 }
                 #[cfg(not(feature = "javascript"))]
@@ -196,7 +200,7 @@ impl Imposter {
             predicates.push(serde_json::Value::Object(predicate));
         }
 
-        predicates
+        Ok(predicates)
     }
 
     /// Insert a generated stub at the specified index
@@ -431,7 +435,7 @@ impl Imposter {
         }
         .await;
 
-        let (status, response_headers, body_bytes, latency_ms) = match forwarded {
+        let (status, mut response_headers, body_bytes, latency_ms) = match forwarded {
             Ok(parts) => parts,
             Err(e) => {
                 if let Some(token) = claim_token {
@@ -481,104 +485,112 @@ impl Imposter {
                 .predicate_generators
                 .iter()
                 .any(|g| g.as_object().is_some_and(|o| o.contains_key("inject")));
-            let predicates = if !proxy_config.predicate_generators.is_empty() {
-                if has_inject_generator {
-                    let generators = proxy_config.predicate_generators.clone();
-                    let method = method.to_string();
-                    let path = uri.path().to_string();
-                    let headers = headers.clone();
-                    let body = body.map(str::to_string);
-                    let query = uri.query().map(str::to_string);
-                    let timeout = std::time::Duration::from_millis(
-                        crate::scripting::resolve_script_timeout_ms(&self.config),
-                    );
-                    let handle = tokio::task::spawn_blocking(move || {
-                        Self::generate_predicates_impl(
-                            &generators,
-                            &method,
-                            &path,
-                            &headers,
-                            body.as_deref(),
-                            query.as_deref(),
+            // `Ok(preds)` = predicates generated (possibly legitimately empty); `Err((token, detail))`
+            // = generation failed and predicates are unknown. On failure we must NOT record a stub:
+            // an empty/partial predicate list matches every future request (issue #498). The failure
+            // token is a short, header-safe category surfaced to the client; `detail` goes to the log.
+            let generation: Result<Vec<serde_json::Value>, (&'static str, String)> =
+                if !proxy_config.predicate_generators.is_empty() {
+                    if has_inject_generator {
+                        let generators = proxy_config.predicate_generators.clone();
+                        let method = method.to_string();
+                        let path = uri.path().to_string();
+                        let headers = headers.clone();
+                        let body = body.map(str::to_string);
+                        let query = uri.query().map(str::to_string);
+                        let timeout = std::time::Duration::from_millis(
+                            crate::scripting::resolve_script_timeout_ms(&self.config),
+                        );
+                        let handle = tokio::task::spawn_blocking(move || {
+                            Self::generate_predicates_impl(
+                                &generators,
+                                &method,
+                                &path,
+                                &headers,
+                                body.as_deref(),
+                                query.as_deref(),
+                            )
+                        });
+                        match tokio::time::timeout(timeout, handle).await {
+                            Ok(Ok(Ok(preds))) => Ok(preds),
+                            Ok(Ok(Err(gen_err))) => Err((gen_err.kind(), gen_err.to_string())),
+                            Ok(Err(join_err)) => {
+                                Err(("task-panic", format!("generator task panicked: {join_err}")))
+                            }
+                            Err(_elapsed) => Err((
+                                "timeout",
+                                format!("timed out after {}ms", timeout.as_millis()),
+                            )),
+                        }
+                    } else {
+                        self.generate_predicates_from_request(
+                            &proxy_config.predicate_generators,
+                            method,
+                            uri.path(),
+                            headers,
+                            body,
+                            uri.query(),
                         )
-                    });
-                    match tokio::time::timeout(timeout, handle).await {
-                        Ok(Ok(preds)) => preds,
-                        // Degrade like a failing generator script (warn + skip its output)
-                        // rather than failing the proxied response the client is waiting on.
-                        Ok(Err(join_err)) => {
-                            warn!("predicate generator task panicked: {join_err}");
-                            vec![]
-                        }
-                        Err(_elapsed) => {
-                            warn!(
-                                "predicate generators timed out after {}ms; recording stub \
-                                 without generated predicates",
-                                timeout.as_millis()
-                            );
-                            vec![]
-                        }
+                        .map_err(|e| (e.kind(), e.to_string()))
                     }
                 } else {
-                    self.generate_predicates_from_request(
-                        &proxy_config.predicate_generators,
-                        method,
+                    // No predicateGenerators, generate empty predicates (matches all requests)
+                    Ok(vec![])
+                };
+
+            match generation {
+                Ok(predicates) => {
+                    let latency_for_stub = proxy_config.add_wait_behavior.then_some(latency_ms);
+
+                    // Note: addDecorateBehavior is added to the SAVED stub's behaviors,
+                    // not applied to the first (live proxy) response. This matches Mountebank's
+                    // behavior. The decoration will be applied when the saved stub is used for
+                    // subsequent requests.
+                    let new_stub = create_stub_from_proxy_response(
+                        predicates,
+                        status,
+                        &response_headers,
+                        &body_bytes,
+                        latency_for_stub,
+                        proxy_config.add_decorate_behavior.clone(),
+                        Some(proxy_config.to.clone()),
+                    );
+
+                    // Insert or append the stub based on proxy mode
+                    // proxyOnce: Insert new stub before the proxy stub
+                    // proxyAlways: Append response to existing stub with matching predicates
+                    let mode = if proxy_config.mode.is_empty() {
+                        "proxyOnce"
+                    } else {
+                        &proxy_config.mode
+                    };
+                    self.insert_or_append_proxy_stub(new_stub, &proxy_config.to, mode);
+                    debug!(
+                        "Generated stub from proxy response for path {} (mode: {})",
                         uri.path(),
-                        headers,
-                        body,
-                        uri.query(),
-                    )
+                        mode
+                    );
                 }
-            } else {
-                // No predicateGenerators, generate empty predicates (matches all requests)
-                vec![]
-            };
-
-            let latency_for_stub = if proxy_config.add_wait_behavior {
-                Some(latency_ms)
-            } else {
-                None
-            };
-
-            // Note: addDecorateBehavior is added to the SAVED stub's behaviors,
-            // not applied to the first (live proxy) response. This matches Mountebank's behavior.
-            // The decoration will be applied when the saved stub is used for subsequent requests.
-
-            let new_stub = create_stub_from_proxy_response(
-                predicates,
-                status,
-                &response_headers,
-                &body_bytes,
-                latency_for_stub,
-                proxy_config.add_decorate_behavior.clone(),
-                Some(proxy_config.to.clone()),
-            );
-
-            // Insert or append the stub based on proxy mode
-            // proxyOnce: Insert new stub before the proxy stub
-            // proxyAlways: Append response to existing stub with matching predicates
-            let mode = if proxy_config.mode.is_empty() {
-                "proxyOnce"
-            } else {
-                &proxy_config.mode
-            };
-            self.insert_or_append_proxy_stub(new_stub, &proxy_config.to, mode);
-            debug!(
-                "Generated stub from proxy response for path {} (mode: {})",
-                uri.path(),
-                mode
-            );
+                Err((token, detail)) => {
+                    // Predicate generation failed — record nothing rather than a match-all stub,
+                    // and mark the proxied response so the failure is client-visible, not a
+                    // server-only warn (issue #498).
+                    warn!(
+                        "predicate generation failed for path {} ({detail}); skipping auto-stub to \
+                         avoid recording a match-all stub",
+                        uri.path()
+                    );
+                    response_headers
+                        .push(("x-rift-generator-error".to_string(), token.to_string()));
+                }
+            }
         }
 
         Ok((
             status,
             response_headers,
             body_bytes.to_vec(),
-            if proxy_config.add_wait_behavior {
-                Some(latency_ms)
-            } else {
-                None
-            },
+            proxy_config.add_wait_behavior.then_some(latency_ms),
         ))
     }
 }
