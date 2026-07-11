@@ -11,6 +11,17 @@ record.
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-07-11
+
+### Changed
+
+- Renamed the `rift-core` crate to **`rift-mock-core`** to resolve a crates.io name collision — the
+  `rift-core` name is owned by an unrelated project, which blocked publishing and had also frozen
+  `rift-http-proxy` on crates.io at 0.4.0. This is purely a packaging change: the binary, FFI
+  cdylib, Docker image, and npm package are functionally identical to 0.13.0. Rust code depending on
+  the engine library from crates.io should switch the dependency name to `rift-mock-core`; the
+  FFI / Docker / binary / npm distribution (what the language SDKs consume) is unaffected.
+
 ## [0.13.0] - 2026-07-10
 
 This release lands the engine-side surface the official language SDKs build on — server-side
@@ -341,7 +352,8 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/EtaCassiopeia/rift/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/EtaCassiopeia/rift/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/EtaCassiopeia/rift/compare/v0.11.3...v0.12.0
 [0.11.3]: https://github.com/EtaCassiopeia/rift/compare/v0.11.2...v0.11.3
