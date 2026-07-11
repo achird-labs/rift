@@ -3407,6 +3407,7 @@ dependencies = [
  "hyper-util",
  "lazy_static",
  "libc",
+ "lru",
  "matchit",
  "num_cpus",
  "p12",
