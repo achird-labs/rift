@@ -19,6 +19,10 @@ record.
   saw them as live. It now drops already-expired entries before extending the survivors (and clears
   the flow map if that leaves it empty), matching the Redis backend, where expired keys are simply
   gone and never revived.
+- **The proxy no longer panics at startup when the native root certificate store can't be loaded.**
+  `create_http_client` called `.expect(...)` on `with_native_roots()`, so running in a minimal or
+  distroless image without `ca-certificates` aborted the process; it now returns the error so the
+  server fails with a diagnostic instead of a panic.
 
 ### Security
 

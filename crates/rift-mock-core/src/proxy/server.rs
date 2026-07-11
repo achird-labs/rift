@@ -222,7 +222,7 @@ impl ProxyServer {
         let skip_tls_verify = should_skip_tls_verify(&config);
 
         // Create shared HTTP client
-        let http_client = create_http_client(&config, skip_tls_verify);
+        let http_client = create_http_client(&config, skip_tls_verify)?;
 
         // Extract recording mode before moving config into Arc
         let recording_mode = config.recording.mode;
