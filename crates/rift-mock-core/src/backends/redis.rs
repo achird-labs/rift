@@ -35,12 +35,30 @@ impl r2d2::ManageConnection for RedisConnectionManager {
     }
 
     fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
-        redis::cmd("PING").query(conn.get_mut().unwrap())
+        // A poisoned lock means a previous caller panicked mid-command, so the connection's
+        // protocol stream may be inconsistent; report it invalid so r2d2 discards it.
+        if conn.is_poisoned() {
+            return Err(redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "pooled Redis connection mutex poisoned by a previous panic",
+            )));
+        }
+        redis::cmd("PING").query(conn.get_mut().unwrap_or_else(|p| p.into_inner()))
     }
 
-    fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
-        false
+    fn has_broken(&self, conn: &mut Self::Connection) -> bool {
+        conn.is_poisoned()
     }
+}
+
+/// Lock a connection mutex, recovering from a poisoned lock instead of panicking. A poison only
+/// means a previous caller panicked while holding the lock; the pool's `has_broken`/`is_valid`
+/// checks then discard the connection, so recovering here turns a one-off panic into a handled
+/// error rather than a repeating-panic cascade (issue #540).
+fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub struct RedisFlowStore {
@@ -77,7 +95,7 @@ impl RedisFlowStore {
         {
             let conn = pool.get().context("Failed to get connection from pool")?;
             let _: String = redis::cmd("PING")
-                .query(&mut *conn.lock().unwrap())
+                .query(&mut *lock_recover(&conn))
                 .context("Failed to PING Redis")?;
         }
 
@@ -146,9 +164,7 @@ impl FlowStore for RedisFlowStore {
             .get()
             .map_err(|e| backend_err("flowStore.pool", e))?;
 
-        let value: Option<String> = conn
-            .lock()
-            .unwrap()
+        let value: Option<String> = lock_recover(&conn)
             .get(&key_str)
             .map_err(|e| backend_err("flowStore.get", e))?;
 
@@ -175,7 +191,7 @@ impl FlowStore for RedisFlowStore {
             .arg(&key_str)
             .arg(self.default_ttl_seconds)
             .arg(json_str)
-            .query(&mut *conn.lock().unwrap())
+            .query(&mut *lock_recover(&conn))
             .map_err(|e| backend_err("flowStore.set", e))?;
 
         Ok(())
@@ -188,9 +204,7 @@ impl FlowStore for RedisFlowStore {
             .get()
             .map_err(|e| backend_err("flowStore.pool", e))?;
 
-        let count: i64 = conn
-            .lock()
-            .unwrap()
+        let count: i64 = lock_recover(&conn)
             .exists(&key_str)
             .map_err(|e| backend_err("flowStore.exists", e))?;
 
@@ -204,9 +218,7 @@ impl FlowStore for RedisFlowStore {
             .get()
             .map_err(|e| backend_err("flowStore.pool", e))?;
 
-        let _: () = conn
-            .lock()
-            .unwrap()
+        let _: () = lock_recover(&conn)
             .del(&key_str)
             .map_err(|e| backend_err("flowStore.delete", e))?;
 
@@ -239,7 +251,7 @@ return v
             .arg(&key_str)
             .arg(by)
             .arg(self.default_ttl_seconds)
-            .query(&mut *conn.lock().unwrap())
+            .query(&mut *lock_recover(&conn))
             .map_err(|e| backend_err("flowStore.incrementBy", e))?;
 
         Ok(new_value)
@@ -297,7 +309,7 @@ end
             .arg(&expected_json)
             .arg(&new_json)
             .arg(self.default_ttl_seconds)
-            .query(&mut *conn.lock().unwrap())
+            .query(&mut *lock_recover(&conn))
             .map_err(|e| backend_err("flowStore.compareAndSet", e))?;
 
         if applied == 1 {
@@ -323,7 +335,7 @@ end
             .pool
             .get()
             .map_err(|e| backend_err("flowStore.pool", e))?;
-        let mut guard = conn.lock().unwrap();
+        let mut guard = lock_recover(&conn);
         let mut cursor: u64 = 0;
         loop {
             let (next, keys) = scan_batch(&mut guard, cursor, &pattern, "flowStore.setTtl")?;
@@ -355,7 +367,7 @@ end
             .pool
             .get()
             .map_err(|e| backend_err("flowStore.pool", e))?;
-        let mut guard = conn.lock().unwrap();
+        let mut guard = lock_recover(&conn);
         if ttl_seconds <= 0 {
             // Redis `EXPIRE key <=0` deletes the key; use DEL explicitly and report whether it
             // existed (issue #530).
@@ -384,7 +396,7 @@ end
             .pool
             .get()
             .map_err(|e| backend_err("flowStore.pool", e))?;
-        let mut guard = conn.lock().unwrap();
+        let mut guard = lock_recover(&conn);
         let mut cursor: u64 = 0;
         loop {
             let (next, keys) = scan_batch(&mut guard, cursor, &pattern, "flowStore.clearFlow")?;
@@ -427,7 +439,7 @@ fn scan_batch(
 pub(crate) fn health_check(pool: &r2d2::Pool<RedisConnectionManager>) -> Result<bool> {
     let conn = pool.get().context("Failed to get connection from pool")?;
 
-    let mut guard = conn.lock().unwrap();
+    let mut guard = lock_recover(&conn);
     match redis::cmd("PING").query::<String>(&mut *guard) {
         Ok(_) => Ok(true),
         Err(e) => {
@@ -440,6 +452,25 @@ pub(crate) fn health_check(pool: &r2d2::Pool<RedisConnectionManager>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Issue #540: a single panic while a connection lock was held poisoned that Mutex, and every
+    // subsequent `.lock().unwrap()` then panicked too — a recoverable poison turned into a
+    // repeating-panic cascade. lock_recover must return the guard (and its data) instead.
+    #[test]
+    fn lock_recover_survives_poisoned_mutex() {
+        use std::sync::{Arc, Mutex};
+        let m = Arc::new(Mutex::new(vec![1u8, 2, 3]));
+        let m2 = Arc::clone(&m);
+        let _ = std::thread::spawn(move || {
+            let _guard = m2.lock().unwrap();
+            panic!("poison the mutex");
+        })
+        .join();
+        assert!(m.is_poisoned(), "precondition: the mutex must be poisoned");
+
+        let guard = lock_recover(&m);
+        assert_eq!(&*guard, &vec![1, 2, 3]);
+    }
 
     // Every Redis op failure funnels through backend_err, so this pins the whole file's
     // error shape: typed, downcastable, structured-503-able (issue #318).

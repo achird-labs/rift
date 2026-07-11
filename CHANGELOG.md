@@ -33,6 +33,11 @@ record.
   `create_http_client` called `.expect(...)` on `with_native_roots()`, so running in a minimal or
   distroless image without `ca-certificates` aborted the process; it now returns the error so the
   server fails with a diagnostic instead of a panic.
+- **A panic in the Redis flow-state backend no longer cascades into a repeating-panic storm.** Each
+  pooled connection is a `Mutex<Connection>` that was accessed with `.lock().unwrap()`; one panic
+  while a lock was held poisoned that mutex, so every later access panicked too, and the pool never
+  discarded the connection (`is_valid`/`has_broken` panicked or reported it healthy). Poisoned locks
+  are now recovered, and a poisoned connection is reported broken so the pool evicts it.
 
 ### Security
 
