@@ -13,7 +13,7 @@ use crate::imposter::{
 use crate::intercept_control::{InterceptControl, InterceptStartOptions};
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -659,6 +659,93 @@ async fn load_imposters_from_file(
 }
 
 /// Load imposters from a data directory
+/// A datadir `*.json` file that could not be turned into a served imposter, kept so the loader can
+/// surface all of them together instead of dropping each with only a per-file log line (issue #532).
+struct SkippedImposterFile {
+    path: PathBuf,
+    reason: String,
+}
+
+/// A successfully-parsed datadir imposter paired with the file it came from (so creation-phase logs
+/// and skips can name the offending file).
+type LoadedImposter = (PathBuf, ImposterConfig);
+
+/// Render an operator-visible summary of skipped datadir files, or `None` when nothing was skipped.
+/// Emitted at `error!` level (not the old per-file `warn!`) so a typo'd fixture that silently
+/// vanished from the running set is impossible to miss in the startup output (issue #532).
+fn format_skipped_summary(skipped: &[SkippedImposterFile]) -> Option<String> {
+    if skipped.is_empty() {
+        return None;
+    }
+    let mut summary = format!(
+        "{} imposter file(s) in the datadir were skipped and are NOT being served:",
+        skipped.len()
+    );
+    for file in skipped {
+        summary.push_str(&format!("\n  - {}: {}", file.path.display(), file.reason));
+    }
+    Some(summary)
+}
+
+/// Read and parse every `*.json` in `datadir`, resolving each imposter's scripts. Returns the
+/// successfully-parsed `(path, config)` pairs plus a list of files that could not be parsed into an
+/// imposter config (an unreadable directory entry, an unreadable file, invalid JSON, or unresolvable
+/// scripts). A single bad file is collected rather than dropped or propagated, so it neither
+/// vanishes silently nor aborts loading of the remaining valid imposters (issue #532). Only a
+/// failure to open the directory itself is fatal.
+fn read_and_parse_datadir(
+    datadir: &Path,
+    base: &ScriptBaseDir,
+) -> anyhow::Result<(Vec<LoadedImposter>, Vec<SkippedImposterFile>)> {
+    let mut parsed = Vec::new();
+    let mut skipped = Vec::new();
+
+    for entry in std::fs::read_dir(datadir)? {
+        // A single unreadable directory entry (e.g. a mid-iteration removal or a stat quirk) must
+        // not abort loading of every other imposter — collect it like any other skipped file.
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(e) => {
+                skipped.push(SkippedImposterFile {
+                    path: datadir.to_path_buf(),
+                    reason: format!("could not read a directory entry: {e}"),
+                });
+                continue;
+            }
+        };
+        if path.extension().map(|e| e == "json").unwrap_or(false) {
+            let content = match std::fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(e) => {
+                    skipped.push(SkippedImposterFile {
+                        path,
+                        reason: format!("could not read file: {e}"),
+                    });
+                    continue;
+                }
+            };
+            match serde_json::from_str::<ImposterConfig>(&content) {
+                Ok(mut config) => {
+                    if let Err(e) = resolve_scripts(&mut config, base) {
+                        skipped.push(SkippedImposterFile {
+                            path,
+                            reason: format!("script resolution failed: {e}"),
+                        });
+                        continue;
+                    }
+                    parsed.push((path, config));
+                }
+                Err(e) => skipped.push(SkippedImposterFile {
+                    path,
+                    reason: format!("invalid imposter JSON: {e}"),
+                }),
+            }
+        }
+    }
+
+    Ok((parsed, skipped))
+}
+
 async fn load_imposters_from_datadir(
     manager: &Arc<ImposterManager>,
     datadir: &PathBuf,
@@ -675,27 +762,22 @@ async fn load_imposters_from_datadir(
     // admin-API POST), so an absolute path or `..` escape is rejected, never read (issue #356
     // B1/B2 defense-in-depth against a datadir re-resolution reading `/etc/passwd`).
     let base = ScriptBaseDir::DatadirRelative(datadir.clone());
-    for entry in std::fs::read_dir(datadir)? {
-        let entry = entry?;
-        let path = entry.path();
+    let (parsed, mut skipped) = read_and_parse_datadir(datadir, &base)?;
 
-        if path.extension().map(|e| e == "json").unwrap_or(false) {
-            let content = std::fs::read_to_string(&path)?;
-            match serde_json::from_str::<ImposterConfig>(&content) {
-                Ok(mut config) => {
-                    if let Err(e) = resolve_scripts(&mut config, &base) {
-                        error!("Failed to resolve scripts for {:?}: {}", path, e);
-                        continue;
-                    }
-                    info!("Loading imposter on port {:?} from {:?}", config.port, path);
-                    match manager.create_imposter(config).await {
-                        Ok(port) => info!("Created imposter on port {} from {:?}", port, path),
-                        Err(e) => error!("Failed to create imposter from {:?}: {}", path, e),
-                    }
-                }
-                Err(e) => warn!("Skipping invalid imposter file {:?}: {}", path, e),
-            }
+    for (path, config) in parsed {
+        info!("Loading imposter on port {:?} from {:?}", config.port, path);
+        match manager.create_imposter(config).await {
+            Ok(port) => info!("Created imposter on port {} from {:?}", port, path),
+            // Surfaced once, via the aggregated summary below, uniform with the other skip reasons.
+            Err(e) => skipped.push(SkippedImposterFile {
+                path,
+                reason: format!("imposter creation failed: {e}"),
+            }),
         }
+    }
+
+    if let Some(summary) = format_skipped_summary(&skipped) {
+        error!("{summary}");
     }
 
     Ok(())
@@ -712,6 +794,107 @@ mod tests {
     fn test_no_parse_flag_accepted() {
         let cli = Cli::try_parse_from(["rift", "--noParse"]).expect("--noParse should be accepted");
         assert!(cli.no_parse);
+    }
+
+    // Issue #532: skipped datadir files must be surfaced, not silently dropped.
+    #[test]
+    fn format_skipped_summary_empty_is_none() {
+        assert!(format_skipped_summary(&[]).is_none());
+    }
+
+    #[test]
+    fn format_skipped_summary_lists_all() {
+        let skipped = vec![
+            SkippedImposterFile {
+                path: PathBuf::from("/data/4501.json"),
+                reason: "invalid imposter JSON: expected value".to_string(),
+            },
+            SkippedImposterFile {
+                path: PathBuf::from("/data/4502.json"),
+                reason: "could not read file: permission denied".to_string(),
+            },
+        ];
+        let summary =
+            format_skipped_summary(&skipped).expect("non-empty skip list yields a summary");
+        assert!(summary.contains('2'), "summary states the count: {summary}");
+        assert!(
+            summary.contains("NOT being served"),
+            "summary warns they are unserved: {summary}"
+        );
+        assert!(summary.contains("/data/4501.json"));
+        assert!(summary.contains("invalid imposter JSON"));
+        assert!(summary.contains("/data/4502.json"));
+        assert!(summary.contains("could not read file"));
+    }
+
+    #[test]
+    fn read_and_parse_datadir_collects_malformed_and_keeps_valid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("4501.json"),
+            r#"{"port": 4501, "protocol": "http", "stubs": []}"#,
+        )
+        .expect("write valid");
+        std::fs::write(dir.path().join("4502.json"), "{ this is not valid json ]")
+            .expect("write malformed");
+
+        let base = ScriptBaseDir::DatadirRelative(dir.path().to_path_buf());
+        let (parsed, skipped) =
+            read_and_parse_datadir(dir.path(), &base).expect("read_and_parse must not abort");
+
+        assert_eq!(parsed.len(), 1, "the valid imposter is still parsed");
+        assert_eq!(parsed[0].1.port, Some(4501));
+        assert_eq!(
+            skipped.len(),
+            1,
+            "the malformed file is collected, not dropped"
+        );
+        assert!(skipped[0].path.ends_with("4502.json"));
+        assert!(skipped[0].reason.contains("invalid imposter JSON"));
+    }
+
+    #[test]
+    fn read_and_parse_datadir_collects_unresolvable_script() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A well-formed imposter whose `_rift.script.file` points at a file that isn't in the
+        // datadir — resolve_scripts fails, so it must be collected as a skip, not dropped.
+        std::fs::write(
+            dir.path().join("4503.json"),
+            r#"{"port": 4503, "protocol": "http",
+                "stubs": [{"responses": [{"_rift": {"script": {"file": "does-not-exist.rhai"}}}]}]}"#,
+        )
+        .expect("write script-ref imposter");
+
+        let base = ScriptBaseDir::DatadirRelative(dir.path().to_path_buf());
+        let (parsed, skipped) = read_and_parse_datadir(dir.path(), &base).expect("read_and_parse");
+
+        assert!(
+            parsed.is_empty(),
+            "the imposter with an unresolvable script is not parsed"
+        );
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].path.ends_with("4503.json"));
+        assert!(
+            skipped[0].reason.contains("script resolution failed"),
+            "reason names the script-resolution failure: {}",
+            skipped[0].reason
+        );
+    }
+
+    #[test]
+    fn read_and_parse_datadir_no_skips_when_all_valid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("4501.json"),
+            r#"{"port": 4501, "protocol": "http", "stubs": []}"#,
+        )
+        .expect("write valid");
+
+        let base = ScriptBaseDir::DatadirRelative(dir.path().to_path_buf());
+        let (parsed, skipped) = read_and_parse_datadir(dir.path(), &base).expect("read_and_parse");
+
+        assert_eq!(parsed.len(), 1);
+        assert!(skipped.is_empty(), "no summary when every file is valid");
     }
 
     #[test]

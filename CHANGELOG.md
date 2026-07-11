@@ -20,6 +20,14 @@ record.
   unchanged through `GET /imposters`. `rift-lint` validates the object form (`probability` required
   and in `[0, 1]`, unknown fault types warned).
 
+### Fixed
+
+- **`--datadir` no longer silently drops malformed imposter files.** A file that can't be loaded
+  (unreadable, invalid JSON, unresolvable scripts, or a creation failure) is now collected and
+  reported together in a single prominent startup error listing every skipped file and why, instead
+  of a per-file warning that was easy to miss — so a typo'd fixture that vanishes from the running
+  set is visible. One bad file also no longer aborts loading of the remaining valid imposters.
+
 ## [0.13.1] - 2026-07-11
 
 ### Changed
