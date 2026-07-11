@@ -14,7 +14,7 @@ pub(crate) struct JsSyntaxError(pub String);
 /// JavaScript syntax validator using boa_engine.
 #[cfg(feature = "javascript")]
 mod js_validator {
-    use boa_engine::{Context, Source};
+    use boa_engine::{Context, Script, Source};
 
     pub fn validate_javascript(script: &str) -> Result<(), super::JsSyntaxError> {
         let mut context = Context::default();
@@ -37,16 +37,15 @@ mod js_validator {
             script_trimmed.to_string()
         };
 
-        match context.eval(Source::from_bytes(&wrapped)) {
+        // Parse only — never execute. `context.eval` used to *run* top-level statements, so a
+        // `while (true) {}` in an inject/decorate body hung the linter with no budget (issue #553).
+        // Parsing reports every syntax error and always terminates regardless of the script's
+        // runtime behaviour; a parse failure is by definition a real syntax problem, so it is
+        // surfaced unconditionally rather than filtered by matching the error message against
+        // `"SyntaxError"`/`"unexpected"` (which silently passed anything else).
+        match Script::parse(Source::from_bytes(&wrapped), None, &mut context) {
             Ok(_) => Ok(()),
-            Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("SyntaxError") || err_str.contains("unexpected") {
-                    Err(super::JsSyntaxError(err_str))
-                } else {
-                    Ok(())
-                }
-            }
+            Err(e) => Err(super::JsSyntaxError(e.to_string())),
         }
     }
 }
@@ -1577,5 +1576,53 @@ mod tcp_fault_tests {
     #[test]
     fn non_string_non_object_errors() {
         assert!(has_code(&lint(json!(42)), "E041"));
+    }
+}
+
+#[cfg(all(test, feature = "javascript"))]
+mod js_syntax_tests {
+    use super::js_validator::validate_javascript;
+
+    #[test]
+    fn non_terminating_js_does_not_hang() {
+        // The syntax check must parse, not execute (issue #553). These forms would loop forever
+        // under `context.eval` — a bare top-level loop and a self-invoking IIFE, neither wrapped
+        // into an uninvoked function expression — but parse instantly. Each runs on a worker
+        // thread with a budget so a regression to eval trips the timeout instead of stalling CI;
+        // the thread is intentionally detached (never joined) since a regression would hang it.
+        for src in ["while (true) {}", "(function(){ while (true) {} })()"] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(validate_javascript(src));
+            });
+            let got = rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("syntax check must return without executing the script");
+            assert!(
+                got.is_ok(),
+                "an infinite loop is syntactically valid JS: {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_function_expression_passes() {
+        assert!(validate_javascript("function (args) { return args.length; }").is_ok());
+        assert!(validate_javascript("config => { config.response.statusCode = 202; }").is_ok());
+    }
+
+    #[test]
+    fn invalid_syntax_is_reported() {
+        // Unconditionally surfaced — no substring filter that could pass a real error as clean.
+        for bad in [
+            "function(args){ return",
+            "function(args){ if (x { } }",
+            "var = 5;",
+        ] {
+            assert!(
+                validate_javascript(bad).is_err(),
+                "invalid JS must be reported: {bad}"
+            );
+        }
     }
 }

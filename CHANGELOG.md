@@ -13,6 +13,11 @@ record.
 
 ### Fixed
 
+- **`rift lint` no longer executes JavaScript while syntax-checking it.** The `javascript`-feature
+  validator ran scripts via the JS engine, so an inject/decorate body containing a loop (e.g.
+  `while (true) {}`) hung the linter, and any engine error whose message lacked `SyntaxError`/
+  `unexpected` was silently treated as valid. It now parses without executing and reports every
+  syntax error.
 - **Flow-level `ctx.state.ttl(seconds)` no longer revives expired keys on the in-memory backend.**
   The positive-TTL branch re-stamped every entry in the flow — including entries already past their
   expiry that the amortized sweeper hadn't reaped yet — resurrecting them so a later `get`/`exists`
