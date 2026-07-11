@@ -189,6 +189,26 @@ pub async fn handle_put_flow_state(
     }
 }
 
+/// DELETE /admin/imposters/:port/flow-state/:flow_id — clear every key in a flow (issue #530).
+/// Idempotent: clearing an absent/empty flow still returns 200. 404 only when the imposter/port
+/// does not exist.
+pub async fn handle_clear_flow_state(
+    port: u16,
+    flow_id: &str,
+    manager: Arc<ImposterManager>,
+) -> Response<Full<Bytes>> {
+    match manager.get_imposter(port) {
+        Ok(imposter) => match imposter.flow_clear(flow_id) {
+            Ok(()) => json_response(
+                StatusCode::OK,
+                &serde_json::json!({ "flowId": flow_id, "cleared": true }),
+            ),
+            Err(e) => backend_error_response(&e),
+        },
+        Err(e) => e.into(),
+    }
+}
+
 /// DELETE /admin/imposters/:port/flow-state/:flow_id/:key
 pub async fn handle_delete_flow_state(
     port: u16,

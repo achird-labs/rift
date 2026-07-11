@@ -61,8 +61,32 @@ pub trait FlowStore: Send + Sync {
         Ok(new_value)
     }
 
-    /// Set TTL for all keys under a flow_id
+    /// Set TTL for all keys under a flow_id. `ttl_seconds <= 0` expires (drops) every current key
+    /// immediately (issue #530), mirroring the per-key `set_key_ttl` and Redis `EXPIRE` semantics.
     fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> Result<()>;
+
+    /// Set the TTL of a single `key` under `flow_id` (issue #530). Returns `true` if the key existed
+    /// and the TTL was applied, `false` if it was absent — mirroring Redis `EXPIRE`. A
+    /// `ttl_seconds <= 0` deletes the key immediately (Redis `EXPIRE` semantics), returning whether
+    /// it existed.
+    ///
+    /// The default is a fail-loud `Err` so third-party `FlowStore` impls keep compiling but can't
+    /// silently pretend a per-key TTL was applied when it wasn't (precedent: the #311/#358 defaults).
+    fn set_key_ttl(&self, flow_id: &str, key: &str, ttl_seconds: i64) -> Result<bool> {
+        let _ = (flow_id, key, ttl_seconds);
+        Err(anyhow!("set_key_ttl not supported by this store"))
+    }
+
+    /// Remove every key under `flow_id` (issue #530) — the whole-flow invalidation primitive behind
+    /// `ctx.state.clear()` and `DELETE /admin/imposters/:port/flow-state/:flow_id`. Clearing an
+    /// absent flow is a no-op success (idempotent).
+    ///
+    /// The default is a fail-loud `Err` so third-party impls keep compiling but can't silently
+    /// claim a flow was cleared when it wasn't.
+    fn clear_flow(&self, flow_id: &str) -> Result<()> {
+        let _ = flow_id;
+        Err(anyhow!("clear_flow not supported by this store"))
+    }
 
     /// Atomically set `key` to `new` iff its current value equals `expected`
     /// (`None` = "not present"). Returns the winning current value on conflict.
@@ -136,6 +160,15 @@ impl FlowStore for NoOpFlowStore {
     }
 
     fn set_ttl(&self, _flow_id: &str, _ttl_seconds: i64) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_key_ttl(&self, _flow_id: &str, _key: &str, _ttl_seconds: i64) -> Result<bool> {
+        // No state is tracked, so no key can exist to expire.
+        Ok(false)
+    }
+
+    fn clear_flow(&self, _flow_id: &str) -> Result<()> {
         Ok(())
     }
 }
@@ -253,6 +286,47 @@ mod tests {
         assert!(store.set_ttl("flow-1", 3600).is_ok());
         assert!(store.set_ttl("flow-1", 0).is_ok());
         assert!(store.set_ttl("flow-1", -1).is_ok());
+    }
+
+    // Issue #530: NoOp has no state, so per-key ttl reports "absent" (false) and clear is a no-op.
+    #[test]
+    fn test_noop_flow_store_set_key_ttl_and_clear() {
+        let store = NoOpFlowStore;
+        assert!(!store.set_key_ttl("flow-1", "k", 60).unwrap());
+        assert!(!store.set_key_ttl("flow-1", "k", 0).unwrap());
+        assert!(store.clear_flow("flow-1").is_ok());
+    }
+
+    // Issue #530: a third-party store that does NOT override the new methods must keep compiling and
+    // fail loud (never silently claim success) — the trait defaults enforce that.
+    #[test]
+    fn test_default_set_key_ttl_and_clear_are_fail_loud() {
+        use std::sync::Mutex;
+        struct Bare(Mutex<()>);
+        impl FlowStore for Bare {
+            fn get(&self, _: &str, _: &str) -> Result<Option<Value>> {
+                let _g = self.0.lock();
+                Ok(None)
+            }
+            fn set(&self, _: &str, _: &str, _: Value) -> Result<()> {
+                Ok(())
+            }
+            fn exists(&self, _: &str, _: &str) -> Result<bool> {
+                Ok(false)
+            }
+            fn delete(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn increment(&self, _: &str, _: &str) -> Result<i64> {
+                Ok(1)
+            }
+            fn set_ttl(&self, _: &str, _: i64) -> Result<()> {
+                Ok(())
+            }
+        }
+        let store = Bare(Mutex::new(()));
+        assert!(store.set_key_ttl("f", "k", 60).is_err());
+        assert!(store.clear_flow("f").is_err());
     }
 
     #[test]
@@ -521,6 +595,12 @@ impl FlowStore for FailingFlowStore {
     }
     fn set_ttl(&self, flow_id: &str, _ttl_seconds: i64) -> Result<()> {
         self.fail("flowStore.setTtl", flow_id, "")
+    }
+    fn set_key_ttl(&self, flow_id: &str, key: &str, _ttl_seconds: i64) -> Result<bool> {
+        self.fail("flowStore.setKeyTtl", flow_id, key)
+    }
+    fn clear_flow(&self, flow_id: &str) -> Result<()> {
+        self.fail("flowStore.clearFlow", flow_id, "")
     }
 }
 

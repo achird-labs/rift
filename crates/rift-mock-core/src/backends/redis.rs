@@ -99,6 +99,32 @@ impl RedisFlowStore {
     fn make_key(&self, flow_id: &str, key: &str) -> String {
         format!("{}flow:{}:{}", self.key_prefix, flow_id, key)
     }
+
+    /// `SCAN MATCH` glob for every key under a flow (issue #530). Mirrors [`Self::make_key`] with a
+    /// trailing `*` for the key part, so `set_ttl` and `clear_flow` operate on exactly the flow's own
+    /// namespace.
+    ///
+    /// `flow_id` is glob-**escaped** before interpolation: it is request-derived (a path/header/body
+    /// capture, or the admin `DELETE .../flow-state/:flow_id` path segment), so a raw `*`/`?`/`[` in
+    /// it would otherwise make these destructive ops match — and wipe/expire — *sibling* flows' keys.
+    /// Escaping keeps the match literal, matching the in-memory backend's exact-string keying.
+    fn flow_scan_pattern(&self, flow_id: &str) -> String {
+        format!("{}flow:{}:*", self.key_prefix, escape_glob(flow_id))
+    }
+}
+
+/// Escape the Redis glob metacharacters (`*`, `?`, `[`, `]`, `\`) in `s` so it matches literally
+/// inside a `SCAN`/`KEYS` `MATCH` pattern (issue #530). Redis pattern matching treats `\x` as a
+/// literal `x`, so a backslash prefix neutralizes each metacharacter.
+fn escape_glob(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '*' | '?' | '[' | ']' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Wrap a Redis op failure so response boundaries map it to a structured 503 (issue
@@ -287,18 +313,113 @@ end
     }
 
     fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> Result<()> {
-        // For now, just log a debug message - individual keys get TTL via set() and increment()
-        // To fully implement this, we'd need to SCAN for all keys matching the pattern
-        // and EXPIRE each one, which is expensive
-        tracing::debug!(
-            "set_ttl called for flow_id={} with ttl={}s - individual operations already set TTL",
-            flow_id,
-            ttl_seconds
-        );
-
-        // Return success since individual operations already handle TTL
+        // Issue #530: re-stamp the TTL of every key currently in the flow via SCAN + EXPIRE. This
+        // replaces the former silent no-op — a script calling `ctx.state.ttl(3600)` on Redis now
+        // actually extends its keys, matching the in-memory backend. A non-positive TTL drops every
+        // key (Redis `EXPIRE` semantics). O(keys-in-flow), but this is an explicit script call, not
+        // on the per-request hot path.
+        let pattern = self.flow_scan_pattern(flow_id);
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| backend_err("flowStore.pool", e))?;
+        let mut guard = conn.lock().unwrap();
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, keys) = scan_batch(&mut guard, cursor, &pattern, "flowStore.setTtl")?;
+            for k in &keys {
+                if ttl_seconds <= 0 {
+                    let _: i64 = redis::cmd("DEL")
+                        .arg(k)
+                        .query(&mut *guard)
+                        .map_err(|e| backend_err("flowStore.setTtl", e))?;
+                } else {
+                    let _: i64 = redis::cmd("EXPIRE")
+                        .arg(k)
+                        .arg(ttl_seconds)
+                        .query(&mut *guard)
+                        .map_err(|e| backend_err("flowStore.setTtl", e))?;
+                }
+            }
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+        }
         Ok(())
     }
+
+    fn set_key_ttl(&self, flow_id: &str, key: &str, ttl_seconds: i64) -> Result<bool> {
+        let key_str = self.make_key(flow_id, key);
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| backend_err("flowStore.pool", e))?;
+        let mut guard = conn.lock().unwrap();
+        if ttl_seconds <= 0 {
+            // Redis `EXPIRE key <=0` deletes the key; use DEL explicitly and report whether it
+            // existed (issue #530).
+            let deleted: i64 = redis::cmd("DEL")
+                .arg(&key_str)
+                .query(&mut *guard)
+                .map_err(|e| backend_err("flowStore.setKeyTtl", e))?;
+            Ok(deleted > 0)
+        } else {
+            // EXPIRE returns 1 if the timeout was set, 0 if the key does not exist — exactly the
+            // "existed?" bool this method promises.
+            let applied: i64 = redis::cmd("EXPIRE")
+                .arg(&key_str)
+                .arg(ttl_seconds)
+                .query(&mut *guard)
+                .map_err(|e| backend_err("flowStore.setKeyTtl", e))?;
+            Ok(applied == 1)
+        }
+    }
+
+    fn clear_flow(&self, flow_id: &str) -> Result<()> {
+        // SCAN + batched DEL over the flow's key namespace (issue #530). SCAN never blocks the
+        // server and tolerates concurrent mutation; DEL of a batch is one round trip.
+        let pattern = self.flow_scan_pattern(flow_id);
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| backend_err("flowStore.pool", e))?;
+        let mut guard = conn.lock().unwrap();
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, keys) = scan_batch(&mut guard, cursor, &pattern, "flowStore.clearFlow")?;
+            if !keys.is_empty() {
+                let _: i64 = redis::cmd("DEL")
+                    .arg(&keys)
+                    .query(&mut *guard)
+                    .map_err(|e| backend_err("flowStore.clearFlow", e))?;
+            }
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+        }
+        Ok(())
+    }
+}
+
+/// One `SCAN cursor MATCH pattern COUNT 100` round trip, returning the next cursor and the batch of
+/// matched keys. Callers loop until the returned cursor is 0. Extracted so `set_ttl` and
+/// `clear_flow` share the identical scan shape (issue #530).
+fn scan_batch(
+    conn: &mut Connection,
+    cursor: u64,
+    pattern: &str,
+    op: &'static str,
+) -> Result<(u64, Vec<String>)> {
+    redis::cmd("SCAN")
+        .arg(cursor)
+        .arg("MATCH")
+        .arg(pattern)
+        .arg("COUNT")
+        .arg(100)
+        .query::<(u64, Vec<String>)>(conn)
+        .map_err(|e| backend_err(op, e))
 }
 
 /// Health check for Redis connection
@@ -331,5 +452,17 @@ mod tests {
         assert_eq!(unavailable.feature, "flowState");
         assert!(unavailable.detail.contains("flowStore.get"));
         assert!(unavailable.detail.contains("connection refused"));
+    }
+
+    // Issue #530: a flow_id carrying glob metacharacters must be escaped so a SCAN MATCH pattern
+    // matches ONLY the literal flow — otherwise clear_flow/set_ttl would destructively match
+    // sibling flows. A plain id is passed through unchanged.
+    #[test]
+    fn escape_glob_neutralizes_scan_metacharacters() {
+        assert_eq!(escape_glob("plain"), "plain");
+        assert_eq!(escape_glob("a*b"), r"a\*b");
+        assert_eq!(escape_glob("a?b"), r"a\?b");
+        assert_eq!(escape_glob("a[bc]d"), r"a\[bc\]d");
+        assert_eq!(escape_glob(r"a\b"), r"a\\b");
     }
 }

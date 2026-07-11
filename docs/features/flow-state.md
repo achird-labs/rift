@@ -30,7 +30,7 @@ is resolved exactly as for [Spaces]({{ site.baseurl }}/features/spaces/).
 | Field | Default | Notes |
 |:------|:--------|:------|
 | `backend` | `inmemory` | `inmemory` or `redis`. |
-| `ttlSeconds` | `300` | Default entry TTL. |
+| `ttlSeconds` | `300` | Default entry TTL, in seconds. Must be `>= 1` (see [TTL semantics](#ttl-semantics)). |
 | `flowIdSource` | `imposter_port` | How the flow id is derived (`imposter_port` or `header:<Name>`). |
 
 With `backend: "redis"` you may also set `url`, `poolSize` (default 10), and `keyPrefix`
@@ -45,6 +45,9 @@ An explicit `flowState` block that can't be honored now **fails imposter creatio
   construction.
 - A **`redis` backend that can't be created** — no redis config block, a connection/pool failure, or
   a binary built without the `redis-backend` feature — fails creation too.
+- A **non-positive `ttlSeconds`** (`< 1`) is rejected: a zero/negative default TTL would expire every
+  write the instant it lands (and errors on the first Redis `SETEX`), so it's caught up front rather
+  than misbehaving later.
 
 Only imposters with genuinely **no state surface** stay on the silent no-op store: no `flowState`
 block, no scenario stubs, and no `_rift.script` stub. Such an imposter never touches the store, so
@@ -77,12 +80,33 @@ for the full surface:
 | `ctx.state.delete(key)` | remove a key |
 | `ctx.state.incr(key)` / `incr_by(key, n)` | atomic increment, returns the new number |
 | `ctx.state.cas(key, expected, new)` | atomic compare-and-set — `{ applied: … }` |
-| `ctx.state.ttl(seconds)` | override the TTL for this flow |
+| `ctx.state.ttl(seconds)` | re-stamp the TTL of **every** key currently in this flow |
+| `ctx.state.ttl(key, seconds)` | set **one** key's TTL — `true` if it existed, `false` if absent; `seconds <= 0` deletes it |
+| `ctx.state.clear()` | remove **every** key in this flow |
 | `ctx.store.flow(id)` | a handle scoped to a **different** flow id (cross-flow access) |
 
 Every `ctx.state` call is **fail-loud**: a backend error (e.g. Redis dropping mid-request) raises a
 script error and is logged — it is never silently swallowed into a default. In JavaScript the
-method names are camelCase (`getOr`/`incrBy`); `cas`/`ttl` are spelled the same in both engines.
+method names are camelCase (`getOr`/`incrBy`); `cas`/`ttl`/`clear` are spelled the same in both
+engines.
+
+### TTL semantics
+
+TTL is a **per-key** attribute, and every backend applies the same rules:
+
+- **Every write stamps the default TTL.** A `set`/`incr`/`incr_by`/applied-`cas` (re)stamps the key's
+  expiry to `now + ttlSeconds`.
+- **Writes reset the TTL.** `ttl(key, s)` overrides a key's expiry, but a *subsequent* write to that
+  key re-stamps it back to the default `ttlSeconds` — TTLs are set by the last write (this is exactly
+  what Redis `SETEX` does; there is no sticky/`KEEPTTL` mode).
+- **`seconds <= 0` expires immediately.** `ttl(key, 0)` (or negative) deletes the key now; flow-level
+  `ttl(0)` expires every current key in the flow. This mirrors Redis `EXPIRE`, giving scripts both
+  "shrink the lifetime" (`ttl(key, 5)`) and "kill now" (`ttl(key, 0)`) with one primitive.
+- **Flow-level `ttl(seconds)` is a convenience** over the per-key primitive: it re-stamps every key
+  *currently* in the flow. On Redis it does an O(keys-in-flow) `SCAN` + `EXPIRE`; on both backends the
+  observable result is identical.
+- There is deliberately **no "no expiry" mode** — an unexpirable store is a memory leak by
+  construction — so `ttlSeconds` is mandatory and must be `>= 1`.
 
 ---
 
@@ -135,6 +159,10 @@ curl -X PUT http://localhost:2525/admin/imposters/4506/flow-state/t1/attempts \
 
 # Delete a key
 curl -X DELETE http://localhost:2525/admin/imposters/4506/flow-state/t1/attempts
+
+# Clear an entire flow (all keys) — the test-arrange/teardown tool for resetting a flow
+# between scenario runs. Idempotent: clearing an absent/empty flow still returns 200.
+curl -X DELETE http://localhost:2525/admin/imposters/4506/flow-state/t1
 ```
 
 Note: an imposter gets a real store when `_rift.flowState` is configured, or it declares scenario

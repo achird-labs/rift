@@ -13,6 +13,13 @@ record.
 
 ### Added
 
+- **Per-key flow-state TTL and flow invalidation** (`ctx.state`): scripts can now set a single key's
+  TTL with `ctx.state.ttl(key, seconds)` (returns `true` if the key existed, `false` if absent;
+  `seconds <= 0` deletes it, matching Redis `EXPIRE`) alongside the existing flow-level
+  `ctx.state.ttl(seconds)`. New `ctx.state.clear()` removes every key in the flow, and a new admin
+  route `DELETE /admin/imposters/:port/flow-state/:flow_id` clears a whole flow (the test
+  arrange/teardown tool). Both rhai and JavaScript engines expose the same surface.
+
 - **Probabilistic TCP faults** (`_rift.fault.tcp`): the fault now accepts an object form
   `{ "probability": 0.1, "type": "CONNECTION_RESET_BY_PEER" }` alongside the existing bare string,
   so a connection reset can be made to fire only some of the time (e.g. "reset 10% of requests").
@@ -27,6 +34,12 @@ record.
   reported together in a single prominent startup error listing every skipped file and why, instead
   of a per-file warning that was easy to miss — so a typo'd fixture that vanishes from the running
   set is visible. One bad file also no longer aborts loading of the remaining valid imposters.
+- **Flow-level `ctx.state.ttl(seconds)` on the Redis backend** was a silent no-op — a script calling
+  `ttl(3600)` got `true` back while nothing changed. It now re-stamps every key in the flow via
+  `SCAN` + `EXPIRE`, matching the in-memory backend's behavior.
+- **Non-positive `flowState.ttlSeconds`** (`< 1`) is now rejected with `400 Bad Request` at imposter
+  creation instead of misbehaving later (in-memory: instant expiry of every write; Redis: a `SETEX`
+  error on the first write).
 
 ## [0.13.1] - 2026-07-11
 

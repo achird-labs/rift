@@ -180,10 +180,17 @@ impl FlowStore for InMemoryFlowStore {
     }
 
     fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> Result<()> {
-        let new_expiry =
-            SystemTime::now() + Duration::from_secs(u64::try_from(ttl_seconds).unwrap_or(0));
         let mut data = self.data.write();
 
+        // Flow-level "expire now" (issue #530): a non-positive TTL drops every current key (and the
+        // flow map), matching per-key `set_key_ttl(<=0)` and Redis `EXPIRE`.
+        if ttl_seconds <= 0 {
+            data.remove(flow_id);
+            return Ok(());
+        }
+
+        let new_expiry =
+            SystemTime::now() + Duration::from_secs(u64::try_from(ttl_seconds).unwrap_or(0));
         // Nested keying (issue #483): touch only this flow's entries, not the whole store.
         if let Some(flow) = data.get_mut(flow_id) {
             for (_, expiry) in flow.values_mut() {
@@ -191,6 +198,41 @@ impl FlowStore for InMemoryFlowStore {
             }
         }
 
+        Ok(())
+    }
+
+    fn set_key_ttl(&self, flow_id: &str, key: &str, ttl_seconds: i64) -> Result<bool> {
+        let mut data = self.data.write();
+        let Some(flow) = data.get_mut(flow_id) else {
+            return Ok(false);
+        };
+        // An already-expired entry counts as absent: clean it up and report false.
+        Self::remove_if_expired(flow, key);
+
+        // Non-positive TTL deletes the key immediately (Redis `EXPIRE` semantics), returning whether
+        // it existed. Drop the flow map if that was its last key (issue #483's growth vector).
+        if ttl_seconds <= 0 {
+            let existed = flow.remove(key).is_some();
+            if flow.is_empty() {
+                data.remove(flow_id);
+            }
+            return Ok(existed);
+        }
+
+        let new_expiry =
+            SystemTime::now() + Duration::from_secs(u64::try_from(ttl_seconds).unwrap_or(0));
+        match flow.get_mut(key) {
+            Some((_, expiry)) => {
+                *expiry = Some(new_expiry);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    fn clear_flow(&self, flow_id: &str) -> Result<()> {
+        // Drop the whole flow map in one step (nested keying, issue #483); absent flow → no-op.
+        self.data.write().remove(flow_id);
         Ok(())
     }
 
@@ -639,5 +681,97 @@ mod tests {
             !store.exists("drop", "k").unwrap(),
             "a sibling flow must keep its original (now expired) TTL"
         );
+    }
+
+    // ===== per-key ttl + clear_flow (issue #530) =====
+
+    // set_key_ttl extends only the target key: a short-lived sibling key in the same flow expires
+    // while the extended key survives.
+    #[test]
+    fn set_key_ttl_extends_only_the_target_key() {
+        let store = InMemoryFlowStore::new(1); // 1s default TTL
+        store.set("f", "keep", json!("v")).unwrap();
+        store.set("f", "drop", json!("v")).unwrap();
+
+        assert!(
+            store.set_key_ttl("f", "keep", 100).unwrap(),
+            "extending an existing key returns true"
+        );
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        assert!(store.exists("f", "keep").unwrap(), "target key extended");
+        assert!(
+            !store.exists("f", "drop").unwrap(),
+            "sibling key keeps its original (now expired) TTL"
+        );
+    }
+
+    #[test]
+    fn set_key_ttl_absent_key_returns_false() {
+        let store = InMemoryFlowStore::new(300);
+        assert!(!store.set_key_ttl("f", "nope", 60).unwrap());
+        // A flow that exists but lacks the key also returns false, and must not create the key.
+        store.set("f", "other", json!(1)).unwrap();
+        assert!(!store.set_key_ttl("f", "nope", 60).unwrap());
+        assert!(!store.exists("f", "nope").unwrap());
+    }
+
+    #[test]
+    fn set_key_ttl_non_positive_deletes_the_key() {
+        let store = InMemoryFlowStore::new(300);
+        store.set("f", "k", json!("v")).unwrap();
+        assert!(
+            store.set_key_ttl("f", "k", 0).unwrap(),
+            "deleting an existing key returns true"
+        );
+        assert!(!store.exists("f", "k").unwrap(), "key deleted by ttl<=0");
+        // Deleting the flow's last key drops the flow map (no empty-map leak, issue #483).
+        assert_eq!(store.stored_flow_count(), 0);
+        // Deleting an absent key returns false.
+        assert!(!store.set_key_ttl("f", "k", -5).unwrap());
+    }
+
+    #[test]
+    fn set_key_ttl_on_expired_key_returns_false() {
+        let store = InMemoryFlowStore::new(1);
+        store.set("f", "k", json!("v")).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            !store.set_key_ttl("f", "k", 100).unwrap(),
+            "an already-expired key is absent, so per-key ttl returns false"
+        );
+    }
+
+    // Flow-level ttl(<=0) expires every current key (issue #530), matching per-key semantics.
+    #[test]
+    fn set_ttl_non_positive_expires_whole_flow() {
+        let store = InMemoryFlowStore::new(300);
+        store.set("f", "a", json!(1)).unwrap();
+        store.set("f", "b", json!(2)).unwrap();
+        store.set_ttl("f", 0).unwrap();
+        assert!(!store.exists("f", "a").unwrap());
+        assert!(!store.exists("f", "b").unwrap());
+        assert_eq!(store.stored_flow_count(), 0, "flow map dropped");
+    }
+
+    #[test]
+    fn clear_flow_drops_only_the_target_flow() {
+        let store = InMemoryFlowStore::new(300);
+        store.set("keep", "k", json!(1)).unwrap();
+        store.set("drop", "k1", json!(1)).unwrap();
+        store.set("drop", "k2", json!(2)).unwrap();
+
+        store.clear_flow("drop").unwrap();
+
+        assert!(
+            store.keys_for_flow("drop").is_empty(),
+            "target flow emptied"
+        );
+        assert!(store.exists("keep", "k").unwrap(), "sibling flow untouched");
+        // No empty flow-map left behind for the cleared flow (issue #483 growth vector).
+        assert_eq!(store.stored_flow_count(), 1);
+        // Clearing an absent flow is an idempotent no-op success.
+        assert!(store.clear_flow("no-such-flow").is_ok());
     }
 }

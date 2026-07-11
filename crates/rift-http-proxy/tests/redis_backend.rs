@@ -229,4 +229,163 @@ mod tests {
 
         store.delete("casf2", "state").unwrap();
     }
+
+    // ===== per-key ttl, flow-level ttl fix, clear_flow (issue #530) =====
+
+    // Regression for finding 2: flow-level set_ttl was a silent no-op on Redis. It must now actually
+    // extend every key's TTL via SCAN + EXPIRE. With a 2s store default, extending to 100s must keep
+    // the keys alive past a 3s wait (before the fix they'd expire at 2s and be gone).
+    #[tokio::test]
+    async fn test_redis_set_ttl_extends_all_keys() {
+        let Some((_container, store)) = setup(2).await else {
+            return;
+        };
+        store.set("extendf", "a", json!(1)).unwrap();
+        store.set("extendf", "b", json!(2)).unwrap();
+        // A sibling flow that is NOT extended must keep its short default TTL and expire.
+        store.set("extendsibling", "k", json!(1)).unwrap();
+
+        store.set_ttl("extendf", 100).unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert!(
+            store.exists("extendf", "a").unwrap(),
+            "set_ttl must extend key a"
+        );
+        assert!(
+            store.exists("extendf", "b").unwrap(),
+            "set_ttl must extend key b"
+        );
+        assert!(
+            !store.exists("extendsibling", "k").unwrap(),
+            "set_ttl must extend only the target flow; the sibling keeps its TTL and expires"
+        );
+
+        store.clear_flow("extendf").unwrap();
+        store.clear_flow("extendsibling").unwrap();
+    }
+
+    // Flow-level ttl(<=0) expires every current key (Redis EXPIRE semantics), matching in-memory.
+    #[tokio::test]
+    async fn test_redis_set_ttl_zero_expires_flow() {
+        let Some((_container, store)) = setup(300).await else {
+            return;
+        };
+        store.set("zerof", "a", json!(1)).unwrap();
+        store.set("zerof", "b", json!(2)).unwrap();
+
+        store.set_ttl("zerof", 0).unwrap();
+        assert!(!store.exists("zerof", "a").unwrap());
+        assert!(!store.exists("zerof", "b").unwrap());
+    }
+
+    // Per-key ttl mirrors Redis EXPIRE: true when the key exists, false when absent; <=0 deletes.
+    #[tokio::test]
+    async fn test_redis_set_key_ttl() {
+        let Some((_container, store)) = setup(300).await else {
+            return;
+        };
+        store.set("keyttl", "k", json!("v")).unwrap();
+
+        assert!(
+            store.set_key_ttl("keyttl", "k", 100).unwrap(),
+            "existing key -> true"
+        );
+        assert!(
+            !store.set_key_ttl("keyttl", "absent", 100).unwrap(),
+            "absent key -> false"
+        );
+
+        // <=0 deletes the key.
+        assert!(
+            store.set_key_ttl("keyttl", "k", 0).unwrap(),
+            "delete existing -> true"
+        );
+        assert!(
+            !store.exists("keyttl", "k").unwrap(),
+            "key deleted by ttl<=0"
+        );
+        assert!(
+            !store.set_key_ttl("keyttl", "k", -1).unwrap(),
+            "delete absent -> false"
+        );
+    }
+
+    // clear_flow removes only the target flow's keys.
+    #[tokio::test]
+    async fn test_redis_clear_flow() {
+        let Some((_container, store)) = setup(300).await else {
+            return;
+        };
+        store.set("clearf", "k1", json!(1)).unwrap();
+        store.set("clearf", "k2", json!(2)).unwrap();
+        store.set("keepf", "k", json!(3)).unwrap();
+
+        store.clear_flow("clearf").unwrap();
+
+        assert!(
+            !store.exists("clearf", "k1").unwrap(),
+            "target flow cleared"
+        );
+        assert!(
+            !store.exists("clearf", "k2").unwrap(),
+            "target flow cleared"
+        );
+        assert!(
+            store.exists("keepf", "k").unwrap(),
+            "sibling flow untouched"
+        );
+
+        // Idempotent on an absent flow.
+        store.clear_flow("no-such-flow").unwrap();
+        store.clear_flow("keepf").unwrap();
+    }
+
+    // Issue #530 (review finding): a flow_id containing a Redis glob metacharacter must be treated
+    // literally by clear_flow's SCAN MATCH — it must NOT wipe sibling flows whose ids the glob would
+    // otherwise match. Here clear_flow("a*") must clear only the literal flow "a*", leaving "abc".
+    #[tokio::test]
+    async fn test_redis_clear_flow_does_not_glob_across_flows() {
+        let Some((_container, store)) = setup(300).await else {
+            return;
+        };
+        store.set("a*", "k", json!("literal-star-flow")).unwrap();
+        store.set("abc", "k", json!("sibling")).unwrap();
+
+        store.clear_flow("a*").unwrap();
+
+        assert!(
+            !store.exists("a*", "k").unwrap(),
+            "the literal 'a*' flow must be cleared"
+        );
+        assert!(
+            store.exists("abc", "k").unwrap(),
+            "a glob in the flow_id must not clear sibling flows ('abc')"
+        );
+
+        // Same guarantee for the destructive flow-level set_ttl(<=0).
+        store.set("a*", "k", json!("again")).unwrap();
+        store.set_ttl("a*", 0).unwrap();
+        assert!(!store.exists("a*", "k").unwrap(), "literal 'a*' expired");
+        assert!(
+            store.exists("abc", "k").unwrap(),
+            "set_ttl(<=0) must not expire sibling flows"
+        );
+
+        store.clear_flow("abc").unwrap();
+    }
+
+    // Per-key ttl on an already-expired key reports false (the key is absent), on Redis too.
+    #[tokio::test]
+    async fn test_redis_set_key_ttl_on_expired_key_is_false() {
+        let Some((_container, store)) = setup(2).await else {
+            return;
+        };
+        store.set("expttl", "k", json!("v")).unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert!(
+            !store.set_key_ttl("expttl", "k", 100).unwrap(),
+            "an expired key is absent, so per-key ttl returns false"
+        );
+    }
 }

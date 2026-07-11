@@ -231,7 +231,8 @@ async fn route_by_path(
     not_found()
 }
 
-/// Route `/admin/imposters/:port/flow-state/:flow_id/:key` (issue #190 StateInspection).
+/// Route `/admin/imposters/:port/flow-state/:flow_id[/:key]` — per-key inspection (issue #190
+/// StateInspection) and whole-flow invalidation (issue #530).
 async fn route_admin_flow_state(
     method: &Method,
     rest: &str,
@@ -240,6 +241,16 @@ async fn route_admin_flow_state(
 ) -> Response<Full<Bytes>> {
     let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
     match segments.as_slice() {
+        // Whole-flow invalidation (issue #530): DELETE /admin/imposters/:port/flow-state/:flow_id
+        [port_str, "flow-state", flow_id] => {
+            let Ok(port) = port_str.parse::<u16>() else {
+                return not_found();
+            };
+            match *method {
+                Method::DELETE => scenarios::handle_clear_flow_state(port, flow_id, manager).await,
+                _ => not_found(),
+            }
+        }
         [port_str, "flow-state", flow_id, key] => {
             let Ok(port) = port_str.parse::<u16>() else {
                 return not_found();
