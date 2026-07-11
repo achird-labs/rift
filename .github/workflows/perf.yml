@@ -59,18 +59,21 @@ jobs:
       # Record BENCH_SAMPLES independent runs per side (baselines base-1..N / pr-1..N). The gate
       # compares the fastest run of each side (issue #446): noise only ever makes a run slower, so
       # min-of-N is the least-contended, most-representative measurement and cancels cross-run jitter.
+      # Select the bench by its workspace-unique target name, NOT `-p <crate>`: the base checkout
+      # may predate a crate rename (e.g. rift-core -> rift-mock-core), so a hardcoded package name
+      # would not exist on the base and would fail the gate. The bench target name is stable.
       - name: Benchmark base (${{ github.base_ref }})
         run: |
           git checkout --force ${{ github.event.pull_request.base.sha }}
           for i in $(seq 1 "$BENCH_SAMPLES"); do
-            cargo bench -p rift-mock-core --bench imposter_matcher_bench -- --save-baseline "base-$i"
+            cargo bench --bench imposter_matcher_bench -- --save-baseline "base-$i"
           done
 
       - name: Benchmark PR head
         run: |
           git checkout --force ${{ github.event.pull_request.head.sha }}
           for i in $(seq 1 "$BENCH_SAMPLES"); do
-            cargo bench -p rift-mock-core --bench imposter_matcher_bench -- --save-baseline "pr-$i"
+            cargo bench --bench imposter_matcher_bench -- --save-baseline "pr-$i"
           done
 
       - name: Compare and gate
