@@ -322,6 +322,16 @@ impl Imposter {
             return Ok(store);
         }
         if let Some(flow_state_config) = config.rift.as_ref().and_then(|r| r.flow_state.as_ref()) {
+            // Fail-loud config validation (issue #530): a non-positive default TTL misbehaves late
+            // and inconsistently (in-memory → instant expiry of every write; Redis → SETEX error on
+            // the first write), so reject it at construction. This surfaces as a 400 via
+            // ImposterError::FlowStoreConfig, matching the unrecognized-backend rule (#377).
+            if flow_state_config.ttl_seconds < 1 {
+                anyhow::bail!(
+                    "flowState.ttlSeconds must be >= 1 (got {}); a non-positive TTL would expire every write immediately",
+                    flow_state_config.ttl_seconds
+                );
+            }
             return match flow_state_config.backend.as_str() {
                 "inmemory" => {
                     info!(
@@ -787,6 +797,38 @@ mod tests {
             Imposter::new_with_hooks_and_journal(cfg, None, None, None).is_err(),
             "an unrecognized flowState.backend must fail construction, not fall back to NoOp"
         );
+    }
+
+    // Issue #530: a non-positive flowState.ttlSeconds misbehaves late (instant expiry / SETEX
+    // error), so it must fail construction up front — surfacing as a 400 at imposter creation.
+    #[test]
+    fn non_positive_ttl_seconds_fails_construction() {
+        for ttl in [0, -1] {
+            let cfg = serde_json::from_value(json!({
+                "port": 0, "protocol": "http", "stubs": [],
+                "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": ttl } }
+            }))
+            .expect("valid imposter config");
+            let msg = match Imposter::new_with_hooks_and_journal(cfg, None, None, None) {
+                Ok(_) => panic!("ttlSeconds = {ttl} must fail construction"),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                msg.contains("ttlSeconds"),
+                "error must name the offending field, got: {msg}"
+            );
+        }
+    }
+
+    // A ttlSeconds of exactly 1 (the boundary) is accepted.
+    #[test]
+    fn ttl_seconds_one_is_accepted() {
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http", "stubs": [],
+            "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 1 } }
+        }))
+        .expect("valid imposter config");
+        assert!(Imposter::new_with_hooks_and_journal(cfg, None, None, None).is_ok());
     }
 
     /// Serve the state's next response body, advancing the shared cycler.

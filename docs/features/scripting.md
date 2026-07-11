@@ -174,8 +174,14 @@ if ctx.state.exists("key") {
 // Delete value
 ctx.state.delete("key");
 
-// Set TTL for the flow (seconds)
+// Set TTL for every key in the flow (seconds)
 ctx.state.ttl(300);
+
+// Set one key's TTL — returns true if it existed, false if absent; <= 0 deletes it
+ctx.state.ttl("counter", 60);
+
+// Remove every key in the flow
+ctx.state.clear();
 ```
 
 ### Return Values
@@ -408,7 +414,9 @@ Atomic ops and ergonomic getters:
 let n = ctx.state.get_or("attempts", 0);   // value, or the default if absent — kills
                                             // the `if v == () { v = 0; }` idiom
 let n = ctx.state.incr_by("attempts", 5);  // atomic +5, starts at 0 when absent
-ctx.state.ttl(60);                         // per-flow TTL override, in seconds
+ctx.state.ttl(60);                         // re-stamp every key in the flow (seconds)
+ctx.state.ttl("attempts", 60);             // set one key's TTL (bool); <= 0 deletes it
+ctx.state.clear();                         // remove every key in the flow
 
 let outcome = ctx.state.cas("status", "pending", "paid");
 if outcome.applied {

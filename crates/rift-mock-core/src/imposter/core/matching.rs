@@ -437,6 +437,12 @@ impl Imposter {
         self.flow_store.delete(flow_id, key)
     }
 
+    /// Clear every key under a flow (issue #530) — backs `DELETE /admin/imposters/:port/flow-state/
+    /// :flow_id`. Idempotent: clearing an absent flow succeeds.
+    pub fn flow_clear(&self, flow_id: &str) -> anyhow::Result<()> {
+        self.flow_store.clear_flow(flow_id)
+    }
+
     /// Distinct scenario names declared by this imposter's stubs (sorted).
     pub fn scenario_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self

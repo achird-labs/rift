@@ -578,6 +578,29 @@ impl ScriptFlowStore {
         )
         .map_err(Into::into)
     }
+
+    /// Set a per-key TTL override (issue #530). Returns `true` if the key existed, `false` if
+    /// absent; `ttl_seconds <= 0` deletes the key. Always fail-loud.
+    pub fn key_ttl(
+        &mut self,
+        flow_id: String,
+        key: String,
+        ttl_seconds: i64,
+    ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
+        flow_result(
+            "keyTtl",
+            self.store.set_key_ttl(&flow_id, &key, ttl_seconds),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Remove every key in a flow (issue #530). Returns `true`. Always fail-loud.
+    pub fn clear(
+        &mut self,
+        flow_id: String,
+    ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
+        flow_result("clear", self.store.clear_flow(&flow_id).map(|()| true)).map_err(Into::into)
+    }
 }
 
 #[cfg(test)]
@@ -606,6 +629,12 @@ mod tests {
             Err(anyhow!("boom"))
         }
         fn set_ttl(&self, _: &str, _: i64) -> Result<()> {
+            Err(anyhow!("boom"))
+        }
+        fn set_key_ttl(&self, _: &str, _: &str, _: i64) -> Result<bool> {
+            Err(anyhow!("boom"))
+        }
+        fn clear_flow(&self, _: &str) -> Result<()> {
             Err(anyhow!("boom"))
         }
     }
@@ -657,6 +686,19 @@ mod tests {
             "set_ttl must raise on a backend failure"
         );
         assert!(take_last_flow_error().is_some_and(|e| e.contains("setTtl")));
+
+        // Issue #530: the per-key ttl and clear ops are fail-loud too.
+        assert!(
+            s.key_ttl("f".into(), "k".into(), 60).is_err(),
+            "key_ttl must raise on a backend failure"
+        );
+        assert!(take_last_flow_error().is_some_and(|e| e.contains("keyTtl")));
+
+        assert!(
+            s.clear("f".into()).is_err(),
+            "clear must raise on a backend failure"
+        );
+        assert!(take_last_flow_error().is_some_and(|e| e.contains("clear")));
     }
 
     // AC2 (issue #322): the Rhai flow_store.last_error() accessor surfaces the last recorded

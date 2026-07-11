@@ -1124,20 +1124,57 @@ fn state_cas(
     }
 }
 
-/// Per-flow TTL override in seconds (issue #358). Always fail-loud.
+/// TTL override, dispatched on the first argument's type (issue #358, per-key added by #530):
+/// `ttl(seconds)` re-stamps every current key of the flow; `ttl(key, seconds)` sets a single key's
+/// TTL (returning `true` if it existed, `false` if absent) and `seconds <= 0` deletes it. Always
+/// fail-loud. The error names both signatures so the #530 "TypeError on `ttl("k", 1)`" can't recur.
 fn state_ttl(
     _this: &JsValue,
     args: &[JsValue],
     flow_id: &StateCaptures,
     _ctx: &mut Context,
 ) -> JsResult<JsValue> {
-    let ttl_seconds = args
+    // Per-key form: first arg is a string key, second is the TTL.
+    if let Some(key) = args
         .first()
-        .and_then(|v| v.as_number())
-        .map(|n| n as i64)
-        .ok_or_else(|| JsNativeError::typ().with_message("seconds must be a number"))?;
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_std_string_escaped())
+    {
+        let ttl_seconds = args
+            .get(1)
+            .and_then(|v| v.as_number())
+            .map(|n| n as i64)
+            .ok_or_else(|| {
+                JsNativeError::typ().with_message("ttl(key, seconds): seconds must be a number")
+            })?;
+        let outcome = with_current_flow_store(|store| {
+            flow_result("keyTtl", store.set_key_ttl(flow_id, &key, ttl_seconds))
+        });
+        return js_flow_outcome_strict(outcome);
+    }
+    // Flow-level form: first arg is the TTL number.
+    if let Some(ttl_seconds) = args.first().and_then(|v| v.as_number()).map(|n| n as i64) {
+        let outcome = with_current_flow_store(|store| {
+            flow_result("ttl", store.set_ttl(flow_id, ttl_seconds).map(|()| true))
+        });
+        return js_flow_outcome_strict(outcome);
+    }
+    Err(JsNativeError::typ()
+        .with_message(
+            "expected ttl(seconds) or ttl(key, seconds): a number, or a string key and a number",
+        )
+        .into())
+}
+
+/// Remove every key in the flow (issue #530): `ctx.state.clear()`. Always fail-loud.
+fn state_clear(
+    _this: &JsValue,
+    _args: &[JsValue],
+    flow_id: &StateCaptures,
+    _ctx: &mut Context,
+) -> JsResult<JsValue> {
     let outcome = with_current_flow_store(|store| {
-        flow_result("ttl", store.set_ttl(flow_id, ttl_seconds).map(|()| true))
+        flow_result("clear", store.clear_flow(flow_id).map(|()| true))
     });
     js_flow_outcome_strict(outcome)
 }
@@ -1148,7 +1185,7 @@ type StateMethodFn = fn(&JsValue, &[JsValue], &StateCaptures, &mut Context) -> J
 
 fn create_state_object(context: &mut Context, flow_id: String) -> Result<JsValue> {
     let obj = create_js_object(context);
-    let methods: [(&str, StateMethodFn); 9] = [
+    let methods: [(&str, StateMethodFn); 10] = [
         ("get", state_get),
         ("set", state_set),
         ("incr", state_incr),
@@ -1158,6 +1195,7 @@ fn create_state_object(context: &mut Context, flow_id: String) -> Result<JsValue
         ("incrBy", state_incr_by),
         ("cas", state_cas),
         ("ttl", state_ttl),
+        ("clear", state_clear),
     ];
     for (name, func) in methods {
         let native_fn = NativeFunction::from_copy_closure_with_captures(func, flow_id.clone())
@@ -4114,6 +4152,100 @@ function respond(ctx) {
             engine.should_inject(request, store())
         }
 
+        /// Run a `respond` script returning `http(200, ...)` and yield the JSON body string.
+        fn run_body(script: &str) -> String {
+            match run_respond(script, &req(HashMap::new(), None)).unwrap() {
+                FaultDecision::Error { body, .. } => body,
+                other => panic!("expected Error(200) carrier, got {other:?}"),
+            }
+        }
+
+        // --- ctx.state.ttl(key, seconds) + clear() (issue #530) ---
+
+        // Regression for the original #530 report: `ttl("k", 1)` used to throw
+        // `TypeError: seconds must be a number`. It now dispatches to the per-key form.
+        #[test]
+        fn per_key_ttl_no_longer_type_errors_and_returns_true() {
+            let body = run_body(
+                r#"function respond(ctx) {
+                    ctx.state.set("k", "v");
+                    return http(200, { ok: ctx.state.ttl("k", 100) });
+                }"#,
+            );
+            assert!(
+                body.contains("true"),
+                "per-key ttl on existing key -> true, got {body}"
+            );
+        }
+
+        #[test]
+        fn per_key_ttl_absent_key_returns_false() {
+            let body = run_body(
+                r#"function respond(ctx) { return http(200, { ok: ctx.state.ttl("absent", 60) }); }"#,
+            );
+            assert!(
+                body.contains("false"),
+                "per-key ttl on absent key -> false, got {body}"
+            );
+        }
+
+        #[test]
+        fn per_key_ttl_zero_deletes_the_key() {
+            let body = run_body(
+                r#"function respond(ctx) {
+                    ctx.state.set("k", "v");
+                    ctx.state.ttl("k", 0);
+                    return http(200, { present: ctx.state.exists("k") });
+                }"#,
+            );
+            assert!(
+                body.contains("false"),
+                "ttl(key, 0) deletes the key, got {body}"
+            );
+        }
+
+        #[test]
+        fn flow_level_ttl_still_dispatches() {
+            let body = run_body(
+                r#"function respond(ctx) { return http(200, { ok: ctx.state.ttl(60) }); }"#,
+            );
+            assert!(
+                body.contains("true"),
+                "flow-level ttl(seconds) still works, got {body}"
+            );
+        }
+
+        #[test]
+        fn clear_empties_the_flow() {
+            let body = run_body(
+                r#"function respond(ctx) {
+                    ctx.state.set("a", 1);
+                    ctx.state.set("b", 2);
+                    ctx.state.clear();
+                    return http(200, { a: ctx.state.exists("a"), b: ctx.state.exists("b") });
+                }"#,
+            );
+            assert!(
+                !body.contains("true"),
+                "clear() removes every key, got {body}"
+            );
+        }
+
+        // The bad-arg error names BOTH signatures so the #530 confusion can't recur.
+        #[test]
+        fn ttl_bad_arg_error_names_both_signatures() {
+            let err = run_respond(
+                r#"function respond(ctx) { return http(200, { v: ctx.state.ttl(true) }); }"#,
+                &req(HashMap::new(), None),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("ttl(seconds)") && err.contains("ttl(key, seconds)"),
+                "error must name both signatures, got: {err}"
+            );
+        }
+
         #[test]
         fn respond_named_wrapper() {
             let script = r#"
@@ -4453,6 +4585,14 @@ function respond(ctx) {
                 (
                     "ttl",
                     r#"function respond(ctx) { return http(200, { v: ctx.state.ttl(60) }); }"#,
+                ),
+                (
+                    "ttl_key",
+                    r#"function respond(ctx) { return http(200, { v: ctx.state.ttl("k", 60) }); }"#,
+                ),
+                (
+                    "clear",
+                    r#"function respond(ctx) { return http(200, { v: ctx.state.clear() }); }"#,
                 ),
             ] {
                 let result = JsEngine::new(script, "fail")

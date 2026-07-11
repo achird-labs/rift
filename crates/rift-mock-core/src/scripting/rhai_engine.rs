@@ -52,7 +52,9 @@ fn is_leap_year(year: u64) -> bool {
 /// - `ctx.state.get_or(key, default)` - Get a value, or `default` if absent
 /// - `ctx.state.incr_by(key, by)` - Atomic increment by `by`, starting at 0 when absent
 /// - `ctx.state.cas(key, expected, new)` - Atomic compare-and-set
-/// - `ctx.state.ttl(seconds)` - Set flow expiration
+/// - `ctx.state.ttl(seconds)` - Set flow expiration (re-stamps every current key)
+/// - `ctx.state.ttl(key, seconds)` - Set a single key's TTL (returns bool; `seconds <= 0` deletes)
+/// - `ctx.state.clear()` - Remove every key in the flow
 ///
 /// `ctx.store.flow(flow_id)` returns the same handle scoped to an arbitrary (not necessarily the
 /// request's own) flow id.
@@ -253,7 +255,9 @@ fn register_v2_api(engine: &mut Engine) {
         .register_fn("get_or", RhaiStateHandle::get_or)
         .register_fn("incr_by", RhaiStateHandle::incr_by)
         .register_fn("cas", RhaiStateHandle::cas)
-        .register_fn("ttl", RhaiStateHandle::ttl);
+        .register_fn("ttl", RhaiStateHandle::ttl)
+        .register_fn("ttl", RhaiStateHandle::ttl_key)
+        .register_fn("clear", RhaiStateHandle::clear);
 
     engine
         .register_type::<RhaiStoreHandle>()
@@ -394,6 +398,22 @@ impl RhaiStateHandle {
     /// Per-flow TTL override in seconds (issue #358). Always fail-loud.
     pub fn ttl(&mut self, seconds: i64) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
         self.inner.ttl(self.flow_id.clone(), seconds)
+    }
+
+    /// Per-key TTL override (issue #530): `ttl(key, seconds)`. Returns `true` if the key existed,
+    /// `false` if absent; `seconds <= 0` deletes it. Registered as an overload of `ttl` — Rhai
+    /// dispatches `ttl(number)` to the flow-level form and `ttl(string, number)` here. Fail-loud.
+    pub fn ttl_key(
+        &mut self,
+        key: String,
+        seconds: i64,
+    ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
+        self.inner.key_ttl(self.flow_id.clone(), key, seconds)
+    }
+
+    /// Remove every key in this flow (issue #530): `clear()`. Returns `true`. Always fail-loud.
+    pub fn clear(&mut self) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
+        self.inner.clear(self.flow_id.clone())
     }
 }
 
@@ -1117,6 +1137,95 @@ mod tests {
         fn run_respond(script: &str, request: &ScriptRequest) -> Result<FaultDecision> {
             let engine = RhaiEngine::new(script, "v2-rule").unwrap();
             engine.should_inject_fault(request, store())
+        }
+
+        /// Run a `respond` script that returns `http(200, ...)` and yield the JSON body string.
+        fn run_body(script: &str) -> String {
+            match run_respond(script, &req(HashMap::new(), None)).unwrap() {
+                FaultDecision::Error { body, .. } => body,
+                other => panic!("expected Error(200) carrier, got {other:?}"),
+            }
+        }
+
+        // --- ctx.state.ttl(key, seconds) + clear() (issue #530) ---
+
+        // Regression for the original #530 report: `ttl("k", 1)` used to throw a TypeError because
+        // only the one-arg flow-level overload existed. It now resolves the per-key overload and
+        // returns true for an existing key.
+        #[test]
+        fn per_key_ttl_no_longer_type_errors_and_returns_true() {
+            let body = run_body(
+                r#"fn respond(ctx) {
+                    ctx.state.set("k", "v");
+                    http(200, #{ ok: ctx.state.ttl("k", 100) })
+                }"#,
+            );
+            assert!(
+                body.contains("true"),
+                "per-key ttl on existing key -> true, got {body}"
+            );
+        }
+
+        #[test]
+        fn per_key_ttl_absent_key_returns_false() {
+            let body =
+                run_body(r#"fn respond(ctx) { http(200, #{ ok: ctx.state.ttl("absent", 60) }) }"#);
+            assert!(
+                body.contains("false"),
+                "per-key ttl on absent key -> false, got {body}"
+            );
+        }
+
+        #[test]
+        fn per_key_ttl_zero_deletes_the_key() {
+            let body = run_body(
+                r#"fn respond(ctx) {
+                    ctx.state.set("k", "v");
+                    ctx.state.ttl("k", 0);
+                    http(200, #{ present: ctx.state.exists("k") })
+                }"#,
+            );
+            assert!(
+                body.contains("false"),
+                "ttl(key, 0) deletes the key, got {body}"
+            );
+        }
+
+        // The one-arg flow-level overload still dispatches (arity/type overloading).
+        #[test]
+        fn flow_level_ttl_still_dispatches() {
+            let body = run_body(r#"fn respond(ctx) { http(200, #{ ok: ctx.state.ttl(60) }) }"#);
+            assert!(
+                body.contains("true"),
+                "flow-level ttl(seconds) still works, got {body}"
+            );
+        }
+
+        #[test]
+        fn clear_empties_the_flow() {
+            let body = run_body(
+                r#"fn respond(ctx) {
+                    ctx.state.set("a", 1);
+                    ctx.state.set("b", 2);
+                    ctx.state.clear();
+                    http(200, #{ a: ctx.state.exists("a"), b: ctx.state.exists("b") })
+                }"#,
+            );
+            assert!(
+                !body.contains("true"),
+                "clear() removes every key, got {body}"
+            );
+        }
+
+        // A `ttl` call matching neither overload (e.g. a bool arg) must raise, not silently pass —
+        // parity with the JS engine's bad-arg guard.
+        #[test]
+        fn ttl_bad_arg_raises() {
+            let result = run_respond(
+                r#"fn respond(ctx) { http(200, #{ v: ctx.state.ttl(true) }) }"#,
+                &req(HashMap::new(), None),
+            );
+            assert!(result.is_err(), "ttl(<bool>) must raise, got {result:?}");
         }
 
         // --- ctx.request ---

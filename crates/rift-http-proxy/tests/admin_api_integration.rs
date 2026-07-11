@@ -122,6 +122,99 @@ async fn scenario_admin_endpoints_arrange_inspect_reset() {
     let _ = manager.delete_imposter(19763).await;
 }
 
+// Issue #530: DELETE /admin/imposters/:port/flow-state/:flow_id clears every key in the flow.
+#[tokio::test]
+async fn delete_flow_state_clears_whole_flow() {
+    let manager = std::sync::Arc::new(ImposterManager::new());
+    let config = serde_json::from_value(order_fsm(19780, None)).unwrap();
+    manager.create_imposter(config).await.expect("create");
+
+    let admin_addr = "127.0.0.1:12602".parse().unwrap();
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
+    tokio::spawn(server.run());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let c = reqwest::Client::new();
+    let admin = "http://127.0.0.1:12602";
+    let key_url = |k: &str| format!("{admin}/admin/imposters/19780/flow-state/flowX/{k}");
+
+    // Arrange two keys under flow "flowX".
+    for (k, v) in [("a", "1"), ("b", "2")] {
+        let r = c
+            .put(key_url(k))
+            .header("content-type", "application/json")
+            .body(format!(r#"{{"value":{v}}}"#))
+            .send()
+            .await
+            .expect("put");
+        assert_eq!(r.status(), 200);
+    }
+
+    // Clear the whole flow.
+    let r = c
+        .delete(format!("{admin}/admin/imposters/19780/flow-state/flowX"))
+        .send()
+        .await
+        .expect("clear");
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        r.json::<serde_json::Value>().await.unwrap()["cleared"],
+        true
+    );
+
+    // Both keys are gone.
+    assert_eq!(c.get(key_url("a")).send().await.unwrap().status(), 404);
+    assert_eq!(c.get(key_url("b")).send().await.unwrap().status(), 404);
+
+    // Idempotent: clearing again still succeeds; an unknown port is 404.
+    assert_eq!(
+        c.delete(format!("{admin}/admin/imposters/19780/flow-state/flowX"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        c.delete(format!("{admin}/admin/imposters/29999/flow-state/flowX"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+
+    let _ = manager.delete_imposter(19780).await;
+}
+
+// Issue #530: creating an imposter with flowState.ttlSeconds < 1 is rejected with 400.
+#[tokio::test]
+async fn create_imposter_rejects_non_positive_ttl_seconds() {
+    let manager = std::sync::Arc::new(ImposterManager::new());
+    let admin_addr = "127.0.0.1:12603".parse().unwrap();
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
+    tokio::spawn(server.run());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let c = reqwest::Client::new();
+    let admin = "http://127.0.0.1:12603";
+    let r = c
+        .post(format!("{admin}/imposters"))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "port": 19781, "protocol": "http", "stubs": [],
+                "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 0 } }
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(r.status(), 400, "ttlSeconds:0 must be rejected at creation");
+    assert!(r.text().await.unwrap().contains("ttlSeconds"));
+}
+
 #[tokio::test]
 async fn scenario_admin_reset_is_per_flow_with_explicit_flow_id() {
     let manager = std::sync::Arc::new(ImposterManager::new());
