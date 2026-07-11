@@ -11,6 +11,15 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Flow-level `ctx.state.ttl(seconds)` no longer revives expired keys on the in-memory backend.**
+  The positive-TTL branch re-stamped every entry in the flow — including entries already past their
+  expiry that the amortized sweeper hadn't reaped yet — resurrecting them so a later `get`/`exists`
+  saw them as live. It now drops already-expired entries before extending the survivors (and clears
+  the flow map if that leaves it empty), matching the Redis backend, where expired keys are simply
+  gone and never revived.
+
 ## [0.13.2] - 2026-07-11
 
 ### Added
