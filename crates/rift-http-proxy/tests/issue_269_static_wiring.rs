@@ -89,7 +89,7 @@ async fn static_response_applies_shell_transform() {
 #[tokio::test]
 async fn static_response_records_request_metric() {
     fn requests_total_418() -> u64 {
-        rift_core::extensions::collect_metrics()
+        rift_mock_core::extensions::collect_metrics()
             .lines()
             .filter(|l| l.starts_with("rift_requests_total") && l.contains("status=\"418\""))
             .filter_map(|l| l.rsplit(' ').next())

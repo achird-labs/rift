@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 
-description = "Rift C-ABI: a tiny opaque-handle + JSON in/out FFI over the rift-core engine, for embedding Rift in-process (e.g. via the JVM Panama FFM backend)."
+description = "Rift C-ABI: a tiny opaque-handle + JSON in/out FFI over the rift-mock-core engine, for embedding Rift in-process (e.g. via the JVM Panama FFM backend)."
 readme = "../../README.md"
 
 [lib]
@@ -22,7 +22,7 @@ workspace = true
 [dependencies]
 # Features are forwarded (not hard-coded) so the per-platform cdylib build can drop optional
 # features that can't cross-compile for a given target — issue #205.
-rift-core = { path = "../rift-core", default-features = false }
+rift-mock-core = { path = "../rift-mock-core", default-features = false }
 # The admin control plane (issue #343): rift_serve_admin spawns the real AdminApiServer over the
 # handle's manager. default-features=false so `mimalloc` is NOT pulled — a cdylib must never
 # impose a global allocator on its host.
@@ -44,7 +44,7 @@ rcgen = "0.13"
 
 [features]
 default = ["redis-backend", "javascript"]
-# Engine features are forwarded to BOTH rift-core and rift-http-proxy so the two share one
+# Engine features are forwarded to BOTH rift-mock-core and rift-http-proxy so the two share one
 # feature set (mimalloc is deliberately never forwarded — see the dependency note above).
-redis-backend = ["rift-core/redis-backend", "rift-http-proxy/redis-backend"]
-javascript = ["rift-core/javascript", "rift-http-proxy/javascript"]
+redis-backend = ["rift-mock-core/redis-backend", "rift-http-proxy/redis-backend"]
+javascript = ["rift-mock-core/javascript", "rift-http-proxy/javascript"]

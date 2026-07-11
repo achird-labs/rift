@@ -10,13 +10,13 @@
 //! contract, and CI runs them via a dedicated `--test handler_error_responses` step.
 //!
 //! They live in their own integration binary — a SEPARATE PROCESS with its own MB JS script pool —
-//! rather than in the rift-core lib test binary, so they don't contend for the shared script pool
+//! rather than in the rift-mock-core lib test binary, so they don't contend for the shared script pool
 //! with the timing-sensitive bounded-matcher unit tests (whose runaway-script cases park pool
 //! workers; co-locating server tests there starves the 60s inject-matching deadline under CI load).
 
 #![cfg(feature = "javascript")]
 
-use rift_core::imposter::ImposterManager;
+use rift_mock_core::imposter::ImposterManager;
 use std::time::Duration;
 
 async fn create(manager: &ImposterManager, cfg: serde_json::Value) {

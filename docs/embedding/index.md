@@ -35,7 +35,7 @@ the source, the source wins — please file an issue.
 
 | Crate | Role | Exposes |
 |:------|:-----|:--------|
-| `rift-core` | The engine library — no CLI, no HTTP server wiring. | `ImposterManager` and the SPI traits (`FlowStoreProvider`, `ResponseSequencer`, `RequestJournal`, `ProxyRecordingStore`, `ImposterEventListener`, `ResponseDecorator`), behaviors, predicates, scripting. |
+| `rift-mock-core` | The engine library — no CLI, no HTTP server wiring. | `ImposterManager` and the SPI traits (`FlowStoreProvider`, `ResponseSequencer`, `RequestJournal`, `ProxyRecordingStore`, `ImposterEventListener`, `ResponseDecorator`), behaviors, predicates, scripting. |
 | `rift-http-proxy` | The server crate — builds the `rift` binary and hosts the admin/metrics HTTP layer. | `ServerBuilder`, `RunningServer`, `AdminApiServer`, `bind_metrics_server`, the single-port gateway, `install_default_crypto_provider()`. |
 | `rift-ffi` | The C-ABI shared library (`cdylib`) plus an `rlib` for in-crate tests. | The `extern "C"` functions (`rift_start`, `rift_serve_admin`, …) and the cbindgen header. |
 | `packages/rift-node` | A Node.js consumer of the above (prebuilt binaries). | Not a Rust SPI crate — an example downstream consumer. |

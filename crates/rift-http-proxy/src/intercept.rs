@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::intercept_rules::{InterceptAction, InterceptRules, ServeStub};
-use rift_core::proxy::intercept_ca::SniCertResolver;
+use rift_mock_core::proxy::intercept_ca::SniCertResolver;
 use rustls::ServerConfig;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -514,7 +514,7 @@ fn parse_request_head(head: &[u8]) -> (String, String, Option<String>, HashMap<S
 mod tests {
     use super::*;
     use crate::intercept_rules::{ForwardTarget, InterceptRule};
-    use rift_core::proxy::intercept_ca::CertificateAuthority;
+    use rift_mock_core::proxy::intercept_ca::CertificateAuthority;
 
     // Issue #522: a panicked accept loop must not be swallowed by `shutdown`/`stop` — its
     // `JoinError` is logged rather than discarded.

@@ -45,7 +45,7 @@ serde_json.workspace = true
 
 # Shared workspace types + CLI-free engine (issue #203)
 rift-types = { path = "../rift-types", version = "0.1.0" }
-rift-core = { path = "../rift-core", version = "0.1.0", default-features = false }
+rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-features = false }
 
 # Stable stub id generation for id-addressed stub ops (issue #202)
 uuid.workspace = true
@@ -83,7 +83,7 @@ crossbeam = "0.8"
 
 # Optional high-throughput global allocator for the server binary (issue #293).
 # Feature-gated (default-on) so FFI/cdylib and cross-compile builds can drop it;
-# it is wired only into the `rift-http-proxy` binary, never rift-core/rift-ffi.
+# it is wired only into the `rift-http-proxy` binary, never rift-mock-core/rift-ffi.
 mimalloc = { version = "0.1", optional = true }
 
 # XML/XPath support for Mountebank compatibility
@@ -95,7 +95,7 @@ serde_json_path = "0.7"
 
 [dev-dependencies]
 # Turn on the failing flow-store backend for backend-outage tests (issue #318)
-rift-core = { path = "../rift-core", version = "0.1.0", default-features = false, features = ["test-backend"] }
+rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-features = false, features = ["test-backend"] }
 # Corpus lint gate (issue #460): lint every vendored fixture via the library API.
 rift-lint = { path = "../rift-lint", version = "0.1.0" }
 tempfile = "3.8"
@@ -114,8 +114,8 @@ port_check = "0.2"
 
 [features]
 default = ["redis-backend", "javascript", "mimalloc"]
-redis-backend = ["rift-core/redis-backend"]
-javascript = ["rift-core/javascript"]
+redis-backend = ["rift-mock-core/redis-backend"]
+javascript = ["rift-mock-core/javascript"]
 # High-throughput global allocator for the server binary; drop it (e.g.
 # `--no-default-features`) for FFI/cross-compile builds that must not link it.
 mimalloc = ["dep:mimalloc"]

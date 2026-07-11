@@ -3298,7 +3298,96 @@ dependencies = [
 ]
 
 [[package]]
-name = "rift-core"
+name = "rift-ffi"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "rcgen",
+ "reqwest",
+ "rift-http-proxy",
+ "rift-mock-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rift-http-proxy"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "anyhow",
+ "assert-json-diff",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "clap",
+ "criterion",
+ "crossbeam",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "lazy_static",
+ "libc",
+ "matchit",
+ "mimalloc",
+ "num_cpus",
+ "parking_lot",
+ "port_check",
+ "prometheus",
+ "rand 0.8.5",
+ "rcgen",
+ "regex",
+ "reqwest",
+ "rift-lint",
+ "rift-mock-core",
+ "rift-types",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "serde_json_path",
+ "serde_yaml",
+ "serial_test",
+ "similar",
+ "socket2 0.5.10",
+ "sxd-document",
+ "sxd-xpath",
+ "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-rustls",
+ "tokio-test",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "tracing-test",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "rift-lint"
+version = "0.1.0"
+dependencies = [
+ "boa_engine",
+ "clap",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "rift-mock-core"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
@@ -3352,95 +3441,6 @@ dependencies = [
  "urlencoding",
  "uuid",
  "yasna",
-]
-
-[[package]]
-name = "rift-ffi"
-version = "0.1.0"
-dependencies = [
- "parking_lot",
- "rcgen",
- "reqwest",
- "rift-core",
- "rift-http-proxy",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rift-http-proxy"
-version = "0.1.0"
-dependencies = [
- "aho-corasick",
- "anyhow",
- "assert-json-diff",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "clap",
- "criterion",
- "crossbeam",
- "futures",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "lazy_static",
- "libc",
- "matchit",
- "mimalloc",
- "num_cpus",
- "parking_lot",
- "port_check",
- "prometheus",
- "rand 0.8.5",
- "rcgen",
- "regex",
- "reqwest",
- "rift-core",
- "rift-lint",
- "rift-types",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "serde_json_path",
- "serde_yaml",
- "serial_test",
- "similar",
- "socket2 0.5.10",
- "sxd-document",
- "sxd-xpath",
- "tempfile",
- "testcontainers",
- "testcontainers-modules",
- "thiserror 2.0.17",
- "tokio",
- "tokio-rustls",
- "tokio-test",
- "tokio-util",
- "tower",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "tracing-test",
- "urlencoding",
- "uuid",
-]
-
-[[package]]
-name = "rift-lint"
-version = "0.1.0"
-dependencies = [
- "boa_engine",
- "clap",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.17",
 ]
 
 [[package]]

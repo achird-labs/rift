@@ -56,13 +56,13 @@ server.shutdown().await;
 
 ### Injecting a custom `ImposterManager`
 
-`ImposterManager` (from `rift-core`) is the injection point for every SPI backend (see
+`ImposterManager` (from `rift-mock-core`) is the injection point for every SPI backend (see
 [Extension Points]({{ site.baseurl }}/embedding/spi/)). Build it, wire your backends, then hand it to
 the server:
 
 ```rust
 use std::sync::Arc;
-use rift_core::imposter::ImposterManager;
+use rift_mock_core::imposter::ImposterManager;
 use rift_http_proxy::{ServerBuilder, Cli};
 use clap::Parser;
 

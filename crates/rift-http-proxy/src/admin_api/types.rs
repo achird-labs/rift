@@ -92,8 +92,8 @@ pub struct RiftImposterExtensions {
 }
 
 // Error types + `error_response` + the `From<ImposterError>` conversion moved to
-// `rift_core::response` (issue #203). Re-exported so admin call sites are unchanged.
-pub use rift_core::response::error_response;
+// `rift_mock_core::response` (issue #203). Re-exported so admin call sites are unchanged.
+pub use rift_mock_core::response::error_response;
 
 /// Request to add a stub
 #[derive(Debug, Deserialize)]
@@ -198,10 +198,10 @@ pub fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Ful
     build_response_with_headers(status, [("Content-Type", "application/json")], json)
 }
 
-// The generic response builders moved to `rift_core::util` (issue #203) so the engine can use
+// The generic response builders moved to `rift_mock_core::util` (issue #203) so the engine can use
 // them without depending on the admin server. Re-exported here so `crate::admin_api::types::*`
 // call sites are unchanged.
-pub use rift_core::util::build_response_with_headers;
+pub use rift_mock_core::util::build_response_with_headers;
 
 /// Create a not found response
 pub fn not_found() -> Response<Full<Bytes>> {

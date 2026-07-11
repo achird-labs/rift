@@ -465,7 +465,7 @@ mod tests {
     use super::*;
 
     // Allocates a fresh port per test so parallel tests never share `IMPOSTER_STATE` (disjoint
-    // from the range used by `rift-core/src/scripting/js_engine.rs`'s own tests in this binary).
+    // from the range used by `rift-mock-core/src/scripting/js_engine.rs`'s own tests in this binary).
     fn test_port() -> u16 {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(41_100);

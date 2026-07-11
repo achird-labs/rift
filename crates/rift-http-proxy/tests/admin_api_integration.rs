@@ -1,4 +1,4 @@
-//! Admin HTTP API integration tests (relocated from rift-core in issue #203, since they spin up
+//! Admin HTTP API integration tests (relocated from rift-mock-core in issue #203, since they spin up
 //! the `AdminApiServer` which lives in this server crate).
 
 use rift_http_proxy::imposter::ImposterManager;

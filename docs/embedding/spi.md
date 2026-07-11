@@ -7,7 +7,7 @@ nav_order: 2
 
 # Extension Points (SPI)
 
-Rift's storage and observation seams are **traits** in `rift-core`. An embedding host implements a
+Rift's storage and observation seams are **traits** in `rift-mock-core`. An embedding host implements a
 trait and injects it through a builder method on `ImposterManager`; if you don't, Rift uses its
 built-in in-memory (or Redis, where applicable) implementation. The built-ins never fail — a custom
 backend may, and Rift surfaces that failure explicitly (see [Backend errors](#backend-errors-and-annotations)).
@@ -16,7 +16,7 @@ All injection is via `ImposterManager` builder methods:
 
 ```rust
 use std::sync::Arc;
-use rift_core::imposter::ImposterManager;
+use rift_mock_core::imposter::ImposterManager;
 
 let manager = ImposterManager::new()
     .with_flow_store_provider(Arc::new(MyFlowStores))

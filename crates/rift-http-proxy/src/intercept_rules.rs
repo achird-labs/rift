@@ -4,14 +4,14 @@
 //! A rule is a `(host?, predicates)` match against the intercepted request paired with an
 //! [`InterceptAction`]: serve an inline stub, or forward the request to a named imposter port.
 //! Rules reuse the existing Mountebank-compatible predicate engine
-//! ([`rift_core::imposter::predicates::stub_matches`]) so the same predicate JSON shape works
+//! ([`rift_mock_core::imposter::predicates::stub_matches`]) so the same predicate JSON shape works
 //! here as everywhere else in Rift.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use rift_core::imposter::stub_matches;
-use rift_core::proxy::intercept_ca::CertificateAuthority;
+use rift_mock_core::imposter::stub_matches;
+use rift_mock_core::proxy::intercept_ca::CertificateAuthority;
 use rift_types::Predicate;
 
 /// A single intercept rule: an optional host filter plus predicates (AND-ed together), and the

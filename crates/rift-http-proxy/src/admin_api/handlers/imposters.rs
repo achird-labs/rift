@@ -510,7 +510,7 @@ async fn handle_set_enabled(
 /// allowlist: only the non-sensitive fields tools need are exposed, so a credential-bearing field
 /// added to the config later (e.g. inside `redis`, or a new backend's auth block) is excluded by
 /// default rather than leaked.
-fn expose_flow_state(fs: &rift_core::imposter::RiftFlowStateConfig) -> serde_json::Value {
+fn expose_flow_state(fs: &rift_mock_core::imposter::RiftFlowStateConfig) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     out.insert("backend".to_string(), serde_json::json!(fs.backend));
     out.insert("ttlSeconds".to_string(), serde_json::json!(fs.ttl_seconds));
@@ -942,7 +942,7 @@ mod redact_tests {
 
     #[test]
     fn expose_flow_state_allowlists_safe_fields_only() {
-        let fs: rift_core::imposter::RiftFlowStateConfig = serde_json::from_value(json!({
+        let fs: rift_mock_core::imposter::RiftFlowStateConfig = serde_json::from_value(json!({
             "backend": "redis",
             "ttlSeconds": 300,
             "redis": { "url": "redis://user:secret@host:6379", "keyPrefix": "rift:" },

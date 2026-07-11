@@ -10,7 +10,7 @@ on:
   pull_request:
     # Only when code that can affect matcher performance changes (keeps the job off doc/CI-only PRs).
     paths:
-      - "crates/rift-core/**"
+      - "crates/rift-mock-core/**"
       - "crates/rift-http-proxy/**"
       - "crates/rift-types/**"
       - ".github/workflows/perf.yml"
@@ -63,14 +63,14 @@ jobs:
         run: |
           git checkout --force ${{ github.event.pull_request.base.sha }}
           for i in $(seq 1 "$BENCH_SAMPLES"); do
-            cargo bench -p rift-core --bench imposter_matcher_bench -- --save-baseline "base-$i"
+            cargo bench -p rift-mock-core --bench imposter_matcher_bench -- --save-baseline "base-$i"
           done
 
       - name: Benchmark PR head
         run: |
           git checkout --force ${{ github.event.pull_request.head.sha }}
           for i in $(seq 1 "$BENCH_SAMPLES"); do
-            cargo bench -p rift-core --bench imposter_matcher_bench -- --save-baseline "pr-$i"
+            cargo bench -p rift-mock-core --bench imposter_matcher_bench -- --save-baseline "pr-$i"
           done
 
       - name: Compare and gate

@@ -1,8 +1,8 @@
-//! Issue #203 gate: the `rift-core` engine drives the full imposter lifecycle in-process —
+//! Issue #203 gate: the `rift-mock-core` engine drives the full imposter lifecycle in-process —
 //! no admin HTTP server, no `clap` CLI — which is the CLI-free surface the embedded `rift-ffi`
 //! backend depends on. If this file compiles and passes, the core is usable standalone.
 
-use rift_core::imposter::ImposterManager;
+use rift_mock_core::imposter::ImposterManager;
 
 #[tokio::test]
 async fn engine_serves_matches_and_records_without_admin_server_or_cli() {

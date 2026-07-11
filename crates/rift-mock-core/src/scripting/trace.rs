@@ -10,7 +10,7 @@
 //! one), so it composes with whatever subscriber (if any) is already installed.
 //!
 //! This is a hand-written [`tracing::Subscriber`] rather than a `tracing-subscriber` `Layer` —
-//! `rift-core` doesn't otherwise depend on `tracing-subscriber`, and capturing one field from one
+//! `rift-mock-core` doesn't otherwise depend on `tracing-subscriber`, and capturing one field from one
 //! target is a handful of trait methods, not worth a new dependency.
 
 use super::FaultDecision;

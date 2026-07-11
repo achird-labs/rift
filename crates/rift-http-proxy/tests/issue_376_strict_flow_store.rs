@@ -2,7 +2,7 @@
 //! returning a fallback value. The raise propagates through `should_inject_bounded` to the
 //! existing 500 (`x-rift-script-error`). Covered for both engines (Rhai / JS).
 //!
-//! The failing backend comes from rift-core's `test-backend` feature: `_rift.flowState.backend =
+//! The failing backend comes from rift-mock-core's `test-backend` feature: `_rift.flowState.backend =
 //! "failing"` installs a store whose ops fail. This needs no Docker/Redis.
 //!
 //! `ctx.state` is unconditionally fail-loud (issue #358).

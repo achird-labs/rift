@@ -48,7 +48,7 @@ default imposter-on-a-port model is unchanged. A minimal, complete, runnable exa
 
 ```rust
 use std::sync::Arc;
-use rift_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
+use rift_mock_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
 use rift_http_proxy::intercept::InterceptListener;
 use rift_http_proxy::intercept_rules::InterceptRules;
 

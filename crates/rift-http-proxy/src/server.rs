@@ -616,7 +616,7 @@ async fn metrics_accept_loop(
                 }};
             }
 
-            if rift_core::util::http2_disabled() {
+            if rift_mock_core::util::http2_disabled() {
                 drive_conn!(
                     hyper::server::conn::http1::Builder::new().serve_connection(io, service)
                 );
@@ -706,7 +706,7 @@ mod tests {
     use super::*;
     // The CA load/generate logic now lives behind `InterceptControl::start`; these tests still
     // exercise `CertificateAuthority` directly (its contract is unchanged).
-    use rift_core::proxy::intercept_ca::CertificateAuthority;
+    use rift_mock_core::proxy::intercept_ca::CertificateAuthority;
 
     #[test]
     fn test_no_parse_flag_accepted() {

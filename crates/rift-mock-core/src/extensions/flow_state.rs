@@ -91,7 +91,7 @@ pub trait FlowStore: Send + Sync {
 }
 
 /// Embedder hook for supplying a custom [`FlowStore`] per imposter (issue #312), e.g.
-/// custom persistence or a test fake, without forking `rift-core`. Register one on the
+/// custom persistence or a test fake, without forking `rift-mock-core`. Register one on the
 /// manager with
 /// [`ImposterManager::with_flow_store_provider`](crate::imposter::ImposterManager::with_flow_store_provider).
 /// It is consulted when an imposter's flow store is constructed, before the built-in

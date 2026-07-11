@@ -29,20 +29,20 @@ COPY crates/rift-http-proxy/Cargo.toml ./crates/rift-http-proxy/
 COPY crates/rift-lint/Cargo.toml ./crates/rift-lint/
 COPY crates/rift-tui/Cargo.toml ./crates/rift-tui/
 COPY crates/rift-types/Cargo.toml ./crates/rift-types/
-COPY crates/rift-core/Cargo.toml ./crates/rift-core/
+COPY crates/rift-mock-core/Cargo.toml ./crates/rift-mock-core/
 COPY crates/rift-ffi/Cargo.toml ./crates/rift-ffi/
 
 # Create dummy source files to build dependencies
 RUN mkdir -p crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches \
-             crates/rift-core/benches \
-             crates/rift-lint/src crates/rift-tui/src crates/rift-types/src crates/rift-core/src crates/rift-ffi/src && \
+             crates/rift-mock-core/benches \
+             crates/rift-lint/src crates/rift-tui/src crates/rift-types/src crates/rift-mock-core/src crates/rift-ffi/src && \
     echo "" > crates/rift-types/src/lib.rs && \
-    echo "" > crates/rift-core/src/lib.rs && \
+    echo "" > crates/rift-mock-core/src/lib.rs && \
     echo "" > crates/rift-ffi/src/lib.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/src/main.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/src/bin/verify.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/benches/matcher_bench.rs && \
-    echo "fn main() {}" > crates/rift-core/benches/imposter_matcher_bench.rs && \
+    echo "fn main() {}" > crates/rift-mock-core/benches/imposter_matcher_bench.rs && \
     echo "pub fn lint() {}" > crates/rift-lint/src/lib.rs && \
     echo "fn main() {}" > crates/rift-lint/src/main.rs && \
     echo "fn main() {}" > crates/rift-tui/src/main.rs && \

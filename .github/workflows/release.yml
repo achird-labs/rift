@@ -381,7 +381,7 @@ jobs:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
-      # Publish in dependency order: rift-types -> rift-core -> rift-http-proxy (rift-lint is a
+      # Publish in dependency order: rift-types -> rift-mock-core -> rift-http-proxy (rift-lint is a
       # leaf and independent). Failures are LOUD (issue #474): the old `|| echo` masked a broken
       # rift-http-proxy publish so releases went green while the crate stayed frozen at 0.4.0.
       - name: Publish to crates.io (in dependency order)
@@ -406,7 +406,7 @@ jobs:
           }
           publish_crate rift-lint
           publish_crate rift-types
-          publish_crate rift-core
+          publish_crate rift-mock-core
           publish_crate rift-http-proxy
 
   # =============================================================================

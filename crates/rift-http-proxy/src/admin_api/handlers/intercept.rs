@@ -17,7 +17,7 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
-use rift_core::proxy::truststore::{TrustStorePassword, ca_pem, export_jks, export_pkcs12};
+use rift_mock_core::proxy::truststore::{TrustStorePassword, ca_pem, export_jks, export_pkcs12};
 use serde::Serialize;
 
 const DEFAULT_TRUSTSTORE_PASSWORD: &str = "changeit";
@@ -279,7 +279,7 @@ fn handle_truststore_jks(query: Option<&str>, state: &InterceptState) -> Respons
 mod tests {
     use super::*;
     use crate::intercept_rules::{InterceptAction, InterceptRules, ServeStub};
-    use rift_core::proxy::intercept_ca::CertificateAuthority;
+    use rift_mock_core::proxy::intercept_ca::CertificateAuthority;
     use std::sync::Arc;
 
     fn test_state() -> InterceptState {
@@ -310,7 +310,7 @@ mod tests {
             "hunter2"
         );
         // `p12` is not a direct dependency of this crate, so we assert non-empty bytes + the
-        // password header rather than round-tripping the parser (rift-core's own tests already
+        // password header rather than round-tripping the parser (rift-mock-core's own tests already
         // cover the PKCS#12 encoding itself).
         assert!(!body_bytes(p12_resp).is_empty());
 
@@ -382,7 +382,7 @@ mod tests {
     #[tokio::test]
     async fn rule_added_via_admin_handler_is_served_through_listener() {
         use crate::intercept::InterceptListener;
-        use rift_core::proxy::intercept_ca::SniCertResolver;
+        use rift_mock_core::proxy::intercept_ca::SniCertResolver;
 
         let ca = CertificateAuthority::generate().expect("ca");
         let ca_pem = ca.ca_cert_pem().to_string();

@@ -90,8 +90,8 @@ pub fn validate_imposter(
 
 /// Infer a script's effective engine: explicit `engine`, else inferred from a `file` path's
 /// extension (`.rhai`/`.js`), else the "rhai" default — mirrors
-/// `rift_core::imposter::RiftScriptConfig`'s resolution rule. A `.lua`/`"lua"` engine still
-/// infers as `"lua"` here (structural checks only; rift-core rejects it at validate/run time —
+/// `rift_mock_core::imposter::RiftScriptConfig`'s resolution rule. A `.lua`/`"lua"` engine still
+/// infers as `"lua"` here (structural checks only; rift-mock-core rejects it at validate/run time —
 /// issue #450).
 fn infer_script_engine(explicit: Option<&str>, file_field: Option<&str>) -> String {
     if let Some(e) = explicit {

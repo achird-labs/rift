@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use rift_core::imposter::{Imposter, ImposterConfig, Predicate, stub_matches};
+use rift_mock_core::imposter::{Imposter, ImposterConfig, Predicate, stub_matches};
 use serde_json::json;
 
 fn predicates_from(values: serde_json::Value) -> Vec<Predicate> {

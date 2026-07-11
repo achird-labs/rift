@@ -297,7 +297,7 @@ async fn accept_loop(
                 }};
             }
 
-            if rift_core::util::http2_disabled() {
+            if rift_mock_core::util::http2_disabled() {
                 drive_conn!(
                     hyper::server::conn::http1::Builder::new().serve_connection(io, service)
                 );

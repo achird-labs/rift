@@ -20,7 +20,7 @@
 
 // Route the server binary's allocations through mimalloc (issue #293). Gated by
 // the default-on `mimalloc` feature so FFI/cross-compile builds can drop it; the
-// allocator is set only here in the binary, never in the rift-core/rift-ffi libs.
+// allocator is set only here in the binary, never in the rift-mock-core/rift-ffi libs.
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -44,7 +44,7 @@ fn main() -> Result<(), anyhow::Error> {
     }
 
     // `--debug` is the server-flag spelling of debug mode (issue #360 Item 3); `RIFT_DEBUG` is
-    // the env-var spelling `rift_core::util::rift_debug_env()` reads everywhere else (issue
+    // the env-var spelling `rift_mock_core::util::rift_debug_env()` reads everywhere else (issue
     // #359). Setting it here (before anything calls `rift_debug_env()`, which caches its read)
     // makes both spellings equivalent. Safe: single-threaded, before the tokio runtime starts.
     if cli.debug {

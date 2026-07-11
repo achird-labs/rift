@@ -2,7 +2,7 @@
 //! admin), the ResponseDecorator hook fires on both phases, and no-decorator responses are
 //! byte-identical to before.
 //!
-//! The failing backend comes from rift-core's `test-backend` feature (dev-dependency):
+//! The failing backend comes from rift-mock-core's `test-backend` feature (dev-dependency):
 //! `_rift.flowState.backend = "failing"` installs a store whose ops annotate then fail
 //! with `BackendUnavailable`.
 

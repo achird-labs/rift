@@ -219,7 +219,7 @@ cargo build --release
 cargo build --release --no-default-features --features redis-backend,javascript
 ```
 
-Only the `rift-http-proxy` binary is affected; `rift-core` and the FFI crate use the system
+Only the `rift-http-proxy` binary is affected; `rift-mock-core` and the FFI crate use the system
 allocator.
 
 ## Build Tuning

@@ -10,9 +10,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rift_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
 use rift_http_proxy::intercept::InterceptListener;
 use rift_http_proxy::intercept_rules::{InterceptAction, InterceptRule, InterceptRules, ServeStub};
+use rift_mock_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
 
 #[tokio::test]
 async fn intercepts_external_config_cdn_without_mitmproxy() {

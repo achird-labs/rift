@@ -1,7 +1,7 @@
 //! Issue #360 Item 3 (debug OFF, the default): the `x-rift-script-trace` header must be absent —
 //! and, more importantly, must never be BUILT — when debug mode is off. This file deliberately
 //! never sets `RIFT_DEBUG` (a separate binary/process from `issue_360_debug_script_trace.rs`,
-//! whose whole point is the opposite): `rift_core::util::rift_debug_env()` caches its first read
+//! whose whole point is the opposite): `rift_mock_core::util::rift_debug_env()` caches its first read
 //! in a `OnceLock`, so debug-on in one binary can't leak into this one.
 
 use rift_http_proxy::imposter::{ImposterConfig, ImposterManager};

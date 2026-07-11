@@ -1,9 +1,9 @@
 //! Rift C-ABI (issue #204, extended in #343): a tiny opaque-handle + JSON in / JSON out FFI over
-//! the rift-core engine, so a host (e.g. the JVM via Panama FFM) can embed Rift in-process.
+//! the rift-mock-core engine, so a host (e.g. the JVM via Panama FFM) can embed Rift in-process.
 //!
 //! Boundary discipline:
 //! - **Opaque handle + JSON only.** No Rust enums/generics cross the line; the JSON codec is the
-//!   same `rift-types`/`rift-core` wire model the admin API uses, so it is version-tolerant.
+//!   same `rift-types`/`rift-mock-core` wire model the admin API uses, so it is version-tolerant.
 //! - **Memory created and freed on the same side.** `rift_start`/`rift_stop` own the
 //!   [`RiftHandle`]; string returns are `*mut c_char` the caller hands back to [`rift_free`]
 //!   (the one exception is [`rift_build_info`], a static string that is never freed).
@@ -33,10 +33,6 @@
 //! emits a `tracing` event.
 
 use parking_lot::Mutex;
-use rift_core::imposter::{
-    ApplyReport, Imposter, ImposterConfig, ImposterManager, Stub, VerifyOptions,
-};
-use rift_core::proxy::truststore::{TrustStorePassword, ca_pem, export_jks, export_pkcs12};
 use rift_http_proxy::admin_api::{
     AdminApiServer, RunningAdminApi, filter_proxy_responses, filter_proxy_stubs,
 };
@@ -46,6 +42,10 @@ use rift_http_proxy::intercept_control::{
 };
 use rift_http_proxy::intercept_rules::InterceptRule;
 use rift_http_proxy::server::{RunningMetrics, bind_metrics_server};
+use rift_mock_core::imposter::{
+    ApplyReport, Imposter, ImposterConfig, ImposterManager, Stub, VerifyOptions,
+};
+use rift_mock_core::proxy::truststore::{TrustStorePassword, ca_pem, export_jks, export_pkcs12};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};

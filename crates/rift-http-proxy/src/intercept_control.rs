@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::intercept::InterceptListener;
 use crate::intercept_rules::{InterceptRules, InterceptState};
-use rift_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
+use rift_mock_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
 use serde::Serialize;
 
 /// A running intercept plane: the listener plus the control-plane [`InterceptState`] (rule store +

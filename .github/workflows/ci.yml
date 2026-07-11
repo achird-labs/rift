@@ -148,7 +148,7 @@ jobs:
       # keytool proves real JVM interop (KeyStore.load surfacing a trustedCertEntry), which the
       # pure-Rust structural tests cannot.
       - name: Run JVM truststore integration tests
-        run: cargo test -p rift-core --no-default-features --lib proxy::truststore -- --ignored
+        run: cargo test -p rift-mock-core --no-default-features --lib proxy::truststore -- --ignored
 
   docs-coverage:
     name: Docs Coverage

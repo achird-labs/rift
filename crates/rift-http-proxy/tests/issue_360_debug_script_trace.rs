@@ -3,7 +3,7 @@
 //! its rendered decision, duration, and captured `ctx.logger` lines.
 //!
 //! This needs its own process: `RIFT_DEBUG` is read once into a `OnceLock`
-//! (`rift_core::util::rift_debug_env`), so it must be set before the very first script run in
+//! (`rift_mock_core::util::rift_debug_env`), so it must be set before the very first script run in
 //! this binary — same pattern as `issue_359_response_templating_debug.rs`. The "trace absent
 //! when debug is off" half of the AC lives in `issue_360_debug_script_trace_off.rs`, a separate
 //! binary that never sets `RIFT_DEBUG`, since within one process the flag can only go one way.
