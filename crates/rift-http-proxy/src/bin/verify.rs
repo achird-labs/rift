@@ -1083,14 +1083,17 @@ fn check_if_dynamic(responses: &[serde_json::Value]) -> (bool, Option<String>) {
 }
 
 /// True when the stub's first response injects a connection-level TCP fault
-/// (`_rift.fault.tcp`, issue #239), for which a transport error is the expected outcome.
+/// (`_rift.fault.tcp`, issue #239) that is *certain* to fire, for which a transport error is the
+/// expected outcome. The probabilistic object form (`{ probability < 1.0, type }`, issue #531) is
+/// non-deterministic — its reset can't be asserted — so it does not expect a transport error.
+/// A bare-string `tcp` is certain (`is_certain` treats an absent `probability` as always-fires).
 fn expects_tcp_fault(responses: &[serde_json::Value]) -> bool {
     responses
         .first()
         .and_then(|r| r.get("_rift"))
         .and_then(|r| r.get("fault"))
         .and_then(|f| f.get("tcp"))
-        .is_some()
+        .is_some_and(dynamic::is_certain)
 }
 
 /// Render an error together with its full `source()` chain. reqwest's top-level `Display` is only
@@ -2661,6 +2664,18 @@ mod verify_tests {
         assert!(!expects_tcp_fault(&[
             json!({ "_rift": { "fault": { "latency": 50 } } })
         ]));
+    }
+
+    // Issue #531: the certain object form (p >= 1.0) still expects a transport error, but the
+    // probabilistic form (p < 1.0) is non-deterministic and must not be asserted as a reset.
+    #[test]
+    fn expects_tcp_fault_certainty() {
+        assert!(expects_tcp_fault(&[json!({
+            "_rift": { "fault": { "tcp": { "probability": 1.0, "type": "reset" } } }
+        })]));
+        assert!(!expects_tcp_fault(&[json!({
+            "_rift": { "fault": { "tcp": { "probability": 0.1, "type": "reset" } } }
+        })]));
     }
 
     #[test]

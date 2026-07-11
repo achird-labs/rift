@@ -184,11 +184,12 @@ pub enum FaultExpectation {
 
 /// Derive the deterministic fault expectation from a stub response's `_rift.fault` block, or
 /// `None` when there is no fault or it is probabilistic (`probability < 1.0`, non-asserted by
-/// design). `tcp` is always deterministic (it has no probability).
+/// design). `tcp` is deterministic in its bare string form and its object form with
+/// `probability >= 1.0`; a probabilistic `tcp` object (issue #531) is non-asserted like the others.
 pub fn fault_expectation(response: &serde_json::Value) -> Option<FaultExpectation> {
     let fault = response.get("_rift")?.get("fault")?;
-    if fault.get("tcp").is_some() {
-        return Some(FaultExpectation::TransportReset);
+    if let Some(tcp) = fault.get("tcp") {
+        return is_certain(tcp).then_some(FaultExpectation::TransportReset);
     }
     if let Some(latency) = fault.get("latency")
         && is_certain(latency)
@@ -206,8 +207,9 @@ pub fn fault_expectation(response: &serde_json::Value) -> Option<FaultExpectatio
 }
 
 /// A fault sub-config is asserted only when it is certain to fire: `probability` absent (treated
-/// as always) or `>= 1.0`.
-fn is_certain(fault_part: &serde_json::Value) -> bool {
+/// as always) or `>= 1.0`. Also used by `expects_tcp_fault` in the parent module for the `tcp`
+/// fault (a bare string has no `probability`, so it reads as certain).
+pub fn is_certain(fault_part: &serde_json::Value) -> bool {
     match fault_part.get("probability") {
         None => true,
         Some(p) => p.as_f64().map(|p| p >= 1.0).unwrap_or(false),
@@ -717,6 +719,21 @@ mod tests {
             fault_expectation(&r),
             Some(FaultExpectation::TransportReset)
         );
+    }
+
+    // Issue #531: the object tcp form asserts a reset only when it is certain (p >= 1.0); a
+    // probabilistic object (p < 1.0) is non-deterministic and yields no expectation.
+    #[test]
+    fn fault_expectation_tcp_object_form() {
+        let certain =
+            json!({ "_rift": { "fault": { "tcp": { "probability": 1.0, "type": "reset" } } } });
+        assert_eq!(
+            fault_expectation(&certain),
+            Some(FaultExpectation::TransportReset)
+        );
+        let probabilistic =
+            json!({ "_rift": { "fault": { "tcp": { "probability": 0.1, "type": "reset" } } } });
+        assert_eq!(fault_expectation(&probabilistic), None);
     }
 
     #[test]

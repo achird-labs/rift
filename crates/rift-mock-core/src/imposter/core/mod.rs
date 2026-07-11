@@ -417,7 +417,7 @@ impl Imposter {
             rift.fault
                 .as_ref()
                 .and_then(|f| f.tcp.as_ref())
-                .is_some_and(|t| TcpFaultKind::parse(t).is_some())
+                .is_some_and(|t| TcpFaultKind::parse(t.kind()).is_some())
         };
         self.stubs
             .load()

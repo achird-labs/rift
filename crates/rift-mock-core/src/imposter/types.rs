@@ -1055,7 +1055,97 @@ pub struct RiftFaultConfig {
     pub error: Option<RiftErrorFault>,
     /// TCP-level fault
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tcp: Option<String>,
+    pub tcp: Option<RiftTcpFault>,
+}
+
+/// A `_rift.fault.tcp` fault (issue #531). Either the bare kind string — always fires, the
+/// canonical Mountebank-compatible form — or the probabilistic object form, a Rift extension that
+/// carries a firing probability. Serialized back in exactly the form it was parsed from (string
+/// stays string, object stays object) so `GET /imposters` round-trips, which is what the SDK
+/// parse-fidelity gate enforces.
+///
+/// Deserialization is hand-written (rather than `#[serde(untagged)]`) so a malformed object form
+/// gets an actionable error at the `POST /imposters` boundary — an untagged enum only ever reports
+/// the opaque "data did not match any variant" — mirroring the diagnostics `rift-lint` emits.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum RiftTcpFault {
+    /// Bare form: `"CONNECTION_RESET_BY_PEER"` — always fires (probability 1.0).
+    Kind(String),
+    /// Probabilistic form: fires with the given probability. `probability` is required (no serde
+    /// default): the object form exists solely to carry it, so `{ "type": X }` alone would be a
+    /// second spelling of the bare form and break parse-fidelity round-trips.
+    Probabilistic {
+        probability: f64,
+        #[serde(rename = "type")]
+        kind: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for RiftTcpFault {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::String(kind) => Ok(RiftTcpFault::Kind(kind)),
+            serde_json::Value::Object(map) => {
+                let probability = match map.get("probability") {
+                    None => {
+                        return Err(D::Error::custom(
+                            "_rift.fault.tcp object form requires a numeric 'probability' (use the bare fault-type string for an always-firing fault)",
+                        ));
+                    }
+                    Some(v) => v.as_f64().ok_or_else(|| {
+                        D::Error::custom(
+                            "_rift.fault.tcp 'probability' must be a number between 0.0 and 1.0",
+                        )
+                    })?,
+                };
+                if !(0.0..=1.0).contains(&probability) {
+                    return Err(D::Error::custom(
+                        "_rift.fault.tcp 'probability' must be between 0.0 and 1.0",
+                    ));
+                }
+                let kind = match map.get("type") {
+                    None => {
+                        return Err(D::Error::custom(
+                            "_rift.fault.tcp object form requires a string 'type'",
+                        ));
+                    }
+                    Some(v) => v
+                        .as_str()
+                        .ok_or_else(|| D::Error::custom("_rift.fault.tcp 'type' must be a string"))?
+                        .to_string(),
+                };
+                Ok(RiftTcpFault::Probabilistic { probability, kind })
+            }
+            _ => Err(D::Error::custom(
+                "_rift.fault.tcp must be a fault-type string or an object { probability, type }",
+            )),
+        }
+    }
+}
+
+impl RiftTcpFault {
+    /// The TCP fault kind string, fed to `TcpFaultKind::parse`.
+    #[must_use]
+    pub fn kind(&self) -> &str {
+        match self {
+            Self::Kind(kind) => kind,
+            Self::Probabilistic { kind, .. } => kind,
+        }
+    }
+
+    /// Probability the fault fires: `1.0` for the bare form.
+    #[must_use]
+    pub fn probability(&self) -> f64 {
+        match self {
+            Self::Kind(_) => 1.0,
+            Self::Probabilistic { probability, .. } => *probability,
+        }
+    }
 }
 
 /// Latency fault configuration
@@ -1557,5 +1647,91 @@ mod tests {
         assert_eq!(stub.recorded_from.as_deref(), Some("http://upstream:8080"));
         let serialized = serde_json::to_value(&stub).unwrap();
         assert_eq!(serialized["recordedFrom"], json!("http://upstream:8080"));
+    }
+
+    // Issue #531: `_rift.fault.tcp` accepts both the bare kind string and the probabilistic object
+    // form, and must round-trip in exactly the parsed shape (string↔string, object↔object) — the
+    // untagged enum must not normalize one into the other, or the SDK parse-fidelity gate breaks.
+    #[test]
+    fn rift_tcp_fault_roundtrips_both_forms() {
+        let bare = json!("CONNECTION_RESET_BY_PEER");
+        let parsed: RiftTcpFault = serde_json::from_value(bare.clone()).unwrap();
+        assert!(matches!(parsed, RiftTcpFault::Kind(_)));
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), bare);
+
+        let object = json!({ "probability": 0.1, "type": "CONNECTION_RESET_BY_PEER" });
+        let parsed: RiftTcpFault = serde_json::from_value(object.clone()).unwrap();
+        assert!(matches!(parsed, RiftTcpFault::Probabilistic { .. }));
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), object);
+    }
+
+    // The object form exists solely to carry `probability`; `{ "type": X }` alone would be a second
+    // spelling of the bare form, so it must be rejected rather than silently defaulted.
+    #[test]
+    fn rift_tcp_fault_object_requires_probability() {
+        let missing = json!({ "type": "CONNECTION_RESET_BY_PEER" });
+        assert!(serde_json::from_value::<RiftTcpFault>(missing).is_err());
+    }
+
+    // The object form must carry both fields: neither `probability` nor `type` alone is a valid
+    // object (an object without `type` is not a second spelling of the bare string either).
+    #[test]
+    fn rift_tcp_fault_object_requires_type() {
+        let missing = json!({ "probability": 0.5 });
+        assert!(serde_json::from_value::<RiftTcpFault>(missing).is_err());
+    }
+
+    // The rejection message must be actionable at the API boundary (not the opaque untagged-enum
+    // "data did not match any variant") — it names the offending field.
+    #[test]
+    fn rift_tcp_fault_errors_are_actionable() {
+        let missing_prob = serde_json::from_value::<RiftTcpFault>(json!({ "type": "reset" }))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing_prob.contains("probability"),
+            "message should name 'probability': {missing_prob}"
+        );
+
+        let missing_type = serde_json::from_value::<RiftTcpFault>(json!({ "probability": 0.5 }))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing_type.contains("type"),
+            "message should name 'type': {missing_type}"
+        );
+    }
+
+    // An out-of-range probability is rejected at parse time rather than silently degrading to
+    // always/never fires at request time.
+    #[test]
+    fn rift_tcp_fault_object_rejects_out_of_range_probability() {
+        for bad in [
+            json!({ "probability": 1.5, "type": "reset" }),
+            json!({ "probability": -0.1, "type": "reset" }),
+        ] {
+            assert!(serde_json::from_value::<RiftTcpFault>(bad).is_err());
+        }
+        // The boundary values 0.0 and 1.0 are valid.
+        assert!(
+            serde_json::from_value::<RiftTcpFault>(json!({ "probability": 0.0, "type": "reset" }))
+                .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<RiftTcpFault>(json!({ "probability": 1.0, "type": "reset" }))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn rift_tcp_fault_accessors() {
+        let bare: RiftTcpFault = serde_json::from_value(json!("EMPTY_RESPONSE")).unwrap();
+        assert_eq!(bare.kind(), "EMPTY_RESPONSE");
+        assert_eq!(bare.probability(), 1.0);
+
+        let object: RiftTcpFault =
+            serde_json::from_value(json!({ "probability": 0.25, "type": "reset" })).unwrap();
+        assert_eq!(object.kind(), "reset");
+        assert_eq!(object.probability(), 0.25);
     }
 }

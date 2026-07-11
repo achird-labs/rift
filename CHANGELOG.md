@@ -11,6 +11,15 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **Probabilistic TCP faults** (`_rift.fault.tcp`): the fault now accepts an object form
+  `{ "probability": 0.1, "type": "CONNECTION_RESET_BY_PEER" }` alongside the existing bare string,
+  so a connection reset can be made to fire only some of the time (e.g. "reset 10% of requests").
+  The bare string form is unchanged and equivalent to `probability: 1.0`; each form round-trips
+  unchanged through `GET /imposters`. `rift-lint` validates the object form (`probability` required
+  and in `[0, 1]`, unknown fault types warned).
+
 ## [0.13.1] - 2026-07-11
 
 ### Changed

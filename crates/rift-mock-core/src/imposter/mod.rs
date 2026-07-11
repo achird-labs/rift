@@ -37,8 +37,8 @@ pub use types::{
     PredicateOperation, PredicateParameters, PredicateSelector, ProxyResponse, RecordedRequest,
     ResponseMode, RiftConfig, RiftConnectionPoolConfig, RiftErrorFault, RiftFaultConfig,
     RiftFlowStateConfig, RiftLatencyFault, RiftMetricsConfig, RiftProxyConfig, RiftRedisConfig,
-    RiftResponseExtension, RiftScriptConfig, RiftScriptEngineConfig, RiftUpstreamConfig, Stub,
-    StubResponse,
+    RiftResponseExtension, RiftScriptConfig, RiftScriptEngineConfig, RiftTcpFault,
+    RiftUpstreamConfig, Stub, StubResponse,
 };
 
 // Re-export script `file:`/`ref:` resolution (issue #356)

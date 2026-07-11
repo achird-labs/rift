@@ -1431,6 +1431,18 @@ async fn apply_rift_fault(
         }
     };
 
+    // A `tcp` fault fires with its own probability (issue #531): the bare string form is always
+    // 1.0; the object form carries a chosen probability. When the roll fails the fault is treated
+    // as absent for this request, falling through to the `error` fault and normal response — the
+    // same semantics `latency`/`error` already use.
+    let apply_tcp = {
+        let mut rng = rand::thread_rng();
+        fault_config
+            .tcp
+            .as_ref()
+            .is_some_and(|tcp| rng.r#gen::<f64>() < tcp.probability())
+    };
+
     // Apply latency fault (this is async)
     if apply_latency && latency_delay_ms > 0 {
         debug!("Applying _rift.fault latency: {}ms", latency_delay_ms);
@@ -1441,8 +1453,8 @@ async fn apply_rift_fault(
     // the connection is reset before any HTTP response can be written, so it must win over an
     // `error` fault — otherwise a configured `tcp` is silently dropped whenever `error` also fires
     // (issue #271). Latency above still applies first, keeping delay-then-drop coherent.
-    if let Some(ref tcp_fault) = fault_config.tcp {
-        if let Some(kind) = super::fault_io::TcpFaultKind::parse(tcp_fault) {
+    if apply_tcp && let Some(ref tcp_fault) = fault_config.tcp {
+        if let Some(kind) = super::fault_io::TcpFaultKind::parse(tcp_fault.kind()) {
             debug!("Applying _rift.fault.tcp: {:?}", kind);
             if apply_error {
                 debug!("_rift.fault.error preempted by tcp fault (connection reset)");
@@ -1452,13 +1464,13 @@ async fn apply_rift_fault(
             // (issue #239) — the status/body here are never observed by the client.
             let mut response = build_response_with_headers(
                 StatusCode::BAD_GATEWAY,
-                [("x-rift-fault", tcp_fault.as_str())],
+                [("x-rift-fault", tcp_fault.kind())],
                 Bytes::new(),
             );
             response.extensions_mut().insert(kind);
             return Some(response);
         }
-        warn!("Unknown TCP fault type: {}", tcp_fault);
+        warn!("Unknown TCP fault type: {}", tcp_fault.kind());
     }
 
     // Apply error fault
@@ -1573,7 +1585,7 @@ mod matcher_error_response_tests {
 #[cfg(test)]
 mod fault_precedence_tests {
     use super::super::fault_io::TcpFaultKind;
-    use super::super::types::{RiftErrorFault, RiftFaultConfig, RiftLatencyFault};
+    use super::super::types::{RiftErrorFault, RiftFaultConfig, RiftLatencyFault, RiftTcpFault};
     use super::{Bytes, Full, Response, apply_rift_fault, handle_fault_response};
     use std::time::Instant;
 
@@ -1647,7 +1659,7 @@ mod fault_precedence_tests {
         let config = RiftFaultConfig {
             latency: Some(latency_fault(0)),
             error: Some(error_fault(503)),
-            tcp: Some("CONNECTION_RESET_BY_PEER".to_string()),
+            tcp: Some(RiftTcpFault::Kind("CONNECTION_RESET_BY_PEER".to_string())),
         };
         let response = apply(&config).await;
 
@@ -1689,7 +1701,7 @@ mod fault_precedence_tests {
         let config = RiftFaultConfig {
             latency: None,
             error: Some(error_fault(503)),
-            tcp: Some("NONSENSE".to_string()),
+            tcp: Some(RiftTcpFault::Kind("NONSENSE".to_string())),
         };
         let response = apply(&config).await;
 
@@ -1704,7 +1716,7 @@ mod fault_precedence_tests {
         let config = RiftFaultConfig {
             latency: None,
             error: None,
-            tcp: Some("CONNECTION_RESET_BY_PEER".to_string()),
+            tcp: Some(RiftTcpFault::Kind("CONNECTION_RESET_BY_PEER".to_string())),
         };
         let response = apply(&config).await;
 
@@ -1720,7 +1732,7 @@ mod fault_precedence_tests {
         let config = RiftFaultConfig {
             latency: Some(latency_fault(60)),
             error: Some(error_fault(503)),
-            tcp: Some("CONNECTION_RESET_BY_PEER".to_string()),
+            tcp: Some(RiftTcpFault::Kind("CONNECTION_RESET_BY_PEER".to_string())),
         };
         let start = Instant::now();
         let response = apply(&config).await;
@@ -1732,6 +1744,97 @@ mod fault_precedence_tests {
         assert_eq!(
             response.extensions().get::<TcpFaultKind>().copied(),
             Some(TcpFaultKind::Reset)
+        );
+    }
+
+    /// Issue #531: a `tcp` fault with `probability: 0.0` must never reset — with no other fault it
+    /// falls through to the normal response (no fault response at all).
+    #[tokio::test]
+    async fn tcp_object_probability_zero_never_resets() {
+        let config = RiftFaultConfig {
+            latency: None,
+            error: None,
+            tcp: Some(RiftTcpFault::Probabilistic {
+                probability: 0.0,
+                kind: "CONNECTION_RESET_BY_PEER".to_string(),
+            }),
+        };
+        let (mut status, mut body) = (200, String::new());
+        for _ in 0..200 {
+            let response = apply_rift_fault(&config, &mut status, &mut body).await;
+            assert!(
+                response.is_none(),
+                "probability 0.0 tcp fault must never fire"
+            );
+        }
+    }
+
+    /// A `probability: 0.0` tcp fault falls through to a certain `error` fault (treated as absent).
+    #[tokio::test]
+    async fn tcp_object_probability_zero_falls_through_to_error() {
+        let config = RiftFaultConfig {
+            latency: None,
+            error: Some(error_fault(503)),
+            tcp: Some(RiftTcpFault::Probabilistic {
+                probability: 0.0,
+                kind: "CONNECTION_RESET_BY_PEER".to_string(),
+            }),
+        };
+        let response = apply(&config).await;
+        assert_eq!(response.status(), 503);
+        assert!(response.extensions().get::<TcpFaultKind>().is_none());
+    }
+
+    /// The object form with `probability: 1.0` behaves exactly like the bare string.
+    #[tokio::test]
+    async fn tcp_object_probability_one_matches_bare_string() {
+        let config = RiftFaultConfig {
+            latency: None,
+            error: Some(error_fault(503)),
+            tcp: Some(RiftTcpFault::Probabilistic {
+                probability: 1.0,
+                kind: "CONNECTION_RESET_BY_PEER".to_string(),
+            }),
+        };
+        let response = apply(&config).await;
+        assert_eq!(
+            response.extensions().get::<TcpFaultKind>().copied(),
+            Some(TcpFaultKind::Reset)
+        );
+        assert_ne!(response.status(), 503);
+        assert_eq!(
+            response.headers().get("x-rift-fault").unwrap(),
+            "CONNECTION_RESET_BY_PEER"
+        );
+    }
+
+    /// Statistical gate: a `probability: 0.3` tcp fault fires at roughly the configured rate.
+    #[tokio::test]
+    async fn tcp_object_fires_at_configured_probability() {
+        let config = RiftFaultConfig {
+            latency: None,
+            error: None,
+            tcp: Some(RiftTcpFault::Probabilistic {
+                probability: 0.3,
+                kind: "CONNECTION_RESET_BY_PEER".to_string(),
+            }),
+        };
+        let iterations = 4000;
+        let mut resets = 0;
+        let (mut status, mut body) = (200, String::new());
+        for _ in 0..iterations {
+            if apply_rift_fault(&config, &mut status, &mut body)
+                .await
+                .and_then(|r| r.extensions().get::<TcpFaultKind>().copied())
+                .is_some()
+            {
+                resets += 1;
+            }
+        }
+        let observed = f64::from(resets) / f64::from(iterations);
+        assert!(
+            (observed - 0.3).abs() < 0.05,
+            "expected ~0.3 reset rate, got {observed}"
         );
     }
 }

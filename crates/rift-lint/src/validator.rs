@@ -141,6 +141,88 @@ fn check_script_syntax(
     }
 }
 
+/// The `_rift.fault.tcp` fault kinds Rift accepts, canonical names plus short aliases — mirrors
+/// `TcpFaultKind::parse` (rift-mock-core `imposter/fault_io.rs`). Kept in sync by hand because
+/// rift-lint does not depend on rift-mock-core.
+const TCP_FAULT_KINDS: &[&str] = &[
+    "reset",
+    "CONNECTION_RESET_BY_PEER",
+    "empty",
+    "EMPTY_RESPONSE",
+    "garbage",
+    "random",
+    "RANDOM_DATA_THEN_CLOSE",
+    "malformed",
+    "MALFORMED_RESPONSE_CHUNK",
+];
+
+/// Validate a `_rift.fault.tcp` value (issue #531). Accepts the bare kind string and the
+/// probabilistic object form `{ probability, type }`. The object form must carry a numeric
+/// `probability` in `[0, 1]` (E041) — it exists solely to express that probability. An unknown
+/// fault type is a warning (W011), mirroring the serve-time `warn!` rather than failing the config.
+fn validate_tcp_fault(file: &Path, tcp: &Value, location: &str, result: &mut LintResult) {
+    let warn_unknown_kind = |result: &mut LintResult, kind: &str| {
+        if !TCP_FAULT_KINDS.contains(&kind) {
+            result.add_issue(
+                LintIssue::warning(
+                    "W011",
+                    format!("Unknown TCP fault type '{kind}' — the fault will not fire at runtime"),
+                    file.to_path_buf(),
+                )
+                .with_location(location.to_string())
+                .with_suggestion(format!("Use one of: {}", TCP_FAULT_KINDS.join(", "))),
+            );
+        }
+    };
+
+    match tcp {
+        Value::String(kind) => warn_unknown_kind(result, kind),
+        Value::Object(_) => {
+            match tcp.get("probability").and_then(Value::as_f64) {
+                Some(p) if (0.0..=1.0).contains(&p) => {}
+                Some(_) => result.add_issue(
+                    LintIssue::error(
+                        "E041",
+                        "_rift.fault.tcp 'probability' must be between 0.0 and 1.0",
+                        file.to_path_buf(),
+                    )
+                    .with_location(location.to_string()),
+                ),
+                None => result.add_issue(
+                    LintIssue::error(
+                        "E041",
+                        "_rift.fault.tcp object form requires a numeric 'probability' (use the bare string form for an always-firing fault)",
+                        file.to_path_buf(),
+                    )
+                    .with_location(location.to_string())
+                    .with_suggestion(
+                        "Add \"probability\": <0.0-1.0>, or replace the object with the bare fault-type string",
+                    ),
+                ),
+            }
+            match tcp.get("type").and_then(Value::as_str) {
+                Some(kind) => warn_unknown_kind(result, kind),
+                None => result.add_issue(
+                    LintIssue::error(
+                        "E041",
+                        "_rift.fault.tcp object form requires a string 'type'",
+                        file.to_path_buf(),
+                    )
+                    .with_location(location.to_string()),
+                ),
+            }
+        }
+        _ => result.add_issue(
+            LintIssue::error(
+                "E041",
+                "_rift.fault.tcp must be a fault-type string or an object { probability, type }",
+                file.to_path_buf(),
+            )
+            .with_location(location.to_string()),
+        ),
+    }
+}
+
 /// Validate one `_rift.script`-shaped object: `{ engine?, code?, file?, ref? }` (issue #356).
 /// Exactly one of `code`/`file`/`ref` must be present (E036). A `file:` is read relative to
 /// `config_file`'s own directory (E038 if unreadable); a `ref:` is resolved against `registry`
@@ -685,6 +767,16 @@ pub fn validate_response(
             result,
             registry,
         );
+    }
+
+    // `_rift.fault.tcp` accepts both the bare kind string and the probabilistic object form
+    // (issue #531). Validate the object form's `probability` and warn on an unknown fault type.
+    if let Some(tcp) = response
+        .get("_rift")
+        .and_then(|rift| rift.get("fault"))
+        .and_then(|fault| fault.get("tcp"))
+    {
+        validate_tcp_fault(file, tcp, &format!("{location}._rift.fault.tcp"), result);
     }
 
     let response_types = [has_is, has_proxy, has_inject, has_fault, has_rift];
@@ -1414,5 +1506,76 @@ mod header_value_tests {
     fn string_header_is_valid() {
         let result = lint(json!({ "Content-Type": "text/plain" }));
         assert_eq!(result.errors, 0);
+    }
+}
+
+// Issue #531: `_rift.fault.tcp` accepts the bare kind string and the probabilistic object form.
+#[cfg(test)]
+mod tcp_fault_tests {
+    use super::validate_tcp_fault;
+    use crate::types::LintResult;
+    use serde_json::{Value, json};
+    use std::path::Path;
+
+    fn lint(tcp: Value) -> LintResult {
+        let mut result = LintResult::new();
+        validate_tcp_fault(Path::new("test.json"), &tcp, "loc", &mut result);
+        result
+    }
+
+    fn has_code(result: &LintResult, code: &str) -> bool {
+        result.issues.iter().any(|i| i.code == code)
+    }
+
+    #[test]
+    fn bare_string_known_kind_is_clean() {
+        let result = lint(json!("CONNECTION_RESET_BY_PEER"));
+        assert_eq!(result.errors, 0);
+        assert_eq!(result.warnings, 0);
+    }
+
+    #[test]
+    fn object_form_with_valid_probability_is_clean() {
+        let result = lint(json!({ "probability": 0.1, "type": "reset" }));
+        assert_eq!(result.errors, 0);
+        assert_eq!(result.warnings, 0);
+    }
+
+    #[test]
+    fn object_form_missing_probability_errors() {
+        let result = lint(json!({ "type": "CONNECTION_RESET_BY_PEER" }));
+        assert!(has_code(&result, "E041"));
+    }
+
+    #[test]
+    fn object_form_probability_out_of_range_errors() {
+        assert!(has_code(
+            &lint(json!({ "probability": 1.5, "type": "reset" })),
+            "E041"
+        ));
+        assert!(has_code(
+            &lint(json!({ "probability": -0.1, "type": "reset" })),
+            "E041"
+        ));
+    }
+
+    #[test]
+    fn object_form_missing_type_errors() {
+        let result = lint(json!({ "probability": 0.5 }));
+        assert!(has_code(&result, "E041"));
+    }
+
+    #[test]
+    fn unknown_kind_warns_both_forms() {
+        assert!(has_code(&lint(json!("NONSENSE")), "W011"));
+        assert!(has_code(
+            &lint(json!({ "probability": 0.5, "type": "NONSENSE" })),
+            "W011"
+        ));
+    }
+
+    #[test]
+    fn non_string_non_object_errors() {
+        assert!(has_code(&lint(json!(42)), "E041"));
     }
 }

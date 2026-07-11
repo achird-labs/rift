@@ -74,6 +74,18 @@
       }]
     },
     {
+      "name": "TCP — reset the connection 10% of the time (probabilistic object form)",
+      "predicates": [{ "equals": { "path": "/faults/tcp-flaky" } }],
+      "responses": [{
+        "is": {
+          "statusCode": 200,
+          "headers": { "Content-Type": "application/json" },
+          "body": { "endpoint": "/faults/tcp-flaky", "note": "10% chance of a connection reset" }
+        },
+        "_rift": { "fault": { "tcp": { "probability": 0.1, "type": "CONNECTION_RESET_BY_PEER" } } }
+      }]
+    },
+    {
       "name": "Baseline — no fault, for comparison",
       "predicates": [{ "equals": { "path": "/faults/healthy" } }],
       "responses": [{

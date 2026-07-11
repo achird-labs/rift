@@ -183,6 +183,28 @@ TCP fault types (each accepts a WireMock-style canonical name or a short alias):
 | `RANDOM_DATA_THEN_CLOSE` | `random`, `garbage` | Write random bytes, then close |
 | `MALFORMED_RESPONSE_CHUNK` | `malformed` | Send a status line + a malformed chunked body, then close |
 
+#### Probabilistic TCP faults
+
+The bare string form above always fires. To reset only *some* of the time, use the object form,
+which carries a firing `probability` (0.0–1.0) alongside the fault `type`:
+
+```json
+{
+  "_rift": {
+    "fault": {
+      "tcp": { "probability": 0.1, "type": "CONNECTION_RESET_BY_PEER" }
+    }
+  }
+}
+```
+
+This resets the connection on ~10% of requests and serves the normal response the rest of the time,
+mirroring the `probability` roll `latency` and `error` already use. `probability` is **required** in
+the object form — `{ "type": ... }` with no probability is rejected; use the bare string form for an
+always-firing fault. The bare form is exactly equivalent to the object form with `probability: 1.0`,
+and each form round-trips unchanged through `GET /imposters` (a string stays a string, an object
+stays an object).
+
 These are real transport-level events applied beneath TLS, so HTTPS imposters get a genuine socket
 fault too. Because a connection-level fault aborts the whole socket, an imposter that uses any TCP
 fault is served over **HTTP/1 only** (HTTP/2 multiplexing is incompatible with mid-stream connection
