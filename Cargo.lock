@@ -3354,6 +3354,7 @@ dependencies = [
  "serial_test",
  "similar",
  "socket2 0.5.10",
+ "subtle",
  "sxd-document",
  "sxd-xpath",
  "tempfile",
