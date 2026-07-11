@@ -83,7 +83,7 @@ fn not_running() -> Response<Full<Bytes>> {
 async fn handle_start(req: Request<Incoming>, control: &InterceptControl) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(e) => return error_response(e.status_code(), &e.to_string()),
     };
     start_from_bytes(&body, control).await
 }
@@ -153,7 +153,7 @@ enum RuleOrRules {
 async fn handle_add_rules(req: Request<Incoming>, state: &InterceptState) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(e) => return error_response(e.status_code(), &e.to_string()),
     };
     add_rules_from_bytes(&body, state)
 }

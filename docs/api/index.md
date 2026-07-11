@@ -595,6 +595,23 @@ Port already in use.
 }
 ```
 
+### 413 Payload Too Large
+
+The request body exceeds the admin API's size limit (64 MiB). The limit bounds
+how much of a single request Rift buffers into memory, since the admin plane
+binds `0.0.0.0` and `--apikey` is optional.
+
+```json
+{
+  "errors": [
+    {
+      "code": "413",
+      "message": "Request body exceeds the 67108864-byte admin API limit"
+    }
+  ]
+}
+```
+
 ---
 
 ## Common Patterns

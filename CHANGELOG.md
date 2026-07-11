@@ -20,6 +20,16 @@ record.
   the flow map if that leaves it empty), matching the Redis backend, where expired keys are simply
   gone and never revived.
 
+### Security
+
+- **Admin API request bodies are now capped at 64 MiB, returning `413 Payload Too Large`.**
+  `collect_body` previously buffered an entire request body into memory with no limit; since the
+  admin plane binds `0.0.0.0` and `--apikey` is optional, an unauthenticated client could OOM the
+  process with a multi-gigabyte `POST`. Every admin write handler funnels through the capped path.
+- **Admin API key comparison is now constant-time.** The bearer-token check short-circuited at the
+  first differing byte, leaking the configured `--apikey` to a timing side-channel; it now uses a
+  constant-time comparison.
+
 ## [0.13.2] - 2026-07-11
 
 ### Added

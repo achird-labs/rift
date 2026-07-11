@@ -216,23 +216,102 @@ pub fn imposter_not_found(port: u16) -> Response<Full<Bytes>> {
     )
 }
 
+/// Maximum admin-API request body accepted before responding `413 Payload Too
+/// Large` (issue #546). The admin plane binds `0.0.0.0` and `--api-key` is
+/// optional, so an unbounded body is a trivial memory-exhaustion vector. The
+/// cap is deliberately generous — legitimate imposter/stub batches are well
+/// under it — while bounding a single request's buffered size. Runtime
+/// configurability was left out on purpose: it would mean threading a limit
+/// through the whole handler dispatch for a value that never needs per-deploy
+/// tuning; adjust this constant if that ever changes.
+pub const MAX_ADMIN_BODY_BYTES: usize = 64 * 1024 * 1024;
+
 /// Error reading a request body into bytes. Its `Display` is surfaced as the
-/// `400 Bad Request` body, so the wording is part of the admin API contract.
+/// response body, so the wording is part of the admin API contract; the status
+/// code comes from [`BodyError::status_code`].
 #[derive(Debug, thiserror::Error)]
 pub enum BodyError {
     #[error("Failed to read request body: {0}")]
-    Read(#[from] hyper::Error),
+    Read(String),
+    #[error("Request body exceeds the {limit}-byte admin API limit")]
+    TooLarge { limit: usize },
 }
 
-/// Collect request body into bytes
+impl BodyError {
+    /// HTTP status the admin API returns for this failure.
+    pub fn status_code(&self) -> StatusCode {
+        match self {
+            BodyError::Read(_) => StatusCode::BAD_REQUEST,
+            BodyError::TooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+        }
+    }
+}
+
+/// Collect a request body into bytes, rejecting anything past
+/// [`MAX_ADMIN_BODY_BYTES`] with [`BodyError::TooLarge`] instead of buffering
+/// it all into memory (issue #546).
 pub async fn collect_body(req: Request<Incoming>) -> Result<Bytes, BodyError> {
-    use http_body_util::BodyExt;
-    Ok(req.collect().await?.to_bytes())
+    collect_limited(req.into_body(), MAX_ADMIN_BODY_BYTES).await
+}
+
+/// Body-generic core of [`collect_body`], factored out so the size cap can be
+/// unit-tested against a synthetic body without a live server.
+async fn collect_limited<B>(body: B, limit: usize) -> Result<Bytes, BodyError>
+where
+    B: hyper::body::Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    use http_body_util::{BodyExt, Limited};
+    match Limited::new(body, limit).collect().await {
+        Ok(collected) => Ok(collected.to_bytes()),
+        Err(e)
+            if e.downcast_ref::<http_body_util::LengthLimitError>()
+                .is_some() =>
+        {
+            Err(BodyError::TooLarge { limit })
+        }
+        Err(e) => Err(BodyError::Read(e.to_string())),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn collect_body_under_limit_returns_bytes() {
+        let payload = Bytes::from(vec![b'a'; 1024]);
+        let body = Full::new(payload.clone());
+        let got = collect_limited(body, 4096).await.expect("under limit");
+        assert_eq!(got, payload);
+    }
+
+    #[tokio::test]
+    async fn collect_body_at_limit_is_accepted() {
+        let payload = Bytes::from(vec![b'a'; 4096]);
+        let body = Full::new(payload.clone());
+        let got = collect_limited(body, 4096).await.expect("exactly at limit");
+        assert_eq!(got, payload);
+    }
+
+    #[tokio::test]
+    async fn collect_body_over_limit_returns_too_large() {
+        let body = Full::new(Bytes::from(vec![b'a'; 4097]));
+        let err = collect_limited(body, 4096).await.expect_err("over limit");
+        assert!(matches!(err, BodyError::TooLarge { limit: 4096 }));
+    }
+
+    #[test]
+    fn body_error_status_codes() {
+        assert_eq!(
+            BodyError::Read("boom".to_string()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            BodyError::TooLarge { limit: 64 }.status_code(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
 
     #[test]
     fn test_imposter_query_params_parse() {

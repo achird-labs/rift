@@ -167,7 +167,7 @@ pub async fn handle_create(
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(e) => return error_response(e.status_code(), &e.to_string()),
     };
 
     let mut config: ImposterConfig = match serde_json::from_slice(&body) {
@@ -289,7 +289,7 @@ pub async fn handle_replace_all(
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(e) => return error_response(e.status_code(), &e.to_string()),
     };
 
     #[derive(Deserialize)]
@@ -596,7 +596,7 @@ pub async fn handle_verify(
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(e) => return error_response(e.status_code(), &e.to_string()),
     };
     // An `inject` predicate evaluates synchronous Boa JavaScript that can run away (issue #476);
     // evaluate the whole verify on the blocking pool so it never head-of-line-blocks a tokio

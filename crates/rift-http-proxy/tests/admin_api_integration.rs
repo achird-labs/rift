@@ -215,6 +215,36 @@ async fn create_imposter_rejects_non_positive_ttl_seconds() {
     assert!(r.text().await.unwrap().contains("ttlSeconds"));
 }
 
+// Issue #546: a request body past MAX_ADMIN_BODY_BYTES is rejected with 413 by
+// the live admin route, proving the cap is wired into the real request path (not
+// just the collect_body unit) — the size check fires before JSON parsing.
+#[tokio::test]
+async fn oversized_admin_body_is_rejected_with_413() {
+    use rift_http_proxy::admin_api::types::MAX_ADMIN_BODY_BYTES;
+
+    let manager = std::sync::Arc::new(ImposterManager::new());
+    let admin_addr = "127.0.0.1:12610".parse().unwrap();
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
+    tokio::spawn(server.run());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let c = reqwest::Client::new();
+    let admin = "http://127.0.0.1:12610";
+    let oversized = vec![b'a'; MAX_ADMIN_BODY_BYTES + 4096];
+    let r = c
+        .post(format!("{admin}/imposters"))
+        .header("content-type", "application/json")
+        .body(oversized)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(
+        r.status(),
+        413,
+        "body over MAX_ADMIN_BODY_BYTES must be rejected with 413 Payload Too Large"
+    );
+}
+
 #[tokio::test]
 async fn scenario_admin_reset_is_per_flow_with_explicit_flow_id() {
     let manager = std::sync::Arc::new(ImposterManager::new());
