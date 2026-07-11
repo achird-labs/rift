@@ -444,6 +444,39 @@ fn severity_color(severity: &Severity) -> &'static str {
     }
 }
 
+/// Rewrite a single header *value* only when it is actually invalid, returning a short
+/// description of the fix (for reporting) or `None` when the value is already valid and left
+/// untouched. A string-only array is a valid multi-value header (engine support since #238) and
+/// is never rewritten; an array carrying a non-string element is stringified element-wise so it
+/// stays a multi-value header (rather than being joined into one comma-string, which changes HTTP
+/// semantics and dropped non-string elements — issue #547).
+fn fix_header_value(value: &mut Value) -> Option<&'static str> {
+    if let Some(arr) = value.as_array_mut() {
+        if arr.iter().all(Value::is_string) {
+            return None;
+        }
+        for element in arr.iter_mut() {
+            if !element.is_string() {
+                *element = Value::String(element.to_string());
+            }
+        }
+        Some("array elements -> strings")
+    } else if value.is_number() {
+        *value = Value::String(value.to_string());
+        Some("number -> string")
+    } else if value.is_boolean() {
+        let bool_str = if value.as_bool().unwrap_or(false) {
+            "true"
+        } else {
+            "false"
+        };
+        *value = Value::String(bool_str.to_string());
+        Some("boolean -> string")
+    } else {
+        None
+    }
+}
+
 fn apply_fixes(imposters: &[(PathBuf, Value)], json_mode: bool) {
     let Palette {
         green, red, reset, ..
@@ -465,42 +498,10 @@ fn apply_fixes(imposters: &[(PathBuf, Value)], json_mode: bool) {
                                 .and_then(|v| v.as_object_mut())
                         {
                             for (name, value) in headers.iter_mut() {
-                                if value.is_array() {
-                                    // Convert array to comma-separated string
-                                    if let Some(arr) = value.as_array() {
-                                        let joined: Vec<String> = arr
-                                            .iter()
-                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                            .collect();
-                                        *value = Value::String(joined.join(", "));
-                                        file_fixed = true;
-                                        fixes_applied += 1;
-                                        emit(
-                                            json_mode,
-                                            &format!("  Fixed header '{name}' array -> string"),
-                                        );
-                                    }
-                                } else if value.is_number() {
-                                    *value = Value::String(value.to_string());
+                                if let Some(kind) = fix_header_value(value) {
                                     file_fixed = true;
                                     fixes_applied += 1;
-                                    emit(
-                                        json_mode,
-                                        &format!("  Fixed header '{name}' number -> string"),
-                                    );
-                                } else if value.is_boolean() {
-                                    let bool_str = if value.as_bool().unwrap_or(false) {
-                                        "true"
-                                    } else {
-                                        "false"
-                                    };
-                                    *value = Value::String(bool_str.to_string());
-                                    file_fixed = true;
-                                    fixes_applied += 1;
-                                    emit(
-                                        json_mode,
-                                        &format!("  Fixed header '{name}' boolean -> string"),
-                                    );
+                                    emit(json_mode, &format!("  Fixed header '{name}' {kind}"));
                                 }
                             }
                         }
@@ -539,4 +540,66 @@ fn apply_fixes(imposters: &[(PathBuf, Value)], json_mode: bool) {
         json_mode,
         &format!("\n{green}Applied {fixes_applied} fixes{reset}"),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fix_header_value;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn fix_header_value_leaves_valid_string_array() {
+        // #547 regression: a string-only array is a valid multi-value header and MUST NOT be
+        // rewritten — joining it into "a=1, b=2" silently changes runtime HTTP semantics.
+        let mut v = json!(["a=1", "b=2"]);
+        assert_eq!(fix_header_value(&mut v), None);
+        assert_eq!(v, json!(["a=1", "b=2"]));
+    }
+
+    #[test]
+    fn fix_header_value_stringifies_invalid_array() {
+        // A non-string element makes the array invalid (E018); fix by stringifying elements in
+        // place, preserving the array (multi-value) and dropping nothing.
+        let mut v = json!(["a=1", 2, true]);
+        assert!(fix_header_value(&mut v).is_some());
+        assert_eq!(v, json!(["a=1", "2", "true"]));
+    }
+
+    #[test]
+    fn fix_header_value_number_to_string() {
+        let mut v = json!(200);
+        assert!(fix_header_value(&mut v).is_some());
+        assert_eq!(v, Value::String("200".to_string()));
+    }
+
+    #[test]
+    fn fix_header_value_boolean_to_string() {
+        let mut v = json!(true);
+        assert!(fix_header_value(&mut v).is_some());
+        assert_eq!(v, Value::String("true".to_string()));
+    }
+
+    #[test]
+    fn fix_header_value_plain_string_untouched() {
+        let mut v = json!("text/html");
+        assert_eq!(fix_header_value(&mut v), None);
+        assert_eq!(v, json!("text/html"));
+    }
+
+    #[test]
+    fn fix_header_value_empty_array_untouched() {
+        // Vacuously all-string, matches the validator (no E018) — left alone, not "fixed".
+        let mut v = json!([]);
+        assert_eq!(fix_header_value(&mut v), None);
+        assert_eq!(v, json!([]));
+    }
+
+    #[test]
+    fn fix_header_value_nested_non_scalar_element_stringified_not_dropped() {
+        // A non-scalar element is stringified to its JSON form rather than dropped — no data loss,
+        // and the array length is preserved.
+        let mut v = json!(["a=1", {"x": 1}, null]);
+        assert!(fix_header_value(&mut v).is_some());
+        assert_eq!(v, json!(["a=1", "{\"x\":1}", "null"]));
+    }
 }
