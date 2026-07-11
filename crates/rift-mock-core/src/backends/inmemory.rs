@@ -193,8 +193,17 @@ impl FlowStore for InMemoryFlowStore {
             SystemTime::now() + Duration::from_secs(u64::try_from(ttl_seconds).unwrap_or(0));
         // Nested keying (issue #483): touch only this flow's entries, not the whole store.
         if let Some(flow) = data.get_mut(flow_id) {
-            for (_, expiry) in flow.values_mut() {
-                *expiry = Some(new_expiry);
+            // Drop entries already logically expired but not yet swept before re-stamping (issue
+            // #537): extending an expired entry to `now + ttl` would revive it, diverging from Redis
+            // (where an expired key is simply gone). Mirror `set_key_ttl`'s per-key guard.
+            flow.retain(|_key, (_, expiry)| !Self::is_expired(expiry));
+            if flow.is_empty() {
+                // Don't leave an empty flow map behind (issue #483 growth vector).
+                data.remove(flow_id);
+            } else {
+                for (_, expiry) in flow.values_mut() {
+                    *expiry = Some(new_expiry);
+                }
             }
         }
 
@@ -680,6 +689,54 @@ mod tests {
         assert!(
             !store.exists("drop", "k").unwrap(),
             "a sibling flow must keep its original (now expired) TTL"
+        );
+    }
+
+    // Issue #537: flow-level set_ttl(positive) must not revive an entry that is already logically
+    // expired but not yet swept. Re-stamping its expiry to `now + ttl` would resurrect it, diverging
+    // from Redis (where an expired key is simply gone). The single expired key is also the flow's
+    // last, so the now-empty flow map must be dropped (issue #483 growth vector), not left behind.
+    #[test]
+    fn set_ttl_does_not_revive_expired_entries() {
+        let store = InMemoryFlowStore::new(1); // 1s default TTL
+        store.set("f", "k", json!("v")).unwrap();
+        std::thread::sleep(Duration::from_secs(2)); // expired, but < SWEEP_INTERVAL writes → unswept
+
+        store.set_ttl("f", 100).unwrap();
+
+        assert!(
+            !store.exists("f", "k").unwrap(),
+            "an expired-but-unswept entry must not be revived by flow-level set_ttl"
+        );
+        assert_eq!(store.get("f", "k").unwrap(), None);
+        assert_eq!(
+            store.stored_flow_count(),
+            0,
+            "pruning the flow's only (expired) entry must drop the empty flow map"
+        );
+    }
+
+    // set_ttl over a flow holding both a live and an expired-but-unswept entry must extend only the
+    // live one and drop the expired one — the live key survives a subsequent expiry window, the
+    // expired key stays gone.
+    #[test]
+    fn set_ttl_extends_live_and_drops_expired_in_same_flow() {
+        let store = InMemoryFlowStore::new(1); // 1s default TTL
+        store.set("f", "old", json!("v")).unwrap();
+        std::thread::sleep(Duration::from_secs(2)); // "old" now expired, still unswept
+        store.set("f", "new", json!("v")).unwrap(); // fresh 1s TTL, live
+
+        store.set_ttl("f", 100).unwrap();
+
+        std::thread::sleep(Duration::from_secs(2)); // outlives the original 1s TTLs, not the new 100s
+
+        assert!(
+            store.exists("f", "new").unwrap(),
+            "the live key must have its TTL extended by set_ttl"
+        );
+        assert!(
+            !store.exists("f", "old").unwrap(),
+            "the expired key must be dropped, not revived, by set_ttl"
         );
     }
 
