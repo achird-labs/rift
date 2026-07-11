@@ -8,9 +8,11 @@
 //! (slice 3) and the truststore/admin surface (slices 2 & 4) live in the sibling
 //! `rift-http-proxy` crate.
 
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+use lru::LruCache;
 
 use anyhow::Context;
 use rcgen::{
@@ -171,37 +173,50 @@ fn pem_to_der(cert_pem: &str) -> anyhow::Result<CertificateDer<'static>> {
     Ok(first)
 }
 
+/// Hard cap on distinct SNI leaves held at once. The SNI is attacker-controlled on the intercept
+/// listener, so an unbounded cache is a memory-exhaustion vector (issue #539); LRU eviction keeps
+/// the working set of real upstream hosts hot while bounding the worst case. Generous relative to
+/// any realistic upstream count.
+const MAX_CACHED_LEAVES: usize = 1024;
+
 /// A rustls certificate resolver that mints (and caches) one leaf per SNI host via the CA.
 #[derive(Debug)]
 pub struct SniCertResolver {
     ca: Arc<CertificateAuthority>,
-    cache: Mutex<HashMap<String, Arc<CertifiedKey>>>,
+    cache: Mutex<LruCache<String, Arc<CertifiedKey>>>,
 }
 
 impl SniCertResolver {
     pub fn new(ca: Arc<CertificateAuthority>) -> Self {
+        let capacity = NonZeroUsize::new(MAX_CACHED_LEAVES).unwrap_or(NonZeroUsize::MIN);
+        Self::with_capacity(ca, capacity)
+    }
+
+    fn with_capacity(ca: Arc<CertificateAuthority>, capacity: NonZeroUsize) -> Self {
         Self {
             ca,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(LruCache::new(capacity)),
         }
     }
 
-    /// Return the certified key for `host`, minting and caching it on first request.
+    /// Return the certified key for `host`, minting and caching it on first request. Minting runs
+    /// outside the cache lock so a slow keygen never serializes unrelated handshakes.
     pub fn cert_for(&self, host: &str) -> anyhow::Result<Arc<CertifiedKey>> {
         if let Some(ck) = self.lock_cache().get(host) {
             return Ok(ck.clone());
         }
         let minted = Arc::new(self.ca.mint_leaf(host)?);
-        // Another thread may have minted concurrently; `or_insert` keeps the first-inserted key
-        // and every caller converges on it — the extra leaf is simply dropped.
-        Ok(self
-            .lock_cache()
-            .entry(host.to_string())
-            .or_insert(minted)
-            .clone())
+        let mut cache = self.lock_cache();
+        // Another thread may have minted concurrently; keep the first-inserted key so every caller
+        // converges on it and the extra leaf is simply dropped.
+        if let Some(existing) = cache.get(host) {
+            return Ok(existing.clone());
+        }
+        cache.put(host.to_string(), minted.clone());
+        Ok(minted)
     }
 
-    fn lock_cache(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<CertifiedKey>>> {
+    fn lock_cache(&self) -> std::sync::MutexGuard<'_, LruCache<String, Arc<CertifiedKey>>> {
         // A poisoned lock only means a thread panicked while holding it; the cached certificates
         // remain valid, so recover rather than permanently break interception for the process.
         self.cache
@@ -290,6 +305,55 @@ mod tests {
                 .verify_server_cert(&ck.cert[0], &[], &wrong, &[], UnixTime::now())
                 .is_err(),
             "leaf minted for cdn.example.com must not be valid for other.example.org"
+        );
+    }
+
+    #[test]
+    fn many_unique_snis_stay_bounded() {
+        // Attacker floods unique SNIs; the cache must never exceed its hard cap (issue #539).
+        let ca = Arc::new(CertificateAuthority::generate().expect("generate CA"));
+        let resolver =
+            SniCertResolver::with_capacity(ca, NonZeroUsize::new(8).expect("nonzero cap"));
+        for i in 0..100 {
+            resolver
+                .cert_for(&format!("h{i}.evil.example"))
+                .expect("mint leaf");
+        }
+        assert_eq!(
+            resolver.lock_cache().len(),
+            8,
+            "cache must be bounded by its capacity regardless of distinct-SNI count"
+        );
+    }
+
+    #[test]
+    fn cache_evicts_lru_keeps_recently_used() {
+        let ca = Arc::new(CertificateAuthority::generate().expect("generate CA"));
+        let resolver =
+            SniCertResolver::with_capacity(ca, NonZeroUsize::new(2).expect("nonzero cap"));
+
+        let a1 = resolver.cert_for("a.example").expect("mint a");
+        let b1 = resolver.cert_for("b.example").expect("mint b");
+        // Touch "a" so "b" becomes the least-recently-used entry.
+        let a2 = resolver.cert_for("a.example").expect("hit a");
+        assert!(Arc::ptr_eq(&a1, &a2), "a stays cached and is bumped to MRU");
+
+        // A third distinct host evicts the LRU entry ("b"), not "a".
+        let _c = resolver.cert_for("c.example").expect("mint c");
+        assert_eq!(
+            resolver.lock_cache().len(),
+            2,
+            "cache never exceeds its cap"
+        );
+
+        let a3 = resolver.cert_for("a.example").expect("a still cached");
+        assert!(Arc::ptr_eq(&a1, &a3), "recently-used a must not be evicted");
+
+        // "b" was evicted, so re-requesting it mints a fresh, distinct key.
+        let b2 = resolver.cert_for("b.example").expect("re-mint b");
+        assert!(
+            !Arc::ptr_eq(&b1, &b2),
+            "evicted host must be re-minted, not served stale"
         );
     }
 

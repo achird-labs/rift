@@ -30,6 +30,8 @@ rustls-pemfile = "2.0"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 # x509-parser: needed to recover a loaded CA's distinguished name (CertificateParams::from_ca_cert_pem)
 rcgen = { version = "0.13", features = ["x509-parser"] }
+# Bounded LRU cache for per-SNI intercept leaves (issue #539 — MITM-intercept DoS)
+lru = "0.18"
 
 # Serialization
 serde.workspace = true

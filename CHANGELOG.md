@@ -29,6 +29,10 @@ record.
 - **Admin API key comparison is now constant-time.** The bearer-token check short-circuited at the
   first differing byte, leaking the configured `--apikey` to a timing side-channel; it now uses a
   constant-time comparison.
+- **TLS-intercept per-SNI leaf cache is now bounded (LRU, 1024 entries).** The SNI on the intercept
+  listener is attacker-controlled; the cache previously grew without limit and minted a fresh
+  keypair per unique SNI, so a flood of unique names was a memory- and CPU-exhaustion vector. Old
+  leaves are now evicted instead of accumulating.
 
 ## [0.13.2] - 2026-07-11
 
