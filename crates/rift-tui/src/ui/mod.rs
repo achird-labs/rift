@@ -367,11 +367,58 @@ pub fn format_uptime(duration: std::time::Duration) -> String {
     }
 }
 
+/// Truncate a string to at most `max` characters, appending an ellipsis when
+/// shortened. Operates on chars, not bytes, so it never slices mid-codepoint.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::tests::{make_imposter, make_test_app};
     use ratatui::{Terminal, backend::TestBackend};
+
+    // ─── truncate ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_multibyte_no_panic() {
+        // Multibyte codepoints (from imported JSON / proxy recordings) must never
+        // land mid-codepoint and panic — regression for #542.
+        let s = "日本語サービス";
+        for max in 0..=s.chars().count() + 2 {
+            let out = truncate(s, max);
+            assert!(out.chars().count() <= max.max(1));
+        }
+    }
+
+    #[test]
+    fn truncate_char_count() {
+        // Shortened result is at most `max` chars, ending in the ellipsis.
+        let out = truncate("日本語サービス", 4);
+        assert_eq!(out, "日本語…");
+        assert_eq!(out.chars().count(), 4);
+    }
+
+    #[test]
+    fn truncate_ascii() {
+        assert_eq!(truncate("hello", 10), "hello"); // fits → unchanged
+        assert_eq!(truncate("hello", 5), "hello"); // exact → unchanged
+        assert_eq!(truncate("hello world", 5), "hell…"); // long → keep 4 + …
+    }
+
+    #[test]
+    fn truncate_edges() {
+        assert_eq!(truncate("", 0), ""); // empty passthrough
+        assert_eq!(truncate("abc", 0), "…"); // max 0 → no underflow
+        assert_eq!(truncate("abc", 1), "…"); // max 1 → just ellipsis
+    }
 
     // ─── format_number ────────────────────────────────────────────────────────
 
