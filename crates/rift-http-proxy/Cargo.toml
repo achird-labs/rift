@@ -66,6 +66,8 @@ reqwest.workspace = true
 # Utils
 bytes.workspace = true
 base64 = "0.22"
+# Constant-time comparison for the admin API key (issue #548 — timing side channel)
+subtle = "2"
 chrono.workspace = true
 regex = "1.11"
 rand.workspace = true

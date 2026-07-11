@@ -14,6 +14,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -249,7 +250,7 @@ async fn accept_loop(
                                 .get("authorization")
                                 .and_then(|v| v.to_str().ok())
                                 .unwrap_or("");
-                            if auth != key.as_str() {
+                            if !api_key_matches(auth, key.as_str()) {
                                 return Ok::<_, hyper::Error>(unauthorized_response());
                             }
                         }
@@ -312,6 +313,16 @@ async fn accept_loop(
     Ok(())
 }
 
+/// Constant-time equality for the admin API key.
+///
+/// A plain `!=` short-circuits at the first differing byte, letting a network
+/// attacker recover the key byte-by-byte from response-timing differences
+/// (issue #548). `ConstantTimeEq` compares every byte regardless of where the
+/// mismatch is; the length check it performs first is not secret.
+fn api_key_matches(provided: &str, expected: &str) -> bool {
+    provided.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
 fn unauthorized_response() -> Response<Full<Bytes>> {
     let body = r#"{"errors":[{"code":"unauthorized","message":"Invalid authorization token"}]}"#;
     Response::builder()
@@ -361,5 +372,32 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
         let server = AdminApiServer::new(addr, manager, None);
         assert!(server.api_key.is_none());
+    }
+
+    #[test]
+    fn api_key_matches_accepts_correct() {
+        assert!(api_key_matches("s3cret-token", "s3cret-token"));
+    }
+
+    #[test]
+    fn api_key_matches_rejects_wrong() {
+        assert!(!api_key_matches("s3cret-tokeX", "s3cret-token"));
+        // Differ in the first byte — a short-circuiting compare would return
+        // fastest here; the constant-time compare must still reject it.
+        assert!(!api_key_matches("Xs3cret-token", "s3cret-token"));
+    }
+
+    #[test]
+    fn api_key_matches_rejects_wrong_length() {
+        assert!(!api_key_matches("s3cret", "s3cret-token"));
+        assert!(!api_key_matches("s3cret-token-extra", "s3cret-token"));
+    }
+
+    #[test]
+    fn api_key_matches_rejects_empty_against_nonempty() {
+        assert!(!api_key_matches("", "s3cret-token"));
+        // Two empty strings are trivially equal — no key configured is handled
+        // by the `Some(key)` guard at the call site, not here.
+        assert!(api_key_matches("", ""));
     }
 }
