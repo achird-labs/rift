@@ -5,6 +5,7 @@
 
 use super::tls::NoVerifier;
 use crate::config::Config;
+use anyhow::Context;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Bytes;
 use hyper_util::client::legacy::Client;
@@ -26,8 +27,10 @@ pub type HttpClient = Client<
 /// * `skip_tls_verify` - Whether to skip TLS certificate verification
 ///
 /// # Returns
-/// A configured HTTP client ready for proxying requests.
-pub fn create_http_client(config: &Config, skip_tls_verify: bool) -> HttpClient {
+/// A configured HTTP client ready for proxying requests, or an error if the native root
+/// certificate store can't be loaded (e.g. a minimal/distroless image without `ca-certificates`),
+/// so the caller can fail gracefully instead of aborting the process (issue #543).
+pub fn create_http_client(config: &Config, skip_tls_verify: bool) -> anyhow::Result<HttpClient> {
     // Create HTTP connector with connection pool settings
     let mut http_connector = hyper_util::client::legacy::connect::HttpConnector::new();
     http_connector.set_keepalive(Some(Duration::from_secs(
@@ -56,7 +59,7 @@ pub fn create_http_client(config: &Config, skip_tls_verify: bool) -> HttpClient 
     } else {
         hyper_rustls::HttpsConnectorBuilder::new()
             .with_native_roots()
-            .expect("Failed to load native root certificates")
+            .context("Failed to load native root certificates")?
             .https_or_http()
             .enable_http1()
             .wrap_connector(http_connector)
@@ -76,7 +79,7 @@ pub fn create_http_client(config: &Config, skip_tls_verify: bool) -> HttpClient 
         config.connection_pool.keepalive_timeout_secs
     );
 
-    http_client
+    Ok(http_client)
 }
 
 /// Check if any upstream needs TLS verification skipped.
@@ -87,4 +90,25 @@ pub fn should_skip_tls_verify(config: &Config) -> bool {
             .as_ref()
             .map(|u| u.tls_skip_verify)
             .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_config() -> Config {
+        serde_json::from_value(serde_json::json!({ "listen": { "port": 0 } }))
+            .expect("minimal config deserializes")
+    }
+
+    #[test]
+    fn create_http_client_returns_result_ok_for_both_tls_modes() {
+        let config = minimal_config();
+        // Fix for issue #543: the fn returns a Result. On a normal host with a CA bundle both
+        // paths succeed; the point is that a native-root load failure is a returned Err, never a
+        // panic that aborts server construction.
+        assert!(create_http_client(&config, false).is_ok());
+        // The skip-verify path never touches the native root store, so it cannot fail on it.
+        assert!(create_http_client(&config, true).is_ok());
+    }
 }
