@@ -13,6 +13,11 @@ record.
 
 ### Fixed
 
+- **The TUI no longer panics on imposter names or paths containing multibyte UTF-8.** Several
+  truncation sites guarded on byte length but sliced at a byte index, so a name/scenario/recorded
+  path with multibyte characters (e.g. `日本語サービス` from imported JSON or proxy recordings)
+  panicked with "byte index is not a char boundary" inside the render loop, tearing down the
+  terminal (often leaving it in raw mode). Truncation is now char-based via a single shared helper.
 - **`rift lint` no longer executes JavaScript while syntax-checking it.** The `javascript`-feature
   validator ran scripts via the JS engine, so an inject/decorate body containing a loop (e.g.
   `while (true) {}`) hung the linter, and any engine error whose message lacked `SyntaxError`/

@@ -1,5 +1,6 @@
 //! Imposter list view
 
+use super::truncate;
 use crate::app::App;
 use ratatui::{
     Frame,
@@ -121,14 +122,5 @@ pub fn draw_list(frame: &mut Frame, app: &App, area: Rect) {
         };
 
         frame.render_widget(paragraph, centered);
-    }
-}
-
-/// Truncate a string to max length with ellipsis
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max - 1])
     }
 }

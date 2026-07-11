@@ -1,5 +1,6 @@
 //! Imposter detail view
 
+use super::truncate;
 use crate::app::{App, FocusArea};
 use ratatui::{
     Frame,
@@ -155,11 +156,7 @@ fn build_stub_summary(stubs: &[crate::api::Stub], max_width: usize) -> String {
         }
     }
 
-    if summary.len() > max_width {
-        format!("{}…", &summary[..max_width.saturating_sub(1)])
-    } else {
-        summary
-    }
+    truncate(&summary, max_width)
 }
 
 /// Draw the stubs panel
@@ -211,11 +208,7 @@ fn draw_stubs_panel(frame: &mut Frame, app: &App, area: Rect) {
 
             // Truncate stub name to fit panel width
             let max_name_len = area.width.saturating_sub(15) as usize;
-            let display_name = if stub_name.len() > max_name_len {
-                format!("{}…", &stub_name[..max_name_len.saturating_sub(1)])
-            } else {
-                stub_name
-            };
+            let display_name = truncate(&stub_name, max_name_len);
 
             let fg_color = if dim { app.theme.muted } else { app.theme.fg };
 
@@ -572,14 +565,5 @@ fn method_color(method: &str, app: &App) -> ratatui::style::Color {
         "PUT" | "PATCH" => ratatui::style::Color::Cyan,
         "DELETE" => app.theme.error,
         _ => app.theme.fg,
-    }
-}
-
-/// Truncate string with ellipsis
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max - 1])
     }
 }
