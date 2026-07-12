@@ -25,21 +25,46 @@ record.
   path with multibyte characters (e.g. `日本語サービス` from imported JSON or proxy recordings)
   panicked with "byte index is not a char boundary" inside the render loop, tearing down the
   terminal (often leaving it in raw mode). Truncation is now char-based via a single shared helper.
+- **Creating an imposter no longer silently succeeds when it can't be persisted to `--datadir`.** The
+  create path wrote the config in a fire-and-forget task that only logged failures, so a datadir
+  write error returned `201 Created` to the caller and the imposter then vanished on restart. Create
+  now persists synchronously and, on failure, rolls back the in-memory imposter and returns a
+  `503` (`ImposterError::PersistError`) — matching the durability contract already used by stub
+  mutations (#173).
 - **`rift lint` no longer executes JavaScript while syntax-checking it.** The `javascript`-feature
   validator ran scripts via the JS engine, so an inject/decorate body containing a loop (e.g.
   `while (true) {}`) hung the linter, and any engine error whose message lacked `SyntaxError`/
   `unexpected` was silently treated as valid. It now parses without executing and reports every
   syntax error.
+- **Concurrent requests to a mixed-type response array no longer serve the wrong branch or a bogus
+  empty 200.** Dispatch classified the response with a non-advancing peek and then advanced the
+  cycler in a separate step, so under load a concurrent request could move the shared cursor between
+  the two and, e.g., serve an empty `x-rift-no-match` 200 where a `proxy` or `is` response was
+  intended. The cycler is now advanced exactly once per request and dispatched on the returned
+  response. (Behavior note: the cursor now advances even when proxy/inject/script handling fails —
+  a shared cursor can't be safely un-advanced under concurrency — where a failed handling previously
+  left the cursor for the next request to retry.)
 - **Flow-level `ctx.state.ttl(seconds)` no longer revives expired keys on the in-memory backend.**
   The positive-TTL branch re-stamped every entry in the flow — including entries already past their
   expiry that the amortized sweeper hadn't reaped yet — resurrecting them so a later `get`/`exists`
   saw them as live. It now drops already-expired entries before extending the survivors (and clears
   the flow map if that leaves it empty), matching the Redis backend, where expired keys are simply
   gone and never revived.
+- **Per-key `ctx.state.ttl(key, seconds)` no longer leaks empty flow maps on the in-memory backend.**
+  When a positive TTL was set on a key that had already expired and was the flow's last entry, the
+  branch cleaned up the key but left the now-empty flow map in the store — so repeated calls across
+  many flow ids grew the store without bound. It now drops the empty flow map, matching the sibling
+  delete / `set_ttl` / sweep paths (issue #483).
 - **The proxy no longer panics at startup when the native root certificate store can't be loaded.**
   `create_http_client` called `.expect(...)` on `with_native_roots()`, so running in a minimal or
   distroless image without `ca-certificates` aborted the process; it now returns the error so the
   server fails with a diagnostic instead of a panic.
+- **`proxyOnce` no longer wedges when a client disconnects mid-proxy.** The pending claim taken when
+  a request begins forwarding was only cleared once the response was recorded, so a client that
+  disconnected before the upstream responded left the request signature stuck "pending" —
+  subsequent matching requests got neither a proxy nor a recorded reply until a later completed
+  request happened to self-heal it. The claim is now released if the forward is cancelled before it
+  records.
 - **A panic in the Redis flow-state backend no longer cascades into a repeating-panic storm.** Each
   pooled connection is a `Mutex<Connection>` that was accessed with `.lock().unwrap()`; one panic
   while a lock was held poisoned that mutex, so every later access panicked too, and the pool never

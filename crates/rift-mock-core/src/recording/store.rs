@@ -122,6 +122,15 @@ impl RecordingStore {
         }
     }
 
+    /// Release a `proxyOnce` pending claim taken by [`Self::should_proxy`] without recording a
+    /// response. A forward that is cancelled (client disconnect) or returns early before
+    /// [`Self::record`] would otherwise leave the signature wedged as permanently pending, so
+    /// `should_proxy` keeps returning `false` with nothing to replay until a later completed
+    /// request self-heals it (issue #555). Safe to call when the signature isn't pending (no-op).
+    pub fn release_pending(&self, signature: &RequestSignature) {
+        self.pending.lock().remove(signature);
+    }
+
     /// Get all recorded responses (for export)
     // Public API for future use (mb replay export)
     pub fn get_all(&self) -> HashMap<RequestSignature, Vec<RecordedResponse>> {
@@ -427,6 +436,28 @@ mod tests {
 
         let transparent = RecordingStore::new(ProxyMode::ProxyTransparent);
         assert_eq!(transparent.mode(), ProxyMode::ProxyTransparent);
+    }
+
+    // Issue #555: a forward abandoned (client disconnect / task cancelled) between should_proxy
+    // and record() must be able to release its pending claim, so the signature isn't wedged as
+    // permanently pending until a later completed request self-heals it.
+    #[test]
+    fn release_pending_reopens_abandoned_claim() {
+        let store = RecordingStore::new(ProxyMode::ProxyOnce);
+        let sig = RequestSignature::new("GET", "/abandoned", None, &[]);
+
+        assert!(store.should_proxy(&sig), "first caller takes the claim");
+        assert!(
+            !store.should_proxy(&sig),
+            "second caller sees the signature pending"
+        );
+
+        store.release_pending(&sig);
+
+        assert!(
+            store.should_proxy(&sig),
+            "after releasing the abandoned claim, proxying re-opens"
+        );
     }
 
     // =========================================================================

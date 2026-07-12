@@ -9,12 +9,10 @@ pub const INITIAL_SCENARIO_STATE: &str = "Started";
 use super::predicates::stub_matches_inner;
 use super::response::{
     create_response_preview, create_stub_from_proxy_response, execute_stub_response_with_rift,
-    get_rift_script_config,
 };
 use super::types::{
     DebugImposter, DebugResponsePreview, DebugStubInfo, ImposterConfig, ImposterError,
-    ProxyResponse, RecordedRequest, ResponseMode, RiftResponseExtension, RiftScriptConfig, Stub,
-    StubResponse,
+    ProxyResponse, RecordedRequest, ResponseMode, RiftResponseExtension, Stub, StubResponse,
 };
 use crate::backends::InMemoryFlowStore;
 use crate::behaviors::{HasRepeatBehavior, RuleCycler};
