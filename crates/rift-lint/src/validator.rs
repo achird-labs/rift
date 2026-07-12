@@ -16,6 +16,25 @@ pub(crate) struct JsSyntaxError(pub String);
 mod js_validator {
     use boa_engine::{Context, Script, Source};
 
+    /// True when `trimmed` is an anonymous function *expression* — `function`, `async function`,
+    /// `function*`, or `async function*` (a generator/async body), with any spacing, immediately
+    /// followed by `(`. These need wrapping as `var __fn = (…)` so Boa parses them as an expression
+    /// rather than a nameless declaration (a syntax error). A *named* function (`function foo(`) is
+    /// not matched — it parses fine as a declaration (issue #571).
+    fn is_anonymous_function_expr(trimmed: &str) -> bool {
+        // Drop a leading `async` keyword (only when followed by whitespace, so `asyncfn`-style
+        // identifiers aren't misread as the keyword).
+        let body = match trimmed.strip_prefix("async") {
+            Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start(),
+            _ => trimmed,
+        };
+        body.strip_prefix("function")
+            .map(str::trim_start)
+            // Optional generator `*`.
+            .map(|rest| rest.strip_prefix('*').map_or(rest, str::trim_start))
+            .is_some_and(|rest| rest.starts_with('('))
+    }
+
     pub fn validate_javascript(script: &str) -> Result<(), super::JsSyntaxError> {
         let mut context = Context::default();
 
@@ -27,11 +46,7 @@ mod js_validator {
         // the common `function (args)` form (a space before the parens) as named, leaving it
         // unwrapped and mis-flagged as a syntax error.
         let script_trimmed = script.trim();
-        let is_anonymous_function_expr = script_trimmed
-            .strip_prefix("function")
-            .map(str::trim_start)
-            .is_some_and(|rest| rest.starts_with('('));
-        let wrapped = if is_anonymous_function_expr {
+        let wrapped = if is_anonymous_function_expr(script_trimmed) {
             format!("var __fn = ({script_trimmed})")
         } else {
             script_trimmed.to_string()
@@ -1609,6 +1624,19 @@ mod js_syntax_tests {
     fn valid_function_expression_passes() {
         assert!(validate_javascript("function (args) { return args.length; }").is_ok());
         assert!(validate_javascript("config => { config.response.statusCode = 202; }").is_ok());
+    }
+
+    #[test]
+    fn async_and_generator_anonymous_expressions_pass() {
+        // Issue #571: anonymous async-function and generator-function *expressions* are valid
+        // inject/decorate bodies; they must be wrapped like a plain `function (…)` expression, not
+        // handed to the parser as a nameless *declaration* (which is a syntax error).
+        assert!(validate_javascript("async function (r) { await r; }").is_ok());
+        assert!(validate_javascript("function* (r) { yield r; }").is_ok());
+        assert!(validate_javascript("async function* (r) { yield await r; }").is_ok());
+        // Spacing variants (no space before the parens / the star).
+        assert!(validate_javascript("function*(r){ yield r; }").is_ok());
+        assert!(validate_javascript("async function(r){ await r; }").is_ok());
     }
 
     #[test]

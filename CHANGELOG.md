@@ -41,6 +41,11 @@ record.
   `while (true) {}`) hung the linter, and any engine error whose message lacked `SyntaxError`/
   `unexpected` was silently treated as valid. It now parses without executing and reports every
   syntax error.
+- **`rift lint` no longer flags valid anonymous `async function`/generator inject bodies as syntax
+  errors.** The `javascript`-feature validator wrapped a plain `function (…)` expression so Boa
+  could parse it, but its detection missed the `async function (…)` and `function* (…)` forms, so
+  those valid inject/decorate bodies were parsed as nameless declarations and mis-reported as
+  errors. The detection now recognises the `async` prefix and the generator `*`.
 - **Concurrent requests to a mixed-type response array no longer serve the wrong branch or a bogus
   empty 200.** Dispatch classified the response with a non-advancing peek and then advanced the
   cycler in a separate step, so under load a concurrent request could move the shared cursor between
