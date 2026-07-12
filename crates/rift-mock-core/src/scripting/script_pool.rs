@@ -59,6 +59,20 @@ pub struct ScriptTask {
     pub result_tx: oneshot::Sender<Result<FaultDecision>>,
 }
 
+/// Decrements the `queue_depth` and `active_tasks` gauges on drop, so every exit path of
+/// `ScriptPool::execute` — success, timeout, or cancel — releases them exactly once (issue #541).
+struct CounterGuard<'a> {
+    queue_depth: &'a AtomicUsize,
+    active_tasks: &'a AtomicUsize,
+}
+
+impl Drop for CounterGuard<'_> {
+    fn drop(&mut self) {
+        self.queue_depth.fetch_sub(1, Ordering::Relaxed);
+        self.active_tasks.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Script worker thread
 struct ScriptWorker {
     worker_id: usize,
@@ -314,17 +328,20 @@ impl ScriptPool {
         // Track active tasks
         self.active_tasks.fetch_add(1, Ordering::Relaxed);
 
+        // Release both counters on every exit path — success, timeout, or cancel. The `?` on the
+        // timeout/cancel branches below returns early, so a manual decrement after them would be
+        // skipped and leak the counters permanently (issue #541). Armed here, after the successful
+        // `try_send` (whose own error path already decrements queue_depth), so no double-decrement.
+        let _counters = CounterGuard {
+            queue_depth: &self.queue_depth,
+            active_tasks: &self.active_tasks,
+        };
+
         // Wait for result with timeout
-        let result = tokio::time::timeout(timeout, result_rx)
+        tokio::time::timeout(timeout, result_rx)
             .await
             .map_err(|_| anyhow!("Script execution timed out"))?
-            .map_err(|_| anyhow!("Script execution cancelled"))?;
-
-        // Update metrics
-        self.queue_depth.fetch_sub(1, Ordering::Relaxed);
-        self.active_tasks.fetch_sub(1, Ordering::Relaxed);
-
-        result
+            .map_err(|_| anyhow!("Script execution cancelled"))?
     }
 
     /// Get current queue depth (for metrics)
@@ -713,6 +730,58 @@ mod tests {
         );
     }
 
+    // Issue #541: the timeout/cancel early-return path must release BOTH the queue_depth and
+    // active_tasks counters. Before the fix they were decremented only on the success path, so
+    // every timed-out script permanently leaked them.
+    #[tokio::test]
+    async fn execute_timeout_releases_queue_and_active_counters() {
+        use crate::extensions::flow_state::NoOpFlowStore;
+        use crate::scripting::ScriptRequest;
+        use std::collections::HashMap;
+
+        let pool = ScriptPool::new(ScriptPoolConfig {
+            workers: 1,
+            queue_size: 10,
+            timeout_ms: 100,
+        })
+        .unwrap();
+
+        let request = ScriptRequest {
+            raw_body: None,
+            method: "GET".to_string(),
+            path: "/test".to_string(),
+            headers: HashMap::new(),
+            body: serde_json::json!(null),
+            query: HashMap::new(),
+            path_params: HashMap::new(),
+        };
+        let flow_store: Arc<dyn crate::extensions::flow_state::FlowStore> = Arc::new(NoOpFlowStore);
+        let ast = rhai::Engine::new()
+            .compile("let i = 0; loop { i += 1; }")
+            .expect("infinite loop compiles");
+        let compiled = CompiledScript::Rhai {
+            ast: Arc::new(ast),
+            rule_id: "leak-check".to_string(),
+        };
+
+        let result = pool.execute(compiled, request, flow_store).await;
+        assert!(
+            result.is_err(),
+            "a script exceeding timeout_ms returns an error"
+        );
+
+        assert_eq!(
+            pool.active_tasks(),
+            0,
+            "active_tasks must be released after a timed-out script"
+        );
+        assert_eq!(
+            pool.queue_depth(),
+            0,
+            "queue_depth must be released after a timed-out script"
+        );
+    }
+
     #[tokio::test]
     async fn test_pool_execute_simple_rhai_script() {
         use crate::extensions::flow_state::NoOpFlowStore;
@@ -758,5 +827,13 @@ mod tests {
 
         let result = pool.execute(compiled, request, flow_store).await;
         assert!(result.is_ok());
+        // The success path releases both gauges too (issue #541: it now goes through the same
+        // CounterGuard::drop as the timeout path).
+        assert_eq!(
+            pool.active_tasks(),
+            0,
+            "active_tasks released after success"
+        );
+        assert_eq!(pool.queue_depth(), 0, "queue_depth released after success");
     }
 }

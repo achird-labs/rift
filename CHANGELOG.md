@@ -13,6 +13,11 @@ record.
 
 ### Fixed
 
+- **Script-pool `queue_depth` / `active_tasks` metrics no longer leak on a timed-out script.** Both
+  gauges were incremented per request but only decremented on the success path, so every script that
+  hit its execution timeout (the exact case the pool bounds) permanently inflated them — the metrics
+  drifted monotonically wrong under sustained load with slow scripts. Both counters are now released
+  on every exit path (success, timeout, cancel) via an RAII guard.
 - **`rift lint --fix` no longer corrupts valid multi-value header arrays.** The fixer rewrote every
   array-valued response header into a single comma-joined string and silently dropped any non-string
   element, so a valid `"Set-Cookie": ["a=1", "b=2"]` (a legitimate multi-value header since #238)
