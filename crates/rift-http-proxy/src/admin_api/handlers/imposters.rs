@@ -23,7 +23,7 @@ use hyper::{Request, Response, StatusCode};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// The `ScriptBaseDir` a `--scripts-dir`-carrying admin API resolves `file:` scripts under;
 /// `Unconfigured` when the flag was never set. Shared by the imposter CRUD handlers and the stub
@@ -291,13 +291,24 @@ pub async fn handle_replace_all(
         Ok(b) => b,
         Err(e) => return error_response(e.status_code(), &e.to_string()),
     };
+    replace_all_from_bytes(&body, base_url, manager, allow_injection, scripts_dir).await
+}
 
+/// Parse, validate, and apply a `PUT /imposters` batch. Split out from `handle_replace_all` so
+/// the path is unit-testable without a `Request<Incoming>` (same seam as `verify_response`).
+async fn replace_all_from_bytes(
+    body: &[u8],
+    base_url: &str,
+    manager: Arc<ImposterManager>,
+    allow_injection: bool,
+    scripts_dir: Option<Arc<PathBuf>>,
+) -> Response<Full<Bytes>> {
     #[derive(Deserialize)]
     struct BatchRequest {
         imposters: Vec<ImposterConfig>,
     }
 
-    let mut batch: BatchRequest = match serde_json::from_slice(&body) {
+    let mut batch: BatchRequest = match serde_json::from_slice(body) {
         Ok(b) => b,
         Err(e) => {
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid batch JSON: {e}"));
@@ -343,15 +354,51 @@ pub async fn handle_replace_all(
         }
     }
 
-    manager.delete_all().await;
-
-    for config in batch.imposters {
-        if let Err(e) = manager.create_imposter(config.clone()).await {
-            error!("Failed to create imposter on port {:?}: {}", config.port, e);
+    // Reconcile toward the new set instead of delete-all-then-recreate (issue #549): the old
+    // wholesale pre-delete meant any create failure (e.g. a transiently-held port) silently lost
+    // the previous imposters behind a 200. apply_config validates the whole set before touching
+    // anything, only replaces what actually changed (an unchanged imposter keeps its runtime
+    // state, like POST /admin/reload), and reports per-port failures instead of log-and-continue.
+    match manager.apply_config(batch.imposters).await {
+        Ok(report) if report.failed.is_empty() => handle_list(manager, None, base_url).await,
+        // Residual per-port apply failures (e.g. a bind race): the other ports are already
+        // reconciled, so carry the full report — a partial failure is exactly when the client
+        // needs to know what did apply (same contract as POST /admin/reload).
+        Ok(report) => {
+            let failures: Vec<String> = report
+                .failed
+                .iter()
+                .map(|(port, e)| match port {
+                    // Port 0 is the ApplyReport sentinel for auto-assigned (port-less) configs.
+                    0 => format!("auto-assign: {e}"),
+                    port => format!("{port}: {e}"),
+                })
+                .collect();
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &serde_json::json!({
+                    "errors": [{
+                        "code": "500",
+                        "message": format!(
+                            "Replace partially failed: {}",
+                            failures.join("; ")
+                        ),
+                    }],
+                    "failed": failures,
+                    "created": report.created,
+                    "replaced": report.replaced,
+                    "stubPatched": report.stub_patched,
+                    "deleted": report.deleted,
+                }),
+            )
         }
+        // Set-level validation failure (bad protocol, duplicate port, duplicate stub id): a bad
+        // request body, rejected before any imposter was touched.
+        Err(e) => error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Invalid imposter set (imposters unchanged): {e}"),
+        ),
     }
-
-    handle_list(manager, None, base_url).await
 }
 
 /// DELETE /imposters - Delete all imposters
@@ -1316,5 +1363,162 @@ mod verify_tests {
         let m = Arc::new(ImposterManager::new());
         let resp = verify_response(19755, br#"{"predicates":[]}"#, &m, false);
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod replace_all_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    const BASE: &str = "http://localhost:2525";
+
+    async fn manager_with_http(port: u16) -> Arc<ImposterManager> {
+        let manager = Arc::new(ImposterManager::new());
+        let config = serde_json::from_value(
+            serde_json::json!({"port": port, "protocol": "http", "stubs": []}),
+        )
+        .expect("config");
+        manager.create_imposter(config).await.expect("create");
+        manager
+    }
+
+    async fn body_json(resp: Response<Full<Bytes>>) -> serde_json::Value {
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    // Issue #549: a partial apply failure must be surfaced (non-2xx with the failing port in the
+    // body), the valid siblings must be applied, and a pre-existing imposter whose config is
+    // unchanged must survive — never a silent 200 with a smaller set after a wholesale delete.
+    #[tokio::test]
+    async fn put_partial_failure_reports_and_preserves_survivors() {
+        let manager = manager_with_http(19760).await;
+        // 19760 unchanged; 19761 fails at apply time (garbage TLS material).
+        let body = serde_json::json!({"imposters": [
+            {"port": 19760, "protocol": "http", "stubs": []},
+            {"port": 19761, "protocol": "https", "cert": "not a pem", "key": "not a pem", "stubs": []}
+        ]})
+        .to_string();
+        let resp =
+            replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
+
+        assert!(
+            !resp.status().is_success(),
+            "a partial failure must not report success, got {}",
+            resp.status()
+        );
+        let json = body_json(resp).await;
+        let failed: Vec<&str> = json["failed"]
+            .as_array()
+            .expect("failed array")
+            .iter()
+            .filter_map(|f| f.as_str())
+            .collect();
+        assert!(
+            failed.iter().any(|f| f.starts_with("19761:")),
+            "the failing port must be identified in the report: {json}"
+        );
+        assert_eq!(json["errors"][0]["code"], "500");
+        assert!(
+            manager.get_imposter(19760).is_ok(),
+            "the unchanged imposter must survive the partial failure"
+        );
+        assert!(
+            manager.get_imposter(19761).is_err(),
+            "the failed imposter must not be running"
+        );
+        manager.delete_all().await;
+    }
+
+    // Mountebank contract pin: full success keeps the 200 + {"imposters": [...]} shape, the old
+    // set is replaced by the new one.
+    #[tokio::test]
+    async fn put_success_replaces_set_with_imposter_list() {
+        let manager = manager_with_http(19762).await;
+        let body =
+            serde_json::json!({"imposters": [{"port": 19763, "protocol": "http", "stubs": []}]})
+                .to_string();
+        let resp =
+            replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let ports: Vec<u64> = json["imposters"]
+            .as_array()
+            .expect("imposters array")
+            .iter()
+            .filter_map(|i| i["port"].as_u64())
+            .collect();
+        assert_eq!(ports, vec![19763]);
+        assert!(manager.get_imposter(19762).is_err(), "old set replaced");
+        assert!(manager.get_imposter(19763).is_ok());
+        manager.delete_all().await;
+    }
+
+    // The documented semantic delta of the #549 fix: an imposter whose config is unchanged is
+    // reconciled as a no-op and keeps its runtime state — under the old wholesale delete+recreate
+    // its recorded requests were wiped by every PUT.
+    #[tokio::test]
+    async fn put_unchanged_imposter_keeps_recorded_requests() {
+        let manager = Arc::new(ImposterManager::new());
+        let cfg = serde_json::json!({"port": 19766, "protocol": "http", "recordRequests": true, "stubs": []});
+        let config = serde_json::from_value(cfg.clone()).expect("config");
+        manager.create_imposter(config).await.expect("create");
+        manager
+            .get_imposter(19766)
+            .expect("imposter")
+            .record_request(&RecordedRequest {
+                request_from: "127.0.0.1:5000".to_string(),
+                method: "GET".to_string(),
+                path: "/seen".to_string(),
+                query: std::collections::HashMap::new(),
+                headers: std::collections::HashMap::new(),
+                body: None,
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+            });
+
+        let body = serde_json::json!({"imposters": [cfg]}).to_string();
+        let resp =
+            replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let recorded = manager
+            .get_imposter(19766)
+            .expect("still running")
+            .get_recorded_requests();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "an unchanged imposter must keep its runtime state across PUT"
+        );
+        manager.delete_all().await;
+    }
+
+    // Issue #549: a set that fails validation (duplicate port) must be rejected as a client error
+    // with the running imposters completely untouched — under the old wholesale pre-delete they
+    // were already gone by the time the creates started failing.
+    #[tokio::test]
+    async fn put_invalid_set_rejected_with_imposters_untouched() {
+        let manager = manager_with_http(19764).await;
+        let body = serde_json::json!({"imposters": [
+            {"port": 19765, "protocol": "http", "stubs": []},
+            {"port": 19765, "protocol": "http", "stubs": []}
+        ]})
+        .to_string();
+        let resp =
+            replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a duplicate-port set is a client error"
+        );
+        assert!(
+            manager.get_imposter(19764).is_ok(),
+            "a rejected set must leave the running imposters untouched"
+        );
+        assert!(manager.get_imposter(19765).is_err());
+        manager.delete_all().await;
     }
 }

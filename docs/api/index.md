@@ -134,7 +134,12 @@ curl -X POST http://localhost:2525/imposters \
 
 ### PUT /imposters
 
-Replace all imposters (bulk create/update).
+Replace all imposters (bulk create/update). The running set is *reconciled* toward the payload —
+the same incremental engine as `POST /admin/reload` — rather than deleted wholesale and recreated:
+imposters absent from the payload are deleted, changed ones are replaced (or stub-patched), and an
+imposter whose config is unchanged keeps its runtime state (recorded requests, response cycling).
+The whole set is validated before anything is touched, so an invalid payload never disturbs the
+running imposters. Use `DELETE /imposters` first if you also want unchanged imposters reset.
 
 **Request Body:**
 ```json
@@ -152,6 +157,13 @@ Replace all imposters (bulk create/update).
   "imposters": [...]
 }
 ```
+
+**Errors:**
+- `400 Bad Request` — the set failed validation (bad protocol, duplicate port, duplicate stub id);
+  the running imposters are unchanged.
+- `500 Internal Server Error` — one or more imposters failed to apply (e.g. a port bind failure);
+  the body carries the per-port `failed` list plus the `created`/`replaced`/`stubPatched`/`deleted`
+  report of what did apply, mirroring `POST /admin/reload`.
 
 ---
 

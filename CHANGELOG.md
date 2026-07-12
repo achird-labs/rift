@@ -13,6 +13,15 @@ record.
 
 ### Fixed
 
+- **`PUT /imposters` no longer loses imposters on a partial failure.** The handler deleted every
+  running imposter and then recreated the payload's set, merely logging any create failure — so a
+  single bad imposter (or a transiently-held port) returned `200` with a silently smaller set, the
+  previous imposters already gone. It now reconciles toward the payload with the same engine as
+  `POST /admin/reload`: the whole set is validated before anything is touched (an invalid payload is
+  a `400` with the running imposters unchanged), and residual per-port apply failures return a `500`
+  whose body reports what failed and what did apply. (Behavior note: an imposter whose config is
+  unchanged now keeps its runtime state — recorded requests, response cycling — instead of being
+  torn down and recreated; `DELETE /imposters` first if a full reset is wanted.)
 - **Script-pool `queue_depth` / `active_tasks` metrics no longer leak on a timed-out script.** Both
   gauges were incremented per request but only decremented on the success path, so every script that
   hit its execution timeout (the exact case the pool bounds) permanently inflated them — the metrics
