@@ -230,13 +230,19 @@ impl FlowStore for InMemoryFlowStore {
 
         let new_expiry =
             SystemTime::now() + Duration::from_secs(u64::try_from(ttl_seconds).unwrap_or(0));
-        match flow.get_mut(key) {
+        let extended = match flow.get_mut(key) {
             Some((_, expiry)) => {
                 *expiry = Some(new_expiry);
-                Ok(true)
+                true
             }
-            None => Ok(false),
+            None => false,
+        };
+        // `remove_if_expired` above may have dropped the flow's last key; drop the now-empty flow
+        // map so repeated calls on expired sole keys can't leak empty maps (issue #562 / #483).
+        if flow.is_empty() {
+            data.remove(flow_id);
         }
+        Ok(extended)
     }
 
     fn clear_flow(&self, flow_id: &str) -> Result<()> {
@@ -761,6 +767,26 @@ mod tests {
         assert!(
             !store.exists("f", "drop").unwrap(),
             "sibling key keeps its original (now expired) TTL"
+        );
+    }
+
+    // Issue #562: a positive-TTL set_key_ttl on an already-expired *sole* key must drop the now-
+    // empty flow map, not leave it behind — otherwise repeated calls across distinct flow ids leak
+    // empty maps in the outer store without bound (the #483 growth vector).
+    #[test]
+    fn set_key_ttl_positive_on_expired_sole_key_drops_empty_flow_map() {
+        let store = InMemoryFlowStore::new(1); // 1s default TTL
+        store.set("f", "only", json!("v")).unwrap();
+        std::thread::sleep(Duration::from_secs(2)); // the sole key is now expired
+
+        assert!(
+            !store.set_key_ttl("f", "only", 100).unwrap(),
+            "there is no live key to extend"
+        );
+        assert_eq!(
+            store.stored_flow_count(),
+            0,
+            "the emptied flow map must be dropped, not leaked"
         );
     }
 
