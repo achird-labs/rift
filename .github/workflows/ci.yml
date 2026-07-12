@@ -285,6 +285,11 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      # The minimal-feature cdylib (docs/embedding/ffi.md) is a shipped configuration, so lint it
+      # too — otherwise warnings can silently accumulate in feature-gated paths (issue #599).
+      - name: Run clippy (no default features)
+        run: cargo clippy -p rift-mock-core -p rift-ffi --all-targets --no-default-features -- -D warnings
+
   build:
     name: Build
     runs-on: ubuntu-latest

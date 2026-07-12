@@ -566,6 +566,9 @@ mod tests {
             rule_id: "test-rule".to_string(),
         };
 
+        // `CompiledScript` has a second (`Js`) variant only under the `javascript` feature, so this
+        // pattern is refutable there but irrefutable without it (issue #599).
+        #[cfg_attr(not(feature = "javascript"), allow(irrefutable_let_patterns))]
         if let CompiledScript::Rhai { rule_id, .. } = compiled {
             assert_eq!(rule_id, "test-rule");
         }
@@ -584,6 +587,7 @@ mod tests {
         };
 
         let cloned = compiled.clone();
+        #[cfg_attr(not(feature = "javascript"), allow(irrefutable_let_patterns))]
         if let CompiledScript::Rhai { rule_id, .. } = cloned {
             assert_eq!(rule_id, "clone-test");
         }

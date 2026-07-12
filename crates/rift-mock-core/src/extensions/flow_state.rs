@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -197,6 +197,11 @@ pub fn create_flow_store(config: &crate::config::FlowStateConfig) -> Result<Arc<
             Ok(Arc::new(InMemoryFlowStore::new(config.ttl_seconds as u64)))
         }
         "redis" => {
+            // Validate config presence in *all* builds so the "no redis config" error is returned
+            // even without the backend feature (a test locks this in); the value is only *consumed*
+            // when the backend is compiled in, hence the unused-var allow for the minimal build.
+            // `Context` is likewise only used inside the feature block, so it's imported there (#599).
+            #[cfg_attr(not(feature = "redis-backend"), allow(unused_variables))]
             let redis_config = config
                 .redis
                 .as_ref()
@@ -204,6 +209,8 @@ pub fn create_flow_store(config: &crate::config::FlowStateConfig) -> Result<Arc<
 
             #[cfg(feature = "redis-backend")]
             {
+                use anyhow::Context;
+
                 use crate::backends::RedisFlowStore;
 
                 let store = RedisFlowStore::new(

@@ -168,6 +168,10 @@ pub fn predicate_matches(
 ///
 /// See [`stub_matches`] for the `Err` contract (issue #440).
 #[allow(clippy::too_many_arguments)]
+// `imposter_port` is consumed by the `inject` predicate evaluator, which is `javascript`-gated
+// (issue #599); without that feature the arm doesn't use it, so it's only threaded through the
+// recursive And/Or descent — a false positive for this build only.
+#[cfg_attr(not(feature = "javascript"), allow(clippy::only_used_in_recursion))]
 pub(crate) fn predicate_matches_inner(
     predicate: &Predicate,
     method: &str,

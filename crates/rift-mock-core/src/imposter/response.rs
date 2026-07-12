@@ -402,12 +402,12 @@ pub fn apply_js_or_rhai_decorate(
         #[cfg(not(feature = "javascript"))]
         {
             // Fallback to Rhai conversion when JavaScript feature is disabled
-            if let Some(start) = script.find('{') {
-                if let Some(end) = script.rfind('}') {
-                    let js_body = script[start + 1..end].trim();
-                    let rhai_script = js_body.replace('\'', "\"");
-                    return apply_decorate(&rhai_script, request, body, status, headers);
-                }
+            if let Some(start) = script.find('{')
+                && let Some(end) = script.rfind('}')
+            {
+                let js_body = script[start + 1..end].trim();
+                let rhai_script = js_body.replace('\'', "\"");
+                return apply_decorate(&rhai_script, request, body, status, headers);
             }
             Err(DecorateError::JsParseFailure)
         }
