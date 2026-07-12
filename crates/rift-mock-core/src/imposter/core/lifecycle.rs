@@ -126,6 +126,11 @@ impl Imposter {
             .collect()
     }
 
+    /// Number of stubs, without cloning them (list/summary endpoints poll this on a tick).
+    pub fn stub_count(&self) -> usize {
+        self.stubs.load().len()
+    }
+
     /// Get a specific stub by index
     pub fn get_stub(&self, index: usize) -> Option<Stub> {
         let stubs = self.stubs.load();

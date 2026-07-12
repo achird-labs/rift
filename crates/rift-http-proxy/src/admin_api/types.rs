@@ -38,6 +38,7 @@ pub struct ImposterSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub number_of_requests: u64,
+    pub stub_count: usize,
     pub enabled: bool,
     #[serde(rename = "_links")]
     pub links: ImposterLinks,

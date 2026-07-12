@@ -266,6 +266,7 @@ pub async fn handle_list(
                     port,
                     name: i.config.name.clone(),
                     number_of_requests: i.get_request_count(),
+                    stub_count: i.stub_count(),
                     enabled: i.is_enabled(),
                     links: make_imposter_links(base_url, port),
                 })
@@ -1519,6 +1520,58 @@ mod replace_all_tests {
             "a rejected set must leave the running imposters untouched"
         );
         assert!(manager.get_imposter(19765).is_err());
+        manager.delete_all().await;
+    }
+}
+
+#[cfg(test)]
+mod list_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    // Issue #558: the default list response carries per-imposter stubCount (and enabled) so
+    // clients like the TUI can render the list from ONE request instead of an N+1 detail loop
+    // whose per-imposter failures were silently dropped.
+    #[tokio::test]
+    async fn list_response_includes_stub_count_and_enabled() {
+        let manager = Arc::new(ImposterManager::new());
+        let config = serde_json::from_value(serde_json::json!({
+            "port": 19770, "protocol": "http",
+            "stubs": [
+                {"predicates": [], "responses": [{"is": {"statusCode": 200}}]},
+                {"predicates": [], "responses": [{"is": {"statusCode": 201}}]}
+            ]
+        }))
+        .expect("config");
+        manager.create_imposter(config).await.expect("create");
+
+        let resp = handle_list(Arc::clone(&manager), None, "http://localhost:2525").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        let entry = &json["imposters"][0];
+        assert_eq!(
+            entry["stubCount"], 2,
+            "the list payload must carry the stub count: {entry}"
+        );
+        assert_eq!(entry["enabled"], true);
+
+        // Boundary: a stubless imposter reports 0, not a missing field.
+        let empty = serde_json::from_value(serde_json::json!({
+            "port": 19771, "protocol": "http", "stubs": []
+        }))
+        .expect("config");
+        manager.create_imposter(empty).await.expect("create");
+        let resp = handle_list(Arc::clone(&manager), None, "http://localhost:2525").await;
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        let stubless = json["imposters"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|i| i["port"] == 19771)
+            .expect("stubless imposter listed");
+        assert_eq!(stubless["stubCount"], 0);
         manager.delete_all().await;
     }
 }

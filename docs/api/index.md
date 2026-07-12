@@ -67,13 +67,17 @@ List all imposters.
       "port": 4545,
       "protocol": "http",
       "name": "User Service",
-      "numberOfRequests": 42
+      "numberOfRequests": 42,
+      "stubCount": 3,
+      "enabled": true
     },
     {
       "port": 4546,
       "protocol": "https",
       "name": "Payment Service",
-      "numberOfRequests": 15
+      "numberOfRequests": 15,
+      "stubCount": 1,
+      "enabled": true
     }
   ]
 }
