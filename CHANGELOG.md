@@ -54,6 +54,12 @@ record.
   `create_http_client` called `.expect(...)` on `with_native_roots()`, so running in a minimal or
   distroless image without `ca-certificates` aborted the process; it now returns the error so the
   server fails with a diagnostic instead of a panic.
+- **`proxyOnce` no longer wedges when a client disconnects mid-proxy.** The pending claim taken when
+  a request begins forwarding was only cleared once the response was recorded, so a client that
+  disconnected before the upstream responded left the request signature stuck "pending" —
+  subsequent matching requests got neither a proxy nor a recorded reply until a later completed
+  request happened to self-heal it. The claim is now released if the forward is cancelled before it
+  records.
 - **A panic in the Redis flow-state backend no longer cascades into a repeating-panic storm.** Each
   pooled connection is a `Mutex<Connection>` that was accessed with `.lock().unwrap()`; one panic
   while a lock was held poisoned that mutex, so every later access panicked too, and the pool never
