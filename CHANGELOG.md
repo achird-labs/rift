@@ -13,6 +13,13 @@ record.
 
 ### Fixed
 
+- **`rift lint --fix` no longer corrupts valid multi-value header arrays.** The fixer rewrote every
+  array-valued response header into a single comma-joined string and silently dropped any non-string
+  element, so a valid `"Set-Cookie": ["a=1", "b=2"]` (a legitimate multi-value header since #238)
+  was clobbered into one header with different runtime semantics — and a fully valid file could be
+  rewritten just because a *different* file in the run had errors. `--fix` now leaves string-only
+  arrays untouched and, for an array that genuinely contains a non-string element, stringifies the
+  offending elements in place (preserving the array) instead of joining and dropping.
 - **The TUI no longer panics on imposter names or paths containing multibyte UTF-8.** Several
   truncation sites guarded on byte length but sliced at a byte index, so a name/scenario/recorded
   path with multibyte characters (e.g. `日本語サービス` from imported JSON or proxy recordings)
