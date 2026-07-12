@@ -468,7 +468,18 @@ impl ImposterManager {
             imposters.insert(port, Arc::clone(&imposter));
         }
 
-        self.persist_imposter(&imposter);
+        // Persist synchronously and surface the result: a create that can't be durably recorded
+        // must fail loudly rather than return a success that vanishes on restart (issue #563).
+        // On failure roll back the insert and stop the listener so `Err` keeps meaning "not
+        // running" for every caller (create_for_apply / replace_imposter rely on that).
+        if let Err(e) = self.persist_imposter_checked(&imposter).await {
+            self.imposters.write().remove(&port);
+            // A write that failed partway (e.g. ENOSPC) can leave a truncated {port}.json; drop it
+            // so a later restart doesn't try to load a corrupt file for a create that never took.
+            self.remove_persisted_imposter(port);
+            let _ = shutdown_tx.send(());
+            return Err(e);
+        }
 
         Ok(port)
     }
@@ -923,35 +934,6 @@ impl ImposterManager {
         })
     }
 
-    /// Persist an imposter's current config to datadir (if configured).
-    /// Fire-and-forget: write failures are logged but not propagated.
-    /// Used by create_imposter where the imposter is already running and
-    /// a persistence failure should not roll back the in-memory state.
-    fn persist_imposter(&self, imposter: &Imposter) {
-        let Some(ref datadir) = self.datadir else {
-            return;
-        };
-        let Some(port) = imposter.config.port else {
-            return;
-        };
-        let mut snapshot = imposter.config.clone();
-        snapshot.stubs = imposter.get_stubs();
-        let path = datadir.join(format!("{port}.json"));
-        tokio::spawn(async move {
-            match serde_json::to_string_pretty(&snapshot) {
-                Ok(json) => {
-                    if let Err(e) = tokio::fs::write(&path, json).await {
-                        error!("Failed to persist imposter {} to {:?}: {}", port, path, e);
-                    }
-                }
-                Err(e) => error!(
-                    "Failed to serialize imposter {} for persistence: {}",
-                    port, e
-                ),
-            }
-        });
-    }
-
     /// Remove an imposter's file from datadir (if configured).
     fn remove_persisted_imposter(&self, port: u16) {
         let Some(ref datadir) = self.datadir else {
@@ -1104,13 +1086,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_stub_returns_persist_error_on_write_failure() {
-        // Point the datadir at a path that cannot be written (a file, not a dir).
-        // The write will fail, and add_stub must propagate ImposterError::PersistError.
+        // Create must succeed first (issue #563 made create persist synchronously), so use a
+        // writable datadir, then remove it so the *subsequent* add_stub write fails and must
+        // propagate ImposterError::PersistError.
         let fake_dir = tempfile::tempdir().expect("tempdir");
-        // Use a datadir sub-path that was never created, so fs::write fails.
-        let nonexistent_datadir = fake_dir.path().join("does_not_exist_subdir");
+        let datadir = fake_dir.path().join("datadir");
+        std::fs::create_dir(&datadir).expect("mk datadir");
 
-        let manager = ImposterManager::with_datadir(Some(nonexistent_datadir));
+        let manager = ImposterManager::with_datadir(Some(datadir.clone()));
         let config: ImposterConfig = serde_json::from_value(serde_json::json!({
             "protocol": "http",
             "port": 19600,
@@ -1121,7 +1104,9 @@ mod tests {
         manager
             .create_imposter(config)
             .await
-            .expect("create should succeed in memory");
+            .expect("create should succeed with a writable datadir");
+
+        std::fs::remove_dir_all(&datadir).expect("break the datadir");
 
         let stub: Stub = serde_json::from_value(serde_json::json!({
             "predicates": [],
@@ -1136,6 +1121,55 @@ mod tests {
         );
 
         manager.delete_imposter(19600).await.unwrap();
+    }
+
+    // Issue #563: create-time persistence must surface as an error and roll back the imposter,
+    // not silently succeed and vanish on restart (the fire-and-forget bug).
+    #[tokio::test]
+    async fn create_returns_persist_error_on_unwritable_datadir() {
+        let fake_dir = tempfile::tempdir().expect("tempdir");
+        let nonexistent_datadir = fake_dir.path().join("does_not_exist_subdir");
+        let manager = ImposterManager::with_datadir(Some(nonexistent_datadir));
+
+        let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "port": 19611,
+            "stubs": []
+        }))
+        .unwrap();
+
+        let result = manager.create_imposter(config).await;
+        assert!(
+            matches!(result, Err(ImposterError::PersistError(_))),
+            "create must surface PersistError when the datadir is not writable, got: {result:?}"
+        );
+        // Rolled back: the imposter must not linger in the map, and its port must be free again.
+        assert!(
+            manager.get_imposter(19611).is_err(),
+            "a create that failed to persist must not leave a running imposter"
+        );
+        assert_eq!(manager.count(), 0, "the failed create must be rolled back");
+    }
+
+    #[tokio::test]
+    async fn create_persists_file_synchronously() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "port": 19612,
+            "stubs": []
+        }))
+        .unwrap();
+
+        manager.create_imposter(config).await.expect("create");
+        // No sleep: create now awaits the persist, so the file exists the moment create returns.
+        assert!(
+            dir.path().join("19612.json").exists(),
+            "create must have written the imposter file before returning"
+        );
+
+        manager.delete_imposter(19612).await.unwrap();
     }
 
     // =========================================================================
@@ -1585,6 +1619,33 @@ mod tests {
         manager.delete_all().await;
     }
 
+    // A create-time persist failure during apply_config lands in `failed` with no phantom entry in
+    // `created` — the create rollback (issue #563) keeps create_for_apply honest under the new
+    // synchronous-persist contract.
+    #[tokio::test]
+    async fn apply_config_create_persist_failure_reports_failed_not_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let datadir = dir.path().join("datadir");
+        std::fs::create_dir(&datadir).expect("mk datadir");
+        let manager = ImposterManager::with_datadir(Some(datadir.clone()));
+        std::fs::remove_dir_all(&datadir).expect("break the datadir");
+
+        let cfg = imposter_cfg(json!({"protocol": "http", "port": 19454, "stubs": []}));
+        let report = manager.apply_config(vec![cfg]).await.expect("apply");
+        assert!(
+            report.created.is_empty(),
+            "a create that failed to persist must not appear as created: {:?}",
+            report.created
+        );
+        assert!(
+            matches!(report.failed[0], (19454, ImposterError::PersistError(_))),
+            "got: {:?}",
+            report.failed
+        );
+        assert!(manager.get_imposter(19454).is_err(), "must be rolled back");
+        assert_eq!(manager.count(), 0);
+    }
+
     // A replace whose recreate fails after teardown is honestly reported: the port lands in
     // both `deleted` and `failed`, and a Deleted event fires so listeners don't track a
     // phantom imposter.
@@ -1642,14 +1703,19 @@ mod tests {
     #[tokio::test]
     async fn apply_config_patch_persist_failure_lands_in_failed() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let manager = ImposterManager::with_datadir(Some(dir.path().join("does_not_exist_subdir")));
+        let datadir = dir.path().join("datadir");
+        std::fs::create_dir(&datadir).expect("mk datadir");
+        let manager = ImposterManager::with_datadir(Some(datadir.clone()));
         manager
             .create_imposter(imposter_cfg(json!({
                 "protocol": "http", "port": 19453,
                 "stubs": [stub_json("a"), stub_json("b"), stub_json("c")]
             })))
             .await
-            .expect("create succeeds in memory");
+            .expect("create succeeds with a writable datadir");
+        // Break the datadir so the apply_config patch's persist fails (issue #173), while the
+        // in-memory patch still stands.
+        std::fs::remove_dir_all(&datadir).expect("break the datadir");
 
         let patched = imposter_cfg(json!({
             "protocol": "http", "port": 19453,
@@ -1994,6 +2060,52 @@ mod tests {
         }
     }
 
+    // Issue #559: under concurrency, a mixed-type response array must never fall through to a
+    // bogus `x-rift-no-match` 200. The old peek-classify-then-advance split let a concurrent
+    // request move the cursor between the peek and the advance, so a request that classified index
+    // 0 (`is`) advanced from index 1 (`proxy`), got a Proxy it wasn't handling, and served an empty
+    // no-match 200. With single-advance dispatch every request serves either the `is` or a proxy
+    // attempt — never the no-match marker.
+    #[tokio::test]
+    async fn concurrent_mixed_array_never_serves_bogus_no_match() {
+        let manager = ImposterManager::new();
+        manager
+            .create_imposter(imposter_cfg(json!({
+                "protocol": "http", "port": 19560,
+                "stubs": [{
+                    "predicates": [{"equals": {"path": "/m"}}],
+                    "responses": [
+                        {"is": {"statusCode": 200, "body": "OK"}},
+                        {"proxy": {"to": "http://127.0.0.1:1", "mode": "proxyOnce"}}
+                    ]
+                }]
+            })))
+            .await
+            .expect("create");
+
+        let mut handles = Vec::new();
+        for _ in 0..100 {
+            handles.push(tokio::spawn(async {
+                let resp = reqwest::get("http://127.0.0.1:19560/m")
+                    .await
+                    .expect("request");
+                resp.headers().contains_key("x-rift-no-match")
+            }));
+        }
+        let mut bogus = 0;
+        for h in handles {
+            if h.await.expect("join") {
+                bogus += 1;
+            }
+        }
+        assert_eq!(
+            bogus, 0,
+            "no concurrent request may fall through to a bogus x-rift-no-match 200 (issue #559)"
+        );
+
+        manager.delete_all().await;
+    }
+
     // =========================================================================
     // Issue #313: pluggable ResponseSequencer
     // =========================================================================
@@ -2127,10 +2239,14 @@ mod tests {
                 nexts.iter().all(|(_, s, ..)| *s == slot),
                 "slot token stable across requests"
             );
+            // Issue #559: response-type dispatch advances the cycler exactly once and dispatches on
+            // the returned response — it no longer peeks to classify and then advances separately,
+            // which is what created the TOCTOU. So the request path consults the sequencer only via
+            // `next` (recorded above), never `peek`.
             let peeks = recorder.peeks.lock().clone();
             assert!(
-                !peeks.is_empty() && peeks.iter().all(|(_, s, ..)| *s == slot),
-                "response-type dispatch peeks route through the sequencer with the same slot"
+                peeks.is_empty(),
+                "dispatch must not peek the cycler — it advances once and dispatches on the result"
             );
 
             manager.delete_all().await;

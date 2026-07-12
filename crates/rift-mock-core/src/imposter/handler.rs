@@ -5,9 +5,12 @@
 
 use super::core::Imposter;
 use super::predicates::parse_query_string;
-use super::response::apply_decorate_bounded;
+use super::response::{
+    apply_decorate_bounded, execute_stub_response_with_rift, get_rift_script_config,
+};
 use super::types::{
     DebugMatchResult, DebugRequest, DebugResponse, ProxyResponse, RecordedRequest, ResponseMode,
+    StubResponse,
 };
 use crate::behaviors::{
     CsvCache, RequestContext, apply_copy_behaviors, apply_lookup_behaviors, apply_shell_transform,
@@ -399,16 +402,28 @@ async fn handle_request_inner(
             return Ok(backend_error_response(&e));
         }
 
-        // Check if this is a proxy response
-        let proxy_config = match imposter.get_proxy_response(&stub_state) {
-            Ok(config) => config,
+        // Advance the shared response cycler exactly ONCE for this matched request and dispatch on
+        // the returned response. Previously each response type was classified by a non-advancing
+        // peek and then advanced through a separate cycler call, so a concurrent request could move
+        // the cursor between the peek and the advance and serve the wrong branch — or a bogus empty
+        // `x-rift-no-match` 200 (issue #559). A consequence of advancing once up front: the cursor
+        // now advances even when proxy/inject/script handling fails (a shared atomic cursor cannot
+        // be safely un-advanced under concurrency), whereas before a failed handling left the
+        // cursor for the next request to retry.
+        let response: Option<&StubResponse> = match imposter.next_stub_response(&stub_state) {
+            Ok(r) => r,
             Err(e) => return Ok(backend_error_response(&e)),
         };
-        if let Some(proxy_config) = proxy_config {
+
+        // Check if this is a proxy response
+        if let Some(StubResponse::Proxy {
+            proxy: proxy_config,
+        }) = response
+        {
             debug!("Handling proxy request to {}", proxy_config.to);
             match imposter
                 .handle_proxy_request(
-                    &proxy_config,
+                    proxy_config,
                     method_str,
                     &uri,
                     &headers_clone,
@@ -417,11 +432,6 @@ async fn handle_request_inner(
                 .await
             {
                 Ok((status, response_headers, body, latency)) => {
-                    // Advance the cycler for this proxy response
-                    if let Err(e) = imposter.advance_cycler_for_proxy(&stub_state) {
-                        return Ok(backend_error_response(&e));
-                    }
-
                     let mut response = Response::builder().status(status);
 
                     for (k, v) in &response_headers {
@@ -459,12 +469,7 @@ async fn handle_request_inner(
 
         // Check if this is an inject response (JavaScript function)
         #[cfg(feature = "javascript")]
-        let inject_fn = match imposter.get_inject_response(&stub_state) {
-            Ok(inject) => inject,
-            Err(e) => return Ok(backend_error_response(&e)),
-        };
-        #[cfg(feature = "javascript")]
-        if let Some(inject_fn) = inject_fn {
+        if let Some(StubResponse::Inject { inject: inject_fn }) = response {
             debug!("Handling inject response");
 
             // Build request for inject function
@@ -477,7 +482,7 @@ async fn handle_request_inner(
             };
 
             match execute_mountebank_inject_bounded(
-                inject_fn,
+                inject_fn.clone(),
                 mb_request,
                 imposter.script_state_key(),
                 stub_state.stub.id.clone(),
@@ -486,11 +491,6 @@ async fn handle_request_inner(
             .await
             {
                 Ok(inject_response) => {
-                    // Advance the cycler for this inject response
-                    if let Err(e) = imposter.advance_cycler_for_inject(&stub_state) {
-                        return Ok(backend_error_response(&e));
-                    }
-
                     let mut response = Response::builder().status(inject_response.status_code);
 
                     for (k, v) in &inject_response.headers {
@@ -537,11 +537,7 @@ async fn handle_request_inner(
         }
 
         // Check if this is a RiftScript response (_rift.script)
-        let script_config = match imposter.get_rift_script_response(&stub_state) {
-            Ok(config) => config,
-            Err(e) => return Ok(backend_error_response(&e)),
-        };
-        if let Some(script_config) = script_config {
+        if let Some(script_config) = response.and_then(get_rift_script_config) {
             // `code` is populated by the config-time resolve-scripts pass (issue #356), which
             // runs before an imposter carrying `file:`/`ref:` scripts is ever created. A `None`
             // here means that pass was skipped (e.g. a stub added through a sub-resource
@@ -669,10 +665,6 @@ async fn handle_request_inner(
                     headers,
                     ..
                 }) => {
-                    if let Err(e) = imposter.advance_cycler_for_rift_script(&stub_state) {
-                        return Ok(backend_error_response(&e));
-                    }
-
                     let mut response = Response::builder().status(status);
                     for (k, v) in &headers {
                         response = response.header(k, v);
@@ -695,10 +687,6 @@ async fn handle_request_inner(
                 Ok(FaultDecision::Latency { duration_ms, .. }) => {
                     // Apply latency then return 200 OK
                     tokio::time::sleep(Duration::from_millis(duration_ms)).await;
-                    if let Err(e) = imposter.advance_cycler_for_rift_script(&stub_state) {
-                        return Ok(backend_error_response(&e));
-                    }
-
                     let mut headers = vec![
                         ("x-rift-imposter".to_string(), "true".to_string()),
                         ("x-rift-script".to_string(), engine.clone()),
@@ -715,10 +703,6 @@ async fn handle_request_inner(
                 }
                 Ok(FaultDecision::None) => {
                     // Script says no fault - return 200 OK
-                    if let Err(e) = imposter.advance_cycler_for_rift_script(&stub_state) {
-                        return Ok(backend_error_response(&e));
-                    }
-
                     let mut headers = vec![
                         ("x-rift-imposter".to_string(), "true".to_string()),
                         ("x-rift-script".to_string(), engine.clone()),
@@ -738,10 +722,6 @@ async fn handle_request_inner(
                     // `handle_fault_response`) — attach the parsed TcpFaultKind as a response
                     // extension; the serve loop's FaultIo aborts the connection before this
                     // carrier response is ever sent, so its status/body are never observed.
-                    if let Err(e) = imposter.advance_cycler_for_rift_script(&stub_state) {
-                        return Ok(backend_error_response(&e));
-                    }
-
                     let mut headers = vec![
                         ("x-rift-imposter".to_string(), "true".to_string()),
                         ("x-rift-script".to_string(), engine.clone()),
@@ -797,10 +777,8 @@ async fn handle_request_inner(
             rift_ext,
             response_mode,
             is_fault,
-        )) = match imposter.execute_stub_with_rift(&stub_state) {
-            Ok(executed) => executed,
-            Err(e) => return Ok(backend_error_response(&e)),
-        } {
+        )) = response.and_then(execute_stub_response_with_rift)
+        {
             // Handle faults - simulate connection errors
             if is_fault {
                 return handle_fault_response(&body);

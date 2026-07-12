@@ -165,8 +165,11 @@ pub async fn forward_with_recording(
     let signature =
         RequestSignature::new(method.as_str(), uri.path(), uri.query(), signature_headers);
 
-    // Check if we should proxy or replay
-    if !recording_store.should_proxy(&signature) {
+    // Check if we should proxy or replay. `should_proxy` returning true means we took the
+    // proxyOnce pending claim; guard it so a forward cancelled before record() (client disconnect)
+    // releases the claim instead of wedging the signature as permanently pending (issue #555).
+    let claimed = recording_store.should_proxy(&signature);
+    if !claimed {
         // Return recorded response (proxyOnce mode with existing recording)
         if let Some(recorded) = recording_store.get_recorded(&signature) {
             debug!(
@@ -197,7 +200,12 @@ pub async fn forward_with_recording(
         }
     }
 
-    // Forward request and record response
+    // Forward request and record response. Only proxyOnce takes a pending claim (other modes'
+    // `should_proxy` returns true without claiming), so arm the guard only there; it releases the
+    // claim if this future is dropped (cancelled) before record() runs below.
+    let claim_guard = (claimed && recording_store.mode() == ProxyMode::ProxyOnce)
+        .then(|| PendingClaimGuard::new(recording_store, signature.clone()));
+
     let start = std::time::Instant::now();
     let response = forward_request_with_body(
         http_client,
@@ -239,6 +247,11 @@ pub async fn forward_with_recording(
     };
 
     recording_store.record(signature, recorded_response);
+    // record() cleared the claim; disarm so the guard's drop doesn't touch a signature a
+    // subsequent proxyOnce cycle may have re-claimed.
+    if let Some(guard) = claim_guard {
+        guard.disarm();
+    }
     debug!(
         "Recorded response for {} {} (status: {}, latency: {}ms)",
         method,
@@ -254,9 +267,74 @@ pub async fn forward_with_recording(
     response.into_boxed()
 }
 
+/// Releases a `proxyOnce` pending claim on drop unless disarmed. `should_proxy` takes the claim
+/// but only `record()` clears it, so a forward that is cancelled (client disconnect drops the
+/// task) between the two would wedge the signature as permanently pending. Arming this guard for
+/// the duration of the forward, then disarming it once `record()` has cleared the claim, releases
+/// the claim on the cancel/early-return path without double-releasing on the happy path (issue
+/// #555). A pending signature is exclusively held, so releasing our own abandoned claim never
+/// touches another request's.
+struct PendingClaimGuard<'a> {
+    store: &'a RecordingStore,
+    signature: RequestSignature,
+    armed: bool,
+}
+
+impl<'a> PendingClaimGuard<'a> {
+    fn new(store: &'a RecordingStore, signature: RequestSignature) -> Self {
+        Self {
+            store,
+            signature,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingClaimGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.store.release_pending(&self.signature);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    // Issue #555: the claim guard releases a pending proxyOnce claim when the forward is dropped
+    // (task cancelled) before record(), but a guard disarmed after a successful record() must NOT
+    // touch the pending set (record() already cleared it).
+    #[test]
+    fn claim_guard_releases_on_drop_unless_disarmed() {
+        let store = Arc::new(RecordingStore::new(ProxyMode::ProxyOnce));
+        let sig = RequestSignature::new("GET", "/guarded", None, &[]);
+
+        // Armed guard dropped without disarm → claim released, proxying re-opens.
+        assert!(store.should_proxy(&sig), "claim taken");
+        {
+            let _guard = PendingClaimGuard::new(&store, sig.clone());
+        }
+        assert!(
+            store.should_proxy(&sig),
+            "dropping an armed guard releases the abandoned claim"
+        );
+
+        // Disarmed guard drop is a no-op: it must not release a claim record() would own.
+        {
+            let guard = PendingClaimGuard::new(&store, sig.clone());
+            guard.disarm();
+        }
+        assert!(
+            !store.should_proxy(&sig),
+            "a disarmed guard must not release the still-pending claim"
+        );
+    }
 
     #[test]
     fn test_error_response_basic() {
