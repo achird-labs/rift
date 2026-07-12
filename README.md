@@ -170,7 +170,7 @@ await server.close();
 
 ### Features
 - [Fault Injection](https://etacassiopeia.github.io/rift/features/fault-injection) - Chaos engineering
-- [Scripting](https://etacassiopeia.github.io/rift/features/scripting) - Rhai, Lua, JavaScript
+- [Scripting](https://etacassiopeia.github.io/rift/features/scripting) - Rhai, JavaScript
 - [TLS/HTTPS](https://etacassiopeia.github.io/rift/features/tls) - Secure connections
 - [Metrics](https://etacassiopeia.github.io/rift/features/metrics) - Prometheus integration
 - [TUI](https://etacassiopeia.github.io/rift/features/tui) - Interactive terminal interface
@@ -301,6 +301,17 @@ cd tests/benchmark && python3 scripts/bench_direct.py --run-all \
   --rift-bin ../../target/release/rift-http-proxy \
   --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
 ```
+
+---
+
+## Used By
+
+Rift powers HTTP mocking in the following projects:
+
+- **[zio-bdd](https://github.com/EtaCassiopeia/zio-bdd)** — a Gherkin-style BDD testing framework for ZIO
+- **[zio-openfeature](https://github.com/EtaCassiopeia/zio-openfeature)** — a ZIO-native wrapper around the OpenFeature Java SDK
+
+Using Rift somewhere? Open a PR to add it here.
 
 ---
 
