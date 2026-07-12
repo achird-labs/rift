@@ -36,6 +36,11 @@ record.
   saw them as live. It now drops already-expired entries before extending the survivors (and clears
   the flow map if that leaves it empty), matching the Redis backend, where expired keys are simply
   gone and never revived.
+- **Per-key `ctx.state.ttl(key, seconds)` no longer leaks empty flow maps on the in-memory backend.**
+  When a positive TTL was set on a key that had already expired and was the flow's last entry, the
+  branch cleaned up the key but left the now-empty flow map in the store — so repeated calls across
+  many flow ids grew the store without bound. It now drops the empty flow map, matching the sibling
+  delete / `set_ttl` / sweep paths (issue #483).
 - **The proxy no longer panics at startup when the native root certificate store can't be loaded.**
   `create_http_client` called `.expect(...)` on `with_native_roots()`, so running in a minimal or
   distroless image without `ca-certificates` aborted the process; it now returns the error so the
