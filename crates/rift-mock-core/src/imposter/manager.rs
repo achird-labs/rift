@@ -1688,7 +1688,7 @@ mod tests {
         let mut stub_b = stub_json("b");
         stub_b["id"] = json!("dup");
         let config = imposter_cfg(json!({
-            "protocol": "http", "port": 19454, "stubs": [stub_a, stub_b]
+            "protocol": "http", "port": 19455, "stubs": [stub_a, stub_b]
         }));
         let result = manager.apply_config(vec![config]).await;
         assert!(
@@ -3017,12 +3017,25 @@ mod tests {
             }
         }
 
-        async fn upstream(manager: &ImposterManager, port: u16) {
+        /// Create an "UP" upstream on an OS-assigned port; returns the bound port. Auto-assign
+        /// (not a fixed literal) so concurrently-running tests can never share a listener — the
+        /// fixed-port + SO_REUSEPORT collision behind issue #587.
+        async fn upstream(manager: &ImposterManager) -> u16 {
             let cfg = imposter_cfg(json!({
-                "port": port, "protocol": "http",
+                "protocol": "http",
                 "stubs": [{ "responses": [{ "is": { "statusCode": 200, "body": "UP" } }] }]
             }));
-            manager.create_imposter(cfg).await.expect("create upstream");
+            manager.create_imposter(cfg).await.expect("create upstream")
+        }
+
+        /// A port with nothing listening: bind an ephemeral port to learn a free number, then drop
+        /// the listener so a connection there is refused — deterministic, unlike a guessed literal.
+        fn closed_port() -> u16 {
+            std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("bind ephemeral")
+                .local_addr()
+                .expect("local_addr")
+                .port()
         }
 
         // AC7: a shared proxy store is injected into imposters, keyed by port, exercised on the
@@ -3033,26 +3046,18 @@ mod tests {
             let manager = ImposterManager::new()
                 .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
 
-            upstream(&manager, 19560).await;
-            manager
-                .create_imposter(imposter_cfg(json!({
-                    "port": 19561, "protocol": "http",
-                    "stubs": [{ "responses": [{ "proxy": {
-                        "to": "http://127.0.0.1:19560", "mode": "proxyOnce"
-                    }}]}]
-                })))
-                .await
-                .expect("create proxy imposter");
+            let up = upstream(&manager).await;
+            let proxy_port = proxy_imposter(&manager, &format!("http://127.0.0.1:{up}")).await;
 
             // The proxy imposter shares the injected store, not its private default.
-            let imposter = manager.get_imposter(19561).unwrap();
+            let imposter = manager.get_imposter(proxy_port).unwrap();
             assert!(Arc::ptr_eq(
                 &imposter.proxy_store,
                 &(spy.clone() as Arc<dyn ProxyRecordingStore>)
             ));
 
             // Driving the proxy leg fires the shared store's claim, keyed by the imposter port.
-            let body = reqwest::get("http://127.0.0.1:19561/thing")
+            let body = reqwest::get(format!("http://127.0.0.1:{proxy_port}/thing"))
                 .await
                 .expect("request")
                 .text()
@@ -3060,29 +3065,29 @@ mod tests {
                 .expect("body");
             assert_eq!(body, "UP");
             assert!(
-                spy.claims.lock().contains(&19561),
+                spy.claims.lock().contains(&proxy_port),
                 "shared store claimed on the imposter port"
             );
 
             // Deleting the imposter reclaims the shared store's port slice.
-            manager.delete_imposter(19561).await.expect("delete");
+            manager.delete_imposter(proxy_port).await.expect("delete");
             assert!(
-                spy.clears.lock().contains(&19561),
+                spy.clears.lock().contains(&proxy_port),
                 "delete clears the port's saved recordings"
             );
 
             manager.delete_all().await;
         }
 
-        /// Build a proxyOnce imposter on `port` forwarding to `to`, sharing `spy`.
-        async fn proxy_imposter(manager: &ImposterManager, port: u16, to: &str) {
+        /// Build a proxyOnce imposter forwarding to `to` on an OS-assigned port; returns the port.
+        async fn proxy_imposter(manager: &ImposterManager, to: &str) -> u16 {
             manager
                 .create_imposter(imposter_cfg(json!({
-                    "port": port, "protocol": "http",
+                    "protocol": "http",
                     "stubs": [{ "responses": [{ "proxy": { "to": to, "mode": "proxyOnce" } }] }]
                 })))
                 .await
-                .expect("create proxy imposter");
+                .expect("create proxy imposter")
         }
 
         // AC2 end-to-end: a failed upstream call releases the claim through
@@ -3093,11 +3098,12 @@ mod tests {
             let spy = Arc::new(SpyProxyStore::new());
             let manager = ImposterManager::new()
                 .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
-            // Forward to a dead port so the upstream leg always fails.
-            proxy_imposter(&manager, 19571, "http://127.0.0.1:19999").await;
+            // Forward to a closed port so the upstream leg always fails.
+            let dead = closed_port();
+            let proxy_port = proxy_imposter(&manager, &format!("http://127.0.0.1:{dead}")).await;
 
             for _ in 0..2 {
-                let _ = reqwest::get("http://127.0.0.1:19571/wedge").await;
+                let _ = reqwest::get(format!("http://127.0.0.1:{proxy_port}/wedge")).await;
             }
 
             assert_eq!(
@@ -3117,11 +3123,11 @@ mod tests {
             let spy = Arc::new(SpyProxyStore::with_faults(false, true));
             let manager = ImposterManager::new()
                 .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
-            upstream(&manager, 19572).await;
-            proxy_imposter(&manager, 19573, "http://127.0.0.1:19572").await;
+            let up = upstream(&manager).await;
+            let proxy_port = proxy_imposter(&manager, &format!("http://127.0.0.1:{up}")).await;
 
             for _ in 0..2 {
-                let body = reqwest::get("http://127.0.0.1:19573/rec")
+                let body = reqwest::get(format!("http://127.0.0.1:{proxy_port}/rec"))
                     .await
                     .expect("request")
                     .text()
@@ -3146,10 +3152,10 @@ mod tests {
             let spy = Arc::new(SpyProxyStore::with_faults(true, false));
             let manager = ImposterManager::new()
                 .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
-            upstream(&manager, 19574).await;
-            proxy_imposter(&manager, 19575, "http://127.0.0.1:19574").await;
+            let up = upstream(&manager).await;
+            let proxy_port = proxy_imposter(&manager, &format!("http://127.0.0.1:{up}")).await;
 
-            let body = reqwest::get("http://127.0.0.1:19575/degrade")
+            let body = reqwest::get(format!("http://127.0.0.1:{proxy_port}/degrade"))
                 .await
                 .expect("request")
                 .text()
