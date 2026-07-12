@@ -268,6 +268,7 @@ pub async fn handle_list(
                     number_of_requests: i.get_request_count(),
                     stub_count: i.stub_count(),
                     enabled: i.is_enabled(),
+                    record_requests: i.config.record_requests,
                     links: make_imposter_links(base_url, port),
                 })
             })
@@ -1572,6 +1573,48 @@ mod list_tests {
             .find(|i| i["port"] == 19771)
             .expect("stubless imposter listed");
         assert_eq!(stubless["stubCount"], 0);
+        manager.delete_all().await;
+    }
+
+    // Issue #584: the list summary must carry recordRequests so the TUI's recording indicator
+    // reflects real state instead of always deserializing a missing field to false.
+    #[tokio::test]
+    async fn list_response_includes_record_requests() {
+        let manager = Arc::new(ImposterManager::new());
+        let recording = serde_json::from_value(serde_json::json!({
+            "port": 19772, "protocol": "http", "recordRequests": true, "stubs": []
+        }))
+        .expect("config");
+        manager.create_imposter(recording).await.expect("create");
+        let plain = serde_json::from_value(serde_json::json!({
+            "port": 19773, "protocol": "http", "stubs": []
+        }))
+        .expect("config");
+        manager.create_imposter(plain).await.expect("create");
+
+        let resp = handle_list(Arc::clone(&manager), None, "http://localhost:2525").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        let by_port = |port: u64| {
+            json["imposters"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .find(|i| i["port"] == port)
+                .unwrap_or_else(|| panic!("imposter {port} listed"))
+                .clone()
+        };
+        assert_eq!(
+            by_port(19772)["recordRequests"],
+            true,
+            "a recording imposter must report recordRequests: true in the list"
+        );
+        assert_eq!(
+            by_port(19773)["recordRequests"],
+            false,
+            "a non-recording imposter must report recordRequests: false, not a missing field"
+        );
         manager.delete_all().await;
     }
 }

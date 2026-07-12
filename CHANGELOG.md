@@ -13,6 +13,11 @@ record.
 
 ### Fixed
 
+- **The TUI imposter-list recording indicator now reflects real state.** The default
+  `GET /imposters` list summary omitted `recordRequests`, so the TUI (which deserializes a missing
+  field to `false`) always drew the indicator as not-recording regardless of the imposter's actual
+  configuration. The list summary now carries `recordRequests`, sourced from each imposter's config,
+  alongside the existing `stubCount`/`enabled` fields.
 - **Response cycling (`repeat`) no longer serves a stale branch to a zero-latency next request.**
   The per-imposter response cursor advanced with `Relaxed` atomic ordering, so a strictly-sequential
   client that issued its next request with near-zero latency — reached via a different worker thread

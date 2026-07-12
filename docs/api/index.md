@@ -69,7 +69,8 @@ List all imposters.
       "name": "User Service",
       "numberOfRequests": 42,
       "stubCount": 3,
-      "enabled": true
+      "enabled": true,
+      "recordRequests": false
     },
     {
       "port": 4546,
@@ -77,7 +78,8 @@ List all imposters.
       "name": "Payment Service",
       "numberOfRequests": 15,
       "stubCount": 1,
-      "enabled": true
+      "enabled": true,
+      "recordRequests": true
     }
   ]
 }
