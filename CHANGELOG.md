@@ -11,6 +11,16 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **`rift_abi_version()` — a queryable C-ABI contract version for SDK compatibility gating.** The
+  new FFI symbol returns the C-ABI contract version (`uint32_t`, currently `2`), bumped only on a
+  breaking ABI change and never on additive or bugfix releases. SDKs can now gate on the ABI
+  contract they bind against instead of `rift_build_info`'s release/marketing `version`, which reads
+  as the workspace placeholder (`0.1.0`) on locally-built engines and made compatibility floor
+  checks misfire. Adopted behind feature detection: gate on the symbol when present, fall back to
+  probing the symbol set when absent.
+
 ## [0.13.3] - 2026-07-12
 
 ### Fixed

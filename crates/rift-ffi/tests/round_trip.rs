@@ -489,6 +489,14 @@ fn ffi_build_info_reports_version_and_features() {
     }
 }
 
+// Issue #591: rift_abi_version reports the C-ABI *contract* version (currently 2), the value SDKs
+// gate on instead of the marketing version in rift_build_info. It is a pure constant with no
+// handle, so it never fails.
+#[test]
+fn ffi_abi_version_is_two() {
+    assert_eq!(rift_abi_version(), 2);
+}
+
 // AC5: rift_last_error is set on failure, cleared by the next successful call, cleared by reading
 // it, and confined to the calling thread.
 #[test]

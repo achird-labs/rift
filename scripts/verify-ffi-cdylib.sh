@@ -37,6 +37,8 @@ SYMBOLS=(
   rift_scenarios
   rift_set_scenario_state
   rift_reset_scenarios
+  # issue #591: queryable C-ABI contract version for SDK compatibility gating
+  rift_abi_version
 )
 
 # Issue #344: the checked-in C header is the ABI's source of truth — assert it matches a fresh

@@ -1894,6 +1894,18 @@ pub unsafe extern "C" fn rift_apply_config(
     })
 }
 
+/// The C-ABI **contract** version — currently `2` (issue #591). Bumped ONLY on a breaking ABI
+/// change: a symbol removed, a signature changed, or a documented semantic break. Releases that
+/// merely add symbols or fix bugs keep this number — additive symbols are discovered by presence,
+/// not by a version floor. This is the value an SDK gates on: unlike [`rift_build_info`]'s
+/// `version` (the marketing/release string, which reads as the workspace placeholder on local
+/// builds), it tracks the C-ABI itself. SDKs feature-detect this symbol — present → gate on it;
+/// absent → fall back to probing the symbol set.
+#[unsafe(no_mangle)]
+pub extern "C" fn rift_abi_version() -> u32 {
+    2
+}
+
 /// Build identity as a STATIC JSON string — never freed; probe this symbol to detect a v2 library
 /// (issue #343). `{"version":"..","commit":"<sha>|null","builtAt":"<iso8601>|null","features":[..]}`.
 /// `commit`/`builtAt` are `null` unless stamped at build time (issue #344).
