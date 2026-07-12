@@ -22,6 +22,12 @@ record.
   whose body reports what failed and what did apply. (Behavior note: an imposter whose config is
   unchanged now keeps its runtime state — recorded requests, response cycling — instead of being
   torn down and recreated; `DELETE /imposters` first if a full reset is wanted.)
+- **The TUI imposter list refreshes with one request instead of N+1, and no longer mis-renders a
+  transiently-failing imposter as "Disabled / 0 stubs".** Every ~1s refresh listed the imposters and
+  then fetched each one's detail sequentially just to fill in its stub count — 51 serial round-trips
+  per tick with 50 imposters — silently dropping any per-imposter failure. `GET /imposters` now
+  carries `stubCount` per entry (alongside the existing `enabled`), and the TUI renders the list
+  straight from that single response.
 - **Script-pool `queue_depth` / `active_tasks` metrics no longer leak on a timed-out script.** Both
   gauges were incremented per request but only decremented on the success path, so every script that
   hit its execution timeout (the exact case the pool bounds) permanently inflated them — the metrics

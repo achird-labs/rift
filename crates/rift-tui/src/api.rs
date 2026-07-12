@@ -244,18 +244,11 @@ impl ApiClient {
             return self.handle_error(resp).await;
         }
 
+        // The list payload carries stubCount/enabled directly (issue #558) — no per-imposter
+        // detail fetches, so refresh is one request per tick and a transient per-imposter failure
+        // can no longer be silently rendered as "Disabled / 0 stubs".
         let body: ImpostersResponse = resp.json().await?;
-
-        // Enrich with stub counts by fetching each imposter
-        let mut imposters = body.imposters;
-        for imp in &mut imposters {
-            if let Ok(detail) = self.get_imposter(imp.port).await {
-                imp.stub_count = detail.stubs.len();
-                imp.enabled = detail.enabled;
-            }
-        }
-
-        Ok(imposters)
+        Ok(body.imposters)
     }
 
     /// Get details for a specific imposter
@@ -582,6 +575,18 @@ mod tests {
     fn test_api_client_no_trailing_slash() {
         let client = ApiClient::new("http://localhost:2525");
         assert_eq!(client.base_url(), "http://localhost:2525");
+    }
+
+    #[test]
+    fn imposter_summary_parses_list_payload_fields() {
+        // Issue #558 contract: the list response carries stubCount/enabled, so the list view
+        // renders from one request — these fields must deserialize straight from the payload.
+        let json = r#"{"imposters":[{"port":4545,"protocol":"http","numberOfRequests":7,"stubCount":3,"enabled":true}]}"#;
+        let body: ImpostersResponse = serde_json::from_str(json).unwrap();
+        let imp = &body.imposters[0];
+        assert_eq!(imp.stub_count, 3);
+        assert!(imp.enabled);
+        assert_eq!(imp.number_of_requests, 7);
     }
 
     #[test]
