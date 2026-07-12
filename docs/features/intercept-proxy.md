@@ -165,9 +165,12 @@ curl -X POST http://localhost:2525/intercept/rules -d '{
 
 | Verb & path | Effect |
 |:--|:--|
-| `POST /intercept/rules` | Add one rule (object) or many (array) |
+| `POST /intercept/rules` | Add one rule (object) or many (array). Rejected with `429 Too Many Requests` once the store holds 10,000 rules — `DELETE` rules before adding more. |
 | `GET /intercept/rules` | List all rules |
 | `DELETE /intercept/rules` | Remove all rules |
+
+The rule store is capped at 10,000 rules to bound both memory and the per-request match scan; a
+batch `POST` that would exceed the cap is rejected in full (no partial add).
 
 When no rule matches, the request falls through to a default `200` (so an unconfigured host is
 answered rather than hanging). Non-goals: HTTP/2, WebSockets, and chunked request bodies are not

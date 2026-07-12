@@ -1496,13 +1496,13 @@ pub unsafe extern "C" fn rift_intercept_add_rules(
             set_last_error("rift_intercept_add_rules: intercept not started");
             return -1;
         };
-        match parsed {
+        let result = match parsed {
             RuleOrRules::One(rule) => state.rules.add(rule),
-            RuleOrRules::Many(rules) => {
-                for rule in rules {
-                    state.rules.add(rule);
-                }
-            }
+            RuleOrRules::Many(rules) => state.rules.extend(rules),
+        };
+        if let Err(e) = result {
+            set_last_error(format!("rift_intercept_add_rules: {e}"));
+            return -1;
         }
         0
     })

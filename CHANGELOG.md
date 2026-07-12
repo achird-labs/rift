@@ -48,6 +48,11 @@ record.
 
 ### Security
 
+- **The intercept rule store is now capped at 10,000 rules, returning `429 Too Many Requests`.**
+  `POST /intercept/rules` appended to an unbounded `Vec`, so a client could grow it without limit —
+  exhausting memory and linearly slowing every intercepted request's rule-match scan. Additions past
+  the cap are now rejected (a batch that would exceed it is rejected in full), bounding both. The
+  same guard covers the FFI `rift_intercept_add_rules` path.
 - **Admin API request bodies are now capped at 64 MiB, returning `413 Payload Too Large`.**
   `collect_body` previously buffered an entire request body into memory with no limit; since the
   admin plane binds `0.0.0.0` and `--apikey` is optional, an unauthenticated client could OOM the

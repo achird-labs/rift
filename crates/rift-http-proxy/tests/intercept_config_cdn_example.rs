@@ -30,15 +30,17 @@ async fn intercepts_external_config_cdn_without_mitmproxy() {
             .expect("valid predicate");
     let mut headers = HashMap::new();
     headers.insert("content-type".to_string(), "application/json".to_string());
-    rules.add(InterceptRule {
-        host: Some("cdn.example.com".to_string()),
-        predicates: vec![path_predicate],
-        action: InterceptAction::Serve(ServeStub {
-            status_code: 200,
-            headers,
-            body: Some(r#"{"featureX":"ON"}"#.to_string()),
-        }),
-    });
+    rules
+        .add(InterceptRule {
+            host: Some("cdn.example.com".to_string()),
+            predicates: vec![path_predicate],
+            action: InterceptAction::Serve(ServeStub {
+                status_code: 200,
+                headers,
+                body: Some(r#"{"featureX":"ON"}"#.to_string()),
+            }),
+        })
+        .unwrap();
 
     // 3. Start the intercept listener. An embedder would also expose the admin API by building the
     //    admin server `with_intercept(...)`; here we drive the rule store directly.

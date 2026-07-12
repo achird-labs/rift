@@ -172,12 +172,14 @@ fn add_rules_from_bytes(body: &[u8], state: &InterceptState) -> Response<Full<By
     };
     let added = match parsed {
         RuleOrRules::One(rule) => {
-            state.rules.add(rule.clone());
+            if let Err(e) = state.rules.add(rule.clone()) {
+                return error_response(StatusCode::TOO_MANY_REQUESTS, &e.to_string());
+            }
             vec![rule]
         }
         RuleOrRules::Many(rules) => {
-            for rule in &rules {
-                state.rules.add(rule.clone());
+            if let Err(e) = state.rules.extend(rules.clone()) {
+                return error_response(StatusCode::TOO_MANY_REQUESTS, &e.to_string());
             }
             rules
         }
@@ -331,15 +333,18 @@ mod tests {
     #[test]
     fn rules_endpoints_list_and_clear() {
         let state = test_state();
-        state.rules.add(InterceptRule {
-            host: None,
-            predicates: vec![],
-            action: InterceptAction::Serve(ServeStub {
-                status_code: 200,
-                headers: Default::default(),
-                body: None,
-            }),
-        });
+        state
+            .rules
+            .add(InterceptRule {
+                host: None,
+                predicates: vec![],
+                action: InterceptAction::Serve(ServeStub {
+                    status_code: 200,
+                    headers: Default::default(),
+                    body: None,
+                }),
+            })
+            .unwrap();
 
         let list_resp = handle_list_rules(&state);
         assert_eq!(list_resp.status(), StatusCode::OK);
@@ -376,6 +381,45 @@ mod tests {
         let bad = add_rules_from_bytes(b"{not json", &state);
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
         assert_eq!(state.rules.len(), 1, "a rejected body must not add a rule");
+    }
+
+    // Issue #554: once the store is at MAX_RULES, POST /intercept/rules is rejected with 429 for
+    // both the single-rule and the batch shape, and stores nothing.
+    #[test]
+    fn add_rules_from_bytes_rejects_past_capacity_with_429() {
+        use crate::intercept_rules::MAX_RULES;
+        let state = test_state();
+        let filler = InterceptRule {
+            host: None,
+            predicates: vec![],
+            action: InterceptAction::Serve(ServeStub {
+                status_code: 200,
+                headers: Default::default(),
+                body: None,
+            }),
+        };
+        state
+            .rules
+            .extend(vec![filler; MAX_RULES])
+            .expect("fill to the cap");
+
+        let one = br#"{"action":{"serve":{"statusCode":200}}}"#;
+        let resp = add_rules_from_bytes(one, &state);
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            state.rules.len(),
+            MAX_RULES,
+            "a rejected add stores nothing"
+        );
+
+        let many = br#"[{"action":{"serve":{"statusCode":200}}}]"#;
+        let resp = add_rules_from_bytes(many, &state);
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            state.rules.len(),
+            MAX_RULES,
+            "a rejected batch stores nothing"
+        );
     }
 
     // AC1/AC4: a rule created via the admin handler actually drives interception end-to-end.

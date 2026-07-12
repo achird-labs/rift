@@ -667,15 +667,17 @@ mod tests {
     #[tokio::test]
     async fn serve_rule_returns_inline_stub() {
         let rules = InterceptRules::new();
-        rules.add(InterceptRule {
-            host: Some("cdn.example.com".to_string()),
-            predicates: vec![],
-            action: InterceptAction::Serve(ServeStub {
-                status_code: 418,
-                headers: HashMap::from([("x-rift".to_string(), "1".to_string())]),
-                body: Some("brewed".to_string()),
-            }),
-        });
+        rules
+            .add(InterceptRule {
+                host: Some("cdn.example.com".to_string()),
+                predicates: vec![],
+                action: InterceptAction::Serve(ServeStub {
+                    status_code: 418,
+                    headers: HashMap::from([("x-rift".to_string(), "1".to_string())]),
+                    body: Some("brewed".to_string()),
+                }),
+            })
+            .unwrap();
         let (listener, ca_pem) = start_listener(rules).await;
         let proxy_url = format!("http://{}", listener.local_addr());
         let client = trusting_client(&proxy_url, &ca_pem);
@@ -713,13 +715,15 @@ mod tests {
         });
 
         let rules = InterceptRules::new();
-        rules.add(InterceptRule {
-            host: None,
-            predicates: vec![],
-            action: InterceptAction::Forward(ForwardTarget {
-                port: imposter_port,
-            }),
-        });
+        rules
+            .add(InterceptRule {
+                host: None,
+                predicates: vec![],
+                action: InterceptAction::Forward(ForwardTarget {
+                    port: imposter_port,
+                }),
+            })
+            .unwrap();
         let (listener, ca_pem) = start_listener(rules).await;
         let proxy_url = format!("http://{}", listener.local_addr());
         let client = trusting_client(&proxy_url, &ca_pem);
@@ -763,11 +767,13 @@ mod tests {
         drop(closed);
 
         let rules = InterceptRules::new();
-        rules.add(InterceptRule {
-            host: None,
-            predicates: vec![],
-            action: InterceptAction::Forward(ForwardTarget { port: closed_port }),
-        });
+        rules
+            .add(InterceptRule {
+                host: None,
+                predicates: vec![],
+                action: InterceptAction::Forward(ForwardTarget { port: closed_port }),
+            })
+            .unwrap();
         let (listener, ca_pem) = start_listener(rules).await;
         let proxy_url = format!("http://{}", listener.local_addr());
         let client = trusting_client(&proxy_url, &ca_pem);

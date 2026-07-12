@@ -59,6 +59,19 @@ pub struct ForwardTarget {
     pub port: u16,
 }
 
+/// Maximum number of intercept rules the store retains. `POST /intercept/rules` is unauthenticated
+/// on the intercept admin surface, so an uncapped `Vec` both grows without bound and linearly slows
+/// every intercepted request's `match_request` scan; the cap bounds both (issue #554).
+pub const MAX_RULES: usize = 10_000;
+
+/// Returned by [`InterceptRules::add`] / [`InterceptRules::extend`] when the store already holds
+/// [`MAX_RULES`] rules. The admin handler maps this to `429 Too Many Requests`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("intercept rule store is at capacity ({limit} rules); delete rules before adding more")]
+pub struct RulesAtCapacity {
+    pub limit: usize,
+}
+
 /// Shared, mutable rule store. Cheap to clone (an `Arc` inside) so the listener and the admin API
 /// can each hold a handle to the same rules.
 #[derive(Debug, Clone, Default)]
@@ -69,9 +82,26 @@ impl InterceptRules {
         Self::default()
     }
 
-    /// Append a rule.
-    pub fn add(&self, rule: InterceptRule) {
-        self.write().push(rule);
+    /// Append a rule, rejecting it once the store is at [`MAX_RULES`] (issue #554). The check and
+    /// the push happen under the same write lock so the cap holds under concurrent adds.
+    pub fn add(&self, rule: InterceptRule) -> Result<(), RulesAtCapacity> {
+        let mut rules = self.write();
+        if rules.len() >= MAX_RULES {
+            return Err(RulesAtCapacity { limit: MAX_RULES });
+        }
+        rules.push(rule);
+        Ok(())
+    }
+
+    /// Append many rules atomically: either the whole batch fits under [`MAX_RULES`] and is added,
+    /// or none of it is and the capacity error is returned (no partial batch).
+    pub fn extend(&self, new_rules: Vec<InterceptRule>) -> Result<(), RulesAtCapacity> {
+        let mut rules = self.write();
+        if rules.len() + new_rules.len() > MAX_RULES {
+            return Err(RulesAtCapacity { limit: MAX_RULES });
+        }
+        rules.extend(new_rules);
+        Ok(())
     }
 
     /// A snapshot clone of all current rules, in insertion order.
@@ -181,7 +211,7 @@ mod tests {
                 body: Some("hi".to_string()),
             }),
         };
-        rules.add(rule.clone());
+        rules.add(rule.clone()).unwrap();
         assert_eq!(rules.len(), 1);
         assert!(!rules.is_empty());
         assert_eq!(rules.list(), vec![rule]);
@@ -194,11 +224,13 @@ mod tests {
     #[test]
     fn predicate_narrows_match() {
         let rules = InterceptRules::new();
-        rules.add(InterceptRule {
-            host: None,
-            predicates: vec![predicate_path_equals("/only-this")],
-            action: InterceptAction::Forward(ForwardTarget { port: 4545 }),
-        });
+        rules
+            .add(InterceptRule {
+                host: None,
+                predicates: vec![predicate_path_equals("/only-this")],
+                action: InterceptAction::Forward(ForwardTarget { port: 4545 }),
+            })
+            .unwrap();
 
         let headers = HashMap::new();
         let matched =
@@ -216,11 +248,13 @@ mod tests {
     #[test]
     fn host_filter_is_case_insensitive_and_none_matches_any() {
         let rules = InterceptRules::new();
-        rules.add(InterceptRule {
-            host: Some("CDN.example.com".to_string()),
-            predicates: vec![],
-            action: InterceptAction::Forward(ForwardTarget { port: 1 }),
-        });
+        rules
+            .add(InterceptRule {
+                host: Some("CDN.example.com".to_string()),
+                predicates: vec![],
+                action: InterceptAction::Forward(ForwardTarget { port: 1 }),
+            })
+            .unwrap();
         let headers = HashMap::new();
         assert!(
             rules
@@ -232,5 +266,57 @@ mod tests {
                 .match_request("other.example.com", "GET", "/", None, &headers, None)
                 .is_none()
         );
+    }
+
+    fn any_rule() -> InterceptRule {
+        InterceptRule {
+            host: None,
+            predicates: vec![],
+            action: InterceptAction::Forward(ForwardTarget { port: 1 }),
+        }
+    }
+
+    // Issue #554: the rule store must not grow without bound — repeated adds are rejected once the
+    // cap is reached, so per-request match latency stays bounded too.
+    #[test]
+    fn add_rejects_at_capacity() {
+        let rules = InterceptRules::new();
+        for _ in 0..MAX_RULES {
+            rules.add(any_rule()).expect("under the cap");
+        }
+        assert_eq!(rules.len(), MAX_RULES);
+        assert_eq!(
+            rules.add(any_rule()),
+            Err(RulesAtCapacity { limit: MAX_RULES }),
+            "adding past the cap is rejected"
+        );
+        assert_eq!(rules.len(), MAX_RULES, "the rejected rule was not stored");
+    }
+
+    #[test]
+    fn extend_at_capacity_is_atomic() {
+        let rules = InterceptRules::new();
+        rules
+            .extend(vec![any_rule(); MAX_RULES - 1])
+            .expect("fits under the cap");
+        assert_eq!(rules.len(), MAX_RULES - 1);
+
+        // A batch of 2 would exceed the cap by 1 — the whole batch is rejected, none added.
+        assert_eq!(
+            rules.extend(vec![any_rule(); 2]),
+            Err(RulesAtCapacity { limit: MAX_RULES }),
+            "a batch that would exceed the cap is rejected atomically"
+        );
+        assert_eq!(
+            rules.len(),
+            MAX_RULES - 1,
+            "no rule from the batch was added"
+        );
+
+        // Boundary: a batch that lands *exactly* at the cap fits (only `>` rejects).
+        rules
+            .extend(vec![any_rule(); 1])
+            .expect("filling exactly to the cap is allowed");
+        assert_eq!(rules.len(), MAX_RULES);
     }
 }
