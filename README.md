@@ -146,6 +146,32 @@ const server = await rift.create({ port: 2525 });
 await server.close();
 ```
 
+### Java / JVM
+
+For JVM projects, use the official [rift-java](https://github.com/EtaCassiopeia/rift-java) SDK.
+It runs the engine three ways — embedded in-process (Panama FFM, no Docker), connected to any
+running admin endpoint, or as a managed spawned binary — with a fluent DSL plus JUnit 5, Spring,
+and Testcontainers integrations. Available on Maven Central under `io.github.etacassiopeia`:
+
+```xml
+<dependency>
+  <groupId>io.github.etacassiopeia</groupId>
+  <artifactId>rift-java-core</artifactId>
+  <scope>test</scope>
+</dependency>
+```
+
+```java
+try (Rift rift = Rift.embedded()) {                  // or Rift.connect(uri) / Rift.spawn()
+    Imposter users = rift.create(
+        imposter("users").stub(onGet("/api/users/1").willReturn(okJson("{\"id\":1}"))));
+    // point your SUT at users.uri(), then assert:
+    users.verify(onGet("/api/users/1"), times(1));
+}
+```
+
+See the [rift-java docs](https://etacassiopeia.github.io/rift-java/) for the full feature surface.
+
 ---
 
 ## Documentation
@@ -154,6 +180,7 @@ await server.close();
 - [Installation](https://etacassiopeia.github.io/rift/getting-started/) - Docker, binary, build from source
 - [Quick Start](https://etacassiopeia.github.io/rift/getting-started/quickstart) - Create your first imposter
 - [Node.js Integration](https://etacassiopeia.github.io/rift/getting-started/nodejs/) - npm package for Node.js
+- [Java / JVM SDK](https://github.com/EtaCassiopeia/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
 - [Migration Guide](https://etacassiopeia.github.io/rift/getting-started/migration) - Using Rift with Mountebank configs
 
 ### Mountebank Compatibility
