@@ -18,6 +18,12 @@ record.
   path with multibyte characters (e.g. `日本語サービス` from imported JSON or proxy recordings)
   panicked with "byte index is not a char boundary" inside the render loop, tearing down the
   terminal (often leaving it in raw mode). Truncation is now char-based via a single shared helper.
+- **Creating an imposter no longer silently succeeds when it can't be persisted to `--datadir`.** The
+  create path wrote the config in a fire-and-forget task that only logged failures, so a datadir
+  write error returned `201 Created` to the caller and the imposter then vanished on restart. Create
+  now persists synchronously and, on failure, rolls back the in-memory imposter and returns a
+  `503` (`ImposterError::PersistError`) — matching the durability contract already used by stub
+  mutations (#173).
 - **`rift lint` no longer executes JavaScript while syntax-checking it.** The `javascript`-feature
   validator ran scripts via the JS engine, so an inject/decorate body containing a loop (e.g.
   `while (true) {}`) hung the linter, and any engine error whose message lacked `SyntaxError`/
