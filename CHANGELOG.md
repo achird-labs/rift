@@ -11,6 +11,8 @@ record.
 
 ## [Unreleased]
 
+## [0.13.5] - 2026-07-12
+
 ### Fixed
 
 - **Deleting an imposter now fully tears it down before the call returns.** `DELETE /imposters[/{port}]`
@@ -541,7 +543,8 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.13.4...HEAD
+[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.13.5...HEAD
+[0.13.5]: https://github.com/EtaCassiopeia/rift/compare/v0.13.4...v0.13.5
 [0.13.4]: https://github.com/EtaCassiopeia/rift/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/EtaCassiopeia/rift/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/EtaCassiopeia/rift/compare/v0.13.1...v0.13.2
