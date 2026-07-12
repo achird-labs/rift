@@ -13,6 +13,13 @@ record.
 
 ### Fixed
 
+- **Response cycling (`repeat`) no longer serves a stale branch to a zero-latency next request.**
+  The per-imposter response cursor advanced with `Relaxed` atomic ordering, so a strictly-sequential
+  client that issued its next request with near-zero latency — reached via a different worker thread
+  on a loaded in-process (embedded) runtime — could observe the pre-advance cursor and be served the
+  previous response (e.g. a third `503` where a `repeat: 2` stub should have crossed to `200`). The
+  cursor now advances with `SeqCst`, matching the ordering the sibling per-imposter cross-request
+  state already uses, so the advance is published before the response is returned.
 - **`PUT /imposters` no longer loses imposters on a partial failure.** The handler deleted every
   running imposter and then recreated the payload's set, merely logging any create failure — so a
   single bad imposter (or a transiently-held port) returned `200` with a silently smaller set, the
