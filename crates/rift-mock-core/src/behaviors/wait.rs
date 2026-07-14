@@ -42,8 +42,14 @@ pub enum WaitBehavior {
         #[serde(rename = "max")]
         max_ms: u64,
     },
-    /// JavaScript function that returns delay
+    /// JavaScript function that returns delay — the Mountebank-compatible spelling.
     Function(String),
+    /// The same JavaScript function in Rift's object spelling (issue #608), as written by
+    /// `docs/features/fault-injection.md`, the shipped examples, and the SDKs. Executes
+    /// identically to [`Self::Function`]; kept as a distinct variant only so a config
+    /// round-trips to the spelling its author wrote. Not portable to Mountebank, which has no
+    /// object form — like [`Self::Range`], this is a documented Rift superset.
+    Inject { inject: String },
 }
 
 impl WaitBehavior {
@@ -55,7 +61,9 @@ impl WaitBehavior {
                 use rand::Rng;
                 rand::thread_rng().gen_range(*min_ms..=*max_ms)
             }
-            WaitBehavior::Function(js_func) => {
+            // Both spellings of a JS-function wait run the identical path (issue #608): same Boa
+            // execution, same cap, same loud fallback.
+            WaitBehavior::Function(js_func) | WaitBehavior::Inject { inject: js_func } => {
                 // Parse JavaScript function and execute
                 // Format: "function() { return Math.floor(Math.random() * 100) + 50; }"
                 // A failed/unusable wait function falls back to 100ms — but loudly, so it is
@@ -220,6 +228,78 @@ fn extract_function_body(js_func: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // AC 608-1: every documented wait spelling deserializes, and each round-trips to the JSON the
+    // author wrote — `GET /imposters?replayable=true` must not rewrite one spelling into another.
+    #[test]
+    fn wait_accepts_all_four_shapes_and_round_trips() {
+        for raw in [
+            r#"100"#,
+            r#"{"min":100,"max":200}"#,
+            r#""function() { return 42; }""#,
+            r#"{"inject":"function() { return 42; }"}"#,
+        ] {
+            let wait: WaitBehavior =
+                serde_json::from_str(raw).unwrap_or_else(|e| panic!("{raw} must parse: {e}"));
+            let back = serde_json::to_string(&wait).expect("serialize");
+            let (a, b): (serde_json::Value, serde_json::Value) = (
+                serde_json::from_str(raw).expect("raw json"),
+                serde_json::from_str(&back).expect("round-trip json"),
+            );
+            assert_eq!(a, b, "{raw} must round-trip unchanged, got {back}");
+        }
+    }
+
+    // AC 608-1: the object shapes are disjoint, so untagged resolution is unambiguous.
+    #[test]
+    fn wait_object_shapes_resolve_to_distinct_variants() {
+        let inject: WaitBehavior =
+            serde_json::from_str(r#"{"inject":"function() { return 1; }"}"#).expect("inject");
+        assert!(matches!(inject, WaitBehavior::Inject { .. }));
+
+        let range: WaitBehavior = serde_json::from_str(r#"{"min":1,"max":2}"#).expect("range");
+        assert!(matches!(range, WaitBehavior::Range { .. }));
+
+        // A wait object that is neither shape is still rejected — the new variant must not turn
+        // the enum into a catch-all that silently accepts nonsense.
+        assert!(serde_json::from_str::<WaitBehavior>(r#"{"bogus":true}"#).is_err());
+        assert!(serde_json::from_str::<WaitBehavior>(r#"{"inject":42}"#).is_err());
+    }
+
+    // AC 608-2: the object form is a spelling of the same JS-function wait — identical execution,
+    // not a second implementation. Holds on both the Boa path and the regex fallback, since the
+    // variants share `execute_js_wait_function`.
+    #[test]
+    fn wait_inject_executes_identically_to_bare_string() {
+        let js = "function() { return Math.floor(Math.random() * 0) + 250; }";
+        let bare = WaitBehavior::Function(js.to_string());
+        let object = WaitBehavior::Inject {
+            inject: js.to_string(),
+        };
+        assert_eq!(bare.get_duration_ms(), object.get_duration_ms());
+        assert_eq!(object.get_duration_ms(), 250);
+    }
+
+    // AC 608-2: the 60s cap and the loud fallback apply to the object form too (issues #355/#490).
+    #[test]
+    fn wait_inject_shares_cap_and_fallback() {
+        let huge = WaitBehavior::Inject {
+            inject: "function() { return 999999999; }".to_string(),
+        };
+        assert!(
+            huge.get_duration_ms() <= MAX_WAIT_MS,
+            "the object form must share the 60s cap"
+        );
+
+        let unusable = WaitBehavior::Inject {
+            inject: "not a function at all".to_string(),
+        };
+        assert_eq!(
+            unusable.get_duration_ms(),
+            100,
+            "an unusable object-form wait falls back to the same loud 100ms as the bare form"
+        );
+    }
 
     #[test]
     fn test_wait_behavior_fixed() {

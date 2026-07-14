@@ -1108,15 +1108,26 @@ pub fn validate_behavior(
             // fixed millisecond delay — valid
         } else if is_valid_wait_range(wait) {
             // {min, max} range object — valid Rift extension
+        } else if let Some(script) = wait_inject_script(wait) {
+            // {inject: "function(){...}"} — the object spelling of a function wait (issue #608);
+            // validate the inner script exactly as the bare-string form.
+            validate_javascript_behavior(
+                file,
+                script,
+                &format!("{location}.wait.inject"),
+                result,
+                options,
+                false,
+            );
         } else {
             result.add_issue(
                 LintIssue::error(
                     "E025",
-                    "Wait behavior must be a number, JavaScript function string, or {min, max} object",
+                    "Wait behavior must be a number, JavaScript function string, {min, max} object, or {inject: \"function(){...}\"}",
                     file.to_path_buf(),
                 )
                 .with_location(format!("{location}.wait"))
-                .with_suggestion("Use a millisecond number, a JS function string, or {\"min\": N, \"max\": M}"),
+                .with_suggestion("Use a millisecond number, a JS function string, {\"min\": N, \"max\": M}, or {\"inject\": \"function() { ... }\"}"),
             );
         }
     }
@@ -1252,6 +1263,12 @@ fn is_valid_wait_range(wait: &Value) -> bool {
     };
     obj.get("min").and_then(|v| v.as_u64()).is_some()
         && obj.get("max").and_then(|v| v.as_u64()).is_some()
+}
+
+/// The inner script of a `{"inject": "function(){...}"}` wait (issue #608), or `None` for any
+/// other object — so a malformed wait object still reaches E025 rather than being waved through.
+fn wait_inject_script(wait: &Value) -> Option<&str> {
+    wait.as_object()?.get("inject")?.as_str()
 }
 
 /// Validate copy behavior.

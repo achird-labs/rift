@@ -81,12 +81,7 @@ fn response_has_script_surface(response: &StubResponse) -> bool {
         StubResponse::Is {
             behaviors, rift, ..
         } => {
-            let behavior_is_scripted = behaviors
-                .as_ref()
-                .and_then(|b| {
-                    serde_json::from_value::<crate::behaviors::ResponseBehaviors>(b.clone()).ok()
-                })
-                .is_some_and(|b| behaviors_contain_script_surface(&b));
+            let behavior_is_scripted = behaviors.as_ref().is_some_and(raw_behaviors_are_scripted);
             behavior_is_scripted || rift.as_ref().is_some_and(|r| r.script.is_some())
         }
         StubResponse::Proxy { proxy } => {
@@ -100,17 +95,44 @@ fn response_has_script_surface(response: &StubResponse) -> bool {
     }
 }
 
-/// True if the parsed `_behaviors` block carries a scripting surface: `decorate` (JS/Rhai),
-/// `shellTransform` (runs a host shell command — B1), or a `wait` expressed as a JS function
-/// (executed on Boa since issue #355 Item 6 — B2). A numeric `wait` (`Fixed`/`Range`) is NOT a
-/// scripting surface and stays allowed.
-fn behaviors_contain_script_surface(behaviors: &crate::behaviors::ResponseBehaviors) -> bool {
-    behaviors.decorate.is_some()
-        || !behaviors.shell_transform.is_empty()
-        || matches!(
-            behaviors.wait,
-            Some(crate::behaviors::WaitBehavior::Function(_))
-        )
+/// True if a raw `_behaviors` block carries a scripting surface: `decorate` (JS/Rhai),
+/// `shellTransform` (runs a host shell command — B1), or a `wait` that is not plainly numeric
+/// (executed on Boa since issue #355 Item 6 — B2).
+///
+/// Read from the raw JSON rather than a parsed [`ResponseBehaviors`](crate::behaviors::ResponseBehaviors)
+/// deliberately (issue #610). The gate's question is only "could this execute code?", which the
+/// script-relevant keys answer on their own — so a block the *executor's* parser rejects can still
+/// be classified, and the gate never has to agree with that parser to stay closed. Parsing first
+/// and treating a parse failure as safe was the fail-open bug; treating it as *scripted* fixed the
+/// hole but 400'd `{"repeat": 2.0}` as an injection error, which is neither true nor this gate's
+/// business.
+///
+/// Fail-closed lives in `wait_is_plainly_numeric`: a `wait` is waved through only when it is
+/// provably a delay, never merely because it failed to parse.
+fn raw_behaviors_are_scripted(behaviors: &serde_json::Value) -> bool {
+    let Some(obj) = behaviors.as_object() else {
+        // Not an object (e.g. an array) — no key this gate recognizes, so nothing it can
+        // classify as executable. Such a block does not parse into `ResponseBehaviors` either,
+        // so it is inert: dropped at construction, with `new_is` logging the drop.
+        return false;
+    };
+    let scripted_key_present = obj.contains_key("decorate") || obj.contains_key("shellTransform");
+    let wait_is_scripted = obj.get("wait").is_some_and(|w| !wait_is_plainly_numeric(w));
+    scripted_key_present || wait_is_scripted
+}
+
+/// True only for the two wait spellings that cannot execute code: a fixed millisecond number and
+/// the `{min, max}` range. Everything else — a bare JS string, `{"inject": ...}`, or a shape this
+/// gate does not recognize — is treated as executable (issue #610).
+fn wait_is_plainly_numeric(wait: &serde_json::Value) -> bool {
+    if wait.is_number() {
+        return true;
+    }
+    wait.as_object().is_some_and(|o| {
+        o.len() == 2
+            && o.get("min").is_some_and(|v| v.is_number())
+            && o.get("max").is_some_and(|v| v.is_number())
+    })
 }
 
 /// Reject a set of stubs carrying a Mountebank scripting surface when `--allowInjection` is off,
@@ -1037,6 +1059,105 @@ mod allow_injection_tests {
             reject_stubs_if_injection_disallowed(&clean.stubs, false).is_none(),
             "a non-script stub slice is always allowed"
         );
+    }
+
+    // ---- #610: the injection gate vs #608's second wait spelling -----------------------
+
+    fn wait_cfg(wait: serde_json::Value) -> ImposterConfig {
+        cfg(json!({
+            "protocol": "http",
+            "stubs": [{
+                "responses": [{
+                    "is": { "statusCode": 200 },
+                    "_behaviors": { "wait": wait }
+                }]
+            }]
+        }))
+    }
+
+    // AC 610-1: pins today's B2 behaviour explicitly — a bare-string function wait is a script
+    // surface. Previously only implied by the classifier's source.
+    #[test]
+    fn bare_string_function_wait_is_gated() {
+        let config = wait_cfg(json!("function() { return 100; }"));
+        assert!(
+            reject_if_injection_disallowed(&config, false).is_some(),
+            "a JS-function wait must require --allowInjection"
+        );
+        assert!(reject_if_injection_disallowed(&config, true).is_none());
+    }
+
+    // AC 610-2: THE BYPASS REGRESSION TEST. #608 makes `{"inject": ...}` parse and execute on Boa;
+    // if the classifier still only matches `Function`, that config is admitted with injection off
+    // and runs anyway. Both spellings are the same capability and must gate identically.
+    #[test]
+    fn object_form_inject_wait_is_gated_identically() {
+        let config = wait_cfg(json!({ "inject": "function() { return 100; }" }));
+        assert!(
+            reject_if_injection_disallowed(&config, false).is_some(),
+            "the object-form wait executes JS just like the bare string — it must not bypass the gate"
+        );
+        assert!(reject_if_injection_disallowed(&config, true).is_none());
+    }
+
+    // AC 610-3: fail closed. A `wait` the gate cannot prove is a plain delay must classify as
+    // scripted rather than slipping through as "no script surface". Previously this was safe only
+    // because the executor's parser failed in lockstep — an invariant nothing tested, and one
+    // #608's new variant is exactly the kind of change to break.
+    #[test]
+    fn unrecognized_wait_shapes_fail_closed() {
+        for wait in [
+            json!({ "bogus": true }),
+            json!({ "inject": 42 }),
+            json!({ "min": 1 }),
+            json!(true),
+        ] {
+            let config = wait_cfg(wait.clone());
+            assert!(
+                reject_if_injection_disallowed(&config, false).is_some(),
+                "a wait the gate cannot prove is a plain delay must be treated as executable: {wait}"
+            );
+        }
+    }
+
+    // Fail-closed must stay scoped to what the gate is actually for. A malformed block with NO
+    // script surface is not an injection problem: 400-ing `{"repeat": 2.0}` with "inject requires
+    // --allowInjection" diagnoses a float as a scripting attempt, and makes a config's validity
+    // depend on an unrelated security flag. Such blocks stay admitted (and are dropped loudly at
+    // construction, per #608) exactly as before this change.
+    #[test]
+    fn script_free_behaviors_are_not_an_injection_problem() {
+        let script_free = [
+            json!({ "repeat": 2.0 }),
+            json!({ "wait": 100.0 }),
+            json!({ "repeat": 3 }),
+            json!([{ "wait": 500 }]),
+        ];
+        for behaviors in script_free {
+            let config = cfg(json!({
+                "protocol": "http",
+                "stubs": [{
+                    "responses": [{ "is": { "statusCode": 200 }, "_behaviors": behaviors }]
+                }]
+            }));
+            assert!(
+                reject_if_injection_disallowed(&config, false).is_none(),
+                "{behaviors} carries no script surface — the injection gate must not reject it"
+            );
+        }
+    }
+
+    // AC 610-5: guard against over-closing — numeric waits carry no script surface and must stay
+    // admissible with injection off.
+    #[test]
+    fn numeric_waits_are_not_script_surfaces() {
+        for wait in [json!(500), json!({ "min": 1, "max": 9 })] {
+            let config = wait_cfg(wait.clone());
+            assert!(
+                reject_if_injection_disallowed(&config, false).is_none(),
+                "{wait} is not a scripting surface and must not require --allowInjection"
+            );
+        }
     }
 }
 

@@ -29,6 +29,9 @@ Rift enables fault injection for chaos engineering and resilience testing.
 
 ### Random Latency
 
+A `wait` can be a JavaScript function returning the delay in milliseconds. Two spellings are
+accepted, and both execute identically:
+
 ```json
 {
   "_behaviors": {
@@ -37,6 +40,29 @@ Rift enables fault injection for chaos engineering and resilience testing.
     }
   }
 }
+```
+
+```json
+{
+  "_behaviors": {
+    "wait": "function() { return Math.floor(Math.random() * 1000) + 500; }"
+  }
+}
+```
+
+The **bare string** is the Mountebank-compatible spelling — use it if the same config must also run
+on Mountebank. The **`{"inject": ...}` object** is Rift's spelling, used by the SDKs; like the
+`{"min": N, "max": M}` range below, it is a Rift extension with no Mountebank equivalent, so a
+config using it is not portable to Mountebank. Rift accepts either and preserves whichever you
+wrote when you read the imposter back.
+
+A function wait requires **`--allowInjection`** (either spelling), the same as Mountebank — without
+it, creating the imposter returns `400 invalid injection`.
+
+For a simple random range with no JavaScript, use the range form instead:
+
+```json
+{ "_behaviors": { "wait": { "min": 500, "max": 1500 } } }
 ```
 
 ### Error Responses

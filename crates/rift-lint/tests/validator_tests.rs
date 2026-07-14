@@ -571,6 +571,34 @@ fn e025_not_fired_for_js_function_wait() {
     assert!(!has_code(&r, "E025"), "unexpected E025: {:?}", codes(&r));
 }
 
+// AC 608-5 (#608): the object-form wait is valid — lint used to mirror the engine enum and so
+// flagged the repo's own shipped example (`examples/latency-testing.json`) as an error.
+#[test]
+fn e025_not_fired_for_inject_object_wait() {
+    let behavior = json!({ "wait": { "inject": "function() { return 100; }" } });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &behavior, "loc", &mut r, &opts());
+    assert!(
+        !has_code(&r, "E025"),
+        "E025 must not fire for the documented {{inject}} wait object, got {:?}",
+        codes(&r)
+    );
+}
+
+// Accepting the object form must not make E025 a rubber stamp for any object.
+#[test]
+fn e025_still_fires_for_malformed_wait_objects() {
+    for bad in [
+        json!({ "wait": { "bogus": true } }),
+        json!({ "wait": { "inject": 42 } }),
+        json!({ "wait": { "min": 100 } }),
+    ] {
+        let mut r = LintResult::new();
+        validate_behavior(path(), &bad, "loc", &mut r, &opts());
+        assert!(has_code(&r, "E025"), "E025 must still fire for {bad}");
+    }
+}
+
 #[test]
 fn e035_repeat_zero_is_invalid() {
     let behavior = json!({ "repeat": 0 });

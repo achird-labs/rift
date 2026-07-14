@@ -129,7 +129,13 @@ Rift supports multiple JSON format variations to ensure compatibility with vario
 | Format Variation | Standard Format | Alternative Format | Status |
 |-----------------|-----------------|-------------------|--------|
 | **Fixed delay** | `"wait": 1000` | `"wait": 1000` | ✅ **Complete** |
-| **Inject object** | `"wait": {"inject": "..."}` | `"wait": "function() {...}"` | ✅ **Complete** |
+| **Function wait** | `"wait": "function() {...}"` | `"wait": {"inject": "..."}` | ✅ **Complete** |
+| **Range** | _(none — Rift extension)_ | `"wait": {"min": N, "max": M}` | ✅ **Rift-only** |
+
+The bare string is Mountebank's standard for a function wait; Mountebank has **no** object form.
+The `{"inject": ...}` spelling and `{"min","max"}` are Rift supersets — accepted here, not portable
+to Mountebank. A function wait requires `--allowInjection` in both engines, in either spelling
+(issues #608, #610).
 
 ### Auto-Port Assignment
 

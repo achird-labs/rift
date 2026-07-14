@@ -387,10 +387,26 @@ impl StubResponse {
         behaviors: Option<serde_json::Value>,
         rift: Option<RiftResponseExtension>,
     ) -> StubResponse {
+        // A block that won't parse can't be cached, so it is dropped — but never silently
+        // (issue #608). Dropping it quietly meant a config using an unsupported shape started
+        // clean and served with its behaviors gone: no wait, no repeat, no signal anywhere.
         let behaviors_parsed = behaviors
             .as_ref()
             .and_then(|v| {
-                serde_json::from_value::<crate::behaviors::ResponseBehaviors>(v.clone()).ok()
+                match serde_json::from_value::<crate::behaviors::ResponseBehaviors>(v.clone()) {
+                    Ok(parsed) => Some(parsed),
+                    Err(e) => {
+                        // Deliberately does not claim the response will serve: construction runs
+                        // before the admin gate, so this config may still be rejected.
+                        tracing::error!(
+                            error = %e,
+                            behaviors = %v,
+                            "malformed `_behaviors` block could not be parsed and will be ignored \
+                             if this response is served"
+                        );
+                        None
+                    }
+                }
             })
             .map(std::sync::Arc::new);
         // Only a non-string body needs rendering; a string body is served as-is.
@@ -1277,6 +1293,60 @@ pub enum ImposterError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // AC 608-4 (#608): a `_behaviors` block that fails to parse is still dropped — the parse-once
+    // cache has nowhere to put it — but it must never be dropped *silently*. Before this, a config
+    // using a documented-but-unsupported shape served with its behaviors gone and no signal at all.
+    #[test]
+    #[tracing_test::traced_test]
+    fn unparseable_behaviors_are_dropped_loudly() {
+        let resp: StubResponse = serde_json::from_value(json!({
+            "is": { "statusCode": 200 },
+            "_behaviors": { "wait": { "bogus": true } }
+        }))
+        .expect("the stub itself still constructs");
+
+        match &resp {
+            StubResponse::Is {
+                behaviors,
+                behaviors_parsed,
+                ..
+            } => {
+                assert!(behaviors.is_some(), "the raw block is retained");
+                assert!(behaviors_parsed.is_none(), "but it could not be parsed");
+            }
+            other => panic!("expected an Is response, got {other:?}"),
+        }
+
+        assert!(
+            logs_contain("_behaviors"),
+            "a dropped behaviors block must be visible in the log, not silent"
+        );
+    }
+
+    // A well-formed block must not log — the error line means something is wrong.
+    #[test]
+    #[tracing_test::traced_test]
+    fn well_formed_behaviors_do_not_log() {
+        let resp: StubResponse = serde_json::from_value(json!({
+            "is": { "statusCode": 200 },
+            "_behaviors": { "wait": { "inject": "function() { return 5; }" } }
+        }))
+        .expect("object-form wait parses");
+        match &resp {
+            StubResponse::Is {
+                behaviors_parsed, ..
+            } => assert!(
+                behaviors_parsed.is_some(),
+                "the documented object-form wait must reach the cache"
+            ),
+            other => panic!("expected an Is response, got {other:?}"),
+        }
+        assert!(
+            !logs_contain("_behaviors"),
+            "a valid block must not emit the dropped-behaviors error"
+        );
+    }
 
     // Issue #479: `_behaviors` are parsed and a non-string body is rendered ONCE at construction,
     // so the request hot path reads cached values instead of re-deserializing/re-serializing.

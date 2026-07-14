@@ -22,8 +22,12 @@ pub enum FaultDecision {
         body: String,
         rule_id: String,
         headers: HashMap<String, String>,
-        /// Optional behaviors for response modification (Mountebank-compatible)
-        behaviors: Option<ResponseBehaviors>,
+        /// Optional behaviors for response modification (Mountebank-compatible).
+        ///
+        /// Boxed so this variant doesn't set the size of every `FaultDecision` — the common
+        /// `None`/`Latency` outcomes would otherwise each carry a `ResponseBehaviors`' worth of
+        /// stack (`clippy::large_enum_variant`).
+        behaviors: Option<Box<ResponseBehaviors>>,
     },
     /// TCP-level fault (Mountebank-compatible)
     TcpFault {
@@ -52,7 +56,7 @@ pub fn decide_fault(fault_config: &FaultConfig, rule_id: &str) -> FaultDecision 
             body: error_fault.body.clone(),
             rule_id: rule_id.to_string(),
             headers: error_fault.headers.clone(),
-            behaviors: error_fault.behaviors.clone(),
+            behaviors: error_fault.behaviors.clone().map(Box::new),
         };
     }
 

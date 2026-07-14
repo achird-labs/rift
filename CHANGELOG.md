@@ -11,6 +11,31 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`"wait": {"inject": "function(){...}"}` now works — it was silently doing nothing.** The
+  object spelling of a function wait is what `docs/features/fault-injection.md`, the shipped
+  `examples/latency-testing.json`, and the SDKs all use, but the engine's `WaitBehavior` had no
+  variant for it. Worse than a load error: `_behaviors` is parsed once into a cache and the parse
+  failure was swallowed, so such a config started cleanly and served requests with the **entire
+  `_behaviors` block dropped** — no latency, no `repeat`, no error, no log. The shipped example's
+  `/random-latency` stub has been answering with no delay. Both spellings are now accepted and
+  execute identically (same sandbox, same 60s cap); Rift preserves whichever you wrote when you
+  read the imposter back. The bare string remains the Mountebank-compatible form; the object form
+  is a Rift superset like `{"min","max"}`. `rift-lint` accepts it too — it previously flagged
+  Rift's own example as an error. A `_behaviors` block that still fails to parse is now logged at
+  error level instead of vanishing.
+
+### Security
+
+- **A function `wait` requires `--allowInjection` in both spellings.** The `--allowInjection`
+  admission gate classified only the bare-string function wait as a scripting surface, so the
+  newly-accepted `{"inject": ...}` form would have executed JavaScript with injection disabled.
+  Both spellings are one capability and now gate identically. The gate also **fails closed**: a
+  `_behaviors` block it cannot parse is treated as scripted rather than admitted as
+  "no script surface" — previously its safety depended on the executor's parser failing in
+  lockstep, an unwritten coupling this release's new wait variant would have broken.
+
 ### Added
 
 - **Admin SSE stream — push request tails instead of polling.** `GET /events` (and the
