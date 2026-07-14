@@ -72,6 +72,23 @@ record.
   "no script surface" — previously its safety depended on the executor's parser failing in
   lockstep, an unwritten coupling this release's new wait variant would have broken.
 
+- **`--allowInjection` is now enforced on `--configfile`, `--datadir`, and `POST /admin/reload`.**
+  The gate only ever guarded the admin API, so the same document got two different security
+  answers depending on the door it came through: `examples/latency-testing.json` (a JS-function
+  `wait`) was correctly refused when POSTed without `--allowInjection`, and loaded and executed
+  when passed to `--configfile`. This mattered most for `--datadir`, which is **not**
+  operator-authored — its `{port}.json` files are persisted from admin-API writes, so running once
+  with `--allowInjection` and restarting without it kept executing the persisted scripts: the gate
+  failed open across restarts. `POST /admin/reload` was ungated and network-reachable. All doors
+  now ask the same classifier the admin API uses (`inject` response/predicate,
+  `predicateGenerators.inject`, `decorate`, `shellTransform`, a non-numeric `wait`,
+  `_rift.script`), with per-door semantics: `--configfile` **aborts startup**, naming the file and
+  every offending port at once; a gated `--datadir` file is **skipped** and named in the existing
+  startup skip summary, so one leftover file cannot brick the rest; `POST /admin/reload` returns
+  **`400 invalid injection`** before applying anything, leaving running imposters untouched.
+  Mountebank refuses injection in a config file too — see the divergence note in the compatibility
+  matrix: mb logs the failed load and stays up, Rift fails fast on `--configfile`.
+
 ### Added
 
 - **Admin SSE stream — push request tails instead of polling.** `GET /events` (and the

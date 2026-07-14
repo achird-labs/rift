@@ -59,6 +59,12 @@ wrote when you read the imposter back.
 A function wait requires **`--allowInjection`** (either spelling), the same as Mountebank — without
 it, creating the imposter returns `400 invalid injection`.
 
+That gate applies to every door an imposter can arrive through, not just the admin API (issue
+#612): a `--configfile` carrying a function wait **aborts startup** naming the offending port, a
+`--datadir` file carrying one is **skipped** and listed in the startup skip summary, and
+`POST /admin/reload` returns `400 invalid injection` and leaves the running imposters unchanged.
+So `examples/latency-testing.json` needs `--allowInjection` however you load it.
+
 For a simple random range with no JavaScript, use the range form instead:
 
 ```json

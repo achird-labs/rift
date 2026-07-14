@@ -348,7 +348,7 @@ This matches Mountebank's behavior for automatic port assignment.
 | `--host` | ✅ Yes | ✅ Yes | ✅ **Complete** | Bind hostname |
 | `--configfile` | ✅ Yes | ✅ Yes | ✅ **Complete** | Single config file path |
 | `--datadir` | ✅ Yes | ✅ Yes | ✅ **Complete** | Load all .json from directory |
-| `--allowInjection` | ✅ Yes | ✅ Yes | ✅ **Complete** | JavaScript injection enabled |
+| `--allowInjection` | ✅ Yes | ✅ Yes | ✅ **Complete** | JavaScript injection enabled. Enforced on every door that admits an imposter: the admin API, `--configfile`, `--datadir`, and `POST /admin/reload` (issue #612). See the divergence note below. |
 | `--localOnly` | ✅ Yes | ✅ Yes | ✅ **Complete** | Bind to localhost only |
 | `--loglevel` | ✅ Yes | ✅ Yes | ✅ **Complete** | debug, info, warn, error |
 | `--nologfile` | ✅ Yes | ✅ Yes | ✅ **Complete** | Stdout logging only |
@@ -358,6 +358,27 @@ This matches Mountebank's behavior for automatic port assignment.
 | `--ipWhitelist` | ✅ Yes | ✅ Yes | ✅ **Complete** | IP whitelist (comma-separated) |
 | `--mock` | ✅ Yes | ✅ Yes | ✅ **Complete** | Mock mode flag |
 | `--origin` | ✅ Yes | ✅ Yes | ✅ **Complete** | CORS allowed origin |
+
+**`--allowInjection` on config-file load — same gate, stricter exit (issue #612):**
+
+Both engines refuse a config file whose imposters carry a scripting surface (`inject` response or
+predicate, `predicateGenerators.inject`, `decorate`, `shellTransform`, a JS-function `wait`, or
+Rift's `_rift.script`) unless `--allowInjection` is set. Mountebank enforces this because it loads
+a config file by PUTting it through its own imposter validation; Rift applies the same classifier
+its admin API uses, so a document gets one security answer through every door.
+
+The **exit behaviour** diverges:
+
+| | Mountebank | Rift |
+|---|---|---|
+| `--configfile` with injection, no flag | logs the failed self-PUT and stays up (that imposter is not served) | **aborts startup**, naming the file and every offending port |
+| `--datadir` file with injection, no flag | not served | file is skipped and named in the startup skip summary; other imposters still load |
+| `POST /admin/reload` with injection, no flag | n/a (Rift extension) | `400 invalid injection`; running imposters unchanged |
+
+Same security outcome — the scripting never executes. Rift fails fast on `--configfile` rather
+than starting up in a state the operator did not ask for. `--datadir` is a per-file skip instead:
+`{port}.json` files are persisted from admin-API writes, so a leftover script-bearing file from an
+earlier `--allowInjection` run must fail closed without bricking startup for everything else.
 
 **Environment Variable Support:**
 - ✅ `MB_PORT` - Admin API port

@@ -19,6 +19,10 @@ pub fn install_default_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+// The `--allowInjection` classifier, shared by every door that admits an imposter config
+// (admin API, --configfile, --datadir, POST /admin/reload) so they cannot diverge (issue #612)
+pub(crate) mod injection_gate;
+
 // ===== Admin HTTP server (control plane — server crate only) =====
 pub mod admin_api;
 
