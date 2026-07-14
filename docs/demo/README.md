@@ -250,13 +250,14 @@ Demonstrates both scripting engines (Rhai, JavaScript) with equivalent functiona
 ### Start
 
 ```bash
-# Using local binary
-./target/release/rift --configfile docs/demo/imposters-scripting-engines.json
+# Using local binary. --allowInjection is required: this demo runs inject/_rift.script, and the
+# configfile door enforces the same injection gate as the admin API (issue #612).
+./target/release/rift --configfile docs/demo/imposters-scripting-engines.json --allowInjection
 
 # Or using Docker
 docker run -p 2525:2525 -p 4560:4560 \
   -v $(pwd)/docs/demo/imposters-scripting-engines.json:/imposters.json:ro \
-  zainalpour/rift-proxy:latest --configfile /imposters.json
+  zainalpour/rift-proxy:latest --configfile /imposters.json --allowInjection
 ```
 
 ### Test All Engines (Port 4560)

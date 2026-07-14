@@ -79,7 +79,10 @@ trap stop_rift EXIT
 # Start rift with a config file on $ADMIN_PORT and wait until the admin API answers (imposters up).
 start_rift() {
   local config="$1"
-  "$RIFT_BIN" --configfile "$config" --port "$ADMIN_PORT" >/dev/null 2>&1 &
+  # --allow-injection: part of the corpus (the scripting demos) legitimately carries inject /
+  # _rift.script, and since issue #612 the configfile door enforces the gate like the admin API
+  # does — without the flag those documented configs correctly refuse to boot.
+  "$RIFT_BIN" --configfile "$config" --port "$ADMIN_PORT" --allow-injection >/dev/null 2>&1 &
   RIFT_PID=$!
   local i
   for i in $(seq 1 60); do
