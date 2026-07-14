@@ -120,6 +120,15 @@ pub fn handle_logs(query: Option<&str>) -> Response<Full<Bytes>> {
     json_response(StatusCode::OK, &logs)
 }
 
+/// True when a reload's configs carry a scripting surface that `--allowInjection` has not
+/// enabled (issue #612) — the same classifier every other imposter door uses.
+fn reload_is_gated(configs: &[crate::imposter::ImposterConfig], allow_injection: bool) -> bool {
+    !allow_injection
+        && configs
+            .iter()
+            .any(crate::injection_gate::config_uses_script_surface)
+}
+
 /// POST /admin/reload - re-read the startup config source and reconcile the running imposters
 /// toward it incrementally (issues #197/#316, Rift extension). No-op (200) when no
 /// `--configfile`/`--datadir` was given. The new set is validated before the running imposters
@@ -129,6 +138,7 @@ pub fn handle_logs(query: Option<&str>) -> Response<Full<Bytes>> {
 pub async fn handle_reload(
     manager: Arc<ImposterManager>,
     config_source: Option<Arc<crate::config_loader::ConfigSource>>,
+    allow_injection: bool,
 ) -> Response<Full<Bytes>> {
     let Some(source) = config_source else {
         return json_response(
@@ -147,6 +157,12 @@ pub async fn handle_reload(
             );
         }
     };
+
+    // Validate-before-touch: refuse a gated config before anything mutates, so a refused reload
+    // leaves the running imposters exactly as they were (issue #612).
+    if reload_is_gated(&configs, allow_injection) {
+        return crate::admin_api::handlers::imposters::injection_disallowed_response();
+    }
 
     let count = configs.len();
     match manager.apply_config(configs).await {
@@ -274,7 +290,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_reload_no_source_is_noop() {
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager, None).await;
+        let resp = handle_reload(manager, None, false).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -300,7 +316,7 @@ mod tests {
         });
 
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager.clone(), Some(source)).await;
+        let resp = handle_reload(manager.clone(), Some(source), false).await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
@@ -351,7 +367,7 @@ mod tests {
         let manager = Arc::new(ImposterManager::new());
 
         // Initial reload creates the imposter with the first script version resolved.
-        let resp = handle_reload(manager.clone(), Some(source.clone())).await;
+        let resp = handle_reload(manager.clone(), Some(source.clone()), true).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let script_code = |manager: &ImposterManager| {
             let imposter = manager.get_imposter(19479).expect("imposter exists");
@@ -371,7 +387,7 @@ mod tests {
         // Edit the referenced file (the configfile itself is untouched) and reload again.
         std::fs::write(&script_path, r#"fn respond(ctx) { http(503, "second") }"#)
             .expect("write script (second version)");
-        let resp = handle_reload(manager.clone(), Some(source)).await;
+        let resp = handle_reload(manager.clone(), Some(source), true).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             script_code(&manager).as_deref(),
@@ -392,5 +408,100 @@ mod tests {
     fn test_handle_logs_with_pagination() {
         let resp = handle_logs(Some("startIndex=10&endIndex=50"));
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ===== Issue #612: POST /admin/reload is the third config door and must gate too =====
+
+    /// Reload from `path`, then read back whether port 19481's stub carries a decorate behavior.
+    #[tokio::test]
+    async fn test_handle_reload_rejects_injection_when_flag_off() {
+        use http_body_util::BodyExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        std::fs::write(
+            &path,
+            r#"{"imposters":[{"port":19481,"protocol":"http","stubs":[
+                {"responses":[{"is":{"statusCode":200,"body":"original"}}]}
+            ]}]}"#,
+        )
+        .expect("write clean config");
+        let source = Arc::new(crate::config_loader::ConfigSource::File {
+            path: path.clone(),
+            no_parse: false,
+        });
+
+        let manager = Arc::new(ImposterManager::new());
+        let resp = handle_reload(manager.clone(), Some(source.clone()), false).await;
+        assert_eq!(resp.status(), StatusCode::OK, "clean config reloads");
+        assert!(manager.get_imposter(19481).is_ok());
+
+        // Edit the config to add a decorate behavior — a script surface.
+        std::fs::write(
+            &path,
+            r#"{"imposters":[{"port":19481,"protocol":"http","stubs":[
+                {"responses":[{"is":{"statusCode":200,"body":"decorated"},
+                 "_behaviors":{"decorate":"function (req, res) { res.body = 'pwned'; }"}}]}
+            ]}]}"#,
+        )
+        .expect("write scripted config");
+
+        let resp = handle_reload(manager.clone(), Some(source), false).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a decorate behavior without --allowInjection must be refused on reload"
+        );
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(
+            body["errors"][0]["code"], "invalid injection",
+            "must use the Mountebank envelope: {body}"
+        );
+
+        // Validate-before-touch: the running imposter is untouched by the refused reload.
+        let imposter = manager.get_imposter(19481).expect("imposter still running");
+        let stubs = imposter.get_stubs();
+        let body_of = |r: &crate::imposter::StubResponse| match r {
+            crate::imposter::StubResponse::Is { is, .. } => is.body.clone(),
+            other => panic!("expected an Is response, got {other:?}"),
+        };
+        assert_eq!(
+            body_of(&stubs[0].responses[0]),
+            Some(serde_json::json!("original")),
+            "the refused reload must leave the running imposter unchanged"
+        );
+
+        manager.delete_all().await;
+    }
+
+    // AC8: with the flag set, the same scripted reload applies.
+    #[tokio::test]
+    async fn test_handle_reload_applies_injection_when_flag_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        std::fs::write(
+            &path,
+            r#"{"imposters":[{"port":19482,"protocol":"http","stubs":[
+                {"responses":[{"is":{"statusCode":200,"body":"decorated"},
+                 "_behaviors":{"decorate":"function (req, res) { res.body = 'ok'; }"}}]}
+            ]}]}"#,
+        )
+        .expect("write scripted config");
+        let source = Arc::new(crate::config_loader::ConfigSource::File {
+            path,
+            no_parse: false,
+        });
+
+        let manager = Arc::new(ImposterManager::new());
+        let resp = handle_reload(manager.clone(), Some(source), true).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "--allowInjection must permit a decorate behavior on reload"
+        );
+        assert!(manager.get_imposter(19482).is_ok());
+
+        manager.delete_all().await;
     }
 }

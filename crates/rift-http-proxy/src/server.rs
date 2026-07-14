@@ -337,10 +337,11 @@ impl ServerBuilder {
         };
 
         if let Some(ref configfile) = cli.configfile {
-            load_imposters_from_file(&manager, configfile, cli.no_parse).await?;
+            load_imposters_from_file(&manager, configfile, cli.no_parse, cli.allow_injection)
+                .await?;
         }
         if let Some(ref datadir) = cli.datadir {
-            load_imposters_from_datadir(&manager, datadir).await?;
+            load_imposters_from_datadir(&manager, datadir, cli.allow_injection).await?;
         }
 
         // Bind the metrics server now so a `:0` request can report its port. A bind failure
@@ -658,11 +659,70 @@ async fn metrics_accept_loop(
     Ok(())
 }
 
+/// The gated surfaces, named the same way by every door (issue #612). The list only — each door
+/// appends its own clause, so this must not carry one.
+const GATED_SCRIPT_SURFACES: &str = "inject/decorate/shellTransform/JS-function wait";
+
+/// The startup error for a `--configfile` whose imposters need `--allowInjection` (issue #612),
+/// or `None` when every imposter is admissible. One message listing every offender, so the
+/// operator fixes the file in a single pass instead of restarting into the next error.
+fn configfile_injection_error(
+    path: &Path,
+    configs: &[ImposterConfig],
+    allow_injection: bool,
+) -> Option<String> {
+    if allow_injection {
+        return None;
+    }
+    let offenders: Vec<String> = configs
+        .iter()
+        .filter(|config| crate::injection_gate::config_uses_script_surface(config))
+        .map(|config| match config.port {
+            Some(port) => port.to_string(),
+            None => "<auto-assigned>".to_string(),
+        })
+        .collect();
+    if offenders.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}: imposter(s) on port(s) {} use {GATED_SCRIPT_SURFACES}. \
+         Restart with --allowInjection to allow this, or remove the scripting from the config.",
+        path.display(),
+        offenders.join(", "),
+    ))
+}
+
+/// Split parsed datadir configs into those that may be served and those gated by `--allowInjection`
+/// (issue #612). A datadir file is skipped rather than fatal: `{port}.json` is persisted from
+/// admin-API writes, so a leftover script-bearing file from an earlier `--allowInjection` run must
+/// fail closed without bricking startup for every other imposter.
+fn partition_gated_datadir(
+    parsed: Vec<LoadedImposter>,
+    allow_injection: bool,
+) -> (Vec<LoadedImposter>, Vec<SkippedImposterFile>) {
+    if allow_injection {
+        return (parsed, Vec::new());
+    }
+    let (gated, servable): (Vec<_>, Vec<_>) = parsed
+        .into_iter()
+        .partition(|(_, config)| crate::injection_gate::config_uses_script_surface(config));
+    let gated = gated
+        .into_iter()
+        .map(|(path, _)| SkippedImposterFile {
+            path,
+            reason: format!("uses {GATED_SCRIPT_SURFACES}, which require --allowInjection"),
+        })
+        .collect();
+    (servable, gated)
+}
+
 /// Load imposters from a JSON config file
 async fn load_imposters_from_file(
     manager: &Arc<ImposterManager>,
     path: &PathBuf,
     no_parse: bool,
+    allow_injection: bool,
 ) -> anyhow::Result<()> {
     info!("Loading imposters from configfile: {:?}", path);
 
@@ -670,6 +730,11 @@ async fn load_imposters_from_file(
         path: path.clone(),
         no_parse,
     })?;
+
+    // Refuse before creating anything: a gated configfile must not half-load (issue #612).
+    if let Some(message) = configfile_injection_error(path, &configs, allow_injection) {
+        anyhow::bail!(message);
+    }
 
     for config in configs {
         info!(
@@ -776,6 +841,7 @@ fn read_and_parse_datadir(
 async fn load_imposters_from_datadir(
     manager: &Arc<ImposterManager>,
     datadir: &PathBuf,
+    allow_injection: bool,
 ) -> anyhow::Result<()> {
     info!("Loading imposters from datadir: {:?}", datadir);
 
@@ -790,6 +856,8 @@ async fn load_imposters_from_datadir(
     // B1/B2 defense-in-depth against a datadir re-resolution reading `/etc/passwd`).
     let base = ScriptBaseDir::DatadirRelative(datadir.clone());
     let (parsed, mut skipped) = read_and_parse_datadir(datadir, &base)?;
+    let (parsed, gated) = partition_gated_datadir(parsed, allow_injection);
+    skipped.extend(gated);
 
     for (path, config) in parsed {
         info!("Loading imposter on port {:?} from {:?}", config.port, path);
@@ -1048,5 +1116,285 @@ mod tests {
         let cli = Cli::try_parse_from(["rift"]).expect("default parse");
         assert!(!cli.nologfile);
         assert!(cli.log.is_none());
+    }
+
+    // ===== Issue #612: the --allowInjection gate on the config doors =====
+    //
+    // A config file and a datadir file must get the same security answer as POST /imposters:
+    // a script surface without --allowInjection is refused. Before this, the same document was
+    // 400'd by the admin API but loaded and executed via --configfile.
+
+    fn config_from(json: serde_json::Value) -> ImposterConfig {
+        serde_json::from_value(json).expect("valid imposter config")
+    }
+
+    fn inject_response_config(port: u16) -> ImposterConfig {
+        config_from(serde_json::json!({
+            "port": port,
+            "protocol": "http",
+            "stubs": [{"responses": [{"inject": "function (req) { return {body: 'x'}; }"}]}],
+        }))
+    }
+
+    /// The `examples/latency-testing.json` shape from the issue's Evidence section: that file
+    /// spells its scripted wait as the `{"inject": ...}` object form, not a bare string.
+    fn js_wait_config(port: u16) -> ImposterConfig {
+        config_from(serde_json::json!({
+            "port": port,
+            "protocol": "http",
+            "stubs": [{"responses": [{
+                "is": {"statusCode": 200, "body": "ok"},
+                "_behaviors": {"wait": {"inject": "function() { return 100; }"}},
+            }]}],
+        }))
+    }
+
+    fn clean_config(port: u16) -> ImposterConfig {
+        config_from(serde_json::json!({
+            "port": port,
+            "protocol": "http",
+            "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}],
+        }))
+    }
+
+    // AC1: an inject response in a configfile aborts startup, and the message must be actionable —
+    // it names the file, the offending port, and the flag that would allow it.
+    #[test]
+    fn configfile_injection_error_names_file_port_and_flag() {
+        let path = PathBuf::from("/cfg/imposters.json");
+        let err = configfile_injection_error(&path, &[inject_response_config(4545)], false)
+            .expect("an inject response without --allowInjection must abort startup");
+        assert!(err.contains("/cfg/imposters.json"), "names the file: {err}");
+        assert!(err.contains("4545"), "names the offending port: {err}");
+        assert!(err.contains("--allowInjection"), "names the flag: {err}");
+    }
+
+    // AC2: a JS-function wait is a script surface too — the exact config that the admin API
+    // already 400s but --configfile used to execute.
+    #[test]
+    fn configfile_injection_error_flags_js_function_wait() {
+        let path = PathBuf::from("/cfg/latency-testing.json");
+        let err = configfile_injection_error(&path, &[js_wait_config(4545)], false)
+            .expect("a JS-function wait without --allowInjection must abort startup");
+        assert!(err.contains("--allowInjection"), "got: {err}");
+    }
+
+    // AC3: the flag is the whole point — with it set, the same config loads.
+    #[test]
+    fn configfile_injection_error_none_when_flag_set() {
+        let path = PathBuf::from("/cfg/imposters.json");
+        assert!(
+            configfile_injection_error(&path, &[inject_response_config(4545)], true).is_none(),
+            "--allowInjection must permit an inject response"
+        );
+    }
+
+    // AC4: no false positives — a script-free config loads with the flag off.
+    #[test]
+    fn configfile_injection_error_none_for_clean_config() {
+        let path = PathBuf::from("/cfg/imposters.json");
+        assert!(
+            configfile_injection_error(&path, &[clean_config(4545)], false).is_none(),
+            "a config with no script surface must load without --allowInjection"
+        );
+    }
+
+    // Design requirement: one message listing every offender, so the operator fixes the file in a
+    // single pass instead of restarting into the next error.
+    #[test]
+    fn configfile_injection_error_lists_every_offending_port_at_once() {
+        let path = PathBuf::from("/cfg/imposters.json");
+        let configs = vec![
+            inject_response_config(4545),
+            clean_config(4546),
+            js_wait_config(4547),
+        ];
+        let err = configfile_injection_error(&path, &configs, false).expect("offenders present");
+        assert!(err.contains("4545"), "lists the first offender: {err}");
+        assert!(err.contains("4547"), "lists the second offender: {err}");
+        assert!(
+            !err.contains("4546"),
+            "must not name the clean imposter: {err}"
+        );
+    }
+
+    // A port-less (auto-assigned) config must still be nameable in the error, not silently omitted.
+    #[test]
+    fn configfile_injection_error_labels_a_portless_config() {
+        let path = PathBuf::from("/cfg/imposters.json");
+        let portless = config_from(serde_json::json!({
+            "protocol": "http",
+            "stubs": [{"responses": [{"inject": "function (req) { return {}; }"}]}],
+        }));
+        let err = configfile_injection_error(&path, &[portless], false)
+            .expect("a port-less offender must still abort startup");
+        assert!(
+            err.contains("<auto-assigned>"),
+            "a port-less offender must still be labelled, not silently omitted: {err}"
+        );
+        assert!(err.contains("--allowInjection"), "got: {err}");
+    }
+
+    // AC5: a datadir gates per file and fails closed — the leftover scripted file is skipped and
+    // named, while the clean file is still served. A persisted `{port}.json` from an earlier
+    // --allowInjection run must not brick startup for everything else.
+    #[test]
+    fn partition_gated_datadir_skips_only_the_scripted_file() {
+        let parsed = vec![
+            (
+                PathBuf::from("/data/4501.json"),
+                inject_response_config(4501),
+            ),
+            (PathBuf::from("/data/4502.json"), clean_config(4502)),
+        ];
+        let (servable, gated) = partition_gated_datadir(parsed, false);
+
+        assert_eq!(servable.len(), 1, "the clean file stays servable");
+        assert_eq!(servable[0].0, PathBuf::from("/data/4502.json"));
+
+        assert_eq!(gated.len(), 1, "the scripted file is skipped");
+        assert_eq!(gated[0].path, PathBuf::from("/data/4501.json"));
+        assert_eq!(
+            gated[0].reason,
+            "uses inject/decorate/shellTransform/JS-function wait, which require --allowInjection",
+            "the operator-facing skip reason must read cleanly, naming the flag once"
+        );
+
+        let summary = format_skipped_summary(&gated).expect("a gated file yields a summary");
+        assert!(
+            summary.contains("/data/4501.json") && summary.contains("NOT being served"),
+            "the gated file flows into the existing skip summary: {summary}"
+        );
+    }
+
+    // AC6: with the flag set, nothing is gated.
+    #[test]
+    fn partition_gated_datadir_keeps_everything_when_flag_set() {
+        let parsed = vec![
+            (
+                PathBuf::from("/data/4501.json"),
+                inject_response_config(4501),
+            ),
+            (PathBuf::from("/data/4502.json"), clean_config(4502)),
+        ];
+        let (servable, gated) = partition_gated_datadir(parsed, true);
+        assert_eq!(servable.len(), 2, "--allowInjection serves both");
+        assert!(gated.is_empty(), "nothing is gated with the flag set");
+    }
+
+    // ===== #612 door-level: the gate must be WIRED, not merely present =====
+    //
+    // The helper tests above prove the classifier decides correctly. They cannot prove the doors
+    // ask it — and #612 was exactly that failure: a call-site that never consulted the gate. These
+    // drive the real loaders, so dropping the gate call (or bailing after the create loop) fails
+    // here even though every helper test would still pass.
+
+    fn write_json(path: &Path, value: serde_json::Value) {
+        std::fs::write(path, serde_json::to_string(&value).expect("json")).expect("write");
+    }
+
+    #[tokio::test]
+    async fn load_imposters_from_file_aborts_before_creating_any_imposter() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        // A clean imposter listed *before* the offender: if the gate ran per-imposter inside the
+        // create loop instead of up front, 19601 would already be bound and serving.
+        write_json(
+            &path,
+            serde_json::json!({"imposters": [
+                {"port": 19601, "protocol": "http",
+                 "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]},
+                {"port": 19602, "protocol": "http",
+                 "stubs": [{"responses": [{"inject": "function (req) { return {body: 'x'}; }"}]}]},
+            ]}),
+        );
+
+        let manager = Arc::new(ImposterManager::new());
+        let err = load_imposters_from_file(&manager, &path, false, false)
+            .await
+            .expect_err("a gated configfile must abort startup");
+        assert!(err.to_string().contains("--allowInjection"), "got: {err}");
+
+        assert!(
+            manager.get_imposter(19601).is_err(),
+            "all-or-nothing: the clean imposter must not be half-loaded before the abort"
+        );
+        assert!(
+            manager.get_imposter(19602).is_err(),
+            "the offender must not load"
+        );
+
+        manager.delete_all().await;
+    }
+
+    // The literal repro from the issue's Evidence section: the shipped example is refused by the
+    // admin API without --allowInjection, and must now be refused through --configfile too.
+    #[tokio::test]
+    async fn load_imposters_from_file_refuses_the_shipped_latency_example() {
+        let example =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/latency-testing.json");
+        assert!(example.exists(), "fixture missing: {}", example.display());
+
+        let manager = Arc::new(ImposterManager::new());
+        let err = load_imposters_from_file(&manager, &example, false, false)
+            .await
+            .expect_err("examples/latency-testing.json uses a JS-function wait; it must be gated");
+        assert!(err.to_string().contains("--allowInjection"), "got: {err}");
+
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn load_imposters_from_datadir_serves_the_clean_file_and_skips_the_scripted_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_json(
+            &dir.path().join("19603.json"),
+            serde_json::json!({"port": 19603, "protocol": "http",
+                "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]}),
+        );
+        write_json(
+            &dir.path().join("19604.json"),
+            serde_json::json!({"port": 19604, "protocol": "http",
+                "stubs": [{"responses": [{"inject": "function (req) { return {body: 'x'}; }"}]}]}),
+        );
+
+        let manager = Arc::new(ImposterManager::new());
+        let datadir = dir.path().to_path_buf();
+        load_imposters_from_datadir(&manager, &datadir, false)
+            .await
+            .expect("a gated datadir file is skipped, never fatal");
+
+        assert!(
+            manager.get_imposter(19603).is_ok(),
+            "the clean file must still be served — one gated file cannot brick startup"
+        );
+        assert!(
+            manager.get_imposter(19604).is_err(),
+            "the scripted file must not be served without --allowInjection"
+        );
+
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn load_imposters_from_datadir_serves_the_scripted_file_with_the_flag() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_json(
+            &dir.path().join("19605.json"),
+            serde_json::json!({"port": 19605, "protocol": "http",
+                "stubs": [{"responses": [{"inject": "function (req) { return {body: 'x'}; }"}]}]}),
+        );
+
+        let manager = Arc::new(ImposterManager::new());
+        let datadir = dir.path().to_path_buf();
+        load_imposters_from_datadir(&manager, &datadir, true)
+            .await
+            .expect("datadir load succeeds");
+        assert!(
+            manager.get_imposter(19605).is_ok(),
+            "--allowInjection must serve the scripted file"
+        );
+
+        manager.delete_all().await;
     }
 }

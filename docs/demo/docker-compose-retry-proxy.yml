@@ -9,7 +9,9 @@ services:
       - "4560:4560"   # Retry proxy imposter
     volumes:
       - ./imposters-retry-proxy.json:/imposters.json:ro
-    command: ["--configfile", "/imposters.json", "--loglevel", "debug"]
+    # --allow-injection: this demo uses inject/_rift.script, which the configfile door
+    # gates since issue #612 — without it rift refuses to start.
+    command: ["--configfile", "/imposters.json", "--loglevel", "debug", "--allow-injection"]
     depends_on:
       - upstream
 
