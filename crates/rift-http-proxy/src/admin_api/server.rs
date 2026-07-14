@@ -1,11 +1,12 @@
 //! Admin API server.
 
+use crate::admin_api::handlers::events::{self, AdminBody};
 use crate::admin_api::router::route_request;
 use crate::config_loader::ConfigSource;
 use crate::extensions::decorate::{ResponsePhase, with_annotation_scope};
 use crate::imposter::ImposterManager;
 use crate::intercept_control::InterceptControl;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::service::service_fn;
 use hyper::{Response, StatusCode};
@@ -224,12 +225,14 @@ async fn accept_loop(
         let conn_cancel = cancel.clone();
 
         tracker.spawn(async move {
+            let stream_cancel = conn_cancel.clone();
             let service = service_fn(move |req| {
                 let manager = Arc::clone(&manager);
                 let api_key = api_key.clone();
                 let config_source = config_source.clone();
                 let intercept = intercept.clone();
                 let scripts_dir = scripts_dir.clone();
+                let stream_cancel = stream_cancel.clone();
                 async move {
                     // Per-request annotation scope + response decorator (issue #318):
                     // every response through this listener — including the `/__rift/`
@@ -251,8 +254,20 @@ async fn accept_loop(
                                 .and_then(|v| v.to_str().ok())
                                 .unwrap_or("");
                             if !api_key_matches(auth, key.as_str()) {
-                                return Ok::<_, hyper::Error>(unauthorized_response());
+                                return Ok::<_, hyper::Error>(box_full(unauthorized_response()));
                             }
+                        }
+                        // Admin SSE stream (issue #461): `/events` + the
+                        // `/imposters/{port}/savedRequests/stream` alias. Runs AFTER the auth gate
+                        // above, and BEFORE the `Full<Bytes>` router so the streaming body type never
+                        // touches the router or its handlers.
+                        if let Some(forced_port) = events::stream_target(req.uri().path()) {
+                            return Ok::<_, hyper::Error>(events::handle_stream(
+                                &manager,
+                                req.uri().query(),
+                                forced_port,
+                                stream_cancel,
+                            ));
                         }
                         route_request(
                             req,
@@ -263,6 +278,7 @@ async fn accept_loop(
                             scripts_dir,
                         )
                         .await
+                        .map(box_full)
                     })
                     .await;
                     let mut response = result?;
@@ -321,6 +337,13 @@ async fn accept_loop(
 /// mismatch is; the length check it performs first is not secret.
 fn api_key_matches(provided: &str, expected: &str) -> bool {
     provided.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
+/// Box a `Full<Bytes>` response into the streaming-unified `AdminBody` (issue #461), so the normal
+/// router path and the SSE stream path share one response type. `Full`'s error is `Infallible`, so
+/// the `map_err` closure is unreachable.
+fn box_full(resp: Response<Full<Bytes>>) -> Response<AdminBody> {
+    resp.map(|body| body.map_err(|never| match never {}).boxed())
 }
 
 fn unauthorized_response() -> Response<Full<Bytes>> {

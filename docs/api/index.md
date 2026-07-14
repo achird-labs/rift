@@ -498,6 +498,68 @@ state intact.
 
 ---
 
+## Events (Server-Sent Events)
+
+### GET /events
+
+A [Server-Sent Events](https://developer.mozilla.org/docs/Web/API/Server-sent_events) stream of
+recorded requests and imposter lifecycle changes — a push upgrade of polling `GET /savedRequests`,
+for live request tails (`ZStream`/`fs2.Stream`, Go channels, async iterators). Gated by the admin
+API key like every other admin route. Older engines return `404`, so an SDK probes this endpoint and
+falls back to polling.
+
+**Query parameters:**
+- `types=requests,lifecycle` — which event families to stream (default: both).
+- `port=<port>` — restrict to one imposter.
+- `match=header:<Name>=<Value>` / `match=flow_id=<Value>` — filter **request** events (AND-ed).
+  `flow_id=` compares the request's record-time resolved flow id (per the imposter's
+  `flow_id_source`); a `header:`-source imposter whose request lacks that header falls back to the
+  port, which `GET /savedRequests?match=flow_id=` treats as "no match" instead — the only edge where
+  the two disagree.
+
+**Event stream** (`Content-Type: text/event-stream`):
+```
+event: hello
+data: {"engineVersion":"X.Y.Z","seq":42,"types":["requests","lifecycle"],"port":null}
+
+event: request
+id: 43
+data: {"port":3000,"flowId":"tenant-a","index":12,"request":{ …RecordedRequest, identical to savedRequests… }}
+
+event: imposter
+id: 44
+data: {"action":"created|replaced|stubsChanged|deleted|allDeleted","port":3000}
+
+event: lagged
+data: {"missed":7}
+
+: ping    ← comment heartbeat every 15s
+```
+
+- **Request events require `recordRequests: true`** — the stream is a tail *of recorded requests*,
+  exactly like `savedRequests`, not a tap of all traffic.
+- The `id:` is a monotonic sequence number spanning **both** event families. **v1 does not replay:**
+  on reconnect, a gap in `id:` (or a `lagged` event, emitted when a slow consumer falls behind the
+  bounded buffer) means "reconcile via `GET /savedRequests`". The stream is lossy-but-loud by
+  design; polling remains the source of truth.
+- **`index`** on a request event is that entry's journal index — the same cursor the polling side
+  reports as `x-rift-next-index` (see [Tailing with a cursor](#tailing-with-a-cursor)). It is what
+  makes reconciling cheap: pass the last `index` you saw as `?since=<index>` and get only what you
+  missed, instead of re-polling the whole journal and de-duplicating by content. Omitted when the
+  journal backend has no stable indices — the same capability probe as the polling side's missing
+  header.
+
+**Canonical tail:** connect → `hello` → baseline `GET /savedRequests` (keep `x-rift-next-index`) →
+consume events, tracking `index` → on `lagged` or a reconnect gap, `GET /savedRequests?since=<last
+index>` to fill the hole, then resume.
+
+### GET /imposters/{port}/savedRequests/stream
+
+Sugar alias for `GET /events?types=requests&port={port}` — a handle-scoped request tail that mirrors
+the `savedRequests` polling endpoint one-to-one.
+
+---
+
 ## Scenarios
 
 Declarative state machines (Mountebank/WireMock style) gate stubs by `requiredScenarioState` and

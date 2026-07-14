@@ -27,7 +27,8 @@ futures.workspace = true
 # HTTP
 hyper = { version = "1.5", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
-http-body-util = "0.1"
+# `channel` (issue #461 SSE body) pulls only tokio, already a dependency — no new crate in the tree.
+http-body-util = { version = "0.1", features = ["channel"] }
 tower = { version = "0.5", features = ["full"] }
 # Pin the rustls crypto provider to `ring` everywhere. hyper-rustls/tokio-rustls
 # default to the `aws-lc-rs` provider, whose C build (aws-lc-sys) fails to compile
