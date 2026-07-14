@@ -4,7 +4,7 @@ use crate::admin_api::request_filter::{parse_match_clauses, parse_since, request
 use crate::admin_api::types::{
     ImposterDetail, ImposterListEntry, ImposterQueryParams, ImposterSummary, ListImpostersResponse,
     RiftImposterExtensions, StubWithLinks, build_response_with_headers, collect_body,
-    error_response, json_response, make_imposter_links, make_stub_links,
+    error_response, json_response, make_imposter_links, make_stub_links, serialize_or_500,
 };
 use crate::extensions::decorate::backend_error_response;
 use crate::imposter::RecordedRequest;
@@ -634,14 +634,23 @@ fn cursor_response(
     next: u64,
     truncated: bool,
 ) -> Response<Full<Bytes>> {
-    let json = match serde_json::to_string_pretty(entries) {
+    build_cursor_response(serialize_or_500(&entries), next, truncated)
+}
+
+/// Attach the cursor headers to an already-serialized body, or serve the serialization failure
+/// verbatim.
+///
+/// Split from [`cursor_response`] so the ordering is enforced by types rather than by discipline:
+/// the headers cannot be built before serialization has succeeded, because this function never
+/// sees the payload. A 500 therefore can never advertise a cursor for a body that was not sent.
+fn build_cursor_response(
+    json: Result<String, Box<Response<Full<Bytes>>>>,
+    next: u64,
+    truncated: bool,
+) -> Response<Full<Bytes>> {
+    let json = match json {
         Ok(j) => j,
-        Err(e) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("failed to serialize recorded requests: {e}"),
-            );
-        }
+        Err(resp) => return *resp,
     };
     let mut headers = vec![
         ("Content-Type".to_string(), "application/json".to_string()),
@@ -1327,6 +1336,35 @@ mod requests_filter_tests {
 
     fn header<'a>(resp: &'a Response<Full<Bytes>>, name: &str) -> Option<&'a str> {
         resp.headers().get(name).and_then(|v| v.to_str().ok())
+    }
+
+    // AC3 (#606): a serialization failure must never be dressed with cursor headers describing a
+    // payload that was never sent. Driving the real header-assembly path with a synthetic failure
+    // — asserting the error is passed through untouched, rather than asserting error_response's
+    // fixed shape, which would hold no matter what this function did.
+    #[tokio::test]
+    async fn build_cursor_response_passes_failures_through_without_cursor_headers() {
+        let failed: Box<Response<Full<Bytes>>> = Box::new(crate::admin_api::types::error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "boom",
+        ));
+        let resp = build_cursor_response(Err(failed), 12, true);
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            header(&resp, "x-rift-next-index").is_none(),
+            "a 500 must not advertise a cursor to advance from"
+        );
+        assert!(
+            header(&resp, "x-rift-truncated").is_none(),
+            "nor a truncation flag, even though truncated=true was requested"
+        );
+
+        // The success path still attaches them, so the assertions above are about the failure
+        // branch and not a helper that never sets headers at all.
+        let ok = build_cursor_response(Ok("[]".to_string()), 12, true);
+        assert_eq!(header(&ok, "x-rift-next-index"), Some("12"));
+        assert_eq!(header(&ok, "x-rift-truncated"), Some("true"));
     }
 
     fn next_index(resp: &Response<Full<Bytes>>) -> Option<&str> {

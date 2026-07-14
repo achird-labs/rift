@@ -194,10 +194,34 @@ pub fn make_stub_links(base_url: &str, port: u16, index: usize) -> StubLinks {
 // Response helper functions
 // =============================================================================
 
+/// Pretty-print `body`, or give back the `500` to serve instead (issue #606).
+///
+/// A response body that cannot be rendered is a server fault, so the failure never inherits the
+/// caller's intended status — a `201` that can't serialize is a `500`, not a `201` with the wrong
+/// body. Callers that add headers should apply this first and return the error verbatim, so an
+/// error response never carries metadata describing a payload that was never sent.
+/// Boxed so the `Err` variant stays small (`clippy::result_large_err`); the allocation only ever
+/// happens on the failure path.
+pub(crate) fn serialize_or_500<T: Serialize>(
+    body: &T,
+) -> Result<String, Box<Response<Full<Bytes>>>> {
+    serde_json::to_string_pretty(body).map_err(|e| {
+        tracing::error!(error = %e, "failed to serialize admin API response body");
+        Box::new(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("failed to serialize response body: {e}"),
+        ))
+    })
+}
+
 /// Create a JSON response
 pub fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Full<Bytes>> {
-    let json = serde_json::to_string_pretty(body).unwrap_or_else(|_| "{}".to_string());
-    build_response_with_headers(status, [("Content-Type", "application/json")], json)
+    match serialize_or_500(body) {
+        Ok(json) => {
+            build_response_with_headers(status, [("Content-Type", "application/json")], json)
+        }
+        Err(resp) => *resp,
+    }
 }
 
 // The generic response builders moved to `rift_mock_core::util` (issue #203) so the engine can use
@@ -279,6 +303,88 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
+
+    /// A payload whose `Serialize` always fails — the only way to drive serde's error path, since
+    /// every real admin payload is plain structs/Vecs of strings and numbers (issue #606).
+    struct Unserializable;
+    impl Serialize for Unserializable {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("nope"))
+        }
+    }
+
+    async fn body_string(resp: Response<Full<Bytes>>) -> String {
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        String::from_utf8(bytes.to_vec()).expect("utf8")
+    }
+
+    // AC1 (#606): a serialization failure is a server fault — 500 with the structured error
+    // envelope, never 200 with a shape-invalid `{}` body that fails in the client's decoder.
+    #[tokio::test]
+    async fn json_response_maps_serialization_failure_to_500() {
+        let resp = json_response(StatusCode::OK, &Unserializable);
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the caller's OK is discarded: a body that cannot render is a server fault"
+        );
+
+        let body = body_string(resp).await;
+        assert_ne!(
+            body.trim(),
+            "{}",
+            "the silent empty-object body must be gone"
+        );
+        let json: serde_json::Value = serde_json::from_str(&body).expect("a structured envelope");
+        assert!(
+            json["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("serialize")),
+            "the envelope names the real cause, not the client's codec: {body}"
+        );
+    }
+
+    // AC2 (#606): the success path is untouched — status, content type, and the exact
+    // pretty-printed bytes SDK codecs and Mountebank compat already depend on.
+    #[tokio::test]
+    async fn json_response_success_path_unchanged() {
+        let payload = serde_json::json!({"a": 1, "b": ["x"]});
+        let resp = json_response(StatusCode::CREATED, &payload);
+        assert_eq!(resp.status(), StatusCode::CREATED, "given status preserved");
+        assert_eq!(
+            resp.headers()
+                .get("Content-Type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        assert_eq!(
+            body_string(resp).await,
+            serde_json::to_string_pretty(&payload).expect("pretty"),
+            "body stays byte-identical to the pretty-printed payload"
+        );
+    }
+
+    // The shared helper both `json_response` and `cursor_response` route through, so the two
+    // paths of the savedRequests handler cannot drift apart again. The header-ordering half of
+    // AC3 lives with `build_cursor_response` in handlers/imposters.rs — asserting it here would
+    // only restate that `error_response` has no cursor headers, which is true regardless of what
+    // the cursor path does.
+    #[tokio::test]
+    async fn serialize_or_500_yields_json_or_a_500_response() {
+        let ok = serialize_or_500(&serde_json::json!({"a": 1}));
+        assert_eq!(
+            ok.ok().as_deref(),
+            Some(
+                serde_json::to_string_pretty(&serde_json::json!({"a": 1}))
+                    .unwrap()
+                    .as_str()
+            )
+        );
+
+        let err = *serialize_or_500(&Unserializable).expect_err("must not serialize");
+        assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     #[tokio::test]
     async fn collect_body_under_limit_returns_bytes() {
