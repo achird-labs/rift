@@ -245,11 +245,11 @@ impl Imposter {
                     .enumerate()
                     .skip(proxy_stub_index + 1) // Only look after the proxy stub
                     .find(|(_, existing)| {
-                        // Compare predicates (JSON comparison)
-                        let existing_preds =
-                            serde_json::to_string(&existing.predicates).unwrap_or_default();
-                        let new_preds = serde_json::to_string(&stub.predicates).unwrap_or_default();
-                        existing_preds == new_preds && !existing.predicates.is_empty()
+                        // Structural comparison, not serialized JSON (issue #611): a predicate's
+                        // operands are `HashMap`s, which serialize in iteration order, so two
+                        // semantically equal multi-key predicate sets reliably produced different
+                        // strings and dedup appended a duplicate stub instead of merging into it.
+                        existing.predicates == stub.predicates && !existing.predicates.is_empty()
                     })
                     .map(|(idx, _)| idx);
 
@@ -592,5 +592,64 @@ impl Imposter {
             body_bytes.to_vec(),
             proxy_config.add_wait_behavior.then_some(latency_ms),
         ))
+    }
+}
+
+#[cfg(test)]
+mod proxy_dedup_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn imposter_with_proxy(to: &str) -> Imposter {
+        let cfg = serde_json::from_value(json!({
+            "port": 0,
+            "protocol": "http",
+            "stubs": [{ "responses": [{ "proxy": { "to": to, "mode": "proxyAlways" } }] }],
+        }))
+        .expect("valid imposter config");
+        Imposter::new(cfg).expect("test imposter")
+    }
+
+    /// A stub whose single predicate matches on several fields at once — the shape a Mountebank
+    /// `predicateGenerators: [{matches: {method, path, query}}]` produces.
+    fn multi_key_stub(body: &str) -> Stub {
+        serde_json::from_value(json!({
+            "predicates": [{ "equals": { "method": "GET", "path": "/x", "query": { "a": "1" } } }],
+            "responses": [{ "is": { "statusCode": 200, "body": body } }],
+        }))
+        .expect("valid stub")
+    }
+
+    // Issue #611: dedup compared *serialized* predicates, but a predicate's operands are `HashMap`s
+    // that serialize in iteration order — so two semantically equal multi-key predicate sets
+    // produced different strings and proxyAlways appended a duplicate stub instead of merging the
+    // recorded response into the existing one.
+    #[test]
+    fn proxy_always_merges_responses_for_equal_multi_key_predicates() {
+        let imposter = imposter_with_proxy("http://upstream");
+
+        imposter.insert_or_append_proxy_stub(
+            multi_key_stub("first"),
+            "http://upstream",
+            "proxyAlways",
+        );
+        imposter.insert_or_append_proxy_stub(
+            multi_key_stub("second"),
+            "http://upstream",
+            "proxyAlways",
+        );
+
+        let stubs = imposter.get_stubs();
+        assert_eq!(
+            stubs.len(),
+            2,
+            "equal predicate sets must merge into one recorded stub alongside the proxy stub, \
+             not append a duplicate"
+        );
+        assert_eq!(
+            stubs[1].responses.len(),
+            2,
+            "both recorded responses must land on the single matching stub"
+        );
     }
 }

@@ -133,6 +133,8 @@ async fn handle_stop(control: &InterceptControl) -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::NO_CONTENT)
         .body(Full::new(Bytes::new()))
+        // Terminal last-resort: `error_response` keeps the correct 500 status and its payload is
+        // infallible by construction, so this cannot mask a failure as success (issue #611).
         .unwrap_or_else(|_| {
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -211,6 +213,8 @@ fn handle_ca_pem(state: &InterceptState) -> Response<Full<Bytes>> {
         .status(StatusCode::OK)
         .header("content-type", "application/x-pem-file")
         .body(Full::new(Bytes::from(pem)))
+        // Terminal last-resort: `error_response` keeps the correct 500 status and its payload is
+        // infallible by construction, so this cannot mask a failure as success (issue #611).
         .unwrap_or_else(|_| {
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -226,6 +230,8 @@ fn password_from_query(query: Option<&str>) -> String {
             q.split('&').find_map(|pair| {
                 let (k, v) = pair.split_once('=')?;
                 (k == "password").then(|| {
+                    // Domain-optional decode: an undecodable value passes through raw, the repo's
+                    // convention for percent-decoding query values (issue #611).
                     urlencoding::decode(v)
                         .map(|d| d.into_owned())
                         .unwrap_or_else(|_| v.to_string())
@@ -245,6 +251,8 @@ fn truststore_response(bytes: Vec<u8>, password: &str, filename: &str) -> Respon
         )
         .header("x-truststore-password", password)
         .body(Full::new(Bytes::from(bytes)))
+        // Terminal last-resort: `error_response` keeps the correct 500 status and its payload is
+        // infallible by construction, so this cannot mask a failure as success (issue #611).
         .unwrap_or_else(|_| {
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,

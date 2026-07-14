@@ -9,7 +9,6 @@ use super::headers::{
 };
 use super::response_ext::ResponseExt;
 use crate::recording::{ProxyMode, RecordedResponse, RecordingStore, RequestSignature};
-use crate::response::builder::ErrorResponseBuilder;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -19,13 +18,17 @@ use std::sync::Arc;
 use tracing::{debug, error};
 
 /// Helper function to create an error response.
+///
+/// Delegates to the crate's canonical Mountebank-shaped error builder (issue #611) rather than
+/// interpolating the message into a JSON string literal, which produced invalid JSON whenever the
+/// message contained a quote. A `status` hyper cannot represent is a server fault, not something
+/// to serve as-is, so it becomes a loud 500.
 pub fn error_response(status: u16, message: &str) -> Response<Full<Bytes>> {
-    let body = format!(r#"{{"error": "{message}"}}"#);
-    Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(Full::new(Bytes::from(body)))
-        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from(r#"{"error": "internal"}"#))))
+    let status = StatusCode::from_u16(status).unwrap_or_else(|e| {
+        error!(status, error = %e, "invalid HTTP status for error response; serving 500");
+        StatusCode::INTERNAL_SERVER_ERROR
+    });
+    crate::response::error_response(status, message)
 }
 
 /// Build a `Request::Builder` pointing at the upstream, with headers copied
@@ -122,10 +125,9 @@ pub async fn forward_request_streaming(
         }
         Err(e) => {
             error!("Failed to forward request to upstream: {}", e);
-            ErrorResponseBuilder::new(StatusCode::BAD_GATEWAY)
-                .header("content-type", "application/json")
-                .body(r#"{"error": "Bad Gateway"}"#)
-                .build_boxed()
+            // Same helper as the buffered path (issue #611) so an upstream failure produces one
+            // error envelope regardless of which proxy mode happens to be serving.
+            error_response(502, "Bad Gateway").into_boxed()
         }
     }
 }
@@ -154,10 +156,7 @@ pub async fn forward_with_recording(
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
             error!("Failed to collect request body for recording: {}", e);
-            return ErrorResponseBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
-                .header("content-type", "application/json")
-                .body(r#"{"error": "Failed to read request body"}"#)
-                .build_boxed();
+            return error_response(500, "Failed to read request body").into_boxed();
         }
     };
 
@@ -368,5 +367,57 @@ mod tests {
     fn test_error_response_503() {
         let response = error_response(503, "Service Unavailable");
         assert_eq!(response.status(), 503);
+    }
+
+    async fn body_string(response: Response<Full<Bytes>>) -> String {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        String::from_utf8(bytes.to_vec()).expect("utf8")
+    }
+
+    // Issue #611: the body was built by string interpolation, so a message containing a quote
+    // produced invalid JSON that only fails in the client's decoder. It must always parse.
+    #[tokio::test]
+    async fn error_response_escapes_quotes_in_the_message() {
+        let response = error_response(502, r#"upstream said "no""#);
+        let body = body_string(response).await;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("error body must be valid JSON");
+        assert_eq!(
+            parsed["errors"][0]["message"],
+            serde_json::json!(r#"upstream said "no""#),
+            "the message must survive escaping intact"
+        );
+    }
+
+    // Issue #611: `status: u16` let a code the builder rejects fall into the terminal fallback,
+    // which answered 200. An unrepresentable code is a server fault → 500, never a masked 200.
+    #[tokio::test]
+    async fn error_response_maps_an_invalid_status_code_to_500() {
+        for bad in [0u16, 1000] {
+            let response = error_response(bad, "boom");
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "status {bad} is not a valid HTTP status; must fall back to 500"
+            );
+        }
+    }
+
+    // Pins the Mountebank error envelope the proxy now shares with the rest of the crate.
+    #[tokio::test]
+    async fn error_response_body_is_the_mountebank_error_envelope() {
+        let response = error_response(502, "Bad Gateway");
+        let body = body_string(response).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(parsed["errors"][0]["code"], serde_json::json!("502"));
+        assert_eq!(
+            parsed["errors"][0]["message"],
+            serde_json::json!("Bad Gateway")
+        );
     }
 }

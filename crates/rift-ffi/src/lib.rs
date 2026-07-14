@@ -1935,6 +1935,9 @@ pub extern "C" fn rift_build_info() -> *const c_char {
             "builtAt": option_env!("RIFT_BUILT_AT"),
             "features": features,
         });
+        // Terminal last-resort: `json!` output cannot contain an interior NUL, so this fallback is
+        // unreachable; and build info carries no status for the `{}` fallback to misreport
+        // (issue #611).
         CString::new(info.to_string()).unwrap_or_else(|_| CString::new("{}").expect("no NUL"))
     })
     .as_ptr()

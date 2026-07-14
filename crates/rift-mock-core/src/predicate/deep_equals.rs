@@ -134,11 +134,7 @@ pub fn parse_query_string(query: Option<&str>) -> HashMap<String, String> {
     if let Some(q) = query {
         for pair in q.split('&') {
             if let Some((key, value)) = pair.split_once('=') {
-                // URL decode would go here for full compatibility
-                params.insert(
-                    key.to_string(),
-                    urlencoding::decode(value).unwrap_or_default().to_string(),
-                );
+                params.insert(key.to_string(), crate::util::decode_or_raw(value));
             } else if !pair.is_empty() {
                 params.insert(pair.to_string(), String::new());
             }
@@ -258,5 +254,17 @@ mod tests {
 
         let encoded = parse_query_string(Some("name=hello%20world"));
         assert_eq!(encoded.get("name"), Some(&"hello world".to_string()));
+    }
+
+    // Issue #611: an undecodable percent-sequence must pass through raw, matching the repo's
+    // decode convention, rather than blanking the value a predicate matches on.
+    #[test]
+    fn test_query_string_passes_through_undecodable_value() {
+        let params = parse_query_string(Some("k=%FF"));
+        assert_eq!(
+            params.get("k"),
+            Some(&"%FF".to_string()),
+            "an undecodable value must pass through raw, not become empty"
+        );
     }
 }

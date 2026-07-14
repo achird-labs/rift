@@ -60,16 +60,40 @@ fn rift_debug_from(val: Option<&str>) -> bool {
         .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
 }
 
+/// Percent-decode a query/form component, passing the raw text through unchanged if it is not
+/// valid percent-encoding.
+///
+/// This is Rift's decode contract (issue #611): an undecodable sequence is the client's own text,
+/// not an error to erase. Blanking it — the `unwrap_or_default()` this replaced — silently
+/// destroys text a predicate matches on, and on a key it collapses distinct parameters into a
+/// single `""` entry that then comma-joins unrelated values.
+pub fn decode_or_raw(value: &str) -> String {
+    urlencoding::decode(value)
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or_else(|_| value.to_string())
+}
+
+/// The terminal fallback for the builders below: a 500 assembled without the builder, so it cannot
+/// itself fail. `Response::new` defaults to **200**, so the status must be set explicitly —
+/// answering 200 with an error string is the failure-masking shape issue #611 sweeps out.
+fn internal_error_fallback(e: &hyper::http::Error) -> Response<Full<Bytes>> {
+    tracing::error!(error = %e, "response build failed; serving a 500");
+    let mut resp = Response::new(Full::new(Bytes::from("Internal Server Error")));
+    *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+    resp
+}
+
 /// Build an HTTP response with the given status and body. Falls back to a minimal 500 if the
 /// builder fails (which should not happen with a valid `StatusCode`).
 pub fn build_response(status: StatusCode, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
     Response::builder()
         .status(status)
         .body(Full::new(body.into()))
-        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from("Internal Server Error"))))
+        .unwrap_or_else(|e| internal_error_fallback(&e))
 }
 
-/// Build an HTTP response with headers. Falls back to a minimal 500 if the builder fails.
+/// Build an HTTP response with headers. Falls back to a minimal 500 if the builder fails (e.g. a
+/// caller-supplied header name/value that hyper rejects).
 pub fn build_response_with_headers(
     status: StatusCode,
     headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
@@ -81,7 +105,7 @@ pub fn build_response_with_headers(
     }
     builder
         .body(Full::new(body.into()))
-        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from("Internal Server Error"))))
+        .unwrap_or_else(|e| internal_error_fallback(&e))
 }
 
 /// Merge a slice of `(key, value)` header pairs into a `HashMap`,
@@ -144,7 +168,34 @@ pub fn unix_timestamp() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{http2_disabled_from, rift_debug_from, strict_behaviors_from};
+    use super::{
+        build_response, build_response_with_headers, http2_disabled_from, rift_debug_from,
+        strict_behaviors_from,
+    };
+    use hyper::StatusCode;
+
+    // Issue #611: the terminal builder fallback must not answer 200. A response-builder failure is
+    // a server fault, and `Response::new` defaults to 200 — the same 200-masking shape #606 fixed
+    // one helper up. An invalid header name is the only way to drive the builder's error path.
+    #[test]
+    fn build_response_with_headers_falls_back_to_500_on_builder_failure() {
+        let resp = build_response_with_headers(StatusCode::OK, [("bad\nname", "v")], "x");
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a builder failure must surface as 500, not a 200 carrying an error string"
+        );
+    }
+
+    // `build_response` takes a valid `StatusCode` and no headers, so its builder cannot fail today;
+    // pin the success path so the fallback added for #611 can't silently change the happy status.
+    #[test]
+    fn build_response_preserves_the_requested_status() {
+        assert_eq!(
+            build_response(StatusCode::NOT_FOUND, "x").status(),
+            StatusCode::NOT_FOUND
+        );
+    }
 
     // Issue #375: RIFT_STRICT_BEHAVIORS parsing — truthy values force strict, everything else lenient.
     #[test]

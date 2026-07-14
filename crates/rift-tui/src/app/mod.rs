@@ -210,6 +210,10 @@ impl StubEditor {
     }
 
     /// Get the stub if valid
+    ///
+    /// Domain-optional parse: editor content that isn't yet a valid stub is a normal editing
+    /// state, not an error — `validate()` is the path that reports the parse error to the user
+    /// (issue #611).
     pub fn get_stub(&self) -> Option<crate::api::Stub> {
         let content = self.editor.lines().join("\n");
         serde_json::from_str(&content).ok()

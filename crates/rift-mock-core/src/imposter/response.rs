@@ -53,6 +53,8 @@ pub fn create_response_preview(response: &StubResponse) -> DebugResponsePreview 
             let body_preview = is.body.as_ref().map(|b| match b {
                 serde_json::Value::String(s) => truncate_with_ellipsis(s, 500),
                 other => {
+                    // Serializing a `serde_json::Value` is infallible by construction, so this
+                    // never defaults; it is a debug preview either way (issue #611).
                     let json = serde_json::to_string(other).unwrap_or_default();
                     truncate_with_ellipsis(&json, 500)
                 }

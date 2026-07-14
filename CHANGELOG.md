@@ -26,6 +26,42 @@ record.
   Rift's own example as an error. A `_behaviors` block that still fails to parse is now logged at
   error level instead of vanishing.
 
+- **A failed response build now answers `500`, not `200` with the words "Internal Server Error".**
+  The shared terminal fallback behind every serving-path response builder used `Response::new`,
+  which defaults to status **200** — so a builder failure (an invalid header name or value, e.g.
+  from a proxied upstream, an inject, or a script) served an error string under a success status,
+  and the client's decoder was the first thing to notice. The fallback now sets a real `500` and
+  logs at error level. Six previously-silent builder fallbacks on the serving path now log the
+  cause instead of swallowing it.
+
+- **Proxy error responses are valid JSON and carry a correct status.** The proxy's error helper
+  interpolated the message straight into a JSON string literal, so any message containing a quote
+  produced a body that failed in the client's parser; it also took an unvalidated `u16` status, and
+  a code HTTP cannot represent fell into a fallback that answered **200**. It now delegates to the
+  same Mountebank-shaped error builder the rest of Rift uses (`{"errors":[{"code","message"}]}`),
+  escaping the message properly, and an unrepresentable status is a logged `500`. Note the body
+  shape of proxy-generated errors (e.g. `Bad Gateway`) changes from `{"error": "..."}` to the
+  Mountebank envelope, matching Rift's other error responses. All proxy modes now emit that one
+  envelope; previously the streaming and recording paths hand-built their own.
+
+- **`proxyAlways` no longer records a duplicate stub when a predicate matches on several fields.**
+  Stub dedup compared *serialized* predicates, but a predicate's operands are maps that serialize
+  in iteration order, so two semantically identical predicate sets reliably produced different
+  JSON strings. A `predicateGenerators: [{"matches": {"method": true, "path": true, "query":
+  true}}]` therefore appended a new stub per recorded request instead of merging responses into
+  the existing one. Dedup now compares the predicates structurally.
+
+- **A query or form value that is not valid percent-encoding is passed through raw instead of
+  being blanked.** Five decode sites — the behaviors request context, both `parse_query_string`
+  helpers, and form-body parsing — turned an undecodable sequence into an **empty string**, so a
+  predicate matched against `""` rather than the text the client actually sent, and an undecodable
+  *key* collapsed distinct parameters into a single `""` entry that comma-joined unrelated values.
+  They now pass the raw value through, which is what every other decode site in Rift already did.
+
+- **Debug-mode responses report a serialization failure as `500`.** An `X-Rift-Debug: true`
+  request answered `200` carrying an error string if the debug payload failed to serialize, with
+  no log.
+
 ### Security
 
 - **A function `wait` requires `--allowInjection` in both spellings.** The `--allowInjection`

@@ -409,7 +409,8 @@ impl StubResponse {
                 }
             })
             .map(std::sync::Arc::new);
-        // Only a non-string body needs rendering; a string body is served as-is.
+        // Only a non-string body needs rendering; a string body is served as-is. Serializing a
+        // `serde_json::Value` is infallible by construction, so this never defaults (issue #611).
         let rendered_body =
             is.body.as_ref().filter(|b| !b.is_string()).map(|b| {
                 std::sync::Arc::from(serde_json::to_string(b).unwrap_or_default().as_str())

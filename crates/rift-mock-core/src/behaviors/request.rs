@@ -43,7 +43,7 @@ impl RequestContext {
                     None => (pair, ""),
                 };
                 let decoded_key = key.to_string();
-                let decoded_value = urlencoding::decode(value).unwrap_or_default().to_string();
+                let decoded_value = crate::util::decode_or_raw(value);
                 query_map
                     .entry(decoded_key)
                     .and_modify(|existing: &mut String| {
@@ -76,6 +76,27 @@ impl RequestContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Issue #611: an undecodable percent-sequence used to blank the value (`unwrap_or_default`),
+    // silently destroying text a predicate matches on. Every sibling decode site in the repo
+    // (request_filter.rs, intercept.rs, scenarios.rs) passes the raw value through instead.
+    #[test]
+    fn from_request_passes_through_an_undecodable_query_value() {
+        let uri: hyper::Uri = "/p?k=%FF".parse().unwrap();
+        let ctx = RequestContext::from_request("GET", &uri, &hyper::HeaderMap::new(), None);
+        assert_eq!(
+            ctx.query.get("k").map(String::as_str),
+            Some("%FF"),
+            "an undecodable value must pass through raw, not become an empty string"
+        );
+    }
+
+    #[test]
+    fn from_request_still_decodes_a_valid_query_value() {
+        let uri: hyper::Uri = "/p?k=hello%20world".parse().unwrap();
+        let ctx = RequestContext::from_request("GET", &uri, &hyper::HeaderMap::new(), None);
+        assert_eq!(ctx.query.get("k").map(String::as_str), Some("hello world"));
+    }
 
     // Issue #480 — the request context is now built from `req.headers().clone()`, whose names are
     // hyper's lowercase form, instead of a HashMap that was pre-title-cased. `from_request` must

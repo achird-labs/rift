@@ -38,6 +38,8 @@ fn flow_id_from_query(query: Option<&str>) -> Option<String> {
     query?.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=')?;
         (k == "flowId").then(|| {
+            // Domain-optional decode: an undecodable value passes through raw, the repo's
+            // convention for percent-decoding query values (issue #611).
             urlencoding::decode(v)
                 .map(|d| d.into_owned())
                 .unwrap_or_else(|_| v.to_string())

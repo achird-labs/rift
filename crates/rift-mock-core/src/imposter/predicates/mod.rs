@@ -498,8 +498,8 @@ pub fn parse_query_string(query: &str) -> HashMap<String, String> {
             Some((k, v)) => (k, v),
             None => (pair, ""),
         };
-        let decoded_key = urlencoding::decode(key).unwrap_or_default().into_owned();
-        let decoded_value = urlencoding::decode(value).unwrap_or_default().into_owned();
+        let decoded_key = crate::util::decode_or_raw(key);
+        let decoded_value = crate::util::decode_or_raw(value);
         map.entry(decoded_key)
             .and_modify(|existing: &mut String| {
                 existing.push(',');
@@ -1793,6 +1793,37 @@ mod tests {
     fn test_parse_query_string_empty() {
         let result = parse_query_string("");
         assert!(result.is_empty());
+    }
+
+    // Issue #611: an undecodable percent-sequence must pass through raw rather than blank the key
+    // or value. Blanking destroys matchable text and, on the key, collapses distinct params into a
+    // single "" entry that then comma-joins unrelated values.
+    #[test]
+    fn test_parse_query_string_passes_through_undecodable_sequences() {
+        let value = parse_query_string("k=%FF");
+        assert_eq!(
+            value.get("k"),
+            Some(&"%FF".to_string()),
+            "an undecodable value must pass through raw, not become empty"
+        );
+
+        let key = parse_query_string("%FF=v");
+        assert_eq!(
+            key.get("%FF"),
+            Some(&"v".to_string()),
+            "an undecodable key must pass through raw, not collapse to an empty key"
+        );
+
+        // The collision the fix exists to prevent: two *different* undecodable keys both blanked
+        // to "" used to comma-join their unrelated values into a single bogus entry.
+        let collision = parse_query_string("%FF=a&%FE=b");
+        assert_eq!(collision.get("%FF"), Some(&"a".to_string()));
+        assert_eq!(collision.get("%FE"), Some(&"b".to_string()));
+        assert_eq!(
+            collision.len(),
+            2,
+            "distinct undecodable keys must stay distinct, not collapse into one \"\" entry"
+        );
     }
 
     // Fix #104: JSON body key matching now respects keyCaseSensitive

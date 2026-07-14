@@ -449,7 +449,8 @@ async fn handle_request_inner(
 
                     return Ok(response
                         .body(Full::new(Bytes::from(body)))
-                        .unwrap_or_else(|_| {
+                        .unwrap_or_else(|e| {
+                            warn!("proxy response build failed (bad upstream header?): {e}");
                             build_response(
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 "Response build error",
@@ -502,7 +503,8 @@ async fn handle_request_inner(
 
                     return Ok(response
                         .body(Full::new(Bytes::from(inject_response.body)))
-                        .unwrap_or_else(|_| {
+                        .unwrap_or_else(|e| {
+                            warn!("inject response build failed (bad injected header?): {e}");
                             build_response(
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 "Response build error",
@@ -567,6 +569,8 @@ async fn handle_request_inner(
                     .iter()
                     .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
                     .collect(),
+                // Domain-optional parse: a request body may legitimately not be JSON, and the
+                // script contract exposes that as `null` rather than an error (issue #611).
                 body: body_string
                     .as_ref()
                     .and_then(|s| serde_json::from_str(s).ok())
@@ -677,7 +681,8 @@ async fn handle_request_inner(
 
                     return Ok(response
                         .body(Full::new(Bytes::from(body)))
-                        .unwrap_or_else(|_| {
+                        .unwrap_or_else(|e| {
+                            warn!("script response build failed (bad script header?): {e}");
                             build_response(
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 "Response build error",
@@ -1130,7 +1135,8 @@ async fn handle_request_inner(
                 response = response.header("x-rift-binary-error", "true");
             }
 
-            return Ok(response.body(Full::new(body_bytes)).unwrap_or_else(|_| {
+            return Ok(response.body(Full::new(body_bytes)).unwrap_or_else(|e| {
+                warn!("stub response build failed (bad stub header?): {e}");
                 build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
             }));
         }
@@ -1197,6 +1203,8 @@ async fn handle_request_inner(
                 if b.is_string() {
                     b.as_str().unwrap_or("").to_string()
                 } else {
+                    // Serializing a `serde_json::Value` is infallible by construction (map keys
+                    // are strings, numbers are finite), so this never defaults (issue #611).
                     serde_json::to_string(b).unwrap_or_default()
                 }
             })
@@ -1228,7 +1236,8 @@ async fn handle_request_inner(
         response = response.header("x-rift-imposter", "true");
         response = response.header("x-rift-default-response", "true");
 
-        return Ok(response.body(Full::new(body_bytes)).unwrap_or_else(|_| {
+        return Ok(response.body(Full::new(body_bytes)).unwrap_or_else(|e| {
+            warn!("defaultResponse build failed (bad default header?): {e}");
             build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
         }));
     }
@@ -1336,17 +1345,32 @@ fn handle_debug_request(
         match_result,
     };
 
-    let json_body = serde_json::to_string_pretty(&debug_response)
-        .unwrap_or_else(|_| r#"{"error": "Failed to serialize debug response"}"#.to_string());
+    let (status, json_body) = debug_serialize_or_500(&debug_response);
 
     Ok(build_response_with_headers(
-        StatusCode::OK,
+        status,
         [
             ("Content-Type", "application/json"),
             ("X-Rift-Debug-Response", "true"),
         ],
         json_body,
     ))
+}
+
+/// Serialize a debug payload into the `(status, body)` the debug endpoint should answer with.
+/// Split out from `handle_debug_request` so the serde error path — unreachable with the real
+/// `DebugResponse` — can be pinned by a test (issue #611).
+fn debug_serialize_or_500<T: serde::Serialize>(payload: &T) -> (StatusCode, String) {
+    match serde_json::to_string_pretty(payload) {
+        Ok(body) => (StatusCode::OK, body),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to serialize debug response");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error": "Failed to serialize debug response"}"#.to_string(),
+            )
+        }
+    }
 }
 
 /// Handle a top-level `fault` response type. A Mountebank `fault` is a transport-level event, so
@@ -1469,7 +1493,8 @@ async fn apply_rift_fault(
         return Some(
             response
                 .body(Full::new(Bytes::from(error_body)))
-                .unwrap_or_else(|_| {
+                .unwrap_or_else(|e| {
+                    warn!("error-fault response build failed (bad fault header?): {e}");
                     build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
                 }),
         );
@@ -1557,6 +1582,43 @@ mod matcher_error_response_tests {
             resp.headers().contains_key("x-rift-inject-error"),
             "a predicate-inject timeout keeps the inject-error marker"
         );
+    }
+}
+
+#[cfg(test)]
+mod debug_serialize_tests {
+    use super::debug_serialize_or_500;
+    use hyper::StatusCode;
+    use serde::{Serialize, Serializer};
+
+    /// A payload whose `Serialize` always fails — the only way to drive serde's error path, since
+    /// the real `DebugResponse` is plain structs of strings and JSON values (issue #611, mirroring
+    /// the #606 technique in `admin_api/types.rs`).
+    struct Unserializable;
+    impl Serialize for Unserializable {
+        fn serialize<S: Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("nope"))
+        }
+    }
+
+    // Issue #611: a serialize failure used to be answered as `200 OK` carrying an error string —
+    // the #606 shape one endpoint over. It is a server fault and must be a 500.
+    #[test]
+    fn debug_serialize_failure_maps_to_500() {
+        let (status, _body) = debug_serialize_or_500(&Unserializable);
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a serialize failure must be a 500, not a 200 carrying an error string"
+        );
+    }
+
+    #[test]
+    fn debug_serialize_success_keeps_200_and_the_payload() {
+        let (status, body) = debug_serialize_or_500(&serde_json::json!({"debug": true}));
+        assert_eq!(status, StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(parsed["debug"], serde_json::json!(true));
     }
 }
 

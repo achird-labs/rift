@@ -513,12 +513,10 @@ impl Imposter {
             for pair in body_str.split('&').filter(|s| !s.is_empty()) {
                 let mut parts = pair.splitn(2, '=');
                 if let Some(raw_key) = parts.next() {
-                    let key = urlencoding::decode(raw_key)
-                        .unwrap_or_default()
-                        .into_owned();
+                    let key = crate::util::decode_or_raw(raw_key);
                     let value = parts
                         .next()
-                        .map(|v| urlencoding::decode(v).unwrap_or_default().into_owned())
+                        .map(crate::util::decode_or_raw)
                         .unwrap_or_default();
                     map.entry(key)
                         .and_modify(|existing: &mut String| {
@@ -554,6 +552,37 @@ mod bounded_matching_tests {
 
     fn no_headers() -> HashMap<String, String> {
         HashMap::new()
+    }
+
+    // Issue #611: an undecodable percent-sequence in a form body must pass through raw rather than
+    // blank the key or value — the same decode convention the rest of the repo follows.
+    #[test]
+    fn parse_form_data_passes_through_undecodable_sequences() {
+        let headers = HashMap::from([(
+            "Content-Type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )]);
+
+        let form = Imposter::parse_form_data(&headers, Some("k=%FF")).expect("form parsed");
+        assert_eq!(
+            form.get("k"),
+            Some(&"%FF".to_string()),
+            "an undecodable value must pass through raw, not become empty"
+        );
+
+        let form = Imposter::parse_form_data(&headers, Some("%FF=v")).expect("form parsed");
+        assert_eq!(
+            form.get("%FF"),
+            Some(&"v".to_string()),
+            "an undecodable key must pass through raw, not collapse to an empty key"
+        );
+
+        let form = Imposter::parse_form_data(&headers, Some("k=hello%20world")).expect("parsed");
+        assert_eq!(
+            form.get("k"),
+            Some(&"hello world".to_string()),
+            "valid sequences must still decode"
+        );
     }
 
     // Issue #475: run_flow_blocking must be transparent — on the default (non-blocking) backend it
