@@ -35,22 +35,46 @@ pub(crate) fn parse_match_clauses(
     query: Option<&str>,
 ) -> Result<Vec<MatchClause>, MatchClauseError> {
     let mut clauses = Vec::new();
-    let Some(q) = query else {
-        return Ok(clauses);
-    };
-    for pair in q.split('&') {
-        let Some((key, raw_value)) = pair.split_once('=') else {
-            continue;
-        };
-        if key != "match" {
-            continue;
+    for (key, value) in query_pairs(query) {
+        if key == "match" {
+            clauses.push(parse_one(&value)?);
         }
-        let value = urlencoding::decode(raw_value)
-            .map(|v| v.into_owned())
-            .unwrap_or_else(|_| raw_value.to_string());
-        clauses.push(parse_one(&value)?);
     }
     Ok(clauses)
+}
+
+/// Decoded `key=value` pairs of a query string. Pairs without `=` are skipped, and a value that
+/// is not valid percent-encoding is passed through raw so it fails the caller's own validation
+/// rather than the decoder's.
+fn query_pairs(query: Option<&str>) -> impl Iterator<Item = (&str, String)> {
+    query
+        .into_iter()
+        .flat_map(|q| q.split('&'))
+        .filter_map(|pair| {
+            let (key, raw_value) = pair.split_once('=')?;
+            let value = urlencoding::decode(raw_value)
+                .map(|v| v.into_owned())
+                .unwrap_or_else(|_| raw_value.to_string());
+            Some((key, value))
+        })
+}
+
+/// Rejected `?since=` cursor. Like [`MatchClauseError`], the message is served verbatim in a
+/// `400 Bad Request` body and is therefore part of the admin API contract.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid since cursor '{0}' (expected a non-negative integer)")]
+pub(crate) struct SinceError(String);
+
+/// Parse the `?since=<u64>` cursor (issue #603). `None` = no cursor requested, i.e. a baseline
+/// read of everything retained. Unknown keys are skipped, so `since` composes with `match`.
+pub(crate) fn parse_since(query: Option<&str>) -> Result<Option<u64>, SinceError> {
+    let mut since = None;
+    for (key, value) in query_pairs(query) {
+        if key == "since" {
+            since = Some(value.parse::<u64>().map_err(move |_| SinceError(value))?);
+        }
+    }
+    Ok(since)
 }
 
 fn parse_one(value: &str) -> Result<MatchClause, MatchClauseError> {

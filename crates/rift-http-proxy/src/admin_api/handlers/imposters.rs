@@ -1,20 +1,17 @@
 //! Imposter CRUD handlers.
 
-use crate::admin_api::request_filter::{parse_match_clauses, request_matches};
+use crate::admin_api::request_filter::{parse_match_clauses, parse_since, request_matches};
 use crate::admin_api::types::{
     ImposterDetail, ImposterListEntry, ImposterQueryParams, ImposterSummary, ListImpostersResponse,
     RiftImposterExtensions, StubWithLinks, build_response_with_headers, collect_body,
     error_response, json_response, make_imposter_links, make_stub_links,
 };
 use crate::extensions::decorate::backend_error_response;
+use crate::imposter::RecordedRequest;
 use crate::imposter::{
     Imposter, ImposterConfig, ImposterError, ImposterManager, Predicate, PredicateOperation,
     ScriptBaseDir, Stub, StubResponse, VerifyOptions, resolve_scripts,
 };
-// `RecordedRequest` is only named in tests now that the `/requests` handler filters before
-// cloning via `get_recorded_requests_filtered` (issue #485).
-#[cfg(test)]
-use crate::imposter::RecordedRequest;
 use crate::scripting::validate_stubs;
 use bytes::Bytes;
 use http_body_util::Full;
@@ -580,8 +577,13 @@ fn flow_id_source(imposter: &Imposter) -> String {
         .unwrap_or_else(|| "imposter_port".to_string())
 }
 
-/// GET /imposters/:port/requests[?match=...] - recorded requests, optionally
-/// filtered by `header:<Name>=<Value>` / `flow_id=<Value>` clauses (AND'd).
+/// GET /imposters/:port/requests[?match=...][?since=<index>] - recorded requests, optionally
+/// filtered by `header:<Name>=<Value>` / `flow_id=<Value>` clauses (AND'd) and cut to entries
+/// newer than a cursor.
+///
+/// The body is always the historical bare array; cursor metadata rides in `x-rift-next-index`
+/// (and `x-rift-truncated` when retention outran the caller). Backends without stable indices
+/// emit neither, which is exactly how an SDK probes for cursor support (issue #603).
 pub async fn handle_get_requests(
     port: u16,
     query: Option<&str>,
@@ -591,17 +593,64 @@ pub async fn handle_get_requests(
         Ok(c) => c,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
+    let since = match parse_since(query) {
+        Ok(s) => s,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+    };
     match manager.get_imposter(port) {
         Ok(imposter) => {
             let source = flow_id_source(&imposter);
             // Filter over references before cloning so an unmatched journal entry is never
-            // deep-cloned (issue #485).
-            let filtered = imposter
-                .get_recorded_requests_filtered(|r| request_matches(r, &clauses, &source, port));
-            json_response(StatusCode::OK, &filtered)
+            // deep-cloned (issue #485) — on both the cursor and the fallback path.
+            let keep = |r: &RecordedRequest| request_matches(r, &clauses, &source, port);
+            match imposter.read_recorded_requests_since(since, keep) {
+                Some(read) => {
+                    let entries: Vec<RecordedRequest> =
+                        read.entries.into_iter().map(|e| e.request).collect();
+                    if read.complete {
+                        cursor_response(&entries, read.next, read.truncated)
+                    } else {
+                        // A degraded read reached only part of its storage, so `next` spans
+                        // entries that were never served. Withholding the cursor is what stops
+                        // a client from advancing past them and losing them for good; it
+                        // re-polls instead, exactly as against a backend with no cursor at all.
+                        json_response(StatusCode::OK, &entries)
+                    }
+                }
+                None => {
+                    let filtered = imposter.get_recorded_requests_filtered(keep);
+                    json_response(StatusCode::OK, &filtered)
+                }
+            }
         }
         Err(e) => e.into(),
     }
+}
+
+/// The savedRequests array plus its cursor headers. `truncated` is emitted only when true —
+/// an SDK tests for the header's presence, never parses a `false`.
+fn cursor_response(
+    entries: &[RecordedRequest],
+    next: u64,
+    truncated: bool,
+) -> Response<Full<Bytes>> {
+    let json = match serde_json::to_string_pretty(entries) {
+        Ok(j) => j,
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to serialize recorded requests: {e}"),
+            );
+        }
+    };
+    let mut headers = vec![
+        ("Content-Type".to_string(), "application/json".to_string()),
+        ("x-rift-next-index".to_string(), next.to_string()),
+    ];
+    if truncated {
+        headers.push(("x-rift-truncated".to_string(), "true".to_string()));
+    }
+    build_response_with_headers(StatusCode::OK, headers, json)
 }
 
 /// DELETE /imposters/:port/savedRequests - Clear recorded requests.
@@ -1272,6 +1321,382 @@ mod requests_filter_tests {
             "malformed DELETE must not clear anything"
         );
         let _ = m.delete_imposter(19741).await;
+    }
+
+    // ---- #603: savedRequests cursor ----------------------------------------------------
+
+    fn header<'a>(resp: &'a Response<Full<Bytes>>, name: &str) -> Option<&'a str> {
+        resp.headers().get(name).and_then(|v| v.to_str().ok())
+    }
+
+    fn next_index(resp: &Response<Full<Bytes>>) -> Option<&str> {
+        header(resp, "x-rift-next-index")
+    }
+
+    fn rec_at(path: &str, space: &str) -> RecordedRequest {
+        let mut r = rec(space, None);
+        r.path = path.to_string();
+        r
+    }
+
+    // AC7 (#603): `?since=` serves only entries newer than the cursor, and reports the new
+    // cursor in the response header. The body stays the historical bare array.
+    #[tokio::test]
+    async fn get_requests_since_returns_newer_with_cursor_header() {
+        let m = manager_with(
+            19750,
+            None,
+            &[rec_at("/a", "A"), rec_at("/b", "A"), rec_at("/c", "A")],
+        )
+        .await;
+
+        let resp = handle_get_requests(19750, Some("since=1"), m.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(next_index(&resp), Some("3"));
+        let got = requests(resp).await;
+        assert_eq!(
+            got.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            vec!["/b", "/c"],
+            "index 1 was already seen"
+        );
+
+        // Caught up: empty body, cursor unchanged.
+        let resp = handle_get_requests(19750, Some("since=3"), m.clone()).await;
+        assert_eq!(next_index(&resp), Some("3"));
+        assert!(requests(resp).await.is_empty());
+
+        let _ = m.delete_imposter(19750).await;
+    }
+
+    // AC8 (#603): `since` and `match` compose — cursor cut first, filter after — and a window
+    // that matches nothing still advances the cursor.
+    #[tokio::test]
+    async fn get_requests_since_composes_with_match() {
+        let m = manager_with(
+            19751,
+            None,
+            &[
+                rec_at("/1", "A"),
+                rec_at("/2", "B"),
+                rec_at("/3", "A"),
+                rec_at("/4", "B"),
+            ],
+        )
+        .await;
+
+        let resp = handle_get_requests(
+            19751,
+            Some("since=1&match=header:X-Mock-Space=A"),
+            m.clone(),
+        )
+        .await;
+        assert_eq!(next_index(&resp), Some("4"), "cursor spans scanned entries");
+        let got = requests(resp).await;
+        assert_eq!(
+            got.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            vec!["/3"],
+            "cut at 1, then keep only space A"
+        );
+
+        // A filtered tail whose window matches nothing must still advance, or it re-scans forever.
+        let resp = handle_get_requests(
+            19751,
+            Some("since=1&match=header:X-Mock-Space=ZZZ"),
+            m.clone(),
+        )
+        .await;
+        assert_eq!(next_index(&resp), Some("4"));
+        assert!(requests(resp).await.is_empty());
+
+        let _ = m.delete_imposter(19751).await;
+    }
+
+    // AC9 (#603): a malformed cursor is rejected before any journal work.
+    #[tokio::test]
+    async fn get_requests_rejects_non_numeric_since() {
+        let m = manager_with(19752, None, &[rec_at("/a", "A")]).await;
+        for bad in ["since=abc", "since=-1", "since=", "since=1.5"] {
+            let resp = handle_get_requests(19752, Some(bad), m.clone()).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "'{bad}' must be rejected"
+            );
+            assert!(next_index(&resp).is_none(), "no cursor header on a 400");
+        }
+        let _ = m.delete_imposter(19752).await;
+    }
+
+    // A journal with no stable indices: it records and reads normally but never overrides the
+    // cursor methods, so it inherits the honest `None` defaults (the out-of-tree embedder case).
+    #[derive(Default)]
+    struct CursorlessJournal(crate::imposter::LocalJournal);
+    impl crate::imposter::RequestJournal for CursorlessJournal {
+        fn note_request(&self, port: u16) {
+            self.0.note_request(port);
+        }
+        fn record(&self, port: u16, flow_id: &str, req: RecordedRequest) {
+            self.0.record(port, flow_id, req);
+        }
+        fn read(&self, port: u16) -> crate::imposter::JournalRead {
+            self.0.read(port)
+        }
+        fn clear(&self, port: u16) -> anyhow::Result<()> {
+            self.0.clear(port)
+        }
+        fn retain(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) {
+            self.0.retain(port, keep);
+        }
+        fn clear_flow(&self, port: u16, flow_id: &str) -> anyhow::Result<()> {
+            self.0.clear_flow(port, flow_id)
+        }
+        fn count(&self, port: u16) -> u64 {
+            self.0.count(port)
+        }
+    }
+
+    async fn manager_with_journal(
+        port: u16,
+        journal: Arc<dyn crate::imposter::RequestJournal>,
+        recorded: &[RecordedRequest],
+    ) -> Arc<ImposterManager> {
+        let manager = Arc::new(ImposterManager::new().with_request_journal(journal));
+        let cfg = serde_json::from_value(serde_json::json!({
+            "port": port, "protocol": "http", "recordRequests": true, "stubs": []
+        }))
+        .expect("config");
+        manager.create_imposter(cfg).await.expect("create");
+        let imposter = manager.get_imposter(port).expect("imposter");
+        for r in recorded {
+            imposter.record_request(r);
+        }
+        manager
+    }
+
+    // AC10 (#603): against a backend without stable indices the endpoint behaves exactly as it
+    // does today — full list, no cursor headers. That absence IS the SDK capability probe, so
+    // it must hold even when the client asks for a cursor.
+    #[tokio::test]
+    async fn get_requests_omits_cursor_headers_without_support() {
+        let m = manager_with_journal(
+            19753,
+            Arc::new(CursorlessJournal::default()),
+            &[rec_at("/a", "A"), rec_at("/b", "A")],
+        )
+        .await;
+
+        for query in [None, Some("since=1")] {
+            let resp = handle_get_requests(19753, query, m.clone()).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(
+                next_index(&resp).is_none(),
+                "no cursor support => no cursor header (the probe)"
+            );
+            assert!(header(&resp, "x-rift-truncated").is_none());
+            assert_eq!(
+                requests(resp).await.len(),
+                2,
+                "an unsupported `since` is ignored, not an error — the full list is served"
+            );
+        }
+        let _ = m.delete_imposter(19753).await;
+    }
+
+    // AC11 (#603): the baseline poll (no `since`) is unchanged in body but carries the cursor
+    // the SDK loop starts from — including on an empty journal.
+    #[tokio::test]
+    async fn get_requests_baseline_reports_next_index() {
+        let empty = manager_with(19754, None, &[]).await;
+        let resp = handle_get_requests(19754, None, empty.clone()).await;
+        assert_eq!(next_index(&resp), Some("0"), "0 == 'seen nothing yet'");
+        assert!(header(&resp, "x-rift-truncated").is_none());
+        assert!(requests(resp).await.is_empty());
+        let _ = empty.delete_imposter(19754).await;
+
+        let m = manager_with(19755, None, &[rec_at("/a", "A"), rec_at("/b", "A")]).await;
+        let resp = handle_get_requests(19755, None, m.clone()).await;
+        assert_eq!(next_index(&resp), Some("2"));
+        assert!(
+            header(&resp, "x-rift-truncated").is_none(),
+            "a baseline read is never truncated"
+        );
+        assert_eq!(requests(resp).await.len(), 2);
+        let _ = m.delete_imposter(19755).await;
+    }
+
+    // A journal reporting a cursor whose unseen entries were lost to retention pressure.
+    // Eviction semantics themselves are proven in journal.rs; this pins the handler's plumbing
+    // of the flag onto the wire.
+    #[derive(Default)]
+    struct TruncatingJournal(crate::imposter::LocalJournal);
+    impl crate::imposter::RequestJournal for TruncatingJournal {
+        fn note_request(&self, port: u16) {
+            self.0.note_request(port);
+        }
+        fn record(&self, port: u16, flow_id: &str, req: RecordedRequest) {
+            self.0.record(port, flow_id, req);
+        }
+        fn record_indexed(&self, port: u16, flow_id: &str, req: RecordedRequest) -> Option<u64> {
+            self.0.record_indexed(port, flow_id, req)
+        }
+        fn read(&self, port: u16) -> crate::imposter::JournalRead {
+            self.0.read(port)
+        }
+        fn read_since(
+            &self,
+            port: u16,
+            since: Option<u64>,
+            keep: &dyn Fn(&RecordedRequest) -> bool,
+        ) -> Option<crate::imposter::JournalReadSince> {
+            self.0.read_since(port, since, keep).map(|mut r| {
+                r.truncated = since.is_some();
+                r
+            })
+        }
+        fn clear(&self, port: u16) -> anyhow::Result<()> {
+            self.0.clear(port)
+        }
+        fn retain(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) {
+            self.0.retain(port, keep);
+        }
+        fn clear_flow(&self, port: u16, flow_id: &str) -> anyhow::Result<()> {
+            self.0.clear_flow(port, flow_id)
+        }
+        fn count(&self, port: u16) -> u64 {
+            self.0.count(port)
+        }
+    }
+
+    // AC12 (#603): `truncated` reaches the wire only when the backend reports a hole, and is
+    // absent otherwise — SDKs treat its presence as "your baseline is stale, re-poll".
+    #[tokio::test]
+    async fn get_requests_flags_truncated_after_eviction() {
+        let m = manager_with_journal(
+            19756,
+            Arc::new(TruncatingJournal::default()),
+            &[rec_at("/a", "A"), rec_at("/b", "A")],
+        )
+        .await;
+
+        let resp = handle_get_requests(19756, Some("since=1"), m.clone()).await;
+        assert_eq!(
+            header(&resp, "x-rift-truncated"),
+            Some("true"),
+            "the backend reported a hole; the client must be told"
+        );
+        assert_eq!(next_index(&resp), Some("2"), "cursor still advances");
+
+        let resp = handle_get_requests(19756, None, m.clone()).await;
+        assert!(
+            header(&resp, "x-rift-truncated").is_none(),
+            "not truncated => header absent entirely, never 'false'"
+        );
+
+        let _ = m.delete_imposter(19756).await;
+    }
+
+    // AC12 (#603), end to end: drive the real 10k cap through the real recording path and
+    // confirm a stale cursor is told it lost data. The double above pins the plumbing; this
+    // pins that genuine retention pressure actually reaches the wire.
+    #[tokio::test]
+    async fn get_requests_truncated_by_real_cap_eviction() {
+        let m = manager_with(19757, None, &[]).await;
+        let imposter = m.get_imposter(19757).expect("imposter");
+        for i in 0..(crate::imposter::MAX_RECORDED_REQUESTS + 5) {
+            imposter.record_request(&rec_at(&format!("/{i}"), "A"));
+        }
+
+        // Indices 1..=5 were evicted; a cursor at 2 never received 3..=5.
+        let resp = handle_get_requests(19757, Some("since=2"), m.clone()).await;
+        assert_eq!(header(&resp, "x-rift-truncated"), Some("true"));
+        assert_eq!(
+            next_index(&resp),
+            Some((crate::imposter::MAX_RECORDED_REQUESTS + 5).to_string()).as_deref()
+        );
+
+        // A cursor past the eviction watermark lost nothing.
+        let resp = handle_get_requests(19757, Some("since=5"), m.clone()).await;
+        assert!(
+            header(&resp, "x-rift-truncated").is_none(),
+            "cursor at the watermark saw everything eviction removed"
+        );
+
+        let _ = m.delete_imposter(19757).await;
+    }
+
+    // A journal that reached only part of its storage (issue #314's degraded-read contract),
+    // now on the cursor path: it returns fewer entries than it counted, but `next` still spans
+    // the range it scanned.
+    #[derive(Default)]
+    struct DegradedJournal(crate::imposter::LocalJournal);
+    impl crate::imposter::RequestJournal for DegradedJournal {
+        fn note_request(&self, port: u16) {
+            self.0.note_request(port);
+        }
+        fn record(&self, port: u16, flow_id: &str, req: RecordedRequest) {
+            self.0.record(port, flow_id, req);
+        }
+        fn record_indexed(&self, port: u16, flow_id: &str, req: RecordedRequest) -> Option<u64> {
+            self.0.record_indexed(port, flow_id, req)
+        }
+        fn read(&self, port: u16) -> crate::imposter::JournalRead {
+            self.0.read(port)
+        }
+        fn read_since(
+            &self,
+            port: u16,
+            since: Option<u64>,
+            keep: &dyn Fn(&RecordedRequest) -> bool,
+        ) -> Option<crate::imposter::JournalReadSince> {
+            self.0.read_since(port, since, keep).map(|mut r| {
+                r.entries.truncate(1);
+                r.complete = false;
+                r
+            })
+        }
+        fn clear(&self, port: u16) -> anyhow::Result<()> {
+            self.0.clear(port)
+        }
+        fn retain(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) {
+            self.0.retain(port, keep);
+        }
+        fn clear_flow(&self, port: u16, flow_id: &str) -> anyhow::Result<()> {
+            self.0.clear_flow(port, flow_id)
+        }
+        fn count(&self, port: u16) -> u64 {
+            self.0.count(port)
+        }
+    }
+
+    // A degraded read must not hand out a cursor: `next` spans entries the backend could not
+    // serve, so advancing on it would skip them permanently and silently. Withholding the
+    // header makes the client re-poll instead — partial data is served, but never at the cost
+    // of losing the rest.
+    #[tokio::test]
+    async fn get_requests_withholds_cursor_on_degraded_read() {
+        let m = manager_with_journal(
+            19758,
+            Arc::new(DegradedJournal::default()),
+            &[rec_at("/a", "A"), rec_at("/b", "A"), rec_at("/c", "A")],
+        )
+        .await;
+
+        for query in [None, Some("since=1")] {
+            let resp = handle_get_requests(19758, query, m.clone()).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(
+                next_index(&resp).is_none(),
+                "an incomplete read must not advertise a cursor to advance from"
+            );
+            assert!(header(&resp, "x-rift-truncated").is_none());
+            assert_eq!(
+                requests(resp).await.len(),
+                1,
+                "the partial results the backend did reach are still served"
+            );
+        }
+
+        let _ = m.delete_imposter(19758).await;
     }
 }
 

@@ -11,6 +11,24 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **`savedRequests` cursor — tail an imposter's recorded requests without re-fetching the journal.**
+  `GET /imposters/{port}/savedRequests?since=<index>` now serves only the requests newer than a
+  cursor, so an SDK request-tail costs O(new entries) per poll instead of O(journal) with
+  client-side dedupe. Every recorded request gets a stable, 1-based, per-port index; the cursor
+  rides in the `x-rift-next-index` response header (pass it back verbatim as the next `since`), and
+  the response body stays the same bare JSON array, so existing clients and Mountebank compatibility
+  are unaffected. `since` composes with the existing `match=` filters, and the cursor always
+  advances past entries a filter rejected — a filtered tail never re-scans. Indices survive
+  `DELETE savedRequests` and scoped clears (later entries simply get larger indices), so a cursor
+  held across a clear stays valid. `x-rift-truncated: true` appears only when the 10k retention cap
+  evicted entries you had not seen yet — the signal to re-baseline. Absence of `x-rift-next-index`
+  is the capability probe: older engines and custom `RequestJournal` backends without stable indices
+  serve the full list and are polled exactly as before. The `RequestJournal` trait gains
+  `read_since`/`record_indexed` as default methods returning "unsupported", so existing embedder
+  implementations compile and behave unchanged.
+
 ## [0.13.5] - 2026-07-12
 
 ### Fixed

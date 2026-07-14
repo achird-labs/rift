@@ -364,8 +364,9 @@ Get recorded requests (if `recordRequests: true`). Also available under the alia
 **Query Parameters:**
 - `match=header:<Name>=<Value>` — keep only requests carrying a matching header
 - `match=flow_id=<Value>` — keep only requests whose resolved flow id matches
+- `since=<index>` — keep only requests newer than a cursor (see [Tailing with a cursor](#tailing-with-a-cursor))
 
-Multiple `match` clauses are AND-ed together.
+Multiple `match` clauses are AND-ed together. `since` is applied first, then the `match` clauses.
 
 **Response:** a JSON array of recorded requests. Each element carries `request_from` (the client
 `ip:port`); `body` is present only when the request had one.
@@ -384,6 +385,52 @@ Multiple `match` clauses are AND-ed together.
   }
 ]
 ```
+
+#### Tailing with a cursor
+
+Polling this endpoint without a cursor re-sends the whole journal every time. `since=<index>`
+makes a poll cost only what is new. Every recorded request is assigned a **stable, 1-based,
+per-port index**; the cursor rides in response headers so the body above is unchanged.
+
+**Response headers:**
+
+| Header | Meaning |
+|---|---|
+| `x-rift-next-index` | The cursor to pass as the next `since`. `0` means nothing has been recorded yet. |
+| `x-rift-truncated` | Present (`true`) only when retention discarded entries you had not seen — your view has a hole. Absent otherwise; it is never `false`. |
+
+```bash
+# Baseline: everything retained, plus the cursor to resume from.
+curl -i localhost:2525/imposters/3000/savedRequests
+# x-rift-next-index: 12
+
+# Only what arrived since — composes with match=.
+curl -i "localhost:2525/imposters/3000/savedRequests?since=12&match=flow_id=tenant-a"
+```
+
+**Contract:**
+
+- **`since` is exclusive** — you receive entries strictly newer than the index you pass. Pass
+  back `x-rift-next-index` verbatim; a cursor at or beyond the tip returns an empty array.
+- **`x-rift-next-index` always advances past everything scanned**, including entries your
+  `match=` clauses rejected. A filtered tail therefore never re-scans the same range.
+- **Indices survive deletion.** `DELETE savedRequests` and scoped clears do not reset them:
+  entries recorded afterwards simply get larger indices, so a cursor held across a clear stays
+  valid and is *not* reported as truncated. Deleting data you asked to delete is not a hole.
+- **`x-rift-truncated` means one thing:** the 10,000-entry cap evicted entries you had not seen.
+  Re-poll without `since` to rebuild a baseline. Note that `since=0` ("replay everything") does
+  report truncation once anything has been evicted, while omitting `since` ("snapshot what is
+  retained") never does — the two return the same entries but ask different questions.
+- **No `x-rift-next-index` means do not advance.** Keep your existing cursor and poll again.
+  Its absence covers three cases, all handled the same way: an older engine (which ignores the
+  unknown parameter), a custom `RequestJournal` backend without stable indices, and a backend
+  that served a *degraded* partial read. In the degraded case the entries returned are real but
+  incomplete, so the cursor is deliberately withheld — advancing on it would skip the entries the
+  backend could not reach. A synthetic index is never returned, because offsets shift under
+  eviction and would silently skip or replay entries.
+
+**Canonical SDK tail:** baseline poll → keep `x-rift-next-index` → poll `?since=<cursor>` on an
+interval, updating the cursor each time → on `x-rift-truncated`, re-baseline.
 
 ---
 

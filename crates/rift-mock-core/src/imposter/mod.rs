@@ -49,7 +49,10 @@ pub use script_resolve::{
 // Re-export core imposter
 #[allow(unused_imports)]
 pub mod journal;
-pub use journal::{JournalRead, LocalJournal, RequestJournal};
+pub use journal::{
+    JournalEntry, JournalRead, JournalReadSince, LocalJournal, MAX_RECORDED_REQUESTS,
+    RequestJournal,
+};
 
 pub use core::Imposter;
 pub use core::{ClosestMatch, FailedPredicate, VerifyOptions, VerifyOutcome};

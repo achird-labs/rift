@@ -4,7 +4,7 @@
 //! signatures are unchanged so the admin API and embedders are untouched.
 
 use super::*;
-use crate::imposter::journal::JournalRead;
+use crate::imposter::journal::{JournalRead, JournalReadSince};
 
 impl Imposter {
     pub(super) fn journal_port(&self) -> u16 {
@@ -12,12 +12,16 @@ impl Imposter {
     }
 
     /// Record a request (when body recording is enabled), tagged with its resolved flow id.
-    pub fn record_request(&self, req: &RecordedRequest) {
-        if self.config.record_requests {
-            let flow_id = self.resolve_flow_id_recorded(&req.headers);
-            self.journal
-                .record(self.journal_port(), &flow_id, req.clone());
+    ///
+    /// Returns the journal index assigned to the entry, or `None` when nothing was recorded
+    /// (recording is off) or the backend has no stable indices (issue #603).
+    pub fn record_request(&self, req: &RecordedRequest) -> Option<u64> {
+        if !self.config.record_requests {
+            return None;
         }
+        let flow_id = self.resolve_flow_id_recorded(&req.headers);
+        self.journal
+            .record_indexed(self.journal_port(), &flow_id, req.clone())
     }
 
     /// Read recorded requests with the backend's completeness flag intact, so embedders
@@ -26,18 +30,22 @@ impl Imposter {
         self.journal.read(self.journal_port())
     }
 
+    fn warn_if_incomplete(&self, complete: bool, entries_served: usize) {
+        if !complete {
+            tracing::warn!(
+                port = self.journal_port(),
+                entries_served,
+                "request journal returned an incomplete read; serving partial results"
+            );
+        }
+    }
+
     /// Get recorded requests. An incomplete read (backend partially unreachable) serves
     /// the partial entries and surfaces the degradation in the log; callers that need to
     /// react to it programmatically use [`Self::read_recorded_requests`].
     pub fn get_recorded_requests(&self) -> Vec<RecordedRequest> {
         let read = self.read_recorded_requests();
-        if !read.complete {
-            tracing::warn!(
-                port = self.journal_port(),
-                entries_served = read.entries.len(),
-                "request journal returned an incomplete read; serving partial results"
-            );
-        }
+        self.warn_if_incomplete(read.complete, read.entries.len());
         read.entries
     }
 
@@ -48,14 +56,24 @@ impl Imposter {
         keep: F,
     ) -> Vec<RecordedRequest> {
         let read = self.journal.read_filtered(self.journal_port(), &keep);
-        if !read.complete {
-            tracing::warn!(
-                port = self.journal_port(),
-                entries_served = read.entries.len(),
-                "request journal returned an incomplete read; serving partial results"
-            );
-        }
+        self.warn_if_incomplete(read.complete, read.entries.len());
         read.entries
+    }
+
+    /// Recorded requests newer than `since` (all retained when `None`), matching `keep`.
+    /// `None` means the backend has no stable indices — callers fall back to
+    /// [`Self::get_recorded_requests_filtered`] and omit cursor metadata (issue #603).
+    ///
+    /// A returned read with `complete: false` has a `next` spanning entries it could not
+    /// serve: callers must withhold the cursor rather than let it advance past them.
+    pub fn read_recorded_requests_since<F: Fn(&RecordedRequest) -> bool>(
+        &self,
+        since: Option<u64>,
+        keep: F,
+    ) -> Option<JournalReadSince> {
+        let read = self.journal.read_since(self.journal_port(), since, &keep)?;
+        self.warn_if_incomplete(read.complete, read.entries.len());
+        Some(read)
     }
 
     /// Clear recorded requests. Also resets the request count to match Mountebank behavior.
