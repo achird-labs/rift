@@ -70,6 +70,14 @@ impl InterceptListener {
         let listener = TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
         let tls = build_tls_acceptor(resolver)?;
+
+        // One forward client per listener, cloned per connection (issue #552). Nothing about it
+        // varies per request — the target port lives in the URL, and reqwest pools per host:port —
+        // so building it per request only discarded the connection pool. Owned by the listener
+        // rather than a process-wide static so the pool dies with `stop()` and embedded
+        // multi-instance use keeps pools independent; building here also surfaces a failure as a
+        // start error instead of a lazy-init panic.
+        let forward_client = build_forward_client()?;
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
         let handle = tokio::spawn(async move {
@@ -80,8 +88,9 @@ impl InterceptListener {
                         Ok((stream, peer)) => {
                             let tls = tls.clone();
                             let rules = rules.clone();
+                            let forward_client = forward_client.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(stream, tls, rules).await {
+                                if let Err(e) = handle_connection(stream, tls, rules, forward_client).await {
                                     tracing::debug!(%peer, error = %e, "intercept connection ended");
                                 }
                             });
@@ -123,6 +132,18 @@ fn log_accept_loop_exit(result: Result<(), tokio::task::JoinError>) {
     }
 }
 
+/// The client used for every `InterceptAction::Forward`. Relays the imposter's own response
+/// verbatim: never follow redirects (a 3xx from the imposter is a response to hand back, not to
+/// chase). `.timeout` is reqwest's per-request total-time bound, so sharing one client across
+/// requests keeps each forward bounded by `IO_TIMEOUT` individually — it is not a client lifetime.
+fn build_forward_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(IO_TIMEOUT)
+        .build()
+        .map_err(|e| anyhow::anyhow!("building forward client: {e}"))
+}
+
 fn build_tls_acceptor(resolver: Arc<SniCertResolver>) -> anyhow::Result<TlsAcceptor> {
     let mut config =
         ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
@@ -139,6 +160,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     tls: TlsAcceptor,
     rules: InterceptRules,
+    forward_client: reqwest::Client,
 ) -> anyhow::Result<()> {
     let head = timeout(IO_TIMEOUT, read_connect_head(&mut stream))
         .await
@@ -226,6 +248,7 @@ async fn handle_connection(
                 &headers,
                 body_bytes.as_deref(),
                 forward.port,
+                &forward_client,
             )
             .await;
             if let Err(e) = forward_result {
@@ -282,6 +305,7 @@ where
 /// Forward the decrypted request to `http://127.0.0.1:{port}{path}[?query]` and relay the
 /// upstream status, headers, and body back over `stream`. Returns `Err` on any connection or I/O
 /// failure so the caller can answer `502 Bad Gateway` without panicking.
+#[allow(clippy::too_many_arguments)]
 async fn forward_and_relay<S>(
     stream: &mut S,
     method: &str,
@@ -290,6 +314,7 @@ async fn forward_and_relay<S>(
     headers: &HashMap<String, String>,
     body: Option<&[u8]>,
     port: u16,
+    client: &reqwest::Client,
 ) -> anyhow::Result<()>
 where
     S: AsyncWrite + Unpin,
@@ -301,13 +326,6 @@ where
     let reqwest_method = reqwest::Method::from_bytes(method.as_bytes())
         .map_err(|e| anyhow::anyhow!("invalid method '{method}': {e}"))?;
 
-    // Relay the imposter's own response verbatim: never follow redirects (a 3xx from the imposter
-    // is a response to hand back, not to chase), and bound the forward by the same IO timeout.
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(IO_TIMEOUT)
-        .build()
-        .map_err(|e| anyhow::anyhow!("building forward client: {e}"))?;
     let mut builder = client.request(reqwest_method, &url);
     for (name, value) in headers {
         if is_hop_by_hop(name) {
@@ -736,6 +754,159 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let body = resp.text().await.unwrap();
         assert_eq!(body, "from-imposter");
+
+        listener.shutdown().await;
+    }
+
+    /// The forward client must be built once per listener, not per request (issue #552): a fresh
+    /// `reqwest::Client` has an empty connection pool, so every forward would open a new TCP
+    /// connection to the imposter and keep-alive would never engage.
+    ///
+    /// Counts connections *accepted* by a keep-alive imposter across N sequential forwards, which
+    /// is the only way to observe pooling from the outside. A per-request client yields N accepts;
+    /// a shared client yields 1. Note the imposter here must serve many requests per connection —
+    /// `forward_rule_proxies_to_imposter_port`'s single-shot imposter would mask this entirely.
+    #[tokio::test]
+    async fn forward_client_is_reused_across_requests() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const FORWARDS: usize = 4;
+
+        let imposter = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let imposter_port = imposter.local_addr().unwrap().port();
+        let accepts = Arc::new(AtomicUsize::new(0));
+
+        let accepts_srv = Arc::clone(&accepts);
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = imposter.accept().await {
+                accepts_srv.fetch_add(1, Ordering::SeqCst);
+                // Serve every request on this connection, keep-alive (no `connection: close`), so
+                // a pooled client can legitimately reuse it.
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    loop {
+                        match s.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {
+                                let body = "from-imposter";
+                                let resp = format!(
+                                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}",
+                                    body.len()
+                                );
+                                if s.write_all(resp.as_bytes()).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        let rules = InterceptRules::new();
+        rules
+            .add(InterceptRule {
+                host: None,
+                predicates: vec![],
+                action: InterceptAction::Forward(ForwardTarget {
+                    port: imposter_port,
+                }),
+            })
+            .unwrap();
+        let (listener, ca_pem) = start_listener(rules).await;
+        let proxy_url = format!("http://{}", listener.local_addr());
+        let client = trusting_client(&proxy_url, &ca_pem);
+
+        for i in 0..FORWARDS {
+            let resp = client
+                .get("https://cdn.example.com/anything")
+                .send()
+                .await
+                .unwrap_or_else(|e| panic!("forward {i} intercepted: {e}"));
+            assert_eq!(resp.status(), 200, "forward {i}");
+            // Drain the body so the forward connection returns to the pool.
+            assert_eq!(resp.text().await.unwrap(), "from-imposter", "forward {i}");
+        }
+
+        let observed = accepts.load(Ordering::SeqCst);
+        assert_eq!(
+            observed, 1,
+            "{FORWARDS} forwards must reuse ONE pooled connection to the imposter; saw {observed} \
+             accepts (a fresh client per request would open {FORWARDS})"
+        );
+
+        listener.shutdown().await;
+    }
+
+    /// A forward to a dead port must not poison the now-shared client for later forwards (issue
+    /// #552). With a per-request client this was impossible by construction; sharing one makes it
+    /// worth pinning, since a connect error must stay scoped to its own request.
+    #[tokio::test]
+    async fn forward_error_does_not_poison_client_for_later_requests() {
+        let imposter = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_port = imposter.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = imposter.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    loop {
+                        match s.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {
+                                let body = "alive";
+                                let resp = format!(
+                                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}",
+                                    body.len()
+                                );
+                                if s.write_all(resp.as_bytes()).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        // Bind then drop, to get a port that is very likely closed for the test's lifetime.
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_port = closed.local_addr().unwrap().port();
+        drop(closed);
+
+        let rules = InterceptRules::new();
+        rules
+            .add(InterceptRule {
+                host: Some("dead.example.com".to_string()),
+                predicates: vec![],
+                action: InterceptAction::Forward(ForwardTarget { port: dead_port }),
+            })
+            .unwrap();
+        rules
+            .add(InterceptRule {
+                host: Some("live.example.com".to_string()),
+                predicates: vec![],
+                action: InterceptAction::Forward(ForwardTarget { port: live_port }),
+            })
+            .unwrap();
+        let (listener, ca_pem) = start_listener(rules).await;
+        let proxy_url = format!("http://{}", listener.local_addr());
+        let client = trusting_client(&proxy_url, &ca_pem);
+
+        let dead = client
+            .get("https://dead.example.com/x")
+            .send()
+            .await
+            .expect("intercepted");
+        assert_eq!(dead.status(), 502, "dead port must relay 502");
+
+        // The same shared forward client must still serve a healthy target afterwards.
+        let live = client
+            .get("https://live.example.com/x")
+            .send()
+            .await
+            .expect("intercepted");
+        assert_eq!(live.status(), 200, "client must survive an earlier 502");
+        assert_eq!(live.text().await.unwrap(), "alive");
 
         listener.shutdown().await;
     }
