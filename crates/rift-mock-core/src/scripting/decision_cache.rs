@@ -72,12 +72,34 @@ impl CacheKey {
         }
     }
 
-    /// Hash a JSON value for cache key generation
+    /// Hash a JSON value for cache key generation.
+    ///
+    /// Walks the `Value` in place. This previously serialised a canonical JSON `String` first,
+    /// which put an allocation and a full render of the body on the per-request hot path — the key
+    /// is built before the cache can be probed, so every request paid it, hits included, and for a
+    /// chunky body it cost multiples of the lookup it exists to memoise (issue #650 has the
+    /// measurements).
+    ///
+    /// `serde_json`'s own impls provide the canonicality the `String` was buying: `Hash for
+    /// Map<String, Value>` sorts its keys when `preserve_order` is on and is a sorted `BTreeMap`
+    /// otherwise, and `Value`'s derived `Hash` mixes in a variant discriminant so distinct shapes
+    /// stay distinct. That is strictly better than the render it replaces — under `preserve_order`,
+    /// `to_string` would have emitted insertion order and silently stopped being canonical.
+    ///
+    /// It also fixes one key split: `-0.0` and `0.0` are `==` as `Value`s, but rendered to
+    /// different strings, so the old hash violated `k1 == k2 ⟹ hash(k1) == hash(k2)` and gave them
+    /// two cache entries. `Hash for Number` folds them onto one, which is what equality already said.
+    ///
+    /// Caveat inherited from `Hash for serde_json::Number`: it hashes the numeric payload without
+    /// an arm tag, so values that differ only across `u64`/`i64`/`f64` but share a bit pattern
+    /// (`18446744073709551615` vs `-1`; `1.0` vs `4607182418800017408`) collide where the old
+    /// render did not. This is accepted rather than fixed by hand-rolling a tagged walk, because
+    /// the caller collapses an incomparably larger class already: `proxy/handler.rs` maps *every*
+    /// non-JSON body to `Value::Null`, so all binary and text bodies share a single key (issue
+    /// #652). Tagging the number arms while that stands would buy nothing.
     fn hash_json(value: &serde_json::Value) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        // Use canonical JSON string for consistent hashing
-        let json_str = serde_json::to_string(value).unwrap_or_default();
-        json_str.hash(&mut hasher);
+        value.hash(&mut hasher);
         hasher.finish()
     }
 }
@@ -355,6 +377,191 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::thread;
+
+    /// Counts allocations made by the calling thread, so `hashing_a_body_allocates_nothing` can
+    /// assert on the property issue #650 is actually about. Thread-local rather than global
+    /// because the rest of this binary's tests run in parallel and would otherwise pollute the
+    /// count. `const`-initialised and `Cell<usize>` (no destructor) so the TLS access itself
+    /// cannot allocate and re-enter the allocator.
+    ///
+    /// This does NOT breach the rule stated in `rift-http-proxy`'s `main.rs` — "the allocator is
+    /// set only here in the binary, never in the rift-mock-core/rift-ffi libs" (issue #293).
+    /// `rift-mock-core` is meant to be embedded, and a lib that hijacks its host's allocator is
+    /// exactly what #293 forbids; this one is `cfg(test)`, so it exists only in this crate's own
+    /// test harness and never in anything an embedder links. Note a binary may have only one:
+    /// a second allocator-swapping test anywhere in this crate collides with this at compile time.
+    mod counting_alloc {
+        use std::alloc::{GlobalAlloc, Layout, System};
+        use std::cell::Cell;
+
+        thread_local! {
+            static ALLOCS: Cell<usize> = const { Cell::new(0) };
+        }
+
+        pub fn count() -> usize {
+            ALLOCS.with(Cell::get)
+        }
+
+        fn record() {
+            ALLOCS.with(|c| c.set(c.get() + 1));
+        }
+
+        pub struct Counting;
+
+        // SAFETY: every method forwards to `System`, a valid allocator, with the pointer/layout it
+        // was given; the counter is a side effect that touches no allocator state. `realloc` and
+        // `alloc_zeroed` are forwarded explicitly rather than left to the trait defaults: the
+        // defaults reroute through `alloc`+copy+`dealloc`, which would cost every `Vec` growth in
+        // the whole test binary its grow-in-place path.
+        unsafe impl GlobalAlloc for Counting {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                record();
+                unsafe { System.alloc(layout) }
+            }
+
+            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+                unsafe { System.dealloc(ptr, layout) }
+            }
+
+            unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+                record();
+                unsafe { System.alloc_zeroed(layout) }
+            }
+
+            unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+                record();
+                unsafe { System.realloc(ptr, layout, new_size) }
+            }
+        }
+    }
+
+    #[global_allocator]
+    static COUNTING_ALLOC: counting_alloc::Counting = counting_alloc::Counting;
+
+    /// A body shaped like the bench's `large_body_64_items` — a plain JSON order payload, not a
+    /// pathological fixture.
+    fn large_body() -> serde_json::Value {
+        json!({
+            "items": (0..64)
+                .map(|i| json!({ "sku": format!("SKU-{i:04}"), "qty": i % 7, "price": i as f64 * 1.5 }))
+                .collect::<Vec<_>>(),
+            "customer": { "id": "acme-corp", "tier": "enterprise" },
+        })
+    }
+
+    /// Issue #650. The body hash is unconditional on the script hot path — `proxy/handler.rs`
+    /// builds the key *before* it can probe the cache — so every request pays it, hits included.
+    /// Serialising a canonical `String` first cost 5.70 µs on this body to memoise a 122 ns
+    /// lookup, i.e. the cache lost to the thing it memoises. Hashing must walk the `Value` in
+    /// place, which allocates nothing.
+    #[test]
+    fn hashing_a_body_allocates_nothing() {
+        let body = large_body();
+        // Warm anything lazy (hasher construction, TLS) so the measured window is the hash alone.
+        let _ = CacheKey::hash_json(&body);
+
+        let before = counting_alloc::count();
+        std::hint::black_box(CacheKey::hash_json(std::hint::black_box(&body)));
+        let allocations = counting_alloc::count() - before;
+
+        assert_eq!(
+            allocations, 0,
+            "hashing a body must not allocate; {allocations} allocation(s) means the hash is \
+             still materialising an intermediate (issue #650)"
+        );
+    }
+
+    /// The property the discarded `to_string` was buying: two bodies equal as JSON must share a
+    /// cache entry however their keys were ordered on the wire. Losing it would split the key on
+    /// nothing and quietly cost hits.
+    #[test]
+    fn body_hash_is_insertion_order_independent() {
+        let a: serde_json::Value =
+            serde_json::from_str(r#"{"x":{"p":1,"q":[1,2]},"y":null,"z":"s"}"#).expect("valid");
+        let b: serde_json::Value =
+            serde_json::from_str(r#"{"z":"s","y":null,"x":{"q":[1,2],"p":1}}"#).expect("valid");
+
+        assert_eq!(a, b, "fixture precondition: these are the same JSON value");
+        assert_eq!(
+            CacheKey::hash_json(&a),
+            CacheKey::hash_json(&b),
+            "equal JSON must hash equally whatever order the keys arrived in"
+        );
+    }
+
+    /// `-0.0` and `0.0` are `==` as `Value`s, so hashing them apart broke
+    /// `k1 == k2 ⟹ hash(k1) == hash(k2)` and handed them two cache entries for one value. The old
+    /// `to_string` did exactly that (`"-0.0"` vs `"0.0"`); `Hash for Number` folds them. This is a
+    /// behaviour change — one fewer key — and it is the correct direction.
+    #[test]
+    fn body_hash_folds_negative_zero_onto_zero() {
+        assert_eq!(
+            json!(-0.0),
+            json!(0.0),
+            "fixture precondition: these are == as Values"
+        );
+        assert_eq!(
+            CacheKey::hash_json(&json!(-0.0)),
+            CacheKey::hash_json(&json!(0.0)),
+            "values that compare equal must hash equally, or they split the key on nothing"
+        );
+    }
+
+    /// Pins a KNOWN, ACCEPTED collision rather than asserting it is desirable — so that a
+    /// serde_json bump, a hasher swap, or someone deliberately closing it cannot move the
+    /// collision surface unnoticed. `Hash for serde_json::Number` hashes the payload with no arm
+    /// tag, and `i64::hash` writes `i as u64`, so every integer in `[i64::MAX + 1, u64::MAX]`
+    /// collides with its two's-complement negative. The old `to_string` hash did not do this.
+    /// Accepted because the caller already collapses every non-JSON body onto `Value::Null`
+    /// (issue #652), an incomparably larger class. If this test fails, that trade-off changed and
+    /// the doc comment on `hash_json` needs revisiting — it is not automatically a bug.
+    #[test]
+    fn known_accepted_collision_across_number_arms_is_unchanged() {
+        assert_ne!(
+            json!(u64::MAX),
+            json!(-1i64),
+            "fixture precondition: these are different JSON values"
+        );
+        assert_eq!(
+            CacheKey::hash_json(&json!(u64::MAX)),
+            CacheKey::hash_json(&json!(-1i64)),
+            "documented accepted collision: u64/i64 arms share a bit pattern (see hash_json's docs)"
+        );
+    }
+
+    /// A `u64` body hash *is* the key — `CacheKey`'s `Eq` compares the hash, never the body — so a
+    /// shape collision serves one body's script decision to a different body. Distinct shapes must
+    /// stay distinct.
+    #[test]
+    fn distinct_json_shapes_produce_distinct_body_hashes() {
+        let shapes = [
+            json!(null),
+            json!("null"),
+            json!(true),
+            json!("true"),
+            json!(1),
+            json!(1.0),
+            json!("1"),
+            json!([]),
+            json!({}),
+            json!([1]),
+            json!([1, 1]),
+            json!({ "a": 1 }),
+            json!({ "a": "1" }),
+            json!({ "a": 1, "b": 2 }),
+            json!([["a", 1]]),
+        ];
+
+        for (i, a) in shapes.iter().enumerate() {
+            for b in &shapes[i + 1..] {
+                assert_ne!(
+                    CacheKey::hash_json(a),
+                    CacheKey::hash_json(b),
+                    "distinct JSON shapes must not share a cache key: {a} vs {b}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_cache_key_creation() {
