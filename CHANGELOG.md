@@ -11,6 +11,8 @@ record.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-15
+
 ### Added
 
 - **A `-static` image flavor: the same rift, on `FROM scratch`.** Published alongside the existing
@@ -30,21 +32,32 @@ record.
   The signing identity is the release workflow itself, so there is no key to distribute; `cosign
   verify` is documented under Deployment → Docker. Enterprise image-curation pipelines check exactly
   these, and an unattested image is what gets rejected at their gate.
+- **The intercept listener and its rules can be declared in `--configfile`.** Imposters were
+  declarative but intercept rules were not: they could only be installed at runtime over
+  `POST /intercept/rules`, so every containerized intercept deployment needed a second "bootstrap"
+  container to `curl` the admin API after boot. That sidecar exits `0` once it has posted the rule,
+  which Kubernetes' `restartPolicy: Always` treats as a crash — the usual workaround is keeping a
+  whole pod alive with `sleep` — and because `depends_on` ordering can't be gated on it, the system
+  under test could start *before* the rule existed and hit the unmatched-host default. A config file
+  may now carry an optional top-level `intercept` block (`{host?, port?, ca?, rules[]}`) alongside
+  its `imposters`, so one declarative file brings up the listener with its rules already installed:
+  `rift --configfile config.json`, no admin call and no sidecar. The rules are seeded *before* the
+  listener binds, so there is no window in which it accepts traffic without them. The block reuses
+  the `POST /intercept` body shape and the existing rule schema verbatim; `POST /intercept` and the
+  FFI `rift_start_intercept` gain the same optional `rules` array, so any surface can start-and-seed
+  in one call. Optional and additive: a config without the block, and any existing payload without
+  `rules`, behave exactly as before. Supplying the block together with `--intercept-*` flags is a
+  startup error rather than a silent precedence guess, and a rule using an `inject` predicate
+  requires `--allowInjection` just as a config-file imposter's scripting surface does. The block is
+  read from the `{"imposters": [...]}` wrapper form; writing one into a single-imposter document is
+  a startup error naming the fix, never a block that silently does nothing. `POST /admin/reload`
+  continues to apply imposters only, and now returns a `warnings` entry (and logs one) when the
+  reloaded file carries an `intercept` block, so an edit to it never looks applied when it wasn't.
 
 ### Changed
 
 - **Every image base is now digest-pinned** (`image:tag@sha256:...`), with Dependabot owning the
   bumps. `rustlang/rust:nightly` floats daily, so builds of the same commit were not reproducible.
-
-### Security
-
-- **The container images no longer install `curl`** ([CVE-2025-10148]).
-  curl was in the image for exactly one reason — to run the `HEALTHCHECK` line — and that line now
-  execs the binary's own `rift healthcheck` instead. The image's intent was always "just the rift
-  binary"; nothing else in it used curl. Downstream consumers were carrying a medium-severity
-  advisory in their test infrastructure on account of a probe.
-
-[CVE-2025-10148]: https://nvd.nist.gov/vuln/detail/cve-2025-10148
 
 ### Fixed
 
@@ -82,6 +95,14 @@ record.
 
 ### Security
 
+- **The container images no longer install `curl`** ([CVE-2025-10148]).
+  curl was in the image for exactly one reason — to run the `HEALTHCHECK` line — and that line now
+  execs the binary's own `rift healthcheck` instead. The image's intent was always "just the rift
+  binary"; nothing else in it used curl. Downstream consumers were carrying a medium-severity
+  advisory in their test infrastructure on account of a probe.
+
+[CVE-2025-10148]: https://nvd.nist.gov/vuln/detail/cve-2025-10148
+
 - **`POST /intercept/rules` now obeys `--allowInjection`.** An intercept rule's predicates are
   evaluated on every intercepted request, so an `inject` predicate is executable JavaScript — but
   this door never asked the `--allowInjection` gate. The identical predicate was refused with `400`
@@ -96,30 +117,6 @@ record.
   **Behaviour change:** a rule with an `inject` predicate now needs `--allowInjection`, and gets the
   same `400` and remedy message every other door gives. `serve`/`forward` actions carry no script
   and are unaffected.
-
-### Added
-
-- **The intercept listener and its rules can be declared in `--configfile`.** Imposters were
-  declarative but intercept rules were not: they could only be installed at runtime over
-  `POST /intercept/rules`, so every containerized intercept deployment needed a second "bootstrap"
-  container to `curl` the admin API after boot. That sidecar exits `0` once it has posted the rule,
-  which Kubernetes' `restartPolicy: Always` treats as a crash — the usual workaround is keeping a
-  whole pod alive with `sleep` — and because `depends_on` ordering can't be gated on it, the system
-  under test could start *before* the rule existed and hit the unmatched-host default. A config file
-  may now carry an optional top-level `intercept` block (`{host?, port?, ca?, rules[]}`) alongside
-  its `imposters`, so one declarative file brings up the listener with its rules already installed:
-  `rift --configfile config.json`, no admin call and no sidecar. The rules are seeded *before* the
-  listener binds, so there is no window in which it accepts traffic without them. The block reuses
-  the `POST /intercept` body shape and the existing rule schema verbatim; `POST /intercept` and the
-  FFI `rift_start_intercept` gain the same optional `rules` array, so any surface can start-and-seed
-  in one call. Optional and additive: a config without the block, and any existing payload without
-  `rules`, behave exactly as before. Supplying the block together with `--intercept-*` flags is a
-  startup error rather than a silent precedence guess, and a rule using an `inject` predicate
-  requires `--allowInjection` just as a config-file imposter's scripting surface does. The block is
-  read from the `{"imposters": [...]}` wrapper form; writing one into a single-imposter document is
-  a startup error naming the fix, never a block that silently does nothing. `POST /admin/reload`
-  continues to apply imposters only, and now returns a `warnings` entry (and logs one) when the
-  reloaded file carries an `intercept` block, so an edit to it never looks applied when it wasn't.
 
 ## [0.13.6] - 2026-07-15
 
@@ -817,7 +814,8 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.13.6...HEAD
+[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/EtaCassiopeia/rift/compare/v0.13.6...v0.14.0
 [0.13.6]: https://github.com/EtaCassiopeia/rift/compare/v0.13.5...v0.13.6
 [0.13.5]: https://github.com/EtaCassiopeia/rift/compare/v0.13.4...v0.13.5
 [0.13.4]: https://github.com/EtaCassiopeia/rift/compare/v0.13.3...v0.13.4
