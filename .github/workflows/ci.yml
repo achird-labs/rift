@@ -337,7 +337,7 @@ jobs:
       # AC4: the flavor exists to have nothing for a scanner to report. Fail on ANY OS-package
       # vulnerability — there are no OS packages, so the only correct result is zero.
       - name: Scan for OS-level CVEs
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: rift-static:ci
           format: table
