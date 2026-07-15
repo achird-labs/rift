@@ -30,9 +30,12 @@ arboard = "3.4"
 
 # Directory paths
 dirs = "5.0"
+chrono.workspace = true
 
 # Async runtime
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# `fs` is required by app/commands/io.rs (issue #564). It was previously supplied only by
+# workspace feature unification, so `cargo build -p rift-tui` alone did not compile.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "fs"] }
 
 # HTTP client for Admin API
 reqwest.workspace = true

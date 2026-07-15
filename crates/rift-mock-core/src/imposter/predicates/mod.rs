@@ -464,7 +464,12 @@ pub(crate) fn predicate_matches_inner(
                     // Reuse the once-per-request query map instead of re-parsing (issue #480).
                     query: query_map.clone(),
                     headers: headers.clone(),
+                    // `body` is already the classified string from the caller (base64 for a
+                    // binary request body, issue #636); this predicate-inject path doesn't thread
+                    // the mode flag through separately, so default to `Text` — the script still
+                    // sees the correct (base64) string, it just can't ask `isBinary`.
                     body: body.map(|b| b.to_string()),
+                    mode: None,
                 };
                 execute_predicate_inject(inject_fn, &mb_request, imposter_port)
             }

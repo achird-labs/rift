@@ -408,6 +408,7 @@ impl Drop for ScriptPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imposter::ResponseMode;
 
     #[test]
     fn test_pool_creation() {
@@ -678,6 +679,7 @@ mod tests {
         let pool = ScriptPool::new(config).unwrap();
 
         let make_request = || ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
@@ -779,6 +781,7 @@ mod tests {
         .unwrap();
 
         let make_request = || ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
@@ -851,6 +854,7 @@ mod tests {
         .unwrap();
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
@@ -918,6 +922,7 @@ mod tests {
         };
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),

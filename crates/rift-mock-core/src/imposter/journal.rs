@@ -276,9 +276,11 @@ impl RequestJournal for LocalJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imposter::ResponseMode;
 
     fn req(path: &str) -> RecordedRequest {
         RecordedRequest {
+            mode: ResponseMode::Text,
             request_from: "t".into(),
             method: "GET".into(),
             path: path.into(),

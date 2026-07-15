@@ -138,12 +138,14 @@ pub(crate) fn request_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imposter::ResponseMode;
     use std::collections::HashMap;
 
     fn req_with_header(name: &str, value: &str) -> RecordedRequest {
         let mut headers = HashMap::new();
         headers.insert(name.to_string(), vec![value.to_string()]);
         RecordedRequest {
+            mode: ResponseMode::Text,
             request_from: "127.0.0.1".to_string(),
             method: "GET".to_string(),
             path: "/".to_string(),

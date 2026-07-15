@@ -72,6 +72,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::ValidationResult { report, action } => {
             dialogs::draw_validation_result(frame, report, action, app.validation_scroll_offset)
         }
+        Overlay::Errors => dialogs::draw_errors(frame, &app.errors, app.errors_scroll),
         Overlay::None => {}
     }
 }
@@ -138,13 +139,28 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             StatusLevel::Warning => app.theme.warning,
             StatusLevel::Error => app.theme.error,
         };
-        let paragraph = Paragraph::new(Span::styled(format!(" {msg}"), Style::default().fg(color)))
+        // The status line is transient; the counter is what keeps errors that already scrolled
+        // past discoverable (issue #624).
+        let mut spans = vec![Span::styled(format!(" {msg}"), Style::default().fg(color))];
+        if !app.errors.is_empty() {
+            spans.push(Span::styled(
+                format!("  ⚠ {} [L]", app.errors.len()),
+                Style::default().fg(app.theme.warning),
+            ));
+        }
+        let paragraph = Paragraph::new(Line::from(spans))
             .block(block)
             .alignment(Alignment::Left);
         frame.render_widget(paragraph, area);
     } else {
         let (commands1, commands2) = get_commands(&app.view);
-        let line1 = build_command_line(&commands1, app);
+        let mut line1 = build_command_line(&commands1, app);
+        if !app.errors.is_empty() {
+            line1.spans.push(Span::styled(
+                format!("  ⚠ {} [L]", app.errors.len()),
+                Style::default().fg(app.theme.warning),
+            ));
+        }
         let lines = if let Some(cmds2) = commands2 {
             let line2 = build_command_line(&cmds2, app);
             vec![line1, line2]
@@ -312,6 +328,17 @@ fn draw_search_bar(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(app.theme.muted),
         ),
     ]);
+
+    // The counter has to live here too: `search_query` stays non-empty after `search_active` goes
+    // false, so this branch owns the status bar for as long as a filter is active — errors would
+    // otherwise be invisible for that whole time, not just transiently (issue #624).
+    let mut line = line;
+    if !app.errors.is_empty() {
+        line.spans.push(Span::styled(
+            format!("  ⚠ {} [L]", app.errors.len()),
+            Style::default().fg(app.theme.warning),
+        ));
+    }
 
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, inner);
@@ -550,5 +577,44 @@ mod tests {
         terminal
             .draw(|f| draw(f, &app))
             .expect("draw must not fail");
+    }
+
+    /// `draw_errors` splits a `Layout` and paginates a reversed iterator, so it is worth pinning
+    /// that it renders — populated, empty, and scrolled past the end (issue #624).
+    #[test]
+    fn test_draw_errors_overlay_does_not_panic() {
+        let mut terminal = make_terminal();
+        let mut app = make_test_app();
+        app.overlay = crate::app::Overlay::Errors;
+
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("empty error log must render");
+
+        app.set_status("boom".to_string(), crate::app::StatusLevel::Error);
+        app.set_status("bang".to_string(), crate::app::StatusLevel::Warning);
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("populated error log must render");
+
+        // Defensive: a scroll offset past the end must yield an empty page, not panic.
+        app.errors_scroll = 99;
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("over-scrolled error log must render");
+    }
+
+    /// The status-bar counter must survive the search-bar branch: `search_query` stays non-empty
+    /// after `search_active` clears, so that branch owns the bar for as long as a filter is active.
+    #[test]
+    fn test_status_bar_renders_error_counter_while_filtering() {
+        let mut terminal = make_terminal();
+        let mut app = make_test_app();
+        app.set_status("boom".to_string(), crate::app::StatusLevel::Error);
+        app.search_query = "foo".to_string();
+        app.search_active = false;
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("counter must render on the search-bar branch");
     }
 }

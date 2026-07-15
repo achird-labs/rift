@@ -1069,6 +1069,7 @@ fn imposter_level_differs(a: &ImposterConfig, b: &ImposterConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imposter::ResponseMode;
 
     #[tokio::test]
     async fn test_create_imposter_writes_to_datadir() {
@@ -1585,6 +1586,7 @@ mod tests {
 
     fn recorded(path: &str) -> RecordedRequest {
         RecordedRequest {
+            mode: ResponseMode::Text,
             request_from: "127.0.0.1".to_string(),
             method: "GET".to_string(),
             path: path.to_string(),

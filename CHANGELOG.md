@@ -13,6 +13,19 @@ record.
 
 ### Fixed
 
+- **Binary request bodies are no longer silently corrupted when recorded or handed to scripts.**
+  Request bodies went through `String::from_utf8_lossy`, which replaces every invalid byte with
+  U+FFFD — so a protobuf, gzip or image upload was recorded as something the client never sent,
+  irreversibly and with no error. Rift records and replays real traffic, so reading a recording back
+  or round-tripping it silently produced wrong bytes. A non-UTF-8 body is now base64-encoded and
+  marked `"_mode": "binary"` on the recorded request, mirroring how binary *response* bodies have
+  always been represented; scripts get the base64 body plus `isBinary` on `ctx.request`. This is
+  additive: `_mode` is absent for text bodies, so existing recordings and all-text traffic are
+  unchanged. The fault-injection proxy path had the same bug and is fixed too. Where rift genuinely
+  cannot classify the body (the `decorate` and predicate-`inject` paths), `isBinary` is absent
+  rather than `false` — a script can tell "text" from "unknown" instead of being told something
+  untrue.
+
 - **Intercept-rule body predicates no longer evaluate against corrupted binary payloads.** The
   TLS-intercept forward-proxy path ran the intercepted request body through
   `String::from_utf8_lossy` before rule matching, replacing every invalid byte with U+FFFD — so a

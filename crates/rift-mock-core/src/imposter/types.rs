@@ -65,6 +65,12 @@ pub struct RecordedRequest {
     pub headers: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// Whether `body` is UTF-8 text or a base64-encoded binary body (issue #636), mirroring
+    /// `IsResponse::mode` (issue #117). `#[serde(default)]` so recordings from before this field
+    /// existed deserialize as `Text`; omitted on serialize for a text body so recordings and
+    /// wire traffic that are all text stay byte-identical to pre-#636 output.
+    #[serde(rename = "_mode", default, skip_serializing_if = "is_text_mode")]
+    pub mode: ResponseMode,
     pub timestamp: String,
 }
 
@@ -1804,5 +1810,64 @@ mod tests {
             serde_json::from_value(json!({ "probability": 0.25, "type": "reset" })).unwrap();
         assert_eq!(object.kind(), "reset");
         assert_eq!(object.probability(), 0.25);
+    }
+
+    // Issue #636: a text-bodied `RecordedRequest` must serialize byte-identically to the
+    // pre-#636 shape — no `_mode` key at all — so existing recordings and all-text traffic are
+    // unaffected by this change.
+    #[test]
+    fn recorded_request_text_body_omits_mode_field() {
+        let req = RecordedRequest {
+            request_from: "127.0.0.1:1234".to_string(),
+            method: "POST".to_string(),
+            path: "/x".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Some("hello".to_string()),
+            mode: ResponseMode::Text,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let value = serde_json::to_value(&req).expect("serializes");
+        assert!(
+            value.get("_mode").is_none(),
+            "a text body must not carry `_mode` on the wire: {value}"
+        );
+        assert_eq!(value["body"], "hello");
+    }
+
+    // Issue #636: a binary body serializes with `_mode: "binary"` and the base64 payload in
+    // `body`, mirroring the response side's `IsResponse::mode` (issue #117).
+    #[test]
+    fn recorded_request_binary_body_carries_mode_field() {
+        let req = RecordedRequest {
+            request_from: "127.0.0.1:1234".to_string(),
+            method: "POST".to_string(),
+            path: "/x".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Some("//4A".to_string()), // base64 of [0xFF, 0xFE, 0x00]
+            mode: ResponseMode::Binary,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let value = serde_json::to_value(&req).expect("serializes");
+        assert_eq!(value["_mode"], "binary");
+        assert_eq!(value["body"], "//4A");
+    }
+
+    // Issue #636: a recording written before `_mode` existed has no such key at all — it must
+    // still deserialize, defaulting to `Text` (the historical, only-ever behavior).
+    #[test]
+    fn recorded_request_without_mode_field_deserializes_as_text() {
+        let value = json!({
+            "requestFrom": "127.0.0.1:1234",
+            "method": "GET",
+            "path": "/x",
+            "query": {},
+            "headers": {},
+            "body": "hello",
+            "timestamp": "2026-01-01T00:00:00Z",
+        });
+        let req: RecordedRequest = serde_json::from_value(value).expect("deserializes");
+        assert_eq!(req.mode, ResponseMode::Text);
     }
 }

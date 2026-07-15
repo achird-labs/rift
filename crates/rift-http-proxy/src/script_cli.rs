@@ -225,6 +225,9 @@ fn fixture_to_script_request(fixture: RequestFixture) -> crate::scripting::Scrip
         path_params: fixture.path_params,
         body: fixture.body,
         raw_body,
+        // `--request` fixtures are authored as JSON, so a binary body can't be expressed here
+        // (issue #636 covers the live serve/proxy paths, not this offline debugging fixture).
+        mode: crate::imposter::ResponseMode::Text,
     }
 }
 

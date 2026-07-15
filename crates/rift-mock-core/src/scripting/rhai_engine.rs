@@ -1,4 +1,5 @@
 use crate::extensions::flow_state::{CasOutcome, FlowStore};
+use crate::imposter::ResponseMode;
 use anyhow::{Result, anyhow};
 use rhai::{AST, Dynamic, Engine, Map, Scope};
 use serde_json::Value;
@@ -689,6 +690,13 @@ fn build_request_ctx_map(request: &ScriptRequest) -> Map {
     });
     m.insert("json".into(), parse_json_or_unit(&raw));
     m.insert("body".into(), Dynamic::from(raw));
+    // Issue #636: `body` is base64 text for a binary request, not the raw bytes (a Rhai string
+    // can't hold arbitrary bytes) — `isBinary` lets a script tell the two apart instead of
+    // treating base64 as if it were the literal body.
+    m.insert(
+        "isBinary".into(),
+        Dynamic::from(request.mode == ResponseMode::Binary),
+    );
 
     m
 }
@@ -889,6 +897,7 @@ mod tests {
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "POST".to_string(),
             path: "/test".to_string(),
@@ -928,6 +937,7 @@ mod tests {
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
@@ -972,6 +982,7 @@ mod tests {
         headers.insert("x-flow-id".to_string(), "flow123".to_string());
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
@@ -1020,6 +1031,7 @@ mod tests {
         headers1.insert("x-user-id".to_string(), "beta-user-123".to_string());
 
         let request1 = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
@@ -1039,6 +1051,7 @@ mod tests {
         headers2.insert("x-user-id".to_string(), "regular-user-456".to_string());
 
         let request2 = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
@@ -1077,6 +1090,7 @@ mod tests {
         // Execute same AST multiple times with reusable engine
         for i in 0..10 {
             let request = ScriptRequest {
+                mode: ResponseMode::Text,
                 raw_body: None,
                 method: "GET".to_string(),
                 path: "/cache-test".to_string(),
@@ -1120,6 +1134,7 @@ mod tests {
 
         fn req(headers: HashMap<String, String>, raw_body: Option<&str>) -> ScriptRequest {
             ScriptRequest {
+                mode: ResponseMode::Text,
                 method: "POST".to_string(),
                 path: "/api/orders".to_string(),
                 headers,

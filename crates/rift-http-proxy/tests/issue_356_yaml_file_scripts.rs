@@ -11,6 +11,7 @@
 
 use rift_http_proxy::backends::InMemoryFlowStore;
 use rift_http_proxy::config_loader::{ConfigSource, load_configs};
+use rift_http_proxy::imposter::ResponseMode;
 use rift_http_proxy::imposter::StubResponse;
 use rift_http_proxy::scripting::{FaultDecision, RhaiEngine, ScriptRequest};
 use std::sync::Arc;
@@ -41,6 +42,7 @@ fn req(attempt_tag: &str) -> ScriptRequest {
         query: Default::default(),
         path_params: Default::default(),
         raw_body: None,
+        mode: ResponseMode::Text,
     }
 }
 

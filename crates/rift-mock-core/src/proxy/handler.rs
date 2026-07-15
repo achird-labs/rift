@@ -36,6 +36,24 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+/// Classify a request body for `ScriptRequest::raw_body`/`mode` (issue #636). A binary body
+/// (protobuf, gzip, an image upload) is not valid UTF-8; `from_utf8_lossy` used to silently
+/// replace the offending bytes with U+FFFD, corrupting `raw_body` for every script that reads
+/// it. Base64-encode it instead, like the imposter serve path (`imposter/handler.rs`) and the
+/// response-side precedent (`util::encode_body_for_stub`, issue #117).
+fn classify_script_request_body(body_bytes: &[u8]) -> (String, crate::imposter::ResponseMode) {
+    match std::str::from_utf8(body_bytes) {
+        Ok(text) => (text.to_string(), crate::imposter::ResponseMode::Text),
+        Err(_) => {
+            use base64::Engine;
+            (
+                base64::engine::general_purpose::STANDARD.encode(body_bytes),
+                crate::imposter::ResponseMode::Binary,
+            )
+        }
+    }
+}
+
 /// Handle an incoming request with fault injection and forwarding.
 pub async fn handle_request(
     ctx: &RequestHandlerContext<'_>,
@@ -187,6 +205,8 @@ async fn handle_script_rules(
     let body_json: serde_json::Value =
         serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
 
+    let (raw_body, body_mode) = classify_script_request_body(&body_bytes);
+
     // Parse query parameters from URI
     let query_params = crate::predicate::parse_query_string(request_info.uri.query());
 
@@ -204,7 +224,8 @@ async fn handle_script_rules(
     );
 
     let script_request = ScriptRequest {
-        raw_body: Some(String::from_utf8_lossy(&body_bytes).into_owned()),
+        raw_body: Some(raw_body),
+        mode: body_mode,
         method: request_info.method.to_string(),
         path: request_info.uri.path().to_string(),
         headers: headers_map,
@@ -757,6 +778,28 @@ pub fn rule_applies_to_upstream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Issue #636: a binary body must round-trip through base64, not get mangled by
+    // `from_utf8_lossy`'s U+FFFD replacement.
+    #[test]
+    fn classify_script_request_body_base64_round_trips_invalid_utf8() {
+        let original: &[u8] = &[0xFF, 0xFE, 0x00, 0x01, 0x02];
+        let (raw_body, mode) = classify_script_request_body(original);
+        assert_eq!(mode, crate::imposter::ResponseMode::Binary);
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&raw_body)
+            .expect("valid base64");
+        assert_eq!(decoded, original);
+    }
+
+    // A valid-UTF-8 body stays plain text with `Text` mode — the common case is unaffected.
+    #[test]
+    fn classify_script_request_body_text_stays_text() {
+        let (raw_body, mode) = classify_script_request_body(b"hello world");
+        assert_eq!(mode, crate::imposter::ResponseMode::Text);
+        assert_eq!(raw_body, "hello world");
+    }
 
     #[test]
     fn test_rule_applies_to_upstream_no_filter() {

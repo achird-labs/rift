@@ -271,6 +271,7 @@ fn request_field(req: &RecordedRequest, key: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imposter::ResponseMode;
     use crate::imposter::types::ImposterConfig;
     use serde_json::json;
 
@@ -296,6 +297,7 @@ mod tests {
                 .push((*v).to_string());
         }
         RecordedRequest {
+            mode: ResponseMode::Text,
             request_from: "127.0.0.1:5000".to_string(),
             method: method.to_string(),
             path: path.to_string(),

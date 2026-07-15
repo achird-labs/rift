@@ -1,4 +1,5 @@
 use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result};
+use crate::imposter::ResponseMode;
 use anyhow::{Result, anyhow};
 use rhai::Dynamic;
 use serde_json::Value;
@@ -404,6 +405,10 @@ pub struct ScriptRequest {
     /// parsed `body`; ctx-building then falls back to re-serializing `body` (loses exact
     /// whitespace but not shape) so callers migrated ad hoc from `body` alone still work.
     pub raw_body: Option<String>,
+    /// Whether `raw_body` is UTF-8 text or a base64-encoded binary body (issue #636). Mirrors
+    /// `ResponseMode`/`_mode` on the response side so scripts can tell which they got instead of
+    /// silently treating base64 as text.
+    pub mode: ResponseMode,
 }
 
 /// Wrapper for FlowStore that can be used in scripts (Rhai and JavaScript)
@@ -894,6 +899,7 @@ mod tests {
     #[test]
     fn test_script_request_creation() {
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "POST".to_string(),
             path: "/api/users".to_string(),
@@ -913,6 +919,7 @@ mod tests {
         headers.insert("Authorization".to_string(), "Bearer token".to_string());
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/data".to_string(),
@@ -935,6 +942,7 @@ mod tests {
         query.insert("limit".to_string(), "10".to_string());
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/items".to_string(),
@@ -954,6 +962,7 @@ mod tests {
         path_params.insert("action".to_string(), "edit".to_string());
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "PUT".to_string(),
             path: "/api/users/123/edit".to_string(),
@@ -968,6 +977,7 @@ mod tests {
     #[test]
     fn test_script_request_clone() {
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "DELETE".to_string(),
             path: "/api/items/456".to_string(),
@@ -984,6 +994,7 @@ mod tests {
     #[test]
     fn test_script_request_debug() {
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
@@ -1117,6 +1128,7 @@ mod tests {
         let engine = ScriptEngine::new("rhai", script, "test-rule").unwrap();
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),

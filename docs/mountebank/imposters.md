@@ -231,6 +231,34 @@ curl http://localhost:2525/imposters/4545
 }
 ```
 
+### Binary Request Bodies
+
+A request body that is not valid UTF-8 (protobuf, gzip, an image upload) cannot be recorded as text
+without destroying it. Such a body is recorded base64-encoded and marked with `_mode: "binary"`,
+mirroring how binary **response** bodies are represented:
+
+```json
+{
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/api/upload",
+      "body": "iVBORw0KGgoAAAANSUhEUg==",
+      "_mode": "binary",
+      "timestamp": "2024-01-15T10:30:00.000Z"
+    }
+  ]
+}
+```
+
+The `body` is standard base64 (with padding). `_mode` is **absent** for a normal text/JSON body, so
+recordings of text traffic are unchanged — check for it rather than assuming it is present.
+
+Scripts see the same distinction: `ctx.request.body` carries the base64 string and
+`ctx.request.isBinary` is `true`. Where rift cannot determine the encoding (the `decorate` and
+predicate-`inject` paths do not carry it), `isBinary` is **absent** rather than `false` — so a
+script can tell "text" apart from "unknown" instead of being told something untrue.
+
 ---
 
 ## Managing Imposters

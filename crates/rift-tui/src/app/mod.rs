@@ -61,6 +61,8 @@ pub enum Overlay {
         report: ValidationReport,
         action: ValidationAction,
     },
+    /// The in-app error log (issue #624).
+    Errors,
 }
 
 /// Actions to take after viewing validation results
@@ -106,6 +108,24 @@ pub enum StatusLevel {
     Success,
     Warning,
     Error,
+}
+
+/// How many errors the in-app log keeps. The status line shows one message and expires it after a
+/// few seconds, so a batch of failures (a folder import where 12 files fail) leaves nothing behind
+/// once the line is overwritten. This is the history (issue #624).
+///
+/// The TUI cannot log to stderr — it would corrupt the alternate-screen render — and a log file
+/// would need a path, rotation, and a way to tell the user where it is. So errors are kept here,
+/// where the user already is. Bounded because it is fed by a long-running UI; appending to a
+/// VecDeque cannot itself fail, which matters for a channel whose whole job is reporting failure.
+pub const MAX_ERROR_ENTRIES: usize = 100;
+
+/// One recorded error or warning, with the wall-clock time it happened so it can be correlated
+/// with server-side logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorEntry {
+    pub at: chrono::DateTime<chrono::Local>,
+    pub message: String,
 }
 
 /// Metrics history snapshot
@@ -366,6 +386,10 @@ pub struct App {
     pub request_list_state: ListState,
     pub focus: FocusArea,
     pub status_message: Option<(String, StatusLevel, Instant)>,
+    /// Bounded history of errors/warnings; the status line only ever shows the latest (issue #624).
+    pub errors: VecDeque<ErrorEntry>,
+    /// Scroll offset for the errors overlay.
+    pub errors_scroll: usize,
 
     // Search State
     pub search_active: bool,
@@ -416,6 +440,8 @@ impl App {
             request_list_state: ListState::default(),
             focus: FocusArea::Left,
             status_message: None,
+            errors: VecDeque::new(),
+            errors_scroll: 0,
 
             search_active: false,
             search_query: String::new(),
@@ -519,7 +545,30 @@ impl App {
 
     /// Set a status message
     pub fn set_status(&mut self, message: String, level: StatusLevel) {
+        // Record failures before the status line overwrites or expires them. Done here rather than
+        // at each call site so every existing one gains history without being touched — and so a
+        // future one cannot forget (issue #624). Success/Info are transient by nature and would
+        // drown the log.
+        if matches!(level, StatusLevel::Error | StatusLevel::Warning) {
+            self.push_error(message.clone());
+        }
         self.status_message = Some((message, level, Instant::now()));
+    }
+
+    /// Append to the bounded error log, dropping the oldest entry at capacity.
+    ///
+    /// Public so a caller with more detail than the status line can carry — e.g. a folder import
+    /// recording every failed file, not just the last — can record it.
+    pub fn push_error(&mut self, message: String) {
+        // `>=` not `==`: `errors` is a pub field, so nothing structurally guarantees this is
+        // the only mutator.
+        while self.errors.len() >= MAX_ERROR_ENTRIES {
+            self.errors.pop_front();
+        }
+        self.errors.push_back(ErrorEntry {
+            at: chrono::Local::now(),
+            message,
+        });
     }
 
     /// Clear status if expired
@@ -641,6 +690,121 @@ impl App {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// The status line shows one message and expires it after 5s, so a batch of failures leaves
+    /// nothing behind: the 2nd..Nth errors of a folder import are unrecoverable once the line is
+    /// overwritten. The buffer is the history (issue #624).
+    #[test]
+    fn set_status_records_errors_and_warnings_but_not_successes() {
+        let mut app = make_test_app();
+
+        app.set_status("boom".to_string(), StatusLevel::Error);
+        app.set_status("careful".to_string(), StatusLevel::Warning);
+        app.set_status("all good".to_string(), StatusLevel::Success);
+        app.set_status("fyi".to_string(), StatusLevel::Info);
+
+        let recorded: Vec<&str> = app.errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            recorded,
+            vec!["boom", "careful"],
+            "only Error/Warning are worth history; Success/Info would drown them"
+        );
+    }
+
+    #[test]
+    fn error_buffer_is_bounded_and_drops_the_oldest() {
+        let mut app = make_test_app();
+        for i in 0..(MAX_ERROR_ENTRIES + 50) {
+            app.set_status(format!("err {i}"), StatusLevel::Error);
+        }
+
+        assert_eq!(
+            app.errors.len(),
+            MAX_ERROR_ENTRIES,
+            "buffer must stay bounded"
+        );
+        assert_eq!(
+            app.errors.front().map(|e| e.message.as_str()),
+            Some(format!("err {}", 50).as_str()),
+            "the oldest entries are the ones dropped"
+        );
+        assert_eq!(
+            app.errors.back().map(|e| e.message.as_str()),
+            Some(format!("err {}", MAX_ERROR_ENTRIES + 49).as_str()),
+            "the newest entry is retained"
+        );
+    }
+
+    /// The status line expires; the buffer must not — that is the whole point.
+    #[test]
+    fn clearing_an_expired_status_leaves_the_error_history_intact() {
+        let mut app = make_test_app();
+        app.set_status("boom".to_string(), StatusLevel::Error);
+        app.status_message = None;
+        app.clear_expired_status();
+        assert_eq!(
+            app.errors.len(),
+            1,
+            "history outlives the transient status line"
+        );
+    }
+
+    #[tokio::test]
+    async fn l_opens_the_errors_overlay_and_esc_dismisses_it() {
+        let mut app = make_test_app();
+        app.set_status("boom".to_string(), StatusLevel::Error);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.overlay, Overlay::Errors, "`L` opens the error log");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.overlay, Overlay::None, "Esc dismisses it");
+    }
+
+    /// The scroll guard is the only nontrivial arithmetic here: relaxing `+ 1 < len` to `<=` would
+    /// let the offset run one past the last entry, and nothing else would catch it.
+    #[tokio::test]
+    async fn errors_overlay_scroll_is_bounded_by_the_entry_count() {
+        let mut app = make_test_app();
+        for i in 0..3 {
+            app.set_status(format!("err {i}"), StatusLevel::Error);
+        }
+        app.overlay = Overlay::Errors;
+
+        // Press Down far more times than there are entries.
+        for _ in 0..10 {
+            app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                .await;
+        }
+        assert_eq!(
+            app.errors_scroll,
+            app.errors.len() - 1,
+            "scrolling must stop at the last entry, never past it"
+        );
+
+        for _ in 0..10 {
+            app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+                .await;
+        }
+        assert_eq!(app.errors_scroll, 0, "scrolling up saturates at the top");
+    }
+
+    /// The global key block runs before the view dispatch and returns, so a global binding shadows
+    /// any view-local one with the same key. `e` is view-local (export-all / stub-edit), which is
+    /// why the error log is on `L` (issue #624).
+    #[tokio::test]
+    async fn errors_overlay_key_does_not_shadow_the_view_local_e_binding() {
+        let mut app = make_test_app();
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
+            .await;
+        assert_ne!(
+            app.overlay,
+            Overlay::Errors,
+            "`e` must still reach its view-local handler, not the error log"
+        );
+    }
+
     use super::*;
     use crate::api::{ApiClient, ImposterSummary, MetricsData};
     use crate::theme::Theme;
@@ -661,6 +825,8 @@ pub(crate) mod tests {
             request_list_state: ListState::default(),
             focus: FocusArea::Left,
             status_message: None,
+            errors: VecDeque::new(),
+            errors_scroll: 0,
             search_active: false,
             search_query: String::new(),
             stub_editor: None,

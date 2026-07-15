@@ -1424,6 +1424,7 @@ mod tests {
         };
         let imposter = Imposter::new(config).expect("test imposter");
         let req = RecordedRequest {
+            mode: ResponseMode::Text,
             request_from: "127.0.0.1".to_string(),
             method: "GET".to_string(),
             path: "/".to_string(),
@@ -1462,6 +1463,7 @@ mod tests {
             let mut headers = std::collections::HashMap::new();
             headers.insert("X-Mock-Space".to_string(), vec![space.to_string()]);
             RecordedRequest {
+                mode: ResponseMode::Text,
                 request_from: "127.0.0.1".to_string(),
                 method: "GET".to_string(),
                 path: "/".to_string(),

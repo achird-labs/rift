@@ -223,10 +223,12 @@ fn run_should_inject_with_abort(
 mod tests {
     use super::*;
     use crate::extensions::flow_state::NoOpFlowStore;
+    use crate::imposter::ResponseMode;
     use std::time::Instant;
 
     fn req() -> ScriptRequest {
         ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".into(),
             path: "/hang".into(),
@@ -510,6 +512,7 @@ mod tests {
                 query: HashMap::new(),
                 headers: HashMap::new(),
                 body: None,
+                mode: Some(ResponseMode::Text),
             }
         }
 

@@ -1112,6 +1112,7 @@ mod redact_tests {
 #[cfg(test)]
 mod requests_filter_tests {
     use super::*;
+    use crate::imposter::ResponseMode;
     use http_body_util::BodyExt;
     use std::collections::HashMap;
 
@@ -1122,6 +1123,7 @@ mod requests_filter_tests {
             headers.insert("X-Tenant".to_string(), vec![t.to_string()]);
         }
         RecordedRequest {
+            mode: ResponseMode::Text,
             request_from: "127.0.0.1".to_string(),
             method: "GET".to_string(),
             path: "/p".to_string(),
@@ -1779,11 +1781,13 @@ mod requests_filter_tests {
 #[cfg(test)]
 mod verify_tests {
     use super::*;
+    use crate::imposter::ResponseMode;
     use http_body_util::BodyExt;
     use std::collections::HashMap;
 
     fn rec(method: &str, path: &str) -> RecordedRequest {
         RecordedRequest {
+            mode: ResponseMode::Text,
             request_from: "127.0.0.1:5000".to_string(),
             method: method.to_string(),
             path: path.to_string(),
@@ -1872,6 +1876,7 @@ mod verify_tests {
 #[cfg(test)]
 mod replace_all_tests {
     use super::*;
+    use crate::imposter::ResponseMode;
     use http_body_util::BodyExt;
 
     const BASE: &str = "http://localhost:2525";
@@ -1972,6 +1977,7 @@ mod replace_all_tests {
             .get_imposter(19766)
             .expect("imposter")
             .record_request(RecordedRequest {
+                mode: ResponseMode::Text,
                 request_from: "127.0.0.1:5000".to_string(),
                 method: "GET".to_string(),
                 path: "/seen".to_string(),

@@ -272,12 +272,30 @@ async fn handle_request_inner(
         }
     };
     // Borrow the body as UTF-8 without forcing an allocation for the common valid-UTF-8 case
-    // (issue #561): `from_utf8_lossy` returns `Cow::Borrowed` then, so only genuinely invalid
-    // UTF-8 pays a copy here. `body_bytes` stays alive for the rest of the function so this
-    // borrow remains valid; callers that need an owned `String` (`RecordedRequest`,
-    // `ScriptRequest`, thread-moved debug/inject requests) materialize one at that boundary.
-    let body_string: Option<std::borrow::Cow<'_, str>> =
-        body_bytes.as_deref().map(String::from_utf8_lossy);
+    // (issue #561): valid UTF-8 stays `Cow::Borrowed`, so only genuinely invalid UTF-8 pays a
+    // copy here. `body_bytes` stays alive for the rest of the function so this borrow remains
+    // valid; callers that need an owned `String` (`RecordedRequest`, `ScriptRequest`,
+    // thread-moved debug/inject requests) materialize one at that boundary.
+    //
+    // Invalid UTF-8 (a binary body: protobuf, gzip, an image upload) used to go through
+    // `from_utf8_lossy`, which silently replaces the offending bytes with U+FFFD — the recorded
+    // request, predicate matches, and script/inject bodies then no longer reflect what the
+    // client sent, irreversibly (issue #636). Base64-encode it instead, mirroring the response
+    // side's `encode_body_for_stub` (issue #117): every consumer below gets a lossless string
+    // representation, and `mode` tells them which kind they have.
+    let (body_string, body_mode): (Option<std::borrow::Cow<'_, str>>, ResponseMode) =
+        match body_bytes.as_deref() {
+            None => (None, ResponseMode::Text),
+            Some(bytes) => match std::str::from_utf8(bytes) {
+                Ok(text) => (Some(std::borrow::Cow::Borrowed(text)), ResponseMode::Text),
+                Err(_) => (
+                    Some(std::borrow::Cow::Owned(
+                        base64::engine::general_purpose::STANDARD.encode(bytes),
+                    )),
+                    ResponseMode::Binary,
+                ),
+            },
+        };
 
     // Record request if enabled
     if imposter.config.record_requests {
@@ -288,6 +306,7 @@ async fn handle_request_inner(
             query: parse_query_string(&query_str),
             headers: headers_multi,
             body: body_string.as_deref().map(str::to_string),
+            mode: body_mode.clone(),
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
         imposter.record_request(recorded);
@@ -482,6 +501,7 @@ async fn handle_request_inner(
                 // Owned boundary (issue #561): the inject job is submitted to a `'static` worker
                 // closure, so `body_string`'s borrow can't cross it.
                 body: body_string.as_deref().map(str::to_string),
+                mode: Some(body_mode.clone()),
             };
 
             match execute_mountebank_inject_bounded(
@@ -567,6 +587,7 @@ async fn handle_request_inner(
                 // Owned boundary (issue #561): `ScriptRequest` is moved into the script engine's
                 // worker job, so the body must be materialized here rather than borrowed.
                 raw_body: Some(body_string.as_deref().unwrap_or_default().to_string()),
+                mode: body_mode.clone(),
                 method: method.clone(),
                 path: path.clone(),
                 headers: headers_clone

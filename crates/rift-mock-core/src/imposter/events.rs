@@ -163,9 +163,11 @@ impl AdminEventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imposter::ResponseMode;
 
     fn rec() -> RecordedRequest {
         RecordedRequest {
+            mode: ResponseMode::Text,
             request_from: "127.0.0.1:5000".to_string(),
             method: "GET".to_string(),
             path: "/x".to_string(),

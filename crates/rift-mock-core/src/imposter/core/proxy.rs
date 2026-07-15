@@ -59,7 +59,11 @@ impl Imposter {
                         path: path.to_string(),
                         query: query_map,
                         headers: headers.clone(),
+                        // `body` is already the classified string from the caller (base64 for a
+                        // binary request body, issue #636); this path doesn't thread the mode
+                        // flag through separately, so default to `Text`.
                         body: body.map(|b| b.to_string()),
+                        mode: None,
                     };
                     let inject_preds =
                         execute_predicate_generator_inject(inject_fn, &mb_request, &predicates)?;

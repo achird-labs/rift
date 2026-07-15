@@ -7,6 +7,25 @@ impl App {
     pub async fn handle_key_event(&mut self, key: KeyEvent) {
         // Handle overlays first
         match &self.overlay.clone() {
+            Overlay::Errors => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('L') | KeyCode::Char('q') => {
+                        self.overlay = Overlay::None;
+                        self.errors_scroll = 0;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.errors_scroll = self.errors_scroll.saturating_sub(1);
+                    }
+                    // Bounded by the entry count, so scrolling cannot run past the last error.
+                    KeyCode::Down | KeyCode::Char('j')
+                        if self.errors_scroll + 1 < self.errors.len() =>
+                    {
+                        self.errors_scroll += 1;
+                    }
+                    _ => {}
+                }
+                return;
+            }
             Overlay::Help => {
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('?') => {
@@ -123,6 +142,13 @@ impl App {
 
         // Global keys
         match key.code {
+            // `L` for error Log. NOT `e`: the global block runs before the view dispatch and
+            // returns, so binding `e` here would shadow the view-local `e` (export-all, stub-edit).
+            KeyCode::Char('L') => {
+                self.overlay = Overlay::Errors;
+                self.errors_scroll = 0;
+                return;
+            }
             KeyCode::Char('?') => {
                 self.overlay = Overlay::Help;
                 self.help_scroll = 0;

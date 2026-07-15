@@ -1,4 +1,5 @@
 use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result};
+use crate::imposter::ResponseMode;
 use crate::scripting::{
     FaultDecision, PredicateGeneratorError, ScriptCtxExtras, ScriptCtxInput, ScriptRequest,
     ScriptResponseContext, ScriptResult, ScriptResultBody, ScriptStubContext, entrypoints,
@@ -495,6 +496,7 @@ pub(crate) fn declared_functions_js(script: &str) -> Result<Vec<String>> {
     SCRIPT_RESULT_REGISTRY.with(|r| r.borrow_mut().clear());
 
     let dummy_request = ScriptRequest {
+        mode: ResponseMode::Text,
         method: "GET".to_string(),
         path: "/".to_string(),
         headers: std::collections::HashMap::new(),
@@ -2154,6 +2156,14 @@ pub struct MountebankRequest {
     pub query: std::collections::HashMap<String, String>,
     pub headers: std::collections::HashMap<String, String>,
     pub body: Option<String>,
+    /// Whether `body` is UTF-8 text or a base64-encoded binary body (issue #636). Mirrors
+    /// `ResponseMode`/`_mode` on the response side so an inject function can tell which it got.
+    ///
+    /// `None` where the caller genuinely does not know — the decorate and predicate-inject paths
+    /// do not thread the classification through. Unknown is represented rather than defaulted to
+    /// `Text`, because a body that is base64 while the flag says "text" is worse than no flag: it
+    /// invites `if (isBinary) … else JSON.parse(body)` and fails it silently.
+    pub mode: Option<ResponseMode>,
 }
 
 /// Create a Mountebank-style request object
@@ -2224,6 +2234,21 @@ fn create_mountebank_request_object(
     } else {
         obj.set(js_string!("body"), JsValue::undefined(), false, context)
             .map_err(|e| anyhow!("Failed to set body: {e}"))?;
+    }
+
+    // Issue #636: `body` is base64 text for a binary request, not the raw bytes (JS strings
+    // can't hold arbitrary bytes) — `isBinary` lets an inject function tell the two apart
+    // instead of treating base64 as if it were the literal body.
+    // Absent, not `false`, when the caller could not classify the body — a script must be able to
+    // distinguish "text" from "unknown".
+    if let Some(mode) = &request.mode {
+        obj.set(
+            js_string!("isBinary"),
+            JsValue::from(*mode == ResponseMode::Binary),
+            false,
+            context,
+        )
+        .map_err(|e| anyhow!("Failed to set isBinary: {e}"))?;
     }
 
     Ok(obj.into())
@@ -2943,6 +2968,7 @@ function respond(ctx) {
         headers.insert("content-type".to_string(), "application/json".to_string());
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
@@ -2970,6 +2996,7 @@ function respond(ctx) {
     fn js_respond_loop_limit_terminates() {
         set_current_flow_store(Arc::new(InMemoryFlowStore::new(300)));
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/".to_string(),
@@ -2992,6 +3019,7 @@ function respond(ctx) {
     fn js_respond_under_limit_runs() {
         set_current_flow_store(Arc::new(InMemoryFlowStore::new(300)));
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/".to_string(),
@@ -3023,6 +3051,7 @@ function respond(ctx) {
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
@@ -3063,6 +3092,7 @@ function respond(ctx) {
         headers.insert("x-flow-id".to_string(), "flow-123".to_string());
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
@@ -3111,6 +3141,7 @@ function respond(ctx) {
         headers.insert("x-flow-id".to_string(), "flow-123".to_string());
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
@@ -3170,6 +3201,7 @@ function respond(ctx) {
         headers.insert("content-type".to_string(), "application/json".to_string());
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/bytecode".to_string(),
@@ -3214,6 +3246,7 @@ function respond(ctx) {
 
         // Test with high value
         let request1 = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "POST".to_string(),
             path: "/api/test".to_string(),
@@ -3241,6 +3274,7 @@ function respond(ctx) {
 
         // Test with low value
         let request2 = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "POST".to_string(),
             path: "/api/test".to_string(),
@@ -3274,6 +3308,7 @@ function respond(ctx) {
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
@@ -3322,6 +3357,7 @@ function respond(ctx) {
         query.insert("page".to_string(), "42".to_string());
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
@@ -3364,6 +3400,7 @@ function respond(ctx) {
         path_params.insert("action".to_string(), "update".to_string());
 
         let request = ScriptRequest {
+            mode: ResponseMode::Text,
             raw_body: None,
             method: "POST".to_string(),
             path: "/users/123/update".to_string(),
@@ -3395,6 +3432,7 @@ function respond(ctx) {
     #[test]
     fn test_decorate_with_logger_arg() {
         let request = MountebankRequest {
+            mode: Some(ResponseMode::Text),
             method: "GET".to_string(),
             path: "/test".to_string(),
             query: HashMap::new(),
@@ -3427,6 +3465,7 @@ function respond(ctx) {
     #[test]
     fn predicate_generator_inject_script_error_returns_err() {
         let request = MountebankRequest {
+            mode: Some(ResponseMode::Text),
             method: "GET".to_string(),
             path: "/api/users".to_string(),
             query: HashMap::new(),
@@ -3456,6 +3495,7 @@ function respond(ctx) {
     #[test]
     fn predicate_generator_inject_invalid_output_returns_err() {
         let request = MountebankRequest {
+            mode: Some(ResponseMode::Text),
             method: "GET".to_string(),
             path: "/api/users".to_string(),
             query: HashMap::new(),
@@ -3486,6 +3526,7 @@ function respond(ctx) {
     #[test]
     fn test_decorate_with_state_arg() {
         let request = MountebankRequest {
+            mode: Some(ResponseMode::Text),
             method: "GET".to_string(),
             path: "/test".to_string(),
             query: HashMap::new(),
@@ -3516,6 +3557,7 @@ function respond(ctx) {
     // Issue #305 gate: `config =>` decorate convention in Boa + CommonJS require().
     fn config_req() -> MountebankRequest {
         MountebankRequest {
+            mode: Some(ResponseMode::Text),
             method: "POST".to_string(),
             path: "/req".to_string(),
             query: HashMap::new(),
@@ -3679,6 +3721,7 @@ function respond(ctx) {
 
     fn mb_req(method: &str, path: &str) -> MountebankRequest {
         MountebankRequest {
+            mode: Some(ResponseMode::Text),
             method: method.to_string(),
             path: path.to_string(),
             query: HashMap::new(),
@@ -4133,6 +4176,7 @@ function respond(ctx) {
 
         fn req(headers: HashMap<String, String>, raw_body: Option<&str>) -> ScriptRequest {
             ScriptRequest {
+                mode: ResponseMode::Text,
                 method: "POST".to_string(),
                 path: "/api/orders".to_string(),
                 headers,
