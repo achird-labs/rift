@@ -13,6 +13,17 @@ record.
 
 ### Fixed
 
+- **Intercept-rule body predicates no longer evaluate against corrupted binary payloads.** The
+  TLS-intercept forward-proxy path ran the intercepted request body through
+  `String::from_utf8_lossy` before rule matching, replacing every invalid byte with U+FFFD — so a
+  body predicate on binary traffic (protobuf, gzip, an image upload) matched or failed to match
+  against garbage the client never sent. A non-UTF-8 body is now matched against its standard
+  base64 encoding, the same convention used for binary recorded requests and binary responses;
+  write the predicate against the base64 string. Text/JSON bodies are matched as-is, unchanged.
+  Forwarding was never affected — it always relayed the raw bytes. **Behavior change:** an
+  intercept-rule body predicate that deliberately matched the U+FFFD-mangled form of a binary body
+  must be rewritten against the base64 encoding.
+
 - **Query-parameter *names* are now percent-decoded everywhere, so `?first%20name=bob` matches a
   predicate on `first name` on every path.** Rift has four query/form parsers, and two of them
   decoded only the value, leaving the key raw — so the same request got a different answer
