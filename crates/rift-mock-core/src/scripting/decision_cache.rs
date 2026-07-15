@@ -1,8 +1,10 @@
 use crate::scripting::FaultDecision;
 use anyhow::Result;
-use std::collections::HashMap;
+use lru::LruCache;
+use parking_lot::Mutex;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, RwLock};
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, trace};
 
@@ -78,23 +80,17 @@ impl CacheKey {
 }
 
 /// Cache entry with TTL tracking
-#[derive(Clone, Debug)]
-
+#[derive(Debug)]
 struct CacheEntry {
     decision: FaultDecision,
     created_at: Instant,
-    last_accessed: Instant,
-    access_count: u64,
 }
 
 impl CacheEntry {
     fn new(decision: FaultDecision) -> Self {
-        let now = Instant::now();
         Self {
             decision,
-            created_at: now,
-            last_accessed: now,
-            access_count: 0,
+            created_at: Instant::now(),
         }
     }
 
@@ -103,11 +99,6 @@ impl CacheEntry {
             return false; // No expiration
         }
         self.created_at.elapsed() > ttl
-    }
-
-    fn touch(&mut self) {
-        self.last_accessed = Instant::now();
-        self.access_count += 1;
     }
 }
 
@@ -134,24 +125,29 @@ impl CacheMetrics {
     }
 }
 
-/// Combined cache state protected by a single lock to prevent deadlocks.
-#[derive(Debug)]
-struct CacheState {
-    entries: HashMap<CacheKey, CacheEntry>,
-    metrics: CacheMetrics,
-}
-
-/// Helper enum to avoid borrow checker issues when checking entry state
-enum EntryState {
-    Expired,
-    Valid(FaultDecision, u64),
+/// Counters kept outside the cache lock. Each is updated independently, so a `metrics()` snapshot
+/// is not a consistent point-in-time view across counters — nothing consumes them that way today.
+#[derive(Debug, Default)]
+struct AtomicMetrics {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    inserts: AtomicU64,
+    evictions: AtomicU64,
+    expirations: AtomicU64,
 }
 
 /// Decision cache for memoizing script execution results
 pub struct DecisionCache {
     config: DecisionCacheConfig,
-    /// Single lock protecting both cache entries and metrics to prevent deadlocks
-    state: Arc<RwLock<CacheState>>,
+    /// `None` when the cache is off — either `enabled == false` or a zero `max_size` — so a
+    /// disabled cache has no storage to accidentally read or grow (issue #544).
+    ///
+    /// A `Mutex` rather than an `RwLock`: an LRU lookup reorders the recency list, so every `get`
+    /// mutates and a read lock was never honest. The win here is a bounded critical section —
+    /// `LruCache::push` evicts in O(1), where the previous `min_by_key` scanned all 10k entries
+    /// under the exclusive lock on every steady-state insert.
+    cache: Option<Mutex<LruCache<CacheKey, CacheEntry>>>,
+    metrics: AtomicMetrics,
 }
 
 impl DecisionCache {
@@ -162,59 +158,49 @@ impl DecisionCache {
             config.enabled, config.max_size, config.ttl_seconds
         );
 
+        let cache = match (config.enabled, NonZeroUsize::new(config.max_size)) {
+            (true, Some(capacity)) => Some(Mutex::new(LruCache::new(capacity))),
+            _ => None,
+        };
+
         Self {
             config,
-            state: Arc::new(RwLock::new(CacheState {
-                entries: HashMap::new(),
-                metrics: CacheMetrics::default(),
-            })),
+            cache,
+            metrics: AtomicMetrics::default(),
         }
     }
 
     /// Get a decision from cache if available and not expired
     pub fn get(&self, key: &CacheKey) -> Option<FaultDecision> {
-        if !self.config.enabled {
-            return None;
-        }
-
-        let mut state = self.state.write().expect("decision cache lock poisoned");
+        let cache = self.cache.as_ref()?;
         let ttl = Duration::from_secs(self.config.ttl_seconds);
 
-        // First, check if entry exists and handle expiration
-        let entry_state = state.entries.get(key).map(|entry| {
+        let mut cache = cache.lock();
+        // `Some(None)` = present but expired; the decision is only cloned on a live hit.
+        let hit = cache.get(key).map(|entry| {
             if entry.is_expired(ttl) {
-                EntryState::Expired
+                None
             } else {
-                EntryState::Valid(entry.decision.clone(), entry.access_count)
+                Some(entry.decision.clone())
             }
         });
 
-        match entry_state {
-            Some(EntryState::Expired) => {
+        match hit {
+            Some(None) => {
                 trace!("Cache entry expired for key: {:?}", key);
-                state.entries.remove(key);
-                state.metrics.misses += 1;
-                state.metrics.expirations += 1;
-                state.metrics.size = state.entries.len();
+                cache.pop(key);
+                self.metrics.misses.fetch_add(1, Ordering::Relaxed);
+                self.metrics.expirations.fetch_add(1, Ordering::Relaxed);
                 None
             }
-            Some(EntryState::Valid(decision, access_count)) => {
-                // Update the entry's access time
-                if let Some(entry) = state.entries.get_mut(key) {
-                    entry.touch();
-                }
-                trace!(
-                    "Cache hit for key: {:?} (access_count: {})",
-                    key,
-                    access_count + 1
-                );
-                state.metrics.hits += 1;
+            Some(Some(decision)) => {
+                trace!("Cache hit for key: {:?}", key);
+                self.metrics.hits.fetch_add(1, Ordering::Relaxed);
                 Some(decision)
             }
             None => {
-                // Cache miss
                 trace!("Cache miss for key: {:?}", key);
-                state.metrics.misses += 1;
+                self.metrics.misses.fetch_add(1, Ordering::Relaxed);
                 None
             }
         }
@@ -222,74 +208,57 @@ impl DecisionCache {
 
     /// Insert a decision into the cache
     pub fn insert(&self, key: CacheKey, decision: FaultDecision) -> Result<()> {
-        if !self.config.enabled {
+        let Some(cache) = self.cache.as_ref() else {
             return Ok(());
+        };
+
+        let mut cache = cache.lock();
+        // `push` returns the displaced pair: the LRU victim when at capacity, or the previous
+        // value when this key was already present. Only the former is an eviction.
+        let replacing = cache.contains(&key);
+        let displaced = cache.push(key, CacheEntry::new(decision));
+        if displaced.is_some() && !replacing {
+            self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
         }
 
-        let mut state = self.state.write().expect("decision cache lock poisoned");
-
-        // Check if we need to evict entries
-        if state.entries.len() >= self.config.max_size && !state.entries.contains_key(&key) {
-            Self::evict_lru(&mut state);
-        }
-
-        // Insert new entry
-        state.entries.insert(key.clone(), CacheEntry::new(decision));
-        trace!("Cache insert for key: {:?}", key);
-
-        state.metrics.inserts += 1;
-        state.metrics.size = state.entries.len();
+        self.metrics.inserts.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
 
-    /// Evict the least recently used entry
-    ///
-    /// This is a static method that takes a mutable reference to the entire
-    /// CacheState, allowing atomic updates to both entries and metrics without
-    /// needing to acquire a separate lock.
-    fn evict_lru(state: &mut CacheState) {
-        // Find entry with oldest last_accessed time
-        if let Some((key_to_evict, _)) = state
-            .entries
-            .iter()
-            .min_by_key(|(_, entry)| entry.last_accessed)
-            .map(|(k, v)| (k.clone(), v.clone()))
-        {
-            state.entries.remove(&key_to_evict);
-            state.metrics.evictions += 1;
-            trace!("Evicted LRU entry: {:?}", key_to_evict);
-        }
-    }
-
     /// Clear all cache entries
     pub fn clear(&self) {
-        let mut state = self.state.write().expect("decision cache lock poisoned");
-        state.entries.clear();
-        state.metrics.size = 0;
+        if let Some(cache) = self.cache.as_ref() {
+            cache.lock().clear();
+        }
         debug!("Cache cleared");
     }
 
     /// Get current cache metrics
     pub fn metrics(&self) -> CacheMetrics {
-        self.state
-            .read()
-            .expect("decision cache lock poisoned")
-            .metrics
-            .clone()
+        CacheMetrics {
+            hits: self.metrics.hits.load(Ordering::Relaxed),
+            misses: self.metrics.misses.load(Ordering::Relaxed),
+            inserts: self.metrics.inserts.load(Ordering::Relaxed),
+            evictions: self.metrics.evictions.load(Ordering::Relaxed),
+            expirations: self.metrics.expirations.load(Ordering::Relaxed),
+            size: self.size(),
+        }
     }
 
     /// Remove expired entries (can be called periodically)
     pub fn cleanup_expired(&self) {
-        if !self.config.enabled || self.config.ttl_seconds == 0 {
+        let Some(cache) = self.cache.as_ref() else {
+            return;
+        };
+        if self.config.ttl_seconds == 0 {
             return;
         }
 
-        let mut state = self.state.write().expect("decision cache lock poisoned");
         let ttl = Duration::from_secs(self.config.ttl_seconds);
+        let mut cache = cache.lock();
 
-        let expired_keys: Vec<CacheKey> = state
-            .entries
+        let expired_keys: Vec<CacheKey> = cache
             .iter()
             .filter(|(_, entry)| entry.is_expired(ttl))
             .map(|(k, _)| k.clone())
@@ -297,23 +266,20 @@ impl DecisionCache {
 
         let count = expired_keys.len();
         for key in expired_keys {
-            state.entries.remove(&key);
+            cache.pop(&key);
         }
 
         if count > 0 {
             debug!("Cleaned up {} expired cache entries", count);
-            state.metrics.expirations += count as u64;
-            state.metrics.size = state.entries.len();
+            self.metrics
+                .expirations
+                .fetch_add(count as u64, Ordering::Relaxed);
         }
     }
 
     /// Get cache size
     pub fn size(&self) -> usize {
-        self.state
-            .read()
-            .expect("decision cache lock poisoned")
-            .entries
-            .len()
+        self.cache.as_ref().map_or(0, |cache| cache.lock().len())
     }
 }
 
@@ -647,5 +613,147 @@ mod tests {
 
         let metrics = cache.metrics();
         assert_eq!(metrics.expirations, 5);
+    }
+
+    fn key_n(i: usize) -> CacheKey {
+        CacheKey::new(
+            "GET".to_string(),
+            format!("/api/test{i}"),
+            vec![],
+            &json!({}),
+            "rule1".to_string(),
+        )
+    }
+
+    /// `max_size: 0` means the cache is off, not "hold one entry" (issue #544). The old
+    /// HashMap path treated it as capacity 1 — `len() >= 0` is always true, so it evicted from an
+    /// empty map and then inserted anyway.
+    #[test]
+    fn max_size_zero_disables_cache() {
+        let cache = DecisionCache::new(DecisionCacheConfig {
+            enabled: true,
+            max_size: 0,
+            ttl_seconds: 0,
+        });
+
+        cache.insert(key_n(0), FaultDecision::None).unwrap();
+
+        assert_eq!(cache.size(), 0, "max_size 0 must store nothing");
+        assert!(
+            cache.get(&key_n(0)).is_none(),
+            "max_size 0 must never serve a hit"
+        );
+    }
+
+    #[test]
+    fn max_size_one_keeps_only_the_newest() {
+        let cache = DecisionCache::new(DecisionCacheConfig {
+            enabled: true,
+            max_size: 1,
+            ttl_seconds: 0,
+        });
+
+        cache.insert(key_n(0), FaultDecision::None).unwrap();
+        cache.insert(key_n(1), FaultDecision::None).unwrap();
+
+        assert_eq!(cache.size(), 1);
+        assert!(cache.get(&key_n(0)).is_none(), "oldest must be evicted");
+        assert!(cache.get(&key_n(1)).is_some(), "newest must be retained");
+    }
+
+    /// The cache must bound itself at `max_size` and count exactly the overflow as evictions.
+    #[test]
+    fn capacity_invariant_holds_beyond_max_size() {
+        const MAX: usize = 8;
+        const OVERFLOW: usize = 5;
+
+        let cache = DecisionCache::new(DecisionCacheConfig {
+            enabled: true,
+            max_size: MAX,
+            ttl_seconds: 0,
+        });
+
+        for i in 0..(MAX + OVERFLOW) {
+            cache.insert(key_n(i), FaultDecision::None).unwrap();
+        }
+
+        assert_eq!(cache.size(), MAX, "cache must stay bounded at max_size");
+        let metrics = cache.metrics();
+        assert_eq!(
+            metrics.evictions, OVERFLOW as u64,
+            "exactly the overflow must be evicted"
+        );
+        assert_eq!(metrics.inserts, (MAX + OVERFLOW) as u64);
+        assert_eq!(metrics.size, MAX, "reported size must track the real size");
+    }
+
+    #[test]
+    fn reinserting_existing_key_at_capacity_does_not_evict() {
+        const MAX: usize = 4;
+
+        let cache = DecisionCache::new(DecisionCacheConfig {
+            enabled: true,
+            max_size: MAX,
+            ttl_seconds: 0,
+        });
+
+        for i in 0..MAX {
+            cache.insert(key_n(i), FaultDecision::None).unwrap();
+        }
+        assert_eq!(cache.metrics().evictions, 0);
+
+        // Replacing a key that is already present displaces nothing.
+        cache.insert(key_n(MAX - 1), FaultDecision::None).unwrap();
+
+        assert_eq!(cache.size(), MAX);
+        assert_eq!(
+            cache.metrics().evictions,
+            0,
+            "replacing an existing key must not evict another"
+        );
+
+        // Re-inserting must also promote: key 0 is now the oldest, so the next insert evicts it
+        // rather than the key we just refreshed.
+        cache.insert(key_n(MAX), FaultDecision::None).unwrap();
+        assert!(
+            cache.get(&key_n(0)).is_none(),
+            "the least-recently-used key must be the victim"
+        );
+        assert!(
+            cache.get(&key_n(MAX - 1)).is_some(),
+            "a re-inserted key must be promoted, not left as the next victim"
+        );
+    }
+
+    /// Concurrent mixed traffic must not deadlock or panic — the cache is one `Arc` shared across
+    /// every tokio worker of a ProxyServer.
+    #[test]
+    fn concurrent_get_and_insert_do_not_deadlock() {
+        use std::sync::Arc;
+
+        let cache = Arc::new(DecisionCache::new(DecisionCacheConfig {
+            enabled: true,
+            max_size: 16,
+            ttl_seconds: 0,
+        }));
+
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let cache = Arc::clone(&cache);
+                std::thread::spawn(move || {
+                    for i in 0..200 {
+                        let k = key_n((t * 200 + i) % 32);
+                        cache.insert(k.clone(), FaultDecision::None).unwrap();
+                        let _ = cache.get(&k);
+                    }
+                })
+            })
+            .collect();
+
+        for t in threads {
+            t.join().expect("no worker may panic");
+        }
+
+        assert!(cache.size() <= 16, "cache must stay bounded under races");
     }
 }
