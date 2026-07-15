@@ -222,38 +222,48 @@ impl App {
         let mut imported = 0;
         let mut failed = 0;
 
-        if let Ok(mut entries) = tokio::fs::read_dir(path).await {
-            loop {
-                // An unreadable entry must neither truncate the scan nor pass as success: `break`
-                // would silently skip every remaining file while still reporting "Imported N",
-                // and the pre-#564 `.flatten()` skipped it but left it uncounted. Tokio's
-                // `ReadDir` stays valid after an `Err` (the failed entry is already consumed), so
-                // continuing advances to the next entry and always terminates.
-                let entry = match entries.next_entry().await {
-                    Ok(Some(entry)) => entry,
-                    Ok(None) => break,
-                    Err(_) => {
-                        failed += 1;
-                        continue;
-                    }
-                };
-                let file_path = entry.path();
-                if file_path.extension().map(|e| e == "json").unwrap_or(false)
-                    && let Ok(content) = tokio::fs::read_to_string(&file_path).await
-                {
-                    if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
-                        let url = format!("{}/imposters", self.client.base_url());
-                        let resp = self.client.client().post(url).json(&config).send().await;
+        let mut entries = match tokio::fs::read_dir(path).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                self.set_status(format!("Failed to read folder: {e}"), StatusLevel::Error);
+                self.is_loading = false;
+                return;
+            }
+        };
 
-                        if resp.map(|r| r.status().is_success()).unwrap_or(false) {
-                            imported += 1;
-                        } else {
-                            failed += 1;
-                        }
-                    } else {
-                        failed += 1;
-                    }
+        loop {
+            // An unreadable entry must neither truncate the scan nor pass as success: `break`
+            // would silently skip every remaining file while still reporting "Imported N",
+            // and the pre-#564 `.flatten()` skipped it but left it uncounted. Tokio's
+            // `ReadDir` stays valid after an `Err` (the failed entry is already consumed), so
+            // continuing advances to the next entry and always terminates.
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(_) => {
+                    failed += 1;
+                    continue;
                 }
+            };
+            let file_path = entry.path();
+            if !file_path.extension().map(|e| e == "json").unwrap_or(false) {
+                continue;
+            }
+            let Ok(content) = tokio::fs::read_to_string(&file_path).await else {
+                failed += 1;
+                continue;
+            };
+            if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
+                let url = format!("{}/imposters", self.client.base_url());
+                let resp = self.client.client().post(url).json(&config).send().await;
+
+                if resp.map(|r| r.status().is_success()).unwrap_or(false) {
+                    imported += 1;
+                } else {
+                    failed += 1;
+                }
+            } else {
+                failed += 1;
             }
         }
 
@@ -343,6 +353,7 @@ impl App {
 
         let mut exported = 0;
         let mut failed = 0;
+        let mut last_error = None;
 
         for imp in &self.imposters {
             match self.client.export_imposter(imp.port, false).await {
@@ -353,21 +364,26 @@ impl App {
                         format!("{}.json", imp.port)
                     };
                     let file_path = path.join(filename);
-                    if tokio::fs::write(&file_path, &json).await.is_ok() {
-                        exported += 1;
-                    } else {
-                        failed += 1;
+                    match tokio::fs::write(&file_path, &json).await {
+                        Ok(_) => exported += 1,
+                        Err(e) => {
+                            failed += 1;
+                            last_error =
+                                Some(format!("failed to write {}: {e}", file_path.display()));
+                        }
                     }
                 }
-                Err(_) => {
+                Err(e) => {
                     failed += 1;
+                    last_error = Some(format!("failed to export port {}: {e}", imp.port));
                 }
             }
         }
 
         if failed > 0 {
+            let detail = last_error.map(|e| format!(" ({e})")).unwrap_or_default();
             self.set_status(
-                format!("Exported {exported} imposters, {failed} failed"),
+                format!("Exported {exported} imposters, {failed} failed{detail}"),
                 StatusLevel::Warning,
             );
         } else {
