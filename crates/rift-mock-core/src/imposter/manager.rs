@@ -1018,13 +1018,17 @@ impl ImposterManager {
         };
         let path = datadir.join(format!("{port}.json"));
         tokio::spawn(async move {
-            if path.exists()
-                && let Err(e) = tokio::fs::remove_file(&path).await
-            {
-                error!(
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                // An absent file is the desired end state, not a failure: the imposter may never
+                // have been persisted, or the file was already removed. Handling NotFound here
+                // (rather than pre-checking `exists()`) also closes the TOCTOU window between
+                // check and unlink.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => error!(
                     "Failed to remove persisted imposter {} at {:?}: {}",
                     port, path, e
-                );
+                ),
             }
         });
     }
@@ -1111,6 +1115,38 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         assert!(!file.exists(), "file should be removed after delete");
+    }
+
+    /// Deleting an imposter whose datadir file is already gone must still succeed: an absent file
+    /// is the desired end state, not a failure (issue #564). Pins that dropping the `exists()`
+    /// pre-check did not turn a missing file into a surfaced error.
+    #[tokio::test]
+    async fn test_delete_imposter_succeeds_when_datadir_file_already_removed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+
+        let config = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "port": 19503,
+            "stubs": []
+        }))
+        .unwrap();
+
+        manager.create_imposter(config).await.expect("create");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Remove the file out from under the manager, so the unlink races with an absent file.
+        let file = dir.path().join("19503.json");
+        std::fs::remove_file(&file).expect("pre-remove the persisted file");
+        assert!(!file.exists(), "precondition: file is already gone");
+
+        manager
+            .delete_imposter(19503)
+            .await
+            .expect("delete must succeed when the datadir file is already gone");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(!file.exists(), "file must still be absent after delete");
     }
 
     #[tokio::test]

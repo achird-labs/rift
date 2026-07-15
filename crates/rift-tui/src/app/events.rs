@@ -488,7 +488,9 @@ impl App {
                     return;
                 }
                 match action {
-                    FileAction::SaveExport { content, .. } => self.save_to_file(&path, &content),
+                    FileAction::SaveExport { content, .. } => {
+                        self.save_to_file(&path, &content).await
+                    }
                     FileAction::ImportFile => self.import_from_file(&path).await,
                     FileAction::ImportFolder => self.import_from_folder(&path).await,
                     FileAction::ExportAll => self.export_all_to_file(&path).await,
