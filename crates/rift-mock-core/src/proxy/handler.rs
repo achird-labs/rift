@@ -235,7 +235,7 @@ async fn handle_script_rules(
 
             // Cache the result if successful (stateless only)
             if let Ok(ref decision) = pool_result {
-                let _ = scripting.decision_cache.insert(cache_key, decision.clone());
+                scripting.decision_cache.insert(cache_key, decision.clone());
             }
 
             pool_result
