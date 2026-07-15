@@ -3392,6 +3392,7 @@ dependencies = [
  "chrono",
  "criterion",
  "crossbeam",
+ "foldhash 0.2.0",
  "futures",
  "http-body-util",
  "hyper",

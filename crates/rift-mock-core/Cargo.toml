@@ -15,6 +15,10 @@ readme = "../../README.md"
 workspace = true
 
 [dependencies]
+# Fast, non-cryptographic hashing for the script decision cache (issue #654). Already in the tree
+# via hashbrown; a direct dep costs nothing. See `scripting::decision_cache` for why the key has no
+# hash-stability requirement across processes.
+foldhash = "0.2"
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
 # TaskTracker for bounded connection-drain on imposter teardown (issue #596)
