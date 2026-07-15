@@ -70,6 +70,7 @@ fn build_help_text() -> Vec<Line<'static>> {
             "Cycle theme (Default/Dark/Light/Nord/Dracula)",
         ),
         help_line("?", "Toggle this help"),
+        help_line("L (Shift+l)", "Show recent errors and warnings"),
         Line::from(""),
         section_header("IMPOSTER LIST (Main View)"),
         Line::from(""),

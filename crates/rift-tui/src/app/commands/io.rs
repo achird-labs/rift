@@ -237,11 +237,16 @@ impl App {
             // and the pre-#564 `.flatten()` skipped it but left it uncounted. Tokio's
             // `ReadDir` stays valid after an `Err` (the failed entry is already consumed), so
             // continuing advances to the next entry and always terminates.
+            // Every failure below records WHICH file and WHY (issue #624). The status line can
+            // only carry an aggregate count, so without this the individual failures of a batch
+            // import are unrecoverable the moment it is written — which is the whole reason the
+            // error log exists.
             let entry = match entries.next_entry().await {
                 Ok(Some(entry)) => entry,
                 Ok(None) => break,
-                Err(_) => {
+                Err(e) => {
                     failed += 1;
+                    self.push_error(format!("unreadable directory entry: {e}"));
                     continue;
                 }
             };
@@ -249,21 +254,37 @@ impl App {
             if !file_path.extension().map(|e| e == "json").unwrap_or(false) {
                 continue;
             }
-            let Ok(content) = tokio::fs::read_to_string(&file_path).await else {
-                failed += 1;
-                continue;
-            };
-            if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
-                let url = format!("{}/imposters", self.client.base_url());
-                let resp = self.client.client().post(url).json(&config).send().await;
-
-                if resp.map(|r| r.status().is_success()).unwrap_or(false) {
-                    imported += 1;
-                } else {
+            let content = match tokio::fs::read_to_string(&file_path).await {
+                Ok(content) => content,
+                Err(e) => {
                     failed += 1;
+                    self.push_error(format!("{}: {e}", file_path.display()));
+                    continue;
                 }
-            } else {
-                failed += 1;
+            };
+            match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(config) => {
+                    let url = format!("{}/imposters", self.client.base_url());
+                    match self.client.client().post(url).json(&config).send().await {
+                        Ok(resp) if resp.status().is_success() => imported += 1,
+                        Ok(resp) => {
+                            failed += 1;
+                            let status = resp.status();
+                            self.push_error(format!(
+                                "{}: server rejected it ({status})",
+                                file_path.display()
+                            ));
+                        }
+                        Err(e) => {
+                            failed += 1;
+                            self.push_error(format!("{}: {e}", file_path.display()));
+                        }
+                    }
+                }
+                Err(e) => {
+                    failed += 1;
+                    self.push_error(format!("{}: invalid JSON ({e})", file_path.display()));
+                }
             }
         }
 
@@ -355,6 +376,10 @@ impl App {
         let mut failed = 0;
         let mut last_error = None;
 
+        // Collected rather than pushed inline: the loop holds `&self.imposters`, so recording into
+        // the error log (which needs `&mut self`) has to wait until it ends.
+        let mut failures: Vec<String> = Vec::new();
+
         for imp in &self.imposters {
             match self.client.export_imposter(imp.port, false).await {
                 Ok(json) => {
@@ -368,16 +393,23 @@ impl App {
                         Ok(_) => exported += 1,
                         Err(e) => {
                             failed += 1;
-                            last_error =
-                                Some(format!("failed to write {}: {e}", file_path.display()));
+                            let detail = format!("failed to write {}: {e}", file_path.display());
+                            failures.push(detail.clone());
+                            last_error = Some(detail);
                         }
                     }
                 }
                 Err(e) => {
                     failed += 1;
-                    last_error = Some(format!("failed to export port {}: {e}", imp.port));
+                    let detail = format!("failed to export port {}: {e}", imp.port);
+                    failures.push(detail.clone());
+                    last_error = Some(detail);
                 }
             }
+        }
+
+        for failure in failures {
+            self.push_error(failure);
         }
 
         if failed > 0 {

@@ -1,6 +1,6 @@
 //! Modal dialogs using tui-popup and tui-prompts for a cleaner implementation
 
-use crate::app::{App, InputAction, ValidationAction};
+use crate::app::{App, ErrorEntry, InputAction, ValidationAction};
 use crate::validation::{IssueSeverity, ValidationReport};
 use ratatui::{
     Frame,
@@ -11,6 +11,7 @@ use ratatui::{
         Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
     },
 };
+use std::collections::VecDeque;
 use tui_popup::Popup;
 
 /// Draw a confirmation dialog with proper sizing for long messages
@@ -683,4 +684,71 @@ pub fn draw_validation_result(
 
     let help_paragraph = Paragraph::new(help).alignment(Alignment::Center);
     frame.render_widget(help_paragraph, chunks[1]);
+}
+
+/// The in-app error log (issue #624).
+///
+/// The status line shows one message and expires it, so without this a batch of failures is
+/// unrecoverable the moment the line is overwritten. Newest first — the most recent failure is
+/// almost always the one being investigated.
+pub fn draw_errors(frame: &mut Frame, errors: &VecDeque<ErrorEntry>, scroll_offset: usize) {
+    let area = super::centered_rect(75, 70, frame.area());
+    frame.render_widget(Clear, area);
+
+    let title = if errors.is_empty() {
+        " Errors (none) ".to_string()
+    } else {
+        format!(" Errors ({}) ", errors.len())
+    };
+
+    let block = Block::default()
+        .title(title)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if errors.is_empty() {
+            Color::Green
+        } else {
+            Color::Red
+        }))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let lines: Vec<Line> = if errors.is_empty() {
+        vec![Line::from(Span::styled(
+            "  No errors recorded.",
+            Style::default().fg(Color::Green),
+        ))]
+    } else {
+        errors
+            .iter()
+            .rev()
+            .skip(scroll_offset)
+            .map(|e| {
+                Line::from(vec![
+                    Span::styled(
+                        format!("  {} ", e.at.format("%H:%M:%S")),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(e.message.clone(), Style::default().fg(Color::Red)),
+                ])
+            })
+            .collect()
+    };
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), chunks[0]);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            " ↑/↓ scroll · Esc/L close ",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .alignment(Alignment::Center),
+        chunks[1],
+    );
 }
