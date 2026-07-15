@@ -2,7 +2,7 @@ use crate::scripting::FaultDecision;
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -135,7 +135,17 @@ impl CacheKey {
     /// cached decision for one TTL, and re-owning serde_json's number hashing to prevent it costs
     /// more than that is worth.
     fn hash_body(body: CacheKeyBody<'_>) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        // `foldhash` rather than SipHash (`DefaultHasher`): this hash never leaves the process —
+        // it is an in-memory LRU key, never persisted and never sent over a wire — so it has no
+        // stability requirement across builds or runs, and SipHash's collision resistance buys
+        // nothing here. It costs, though: walking a ~200-node `Value` tree through SipHash was the
+        // dominant term in key construction (issue #654).
+        //
+        // `FixedState`, NOT `RandomState`: this `u64` is *stored* in the key and compared by `Eq`,
+        // so a per-call random seed would give the same body a different hash on every request and
+        // the cache would never hit again — silently, with every correctness test still green.
+        // (The LRU map's own hasher is randomly seeded; see `DecisionCache::new`.)
+        let mut hasher = foldhash::fast::FixedState::default().build_hasher();
         match body {
             CacheKeyBody::Json(value) => {
                 JSON_BODY_TAG.hash(&mut hasher);
@@ -232,7 +242,7 @@ pub struct DecisionCache {
     /// mutates and a read lock was never honest. The win here is a bounded critical section —
     /// `LruCache::push` evicts in O(1), where the previous `min_by_key` scanned all 10k entries
     /// under the exclusive lock on every steady-state insert.
-    cache: Option<Mutex<LruCache<CacheKey, CacheEntry>>>,
+    cache: Option<Mutex<LruCache<CacheKey, CacheEntry, foldhash::fast::RandomState>>>,
     metrics: AtomicMetrics,
     /// Latches the degenerate-cache warning so a pathological key shape is reported once, not
     /// once per request.
@@ -247,8 +257,18 @@ impl DecisionCache {
             config.enabled, config.max_size, config.ttl_seconds
         );
 
+        // `foldhash` for the map too (issue #654): `get`/`push` re-hash the *whole* key — the
+        // method/path/rule strings and every kept header — through the map's build hasher on every
+        // probe, so the lookup side pays SipHash as well, not just the body hash.
+        //
+        // `RandomState` here, unlike `hash_body`: the map holds one instance, so it is internally
+        // consistent for its whole life, and a per-process seed keeps keys built from
+        // network-controlled input (path, headers, body) from being collided on purpose.
         let cache = match (config.enabled, NonZeroUsize::new(config.max_size)) {
-            (true, Some(capacity)) => Some(Mutex::new(LruCache::new(capacity))),
+            (true, Some(capacity)) => Some(Mutex::new(LruCache::with_hasher(
+                capacity,
+                foldhash::fast::RandomState::default(),
+            ))),
             _ => None,
         };
 
@@ -1267,6 +1287,27 @@ mod tests {
         assert_ne!(json_null, empty, "a literal JSON null is not an empty body");
         assert_ne!(json_null, raw, "a literal JSON null is not a binary body");
         assert_ne!(empty, raw, "an empty body is not a binary body");
+    }
+
+    /// The body hash is **stored** in the key (`body_hash: u64`) and compared by `Eq`, so it must
+    /// be stable across calls for the life of the process — a per-call random seed would give the
+    /// same body a different hash every request, and the cache would never hit again while every
+    /// correctness test still passed. That is why `hash_body` seeds with `foldhash`'s `FixedState`
+    /// and not `RandomState` (issue #654); the LRU map's own hasher is a different question, and
+    /// is randomly seeded on purpose.
+    #[test]
+    fn hash_body_is_stable_across_calls() {
+        let body = serde_json::json!({"order": {"id": 7, "items": [1, 2, 3]}});
+        assert_eq!(
+            CacheKey::hash_body(CacheKeyBody::Json(&body)),
+            CacheKey::hash_body(CacheKeyBody::Json(&body)),
+            "a stored key hash seeded per call would never match itself again"
+        );
+        assert_eq!(
+            CacheKey::hash_body(CacheKeyBody::Raw(b"\x00\x01binary")),
+            CacheKey::hash_body(CacheKeyBody::Raw(b"\x00\x01binary")),
+            "the raw arm must be just as stable as the json arm"
+        );
     }
 
     /// A raw body whose bytes are the JSON text of a value must not collide with that parsed value:
