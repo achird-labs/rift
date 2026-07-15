@@ -94,9 +94,16 @@ pub async fn route_request(
     // sub-path/method or a control-less server both fall through to the ordinary 404.
     if path == "/intercept" || path.starts_with("/intercept/") {
         let resp = match intercept.as_ref() {
-            Some(control) => intercept::route(&method, &path, query.as_deref(), req, control)
-                .await
-                .unwrap_or_else(not_found),
+            Some(control) => intercept::route(
+                &method,
+                &path,
+                query.as_deref(),
+                req,
+                control,
+                allow_injection,
+            )
+            .await
+            .unwrap_or_else(not_found),
             None => not_found(),
         };
         return Ok(resp);

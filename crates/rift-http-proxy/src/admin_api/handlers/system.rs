@@ -6,6 +6,7 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
 use std::sync::Arc;
+use tracing::warn;
 
 /// GET / - Root endpoint (Mountebank-compatible format)
 pub fn handle_root(base_url: &str) -> Response<Full<Bytes>> {
@@ -153,25 +154,41 @@ pub async fn handle_reload(
     // reads plus EJS/regex/serde work — and unlike startup, reload is network-triggered and
     // repeatable, so a large datadir or a stalled mount would pin a runtime worker for the whole
     // read. Awaited here, so the parse still completes before anything mutates.
-    let configs = match tokio::task::spawn_blocking(move || {
-        crate::config_loader::load_configs(&source)
-    })
-    .await
-    {
-        Ok(Ok(configs)) => configs,
-        Ok(Err(e)) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Reload failed (imposters unchanged): {e}"),
-            );
-        }
-        Err(e) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Reload task failed: {e}"),
-            );
-        }
+    let loaded =
+        match tokio::task::spawn_blocking(move || crate::config_loader::load_configs_full(&source))
+            .await
+        {
+            Ok(Ok(loaded)) => loaded,
+            Ok(Err(e)) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Reload failed (imposters unchanged): {e}"),
+                );
+            }
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Reload task failed: {e}"),
+                );
+            }
+        };
+
+    // The `intercept` block is applied at boot only (issue #655): re-seeding would duplicate or
+    // clobber rules added at runtime, and rebinding the listener is a lifecycle change reload does
+    // not own. The party that needs to know is the client that just asked for the reload, and a
+    // server-side log is invisible to it (doubly so over FFI, where tracing may go nowhere) — so
+    // the response body carries the warning and the log is a `warn!`, not an `info!`: the caller
+    // asked for something that deliberately did not happen.
+    let warnings: Vec<String> = if loaded.intercept.is_some() {
+        let warning = "the config file's `intercept` block is applied at startup only and was NOT \
+                       re-applied; imposters were reloaded. Use /intercept/rules to change rules \
+                       at runtime, or restart to re-read the block.";
+        warn!("Reload: {warning}");
+        vec![warning.to_string()]
+    } else {
+        Vec::new()
     };
+    let configs = loaded.imposters;
 
     // Validate-before-touch: refuse a gated config before anything mutates, so a refused reload
     // leaves the running imposters exactly as they were (issue #612).
@@ -181,16 +198,21 @@ pub async fn handle_reload(
 
     let count = configs.len();
     match manager.apply_config(configs).await {
-        Ok(report) if report.failed.is_empty() => json_response(
-            StatusCode::OK,
-            &serde_json::json!({
+        Ok(report) if report.failed.is_empty() => {
+            let mut body = serde_json::json!({
                 "message": format!("Reloaded {count} imposter(s)"),
                 "created": report.created,
                 "replaced": report.replaced,
                 "stubPatched": report.stub_patched,
                 "deleted": report.deleted,
-            }),
-        ),
+            });
+            // Additive: absent entirely when there is nothing to warn about, so existing clients
+            // and their parsers are unaffected.
+            if !warnings.is_empty() {
+                body["warnings"] = serde_json::json!(warnings);
+            }
+            json_response(StatusCode::OK, &body)
+        }
         // A reload failure is a server-side config problem, not a bad client request — report 5xx.
         // Validation errors are caught before anything mutates (running imposters intact, Err
         // below); per-port failures here are residual apply errors (e.g. a bind failure on a

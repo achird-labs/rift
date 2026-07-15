@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::intercept::InterceptListener;
-use crate::intercept_rules::{InterceptRules, InterceptState};
+use crate::intercept_rules::{InterceptRule, InterceptRules, InterceptState, RulesAtCapacity};
 use rift_mock_core::proxy::intercept_ca::{CaSource, CertificateAuthority, SniCertResolver};
 use serde::Serialize;
 
@@ -55,6 +55,12 @@ pub struct InterceptStartOptions {
     /// Generate a fresh CA and return its cert **and** key in the start response (issue #593).
     /// Only valid when no CA source is supplied — combining it with a path/PEM pair is a `400`.
     pub return_ca_key: Option<bool>,
+    /// Rules to install before the listener accepts anything (issue #655). Lets one declarative
+    /// document — a `--configfile` `intercept` block, a `POST /intercept` body, or an FFI start —
+    /// bring up a listener that is already correct, instead of requiring a follow-up
+    /// `POST /intercept/rules` that traffic can race.
+    #[serde(default)]
+    pub rules: Vec<InterceptRule>,
 }
 
 impl std::fmt::Debug for InterceptStartOptions {
@@ -71,6 +77,8 @@ impl std::fmt::Debug for InterceptStartOptions {
                 &self.ca_key_pem.as_ref().map(|_| "<redacted>"),
             )
             .field("return_ca_key", &self.return_ca_key)
+            // Count only: a rule's serve body can be an arbitrarily large payload.
+            .field("rules", &self.rules.len())
             .finish()
     }
 }
@@ -147,6 +155,10 @@ pub enum InterceptStartError {
     Ca(#[source] anyhow::Error),
     #[error("bind failed: {0}")]
     Bind(#[source] anyhow::Error),
+    /// Seeding the start-time rules exceeded [`MAX_RULES`](crate::intercept_rules::MAX_RULES).
+    /// Mapped to the same `429` the runtime `POST /intercept/rules` returns for a full store.
+    #[error(transparent)]
+    Rules(#[from] RulesAtCapacity),
 }
 
 impl InterceptControl {
@@ -221,7 +233,17 @@ impl InterceptControl {
         })?);
         let ca_export = return_ca_key.then(|| (ca.ca_cert_pem().to_string(), ca.ca_key_pem()));
 
+        // Seed BEFORE binding: once `bind` returns the listener is accepting, so rules installed
+        // after it could be raced by the first request, which would fall through to the
+        // unmatched-host default (issue #655). Seeding here makes a started listener correct by
+        // construction — and an over-capacity batch fails the start rather than binding a listener
+        // with a partial rule set.
         let rules = InterceptRules::new();
+        rules.extend(opts.rules).map_err(|e| {
+            tracing::warn!(error = %e, "intercept start: rule seeding failed");
+            InterceptStartError::Rules(e)
+        })?;
+
         let resolver = Arc::new(SniCertResolver::new(ca.clone()));
         let listener = InterceptListener::bind(addr, resolver, rules.clone())
             .await
@@ -482,6 +504,123 @@ mod tests {
             .await
             .expect_err("returnCaKey with CA paths must be rejected");
         assert!(matches!(err, InterceptStartError::Ca(_)));
+    }
+
+    // ===== Config-declared rules seeded at start (issue #655) =====
+
+    fn serve_rule(host: &str) -> InterceptRule {
+        InterceptRule {
+            host: Some(host.to_string()),
+            predicates: vec![],
+            action: crate::intercept_rules::InterceptAction::Serve(
+                crate::intercept_rules::ServeStub {
+                    status_code: 200,
+                    headers: Default::default(),
+                    body: Some("seeded".to_string()),
+                },
+            ),
+        }
+    }
+
+    /// AC1: rules supplied to `start` are in the store the listener matches against by the time
+    /// `start` returns — no second admin call, and (because seeding precedes `bind`) no window in
+    /// which the listener is live with an empty store.
+    #[tokio::test]
+    async fn start_seeds_rules_from_options() {
+        let control = InterceptControl::default();
+        control
+            .start(InterceptStartOptions {
+                rules: vec![serve_rule("a.example.com"), serve_rule("b.example.com")],
+                ..Default::default()
+            })
+            .await
+            .expect("start with seeded rules");
+
+        let listed = control.state().expect("running").rules.list();
+        assert_eq!(listed.len(), 2, "both config rules are in the live store");
+        assert_eq!(listed[0].host.as_deref(), Some("a.example.com"));
+        assert_eq!(
+            listed[1].host.as_deref(),
+            Some("b.example.com"),
+            "insertion order is preserved (first match wins depends on it)"
+        );
+        control.stop().await;
+    }
+
+    /// AC2 (unit half): an options payload without `rules` behaves exactly as before.
+    #[tokio::test]
+    async fn start_without_rules_leaves_store_empty() {
+        let control = InterceptControl::default();
+        control.start(defaults()).await.expect("start");
+        assert!(
+            control.state().expect("running").rules.is_empty(),
+            "no rules unless the caller supplied some"
+        );
+        control.stop().await;
+    }
+
+    /// AC6: runtime `POST /intercept/rules` / `DELETE` still layer on top of the seeded set.
+    #[tokio::test]
+    async fn seeded_rules_accept_runtime_additions_and_clear() {
+        let control = InterceptControl::default();
+        control
+            .start(InterceptStartOptions {
+                rules: vec![serve_rule("seeded.example.com")],
+                ..Default::default()
+            })
+            .await
+            .expect("start");
+        let rules = control.state().expect("running").rules;
+
+        rules
+            .add(serve_rule("runtime.example.com"))
+            .expect("runtime add on top of the seeded set");
+        let listed = rules.list();
+        assert_eq!(listed.len(), 2, "runtime rule layers on top, not replacing");
+        assert_eq!(listed[0].host.as_deref(), Some("seeded.example.com"));
+        assert_eq!(listed[1].host.as_deref(), Some("runtime.example.com"));
+
+        rules.clear();
+        assert!(rules.is_empty(), "DELETE clears seeded rules too");
+        control.stop().await;
+    }
+
+    /// Seeding failure fails `start` loudly (and therefore server boot) rather than binding a
+    /// listener with a partial rule set.
+    #[tokio::test]
+    async fn start_rejects_rules_over_capacity_without_binding() {
+        let control = InterceptControl::default();
+        let too_many = (0..crate::intercept_rules::MAX_RULES + 1)
+            .map(|i| serve_rule(&format!("h{i}.example.com")))
+            .collect();
+        let err = control
+            .start(InterceptStartOptions {
+                rules: too_many,
+                ..Default::default()
+            })
+            .await
+            .expect_err("an over-capacity rule set must fail the start");
+        assert!(matches!(err, InterceptStartError::Rules(_)));
+        assert!(
+            control.status().is_none(),
+            "no listener may be left behind by a failed seed"
+        );
+    }
+
+    /// The config block IS this struct: `rules` must parse from the same camelCase JSON the admin
+    /// `POST /intercept` body uses, and stay optional for pre-#655 payloads.
+    #[test]
+    fn rules_parse_from_json_and_default_to_empty() {
+        let seeded: InterceptStartOptions = serde_json::from_str(
+            r#"{"port":8080,"rules":[{"host":"cdn.example.com","action":{"forward":{"port":4545}}}]}"#,
+        )
+        .expect("rules parse from the shared camelCase shape");
+        assert_eq!(seeded.rules.len(), 1);
+        assert_eq!(seeded.port, Some(8080));
+
+        let legacy: InterceptStartOptions =
+            serde_json::from_str(r#"{"port":8080}"#).expect("a pre-#655 payload still parses");
+        assert!(legacy.rules.is_empty(), "rules defaults to empty");
     }
 
     #[tokio::test]

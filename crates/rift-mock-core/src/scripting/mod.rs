@@ -23,7 +23,7 @@ pub use script_pool::{CompiledScript, ScriptPool, ScriptPoolConfig};
 
 // Decision cache for memoization
 mod decision_cache;
-pub use decision_cache::{CacheKey, DecisionCache, DecisionCacheConfig};
+pub use decision_cache::{CacheKey, CacheKeyBody, DecisionCache, DecisionCacheConfig};
 
 #[cfg(feature = "javascript")]
 mod js_engine;

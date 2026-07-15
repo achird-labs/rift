@@ -25,7 +25,9 @@ use crate::extensions::template::{RequestData, has_template_variables, process_t
 use crate::proxy::context::{
     ForwardingContext, RequestHandlerContext, RequestInfo, ScriptingContext, UpstreamService,
 };
-use crate::scripting::{CacheKey, FaultDecision as ScriptFaultDecision, ScriptRequest};
+use crate::scripting::{
+    CacheKey, CacheKeyBody, FaultDecision as ScriptFaultDecision, ScriptRequest,
+};
 
 use http_body_util::BodyExt;
 use http_body_util::combinators::BoxBody;
@@ -202,8 +204,18 @@ async fn handle_script_rules(
         }
     }
 
-    let body_json: serde_json::Value =
-        serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+    // Domain-optional parse: a non-JSON body is a legitimate domain value here, not an error — the
+    // script contract is `ctx.request.body == null` with the bytes on `raw_body`/`mode`. Kept as an
+    // `Option` rather than pre-coalesced to `Null` so the cache key can tell "parsed to null" from
+    // "did not parse", which the key must distinguish: the script branches on `raw_body`, so two
+    // different non-JSON bodies are two different inputs (issue #652).
+    let parsed_body: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
+    if parsed_body.is_none() && !body_bytes.is_empty() {
+        debug!(
+            bytes = body_bytes.len(),
+            "request body is not JSON; keying the script decision cache on its raw bytes"
+        );
+    }
 
     let (raw_body, body_mode) = classify_script_request_body(&body_bytes);
 
@@ -218,10 +230,16 @@ async fn handle_script_rules(
     let cache_key = CacheKey::new(
         request_info.method.to_string(),
         request_info.uri.path().to_string(),
+        // `Uri::path()` excludes the query, but the script reads it as `ctx.request.query` — so
+        // without this the key could not tell `?page=1` from `?page=2` (issue #660).
+        request_info.uri.query(),
         scripting.decision_cache.key_headers(&headers_map),
-        &body_json,
+        parsed_body
+            .as_ref()
+            .map_or(CacheKeyBody::Raw(&body_bytes), CacheKeyBody::Json),
         compiled_rule.id.clone(),
     );
+    let body_json = parsed_body.unwrap_or(serde_json::Value::Null);
 
     let script_request = ScriptRequest {
         raw_body: Some(raw_body),

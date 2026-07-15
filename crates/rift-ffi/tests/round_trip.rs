@@ -2209,3 +2209,180 @@ fn ffi_admin_longtail_scenario_and_flow_edges() {
         rift_stop(h);
     }
 }
+
+// ===== configFile `intercept` block over FFI (issue #655) =====
+
+/// Write a config file declaring an imposter plus an `intercept` block that forwards to it.
+fn intercept_config_file(dir: &std::path::Path, imposter_port: u16, predicates: &str) -> String {
+    let path = dir.join("intercept-config.json");
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{"imposters": [{{ "port": {imposter_port}, "protocol": "http",
+                   "stubs": [{{ "responses": [{{ "is": {{ "statusCode": 200, "body": "from-imposter" }} }}] }}] }}],
+               "intercept": {{ "port": 0, "rules": [
+                   {{ "host": "cdn.example.com"{predicates},
+                      "action": {{ "forward": {{ "port": {imposter_port}}} }} }} ] }} }}"#
+        ),
+    )
+    .expect("write config");
+    serde_json::json!(path.to_str().expect("utf8 path")).to_string()
+}
+
+/// Issue #655 AC7: an embedded host booting from a `configFile` gets the listener **and** its rules
+/// with no extra FFI call — the same declarative parity the CLI has. Without this the FFI block
+/// handling could be deleted wholesale and nothing would fail.
+#[test]
+fn ffi_serve_admin_config_file_seeds_the_intercept_block() {
+    unsafe {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path_json = intercept_config_file(dir.path(), 19655, "");
+
+        let h = rift_start();
+        let info = take_json(rift_serve_admin(
+            h,
+            cstr(&format!(r#"{{"port": 0, "configFile": {path_json}}}"#)).as_ptr(),
+        ));
+        let info: serde_json::Value = serde_json::from_str(&info).expect("serve json");
+        let admin_port = info["adminPort"].as_u64().expect("adminPort");
+
+        // The block started the listener and seeded its rule — no rift_start_intercept, no
+        // rift_intercept_add_rules. `list_rules` errors with "intercept not started" if the block
+        // was ignored, so this asserts both halves at once.
+        let listed: serde_json::Value =
+            serde_json::from_str(&take_json(rift_intercept_list_rules(h))).expect("rules json");
+        let rules = listed.as_array().expect("rules array");
+        assert_eq!(
+            rules.len(),
+            1,
+            "the config block's rule is seeded: {listed}"
+        );
+        assert_eq!(rules[0]["host"].as_str(), Some("cdn.example.com"));
+
+        // ...and the listener actually works: drive real HTTPS through it to the imposter the same
+        // file declared.
+        let ca_pem = take_json(rift_intercept_ca_pem(h));
+        rt().block_on(async move {
+            let status: serde_json::Value =
+                reqwest::get(format!("http://127.0.0.1:{admin_port}/intercept"))
+                    .await
+                    .expect("GET /intercept")
+                    .json()
+                    .await
+                    .expect("intercept status json");
+            let intercept_port = status["interceptPort"].as_u64().expect("interceptPort");
+            assert!(intercept_port > 0, "the block bound a real port");
+
+            let client = reqwest::Client::builder()
+                .proxy(reqwest::Proxy::https(format!("http://127.0.0.1:{intercept_port}")).unwrap())
+                .add_root_certificate(reqwest::Certificate::from_pem(ca_pem.as_bytes()).unwrap())
+                .build()
+                .unwrap();
+            let resp = client
+                .get("https://cdn.example.com/datafile.json")
+                .send()
+                .await
+                .expect("intercepted and forwarded");
+            assert_eq!(resp.status(), 200);
+            assert_eq!(resp.text().await.unwrap(), "from-imposter");
+        });
+
+        rift_stop(h);
+    }
+}
+
+/// Issue #655 AC7 (gate half): a `configFile` crosses a trust boundary, so an `inject` predicate in
+/// its intercept block is refused without `allowInjection` — mirroring the imposter gate on the same
+/// door. The gate runs before the listener starts, so a rejected file must leave nothing bound.
+#[test]
+fn ffi_serve_admin_config_file_intercept_inject_requires_allow_injection() {
+    unsafe {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path_json = intercept_config_file(
+            dir.path(),
+            19656,
+            r#", "predicates": [{ "inject": "function (request) { return true; }" }]"#,
+        );
+
+        let h = rift_start();
+        assert!(
+            rift_serve_admin(
+                h,
+                cstr(&format!(
+                    r#"{{"port": 0, "allowInjection": false, "configFile": {path_json}}}"#
+                ))
+                .as_ptr()
+            )
+            .is_null(),
+            "an inject predicate in the intercept block must be rejected when allowInjection is off"
+        );
+
+        let err = rift_last_error();
+        assert!(!err.is_null(), "a gated block records last_error");
+        let msg = CStr::from_ptr(err).to_str().expect("utf8").to_owned();
+        rift_free(err);
+        assert!(
+            msg.contains("allowInjection"),
+            "the rejection must name the gate that blocked it, got: {msg}"
+        );
+
+        // Nothing may be left behind: no listener bound, and no imposter applied. Asserted rather
+        // than inferred — a refactor moving the gate after `intercept.start`/`apply_config` would
+        // still return NULL and still set last_error, and only these checks would notice.
+        assert!(
+            rift_intercept_list_rules(h).is_null(),
+            "a rejected configFile must not leave an intercept listener running"
+        );
+        let listed = take_json(rift_list_imposters(h, std::ptr::null()));
+        assert!(
+            !listed.contains("19656"),
+            "a rejected configFile must apply no imposters, got: {listed}"
+        );
+
+        rift_stop(h);
+    }
+}
+
+/// Issue #655: the `intercept` block binds a listener partway through `rift_serve_admin`, so a
+/// failure *after* that point must roll it back. Otherwise the handle is poisoned: the caller sees
+/// the serve fail, retries, and gets `AlreadyRunning` forever — blamed on a listener they never
+/// successfully started. Driven through a real admin-bind failure (the port is already held).
+#[test]
+fn ffi_serve_admin_failure_after_intercept_start_leaves_no_listener() {
+    unsafe {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path_json = intercept_config_file(dir.path(), 19657, "");
+
+        // Hold a port so the admin bind — which happens after the block starts — must fail.
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+        let taken_port = occupied.local_addr().unwrap().port();
+
+        let h = rift_start();
+        assert!(
+            rift_serve_admin(
+                h,
+                cstr(&format!(
+                    r#"{{"host": "127.0.0.1", "port": {taken_port}, "configFile": {path_json}}}"#
+                ))
+                .as_ptr()
+            )
+            .is_null(),
+            "serve must fail when the admin port is already held"
+        );
+
+        // The rollback: a retry can start intercept, which is impossible if the failed call left
+        // its listener bound (that would be AlreadyRunning).
+        let started = rift_start_intercept(h, cstr(r#"{"port":0}"#).as_ptr());
+        assert!(
+            !started.is_null(),
+            "a failed serve must not leave its intercept listener bound: {}",
+            CStr::from_ptr(rift_last_error())
+                .to_str()
+                .unwrap_or("<no error>")
+        );
+        rift_free(started);
+
+        rift_stop(h);
+        drop(occupied);
+    }
+}

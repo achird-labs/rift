@@ -6,14 +6,25 @@
 //! The gate used to live behind the admin API only, so the same document was refused by an HTTP
 //! POST and executed when loaded from a file.
 //!
+//! The intercept **rule** doors ask it too (issue #657): `POST /intercept/rules`, the `rules` array
+//! on `POST /intercept`, and the `--configfile` `intercept` block (issue #655). A rule's predicates
+//! are evaluated per intercepted request, so an `inject` there is executable code arriving over the
+//! same boundaries — the #612 sweep missed this door, and the same predicate was refused by
+//! `POST /imposters` and executed by `POST /intercept/rules`.
+//!
 //! This module only *classifies*. Each door owns its own failure semantics (400, startup abort,
 //! per-file skip, or FFI NULL), which is why the response builder stays with the admin handlers.
 //!
 //! The gate's subject is the *document*, not the caller: it asks whether config that crossed a
 //! trust boundary carries executable surface. In-process config supplied by an embedding host
-//! (`rift_apply_config`, `rift_create_imposter`, `rift_serve_admin`'s inline `config`) is the
-//! trusted host path and is deliberately never gated (issue #492) — that host can already execute
-//! code in the process, so gating its own JSON would restrict nobody.
+//! (`rift_apply_config`, `rift_create_imposter`, `rift_add_stub`, `rift_replace_stubs`,
+//! `rift_intercept_add_rules`, `rift_start_intercept`, and `rift_serve_admin`'s inline `config`)
+//! is the trusted host path and is deliberately never gated (issue #492) — that host can already
+//! execute code in the process, so gating its own JSON would restrict nobody.
+//!
+//! Both lists above are exhaustive on purpose, and adding a door means adding it to one of them:
+//! #657 happened because a door existed in neither, so "which doors ask the gate?" had to be
+//! re-derived from the code — and the answer was wrong.
 
 use crate::imposter::{ImposterConfig, Predicate, PredicateOperation, Stub, StubResponse};
 
@@ -46,6 +57,19 @@ pub fn gated_offender_ports(configs: &[ImposterConfig]) -> Vec<String> {
             None => "<auto-assigned>".to_string(),
         })
         .collect()
+}
+
+/// True if `rule` carries a scripting surface gated by `--allowInjection` (issues #655, #657).
+///
+/// An intercept rule's only executable surface is a predicate `inject`: its `serve` action is a
+/// fixed status/headers/body stub and `forward` is a port number, so neither can carry script — a
+/// serve body that merely looks like JavaScript is inert data. Every door that admits a rule asks
+/// this — `POST /intercept/rules`, the `rules` array on `POST /intercept`, and the `--configfile`
+/// `intercept` block — the same question `--configfile` imposters answer via
+/// [`config_uses_script_surface`], so one document cannot be refused as an imposter stub and
+/// executed as an intercept predicate.
+pub fn intercept_rule_uses_script_surface(rule: &crate::intercept_rules::InterceptRule) -> bool {
+    rule.predicates.iter().any(predicate_has_inject)
 }
 
 /// True if any stub in `stubs` uses a Mountebank scripting surface gated by `--allowInjection`

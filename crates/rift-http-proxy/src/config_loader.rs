@@ -3,6 +3,7 @@
 //! running state is touched), so a parse error is returned rather than applied.
 
 use crate::imposter::{ImposterConfig, ScriptBaseDir, resolve_scripts};
+use crate::intercept_control::InterceptStartOptions;
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -50,16 +51,39 @@ pub enum ConfigSource {
     Dir(PathBuf),
 }
 
+/// Everything a config source declares: the imposters, plus the optional `intercept` block that
+/// brings up the intercept listener with its rules already installed (issue #655).
+#[derive(Debug, Default)]
+pub struct LoadedConfig {
+    pub imposters: Vec<ImposterConfig>,
+    /// `None` when the document declares no `intercept` block — the overwhelmingly common case, and
+    /// byte-for-byte the pre-#655 behaviour. Only the `{ "imposters": [...] }` wrapper object has
+    /// somewhere to put one; a bare array and a `--datadir` never yield a block.
+    pub intercept: Option<InterceptStartOptions>,
+}
+
 /// Parse the source into imposter configs without creating any imposters. A parse error is
 /// returned so the caller (startup or hot-reload) decides whether to apply the result.
+///
+/// Imposters only: the `intercept` block is boot-only, so `POST /admin/reload` — which goes through
+/// here — keeps reloading imposters and leaves the running listener alone (issue #655). Callers that
+/// need the block use [`load_configs_full`].
 pub fn load_configs(source: &ConfigSource) -> anyhow::Result<Vec<ImposterConfig>> {
+    load_configs_full(source).map(|loaded| loaded.imposters)
+}
+
+/// Parse the source into everything it declares, including the optional `intercept` block.
+pub fn load_configs_full(source: &ConfigSource) -> anyhow::Result<LoadedConfig> {
     match source {
         ConfigSource::File { path, no_parse } => load_file(path, *no_parse),
-        ConfigSource::Dir(dir) => load_dir(dir),
+        ConfigSource::Dir(dir) => load_dir(dir).map(|imposters| LoadedConfig {
+            imposters,
+            intercept: None,
+        }),
     }
 }
 
-fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<Vec<ImposterConfig>> {
+fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<LoadedConfig> {
     let raw = std::fs::read_to_string(path)?;
     let content = if no_parse {
         raw
@@ -68,11 +92,32 @@ fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<Vec<ImposterConfig>>
     };
 
     let trimmed = content.trim_start();
+    let mut intercept = None;
     let mut configs: Vec<ImposterConfig> = if trimmed.starts_with('{') {
         // Single imposter, or a `{ "imposters": [...] }` wrapper (Mountebank format).
         let value: serde_json::Value = serde_json::from_str(&content)?;
         match value.get("imposters") {
-            Some(imposters) => serde_json::from_value(imposters.clone())?,
+            Some(imposters) => {
+                // Only the wrapper carries siblings, so this is the one shape with somewhere to
+                // declare an intercept listener (issue #655). `InterceptStartOptions` is
+                // `deny_unknown_fields`, so a typo here is a startup error rather than a config
+                // block that silently does nothing.
+                intercept = value
+                    .get("intercept")
+                    .map(|block| serde_json::from_value(block.clone()))
+                    .transpose()
+                    .map_err(|e| anyhow::anyhow!("invalid `intercept` block: {e}"))?;
+                serde_json::from_value(imposters.clone())?
+            }
+            // A single-imposter document has no `imposters` key, so it has no wrapper to carry a
+            // listener declaration — and `ImposterConfig` ignores unknown fields, so an `intercept`
+            // key here would be dropped without a word: no listener, no rule, no diagnostic, and a
+            // green boot (issue #655). Refuse instead; the remedy is one line of JSON.
+            None if value.get("intercept").is_some() => anyhow::bail!(
+                "an `intercept` block is only read from the `{{\"imposters\": [...], \"intercept\": {{...}}}}` \
+                 wrapper form, but this document has no `imposters` key, so the block would be ignored. \
+                 Wrap the imposter in `\"imposters\": [ ... ]` (use `[]` if the file declares none)."
+            ),
             None => vec![serde_json::from_value(value)?],
         }
     } else if trimmed.starts_with('[') {
@@ -93,7 +138,10 @@ fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<Vec<ImposterConfig>>
     for config in &mut configs {
         resolve_scripts(config, &base)?;
     }
-    Ok(configs)
+    Ok(LoadedConfig {
+        imposters: configs,
+        intercept,
+    })
 }
 
 fn load_dir(dir: &Path) -> anyhow::Result<Vec<ImposterConfig>> {
@@ -319,6 +367,186 @@ mod tests {
                 "the secret's content must never appear (it must not be read): {msg}"
             );
         }
+    }
+
+    // ===== Optional `intercept` block (issue #655) =====
+
+    const WITH_INTERCEPT: &str = r#"{
+        "imposters": [{"port":4545,"protocol":"http"}],
+        "intercept": {
+            "host": "0.0.0.0",
+            "port": 8080,
+            "rules": [{"host":"cdn.example.com","action":{"forward":{"port":4545}}}]
+        }
+    }"#;
+
+    /// AC2: the block is read from the same wrapper object that already carries `imposters`.
+    #[test]
+    fn load_configs_full_reads_intercept_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "cfg.json", WITH_INTERCEPT);
+        let loaded = load_configs_full(&ConfigSource::File {
+            path,
+            no_parse: false,
+        })
+        .unwrap();
+
+        assert_eq!(loaded.imposters.len(), 1);
+        assert_eq!(loaded.imposters[0].port, Some(4545));
+        let intercept = loaded.intercept.expect("the intercept block is read");
+        assert_eq!(intercept.host.as_deref(), Some("0.0.0.0"));
+        assert_eq!(intercept.port, Some(8080));
+        assert_eq!(intercept.rules.len(), 1);
+        assert_eq!(intercept.rules[0].host.as_deref(), Some("cdn.example.com"));
+    }
+
+    /// AC2: absent block → exactly today's behaviour, imposters untouched.
+    #[test]
+    fn load_configs_full_without_intercept_block_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in [
+            (
+                "wrap.json",
+                r#"{"imposters":[{"port":8001,"protocol":"http"}]}"#,
+            ),
+            ("single.json", r#"{"port":8000,"protocol":"http"}"#),
+            ("arr.json", r#"[{"port":8003,"protocol":"http"}]"#),
+        ] {
+            let path = write(dir.path(), name, body);
+            let loaded = load_configs_full(&ConfigSource::File {
+                path,
+                no_parse: false,
+            })
+            .unwrap();
+            assert_eq!(loaded.imposters.len(), 1, "{name}: imposters still load");
+            assert!(
+                loaded.intercept.is_none(),
+                "{name}: no block means no intercept"
+            );
+        }
+    }
+
+    /// A `--datadir` has no wrapper object to carry a block.
+    #[test]
+    fn load_configs_full_from_dir_has_no_intercept_block() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.json", r#"{"port":8100,"protocol":"http"}"#);
+        let loaded = load_configs_full(&ConfigSource::Dir(dir.path().to_path_buf())).unwrap();
+        assert_eq!(loaded.imposters.len(), 1);
+        assert!(loaded.intercept.is_none());
+    }
+
+    /// AC5: `POST /admin/reload` goes through `load_configs`, which must keep returning imposters
+    /// only — the block is boot-only, and a config carrying one must still reload its imposters
+    /// rather than erroring.
+    #[test]
+    fn load_configs_returns_imposters_only_for_a_config_with_a_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "cfg.json", WITH_INTERCEPT);
+        let configs = load_configs(&ConfigSource::File {
+            path,
+            no_parse: false,
+        })
+        .expect("a config with an intercept block still reloads its imposters");
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].port, Some(4545));
+    }
+
+    /// The block is `InterceptStartOptions`, which is `deny_unknown_fields` — a typo is a loud
+    /// startup error, not a silently-ignored listener.
+    #[test]
+    fn misspelled_intercept_field_is_a_load_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "typo.json",
+            r#"{"imposters":[],"intercept":{"prot":8080}}"#,
+        );
+        let err = load_configs_full(&ConfigSource::File {
+            path,
+            no_parse: false,
+        })
+        .expect_err("a misspelled block field must fail the load");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("prot") || msg.contains("unknown field"),
+            "the error must name the offending field: {msg}"
+        );
+    }
+
+    /// An `intercept` key outside the wrapper form must be a loud error, never a silent no-op:
+    /// `ImposterConfig` ignores unknown fields, so the block would otherwise vanish and rift would
+    /// boot green with no listener. Both single-imposter spellings are covered — with and without
+    /// other imposter fields — because the intercept-only document (`{"intercept": {...}}`) also
+    /// parses as a *default* `ImposterConfig`, which would additionally conjure a phantom
+    /// auto-assigned-port imposter out of a file that declares none.
+    #[test]
+    fn intercept_block_outside_the_wrapper_form_is_a_loud_error() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in [
+            (
+                "single_plus_block.json",
+                r#"{"port":8000,"protocol":"http","intercept":{"port":8080,"rules":[]}}"#,
+            ),
+            (
+                "block_only.json",
+                r#"{"intercept":{"port":8080,"rules":[]}}"#,
+            ),
+        ] {
+            let path = write(dir.path(), name, body);
+            let err = load_configs_full(&ConfigSource::File {
+                path,
+                no_parse: false,
+            })
+            .expect_err("{name}: a block outside the wrapper must not be silently dropped");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("imposters"),
+                "{name}: the error must name the wrapper key that fixes it: {msg}"
+            );
+        }
+    }
+
+    /// The guard above must not fire on documents that never mentioned `intercept` — the
+    /// single-imposter shape stays exactly as it was.
+    #[test]
+    fn single_imposter_without_a_block_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "single.json",
+            r#"{"port":8000,"protocol":"http"}"#,
+        );
+        let loaded = load_configs_full(&ConfigSource::File {
+            path,
+            no_parse: false,
+        })
+        .expect("a plain single-imposter config is unaffected");
+        assert_eq!(loaded.imposters.len(), 1);
+        assert_eq!(loaded.imposters[0].port, Some(8000));
+        assert!(loaded.intercept.is_none());
+    }
+
+    /// EJS runs before parsing, so the block gets env substitution like the rest of the file.
+    #[test]
+    fn intercept_block_supports_ejs_env_substitution() {
+        unsafe { std::env::set_var("RIFT_TEST_655_HOST", "flags.example.com") };
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "ejs.json",
+            r#"{"imposters":[],"intercept":{"rules":[{"host":"<%= process.env.RIFT_TEST_655_HOST %>","action":{"forward":{"port":4545}}}]}}"#,
+        );
+        let loaded = load_configs_full(&ConfigSource::File {
+            path,
+            no_parse: false,
+        })
+        .unwrap();
+        assert_eq!(
+            loaded.intercept.expect("block").rules[0].host.as_deref(),
+            Some("flags.example.com")
+        );
+        unsafe { std::env::remove_var("RIFT_TEST_655_HOST") };
     }
 
     #[test]

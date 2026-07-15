@@ -337,9 +337,16 @@ impl ServerBuilder {
             }
         };
 
+        let mut intercept_block = None;
         if let Some(ref configfile) = cli.configfile {
-            load_imposters_from_file(&manager, configfile, cli.no_parse, cli.allow_injection)
-                .await?;
+            intercept_block = load_imposters_from_file(
+                &manager,
+                configfile,
+                cli.no_parse,
+                cli.allow_injection,
+                &cli_intercept_flags(&cli),
+            )
+            .await?;
         }
         if let Some(ref datadir) = cli.datadir {
             load_imposters_from_datadir(&manager, datadir, cli.allow_injection).await?;
@@ -405,10 +412,14 @@ impl ServerBuilder {
         // every standalone server — flag or no flag (the issue's goal for the connect transport).
         // `--intercept-port` just eagerly starts the same listener the API would; a start error
         // still aborts startup, as before.
+        // The config file's `intercept` block (issue #655) and `--intercept-port` are two spellings
+        // of the same listener; supplying both was already refused when the file was loaded, so at
+        // most one of these arms can run. The block declares its own bind host, so unlike the flag
+        // it does not inherit the admin `host`.
         let intercept = InterceptControl::default();
-        if let Some(intercept_port) = cli.intercept_port {
-            intercept
-                .start(InterceptStartOptions {
+        let start_options = intercept_block.or_else(|| {
+            cli.intercept_port
+                .map(|intercept_port| InterceptStartOptions {
                     host: Some(host.to_string()),
                     port: Some(intercept_port),
                     ca_cert_path: cli
@@ -424,13 +435,25 @@ impl ServerBuilder {
                     // Cloned (not moved) because `cli` is borrowed for the rest of startup.
                     ..Default::default()
                 })
-                .await
-                .map_err(|e| anyhow::anyhow!("intercept: {e}"))?;
+        });
+        if let Some(options) = start_options {
+            let seeded_rules = options.rules.len();
+            if let Err(e) = intercept.start(options).await {
+                // Same contract as the admin-bind arm below: don't orphan a listener already bound
+                // by this call. #655 widens the ways this can fail (rule-capacity, and a CA/bind
+                // error declared by the config block rather than typed as a flag), and `start()` is
+                // an embedding seam callers retry — a held metrics port would fail the retry too.
+                if let Some(metrics) = metrics {
+                    metrics.shutdown().await;
+                }
+                return Err(anyhow::anyhow!("intercept: {e}"));
+            }
             info!(
-                "Rift intercept proxy listening (HTTPS forward-proxy) on {}",
+                "Rift intercept proxy listening (HTTPS forward-proxy) on {} with {} configured rule(s)",
                 intercept
                     .status()
-                    .expect("intercept listener bound after a successful start")
+                    .expect("intercept listener bound after a successful start"),
+                seeded_rules
             );
         }
         server = server.with_intercept(intercept.clone());
@@ -707,26 +730,110 @@ fn partition_gated_datadir(
     (servable, gated)
 }
 
-/// Load imposters from a JSON config file
+/// The `--intercept-*` flags the operator supplied, by long name; empty when none were.
+fn cli_intercept_flags(cli: &Cli) -> Vec<&'static str> {
+    [
+        ("--intercept-port", cli.intercept_port.is_some()),
+        ("--intercept-ca-cert", cli.intercept_ca_cert.is_some()),
+        ("--intercept-ca-key", cli.intercept_ca_key.is_some()),
+        (
+            "--intercept-ca-cert-pem",
+            cli.intercept_ca_cert_pem.is_some(),
+        ),
+        ("--intercept-ca-key-pem", cli.intercept_ca_key_pem.is_some()),
+    ]
+    .into_iter()
+    .filter(|(_, present)| *present)
+    .map(|(name, _)| name)
+    .collect()
+}
+
+/// The error for a config `intercept` block supplied alongside `--intercept-*` flags, or `None`
+/// when at most one source configures the listener (issue #655).
+///
+/// Two spellings of one listener is a config bug, so it is refused rather than resolved by a silent
+/// precedence rule the operator would have to know — the same fail-loud choice clap already makes
+/// for the CA path/PEM pairs.
+fn intercept_source_conflict_error(path: &Path, flags: &[&str]) -> Option<String> {
+    if flags.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}: the `intercept` block and {} both configure the intercept listener. \
+         Use one or the other — the block declares the listener, its CA, and its rules together. \
+         (Each of these flags also has a RIFT_INTERCEPT_* environment variable, which is the \
+         intended vehicle for the inline CA PEMs — check the environment, not just the command line.)",
+        path.display(),
+        flags.join(", ")
+    ))
+}
+
+/// The error for config-file intercept rules carrying a gated script surface, or `None` when every
+/// rule is admissible (issue #655). One message listing every offender, matching
+/// [`configfile_injection_error`]'s contract for imposters.
+fn configfile_intercept_injection_error(
+    path: &Path,
+    rules: &[crate::intercept_rules::InterceptRule],
+    allow_injection: bool,
+) -> Option<String> {
+    if allow_injection {
+        return None;
+    }
+    let offenders: Vec<String> = rules
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| crate::injection_gate::intercept_rule_uses_script_surface(rule))
+        .map(|(index, rule)| match &rule.host {
+            Some(host) => format!("#{index} ({host})"),
+            None => format!("#{index} (any host)"),
+        })
+        .collect();
+    if offenders.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}: intercept rule(s) {} use an inject predicate, which requires --allowInjection. \
+         Remove the injection or restart with --allowInjection.",
+        path.display(),
+        offenders.join(", ")
+    ))
+}
+
+/// Load imposters from a JSON config file, returning the file's optional `intercept` block for the
+/// caller to start the listener from (issue #655) — the block is parsed and validated here so the
+/// whole document is refused as one, before any imposter exists.
 async fn load_imposters_from_file(
     manager: &Arc<ImposterManager>,
     path: &PathBuf,
     no_parse: bool,
     allow_injection: bool,
-) -> anyhow::Result<()> {
+    intercept_flags: &[&str],
+) -> anyhow::Result<Option<InterceptStartOptions>> {
     info!("Loading imposters from configfile: {:?}", path);
 
-    let configs = config_loader::load_configs(&ConfigSource::File {
+    let loaded = config_loader::load_configs_full(&ConfigSource::File {
         path: path.clone(),
         no_parse,
     })?;
 
-    // Refuse before creating anything: a gated configfile must not half-load (issue #612).
-    if let Some(message) = configfile_injection_error(path, &configs, allow_injection) {
+    // Refuse before creating anything: a gated configfile must not half-load (issue #612). The
+    // intercept block is validated in the same breath, so a file that cannot bring up its listener
+    // never half-applies its imposters either.
+    if let Some(message) = configfile_injection_error(path, &loaded.imposters, allow_injection) {
         anyhow::bail!(message);
     }
+    if let Some(block) = &loaded.intercept {
+        if let Some(message) = intercept_source_conflict_error(path, intercept_flags) {
+            anyhow::bail!(message);
+        }
+        if let Some(message) =
+            configfile_intercept_injection_error(path, &block.rules, allow_injection)
+        {
+            anyhow::bail!(message);
+        }
+    }
 
-    for config in configs {
+    for config in loaded.imposters {
         info!(
             "Creating imposter on port {:?} from configfile",
             config.port
@@ -737,7 +844,7 @@ async fn load_imposters_from_file(
         }
     }
 
-    Ok(())
+    Ok(loaded.intercept)
 }
 
 /// Load imposters from a data directory
@@ -1300,7 +1407,7 @@ mod tests {
         );
 
         let manager = Arc::new(ImposterManager::new());
-        let err = load_imposters_from_file(&manager, &path, false, false)
+        let err = load_imposters_from_file(&manager, &path, false, false, &[])
             .await
             .expect_err("a gated configfile must abort startup");
         assert!(err.to_string().contains("--allowInjection"), "got: {err}");
@@ -1326,7 +1433,7 @@ mod tests {
         assert!(example.exists(), "fixture missing: {}", example.display());
 
         let manager = Arc::new(ImposterManager::new());
-        let err = load_imposters_from_file(&manager, &example, false, false)
+        let err = load_imposters_from_file(&manager, &example, false, false, &[])
             .await
             .expect_err("examples/latency-testing.json uses a JS-function wait; it must be gated");
         assert!(err.to_string().contains("--allowInjection"), "got: {err}");
@@ -1386,5 +1493,151 @@ mod tests {
         );
 
         manager.delete_all().await;
+    }
+
+    // ===== `intercept` config block: source conflict + injection gate (issue #655) =====
+
+    fn rule_from(value: serde_json::Value) -> crate::intercept_rules::InterceptRule {
+        serde_json::from_value(value).expect("valid intercept rule")
+    }
+
+    fn clean_rule() -> crate::intercept_rules::InterceptRule {
+        rule_from(serde_json::json!({
+            "host": "cdn.example.com",
+            "predicates": [{"equals": {"path": "/config.json"}}],
+            "action": {"forward": {"port": 4545}}
+        }))
+    }
+
+    fn inject_rule() -> crate::intercept_rules::InterceptRule {
+        rule_from(serde_json::json!({
+            "host": "evil.example.com",
+            "predicates": [{"inject": "function (req) { return true; }"}],
+            "action": {"serve": {"statusCode": 200}}
+        }))
+    }
+
+    /// AC3: the block and `--intercept-port` are two spellings of one listener. Supplying both is a
+    /// startup error naming the offending flag, not a silent precedence guess.
+    #[test]
+    fn intercept_conflict_names_every_supplied_flag() {
+        for (args, expected) in [
+            (vec!["rift", "--intercept-port", "8080"], "--intercept-port"),
+            (
+                vec![
+                    "rift",
+                    "--intercept-ca-cert",
+                    "c.pem",
+                    "--intercept-ca-key",
+                    "k.pem",
+                ],
+                "--intercept-ca-cert",
+            ),
+            (
+                vec![
+                    "rift",
+                    "--intercept-ca-cert-pem",
+                    "PEM",
+                    "--intercept-ca-key-pem",
+                    "PEM",
+                ],
+                "--intercept-ca-cert-pem",
+            ),
+        ] {
+            let cli = Cli::parse_from(args);
+            let flags = cli_intercept_flags(&cli);
+            let err = intercept_source_conflict_error(Path::new("/cfg/x.json"), &flags)
+                .expect("block + flag must conflict");
+            assert!(err.contains(expected), "names the flag: {err}");
+            assert!(err.contains("/cfg/x.json"), "names the file: {err}");
+        }
+    }
+
+    /// AC3 (negative): neither source alone conflicts — the block is additive, the flags keep working.
+    #[test]
+    fn intercept_conflict_absent_when_only_one_source() {
+        let cli = Cli::parse_from(["rift"]);
+        assert!(
+            cli_intercept_flags(&cli).is_empty(),
+            "no flags supplied means no conflict with a block"
+        );
+        assert!(
+            intercept_source_conflict_error(Path::new("/cfg/x.json"), &[]).is_none(),
+            "a block with no flags is the whole point of the feature"
+        );
+    }
+
+    /// AC4: an `inject` predicate arriving by config file is executable code crossing the same
+    /// trust boundary the imposter gate already guards — it must be refused without the flag.
+    #[test]
+    fn configfile_intercept_injection_error_names_file_rule_and_flag() {
+        let err = configfile_intercept_injection_error(
+            Path::new("/cfg/optimizely.json"),
+            &[clean_rule(), inject_rule()],
+            false,
+        )
+        .expect("an inject predicate without --allowInjection must abort startup");
+        assert!(
+            err.contains("/cfg/optimizely.json"),
+            "names the file: {err}"
+        );
+        assert!(err.contains("evil.example.com"), "names the rule: {err}");
+        assert!(err.contains("--allowInjection"), "names the flag: {err}");
+        assert!(
+            !err.contains("cdn.example.com"),
+            "must not name the clean rule: {err}"
+        );
+    }
+
+    /// The gate must see through `not`/`or`/`and` nesting, exactly as it does for imposter stubs —
+    /// otherwise wrapping the inject in a `not` walks straight past it.
+    #[test]
+    fn configfile_intercept_injection_error_sees_nested_inject() {
+        let nested = rule_from(serde_json::json!({
+            "host": "nested.example.com",
+            "predicates": [{"or": [
+                {"equals": {"path": "/a"}},
+                {"not": {"inject": "function (req) { return true; }"}}
+            ]}],
+            "action": {"serve": {"statusCode": 200}}
+        }));
+        assert!(
+            configfile_intercept_injection_error(Path::new("/cfg/x.json"), &[nested], false)
+                .is_some(),
+            "an inject nested under or/not must still be gated"
+        );
+    }
+
+    /// AC4 (negatives): the flag admits it, and a script-free rule set never trips the gate.
+    #[test]
+    fn configfile_intercept_injection_error_none_when_allowed_or_clean() {
+        assert!(
+            configfile_intercept_injection_error(Path::new("/cfg/x.json"), &[inject_rule()], true)
+                .is_none(),
+            "--allowInjection must permit an inject predicate"
+        );
+        assert!(
+            configfile_intercept_injection_error(Path::new("/cfg/x.json"), &[clean_rule()], false)
+                .is_none(),
+            "a rule with no script surface must load without --allowInjection"
+        );
+        assert!(
+            configfile_intercept_injection_error(Path::new("/cfg/x.json"), &[], false).is_none(),
+            "an empty rule set is admissible"
+        );
+    }
+
+    /// A `serve` action is a fixed stub and `forward` carries no script, so neither is a gated
+    /// surface — pinning that the gate does not over-reach into refusing ordinary rules.
+    #[test]
+    fn serve_and_forward_actions_are_not_script_surfaces() {
+        let serve = rule_from(serde_json::json!({
+            "action": {"serve": {"statusCode": 200, "body": "function (req) { return true; }"}}
+        }));
+        assert!(
+            configfile_intercept_injection_error(Path::new("/cfg/x.json"), &[serve], false)
+                .is_none(),
+            "a serve body that merely looks like JS is inert data, not an injection"
+        );
     }
 }

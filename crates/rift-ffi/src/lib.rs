@@ -1451,6 +1451,9 @@ pub unsafe extern "C" fn rift_start_intercept(
                     InterceptStartError::Ca(err) => {
                         format!("rift_start_intercept: CA setup failed: {err:#}")
                     }
+                    InterceptStartError::Rules(err) => {
+                        format!("rift_start_intercept: rule seeding failed: {err}")
+                    }
                     InterceptStartError::Bind(err) => {
                         format!("rift_start_intercept: bind failed: {err}")
                     }
@@ -1769,11 +1772,56 @@ fn gated_config_file_error(configs: &[ImposterConfig], allow_injection: bool) ->
     ))
 }
 
+/// The `configFile` gate for the file's `intercept` block (issue #655). Same boundary, same
+/// question, same remedy as [`gated_config_file_error`] — a rule's only executable surface is an
+/// `inject` predicate.
+fn gated_intercept_rules_error(
+    rules: &[rift_http_proxy::intercept_rules::InterceptRule],
+    allow_injection: bool,
+) -> Option<String> {
+    if allow_injection {
+        return None;
+    }
+    let offenders: Vec<String> = rules
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| injection_gate::intercept_rule_uses_script_surface(rule))
+        .map(|(index, _)| format!("#{index}"))
+        .collect();
+    if offenders.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "configFile load: intercept rule(s) {} use an inject predicate, which requires \
+         allowInjection. Set \"allowInjection\": true to allow this, or remove the injection.",
+        offenders.join(", "),
+    ))
+}
+
 /// Bind the admin (and optional metrics) plane per `opts`, returning the plane plus the JSON
 /// response body. Errors are `String`s (mapped to `last_error` by the caller).
+///
+/// A `configFile` `intercept` block binds a listener partway through (issue #655), so a later
+/// failure must not leave it running: the handle survives a failed `rift_serve_admin`, and an
+/// orphaned listener would make every retry fail forever with `AlreadyRunning` — blaming a
+/// listener the caller never successfully started. Only a listener *this call* started is stopped;
+/// one from an earlier `rift_start_intercept` is not ours to touch.
 async fn build_admin_plane(
     handle: &RiftHandle,
     opts: &ServeOptions,
+) -> Result<(AdminPlane, String), String> {
+    let mut started_intercept = false;
+    let result = build_admin_plane_inner(handle, opts, &mut started_intercept).await;
+    if result.is_err() && started_intercept {
+        handle.intercept.stop().await;
+    }
+    result
+}
+
+async fn build_admin_plane_inner(
+    handle: &RiftHandle,
+    opts: &ServeOptions,
+    started_intercept: &mut bool,
 ) -> Result<(AdminPlane, String), String> {
     let host = opts.host.as_deref().unwrap_or("127.0.0.1");
     let port = opts.port.unwrap_or(0);
@@ -1804,14 +1852,29 @@ async fn build_admin_plane(
                 path: PathBuf::from(path),
                 no_parse: false,
             };
-            let configs = config_loader::load_configs(&source)
+            let loaded = config_loader::load_configs_full(&source)
                 .map_err(|e| format!("configFile load: {e}"))?;
-            if let Some(err) = gated_config_file_error(&configs, allow_injection) {
+            if let Some(err) = gated_config_file_error(&loaded.imposters, allow_injection) {
                 return Err(err);
+            }
+            // The file's `intercept` block (issue #655) gives an embedded host the same
+            // declarative listener the CLI gets — started before the imposters are applied so a
+            // block that cannot bind fails the call outright rather than half-applying the file.
+            // Gated identically to the imposters around it: the file crossed the same boundary.
+            if let Some(block) = loaded.intercept {
+                if let Some(err) = gated_intercept_rules_error(&block.rules, allow_injection) {
+                    return Err(err);
+                }
+                handle
+                    .intercept
+                    .start(block)
+                    .await
+                    .map_err(|e| format!("configFile intercept: {e}"))?;
+                *started_intercept = true;
             }
             let report = handle
                 .manager
-                .apply_config(configs)
+                .apply_config(loaded.imposters)
                 .await
                 .map_err(|e| format!("configFile apply: {e}"))?;
             warn_failed(&report, "configFile");

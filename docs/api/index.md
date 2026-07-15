@@ -368,12 +368,12 @@ Get recorded requests (if `recordRequests: true`). Also available under the alia
 
 Multiple `match` clauses are AND-ed together. `since` is applied first, then the `match` clauses.
 
-**Response:** a JSON array of recorded requests. Each element carries `request_from` (the client
+**Response:** a JSON array of recorded requests. Each element carries `requestFrom` (the client
 `ip:port`); `body` is present only when the request had one.
 ```json
 [
   {
-    "request_from": "127.0.0.1:52344",
+    "requestFrom": "127.0.0.1:52344",
     "method": "GET",
     "path": "/api/users",
     "query": {},

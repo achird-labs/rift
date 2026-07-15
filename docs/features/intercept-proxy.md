@@ -88,6 +88,62 @@ a CA over the admin API instead, so the key is never printed to logs.)
 — it is no longer the only way to enable intercept. A server started **without** the flag still
 serves the lifecycle endpoints below, so a client can turn intercept on later.
 
+### Declare it in the config file
+
+The flags above start a listener with **no rules**, so a container has to `curl` the admin API after
+boot to install them — a bootstrap sidecar that exits `0` (and so crash-loops under Kubernetes'
+`restartPolicy: Always`), and a window where the SUT's first calls race the rule that isn't there
+yet. Instead, put an `intercept` block next to your imposters in `--configfile`: the listener binds
+with its rules **already installed**, so the server is correct the moment it is ready.
+
+```json
+{
+  "imposters": [
+    { "port": 4545, "protocol": "http", "name": "Optimizely datafile",
+      "stubs": [{ "responses": [{ "is": { "statusCode": 200, "body": "{\"featureX\":\"ON\"}" } }] }] }
+  ],
+  "intercept": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "caCertPath": "/certs/rift-ca-cert.pem",
+    "caKeyPath": "/certs/rift-ca-key.pem",
+    "rules": [
+      { "host": "cdn.example.com", "action": { "forward": { "port": 4545 } } }
+    ]
+  }
+}
+```
+
+```bash
+rift --configfile /config/optimizely.json   # listener up + rules installed; no admin call, no sidecar
+```
+
+The block is the same shape as the `POST /intercept` body — `host`, `port`, the CA fields
+(`caCertPath`/`caKeyPath` or inline `caCertPem`/`caKeyPem`), plus `rules[]` using the
+[rule schema](#configuring-rules-admin-api) verbatim. Notes:
+
+- **Optional and additive.** A config file without an `intercept` block behaves exactly as before.
+- **It lives in the wrapper form.** Only the `{ "imposters": [...] }` object can carry an
+  `intercept` block. Putting one in a single-imposter document (`{"port": 4545, ...}`) is a startup
+  error naming the fix, never a silently ignored block — add `"imposters": [ ... ]` around the
+  imposter, using `[]` if the file declares none. A bare top-level array, and a YAML config (which
+  is the array form), have nowhere to put a block at all.
+- **One source of truth.** Supplying the block *and* any `--intercept-*` flag is a startup error
+  rather than a silent precedence guess. Use one or the other.
+- **Runtime rules still layer on top.** `POST /intercept/rules` adds to the config-seeded set and
+  `DELETE /intercept/rules` clears it; `GET` lists both.
+- **`rules` works over the admin API and FFI too.** `POST /intercept` and `rift_start_intercept`
+  accept the same optional `rules` array, so any surface can start-and-seed in one call.
+- **Boot-only.** `POST /admin/reload` re-applies imposters only. When the reloaded file carries an
+  `intercept` block, the response body carries a `warnings` entry saying it was not re-applied (and
+  the server logs a warning), so an edit to the block never *looks* applied. Change rules at runtime
+  over the admin API, or restart to re-read the block.
+- **Injection is gated.** A rule whose predicates use `inject` needs `--allowInjection`, exactly as a
+  config-file imposter's scripting surface does — the file crossed the same trust boundary.
+
+An `intercept` block also gets EJS preprocessing like the rest of the file, so
+`"host": "<%= process.env.CDN_HOST %>"` works.
+
 ### Runtime lifecycle (admin API)
 
 Start, inspect, and stop the intercept listener at runtime over the admin API — no restart, and no
@@ -171,6 +227,14 @@ its **standard base64 encoding** (with padding) — the same convention as
 the predicate against the base64 string, e.g.
 `{ "equals": { "body": "H4sIAAAAAAAA/w==" } }`. A valid-UTF-8 (text or JSON) body is matched
 as-is, unchanged. Forwarding always relays the raw bytes regardless of classification.
+
+> **`inject` predicates require `--allowInjection`.** A rule's predicates are evaluated on every
+> intercepted request, so an `inject` predicate is executable JavaScript — the same surface
+> `--allowInjection` gates on imposter stubs. Without the flag, a rule carrying one (however deeply
+> nested under `not`/`or`/`and`) is refused with `400` and the whole request is rejected: a batch
+> containing one such rule stores none of it. This holds on every door that admits a rule —
+> `POST /intercept/rules`, the `rules` array on `POST /intercept`, and the `--configfile`
+> `intercept` block. `serve` and `forward` actions carry no script and are never gated.
 
 ### Serve an inline stub
 

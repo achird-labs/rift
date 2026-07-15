@@ -3,66 +3,111 @@
 //! These tests start a throwaway Redis container via testcontainers, so **Docker must be
 //! running**. When Docker is not available they are **skipped** locally (with a note on stderr)
 //! rather than hanging and failing — so `cargo test -p rift-http-proxy` is green on a dev machine
-//! without Docker. In CI (`CI`/`GITHUB_ACTIONS` set) an unavailable Docker is a hard failure, so
-//! coverage is never silently lost. To run them locally, start Docker (e.g. `colima start` or
-//! Docker Desktop) and re-run.
+//! without Docker. In CI (`CI`/`GITHUB_ACTIONS` set) a *definitively* absent Docker is a hard
+//! failure, so coverage is never silently lost; a probe that merely times out under load proceeds
+//! and lets testcontainers decide (issue #649). To run them locally, start Docker (e.g.
+//! `colima start` or Docker Desktop) and re-run.
 
 #[cfg(feature = "redis-backend")]
 mod tests {
     use rift_http_proxy::backends::RedisFlowStore;
     use rift_http_proxy::flow_state::FlowStore;
     use serde_json::json;
+    use std::time::{Duration, Instant};
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::redis::Redis;
 
-    /// Whether a Docker daemon is reachable, probed once. testcontainers needs Docker to start the
-    /// Redis container; probing up front lets us skip fast instead of waiting out its ~120s
-    /// container-start retry. The probe itself is bounded to 5s and killed if it exceeds that,
-    /// because `docker info` can itself hang when the CLI is installed but the daemon is down.
-    fn docker_available() -> bool {
-        use std::process::{Command, Stdio};
-        use std::time::{Duration, Instant};
+    /// Outcome of probing for a Docker daemon. `Absent` is *definitive* (CLI missing, or
+    /// `docker info` completed with non-success exit); `Timeout` is not — a loaded runner can
+    /// legitimately push `docker info` past the deadline while Docker is present and healthy
+    /// (issue #649), so the two must never be conflated.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum DockerProbe {
+        Available,
+        Absent,
+        Timeout,
+    }
 
-        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *AVAILABLE.get_or_init(|| {
-            let Ok(mut child) = Command::new("docker")
-                .arg("info")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            else {
-                return false; // docker CLI not installed
-            };
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => return status.success(),
-                    Ok(None) if Instant::now() >= deadline => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return false; // daemon unreachable / probe hung
-                    }
-                    Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-                    Err(_) => return false,
-                }
+    /// What `setup()` does with a probe outcome.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Disposition {
+        Proceed,
+        Skip,
+        FailCi,
+    }
+
+    impl DockerProbe {
+        /// Only a definitive `Absent` may hard-fail CI. A `Timeout` in CI proceeds and lets
+        /// testcontainers be the authority: if Docker is genuinely broken its container start
+        /// still fails the test, so coverage is never silently lost — but a probe blip no
+        /// longer turns unrelated PRs red. Locally, anything short of `Available` skips fast
+        /// instead of waiting out testcontainers' ~120s container-start retry.
+        pub(crate) fn disposition(self, in_ci: bool) -> Disposition {
+            match (self, in_ci) {
+                (DockerProbe::Available, _) | (DockerProbe::Timeout, true) => Disposition::Proceed,
+                (DockerProbe::Absent, true) => Disposition::FailCi,
+                (_, false) => Disposition::Skip,
             }
-        })
+        }
+    }
+
+    /// Run `cmd args...` with output discarded and classify the outcome. The child is killed at
+    /// the deadline because `docker info` can hang indefinitely when the CLI is installed but
+    /// the daemon is down.
+    pub(crate) fn probe_command(cmd: &str, args: &[&str], timeout: Duration) -> DockerProbe {
+        use std::process::{Command, Stdio};
+
+        let Ok(mut child) = Command::new(cmd)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return DockerProbe::Absent; // CLI not installed
+        };
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => return DockerProbe::Available,
+                Ok(Some(_)) => return DockerProbe::Absent,
+                Ok(None) if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return DockerProbe::Timeout;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                // try_wait on a child we own essentially never errors; if it does, fail closed
+                // (Absent hard-fails CI) rather than risk silently losing coverage.
+                Err(_) => return DockerProbe::Absent,
+            }
+        }
+    }
+
+    /// Probe `docker info` once per test binary. testcontainers needs Docker to start the Redis
+    /// container; probing up front lets local runs skip fast instead of waiting out its ~120s
+    /// container-start retry.
+    fn docker_probe() -> DockerProbe {
+        static PROBE: std::sync::OnceLock<DockerProbe> = std::sync::OnceLock::new();
+        *PROBE.get_or_init(|| probe_command("docker", &["info"], Duration::from_secs(5)))
     }
 
     /// Start a Redis container and build a store against it. Returns `None` when Docker is
-    /// unavailable so the caller can skip — except under `CI`, where Docker is required and its
-    /// absence is a hard failure (so CI never silently loses Redis coverage).
+    /// unavailable so the caller can skip — except under `CI`, where a *definitively* absent
+    /// Docker is a hard failure (so CI never silently loses Redis coverage). A probe timeout
+    /// in CI is not treated as absence; see [`DockerProbe::disposition`].
     async fn setup(ttl: i64) -> Option<(testcontainers::ContainerAsync<Redis>, RedisFlowStore)> {
-        if !docker_available() {
-            let in_ci = std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok();
-            assert!(
-                !in_ci,
+        let in_ci = std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok();
+        match docker_probe().disposition(in_ci) {
+            Disposition::Proceed => {}
+            Disposition::FailCi => panic!(
                 "Docker is required for the Redis integration tests in CI (CI/GITHUB_ACTIONS set) but is not available"
-            );
-            eprintln!(
-                "skipping Redis integration test: Docker is not available (start Docker to run these locally)"
-            );
-            return None;
+            ),
+            Disposition::Skip => {
+                eprintln!(
+                    "skipping Redis integration test: Docker is not available (start Docker to run these locally)"
+                );
+                return None;
+            }
         }
         let container = Redis::default().start().await.unwrap();
         let port = container.get_host_port_ipv4(6379).await.unwrap();
@@ -387,5 +432,79 @@ mod tests {
             !store.set_key_ttl("expttl", "k", 100).unwrap(),
             "an expired key is absent, so per-key ttl returns false"
         );
+    }
+
+    // ===== Docker probe classification (issue #649) — no Docker needed =====
+    //
+    // The probe must distinguish a *definitive* negative (CLI missing, or a completed
+    // `docker info` with non-success exit) from a probe that merely timed out under load.
+    // Only the definitive negative may hard-fail CI; a timeout in CI proceeds and lets
+    // testcontainers be the authority (issue #649: a 5s `docker info` blip turned
+    // unrelated PRs red).
+
+    mod probe_gate {
+        use super::{Disposition, DockerProbe, probe_command};
+        use std::time::{Duration, Instant};
+
+        #[test]
+        fn probe_missing_cli_is_absent() {
+            assert_eq!(
+                probe_command("rift-no-such-cli-649", &[], Duration::from_secs(5)),
+                DockerProbe::Absent
+            );
+        }
+
+        #[test]
+        fn probe_nonzero_exit_is_absent() {
+            assert_eq!(
+                probe_command("false", &[], Duration::from_secs(5)),
+                DockerProbe::Absent
+            );
+        }
+
+        #[test]
+        fn probe_success_is_available() {
+            assert_eq!(
+                probe_command("true", &[], Duration::from_secs(5)),
+                DockerProbe::Available
+            );
+        }
+
+        #[test]
+        fn probe_deadline_exceeded_is_timeout() {
+            let start = Instant::now();
+            assert_eq!(
+                probe_command("sleep", &["30"], Duration::from_millis(200)),
+                DockerProbe::Timeout
+            );
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "a timed-out probe child must be killed, not waited out"
+            );
+        }
+
+        #[test]
+        fn disposition_available_proceeds() {
+            assert_eq!(
+                DockerProbe::Available.disposition(true),
+                Disposition::Proceed
+            );
+            assert_eq!(
+                DockerProbe::Available.disposition(false),
+                Disposition::Proceed
+            );
+        }
+
+        #[test]
+        fn disposition_absent_fails_ci_skips_locally() {
+            assert_eq!(DockerProbe::Absent.disposition(true), Disposition::FailCi);
+            assert_eq!(DockerProbe::Absent.disposition(false), Disposition::Skip);
+        }
+
+        #[test]
+        fn disposition_timeout_proceeds_in_ci_skips_locally() {
+            assert_eq!(DockerProbe::Timeout.disposition(true), Disposition::Proceed);
+            assert_eq!(DockerProbe::Timeout.disposition(false), Disposition::Skip);
+        }
     }
 }

@@ -31,18 +31,19 @@ pub async fn route(
     query: Option<&str>,
     req: Request<Incoming>,
     control: &InterceptControl,
+    allow_injection: bool,
 ) -> Option<Response<Full<Bytes>>> {
     let rest = path.strip_prefix("/intercept")?;
     let resp = match (method, rest) {
         // Runtime lifecycle (issue #493) — operate on the shared slot, listener or not.
-        (&Method::POST, "") => handle_start(req, control).await,
+        (&Method::POST, "") => handle_start(req, control, allow_injection).await,
         (&Method::GET, "") => handle_status(control),
         (&Method::DELETE, "") => handle_stop(control).await,
         // Rule CRUD + CA/truststore — need a running listener's state. When none is running these
         // are a known route with an actionable body ("not running"), not the generic 404 an unknown
         // sub-path gets below — mirroring `GET /intercept`.
         (&Method::POST, "/rules") => match control.state() {
-            Some(state) => handle_add_rules(req, &state).await,
+            Some(state) => handle_add_rules(req, &state, allow_injection).await,
             None => not_running(),
         },
         (&Method::GET, "/rules") => match control.state() {
@@ -80,17 +81,25 @@ fn not_running() -> Response<Full<Bytes>> {
 /// `POST /intercept` — start the listener. Body is optional: absent, empty, or `{}` all mean
 /// defaults (`127.0.0.1:0`, fresh in-memory CA). `201` with the [`InterceptStatus`] body on
 /// success, `409` when already running, `400` for a bad body / options / CA / bind.
-async fn handle_start(req: Request<Incoming>, control: &InterceptControl) -> Response<Full<Bytes>> {
+async fn handle_start(
+    req: Request<Incoming>,
+    control: &InterceptControl,
+    allow_injection: bool,
+) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
         Err(e) => return error_response(e.status_code(), &e.to_string()),
     };
-    start_from_bytes(&body, control).await
+    start_from_bytes(&body, control, allow_injection).await
 }
 
 /// Parse start options from a (possibly empty) JSON body and drive `control.start`. Split out from
 /// `handle_start` so the `201`/`409`/`400` mapping is unit-testable without a `Request<Incoming>`.
-async fn start_from_bytes(body: &[u8], control: &InterceptControl) -> Response<Full<Bytes>> {
+async fn start_from_bytes(
+    body: &[u8],
+    control: &InterceptControl,
+    allow_injection: bool,
+) -> Response<Full<Bytes>> {
     let opts: InterceptStartOptions = if body.is_empty() {
         InterceptStartOptions::default()
     } else {
@@ -104,11 +113,20 @@ async fn start_from_bytes(body: &[u8], control: &InterceptControl) -> Response<F
             }
         }
     };
+    // Rules seeded at start (issue #655) come through the same door as `POST /intercept/rules` and
+    // are executed the same way, so they ask the same question (issue #657). Before `start`, so a
+    // refused document binds no listener.
+    if rules_are_gated(&opts.rules, allow_injection) {
+        return crate::admin_api::handlers::imposters::injection_disallowed_response();
+    }
     match control.start(opts).await {
         Ok(started) => json_response(StatusCode::CREATED, &InterceptStatus::from_started(started)),
         Err(e) => {
             let status = match e {
                 InterceptStartError::AlreadyRunning => StatusCode::CONFLICT,
+                // Same code the runtime rule route returns for a full store, so one condition has
+                // one status whichever door reports it (issue #655).
+                InterceptStartError::Rules(_) => StatusCode::TOO_MANY_REQUESTS,
                 _ => StatusCode::BAD_REQUEST,
             };
             error_response(status, &e.to_string())
@@ -151,18 +169,40 @@ enum RuleOrRules {
     Many(Vec<InterceptRule>),
 }
 
+/// True when `rules` carry a scripting surface `--allowInjection` has not enabled (issue #657) —
+/// the same classifier every other door asks, so one document gets one answer wherever it arrives.
+///
+/// A rule's predicates are evaluated per intercepted request (`InterceptRules::match_request` →
+/// `stub_matches`, which has no gate of its own), so an `inject` predicate admitted here is
+/// executable code. Callers must ask *before* storing or starting: the refusal is atomic, matching
+/// `POST /imposters` refusing the whole document rather than the offending part.
+fn rules_are_gated(rules: &[InterceptRule], allow_injection: bool) -> bool {
+    !allow_injection
+        && rules
+            .iter()
+            .any(crate::injection_gate::intercept_rule_uses_script_surface)
+}
+
 /// `POST /intercept/rules` — add one rule (a bare `InterceptRule` object) or many (a JSON array).
-async fn handle_add_rules(req: Request<Incoming>, state: &InterceptState) -> Response<Full<Bytes>> {
+async fn handle_add_rules(
+    req: Request<Incoming>,
+    state: &InterceptState,
+    allow_injection: bool,
+) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
         Err(e) => return error_response(e.status_code(), &e.to_string()),
     };
-    add_rules_from_bytes(&body, state)
+    add_rules_from_bytes(&body, state, allow_injection)
 }
 
 /// Parse a rule (or array of rules) from a JSON body and add them to the store. Split out from
 /// `handle_add_rules` so the parse/store path is unit-testable without a `Request<Incoming>`.
-fn add_rules_from_bytes(body: &[u8], state: &InterceptState) -> Response<Full<Bytes>> {
+fn add_rules_from_bytes(
+    body: &[u8],
+    state: &InterceptState,
+    allow_injection: bool,
+) -> Response<Full<Bytes>> {
     let parsed: RuleOrRules = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => {
@@ -172,6 +212,15 @@ fn add_rules_from_bytes(body: &[u8], state: &InterceptState) -> Response<Full<By
             );
         }
     };
+    // Gate before the store, on the whole document: one gated rule refuses the batch, so a
+    // refused request leaves the store exactly as it was.
+    let gated = match &parsed {
+        RuleOrRules::One(rule) => rules_are_gated(std::slice::from_ref(rule), allow_injection),
+        RuleOrRules::Many(rules) => rules_are_gated(rules, allow_injection),
+    };
+    if gated {
+        return crate::admin_api::handlers::imposters::injection_disallowed_response();
+    }
     let added = match parsed {
         RuleOrRules::One(rule) => {
             if let Err(e) = state.rules.add(rule.clone()) {
@@ -378,7 +427,7 @@ mod tests {
         let state = test_state();
         let json =
             br#"{"host":"cdn.example.com","action":{"serve":{"statusCode":418,"body":"brew"}}}"#;
-        let resp = add_rules_from_bytes(json, &state);
+        let resp = add_rules_from_bytes(json, &state, true);
         assert_eq!(resp.status(), StatusCode::CREATED);
         assert_eq!(state.rules.len(), 1);
         assert_eq!(
@@ -386,7 +435,7 @@ mod tests {
             Some("cdn.example.com")
         );
 
-        let bad = add_rules_from_bytes(b"{not json", &state);
+        let bad = add_rules_from_bytes(b"{not json", &state, true);
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
         assert_eq!(state.rules.len(), 1, "a rejected body must not add a rule");
     }
@@ -412,7 +461,7 @@ mod tests {
             .expect("fill to the cap");
 
         let one = br#"{"action":{"serve":{"statusCode":200}}}"#;
-        let resp = add_rules_from_bytes(one, &state);
+        let resp = add_rules_from_bytes(one, &state, true);
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
             state.rules.len(),
@@ -421,7 +470,7 @@ mod tests {
         );
 
         let many = br#"[{"action":{"serve":{"statusCode":200}}}]"#;
-        let resp = add_rules_from_bytes(many, &state);
+        let resp = add_rules_from_bytes(many, &state, true);
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
             state.rules.len(),
@@ -447,7 +496,7 @@ mod tests {
         // Add the rule through the ADMIN handler path (not InterceptRules::add directly).
         let json = br#"{"host":"cdn.example.com","action":{"serve":{"statusCode":418,"body":"admin-brewed"}}}"#;
         assert_eq!(
-            add_rules_from_bytes(json, &state).status(),
+            add_rules_from_bytes(json, &state, true).status(),
             StatusCode::CREATED
         );
 
@@ -502,7 +551,7 @@ mod tests {
         assert_eq!(handle_status(&control).status(), StatusCode::NOT_FOUND);
 
         // POST empty body → 201 with an OS-assigned port.
-        let started = start_from_bytes(b"", &control).await;
+        let started = start_from_bytes(b"", &control, true).await;
         assert_eq!(started.status(), StatusCode::CREATED);
         let body: StatusBody = serde_json::from_str(&read_body(started).await).unwrap();
         assert!(body.intercept_port > 0);
@@ -516,7 +565,7 @@ mod tests {
 
         // POST while running → 409.
         assert_eq!(
-            start_from_bytes(b"{}", &control).await.status(),
+            start_from_bytes(b"{}", &control, true).await.status(),
             StatusCode::CONFLICT
         );
 
@@ -530,13 +579,15 @@ mod tests {
     async fn start_rejects_unknown_field_and_bad_json() {
         let control = InterceptControl::default();
         assert_eq!(
-            start_from_bytes(br#"{"caCertpath":"x"}"#, &control)
+            start_from_bytes(br#"{"caCertpath":"x"}"#, &control, true)
                 .await
                 .status(),
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            start_from_bytes(b"{not json", &control).await.status(),
+            start_from_bytes(b"{not json", &control, true)
+                .await
+                .status(),
             StatusCode::BAD_REQUEST
         );
         assert!(
@@ -549,7 +600,7 @@ mod tests {
     async fn start_serialized_body_is_deserializable_status() {
         // AC8/parity: the 201 body round-trips through the same shape the FFI returns.
         let control = InterceptControl::default();
-        let resp = start_from_bytes(b"", &control).await;
+        let resp = start_from_bytes(b"", &control, true).await;
         let json = read_body(resp).await;
         assert!(json.contains("interceptPort"));
         assert!(json.contains("interceptUrl"));
@@ -561,7 +612,7 @@ mod tests {
     #[tokio::test]
     async fn start_without_return_ca_key_omits_ca_fields() {
         let control = InterceptControl::default();
-        let json = read_body(start_from_bytes(b"{}", &control).await).await;
+        let json = read_body(start_from_bytes(b"{}", &control, true).await).await;
         assert!(!json.contains("caCertPem"), "no CA cert unless requested");
         assert!(!json.contains("caKeyPem"), "no CA key unless requested");
         let status_json = read_body(handle_status(&control)).await;
@@ -576,7 +627,7 @@ mod tests {
     #[tokio::test]
     async fn start_returns_ca_pair_when_requested() {
         let control = InterceptControl::default();
-        let resp = start_from_bytes(br#"{"returnCaKey":true}"#, &control).await;
+        let resp = start_from_bytes(br#"{"returnCaKey":true}"#, &control, true).await;
         assert_eq!(resp.status(), StatusCode::CREATED);
         let v: serde_json::Value = serde_json::from_str(&read_body(resp).await).unwrap();
         let cert = v["caCertPem"].as_str().expect("caCertPem present");
@@ -593,7 +644,7 @@ mod tests {
         let control = InterceptControl::default();
         let body = br#"{"returnCaKey":true,"caCertPath":"c.pem","caKeyPath":"k.pem"}"#;
         assert_eq!(
-            start_from_bytes(body, &control).await.status(),
+            start_from_bytes(body, &control, true).await.status(),
             StatusCode::BAD_REQUEST
         );
         assert!(control.status().is_none(), "no listener left behind");
@@ -607,14 +658,16 @@ mod tests {
         let key_pem = ca.ca_key_pem();
         let control = InterceptControl::default();
         let body = serde_json::json!({"caCertPem": cert_pem, "caKeyPem": key_pem}).to_string();
-        let resp = start_from_bytes(body.as_bytes(), &control).await;
+        let resp = start_from_bytes(body.as_bytes(), &control, true).await;
         assert_eq!(resp.status(), StatusCode::CREATED);
         assert_eq!(control.state().unwrap().ca.ca_cert_pem(), cert_pem);
         control.stop().await;
 
         let half = serde_json::json!({"caCertPem": cert_pem}).to_string();
         assert_eq!(
-            start_from_bytes(half.as_bytes(), &control).await.status(),
+            start_from_bytes(half.as_bytes(), &control, true)
+                .await
+                .status(),
             StatusCode::BAD_REQUEST
         );
     }
@@ -631,5 +684,144 @@ mod tests {
 
     fn body_string(resp: Response<Full<Bytes>>) -> String {
         String::from_utf8(body_bytes(resp)).unwrap()
+    }
+
+    // ===== --allowInjection gate on the rule doors (issue #657) =====
+    //
+    // An intercept rule's predicates are executed per intercepted request (`match_request` →
+    // `stub_matches`, which has no injection gate of its own), so an `inject` predicate arriving
+    // here is executable code crossing the same trust boundary `POST /imposters` already guards.
+    // Two doors admit rules: `POST /intercept/rules` (always) and `POST /intercept` via the
+    // `rules` array (issue #655). Both must ask the same question.
+
+    const INJECT_RULE: &str = r#"{"host":"evil.example.com",
+        "predicates":[{"inject":"function (request) { return true; }"}],
+        "action":{"serve":{"statusCode":200,"body":"pwned"}}}"#;
+    const CLEAN_RULE: &str = r#"{"host":"cdn.example.com",
+        "predicates":[{"equals":{"path":"/config.json"}}],
+        "action":{"serve":{"statusCode":200,"body":"ok"}}}"#;
+    /// The inject nested under `or`/`not` — wrapping it must not walk past the gate.
+    const NESTED_INJECT_RULE: &str = r#"{"host":"nested.example.com",
+        "predicates":[{"or":[{"equals":{"path":"/a"}},
+                             {"not":{"inject":"function (request) { return true; }"}}]}],
+        "action":{"serve":{"statusCode":200,"body":"pwned"}}}"#;
+
+    fn assert_injection_refused(resp: Response<Full<Bytes>>) {
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_string(resp);
+        assert!(
+            body.contains("allowInjection"),
+            "the refusal must name the flag that would allow it, like every other door: {body}"
+        );
+    }
+
+    /// The async twin of [`assert_injection_refused`]: `body_bytes` builds its own runtime, so it
+    /// cannot be called from inside a `#[tokio::test]`. Same assertions, awaited instead.
+    async fn assert_injection_refused_async(resp: Response<Full<Bytes>>) {
+        let status = resp.status();
+        let body = read_body(resp).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body.contains("allowInjection"),
+            "the refusal must name the flag that would allow it, like every other door: {body}"
+        );
+    }
+
+    #[test]
+    fn add_rules_refuses_inject_predicate_without_allow_injection() {
+        let state = test_state();
+        assert_injection_refused(add_rules_from_bytes(INJECT_RULE.as_bytes(), &state, false));
+        assert!(
+            state.rules.is_empty(),
+            "a refused rule must not be stored — the proof it was gated before the store, not after"
+        );
+    }
+
+    #[test]
+    fn add_rules_refuses_nested_inject_without_allow_injection() {
+        let state = test_state();
+        assert_injection_refused(add_rules_from_bytes(
+            NESTED_INJECT_RULE.as_bytes(),
+            &state,
+            false,
+        ));
+        assert!(state.rules.is_empty());
+    }
+
+    /// Atomicity: a batch is one document. If any rule in it is gated, none of it is stored —
+    /// matching `POST /imposters` refusing the whole document rather than the offending part.
+    #[test]
+    fn add_rules_batch_with_one_inject_stores_nothing() {
+        let state = test_state();
+        let batch = format!("[{CLEAN_RULE},{INJECT_RULE}]");
+        assert_injection_refused(add_rules_from_bytes(batch.as_bytes(), &state, false));
+        assert!(
+            state.rules.is_empty(),
+            "the clean rule from a refused batch must not be stored either"
+        );
+    }
+
+    /// The flag is the whole point: with it set the same rule is admitted.
+    #[test]
+    fn add_rules_admits_inject_with_allow_injection() {
+        let state = test_state();
+        let resp = add_rules_from_bytes(INJECT_RULE.as_bytes(), &state, true);
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(state.rules.len(), 1);
+    }
+
+    /// No over-reach: an ordinary rule is unaffected by the gate.
+    #[test]
+    fn add_rules_admits_clean_rule_without_allow_injection() {
+        let state = test_state();
+        let resp = add_rules_from_bytes(CLEAN_RULE.as_bytes(), &state, false);
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(state.rules.len(), 1);
+    }
+
+    /// The second door (issue #655): `POST /intercept` can seed `rules` at start. It crosses the
+    /// same boundary, so it asks the same question — and a refused start binds no listener.
+    #[tokio::test]
+    async fn start_refuses_inject_rule_in_the_seeded_rules_array() {
+        let control = InterceptControl::default();
+        let body = format!(r#"{{"port":0,"rules":[{INJECT_RULE}]}}"#);
+        assert_injection_refused_async(start_from_bytes(body.as_bytes(), &control, false).await)
+            .await;
+        assert!(
+            control.status().is_none(),
+            "a refused start must not leave a listener bound"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_admits_seeded_inject_rule_with_allow_injection() {
+        let control = InterceptControl::default();
+        let body = format!(r#"{{"port":0,"rules":[{INJECT_RULE}]}}"#);
+        let resp = start_from_bytes(body.as_bytes(), &control, true).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(control.state().expect("running").rules.len(), 1);
+        control.stop().await;
+    }
+
+    /// No over-reach on the start door either: a *populated* but script-free `rules` array is
+    /// admitted without the flag. Distinct from the no-rules case below — a refactor that special-
+    /// cased "empty vs non-empty" would slip past that one.
+    #[tokio::test]
+    async fn start_admits_seeded_clean_rule_without_allow_injection() {
+        let control = InterceptControl::default();
+        let body = format!(r#"{{"port":0,"rules":[{CLEAN_RULE}]}}"#);
+        let resp = start_from_bytes(body.as_bytes(), &control, false).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(control.state().expect("running").rules.len(), 1);
+        control.stop().await;
+    }
+
+    /// A start with no rules is unaffected by the gate, flag or no flag.
+    #[tokio::test]
+    async fn start_without_rules_is_ungated() {
+        let control = InterceptControl::default();
+        let resp = start_from_bytes(b"{\"port\":0}", &control, false).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        control.stop().await;
     }
 }

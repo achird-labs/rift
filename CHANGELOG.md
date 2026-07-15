@@ -11,6 +11,81 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two requests differing only in their query string no longer share one cached script decision.**
+  The decision-cache key was built from `Uri::path()`, which excludes the query — but scripts read
+  the query as `ctx.request.query`. So `?scenario=timeout` and `?scenario=none`, identical in every
+  other respect, produced the same key, and the second request was served **the first one's fault
+  decision**: silently, for up to the cache TTL. Query-driven scenarios are an ordinary way to drive
+  a fault-injection proxy, and this affected the default configuration (cache on, 300s TTL) for any
+  deployment not using flow state. This is the same defect as the non-JSON-body collision below, one
+  component over: the key must cover every request-varying input the memoised script can observe —
+  headers came under that rule earlier, the body did too, the query never had. The query now enters
+  the key on its raw spelling, so `?a=1&b=2` and `?b=2&a=1` are two entries — deliberate, since the
+  only cost is a cache miss, where keying on the parsed form could hand one request another's
+  decision. **Breaking (embedders only):** `CacheKey::new` takes a `query: Option<&str>` after
+  `path`.
+
+- **Two requests with different non-JSON bodies no longer share one cached script decision.** The
+  decision-cache key hashed only the *parsed* body, and every body that is not JSON — every
+  protobuf, gzip or image upload, every text payload, every malformed body, and the empty body —
+  parsed to `null`. So any two of them with the same method, path, keyed headers and rule produced
+  an identical key, and the second request was served the **first one's fault decision**: silently,
+  for up to the cache TTL, with nothing logged to correlate. Scripts read the body as
+  `ctx.request.raw_body`, so this was the cache discarding an input the memoised script can branch
+  on. The body now enters the key as its raw bytes whenever it is not JSON, in a separate hash
+  domain from parsed JSON — so a JSON `null`, an empty body and a binary body are three distinct
+  keys by construction. JSON bodies keep their structural key (formatting and key order still do
+  not split it), identical payloads still hit the cache, and the non-JSON path is *cheaper* than
+  before: hashing bytes beats walking a JSON tree. The script-visible contract is unchanged —
+  `ctx.request.body` is still `null` for a non-JSON body, with the bytes on `raw_body`/`mode`.
+  Affects the default configuration (cache on, 300s TTL) for any deployment not using flow state.
+  **Breaking (embedders only):** `rift_mock_core`'s `CacheKey::new` now takes a `CacheKeyBody<'_>`
+  (`Json(&Value)` / `Raw(&[u8])`) in place of `&serde_json::Value`. In-process callers building
+  cache keys directly must wrap the argument; no configuration or wire format changes.
+
+### Security
+
+- **`POST /intercept/rules` now obeys `--allowInjection`.** An intercept rule's predicates are
+  evaluated on every intercepted request, so an `inject` predicate is executable JavaScript — but
+  this door never asked the `--allowInjection` gate. The identical predicate was refused with `400`
+  by `POST /imposters` and executed by `POST /intercept/rules`, on a server started without the
+  flag and on an admin port that is unauthenticated unless `--apikey` is set. Since admin access is
+  deliberately *not* supposed to grant code execution — that is precisely what the flag gates —
+  this was a privilege escalation past rift's own stated boundary. Issue #612 swept every door that
+  admits config through one classifier; this is the door it missed. All rule doors now ask it:
+  `POST /intercept/rules`, the `rules` array on `POST /intercept`, and the `--configfile`
+  `intercept` block. The refusal is atomic and sees through `not`/`or`/`and` nesting — a batch
+  containing one gated rule stores none of it, and a refused start binds no listener.
+  **Behaviour change:** a rule with an `inject` predicate now needs `--allowInjection`, and gets the
+  same `400` and remedy message every other door gives. `serve`/`forward` actions carry no script
+  and are unaffected.
+
+### Added
+
+- **The intercept listener and its rules can be declared in `--configfile`.** Imposters were
+  declarative but intercept rules were not: they could only be installed at runtime over
+  `POST /intercept/rules`, so every containerized intercept deployment needed a second "bootstrap"
+  container to `curl` the admin API after boot. That sidecar exits `0` once it has posted the rule,
+  which Kubernetes' `restartPolicy: Always` treats as a crash — the usual workaround is keeping a
+  whole pod alive with `sleep` — and because `depends_on` ordering can't be gated on it, the system
+  under test could start *before* the rule existed and hit the unmatched-host default. A config file
+  may now carry an optional top-level `intercept` block (`{host?, port?, ca?, rules[]}`) alongside
+  its `imposters`, so one declarative file brings up the listener with its rules already installed:
+  `rift --configfile config.json`, no admin call and no sidecar. The rules are seeded *before* the
+  listener binds, so there is no window in which it accepts traffic without them. The block reuses
+  the `POST /intercept` body shape and the existing rule schema verbatim; `POST /intercept` and the
+  FFI `rift_start_intercept` gain the same optional `rules` array, so any surface can start-and-seed
+  in one call. Optional and additive: a config without the block, and any existing payload without
+  `rules`, behave exactly as before. Supplying the block together with `--intercept-*` flags is a
+  startup error rather than a silent precedence guess, and a rule using an `inject` predicate
+  requires `--allowInjection` just as a config-file imposter's scripting surface does. The block is
+  read from the `{"imposters": [...]}` wrapper form; writing one into a single-imposter document is
+  a startup error naming the fix, never a block that silently does nothing. `POST /admin/reload`
+  continues to apply imposters only, and now returns a `warnings` entry (and logs one) when the
+  reloaded file carries an `intercept` block, so an edit to it never looks applied when it wasn't.
+
 ## [0.13.6] - 2026-07-15
 
 ### Fixed
