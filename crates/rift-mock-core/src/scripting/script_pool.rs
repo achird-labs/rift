@@ -3,12 +3,36 @@ use crate::scripting::{FaultDecision, ScriptRequest};
 use anyhow::{Result, anyhow};
 use crossbeam::channel::{Receiver, Sender, bounded};
 use rhai::AST;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
+
+/// Process epoch for the worker deadline clock. `Instant` is not representable as an integer, so
+/// deadlines are stored as nanos elapsed since this fixed point (issue #551). u64 nanos covers
+/// ~584 years of uptime.
+static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+fn now_nanos() -> u64 {
+    EPOCH.elapsed().as_nanos() as u64
+}
+
+/// Consult the deadline every 64 Rhai ops, amortizing the `Instant::now()` read (~20-25ns) against
+/// Rhai's ~50-200ns/op interpreter overhead — that elides ~98% of clock reads, which is all the
+/// amortization is worth.
+///
+/// The mask sets a floor on enforcement: a script that never reaches the next multiple is never
+/// checked. That window must stay small enough not to contain an I/O loop, because the flow-store
+/// natives call the *synchronous* redis backend inline on this thread — a handful of slow `get`s is
+/// only a few hundred ops, but can hold the worker far past its deadline. A wider mask (1024) makes
+/// such a script invisible to the deadline entirely, which strands the worker and sheds load
+/// through the queue (the liberation property issue #541 pins).
+const DEADLINE_CHECK_MASK: u64 = 0x3F;
+
+/// Deadline slot value meaning "no deadline armed".
+const NO_DEADLINE: u64 = u64::MAX;
 
 /// Configuration for the script thread pool
 #[derive(Clone, Debug)]
@@ -86,24 +110,28 @@ impl ScriptWorker {
             .spawn(move || {
                 debug!("Script worker {} started", worker_id);
 
-                // Per-worker abort flag: set to true by the watchdog when the task
-                // deadline is exceeded; checked by Rhai's on_progress callback.
-                let abort_flag = Arc::new(AtomicBool::new(false));
+                // Per-worker deadline for the task in flight, as nanos since EPOCH, or NO_DEADLINE
+                // (issue #551). This replaces a watchdog thread spawned and joined per execution.
+                //
+                // Only this worker ever writes the slot, and it writes it before starting a task
+                // and clears it after — so a deadline can never leak onto a later task. That is
+                // what made the old join necessary: a watchdog whose `store(true)` landed late
+                // could poison the *next* task's abort flag. The race is designed away rather than
+                // re-mitigated, which is also why `Relaxed` is sound here — keep it single-writer.
+                let deadline = Arc::new(AtomicU64::new(NO_DEADLINE));
 
                 // Create reusable engine instances per worker with custom functions.
                 // `mut` is required to install the on_progress callback.
                 let mut rhai_engine = crate::scripting::rhai_engine::RhaiEngine::create_engine();
 
-                // Register the abort flag as a Rhai progress callback.
-                // Rhai calls this periodically during AST evaluation; returning Some(_)
-                // terminates execution with EvalAltResult::ErrorTerminated.
-                let progress_flag = Arc::clone(&abort_flag);
-                rhai_engine.on_progress(move |_ops| {
-                    if progress_flag.load(Ordering::Relaxed) {
-                        Some(rhai::Dynamic::TRUE)
-                    } else {
-                        None
-                    }
+                // Rhai calls this periodically during AST evaluation; returning Some(_) terminates
+                // execution with EvalAltResult::ErrorTerminated. The script now clocks itself
+                // against its own deadline instead of waiting to be told by another thread.
+                let progress_deadline = Arc::clone(&deadline);
+                rhai_engine.on_progress(move |ops| {
+                    (ops & DEADLINE_CHECK_MASK == 0
+                        && now_nanos() > progress_deadline.load(Ordering::Relaxed))
+                    .then_some(rhai::Dynamic::TRUE)
                 });
 
                 loop {
@@ -119,33 +147,30 @@ impl ScriptWorker {
                             let start = Instant::now();
                             let timeout = task.timeout;
 
-                            // Reset the abort flag before each task.
-                            abort_flag.store(false, Ordering::Relaxed);
-                            // Reset the last-flow-error slot too: pool workers are long-lived and
+                            // Reset the last-flow-error slot: pool workers are long-lived and
                             // reused across requests, so without this a script could observe a
                             // previous request's flow_store error via last_error() (issue #322).
                             crate::extensions::flow_state::clear_last_flow_error();
 
-                            // Start a watchdog thread: sets the abort flag after
-                            // `timeout`, causing Rhai to self-interrupt via on_progress.
-                            // Using a channel so the watchdog can be cancelled cleanly
-                            // when the script finishes before the deadline.
-                            let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
-                            let watchdog_flag = Arc::clone(&abort_flag);
-                            let watchdog_handle = thread::Builder::new()
-                                .name(format!("script-watchdog-{worker_id}"))
-                                .spawn(move || {
-                                    // Timeout fires: set the abort flag so Rhai's
-                                    // on_progress callback interrupts the script.
-                                    // Any other outcome (Ok or Disconnected) means the
-                                    // task completed or was cancelled — nothing to do.
-                                    if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-                                        cancel_rx.recv_timeout(timeout)
-                                    {
-                                        watchdog_flag.store(true, Ordering::Relaxed);
-                                    }
-                                })
-                                .expect("Failed to spawn watchdog thread");
+                            // Arm the deadline for this task. The clock starts at dequeue, matching
+                            // the watchdog's semantics. Only Rhai is interruptible: Boa 0.20 has no
+                            // per-instruction interrupt, so the JS arm is bounded by RuntimeLimits'
+                            // loop-iteration cap plus `execute()`'s outer tokio timeout instead —
+                            // arming a deadline it cannot observe would be theatre.
+                            let armed = match &task.engine {
+                                CompiledScript::Rhai { .. } => {
+                                    // Saturate the cast, not just the add: `timeout_ms` is
+                                    // unvalidated config, and a bare `as u64` would wrap an absurd
+                                    // value down to a *shorter* deadline than a normal one.
+                                    // Saturating lands on NO_DEADLINE, which is what an unbounded
+                                    // timeout should mean.
+                                    let ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
+                                    now_nanos().saturating_add(ns)
+                                }
+                                #[cfg(feature = "javascript")]
+                                CompiledScript::JavaScript { .. } => NO_DEADLINE,
+                            };
+                            deadline.store(armed, Ordering::Relaxed);
 
                             let result = match &task.engine {
                                 CompiledScript::Rhai { ast, rule_id } => Self::execute_rhai(
@@ -166,16 +191,10 @@ impl ScriptWorker {
                                 }
                             };
 
-                            // Cancel the watchdog by closing the channel, then join
-                            // it to ensure it has fully exited before resetting the
-                            // flag. Joining is cheap: the watchdog exits immediately
-                            // on Disconnected (normal path) or has already exited
-                            // after setting the flag (timeout path). Without the join,
-                            // a delayed store(true) from watchdog could corrupt the
-                            // next task's abort state.
-                            drop(cancel_tx);
-                            let _ = watchdog_handle.join();
-                            abort_flag.store(false, Ordering::Relaxed);
+                            // Disarm: nothing is running, so no deadline should be live. The task
+                            // that follows overwrites this slot before it starts regardless, so
+                            // this cannot leak into it.
+                            deadline.store(NO_DEADLINE, Ordering::Relaxed);
 
                             let duration = start.elapsed();
                             if duration >= timeout {
@@ -696,9 +715,8 @@ mod tests {
             "Infinite loop must return an error (either tokio timeout or Rhai interrupt)"
         );
 
-        // Give the worker time to finish its internal cleanup after the interrupt.
-        // The worker joins the watchdog (cheap), resets the flag, then loops back
-        // to recv_timeout — all well within 300 ms.
+        // Give the worker time to finish its internal cleanup after the interrupt: it disarms the
+        // deadline and loops back to recv_timeout — well within 300 ms.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
         // Re-use the *same* pool (same single worker) to prove the worker is free.
@@ -731,6 +749,88 @@ mod tests {
         assert!(
             result2.is_ok(),
             "Same worker must handle scripts normally after a timeout interrupt; got: {result2:?}"
+        );
+    }
+
+    /// A task must never inherit the previous task's deadline (issue #551).
+    ///
+    /// This pins the property the deleted watchdog `join` used to protect: a watchdog whose
+    /// `store(true)` landed late could poison the *next* task's abort flag, so the worker had to
+    /// join it before clearing. The deadline slot is single-writer — the owning worker arms it at
+    /// dequeue — so the hazard is designed away; this test keeps it that way.
+    ///
+    /// Task A is interrupted at its deadline, so that deadline is definitely in the past; task B,
+    /// dequeued onto the same worker immediately after, must get a fresh one.
+    ///
+    /// B must be long enough to actually be progress-checked: `on_progress` only consults the
+    /// deadline every `DEADLINE_CHECK_MASK + 1` ops, so a trivial script is never checked and
+    /// could not detect a stale deadline no matter how broken the slot was.
+    #[tokio::test]
+    async fn deadline_does_not_leak_from_one_task_to_the_next() {
+        use crate::extensions::flow_state::NoOpFlowStore;
+        use crate::scripting::ScriptRequest;
+        use std::collections::HashMap;
+
+        let pool = ScriptPool::new(ScriptPoolConfig {
+            workers: 1, // one worker, so B is guaranteed to reuse A's deadline slot
+            queue_size: 10,
+            timeout_ms: 500,
+        })
+        .unwrap();
+
+        let make_request = || ScriptRequest {
+            raw_body: None,
+            method: "GET".to_string(),
+            path: "/test".to_string(),
+            headers: HashMap::new(),
+            body: serde_json::json!(null),
+            query: HashMap::new(),
+            path_params: HashMap::new(),
+        };
+        let flow_store =
+            || -> Arc<dyn crate::extensions::flow_state::FlowStore> { Arc::new(NoOpFlowStore) };
+
+        let compile = |src: &str| {
+            Arc::new(
+                rhai::Engine::new()
+                    .compile(src)
+                    .expect("script should compile"),
+            )
+        };
+
+        // Task A: runs until its deadline interrupts it, leaving that deadline in the past.
+        let interrupted = pool
+            .execute(
+                CompiledScript::Rhai {
+                    ast: compile("let i = 0; loop { i += 1; }"),
+                    rule_id: "leak-source".to_string(),
+                },
+                make_request(),
+                flow_store(),
+            )
+            .await;
+        assert!(interrupted.is_err(), "task A must hit its deadline");
+
+        // Let the worker disarm and return to the recv loop.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Task B on the same worker: enough ops to be progress-checked several times over, but
+        // trivially inside a fresh 500 ms budget. If A's expired deadline lingered in the slot,
+        // B's first progress check would terminate it.
+        let after = pool
+            .execute(
+                CompiledScript::Rhai {
+                    ast: compile("let i = 0; while i < 50000 { i += 1; }"),
+                    rule_id: "leak-victim".to_string(),
+                },
+                make_request(),
+                flow_store(),
+            )
+            .await;
+
+        assert!(
+            after.is_ok(),
+            "task B must get a fresh deadline, not inherit task A's expired one; got: {after:?}"
         );
     }
 
