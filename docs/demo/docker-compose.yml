@@ -24,7 +24,7 @@ services:
       - ./imposters.json:/imposters.json:ro
     command: ["--configfile", "/imposters.json"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:2525/"]
+      test: ["CMD", "rift", "healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 3

@@ -1,6 +1,8 @@
 # Build stage
 # Using Rust nightly for if-let-chains feature (required by regress 0.10.5, a boa_engine dependency)
-FROM rustlang/rust:nightly AS builder
+# Digest-pinned (issue #664): `nightly` floats daily, so an unpinned tag makes this build
+# irreproducible. Dependabot reads the tag and bumps the digest.
+FROM rustlang/rust:nightly@sha256:3c0f3ff052e4e8981d3aabeb30db61658708cd4255a6df562ac8959d32b3478f AS builder
 
 WORKDIR /build
 
@@ -62,11 +64,15 @@ RUN find crates/rift-http-proxy/src -name '*.rs' -exec touch {} \; && \
 
 # Runtime stage
 # Using debian:trixie-slim (Debian 13/testing) for GLIBC_2.39+ compatibility with nightly Rust build
-FROM debian:trixie-slim
+# (the `-static` flavor — Dockerfile.static — has no such constraint).
+FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 
-# Install CA certificates and curl
+# CA certificates only. `curl` used to be installed here purely to serve the HEALTHCHECK below;
+# `rift healthcheck` replaced it (issue #664), so the image no longer carries curl's CVE surface.
+# ca-certificates stays: hyper-rustls is built with `native-tokio` and loads this trust store at
+# runtime, so dropping it silently breaks HTTPS upstream proxying.
 RUN apt-get update && \
-    apt-get install -y ca-certificates curl && \
+    apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy binary from builder
@@ -109,9 +115,10 @@ WORKDIR /data
 # Note: Docker publish (-p) works regardless of EXPOSE; this is documentation
 EXPOSE 2525 9090 4545-4550 8080-8090
 
-# Health check for admin API
+# Health check for admin API. Exec form (no shell): the probe is built into the binary, and it
+# reads MB_PORT/MB_HOST from the environment itself.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD curl -fsS http://localhost:${MB_PORT:-2525}/ >/dev/null || exit 1
+  CMD ["/usr/local/bin/rift", "healthcheck"]
 
 # ============================================================
 # Environment Variables

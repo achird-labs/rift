@@ -27,6 +27,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::Parser;
 use rift_http_proxy::admin_api::DEFAULT_ADMIN_PORT;
+use rift_http_proxy::healthcheck;
 use rift_http_proxy::script_cli;
 use rift_http_proxy::server::{Cli, Commands, ServerBuilder};
 use std::path::PathBuf;
@@ -41,6 +42,13 @@ fn main() -> Result<(), anyhow::Error> {
     // (and `cli.command`) stay intact for the Stop/Restart/Save/Replay dispatch below.
     if let Some(Commands::Script { action }) = cli.command.clone() {
         return script_cli::dispatch(action);
+    }
+
+    // Same treatment for `healthcheck` (issue #664), and for a second reason beyond skipping the
+    // bootstrap: the path below writes `--pidfile`, which would clobber the running server's PID
+    // file with the probe's own — every container health check.
+    if let Some(Commands::Healthcheck { url, timeout }) = cli.command.clone() {
+        return healthcheck::dispatch(url, &cli.host, cli.port, timeout);
     }
 
     // `--debug` is the server-flag spelling of debug mode (issue #360 Item 3); `RIFT_DEBUG` is
@@ -129,6 +137,11 @@ fn main() -> Result<(), anyhow::Error> {
         // match stays exhaustive and correct if that ever changes.
         Some(Commands::Script { action }) => {
             return script_cli::dispatch(action.clone());
+        }
+        // Likewise already handled above — and it must stay that way: reaching here would mean the
+        // probe had already overwritten `--pidfile` with its own PID.
+        Some(Commands::Healthcheck { url, timeout }) => {
+            return healthcheck::dispatch(url.clone(), &cli.host, cli.port, *timeout);
         }
         Some(Commands::Start) | None => {
             // Default behavior - start in Mountebank mode

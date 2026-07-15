@@ -6,7 +6,8 @@
 #     --build-arg BINARY_PATH=./rift-http-proxy \
 #     -f Dockerfile.prebuilt .
 
-FROM debian:bookworm-slim
+# Digest-pinned (issue #664) so the published image is reproducible; Dependabot bumps it.
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 # Build args for metadata
 ARG VERSION=dev
@@ -14,9 +15,10 @@ ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
 ARG TARGETARCH
 
-# Install CA certificates and curl for health checks
+# CA certificates only — `rift healthcheck` replaced the curl-based probe (issue #664).
+# ca-certificates stays: hyper-rustls (`native-tokio`) loads this trust store for HTTPS upstreams.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates curl && \
+    apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy pre-built binary (provided via build context)
@@ -48,9 +50,9 @@ WORKDIR /data
 # Expose ports
 EXPOSE 2525 9090 4545-4550 8080-8090
 
-# Health check
+# Health check. Exec form (no shell): the probe is built into the binary and reads MB_PORT itself.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD curl -fsS http://localhost:${MB_PORT:-2525}/ >/dev/null || exit 1
+  CMD ["/usr/local/bin/rift", "healthcheck"]
 
 # Environment variables
 ENV MB_PORT=2525

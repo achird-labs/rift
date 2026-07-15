@@ -31,6 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # cosign keyless signing exchanges this OIDC token for a short-lived Fulcio cert (issue #664).
+      id-token: write
 
     steps:
       - name: Checkout repository
@@ -95,7 +97,10 @@ jobs:
             VERSION=${{ steps.vars.outputs.VERSION }}
             VCS_REF=${{ github.sha }}
             BUILD_DATE=${{ steps.vars.outputs.BUILD_DATE }}
-          provenance: false
+          # Attestations (issue #664): enterprise image-curation pipelines verify these, and an
+          # unattested image is what gets rejected at their gate.
+          sbom: true
+          provenance: mode=max
 
       # Build and push arm64 image
       - name: Build and push arm64
@@ -110,7 +115,10 @@ jobs:
             VERSION=${{ steps.vars.outputs.VERSION }}
             VCS_REF=${{ github.sha }}
             BUILD_DATE=${{ steps.vars.outputs.BUILD_DATE }}
-          provenance: false
+          # Attestations (issue #664): enterprise image-curation pipelines verify these, and an
+          # unattested image is what gets rejected at their gate.
+          sbom: true
+          provenance: mode=max
 
       # Create and push multi-arch manifest
       - name: Create and push manifest
@@ -128,6 +136,198 @@ jobs:
             ${{ env.REGISTRY }}/${REPO}:${VERSION}-amd64 \
             ${{ env.REGISTRY }}/${REPO}:${VERSION}-arm64
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Sign the multi-arch index each tag actually resolves to — that digest is what a consumer
+      # pulls and what `cosign verify` checks. Keyless: the identity is this workflow, not a key
+      # anyone has to hold. Tags are deduped because :VERSION and :latest are the same index.
+      - name: Sign published images
+        run: |
+          # pipefail matters here: without it a failing `imagetools inspect` yields an empty digest
+          # list, the loop signs nothing, and the step still exits 0 — a publish that reports
+          # success having signed nothing. The signed-count assertion is the backstop.
+          set -euo pipefail
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy"
+
+          DIGESTS=$(for TAG in "${VERSION}" latest; do
+            docker buildx imagetools inspect "${{ env.REGISTRY }}/${REPO}:${TAG}" \
+              --format '{{.Manifest.Digest}}'
+          done | sort -u)
+
+          [ -n "$DIGESTS" ] || { echo "::error::resolved no digests to sign for ${REPO}"; exit 1; }
+
+          echo "$DIGESTS" | while read -r DIGEST; do
+            echo "signing ${REPO}@${DIGEST}"
+            cosign sign --yes "${{ env.REGISTRY }}/${REPO}@${DIGEST}"
+          done
+
+          # Prove the attestations survived `imagetools create`: buildx attaches SBOM/provenance as
+          # separate manifests in each per-arch index, and this job merges those indexes into a new
+          # one. If that merge ever drops them, fail here rather than publish an image that claims
+          # attestations it does not carry.
+          echo "$DIGESTS" | while read -r DIGEST; do
+            REF="${{ env.REGISTRY }}/${REPO}@${DIGEST}"
+            for KIND in SBOM Provenance; do
+              OUT=$(docker buildx imagetools inspect "$REF" --format "{{ json .${KIND} }}")
+              case "$OUT" in
+                ''|null|'{}') echo "::error::${REF} carries no ${KIND}"; exit 1 ;;
+                *) echo "  ${KIND} present on ${REF}" ;;
+              esac
+            done
+          done
+
+  # =============================================================================
+  # Build and push the static (scratch) rift-proxy flavor — issue #664.
+  #
+  # Uses the musl release binaries, which release.yml already builds with `cross`. They are
+  # genuinely static (rift's TLS is pure rustls/ring, no OpenSSL), so the image can be FROM
+  # scratch: no OS packages, nothing for a scanner to flag, nothing to patch.
+  # Published as `-static` tags alongside the Debian-based default.
+  # =============================================================================
+  build-rift-proxy-static:
+    name: Build rift-proxy (static)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # cosign keyless signing exchanges this OIDC token for a short-lived Fulcio cert (issue #664).
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Determine version
+        id: vars
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            VERSION="${{ inputs.tag }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="edge"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+
+      # Pre-built musl binaries from the GitHub Release (release.yml build matrix).
+      - name: Download linux-amd64 musl binary
+        run: |
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          mkdir -p binaries/amd64-musl
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${VERSION}/rift-${VERSION}-x86_64-unknown-linux-musl.tar.gz" | \
+            tar --wildcards -xzf - -C binaries/amd64-musl --strip-components=2 "*/bin/rift"
+          mv binaries/amd64-musl/rift binaries/amd64-musl/rift-http-proxy
+          chmod +x binaries/amd64-musl/rift-http-proxy
+
+      - name: Download linux-arm64 musl binary
+        run: |
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          mkdir -p binaries/arm64-musl
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${VERSION}/rift-${VERSION}-aarch64-unknown-linux-musl.tar.gz" | \
+            tar --wildcards -xzf - -C binaries/arm64-musl --strip-components=2 "*/bin/rift"
+          mv binaries/arm64-musl/rift binaries/arm64-musl/rift-http-proxy
+          chmod +x binaries/arm64-musl/rift-http-proxy
+
+      # The binary is static, but the image is still built per-platform so the manifest advertises
+      # the right architecture to a puller.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push amd64 (static)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./binaries/amd64-musl
+          file: ./crates/rift-http-proxy/Dockerfile.static
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy:${{ steps.vars.outputs.VERSION }}-static-amd64
+          build-args: |
+            VERSION=${{ steps.vars.outputs.VERSION }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.vars.outputs.BUILD_DATE }}
+          sbom: true
+          provenance: mode=max
+
+      - name: Build and push arm64 (static)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./binaries/arm64-musl
+          file: ./crates/rift-http-proxy/Dockerfile.static
+          platforms: linux/arm64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy:${{ steps.vars.outputs.VERSION }}-static-arm64
+          build-args: |
+            VERSION=${{ steps.vars.outputs.VERSION }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.vars.outputs.BUILD_DATE }}
+          sbom: true
+          provenance: mode=max
+
+      - name: Create and push static manifest
+        run: |
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy"
+
+          docker buildx imagetools create -t ${{ env.REGISTRY }}/${REPO}:${VERSION}-static \
+            ${{ env.REGISTRY }}/${REPO}:${VERSION}-static-amd64 \
+            ${{ env.REGISTRY }}/${REPO}:${VERSION}-static-arm64
+
+          docker buildx imagetools create -t ${{ env.REGISTRY }}/${REPO}:latest-static \
+            ${{ env.REGISTRY }}/${REPO}:${VERSION}-static-amd64 \
+            ${{ env.REGISTRY }}/${REPO}:${VERSION}-static-arm64
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign published static images
+        run: |
+          # pipefail matters here: without it a failing `imagetools inspect` yields an empty digest
+          # list, the loop signs nothing, and the step still exits 0 — a publish that reports
+          # success having signed nothing. The signed-count assertion is the backstop.
+          set -euo pipefail
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy"
+
+          DIGESTS=$(for TAG in "${VERSION}-static" latest-static; do
+            docker buildx imagetools inspect "${{ env.REGISTRY }}/${REPO}:${TAG}" \
+              --format '{{.Manifest.Digest}}'
+          done | sort -u)
+
+          [ -n "$DIGESTS" ] || { echo "::error::resolved no digests to sign for ${REPO}"; exit 1; }
+
+          echo "$DIGESTS" | while read -r DIGEST; do
+            echo "signing ${REPO}@${DIGEST}"
+            cosign sign --yes "${{ env.REGISTRY }}/${REPO}@${DIGEST}"
+          done
+
+          # Prove the attestations survived `imagetools create`: buildx attaches SBOM/provenance as
+          # separate manifests in each per-arch index, and this job merges those indexes into a new
+          # one. If that merge ever drops them, fail here rather than publish an image that claims
+          # attestations it does not carry.
+          echo "$DIGESTS" | while read -r DIGEST; do
+            REF="${{ env.REGISTRY }}/${REPO}@${DIGEST}"
+            for KIND in SBOM Provenance; do
+              OUT=$(docker buildx imagetools inspect "$REF" --format "{{ json .${KIND} }}")
+              case "$OUT" in
+                ''|null|'{}') echo "::error::${REF} carries no ${KIND}"; exit 1 ;;
+                *) echo "  ${KIND} present on ${REF}" ;;
+              esac
+            done
+          done
+
   # =============================================================================
   # Build and push rift-lint using pre-built binaries from release
   # =============================================================================
@@ -136,6 +336,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # cosign keyless signing exchanges this OIDC token for a short-lived Fulcio cert (issue #664).
+      id-token: write
 
     steps:
       - name: Checkout repository
@@ -198,7 +400,10 @@ jobs:
             VERSION=${{ steps.vars.outputs.VERSION }}
             VCS_REF=${{ github.sha }}
             BUILD_DATE=${{ steps.vars.outputs.BUILD_DATE }}
-          provenance: false
+          # Attestations (issue #664): enterprise image-curation pipelines verify these, and an
+          # unattested image is what gets rejected at their gate.
+          sbom: true
+          provenance: mode=max
 
       # Build and push arm64 image
       - name: Build and push arm64
@@ -213,7 +418,10 @@ jobs:
             VERSION=${{ steps.vars.outputs.VERSION }}
             VCS_REF=${{ github.sha }}
             BUILD_DATE=${{ steps.vars.outputs.BUILD_DATE }}
-          provenance: false
+          # Attestations (issue #664): enterprise image-curation pipelines verify these, and an
+          # unattested image is what gets rejected at their gate.
+          sbom: true
+          provenance: mode=max
 
       # Create and push multi-arch manifest
       - name: Create and push manifest
@@ -228,3 +436,45 @@ jobs:
           docker buildx imagetools create -t ${{ env.REGISTRY }}/${REPO}:latest \
             ${{ env.REGISTRY }}/${REPO}:${VERSION}-amd64 \
             ${{ env.REGISTRY }}/${REPO}:${VERSION}-arm64
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Sign the multi-arch index each tag actually resolves to — that digest is what a consumer
+      # pulls and what `cosign verify` checks. Keyless: the identity is this workflow, not a key
+      # anyone has to hold. Tags are deduped because :VERSION and :latest are the same index.
+      - name: Sign published images
+        run: |
+          # pipefail matters here: without it a failing `imagetools inspect` yields an empty digest
+          # list, the loop signs nothing, and the step still exits 0 — a publish that reports
+          # success having signed nothing. The signed-count assertion is the backstop.
+          set -euo pipefail
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/rift-lint"
+
+          DIGESTS=$(for TAG in "${VERSION}" latest; do
+            docker buildx imagetools inspect "${{ env.REGISTRY }}/${REPO}:${TAG}" \
+              --format '{{.Manifest.Digest}}'
+          done | sort -u)
+
+          [ -n "$DIGESTS" ] || { echo "::error::resolved no digests to sign for ${REPO}"; exit 1; }
+
+          echo "$DIGESTS" | while read -r DIGEST; do
+            echo "signing ${REPO}@${DIGEST}"
+            cosign sign --yes "${{ env.REGISTRY }}/${REPO}@${DIGEST}"
+          done
+
+          # Prove the attestations survived `imagetools create`: buildx attaches SBOM/provenance as
+          # separate manifests in each per-arch index, and this job merges those indexes into a new
+          # one. If that merge ever drops them, fail here rather than publish an image that claims
+          # attestations it does not carry.
+          echo "$DIGESTS" | while read -r DIGEST; do
+            REF="${{ env.REGISTRY }}/${REPO}@${DIGEST}"
+            for KIND in SBOM Provenance; do
+              OUT=$(docker buildx imagetools inspect "$REF" --format "{{ json .${KIND} }}")
+              case "$OUT" in
+                ''|null|'{}') echo "::error::${REF} carries no ${KIND}"; exit 1 ;;
+                *) echo "  ${KIND} present on ${REF}" ;;
+              esac
+            done
+          done

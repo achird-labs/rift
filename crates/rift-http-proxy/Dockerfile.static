@@ -1,0 +1,88 @@
+# Static (scratch) image for using the pre-built musl binaries from the release workflow.
+#
+# Why this flavor exists (issue #664): the Debian-based images carry a full OS userland that rift
+# never uses, and every package in it is CVE surface a downstream consumer has to chase — the
+# trigger was CVE-2025-10148 against a curl that only existed to serve the HEALTHCHECK. This image
+# contains the rift binary, a CA bundle, and a passwd entry. Nothing else. No package manager ever
+# runs, so an image scanner finds no OS packages to report.
+#
+# This works because rift's TLS is pure rustls pinned to `ring` (no OpenSSL anywhere in
+# Cargo.lock), so the release musl binaries are genuinely static and need no loader at runtime.
+#
+# Feature parity note: the musl release binaries are built `--no-default-features --features
+# javascript,redis-backend` (see release.yml), so scripting and the Redis backend are present but
+# the mimalloc allocator is not — that is the one difference from the Debian flavor.
+#
+# Usage:
+#   docker buildx build --platform linux/amd64 \
+#     --build-arg BINARY_PATH=./rift-http-proxy \
+#     -f Dockerfile.static .
+
+# Assemble everything that is not the binary. scratch has no shell, so nothing can be created in
+# the final stage — it can only be copied in.
+# Digest-pinned (issue #664); Dependabot reads the tag and bumps the digest.
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS rootfs
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# A non-root uid needs a passwd entry to be a *name*; without one the container still runs as
+# 1000 but tools resolve it to a bare number. /data and /config are made here because the final
+# stage cannot mkdir them.
+RUN printf 'rift:x:1000:1000::/data:/sbin/nologin\n' > /rootfs-etc-passwd && \
+    printf 'rift:x:1000:\n' > /rootfs-etc-group && \
+    mkdir -p /rootfs/data /rootfs/config
+
+FROM scratch
+
+# Build args for metadata
+ARG VERSION=dev
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+
+# The CA bundle is not optional: hyper-rustls is built with `native-tokio`, so it loads the OS
+# trust store at runtime. Without this file every HTTPS upstream proxy fails.
+COPY --from=rootfs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=rootfs /rootfs-etc-passwd /etc/passwd
+COPY --from=rootfs /rootfs-etc-group /etc/group
+COPY --from=rootfs --chown=1000:1000 /rootfs/data /data
+COPY --from=rootfs --chown=1000:1000 /rootfs/config /config
+
+# The statically-linked musl binary (provided via build context, as in Dockerfile.prebuilt).
+# --chmod is explicit because there is no shell here to chmod it afterwards.
+COPY --chmod=755 rift-http-proxy /usr/local/bin/rift
+
+# OCI labels and metadata
+LABEL \
+  org.opencontainers.image.title="Rift HTTP Proxy (static)" \
+  org.opencontainers.image.description="Mountebank-compatible HTTP chaos engineering proxy — statically linked, no OS packages." \
+  org.opencontainers.image.url="https://github.com/EtaCassiopeia/rift" \
+  org.opencontainers.image.source="https://github.com/EtaCassiopeia/rift" \
+  org.opencontainers.image.version="$VERSION" \
+  org.opencontainers.image.revision="$VCS_REF" \
+  org.opencontainers.image.created="$BUILD_DATE" \
+  org.opencontainers.image.licenses="Apache-2.0" \
+  org.opencontainers.image.vendor="Rift" \
+  org.opencontainers.image.base.name="scratch"
+
+USER 1000:1000
+WORKDIR /data
+
+# Expose ports (see Dockerfile for the full rationale):
+# 2525 admin API, 9090 metrics, 4545-4550 + 8080-8090 imposter ports
+EXPOSE 2525 9090 4545-4550 8080-8090
+
+# Environment variables
+ENV MB_PORT=2525
+ENV MB_HOST=0.0.0.0
+ENV MB_LOGLEVEL=info
+ENV RIFT_METRICS_PORT=9090
+
+# Health check. Exec form is mandatory here — there is no shell to expand a string-form CMD, which
+# is exactly why the probe is built into the binary (issue #664).
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD ["/usr/local/bin/rift", "healthcheck"]
+
+ENTRYPOINT ["/usr/local/bin/rift"]
+CMD []

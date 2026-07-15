@@ -32,7 +32,7 @@ services:
       - ./certs:/certs:ro
     command: ["--configfile", "/imposters.json", "--default-tls-cert", "/certs/server.crt", "--default-tls-key", "/certs/server.key"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
+      test: ["CMD", "rift", "healthcheck", "--url", "http://localhost:9090/metrics"]
       interval: 10s
       timeout: 5s
       retries: 3

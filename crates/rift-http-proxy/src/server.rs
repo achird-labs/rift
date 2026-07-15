@@ -26,6 +26,11 @@ use tracing::{debug, error, info, warn};
 /// Bounded grace given to in-flight metrics connections on `shutdown()` (issue #342).
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
+/// Default `rift healthcheck` timeout. Deliberately *under* the `--timeout=3s` the images'
+/// HEALTHCHECK lines allow, so a hung server makes the probe report an unhealthy verdict itself
+/// rather than race Docker's killer for it (equal budgets fire at the same instant).
+pub const DEFAULT_HEALTHCHECK_TIMEOUT_SECS: u64 = 2;
+
 /// Rift - A Mountebank-compatible HTTP chaos engineering proxy
 ///
 /// Rift starts an admin API on port 2525 (configurable) for creating imposters
@@ -219,6 +224,20 @@ pub enum Commands {
     Script {
         #[command(subcommand)]
         action: ScriptAction,
+    },
+
+    /// Probe a running server's admin API; exits 0 when healthy, 1 otherwise (issue #664).
+    ///
+    /// This is the container HEALTHCHECK: the `-static` image is `FROM scratch`, so there is no
+    /// shell and no curl to probe with.
+    Healthcheck {
+        /// URL to probe (default: the admin API's /health on --host/--port)
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+
+        /// Give up after this many seconds
+        #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEALTHCHECK_TIMEOUT_SECS)]
+        timeout: u64,
     },
 }
 
@@ -986,6 +1005,64 @@ mod tests {
     fn test_no_parse_flag_accepted() {
         let cli = Cli::try_parse_from(["rift", "--noParse"]).expect("--noParse should be accepted");
         assert!(cli.no_parse);
+    }
+
+    // Issue #664: `rift healthcheck` is what the images run as their HEALTHCHECK, so its bare form
+    // must parse with no arguments and default to the admin port.
+    #[test]
+    fn healthcheck_parses_bare() {
+        let cli = Cli::try_parse_from(["rift", "healthcheck"]).expect("parse");
+        match cli.command {
+            Some(Commands::Healthcheck { url, timeout }) => {
+                assert!(url.is_none(), "no --url means probe the admin API");
+                assert_eq!(timeout, DEFAULT_HEALTHCHECK_TIMEOUT_SECS);
+            }
+            other => panic!("expected Healthcheck, got {other:?}"),
+        }
+        assert_eq!(cli.port, DEFAULT_ADMIN_PORT);
+    }
+
+    #[test]
+    fn healthcheck_accepts_url_and_timeout() {
+        let cli = Cli::try_parse_from([
+            "rift",
+            "healthcheck",
+            "--url",
+            "http://localhost:9090/metrics",
+            "--timeout",
+            "10",
+        ])
+        .expect("parse");
+        match cli.command {
+            Some(Commands::Healthcheck { url, timeout }) => {
+                assert_eq!(url.as_deref(), Some("http://localhost:9090/metrics"));
+                assert_eq!(timeout, 10);
+            }
+            other => panic!("expected Healthcheck, got {other:?}"),
+        }
+    }
+
+    // The probe has to follow the server's own --port, since that is how the container's MB_PORT
+    // reaches it.
+    #[test]
+    fn healthcheck_follows_the_servers_port_flag() {
+        let cli = Cli::try_parse_from(["rift", "--port", "3000", "healthcheck"]).expect("parse");
+        assert_eq!(cli.port, 3000);
+        assert!(matches!(cli.command, Some(Commands::Healthcheck { .. })));
+    }
+
+    // Its budget must stay strictly under the images' `HEALTHCHECK --timeout=3s`, or the probe
+    // races Docker's killer instead of reporting the unhealthy verdict itself. A const block makes
+    // raising the default past that budget a compile error rather than a test failure.
+    #[test]
+    fn healthcheck_default_timeout_is_under_the_dockerfile_budget() {
+        const DOCKERFILE_HEALTHCHECK_TIMEOUT_SECS: u64 = 3;
+        const {
+            assert!(
+                DEFAULT_HEALTHCHECK_TIMEOUT_SECS < DOCKERFILE_HEALTHCHECK_TIMEOUT_SECS,
+                "the probe's budget must be strictly under the Dockerfile HEALTHCHECK --timeout"
+            )
+        };
     }
 
     // Issue #532: skipped datadir files must be surfaced, not silently dropped.

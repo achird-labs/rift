@@ -13,7 +13,7 @@ services:
     # gates since issue #612 — without it rift refuses to start.
     command: ["--configfile", "/imposters.json", "--allow-injection"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:2525/"]
+      test: ["CMD", "rift", "healthcheck"]
       interval: 5s
       timeout: 3s
       retries: 5

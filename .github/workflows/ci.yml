@@ -163,6 +163,20 @@ jobs:
           ./scripts/verify-docs-coverage.sh --self-test
           ./scripts/verify-docs-coverage.sh
 
+  image-hardening:
+    name: Image Hardening
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Issue #664: the images ship the rift binary and nothing else. Fail if curl creeps back in,
+      # a base image goes unpinned, a healthcheck starts shelling out again, or the publish
+      # pipeline stops attesting/signing. --self-test first proves the checker isn't a no-op.
+      - name: Verify image hardening
+        run: |
+          ./scripts/verify-image-hardening.sh --self-test
+          ./scripts/verify-image-hardening.sh
+
   docs-examples:
     name: Docs Examples
     runs-on: ubuntu-latest
@@ -249,6 +263,94 @@ jobs:
       # release self-containment gate's musl allowlist is validated here on a real musl artifact.
       - name: Assert the musl cdylib is self-contained
         run: ./scripts/check-ffi-selfcontained.sh target/x86_64-unknown-linux-musl/release/librift_ffi.so
+
+  static-image:
+    name: Static Image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install cross
+        uses: taiki-e/install-action@cross
+
+      # Issue #664: same reasoning as the musl-cdylib gate above. docker-publish.yml only runs on
+      # release (workflow_call/dispatch), so without this job nothing builds or runs the `-static`
+      # image before it ships, and every claim about it would rest on grepping Dockerfile text.
+      # Reproduces the release build path exactly (cross + the same feature set, which drops
+      # mimalloc), then builds the scratch image and proves the container actually reports healthy.
+      - name: Build rift-http-proxy for musl
+        run: |
+          cross build --release --package rift-http-proxy --target x86_64-unknown-linux-musl \
+            --no-default-features --features javascript,redis-backend
+
+      - name: Assemble the build context
+        run: |
+          set -euo pipefail
+          mkdir -p ctx
+          cp target/x86_64-unknown-linux-musl/release/rift-http-proxy ctx/rift-http-proxy
+          chmod +x ctx/rift-http-proxy
+          # The binary must need no dynamic loader: scratch has none, so a dynamically linked
+          # binary would fail to exec at all. Rust's musl target emits a static-PIE, which `file`
+          # reports as "static-pie linked" rather than "statically linked" — both are static and
+          # both run here; only "dynamically linked" is disqualifying.
+          file ctx/rift-http-proxy
+          file ctx/rift-http-proxy | grep -qE 'static-pie linked|statically linked' \
+            || { echo "[fail] musl binary is not static — it cannot run on scratch" >&2; exit 1; }
+          file ctx/rift-http-proxy | grep -q 'dynamically linked' \
+            && { echo "[fail] musl binary wants a dynamic loader that scratch does not have" >&2; exit 1; }
+          echo "[pass] binary is static and needs no loader"
+
+      - name: Build the static image
+        run: |
+          docker build -f crates/rift-http-proxy/Dockerfile.static -t rift-static:ci ctx
+
+      # The point of the whole flavor: the built-in probe reports healthy from a scratch image with
+      # no shell and no curl. This is what proves AC1 for real rather than by text-matching.
+      - name: The container reports healthy via the built-in probe
+        run: |
+          set -euo pipefail
+          docker run -d --name rift-static -p 2525:2525 rift-static:ci
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' rift-static 2>/dev/null || echo starting)
+            echo "  health: $status"
+            [ "$status" = "healthy" ] && break
+            [ "$status" = "unhealthy" ] && { docker logs rift-static; exit 1; }
+            sleep 2
+          done
+          [ "$(docker inspect --format='{{.State.Health.Status}}' rift-static)" = "healthy" ] \
+            || { echo "[fail] static image never became healthy" >&2; docker logs rift-static; exit 1; }
+          # And the probe is usable directly, which is what the compose files and docs tell people
+          # to run.
+          docker exec rift-static rift healthcheck
+          echo "[pass] scratch image reports healthy via the built-in probe"
+
+      - name: The admin API actually serves from the static image
+        run: |
+          set -euo pipefail
+          curl -fsS http://localhost:2525/health | grep -q '"ok"' \
+            || { echo "[fail] admin API did not answer from the static image" >&2; exit 1; }
+          echo "[pass] admin API serves from scratch"
+
+      - name: Stop the container
+        if: always()
+        run: docker rm -f rift-static || true
+
+      # AC4: the flavor exists to have nothing for a scanner to report. Fail on ANY OS-package
+      # vulnerability — there are no OS packages, so the only correct result is zero.
+      - name: Scan for OS-level CVEs
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: rift-static:ci
+          format: table
+          exit-code: '1'
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          vuln-type: os
+          ignore-unfixed: false
 
   lint:
     name: Lint

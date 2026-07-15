@@ -1,0 +1,26 @@
+version: 2
+
+# The Dockerfiles pin their bases by digest (issue #664) so builds are reproducible. A pin with
+# nobody bumping it is just a stale base, so Dependabot owns the bumps: it reads the tag next to
+# each digest and opens a PR when that tag moves.
+updates:
+  - package-ecosystem: "docker"
+    directories:
+      - "/crates/rift-http-proxy"
+      - "/crates/rift-lint"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "build(docker)"
+
+  # The publish pipeline's own actions are a supply-chain surface too.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "build(ci)"
