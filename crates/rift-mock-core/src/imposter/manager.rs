@@ -344,6 +344,12 @@ impl ImposterManager {
         let bind_host: &str = config.host.as_deref().unwrap_or("0.0.0.0");
         // Determine port - either from config or auto-assign
         let (port, listener) = if let Some(p) = config.port {
+            if p == 0 {
+                return Err(ImposterError::BindError(
+                    p,
+                    "port 0 is reserved; omit `port` to auto-assign one".to_string(),
+                ));
+            }
             // Check if specified port is already in use
             if self.imposters.read().contains_key(&p) {
                 return Err(ImposterError::PortInUse(p));
@@ -1474,7 +1480,6 @@ mod tests {
         let port = manager
             .create_imposter(imposter_cfg(json!({
                 "protocol": "http",
-                "port": 0,
                 "stubs": [
                     {"predicates": [{"equals": {"path": "/dup"}}],
                      "responses": [{"is": {"statusCode": 200, "body": "x"}}]},

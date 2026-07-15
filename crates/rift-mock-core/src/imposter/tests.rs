@@ -300,6 +300,24 @@ async fn test_imposter_manager_create_delete() {
     }
 }
 
+#[tokio::test]
+async fn explicit_port_zero_is_rejected() {
+    let manager = ImposterManager::new();
+    let config = ImposterConfig {
+        port: Some(0),
+        protocol: "http".to_string(),
+        ..Default::default()
+    };
+
+    let err = manager
+        .create_imposter(config)
+        .await
+        .expect_err("explicit port 0 must not register an unreachable imposter");
+
+    assert!(matches!(err, ImposterError::BindError(0, _)));
+    assert_eq!(manager.count(), 0);
+}
+
 #[test]
 fn test_add_decorate_behavior_serde() {
     let json = r#"{"to":"http://localhost:4546","mode":"proxyOnce","addDecorateBehavior":"function(request, response) { response.headers['X-Proxied'] = 'true'; }"}"#;
