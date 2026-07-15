@@ -1,5 +1,4 @@
 use crate::scripting::FaultDecision;
-use anyhow::Result;
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::hash::{Hash, Hasher};
@@ -207,9 +206,9 @@ impl DecisionCache {
     }
 
     /// Insert a decision into the cache
-    pub fn insert(&self, key: CacheKey, decision: FaultDecision) -> Result<()> {
+    pub fn insert(&self, key: CacheKey, decision: FaultDecision) {
         let Some(cache) = self.cache.as_ref() else {
-            return Ok(());
+            return;
         };
 
         let mut cache = cache.lock();
@@ -222,8 +221,6 @@ impl DecisionCache {
         }
 
         self.metrics.inserts.fetch_add(1, Ordering::Relaxed);
-
-        Ok(())
     }
 
     /// Clear all cache entries
@@ -374,7 +371,7 @@ mod tests {
             duration_ms: 100,
             rule_id: "rule1".to_string(),
         };
-        cache.insert(key.clone(), decision.clone()).unwrap();
+        cache.insert(key.clone(), decision.clone());
 
         // Cache hit
         let cached = cache.get(&key).unwrap();
@@ -412,7 +409,7 @@ mod tests {
         );
 
         let decision = FaultDecision::None;
-        cache.insert(key.clone(), decision).unwrap();
+        cache.insert(key.clone(), decision);
 
         // Should be cached
         assert!(cache.get(&key).is_some());
@@ -447,7 +444,7 @@ mod tests {
                 &json!({}),
                 format!("rule{i}"),
             );
-            cache.insert(key, FaultDecision::None).unwrap();
+            cache.insert(key, FaultDecision::None);
         }
 
         assert_eq!(cache.size(), 3);
@@ -479,7 +476,7 @@ mod tests {
             &json!({}),
             "rule3".to_string(),
         );
-        cache.insert(key3, FaultDecision::None).unwrap();
+        cache.insert(key3, FaultDecision::None);
 
         assert_eq!(cache.size(), 3);
 
@@ -520,7 +517,7 @@ mod tests {
         );
 
         let decision = FaultDecision::None;
-        cache.insert(key.clone(), decision).unwrap();
+        cache.insert(key.clone(), decision);
 
         // Should always return None when disabled
         assert!(cache.get(&key).is_none());
@@ -541,7 +538,7 @@ mod tests {
                 &json!({}),
                 format!("rule{i}"),
             );
-            cache.insert(key, FaultDecision::None).unwrap();
+            cache.insert(key, FaultDecision::None);
         }
 
         assert_eq!(cache.size(), 5);
@@ -566,7 +563,7 @@ mod tests {
         // 1 miss
         cache.get(&key);
 
-        cache.insert(key.clone(), FaultDecision::None).unwrap();
+        cache.insert(key.clone(), FaultDecision::None);
 
         // 3 hits
         cache.get(&key);
@@ -598,7 +595,7 @@ mod tests {
                 &json!({}),
                 format!("rule{i}"),
             );
-            cache.insert(key, FaultDecision::None).unwrap();
+            cache.insert(key, FaultDecision::None);
         }
 
         assert_eq!(cache.size(), 5);
@@ -636,7 +633,7 @@ mod tests {
             ttl_seconds: 0,
         });
 
-        cache.insert(key_n(0), FaultDecision::None).unwrap();
+        cache.insert(key_n(0), FaultDecision::None);
 
         assert_eq!(cache.size(), 0, "max_size 0 must store nothing");
         assert!(
@@ -653,8 +650,8 @@ mod tests {
             ttl_seconds: 0,
         });
 
-        cache.insert(key_n(0), FaultDecision::None).unwrap();
-        cache.insert(key_n(1), FaultDecision::None).unwrap();
+        cache.insert(key_n(0), FaultDecision::None);
+        cache.insert(key_n(1), FaultDecision::None);
 
         assert_eq!(cache.size(), 1);
         assert!(cache.get(&key_n(0)).is_none(), "oldest must be evicted");
@@ -674,7 +671,7 @@ mod tests {
         });
 
         for i in 0..(MAX + OVERFLOW) {
-            cache.insert(key_n(i), FaultDecision::None).unwrap();
+            cache.insert(key_n(i), FaultDecision::None);
         }
 
         assert_eq!(cache.size(), MAX, "cache must stay bounded at max_size");
@@ -698,12 +695,12 @@ mod tests {
         });
 
         for i in 0..MAX {
-            cache.insert(key_n(i), FaultDecision::None).unwrap();
+            cache.insert(key_n(i), FaultDecision::None);
         }
         assert_eq!(cache.metrics().evictions, 0);
 
         // Replacing a key that is already present displaces nothing.
-        cache.insert(key_n(MAX - 1), FaultDecision::None).unwrap();
+        cache.insert(key_n(MAX - 1), FaultDecision::None);
 
         assert_eq!(cache.size(), MAX);
         assert_eq!(
@@ -714,7 +711,7 @@ mod tests {
 
         // Re-inserting must also promote: key 0 is now the oldest, so the next insert evicts it
         // rather than the key we just refreshed.
-        cache.insert(key_n(MAX), FaultDecision::None).unwrap();
+        cache.insert(key_n(MAX), FaultDecision::None);
         assert!(
             cache.get(&key_n(0)).is_none(),
             "the least-recently-used key must be the victim"
@@ -743,7 +740,7 @@ mod tests {
                 std::thread::spawn(move || {
                     for i in 0..200 {
                         let k = key_n((t * 200 + i) % 32);
-                        cache.insert(k.clone(), FaultDecision::None).unwrap();
+                        cache.insert(k.clone(), FaultDecision::None);
                         let _ = cache.get(&k);
                     }
                 })
