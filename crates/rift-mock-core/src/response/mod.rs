@@ -47,10 +47,13 @@ impl From<ImposterError> for Response<Full<Bytes>> {
                 StatusCode::NOT_FOUND,
                 &format!("Imposter not found on port {p}"),
             ),
-            ImposterError::BindError(p, e) => error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to bind port {p}: {e}"),
-            ),
+            ImposterError::BindError(p, e) => {
+                tracing::error!(port = p, error = %e, "failed to bind imposter port");
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to bind port {p}: {e}"),
+                )
+            }
             ImposterError::InvalidProtocol(p) => {
                 error_response(StatusCode::BAD_REQUEST, &format!("Invalid protocol: {p}"))
             }
@@ -64,10 +67,13 @@ impl From<ImposterError> for Response<Full<Bytes>> {
                 StatusCode::CONFLICT,
                 &format!("A stub with id '{id}' already exists"),
             ),
-            ImposterError::PersistError(msg) => error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &format!("Persistence error: {msg}"),
-            ),
+            ImposterError::PersistError(msg) => {
+                tracing::error!(error = %msg, "failed to persist imposter state");
+                error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &format!("Persistence error: {msg}"),
+                )
+            }
             ImposterError::Tls(msg) => error_response(
                 StatusCode::BAD_REQUEST,
                 &format!("TLS configuration error: {msg}"),
