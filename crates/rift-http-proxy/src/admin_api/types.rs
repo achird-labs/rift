@@ -93,9 +93,19 @@ pub struct RiftImposterExtensions {
     pub flow_state: Option<serde_json::Value>,
 }
 
-// Error types + `error_response` + the `From<ImposterError>` conversion moved to
-// `rift_mock_core::response` (issue #203). Re-exported so admin call sites are unchanged.
-pub use rift_mock_core::response::error_response;
+// Error types + the `From<ImposterError>` conversion moved to
+// `rift_mock_core::response` (issue #203). Keep an admin-local wrapper for `error_response` so
+// every Admin API 5xx response has a server-side trace (issue #628).
+pub fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
+    if status.is_server_error() {
+        tracing::error!(
+            status = status.as_u16(),
+            message = %message,
+            "admin API error response"
+        );
+    }
+    rift_mock_core::response::error_response(status, message)
+}
 
 /// Request to add a stub
 #[derive(Debug, Deserialize)]
@@ -206,7 +216,6 @@ pub(crate) fn serialize_or_500<T: Serialize>(
     body: &T,
 ) -> Result<String, Box<Response<Full<Bytes>>>> {
     serde_json::to_string_pretty(body).map_err(|e| {
-        tracing::error!(error = %e, "failed to serialize admin API response body");
         Box::new(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("failed to serialize response body: {e}"),
