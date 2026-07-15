@@ -16,6 +16,10 @@ pub use bounded::{
 };
 
 pub use rhai_engine::RhaiEngine;
+/// Exposed for the decision-cache payoff bench (issue #665): the worker-side execute with a
+/// reusable engine, i.e. the per-request cost a cache hit actually avoids. `should_inject_fault`
+/// is not a substitute there — it builds a fresh `Engine` per call, which the pool never pays.
+pub use rhai_engine::execute_rhai_with_engine;
 
 // Script pool for optimized execution
 mod script_pool;
