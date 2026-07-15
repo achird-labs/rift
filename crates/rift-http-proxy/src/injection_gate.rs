@@ -1,18 +1,51 @@
 //! The `--allowInjection` classifier: does a stub carry a Mountebank scripting surface?
 //!
 //! Extracted from the admin imposter handlers (issue #612) so every door that admits an imposter
-//! config — `POST/PUT /imposters`, `--configfile`, `--datadir`, and `POST /admin/reload` — asks
-//! one classifier the same question. The gate used to live behind the admin API only, so the same
-//! document was refused by an HTTP POST and executed when loaded from a file.
+//! config — `POST/PUT /imposters`, `--configfile`, `--datadir`, `POST /admin/reload`, and the
+//! FFI's `rift_serve_admin` `configFile` (issue #616) — asks one classifier the same question.
+//! The gate used to live behind the admin API only, so the same document was refused by an HTTP
+//! POST and executed when loaded from a file.
 //!
 //! This module only *classifies*. Each door owns its own failure semantics (400, startup abort,
-//! or per-file skip), which is why the response builder stays with the admin handlers.
+//! per-file skip, or FFI NULL), which is why the response builder stays with the admin handlers.
+//!
+//! The gate's subject is the *document*, not the caller: it asks whether config that crossed a
+//! trust boundary carries executable surface. In-process config supplied by an embedding host
+//! (`rift_apply_config`, `rift_create_imposter`, `rift_serve_admin`'s inline `config`) is the
+//! trusted host path and is deliberately never gated (issue #492) — that host can already execute
+//! code in the process, so gating its own JSON would restrict nobody.
 
 use crate::imposter::{ImposterConfig, Predicate, PredicateOperation, Stub, StubResponse};
 
-/// True if `config`'s stubs carry a scripting surface gated by `--allowInjection`.
-pub(crate) fn config_uses_script_surface(config: &ImposterConfig) -> bool {
+/// The gated surfaces, named the same way by every door (issue #612). The list only — each door
+/// appends its own clause, so this must not carry one.
+pub const GATED_SCRIPT_SURFACES: &str = "inject/decorate/shellTransform/JS-function wait";
+
+/// True if `config`'s stubs carry a scripting surface gated by `--allowInjection`: an inject
+/// response, a `decorate` behavior, a `shellTransform`, a `wait` expressed as a JS function, a
+/// predicate `inject`, a `predicateGenerators.inject`, or `_rift.script`.
+///
+/// The classifier behind every `allowInjection` door. A door calls this to decide admission and
+/// supplies its own failure semantics — this only answers the question, and answers it identically
+/// for all of them. Classification fails **closed**: a `_behaviors` block that cannot be parsed is
+/// treated as scripted rather than admitted as safe.
+pub fn config_uses_script_surface(config: &ImposterConfig) -> bool {
     stubs_contain_script_surface(&config.stubs)
+}
+
+/// The explicit ports of every config in `configs` that trips [`config_uses_script_surface`], as a
+/// door would name them to a human; empty when all are admissible. Shared so the `--configfile` and
+/// FFI `configFile` doors list offenders identically — each still writes its own message, because
+/// their remedies differ (`--allowInjection` vs `"allowInjection": true`).
+pub fn gated_offender_ports(configs: &[ImposterConfig]) -> Vec<String> {
+    configs
+        .iter()
+        .filter(|config| config_uses_script_surface(config))
+        .map(|config| match config.port {
+            Some(port) => port.to_string(),
+            None => "<auto-assigned>".to_string(),
+        })
+        .collect()
 }
 
 /// True if any stub in `stubs` uses a Mountebank scripting surface gated by `--allowInjection`

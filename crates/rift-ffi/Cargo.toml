@@ -41,6 +41,8 @@ parking_lot = "0.12"
 reqwest.workspace = true
 # Mint a committed CA (cert+key PEM) on disk in the intercept CA-reuse gate test (issue #429).
 rcgen = "0.13"
+# Write imposter config files on disk for the `configFile` allowInjection gate tests (issue #616).
+tempfile = "3.8"
 
 [features]
 default = ["redis-backend", "javascript"]

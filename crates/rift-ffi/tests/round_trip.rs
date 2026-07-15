@@ -335,10 +335,163 @@ fn ffi_serve_admin_allow_injection_gates_the_admin_plane() {
     }
 }
 
+// A scripted imposter config used by the `configFile` gate tests below (issue #616).
+fn scripted_config_json(port: u16) -> String {
+    format!(
+        r#"{{"imposters": [{{"port": {port}, "protocol": "http",
+             "stubs": [{{"responses": [{{"inject": "function (config) {{ return {{ statusCode: 200, body: 'hi' }}; }}"}}]}}]}}]}}"#
+    )
+}
+
+// Issue #616: `configFile` names a path, and the content behind it is dereferenced off disk — it is
+// not necessarily authored by the embedding host (ops-provisioned, mounted, edited out-of-band), so
+// it crosses a trust boundary and is gated exactly like the CLI's `--configfile` (issue #612).
+// Contrast `ffi_serve_admin_inline_config_inject_is_ungated` below: in-process JSON is the trusted
+// host path and stays ungated. The gate rejects the whole serve up front, so nothing is applied.
+#[test]
+fn ffi_serve_admin_config_file_inject_requires_allow_injection() {
+    unsafe {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        std::fs::write(&path, scripted_config_json(19976)).expect("write config");
+        let path_json = serde_json::json!(path.to_str().expect("utf8 path"));
+
+        let h = rift_start();
+        let opts = cstr(&format!(
+            r#"{{"allowInjection": false, "configFile": {path_json}}}"#
+        ));
+        assert!(
+            rift_serve_admin(h, opts.as_ptr()).is_null(),
+            "a scripted configFile must be rejected when allowInjection is off"
+        );
+
+        let err = rift_last_error();
+        assert!(!err.is_null(), "a gated configFile records last_error");
+        let msg = CStr::from_ptr(err).to_str().expect("utf8").to_owned();
+        rift_free(err);
+        assert!(
+            msg.contains("allowInjection"),
+            "the rejection must name the gate that blocked it, got: {msg}"
+        );
+        assert!(
+            msg.contains("19976"),
+            "the rejection must name the offending port so the file can be fixed, got: {msg}"
+        );
+
+        // The gate runs before apply_config, so a rejected file leaves nothing behind. Asserted
+        // rather than inferred: a refactor that moved the gate after apply_config would still
+        // return NULL and still set last_error, and only this check would notice the imposter it
+        // had already created.
+        let listed = take_json(rift_list_imposters(h, std::ptr::null()));
+        let v: serde_json::Value = serde_json::from_str(&listed).expect("imposters json");
+        let ports: Vec<u64> = v["imposters"]
+            .as_array()
+            .expect("imposters array")
+            .iter()
+            .filter_map(|i| i["port"].as_u64())
+            .collect();
+        assert!(
+            !ports.contains(&19976),
+            "a rejected configFile must apply nothing, got ports: {ports:?}"
+        );
+
+        rift_stop(h);
+    }
+}
+
+// Issue #616: the same file loads once the host opts in, so the gate is a gate and not a ban.
+#[test]
+fn ffi_serve_admin_config_file_inject_loads_with_allow_injection() {
+    unsafe {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        std::fs::write(&path, scripted_config_json(19977)).expect("write config");
+        let path_json = serde_json::json!(path.to_str().expect("utf8 path"));
+
+        let h = rift_start();
+        let admin = serve_admin(
+            h,
+            &format!(r#"{{"allowInjection": true, "configFile": {path_json}}}"#),
+        );
+        let admin_url = admin["adminUrl"].as_str().expect("adminUrl").to_string();
+
+        rt().block_on(async {
+            let imps: serde_json::Value = reqwest::get(format!("{admin_url}/imposters"))
+                .await
+                .expect("admin /imposters reachable")
+                .json()
+                .await
+                .expect("json");
+            let ports: Vec<u64> = imps["imposters"]
+                .as_array()
+                .expect("imposters array")
+                .iter()
+                .filter_map(|i| i["port"].as_u64())
+                .collect();
+            assert!(
+                ports.contains(&19977),
+                "allowInjection=true must load the scripted configFile, got ports: {ports:?}"
+            );
+        });
+
+        rift_stop(h);
+    }
+}
+
+// Issue #616: the gate must classify, not blanket-reject — a configFile with no scripting surface
+// still loads with allowInjection off.
+#[test]
+fn ffi_serve_admin_config_file_without_script_loads_ungated() {
+    unsafe {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        std::fs::write(
+            &path,
+            r#"{"imposters": [{"port": 19978, "protocol": "http",
+                 "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "plain"}}]}]}]}"#,
+        )
+        .expect("write config");
+        let path_json = serde_json::json!(path.to_str().expect("utf8 path"));
+
+        let h = rift_start();
+        let admin = serve_admin(
+            h,
+            &format!(r#"{{"allowInjection": false, "configFile": {path_json}}}"#),
+        );
+        let admin_url = admin["adminUrl"].as_str().expect("adminUrl").to_string();
+
+        rt().block_on(async {
+            let imps: serde_json::Value = reqwest::get(format!("{admin_url}/imposters"))
+                .await
+                .expect("admin /imposters reachable")
+                .json()
+                .await
+                .expect("json");
+            let ports: Vec<u64> = imps["imposters"]
+                .as_array()
+                .expect("imposters array")
+                .iter()
+                .filter_map(|i| i["port"].as_u64())
+                .collect();
+            assert!(
+                ports.contains(&19978),
+                "a non-scripted configFile must load with allowInjection off, got ports: {ports:?}"
+            );
+        });
+
+        rift_stop(h);
+    }
+}
+
 // Issue #492: `allowInjection` gates only imposters submitted THROUGH the running admin plane.
 // A script imposter supplied via rift_serve_admin's own `config` (startup) is applied directly by
 // the manager — the trusted host path — so it is created even with allowInjection off. This pins
 // that intentional asymmetry so a future change can't silently start gating the startup path.
+//
+// Issue #616 reaffirmed this: `allowInjection` gates untrusted config *documents*, not untrusted
+// *hosts*. An in-process caller that can pass this JSON can already run code in the process and
+// could hand the same document to the ungated `rift_apply_config`, so gating it would restrict
+// nobody. `configFile` is gated (see above) because its content comes off disk, not from the host.
 #[test]
 fn ffi_serve_admin_inline_config_inject_is_ungated() {
     unsafe {

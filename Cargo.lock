@@ -3309,6 +3309,7 @@ dependencies = [
  "rift-mock-core",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]

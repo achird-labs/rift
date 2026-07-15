@@ -37,6 +37,7 @@ use rift_http_proxy::admin_api::{
     AdminApiServer, RunningAdminApi, filter_proxy_responses, filter_proxy_stubs,
 };
 use rift_http_proxy::config_loader::{self, ConfigSource};
+use rift_http_proxy::injection_gate;
 use rift_http_proxy::intercept_control::{
     InterceptControl, InterceptStartError, InterceptStartOptions, InterceptStatus,
 };
@@ -221,9 +222,13 @@ struct ServeOptions {
     metrics_port: Option<u16>,
     config_file: Option<String>,
     config: Option<Value>,
-    /// Gate script/inject imposters submitted THROUGH the admin plane (issue #492). Default false,
-    /// preserving the previous behavior. Direct FFI calls (`rift_create_imposter`, …) are ungated
-    /// by design — the host process is already trusted; this only governs the in-process admin API.
+    /// Gate script/inject imposters that reach Rift across a trust boundary: submitted THROUGH the
+    /// admin plane (issue #492) or read off disk via `configFile` (issue #616). Default false,
+    /// preserving the previous behavior.
+    ///
+    /// In-process config from the embedding host — `config` below, `rift_apply_config`,
+    /// `rift_create_imposter` — is ungated by design: that host can already execute code in this
+    /// process, so gating its own JSON would restrict nobody.
     allow_injection: Option<bool>,
 }
 
@@ -1740,6 +1745,30 @@ fn warn_failed(report: &ApplyReport, source: &str) {
     }
 }
 
+/// The rejection for a `configFile` whose imposters need `allowInjection` (issue #616), or `None`
+/// when every imposter is admissible. One message listing every offender, so a host fixing the file
+/// sees all of them at once.
+///
+/// `configFile` names a path, and the content behind it is read off disk — it is not necessarily
+/// authored by the embedding host, so it crosses a trust boundary and is gated exactly like the
+/// CLI's `--configfile` (issue #612). The host's own in-process config (`config`,
+/// `rift_apply_config`, `rift_create_imposter`) is the trusted path and stays ungated (issue #492).
+fn gated_config_file_error(configs: &[ImposterConfig], allow_injection: bool) -> Option<String> {
+    if allow_injection {
+        return None;
+    }
+    let offenders = injection_gate::gated_offender_ports(configs);
+    if offenders.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "configFile load: imposter(s) on port(s) {} use {}, which require allowInjection. \
+         Set \"allowInjection\": true to allow this, or remove the scripting from the config.",
+        offenders.join(", "),
+        injection_gate::GATED_SCRIPT_SURFACES,
+    ))
+}
+
 /// Bind the admin (and optional metrics) plane per `opts`, returning the plane plus the JSON
 /// response body. Errors are `String`s (mapped to `last_error` by the caller).
 async fn build_admin_plane(
@@ -1749,6 +1778,7 @@ async fn build_admin_plane(
     let host = opts.host.as_deref().unwrap_or("127.0.0.1");
     let port = opts.port.unwrap_or(0);
     let api_key = opts.api_key.clone();
+    let allow_injection = opts.allow_injection.unwrap_or(false);
 
     // Parse both addresses up front, before any side effects (imposter creation / binding).
     let addr: SocketAddr = format!("{host}:{port}")
@@ -1776,6 +1806,9 @@ async fn build_admin_plane(
             };
             let configs = config_loader::load_configs(&source)
                 .map_err(|e| format!("configFile load: {e}"))?;
+            if let Some(err) = gated_config_file_error(&configs, allow_injection) {
+                return Err(err);
+            }
             let report = handle
                 .manager
                 .apply_config(configs)
@@ -1814,7 +1847,7 @@ async fn build_admin_plane(
     // `rift_start_intercept` is then visible to `GET /intercept`, and `POST /intercept` feeds
     // `rift_intercept_add_rules` — a double-start across surfaces 409s/-1s consistently.
     let mut server = AdminApiServer::new(addr, Arc::clone(&handle.manager), api_key)
-        .with_allow_injection(opts.allow_injection.unwrap_or(false))
+        .with_allow_injection(allow_injection)
         .with_intercept(handle.intercept.clone());
     if let Some(source) = config_source {
         server = server.with_config_source(source);

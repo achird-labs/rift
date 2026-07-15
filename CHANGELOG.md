@@ -64,6 +64,22 @@ record.
 
 ### Security
 
+- **`allowInjection` is now enforced on the FFI's `configFile` door (`rift_serve_admin`).** The
+  embedded admin plane honoured `allowInjection` for imposters submitted through it, but the
+  `configFile` option loaded and executed a scripted imposter regardless — so an embedding host
+  that passed `allowInjection: false` and pointed Rift at a config file it did not fully control
+  (ops-provisioned, mounted, edited out-of-band) still ran `inject`/`decorate`/`shellTransform`/
+  JS-function `wait`. This was the last door left open by the previous entry, which closed the
+  CLI's `--configfile`/`--datadir`. A scripted `configFile` now fails the serve outright — `NULL`
+  plus a `rift_last_error` naming the offending ports — so nothing is applied.
+
+  **Unchanged, and deliberately so:** in-process config from the embedding host — the inline
+  `config` option, `rift_apply_config`, `rift_create_imposter` — remains **ungated**. The gate's
+  subject is a config *document that crossed a trust boundary*, not the host: a caller holding the
+  C-ABI can already execute code in the process, so gating its own JSON would restrict nobody while
+  breaking hosts that legitimately drive script imposters over the C-ABI. The trust boundary is now
+  documented in `docs/embedding/ffi.md`.
+
 - **A function `wait` requires `--allowInjection` in both spellings.** The `--allowInjection`
   admission gate classified only the bare-string function wait as a scripting surface, so the
   newly-accepted `{"inject": ...}` form would have executed JavaScript with injection disabled.

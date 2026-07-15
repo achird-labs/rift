@@ -110,12 +110,27 @@ rift_free(result);
   `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"config":null,"allowInjection":false}`.
   `port: 0` binds an ephemeral port; `configFile` is loaded as the reload source (like `--configfile`);
   `config` is an inline `{"imposters":[...]}`. `configFile` and `config` do not compose — pass one.
-- **`allowInjection`** (default `false`): whether the admin plane accepts script/`inject` imposters
-  submitted **through it** (`POST /imposters` etc.), mirroring the `--allowInjection` CLI flag.
-  Note the deliberate asymmetry: **direct FFI calls** (`rift_create_imposter`, `rift_replace_stubs`,
-  …) are **ungated** — the host process is already trusted, so script imposters always work over the
-  C-ABI. `allowInjection` only governs the in-process HTTP admin surface; leave it `false` unless you
-  expose that surface to less-trusted callers and want script imposters permitted there too.
+- **`allowInjection`** (default `false`): whether Rift admits script/`inject` imposters
+  (`inject`/`decorate`/`shellTransform`/JS-function `wait`/`_rift.script`), mirroring the
+  `--allowInjection` CLI flag. Leave it `false` unless you intend to permit them.
+
+  **What the gate protects.** `allowInjection` gates config **documents that cross a trust
+  boundary**, not untrusted *hosts*. A config the embedding host hands over in-process is trusted;
+  one that arrives over HTTP or is read off disk is not:
+
+  | Door | Gated by `allowInjection`? | Why |
+  |---|---|---|
+  | Admin plane (`POST /imposters`, …) | **yes** (#492) | Arrives over HTTP, possibly from a less-trusted caller |
+  | `configFile` | **yes** (#616) | A path dereferenced to disk content the host may not have authored — ops-provisioned, mounted, or edited out-of-band. Same class as the CLI's `--configfile`/`--datadir` |
+  | `POST /admin/reload` (re-reads `configFile`) | **yes** (#612) | Same file, same flag — a file edited to add scripting after a clean start is refused on reload |
+  | Inline `config` | no (#492) | Authored in-process by the host |
+  | `rift_create_imposter`, `rift_replace_stubs`, `rift_apply_config`, … | no (#492) | Authored in-process by the host |
+
+  The in-process doors are **ungated by design**, not an oversight: a caller who can reach the
+  C-ABI can already execute code in this process, so gating its own JSON would restrict nobody
+  while breaking hosts that legitimately drive script imposters over the C-ABI. If you load config
+  from a file you do not fully control, keep `allowInjection: false` — a scripted `configFile` then
+  fails the serve outright (`NULL` + `rift_last_error`) rather than loading, so nothing is applied.
 - **Returns** (caller frees): `{"adminPort":...,"adminUrl":"...","metricsPort":...}`, or `NULL` on
   error (bad JSON, bind failure, or already serving — one admin plane per handle).
 

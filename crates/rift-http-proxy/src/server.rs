@@ -10,6 +10,7 @@ use crate::extensions::metrics;
 use crate::imposter::{
     ImposterConfig, ImposterManager, ScriptBaseDir, TlsDefaults, resolve_scripts,
 };
+use crate::injection_gate::GATED_SCRIPT_SURFACES;
 use crate::intercept_control::{InterceptControl, InterceptStartOptions};
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
@@ -659,10 +660,6 @@ async fn metrics_accept_loop(
     Ok(())
 }
 
-/// The gated surfaces, named the same way by every door (issue #612). The list only — each door
-/// appends its own clause, so this must not carry one.
-const GATED_SCRIPT_SURFACES: &str = "inject/decorate/shellTransform/JS-function wait";
-
 /// The startup error for a `--configfile` whose imposters need `--allowInjection` (issue #612),
 /// or `None` when every imposter is admissible. One message listing every offender, so the
 /// operator fixes the file in a single pass instead of restarting into the next error.
@@ -674,14 +671,7 @@ fn configfile_injection_error(
     if allow_injection {
         return None;
     }
-    let offenders: Vec<String> = configs
-        .iter()
-        .filter(|config| crate::injection_gate::config_uses_script_surface(config))
-        .map(|config| match config.port {
-            Some(port) => port.to_string(),
-            None => "<auto-assigned>".to_string(),
-        })
-        .collect();
+    let offenders = crate::injection_gate::gated_offender_ports(configs);
     if offenders.is_empty() {
         return None;
     }
