@@ -10,12 +10,14 @@
 //! It is entirely opt-in: nothing runs until [`InterceptListener::bind`] is called, so the
 //! default imposter-on-a-port model is unchanged.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::intercept_rules::{InterceptAction, InterceptRules, ServeStub};
+use base64::Engine;
 use rift_mock_core::proxy::intercept_ca::SniCertResolver;
 use rustls::ServerConfig;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -220,9 +222,7 @@ async fn handle_connection(
         }
         None => None,
     };
-    let body = body_bytes
-        .as_deref()
-        .map(|b| String::from_utf8_lossy(b).into_owned());
+    let body = body_bytes.as_deref().map(classify_intercept_body);
 
     let action = rules.match_request(
         &target.host,
@@ -503,6 +503,19 @@ fn parse_connect(head: &[u8]) -> Option<ConnectTarget> {
 
 /// Parse the request line and header block of an intercepted request into `(method, path, query,
 /// headers)`. Header names are lowercased so lookups (e.g. `content-length`) are case-insensitive.
+/// Classify an intercepted request body for rule matching (issue #646): valid UTF-8 is matched
+/// as-is (borrowed, no copy); a binary body (protobuf, gzip, an image) is matched against its
+/// standard base64 encoding — the same convention as recorded requests (#636) and binary
+/// responses (#117). `from_utf8_lossy` used to replace every invalid byte with U+FFFD, so body
+/// predicates evaluated against garbage the client never sent. Forwarding is unaffected: it
+/// sends the raw `body_bytes`.
+fn classify_intercept_body(bytes: &[u8]) -> Cow<'_, str> {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Cow::Borrowed(text),
+        Err(_) => Cow::Owned(base64::engine::general_purpose::STANDARD.encode(bytes)),
+    }
+}
+
 fn parse_request_head(head: &[u8]) -> (String, String, Option<String>, HashMap<String, String>) {
     let text = String::from_utf8_lossy(head);
     let mut lines = text.split("\r\n");
@@ -557,6 +570,97 @@ mod tests {
             !logs_contain("accept loop ended abnormally"),
             "a clean shutdown logs nothing"
         );
+    }
+
+    // Issue #646: a binary intercepted body must reach rule matching as lossless base64, not
+    // `from_utf8_lossy`'s U+FFFD-mangled garbage.
+    #[test]
+    fn classify_intercept_body_base64_round_trips_invalid_utf8() {
+        let original: &[u8] = &[0xFF, 0xFE, 0x00, 0x01, 0x02];
+        let classified = classify_intercept_body(original);
+        assert!(
+            !classified.contains('\u{FFFD}'),
+            "no replacement-character corruption"
+        );
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(classified.as_ref())
+            .expect("valid standard base64");
+        assert_eq!(decoded, original, "classification is lossless");
+    }
+
+    #[test]
+    fn classify_intercept_body_text_passthrough() {
+        let classified = classify_intercept_body(b"hello world");
+        assert_eq!(
+            classified.as_ref(),
+            "hello world",
+            "valid UTF-8 matches as-is; text traffic behaviour is unchanged"
+        );
+        assert!(
+            matches!(classified, Cow::Borrowed(_)),
+            "text bodies must not pay an allocation (issue #561 convention)"
+        );
+        assert_eq!(
+            classify_intercept_body(b"").as_ref(),
+            "",
+            "an empty body classifies as empty text, matching the pre-fix behaviour"
+        );
+    }
+
+    // Issue #646 end-to-end semantic: a body predicate written against the base64 string matches
+    // a binary body, and a predicate written against the old lossy garbage no longer does.
+    #[test]
+    fn binary_body_predicate_matches_base64_not_lossy_garbage() {
+        let binary: &[u8] = &[0x1F, 0x8B, 0x08, 0x00, 0xFF, 0xFE];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(binary);
+        let lossy = String::from_utf8_lossy(binary).into_owned();
+        assert_ne!(b64, lossy, "the two conventions must be distinguishable");
+
+        let body_equals = |needle: &str| -> rift_types::Predicate {
+            serde_json::from_value(serde_json::json!({ "equals": { "body": needle } }))
+                .expect("valid predicate JSON")
+        };
+        let serve = |marker: &str| {
+            InterceptAction::Serve(ServeStub {
+                status_code: 200,
+                headers: HashMap::new(),
+                body: Some(marker.to_string()),
+            })
+        };
+
+        let rules = InterceptRules::new();
+        rules
+            .add(InterceptRule {
+                host: None,
+                predicates: vec![body_equals(&lossy)],
+                action: serve("lossy"),
+            })
+            .unwrap();
+        rules
+            .add(InterceptRule {
+                host: None,
+                predicates: vec![body_equals(&b64)],
+                action: serve("base64"),
+            })
+            .unwrap();
+
+        let classified = classify_intercept_body(binary);
+        let action = rules.match_request(
+            "cdn.example.com",
+            "POST",
+            "/upload",
+            None,
+            &HashMap::new(),
+            Some(classified.as_ref()),
+        );
+        match action {
+            Some(InterceptAction::Serve(stub)) => assert_eq!(
+                stub.body.as_deref(),
+                Some("base64"),
+                "the base64-keyed rule matches; the lossy-keyed rule does not"
+            ),
+            other => panic!("expected the base64-keyed serve rule to match, got {other:?}"),
+        }
     }
 
     #[test]
@@ -709,6 +813,54 @@ mod tests {
         assert_eq!(resp.headers().get("x-rift").unwrap(), "1");
         let body = resp.text().await.unwrap();
         assert!(body.contains("brewed"), "got: {body}");
+
+        listener.shutdown().await;
+    }
+
+    // Issue #646, call-site guard: drives the live listener path, so it fails if
+    // `handle_connection` is ever rewired to hand the lossy string (rather than the classified
+    // base64 one) to rule matching — the helper's own unit tests cannot catch that.
+    #[tokio::test]
+    async fn binary_body_matches_base64_keyed_rule_through_live_listener() {
+        let binary: &[u8] = &[0x1F, 0x8B, 0x08, 0x00, 0xFF, 0xFE];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(binary);
+        assert_ne!(
+            b64,
+            String::from_utf8_lossy(binary),
+            "the two conventions must be distinguishable"
+        );
+
+        let rules = InterceptRules::new();
+        rules
+            .add(InterceptRule {
+                host: None,
+                predicates: vec![
+                    serde_json::from_value(serde_json::json!({ "equals": { "body": b64 } }))
+                        .expect("valid predicate JSON"),
+                ],
+                action: InterceptAction::Serve(ServeStub {
+                    status_code: 418,
+                    headers: HashMap::new(),
+                    body: Some("matched-binary".to_string()),
+                }),
+            })
+            .unwrap();
+        let (listener, ca_pem) = start_listener(rules).await;
+        let proxy_url = format!("http://{}", listener.local_addr());
+        let client = trusting_client(&proxy_url, &ca_pem);
+
+        let resp = client
+            .post("https://cdn.example.com/upload")
+            .body(binary.to_vec())
+            .send()
+            .await
+            .expect("request intercepted");
+        assert_eq!(
+            resp.status(),
+            418,
+            "the base64-keyed body predicate must match the raw binary body \
+             (a lossy-classified body falls through to the 200 echo)"
+        );
 
         listener.shutdown().await;
     }
