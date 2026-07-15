@@ -1,11 +1,12 @@
 use crate::scripting::FaultDecision;
 use lru::LruCache;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 /// Configuration for the decision cache
 #[derive(Clone, Debug)]
@@ -17,6 +18,8 @@ pub struct DecisionCacheConfig {
     pub max_size: usize,
     /// TTL for cache entries in seconds (0 = no expiration)
     pub ttl_seconds: u64,
+    /// Headers that participate in the cache key. `None` keys on every header (issue #630).
+    pub key_headers: Option<Vec<String>>,
 }
 
 impl Default for DecisionCacheConfig {
@@ -25,6 +28,7 @@ impl Default for DecisionCacheConfig {
             enabled: true,
             max_size: 10000,
             ttl_seconds: 300, // 5 minutes
+            key_headers: None,
         }
     }
 }
@@ -124,6 +128,19 @@ impl CacheMetrics {
     }
 }
 
+/// A cache doing no useful work is worse than no cache — it pays hashing, allocation and lock
+/// traffic per request and returns nothing — but nothing consumes `metrics()`, so the state is
+/// otherwise invisible (issue #630). These bound a once-per-process warning.
+const DEGENERATE_MIN_LOOKUPS: u64 = 4096;
+const DEGENERATE_HIT_RATE: f64 = 0.01;
+
+/// True when enough lookups have happened to judge, and effectively none of them hit. Pure so the
+/// threshold logic is testable without a log-capture subscriber.
+fn is_degenerate(hits: u64, misses: u64) -> bool {
+    let total = hits + misses;
+    total >= DEGENERATE_MIN_LOOKUPS && (hits as f64 / total as f64) < DEGENERATE_HIT_RATE
+}
+
 /// Counters kept outside the cache lock. Each is updated independently, so a `metrics()` snapshot
 /// is not a consistent point-in-time view across counters — nothing consumes them that way today.
 #[derive(Debug, Default)]
@@ -147,6 +164,9 @@ pub struct DecisionCache {
     /// under the exclusive lock on every steady-state insert.
     cache: Option<Mutex<LruCache<CacheKey, CacheEntry>>>,
     metrics: AtomicMetrics,
+    /// Latches the degenerate-cache warning so a pathological key shape is reported once, not
+    /// once per request.
+    degenerate_warned: AtomicBool,
 }
 
 impl DecisionCache {
@@ -166,6 +186,7 @@ impl DecisionCache {
             config,
             cache,
             metrics: AtomicMetrics::default(),
+            degenerate_warned: AtomicBool::new(false),
         }
     }
 
@@ -199,9 +220,58 @@ impl DecisionCache {
             }
             None => {
                 trace!("Cache miss for key: {:?}", key);
-                self.metrics.misses.fetch_add(1, Ordering::Relaxed);
+                let misses = self.metrics.misses.fetch_add(1, Ordering::Relaxed) + 1;
+                // Sampled: the check reads a second atomic and does a float divide, so it must not
+                // ride every miss. Only the true-miss arm samples — an expiring entry means the key
+                // IS being reused, which is the opposite of the shape being detected.
+                if misses.is_multiple_of(DEGENERATE_MIN_LOOKUPS) {
+                    self.warn_if_degenerate(misses);
+                }
                 None
             }
+        }
+    }
+
+    /// Report a cache that is doing no useful work — once per process (issue #630).
+    ///
+    /// The usual cause is a per-request-unique header (`x-request-id`, `traceparent`, `date`) in
+    /// the key, which makes every key unique: 0% hits, and the cache is pure overhead on the hot
+    /// path. Without this the state is silent, because nothing reads `metrics()`.
+    fn warn_if_degenerate(&self, misses: u64) {
+        let hits = self.metrics.hits.load(Ordering::Relaxed);
+        if !is_degenerate(hits, misses) {
+            return;
+        }
+        if self.degenerate_warned.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        warn!(
+            hits,
+            misses,
+            "decision cache hit rate is ~0%: it is costing more than it saves. A per-request-unique \
+             header (x-request-id, traceparent, date) in the cache key makes every key unique — set \
+             `scripting.decision_cache.key_headers` to the headers your scripts actually read."
+        );
+    }
+
+    /// The header subset that participates in the cache key (issue #630).
+    ///
+    /// `None` keys on every header — correct but degenerate whenever any header is per-request
+    /// unique. `Some(allow)` is the user asserting their scripts' decisions depend on at most
+    /// those headers; the key cannot be narrowed automatically, because the cached value is a
+    /// user script's decision and the script is handed every header. Matching is
+    /// case-insensitive: config is human-written (`X-Tenant`), the wire name arrives lowercased.
+    pub fn key_headers(&self, headers: &HashMap<String, String>) -> Vec<(String, String)> {
+        match &self.config.key_headers {
+            None => headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            Some(allow) => headers
+                .iter()
+                .filter(|(k, _)| allow.iter().any(|a| a.eq_ignore_ascii_case(k)))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         }
     }
 
@@ -351,6 +421,7 @@ mod tests {
             enabled: true,
             max_size: 100,
             ttl_seconds: 0, // No expiration for this test
+            key_headers: None,
         };
 
         let cache = DecisionCache::new(config);
@@ -396,6 +467,7 @@ mod tests {
             enabled: true,
             max_size: 100,
             ttl_seconds: 1, // 1 second TTL
+            key_headers: None,
         };
 
         let cache = DecisionCache::new(config);
@@ -431,6 +503,7 @@ mod tests {
             enabled: true,
             max_size: 3,
             ttl_seconds: 0,
+            key_headers: None,
         };
 
         let cache = DecisionCache::new(config);
@@ -504,6 +577,7 @@ mod tests {
             enabled: false,
             max_size: 100,
             ttl_seconds: 0,
+            key_headers: None,
         };
 
         let cache = DecisionCache::new(config);
@@ -582,6 +656,7 @@ mod tests {
             enabled: true,
             max_size: 100,
             ttl_seconds: 1,
+            key_headers: None,
         };
 
         let cache = DecisionCache::new(config);
@@ -631,6 +706,7 @@ mod tests {
             enabled: true,
             max_size: 0,
             ttl_seconds: 0,
+            key_headers: None,
         });
 
         cache.insert(key_n(0), FaultDecision::None);
@@ -648,6 +724,7 @@ mod tests {
             enabled: true,
             max_size: 1,
             ttl_seconds: 0,
+            key_headers: None,
         });
 
         cache.insert(key_n(0), FaultDecision::None);
@@ -668,6 +745,7 @@ mod tests {
             enabled: true,
             max_size: MAX,
             ttl_seconds: 0,
+            key_headers: None,
         });
 
         for i in 0..(MAX + OVERFLOW) {
@@ -692,6 +770,7 @@ mod tests {
             enabled: true,
             max_size: MAX,
             ttl_seconds: 0,
+            key_headers: None,
         });
 
         for i in 0..MAX {
@@ -732,6 +811,7 @@ mod tests {
             enabled: true,
             max_size: 16,
             ttl_seconds: 0,
+            key_headers: None,
         }));
 
         let threads: Vec<_> = (0..8)
@@ -752,5 +832,118 @@ mod tests {
         }
 
         assert!(cache.size() <= 16, "cache must stay bounded under races");
+    }
+
+    fn cfg_with_key_headers(key_headers: Option<Vec<String>>) -> DecisionCache {
+        DecisionCache::new(DecisionCacheConfig {
+            enabled: true,
+            max_size: 16,
+            ttl_seconds: 0,
+            key_headers,
+        })
+    }
+
+    fn headers_of(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    fn key_from(cache: &DecisionCache, headers: &HashMap<String, String>) -> CacheKey {
+        CacheKey::new(
+            "GET".to_string(),
+            "/api".to_string(),
+            cache.key_headers(headers),
+            &json!({}),
+            "rule1".to_string(),
+        )
+    }
+
+    /// Default (`None`) must key on every header — byte-identical to pre-#630 behaviour.
+    #[test]
+    fn key_headers_none_keys_on_every_header() {
+        let cache = cfg_with_key_headers(None);
+        let a = key_from(
+            &cache,
+            &headers_of(&[("x-tenant", "t1"), ("x-request-id", "r1")]),
+        );
+        let b = key_from(
+            &cache,
+            &headers_of(&[("x-tenant", "t1"), ("x-request-id", "r2")]),
+        );
+        assert_ne!(
+            a, b,
+            "with no allowlist every header participates, so a differing x-request-id must split the key"
+        );
+    }
+
+    /// The whole point of #630: a per-request-unique header must not split the key once the user
+    /// has declared what their scripts actually read.
+    #[test]
+    fn key_headers_allowlist_ignores_unlisted_headers() {
+        let cache = cfg_with_key_headers(Some(vec!["x-tenant".to_string()]));
+        let a = key_from(
+            &cache,
+            &headers_of(&[("x-tenant", "t1"), ("x-request-id", "r1")]),
+        );
+        let b = key_from(
+            &cache,
+            &headers_of(&[("x-tenant", "t1"), ("x-request-id", "r2")]),
+        );
+        assert_eq!(a, b, "an unlisted header must not participate in the key");
+    }
+
+    #[test]
+    fn key_headers_allowlist_still_splits_on_listed_headers() {
+        let cache = cfg_with_key_headers(Some(vec!["x-tenant".to_string()]));
+        let a = key_from(
+            &cache,
+            &headers_of(&[("x-tenant", "t1"), ("x-request-id", "r1")]),
+        );
+        let b = key_from(
+            &cache,
+            &headers_of(&[("x-tenant", "t2"), ("x-request-id", "r1")]),
+        );
+        assert_ne!(a, b, "a listed header must still split the key");
+    }
+
+    /// Config is written by humans (`X-Tenant`); hyper lowercases the wire name (`x-tenant`).
+    #[test]
+    fn key_headers_allowlist_is_case_insensitive() {
+        let cache = cfg_with_key_headers(Some(vec!["X-Tenant".to_string()]));
+        let kept = cache.key_headers(&headers_of(&[("x-tenant", "t1"), ("x-request-id", "r1")]));
+        assert_eq!(
+            kept,
+            vec![("x-tenant".to_string(), "t1".to_string())],
+            "a config-cased allowlist entry must match the lowercased wire header"
+        );
+    }
+
+    /// An empty allowlist is a legitimate declaration: "no header affects my decisions".
+    #[test]
+    fn key_headers_empty_allowlist_drops_all_headers() {
+        let cache = cfg_with_key_headers(Some(vec![]));
+        assert!(
+            cache
+                .key_headers(&headers_of(&[("x-tenant", "t1")]))
+                .is_empty(),
+            "an empty allowlist keys on no headers at all"
+        );
+    }
+
+    #[test]
+    fn degenerate_cache_is_detected_only_after_enough_lookups_and_below_the_floor() {
+        // Too few lookups to judge, even at 0%.
+        assert!(!is_degenerate(0, DEGENERATE_MIN_LOOKUPS - 1));
+        // ~0% hit rate over a meaningful sample: the #630 condition.
+        assert!(is_degenerate(0, DEGENERATE_MIN_LOOKUPS));
+        assert!(is_degenerate(1, DEGENERATE_MIN_LOOKUPS * 100));
+        // A healthy cache must never trip it.
+        assert!(!is_degenerate(
+            DEGENERATE_MIN_LOOKUPS,
+            DEGENERATE_MIN_LOOKUPS
+        ));
+        assert!(!is_degenerate(50, 50));
     }
 }

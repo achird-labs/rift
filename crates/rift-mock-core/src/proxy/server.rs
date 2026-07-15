@@ -201,6 +201,7 @@ impl ProxyServer {
                     enabled: cache_cfg.enabled,
                     max_size: cache_cfg.max_size,
                     ttl_seconds: cache_cfg.ttl_seconds,
+                    key_headers: cache_cfg.key_headers.clone(),
                 }
             } else {
                 DecisionCacheConfig::default()

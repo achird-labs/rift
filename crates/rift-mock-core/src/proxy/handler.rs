@@ -190,24 +190,28 @@ async fn handle_script_rules(
     // Parse query parameters from URI
     let query_params = crate::predicate::parse_query_string(request_info.uri.query());
 
+    // Key first: `key_headers` only borrows, so the map can then move into the script request
+    // rather than being cloned (it was cloned only because the old key build consumed it).
+    //
+    // Only the KEY is filtered — the script still receives every header, which is what makes the
+    // allowlist a user assertion rather than something rift could infer (issue #630).
+    let cache_key = CacheKey::new(
+        request_info.method.to_string(),
+        request_info.uri.path().to_string(),
+        scripting.decision_cache.key_headers(&headers_map),
+        &body_json,
+        compiled_rule.id.clone(),
+    );
+
     let script_request = ScriptRequest {
         raw_body: Some(String::from_utf8_lossy(&body_bytes).into_owned()),
         method: request_info.method.to_string(),
         path: request_info.uri.path().to_string(),
-        headers: headers_map.clone(),
+        headers: headers_map,
         body: body_json.clone(),
         query: query_params,
         path_params: HashMap::new(),
     };
-
-    // Create cache key
-    let cache_key = CacheKey::new(
-        request_info.method.to_string(),
-        request_info.uri.path().to_string(),
-        headers_map.into_iter().collect(),
-        &body_json,
-        compiled_rule.id.clone(),
-    );
 
     // Determine if caching should be used
     // If flow_state is configured (not NoOpFlowStore), disable caching
