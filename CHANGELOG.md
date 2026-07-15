@@ -11,6 +11,8 @@ record.
 
 ## [Unreleased]
 
+## [0.13.6] - 2026-07-15
+
 ### Fixed
 
 - **Binary request bodies are no longer silently corrupted when recorded or handed to scripts.**
@@ -705,7 +707,8 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.13.5...HEAD
+[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.13.6...HEAD
+[0.13.6]: https://github.com/EtaCassiopeia/rift/compare/v0.13.5...v0.13.6
 [0.13.5]: https://github.com/EtaCassiopeia/rift/compare/v0.13.4...v0.13.5
 [0.13.4]: https://github.com/EtaCassiopeia/rift/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/EtaCassiopeia/rift/compare/v0.13.2...v0.13.3
