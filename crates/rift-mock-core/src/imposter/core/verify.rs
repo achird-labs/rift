@@ -313,9 +313,9 @@ mod tests {
     #[test]
     fn matched_and_total_count_all_predicates_anded() {
         let imp = imposter(None);
-        imp.record_request(&rec("GET", "/a", &[], None));
-        imp.record_request(&rec("POST", "/a", &[], None));
-        imp.record_request(&rec("GET", "/b", &[], None));
+        imp.record_request(rec("GET", "/a", &[], None));
+        imp.record_request(rec("POST", "/a", &[], None));
+        imp.record_request(rec("GET", "/b", &[], None));
 
         let opts = VerifyOptions {
             predicates: preds(json!([{ "equals": { "method": "GET", "path": "/a" } }])),
@@ -331,8 +331,8 @@ mod tests {
     #[test]
     fn empty_predicates_match_everything() {
         let imp = imposter(None);
-        imp.record_request(&rec("GET", "/a", &[], None));
-        imp.record_request(&rec("GET", "/b", &[], None));
+        imp.record_request(rec("GET", "/a", &[], None));
+        imp.record_request(rec("GET", "/b", &[], None));
         let out = imp.verify(&VerifyOptions::default()).expect("verify");
         assert_eq!(out.matched, 2);
         assert_eq!(out.total, 2);
@@ -341,9 +341,9 @@ mod tests {
     #[test]
     fn include_requests_returns_the_matching_requests() {
         let imp = imposter(None);
-        imp.record_request(&rec("GET", "/keep", &[], None));
-        imp.record_request(&rec("GET", "/drop", &[], None));
-        imp.record_request(&rec("GET", "/keep", &[], None));
+        imp.record_request(rec("GET", "/keep", &[], None));
+        imp.record_request(rec("GET", "/drop", &[], None));
+        imp.record_request(rec("GET", "/keep", &[], None));
 
         let opts = VerifyOptions {
             predicates: preds(json!([{ "equals": { "path": "/keep" } }])),
@@ -360,9 +360,9 @@ mod tests {
     fn closest_picks_most_satisfied_clauses_and_reports_failures() {
         let imp = imposter(None);
         // Satisfies neither clause.
-        imp.record_request(&rec("DELETE", "/x", &[], None));
+        imp.record_request(rec("DELETE", "/x", &[], None));
         // Satisfies method only (1 of 2) — the closest.
-        imp.record_request(&rec("GET", "/x", &[], None));
+        imp.record_request(rec("GET", "/x", &[], None));
 
         let opts = VerifyOptions {
             predicates: preds(json!([
@@ -387,8 +387,8 @@ mod tests {
         let imp = imposter(None);
         // Both satisfy the method clause (1 of 1 failing overall since path never matches),
         // so the tie is broken toward the later-recorded request.
-        imp.record_request(&rec("GET", "/first", &[], None));
-        imp.record_request(&rec("GET", "/second", &[], None));
+        imp.record_request(rec("GET", "/first", &[], None));
+        imp.record_request(rec("GET", "/second", &[], None));
 
         let opts = VerifyOptions {
             predicates: preds(json!([
@@ -409,9 +409,9 @@ mod tests {
     #[test]
     fn flow_id_scopes_total_and_matched() {
         let imp = imposter(Some("header:X-Space"));
-        imp.record_request(&rec("GET", "/a", &[("X-Space", "blue")], None));
-        imp.record_request(&rec("GET", "/a", &[("X-Space", "green")], None));
-        imp.record_request(&rec("GET", "/a", &[("X-Space", "blue")], None));
+        imp.record_request(rec("GET", "/a", &[("X-Space", "blue")], None));
+        imp.record_request(rec("GET", "/a", &[("X-Space", "green")], None));
+        imp.record_request(rec("GET", "/a", &[("X-Space", "blue")], None));
 
         let opts = VerifyOptions {
             predicates: preds(json!([{ "equals": { "path": "/a" } }])),
@@ -427,8 +427,8 @@ mod tests {
     fn flow_id_scopes_under_the_default_imposter_port_source() {
         // With no flow_id_source declared, every request's flow is the imposter port ("0" here).
         let imp = imposter(None);
-        imp.record_request(&rec("GET", "/a", &[], None));
-        imp.record_request(&rec("GET", "/a", &[], None));
+        imp.record_request(rec("GET", "/a", &[], None));
+        imp.record_request(rec("GET", "/a", &[], None));
 
         let matching = VerifyOptions {
             flow_id: Some("0".to_string()),
@@ -450,7 +450,7 @@ mod tests {
         // Regression: the `ip` field must compare against the bare IP recovered from `request_from`
         // (`ip:port`), not an empty string — otherwise every `ip` predicate silently mis-counts.
         let imp = imposter(None);
-        imp.record_request(&rec("GET", "/a", &[], None)); // request_from = 127.0.0.1:5000
+        imp.record_request(rec("GET", "/a", &[], None)); // request_from = 127.0.0.1:5000
 
         let opts = VerifyOptions {
             predicates: preds(json!([{ "equals": { "ip": "127.0.0.1" } }])),
@@ -464,7 +464,7 @@ mod tests {
         // A header recorded with two values collapses to its last, mirroring live matching's
         // single-value view.
         let imp = imposter(None);
-        imp.record_request(&rec(
+        imp.record_request(rec(
             "GET",
             "/a",
             &[("X-Dup", "first"), ("X-Dup", "second")],
@@ -493,7 +493,7 @@ mod tests {
         // A compound (`or`) predicate implicates no single field, so `actual` is the whole-request
         // view rather than a field-keyed projection.
         let imp = imposter(None);
-        imp.record_request(&rec("GET", "/c", &[], None));
+        imp.record_request(rec("GET", "/c", &[], None));
 
         let opts = VerifyOptions {
             predicates: preds(json!([
@@ -516,7 +516,7 @@ mod tests {
         // A jsonpath/xpath selector rewrites the effective body, so no single request field is
         // implicated — `actual` is the whole-request view.
         let imp = imposter(None);
-        imp.record_request(&rec("POST", "/a", &[], Some(r#"{"foo":"bar"}"#)));
+        imp.record_request(rec("POST", "/a", &[], Some(r#"{"foo":"bar"}"#)));
 
         let opts = VerifyOptions {
             predicates: preds(json!([

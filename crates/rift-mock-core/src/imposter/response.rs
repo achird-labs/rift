@@ -126,7 +126,7 @@ pub fn execute_stub_response_with_rift(
     HashMap<String, Vec<String>>,
     String,
     Option<std::sync::Arc<crate::behaviors::ResponseBehaviors>>,
-    Option<RiftResponseExtension>,
+    Option<&RiftResponseExtension>,
     ResponseMode,
     bool,
 )> {
@@ -168,7 +168,10 @@ pub fn execute_stub_response_with_rift(
                 headers,
                 body,
                 behaviors_parsed.clone(),
-                rift.clone(),
+                // Borrowed, not cloned (issue #561): the lifetime elides from `response`, and
+                // every caller only reads this on the hot path — an owned copy is materialized
+                // only where a caller genuinely needs one (see `execute_stub_with_rift`).
+                rift.as_ref(),
                 mode,
                 false,
             ))

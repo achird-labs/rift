@@ -1435,7 +1435,7 @@ mod tests {
 
         use crate::imposter::journal::MAX_RECORDED_REQUESTS;
         for _ in 0..MAX_RECORDED_REQUESTS + 10 {
-            imposter.record_request(&req);
+            imposter.record_request(req.clone());
         }
 
         let recorded = imposter.get_recorded_requests();
@@ -1471,9 +1471,9 @@ mod tests {
                 timestamp: "2026-01-01T00:00:00Z".to_string(),
             }
         };
-        imposter.record_request(&req("A"));
-        imposter.record_request(&req("B"));
-        imposter.record_request(&req("A"));
+        imposter.record_request(req("A"));
+        imposter.record_request(req("B"));
+        imposter.record_request(req("A"));
         for _ in 0..3 {
             imposter.increment_request_count();
         }

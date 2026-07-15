@@ -34,6 +34,7 @@ use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 
 use rand::Rng;
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -212,16 +213,14 @@ async fn handle_request_inner(
     // Increment request count
     imposter.increment_request_count();
 
-    // Extract parts we need before consuming the request body
-    let method = req.method().to_string();
-    let uri = req.uri().clone();
-    // Clone the original validated HeaderMap up front for the request context, instead of rebuilding
-    // one from the title-cased HashMap below (which re-validated every header per request, issue
-    // #480). `RequestContext::from_request` title-cases the names itself, so the map's own casing
-    // (hyper stores lowercase) does not change the resulting context.
-    let headers_for_context = req.headers().clone();
-    let headers_clone: HashMap<String, String> = req
-        .headers()
+    // Extract parts we need before consuming the request body. `into_parts()` (issue #561) hands
+    // back owned `method`/`uri`/`headers` for free — no `.clone()` needed to get an owned
+    // `HeaderMap` for the request context, unlike the old `req.headers().clone()`.
+    let (parts, body) = req.into_parts();
+    let method = parts.method.to_string();
+    let uri = parts.uri;
+    let headers_for_context = parts.headers;
+    let headers_clone: HashMap<String, String> = headers_for_context
         .iter()
         .map(|(k, v)| {
             (
@@ -235,7 +234,7 @@ async fn handle_request_inner(
     // collapses to one value and stays the single-value view used for matching/context).
     let headers_multi: HashMap<String, Vec<String>> = if imposter.config.record_requests {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
-        for (k, v) in req.headers().iter() {
+        for (k, v) in headers_for_context.iter() {
             map.entry(header_to_title_case(k.as_str()))
                 .or_default()
                 .push(v.to_str().unwrap_or("").to_string());
@@ -256,15 +255,11 @@ async fn handle_request_inner(
     }
 
     // Collect request body with size limit to prevent memory exhaustion
-    let limited_body = Limited::new(req.into_body(), MAX_REQUEST_BODY_SIZE);
-    let body_string = match limited_body.collect().await {
+    let limited_body = Limited::new(body, MAX_REQUEST_BODY_SIZE);
+    let body_bytes = match limited_body.collect().await {
         Ok(collected) => {
             let bytes = collected.to_bytes();
-            if bytes.is_empty() {
-                None
-            } else {
-                Some(String::from_utf8_lossy(&bytes).to_string())
-            }
+            if bytes.is_empty() { None } else { Some(bytes) }
         }
         Err(_) => {
             return Ok(build_response_with_headers(
@@ -276,10 +271,13 @@ async fn handle_request_inner(
             ));
         }
     };
-
-    // Build request context for behaviors
-    let request_context =
-        RequestContext::from_request(&method, &uri, &headers_for_context, body_string.as_deref());
+    // Borrow the body as UTF-8 without forcing an allocation for the common valid-UTF-8 case
+    // (issue #561): `from_utf8_lossy` returns `Cow::Borrowed` then, so only genuinely invalid
+    // UTF-8 pays a copy here. `body_bytes` stays alive for the rest of the function so this
+    // borrow remains valid; callers that need an owned `String` (`RecordedRequest`,
+    // `ScriptRequest`, thread-moved debug/inject requests) materialize one at that boundary.
+    let body_string: Option<std::borrow::Cow<'_, str>> =
+        body_bytes.as_deref().map(String::from_utf8_lossy);
 
     // Record request if enabled
     if imposter.config.record_requests {
@@ -289,10 +287,10 @@ async fn handle_request_inner(
             path: path.clone(),
             query: parse_query_string(&query_str),
             headers: headers_multi,
-            body: body_string.clone(),
+            body: body_string.as_deref().map(str::to_string),
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
-        imposter.record_request(&recorded);
+        imposter.record_request(recorded);
     }
 
     // Find matching stub
@@ -326,7 +324,9 @@ async fn handle_request_inner(
         let debug_imposter = Arc::clone(&imposter);
         let (dbg_method, dbg_path, dbg_query) = (method.clone(), path.clone(), query_str.clone());
         let dbg_headers = headers_clone.clone();
-        let dbg_body = body_string.clone();
+        // Materialize an owned copy here (issue #561): `body_string` borrows from `body_bytes`,
+        // which does not outlive this `spawn_blocking` closure's `'static` bound.
+        let dbg_body = body_string.as_deref().map(str::to_string);
         let handle = tokio::task::spawn_blocking(move || {
             handle_debug_request(
                 &debug_imposter,
@@ -479,7 +479,9 @@ async fn handle_request_inner(
                 path: path.clone(),
                 query: parse_query_string(&query_str),
                 headers: headers_clone.clone(),
-                body: body_string.clone(),
+                // Owned boundary (issue #561): the inject job is submitted to a `'static` worker
+                // closure, so `body_string`'s borrow can't cross it.
+                body: body_string.as_deref().map(str::to_string),
             };
 
             match execute_mountebank_inject_bounded(
@@ -562,7 +564,9 @@ async fn handle_request_inner(
             // them case-insensitively (e.g. `request.headers["x-flow-id"]`) regardless of the
             // wire casing; this matches the engine docs and HTTP header semantics.
             let script_request = ScriptRequest {
-                raw_body: Some(body_string.clone().unwrap_or_default()),
+                // Owned boundary (issue #561): `ScriptRequest` is moved into the script engine's
+                // worker job, so the body must be materialized here rather than borrowed.
+                raw_body: Some(body_string.as_deref().unwrap_or_default().to_string()),
                 method: method.clone(),
                 path: path.clone(),
                 headers: headers_clone
@@ -572,7 +576,7 @@ async fn handle_request_inner(
                 // Domain-optional parse: a request body may legitimately not be JSON, and the
                 // script contract exposes that as `null` rather than an error (issue #611).
                 body: body_string
-                    .as_ref()
+                    .as_deref()
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or(serde_json::Value::Null),
                 query: parse_query_string(&query_str),
@@ -790,7 +794,7 @@ async fn handle_request_inner(
             }
 
             // Apply _rift.fault extensions (probabilistic faults)
-            if let Some(ref rift) = rift_ext
+            if let Some(rift) = rift_ext
                 && let Some(ref fault_config) = rift.fault
                 && let Some(response) = apply_rift_fault(fault_config, &mut status, &mut body).await
             {
@@ -813,7 +817,7 @@ async fn handle_request_inner(
             // template-injection hole (an unauthenticated caller could reach `state.*`/force errors)
             // and would also break the module's "a literal `{{` is served verbatim" promise for
             // reflected text. Off by default so recorded fixtures with a literal `{{` are untouched.
-            if rift_ext.as_ref().is_some_and(|r| r.templated) {
+            if rift_ext.is_some_and(|r| r.templated) {
                 let request_data = RequestData::new(
                     method_str,
                     path_str,
@@ -922,6 +926,25 @@ async fn handle_request_inner(
                     }
                 }
 
+                // Lazy request context (issue #561): only copy/lookup/decorate/shellTransform read
+                // it, and `RequestContext::from_request` re-parses the query, retitles every
+                // header, and copies the body — so a wait/repeat-only stub (or any non-`is`
+                // response) must not pay for it.
+                //
+                // Built on first read rather than behind a hand-maintained "does anything below
+                // need this?" predicate: such a predicate has to be kept in sync with consumers
+                // 100+ lines away, and getting it wrong would hand one an empty-but-valid context —
+                // wrong output, no error. Here a consumer that forgets to ask simply cannot exist.
+                let request_context: OnceCell<RequestContext> = OnceCell::new();
+                let build_request_context = || {
+                    RequestContext::from_request(
+                        &method,
+                        &uri,
+                        &headers_for_context,
+                        body_string.as_deref(),
+                    )
+                };
+
                 // copy/lookup are pure token substitution — apply them across each value of
                 // multi-value headers so multiplicity survives (e.g. multiple Set-Cookie;
                 // RFC 7230 §3.2.2 forbids folding Set-Cookie). decorate uses a single-value
@@ -932,7 +955,7 @@ async fn handle_request_inner(
                         &body,
                         &mut headers,
                         &parsed_behaviors.copy,
-                        &request_context,
+                        request_context.get_or_init(build_request_context),
                     );
                 }
                 if !parsed_behaviors.lookup.is_empty() {
@@ -940,7 +963,7 @@ async fn handle_request_inner(
                         &body,
                         &mut headers,
                         &parsed_behaviors.lookup,
-                        &request_context,
+                        request_context.get_or_init(build_request_context),
                         csv_cache(),
                     );
                 }
@@ -976,7 +999,7 @@ async fn handle_request_inner(
                         .collect();
                     match apply_decorate_bounded(
                         decorate_script.clone(),
-                        request_context.clone(),
+                        request_context.get_or_init(build_request_context).clone(),
                         body.clone(),
                         status,
                         single,
@@ -1052,7 +1075,7 @@ async fn handle_request_inner(
                     // starving unrelated requests multiplexed on it.
                     let shell_result = {
                         let cmd = cmd.clone();
-                        let rc = request_context.clone();
+                        let rc = request_context.get_or_init(build_request_context).clone();
                         let body_in = body.clone();
                         tokio::task::spawn_blocking(move || {
                             apply_shell_transform(&cmd, &rc, &body_in, status)

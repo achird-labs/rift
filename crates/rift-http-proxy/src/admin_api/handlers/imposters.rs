@@ -1150,7 +1150,7 @@ mod requests_filter_tests {
         manager.create_imposter(config).await.expect("create");
         let imposter = manager.get_imposter(port).expect("imposter");
         for r in recorded {
-            imposter.record_request(r);
+            imposter.record_request(r.clone());
         }
         manager
     }
@@ -1544,7 +1544,7 @@ mod requests_filter_tests {
         manager.create_imposter(cfg).await.expect("create");
         let imposter = manager.get_imposter(port).expect("imposter");
         for r in recorded {
-            imposter.record_request(r);
+            imposter.record_request(r.clone());
         }
         manager
     }
@@ -1679,7 +1679,7 @@ mod requests_filter_tests {
         let m = manager_with(19757, None, &[]).await;
         let imposter = m.get_imposter(19757).expect("imposter");
         for i in 0..(crate::imposter::MAX_RECORDED_REQUESTS + 5) {
-            imposter.record_request(&rec_at(&format!("/{i}"), "A"));
+            imposter.record_request(rec_at(&format!("/{i}"), "A"));
         }
 
         // Indices 1..=5 were evicted; a cursor at 2 never received 3..=5.
@@ -1803,7 +1803,7 @@ mod verify_tests {
         manager.create_imposter(config).await.expect("create");
         let imposter = manager.get_imposter(port).expect("imposter");
         for r in recorded {
-            imposter.record_request(r);
+            imposter.record_request(r.clone());
         }
         manager
     }
@@ -1971,7 +1971,7 @@ mod replace_all_tests {
         manager
             .get_imposter(19766)
             .expect("imposter")
-            .record_request(&RecordedRequest {
+            .record_request(RecordedRequest {
                 request_from: "127.0.0.1:5000".to_string(),
                 method: "GET".to_string(),
                 path: "/seen".to_string(),

@@ -13,26 +13,37 @@ impl Imposter {
 
     /// Record a request (when body recording is enabled), tagged with its resolved flow id.
     ///
+    /// Takes `req` by value (issue #561): the caller's owned `RecordedRequest` is never used
+    /// again afterward, so this used to pay a full clone (up to 10 MB) just to satisfy the
+    /// by-value `RequestJournal::record`. It is now moved into the journal directly, and cloned
+    /// only in the (uncommon) case an SSE subscriber also needs its own copy.
+    ///
     /// Returns the journal index assigned to the entry, or `None` when nothing was recorded
     /// (recording is off) or the backend has no stable indices (issue #603).
-    pub fn record_request(&self, req: &RecordedRequest) -> Option<u64> {
+    pub fn record_request(&self, req: RecordedRequest) -> Option<u64> {
         if !self.config.record_requests {
             return None;
         }
         let flow_id = self.resolve_flow_id_recorded(&req.headers);
-        let index = self
-            .journal
-            .record_indexed(self.journal_port(), &flow_id, req.clone());
         // Fan the recorded request out to the admin SSE stream (issue #461). Guard on an active
         // subscriber first so the hot path never clones the request for nobody. The journal
         // index rides along (issue #603) so a client that reconnects or lags can reconcile with
         // `?since=<index>` instead of re-polling the whole journal.
-        if let Some(bus) = &self.event_bus
-            && bus.has_subscribers()
-        {
-            bus.publish_request(self.journal_port(), flow_id, index, req.clone());
+        match self.event_bus.as_ref().filter(|bus| bus.has_subscribers()) {
+            Some(bus) => {
+                // A subscriber needs its own copy after this call, so clone once for the journal
+                // and move the original into `publish_request`.
+                let index = self
+                    .journal
+                    .record_indexed(self.journal_port(), &flow_id, req.clone());
+                bus.publish_request(self.journal_port(), flow_id, index, req);
+                index
+            }
+            // Nobody is listening: move `req` straight into the journal, no clone at all.
+            None => self
+                .journal
+                .record_indexed(self.journal_port(), &flow_id, req),
         }
-        index
     }
 
     /// Read recorded requests with the backend's completeness flag intact, so embedders

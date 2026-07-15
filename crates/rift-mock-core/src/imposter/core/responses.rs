@@ -148,6 +148,20 @@ impl Imposter {
         let Some(response) = self.next_stub_response(stub_state)? else {
             return Ok(None);
         };
-        Ok(execute_stub_response_with_rift(response))
+        // This wrapper's own contract stays owned (it backs the debug/preview paths, not the
+        // request hot path) — clone here rather than push a lifetime through its signature.
+        Ok(execute_stub_response_with_rift(response).map(
+            |(status, headers, body, behaviors, rift, mode, is_fault)| {
+                (
+                    status,
+                    headers,
+                    body,
+                    behaviors,
+                    rift.cloned(),
+                    mode,
+                    is_fault,
+                )
+            },
+        ))
     }
 }

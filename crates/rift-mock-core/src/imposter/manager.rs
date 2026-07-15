@@ -1614,7 +1614,7 @@ mod tests {
         assert!(report.failed.is_empty());
 
         let untouched = manager.get_imposter(19410).unwrap();
-        untouched.record_request(&recorded("/cycled"));
+        untouched.record_request(recorded("/cycled"));
         assert_eq!(next_body(&untouched.stubs.load()[0]), "a1");
 
         let p2_changed = imposter_cfg(json!({
@@ -1660,7 +1660,7 @@ mod tests {
         }));
         manager.apply_config(vec![initial]).await.expect("create");
         let before = manager.get_imposter(19420).unwrap();
-        before.record_request(&recorded("/a"));
+        before.record_request(recorded("/a"));
 
         let renamed = imposter_cfg(json!({
             "protocol": "http", "port": 19420, "recordRequests": true, "name": "renamed",
