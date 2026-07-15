@@ -85,9 +85,9 @@ impl App {
     }
 
     /// Save content to file
-    pub fn save_to_file(&mut self, path: &str, content: &str) {
+    pub async fn save_to_file(&mut self, path: &str, content: &str) {
         let expanded_path = Self::expand_path(path);
-        match std::fs::write(&expanded_path, content) {
+        match tokio::fs::write(&expanded_path, content).await {
             Ok(_) => {
                 self.set_status(format!("Saved to {expanded_path}"), StatusLevel::Success);
                 self.overlay = Overlay::None;
@@ -131,7 +131,7 @@ impl App {
         self.is_loading = true;
         let expanded_path = Self::expand_path(path);
 
-        match std::fs::read_to_string(&expanded_path) {
+        match tokio::fs::read_to_string(&expanded_path).await {
             Ok(content) => {
                 // Validate the content before importing
                 let report = validate_imposter_json(&content, &expanded_path);
@@ -206,7 +206,11 @@ impl App {
         let expanded_folder = Self::expand_path(folder);
 
         let path = std::path::Path::new(&expanded_folder);
-        if !path.is_dir() {
+        let is_dir = tokio::fs::metadata(path)
+            .await
+            .map(|m| m.is_dir())
+            .unwrap_or(false);
+        if !is_dir {
             self.set_status(
                 format!("{expanded_folder} is not a directory"),
                 StatusLevel::Error,
@@ -218,11 +222,24 @@ impl App {
         let mut imported = 0;
         let mut failed = 0;
 
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
+        if let Ok(mut entries) = tokio::fs::read_dir(path).await {
+            loop {
+                // An unreadable entry must neither truncate the scan nor pass as success: `break`
+                // would silently skip every remaining file while still reporting "Imported N",
+                // and the pre-#564 `.flatten()` skipped it but left it uncounted. Tokio's
+                // `ReadDir` stays valid after an `Err` (the failed entry is already consumed), so
+                // continuing advances to the next entry and always terminates.
+                let entry = match entries.next_entry().await {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => break,
+                    Err(_) => {
+                        failed += 1;
+                        continue;
+                    }
+                };
                 let file_path = entry.path();
                 if file_path.extension().map(|e| e == "json").unwrap_or(false)
-                    && let Ok(content) = std::fs::read_to_string(&file_path)
+                    && let Ok(content) = tokio::fs::read_to_string(&file_path).await
                 {
                     if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
                         let url = format!("{}/imposters", self.client.base_url());
@@ -293,7 +310,7 @@ impl App {
         let expanded_path = Self::expand_path(path);
 
         match self.client.export_all_imposters().await {
-            Ok(json) => match std::fs::write(&expanded_path, &json) {
+            Ok(json) => match tokio::fs::write(&expanded_path, &json).await {
                 Ok(_) => {
                     self.set_status(format!("Exported to {expanded_path}"), StatusLevel::Success);
                     self.overlay = Overlay::None;
@@ -318,7 +335,7 @@ impl App {
         let path = std::path::Path::new(&expanded_folder);
 
         // Create folder if it doesn't exist
-        if let Err(e) = std::fs::create_dir_all(path) {
+        if let Err(e) = tokio::fs::create_dir_all(path).await {
             self.set_status(format!("Failed to create folder: {e}"), StatusLevel::Error);
             self.is_loading = false;
             return;
@@ -336,7 +353,7 @@ impl App {
                         format!("{}.json", imp.port)
                     };
                     let file_path = path.join(filename);
-                    if std::fs::write(&file_path, &json).is_ok() {
+                    if tokio::fs::write(&file_path, &json).await.is_ok() {
                         exported += 1;
                     } else {
                         failed += 1;
