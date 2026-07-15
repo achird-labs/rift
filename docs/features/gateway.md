@@ -32,5 +32,5 @@ curl http://localhost:4545/api/users?id=1
 `/__rift/4545` with no trailing path dispatches to `/`. An unknown port returns `404`; a
 non-numeric port returns `400`.
 
-Recorded requests made through the gateway show `request_from` as the loopback address, since the
+Recorded requests made through the gateway show `requestFrom` as the loopback address, since the
 gateway is the imposter's local client.
