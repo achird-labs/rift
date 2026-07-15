@@ -293,14 +293,16 @@ impl<'a> DynamicVerifier<'a> {
             Ok(s) => s,
             Err(e) => return vec![DynCheck::fail(label, e)],
         };
-        let Some(port) = free_port() else {
-            return vec![DynCheck::fail(label, "no free port".to_string())];
-        };
         let mut config = imposter.clone();
-        config["port"] = port.into();
-        if let Err(e) = self.create_imposter(&config).await {
-            return vec![DynCheck::fail(label, e)];
+        // Omit `port` entirely rather than sending 0: the server treats an explicit 0 as a literal
+        // port request, and only an absent port takes its find-and-bind-atomically path.
+        if let Some(obj) = config.as_object_mut() {
+            obj.remove("port");
         }
+        let port = match self.create_imposter(&config).await {
+            Ok(port) => port,
+            Err(e) => return vec![DynCheck::fail(label, e)],
+        };
 
         let mut checks = Vec::new();
         for (i, step) in spec.sequence.iter().enumerate() {
@@ -332,21 +334,18 @@ impl<'a> DynamicVerifier<'a> {
             Ok(m) => m,
             Err(e) => return vec![DynCheck::fail(label, e)],
         };
-        let Some(port) = free_port() else {
-            return vec![DynCheck::fail(label, "no free port".to_string())];
-        };
-
         let mut proxy_cfg = serde_json::json!({ "to": mock.url(), "mode": mode });
         if let Some(pg) = proxy.get("predicateGenerators") {
             proxy_cfg["predicateGenerators"] = pg.clone();
         }
         let config = serde_json::json!({
-            "port": port, "protocol": "http",
+            "protocol": "http",
             "stubs": [{ "responses": [{ "proxy": proxy_cfg }] }],
         });
-        if let Err(e) = self.create_imposter(&config).await {
-            return vec![DynCheck::fail(label, e)];
-        }
+        let port = match self.create_imposter(&config).await {
+            Ok(port) => port,
+            Err(e) => return vec![DynCheck::fail(label, e)],
+        };
 
         let mut checks = Vec::new();
         let before = self.stub_count(port).await;
@@ -394,17 +393,15 @@ impl<'a> DynamicVerifier<'a> {
         expectation: FaultExpectation,
     ) -> Vec<DynCheck> {
         let label = format!("stub #{stub_idx} fault");
-        let Some(port) = free_port() else {
-            return vec![DynCheck::fail(label, "no free port".to_string())];
-        };
         let path = "/__rift_verify_fault";
         let config = serde_json::json!({
-            "port": port, "protocol": "http",
+            "protocol": "http",
             "stubs": [{ "predicates": [{ "equals": { "path": path } }], "responses": [response] }],
         });
-        if let Err(e) = self.create_imposter(&config).await {
-            return vec![DynCheck::fail(label, e)];
-        }
+        let port = match self.create_imposter(&config).await {
+            Ok(port) => port,
+            Err(e) => return vec![DynCheck::fail(label, e)],
+        };
 
         // A non-fault control path proves the imposter is actually serving, so a reset/delay on the
         // fault path is attributable to the fault rather than a sick imposter or ordinary overhead.
@@ -531,7 +528,14 @@ impl<'a> DynamicVerifier<'a> {
         Ok((status, body))
     }
 
-    async fn create_imposter(&self, config: &serde_json::Value) -> Result<(), String> {
+    /// Create a temporary imposter and return the port the server actually bound.
+    ///
+    /// `config` must ask for port 0: the server then finds and binds a free port in one step, so no
+    /// other process can take it in between (issue #623). Picking a port here instead — bind an
+    /// ephemeral port, read it, drop the listener, then ask the server to bind it again — leaves
+    /// the port unowned across the POST, and under a parallel test run something else claims it and
+    /// the create fails.
+    async fn create_imposter(&self, config: &serde_json::Value) -> Result<u16, String> {
         let resp = self
             .client
             .post(format!("{}/imposters", self.admin_url))
@@ -539,11 +543,22 @@ impl<'a> DynamicVerifier<'a> {
             .send()
             .await
             .map_err(|e| format!("create imposter: {e}"))?;
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            Err(format!("create imposter: HTTP {}", resp.status().as_u16()))
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            // Carry the body: a bare status makes a failure here undiagnosable, which is what made
+            // this flake expensive to chase in the first place.
+            return Err(format!(
+                "create imposter: HTTP {} — {}",
+                status.as_u16(),
+                body.trim()
+            ));
         }
+        serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("port")?.as_u64())
+            .and_then(|p| u16::try_from(p).ok())
+            .ok_or_else(|| format!("create imposter: no port in response — {}", body.trim()))
     }
 
     async fn delete_imposter(&self, port: u16) {
@@ -585,13 +600,6 @@ fn get_request(path: &str) -> VerifyRequest {
         body: None,
         headers: HashMap::new(),
     }
-}
-
-/// Acquire a free TCP port by binding to :0 and immediately releasing it. There is an inherent
-/// race between release and reuse, but the verifier owns the throwaway port for its short lifetime.
-fn free_port() -> Option<u16> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
-    listener.local_addr().ok().map(|a| a.port())
 }
 
 // ============================================================================
