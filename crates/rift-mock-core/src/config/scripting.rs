@@ -113,6 +113,16 @@ pub struct DecisionCacheConfigFile {
     /// TTL for cache entries in seconds (0 = no expiration)
     #[serde(default = "default_decision_cache_ttl_seconds")]
     pub ttl_seconds: u64,
+    /// Headers that participate in the cache key (issue #630).
+    ///
+    /// Omitted (the default) keys on **every** header, which is always correct but degenerates to a
+    /// ~0% hit rate whenever a per-request-unique header (`x-request-id`, `traceparent`, `date`) is
+    /// present — the cache then costs more than it saves. Setting this is an assertion that your
+    /// scripts' fault decisions depend on at most these headers; it cannot be inferred, because the
+    /// script is handed every header and may branch on any of them. Names are matched
+    /// case-insensitively. An empty list keys on no headers at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_headers: Option<Vec<String>>,
 }
 
 fn default_decision_cache_enabled() -> bool {
@@ -133,6 +143,43 @@ impl Default for DecisionCacheConfigFile {
             enabled: default_decision_cache_enabled(),
             max_size: default_decision_cache_max_size(),
             ttl_seconds: default_decision_cache_ttl_seconds(),
+            key_headers: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod decision_cache_config_tests {
+    use super::DecisionCacheConfigFile;
+
+    /// `key_headers` must match its siblings' casing. This config block has no `rename_all`, so
+    /// `max_size`/`ttl_seconds` are snake_case on the wire; a camelCase `keyHeaders` would force
+    /// users to mix conventions inside one object (issue #630).
+    #[test]
+    fn key_headers_is_snake_case_like_its_siblings() {
+        let cfg: DecisionCacheConfigFile = serde_json::from_str(
+            r#"{"enabled": true, "max_size": 10, "ttl_seconds": 5, "key_headers": ["X-Tenant"]}"#,
+        )
+        .expect("snake_case key_headers must deserialize");
+        assert_eq!(
+            cfg.key_headers.as_deref(),
+            Some(&["X-Tenant".to_string()][..])
+        );
+    }
+
+    /// Omitting it is the default and must stay that way — it is what preserves today's
+    /// key-on-every-header behaviour for every existing config.
+    #[test]
+    fn key_headers_defaults_to_none_and_is_not_serialized() {
+        let cfg: DecisionCacheConfigFile =
+            serde_json::from_str(r#"{"enabled": true, "max_size": 10, "ttl_seconds": 5}"#)
+                .expect("config without key_headers must deserialize");
+        assert!(cfg.key_headers.is_none());
+
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        assert!(
+            !json.contains("key_headers"),
+            "an unset allowlist must not appear on the wire: {json}"
+        );
     }
 }

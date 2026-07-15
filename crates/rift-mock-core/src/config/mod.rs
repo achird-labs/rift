@@ -205,6 +205,38 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    /// `docs/performance/index.md` tells users to put `decision_cache` on the **proxy** config next
+    /// to `script_rules` — NOT inside the imposter `_rift` block. That distinction is load-bearing:
+    /// neither `Config` nor `DecisionCacheConfigFile` sets `deny_unknown_fields`, so a wrong doc is
+    /// silently DROPPED rather than rejected — the knob would do nothing, with no error, while the
+    /// degenerate-cache warning kept telling the user to set the key they had already set.
+    ///
+    /// The docs-examples CI gate only boots the enumerated `docs/demo/*.json` files and never parses
+    /// inline doc snippets, so this test is what actually holds that doc honest (issue #630).
+    #[test]
+    fn documented_decision_cache_block_parses_on_the_proxy_config() {
+        let yaml = r#"
+listen:
+  port: 8080
+decision_cache:
+  enabled: true
+  max_size: 10000
+  ttl_seconds: 300
+  key_headers: ["X-Tenant", "X-Feature-Flag"]
+"#;
+        let config: Config = serde_yaml::from_str(yaml)
+            .expect("the documented decision_cache block must deserialize on the proxy Config");
+        let dc = config
+            .decision_cache
+            .expect("decision_cache must be parsed, not silently dropped");
+        assert_eq!(
+            dc.key_headers.as_deref(),
+            Some(&["X-Tenant".to_string(), "X-Feature-Flag".to_string()][..]),
+            "the documented key_headers spelling must be the one serde accepts"
+        );
+        assert_eq!(dc.max_size, 10000);
+    }
+
     use super::*;
     use crate::recording::ProxyMode;
 

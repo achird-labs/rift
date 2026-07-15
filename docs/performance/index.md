@@ -157,6 +157,42 @@ cat results/ADMIN_BENCHMARK_REPORT.md
 3. **Avoid unnecessary behaviors** - Each behavior adds overhead
 4. **Use native formats** - JSON body predicates are faster than string matching
 
+### For Script Fault Injection
+
+Script fault decisions are memoized in a decision cache, keyed on the request. By default the key
+includes **every** request header. That is always correct, but if your traffic carries a
+per-request-unique header — `x-request-id`, `traceparent`, `x-amzn-trace-id`, `date` — then every
+key is unique, nothing ever hits, and the cache becomes pure overhead: it pays hashing, allocation
+and lock traffic on the hot path and returns nothing.
+
+Rift cannot narrow the key for you: the cached value is *your* script's decision, and your script is
+handed every header, so it may branch on any of them. Dropping a header from the key that your
+script actually reads would serve one request's decision to a different request. So the allowlist is
+opt-in — it is your assertion about what your scripts read:
+
+```yaml
+# Proxy config (the same file that carries `script_rules`) — NOT the imposter `_rift` block.
+listen:
+  port: 8080
+script_rules:
+  - # ...
+decision_cache:
+  enabled: true
+  max_size: 10000
+  ttl_seconds: 300
+  key_headers: ["X-Tenant", "X-Feature-Flag"]
+```
+
+Only the listed headers enter the cache key; names are matched case-insensitively, and an empty
+list (`[]`) declares that no header affects your decisions. Your scripts still receive **all**
+headers either way — this only changes what makes two requests "the same" for caching.
+
+If the cache degenerates to a ~0% hit rate, Rift logs a warning once per process telling you so,
+rather than silently burning CPU.
+
+> The cache is only consulted on the fault-injection proxy path with `script_rules` configured and
+> flow state **not** configured — stateful scripts are never cached.
+
 ### For Lowest Latency
 
 1. **Minimize stub count** - Fewer stubs = faster matching
