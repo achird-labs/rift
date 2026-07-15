@@ -294,10 +294,16 @@ jobs:
           mkdir -p ctx
           cp target/x86_64-unknown-linux-musl/release/rift-http-proxy ctx/rift-http-proxy
           chmod +x ctx/rift-http-proxy
-          # The binary must be static: a scratch image has no dynamic loader to fall back on.
+          # The binary must need no dynamic loader: scratch has none, so a dynamically linked
+          # binary would fail to exec at all. Rust's musl target emits a static-PIE, which `file`
+          # reports as "static-pie linked" rather than "statically linked" — both are static and
+          # both run here; only "dynamically linked" is disqualifying.
           file ctx/rift-http-proxy
-          file ctx/rift-http-proxy | grep -q 'statically linked' \
-            || { echo "[fail] musl binary is not statically linked — it cannot run on scratch" >&2; exit 1; }
+          file ctx/rift-http-proxy | grep -qE 'static-pie linked|statically linked' \
+            || { echo "[fail] musl binary is not static — it cannot run on scratch" >&2; exit 1; }
+          file ctx/rift-http-proxy | grep -q 'dynamically linked' \
+            && { echo "[fail] musl binary wants a dynamic loader that scratch does not have" >&2; exit 1; }
+          echo "[pass] binary is static and needs no loader"
 
       - name: Build the static image
         run: |
