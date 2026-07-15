@@ -301,7 +301,7 @@ async fn test_imposter_manager_create_delete() {
 }
 
 #[tokio::test]
-async fn explicit_port_zero_is_rejected() {
+async fn explicit_port_zero_auto_assigns() {
     let manager = ImposterManager::new();
     let config = ImposterConfig {
         port: Some(0),
@@ -309,13 +309,14 @@ async fn explicit_port_zero_is_rejected() {
         ..Default::default()
     };
 
-    let err = manager
+    let port = manager
         .create_imposter(config)
         .await
-        .expect_err("explicit port 0 must not register an unreachable imposter");
+        .expect("explicit port 0 should auto-assign an available port");
 
-    assert!(matches!(err, ImposterError::BindError(0, _)));
-    assert_eq!(manager.count(), 0);
+    assert_ne!(port, 0);
+    assert!(manager.get_imposter(port).is_some());
+    assert_eq!(manager.count(), 1);
 }
 
 #[test]

@@ -343,32 +343,29 @@ impl ImposterManager {
 
         let bind_host: &str = config.host.as_deref().unwrap_or("0.0.0.0");
         // Determine port - either from config or auto-assign
-        let (port, listener) = if let Some(p) = config.port {
-            if p == 0 {
-                return Err(ImposterError::BindError(
+        let (port, listener) = match config.port {
+            Some(p) if p != 0 => {
+                // Check if specified port is already in use
+                if self.imposters.read().contains_key(&p) {
+                    return Err(ImposterError::PortInUse(p));
+                }
+                // Bind with SO_REUSEADDR/REUSEPORT so a hot-reload (#197) can re-bind the same port
+                // immediately after the previous imposter's listener is torn down.
+                let addr = (bind_host, p)
+                    .to_socket_addrs()
+                    .map_err(|e| ImposterError::BindError(p, e.to_string()))?
+                    .next()
+                    .ok_or_else(|| ImposterError::BindError(p, "no socket address".to_string()))?;
+                (
                     p,
-                    "port 0 is reserved; omit `port` to auto-assign one".to_string(),
-                ));
+                    crate::proxy::network::create_reusable_listener(addr)
+                        .map_err(|e| ImposterError::BindError(p, e.to_string()))?,
+                )
             }
-            // Check if specified port is already in use
-            if self.imposters.read().contains_key(&p) {
-                return Err(ImposterError::PortInUse(p));
+            _ => {
+                // Auto-assign port: find an available port starting from a base
+                self.find_available_port(bind_host).await?
             }
-            // Bind with SO_REUSEADDR/REUSEPORT so a hot-reload (#197) can re-bind the same port
-            // immediately after the previous imposter's listener is torn down.
-            let addr = (bind_host, p)
-                .to_socket_addrs()
-                .map_err(|e| ImposterError::BindError(p, e.to_string()))?
-                .next()
-                .ok_or_else(|| ImposterError::BindError(p, "no socket address".to_string()))?;
-            (
-                p,
-                crate::proxy::network::create_reusable_listener(addr)
-                    .map_err(|e| ImposterError::BindError(p, e.to_string()))?,
-            )
-        } else {
-            // Auto-assign port: find an available port starting from a base
-            self.find_available_port(bind_host).await?
         };
 
         config.port = Some(port);
