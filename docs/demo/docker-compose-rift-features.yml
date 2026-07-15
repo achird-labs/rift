@@ -11,7 +11,7 @@ services:
       - MB_PORT=2525
     command: ["--configfile", "/imposters.json"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:2525/"]
+      test: ["CMD", "rift", "healthcheck"]
       interval: 5s
       timeout: 3s
       retries: 5

@@ -1,7 +1,8 @@
 # Dockerfile for using pre-built binaries from release workflow
 # This is much faster than compiling in Docker
 
-FROM debian:bookworm-slim
+# Digest-pinned (issue #664); Dependabot reads the tag and bumps the digest.
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 # Build args for metadata
 ARG VERSION=dev

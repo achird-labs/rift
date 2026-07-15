@@ -57,7 +57,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:2525/"]
+      test: ["CMD", "rift", "healthcheck"]
       interval: 5s
       timeout: 10s
       retries: 15

@@ -1,6 +1,7 @@
 # Build stage
 # Using Rust nightly for if-let-chains feature (required by regress 0.10.5, a boa_engine dependency)
-FROM rustlang/rust:nightly AS builder
+# Digest-pinned (issue #664); Dependabot reads the tag and bumps the digest.
+FROM rustlang/rust:nightly@sha256:3c0f3ff052e4e8981d3aabeb30db61658708cd4255a6df562ac8959d32b3478f AS builder
 
 WORKDIR /build
 
@@ -48,7 +49,8 @@ RUN find crates/rift-lint/src -name '*.rs' -exec touch {} \; && \
 
 # Runtime stage
 # Using debian:trixie-slim (Debian 13/testing) for GLIBC_2.39+ compatibility with nightly Rust build
-FROM debian:trixie-slim
+# Digest-pinned (issue #664); Dependabot reads the tag and bumps the digest.
+FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 
 # Install CA certificates (needed for potential HTTPS validation in future)
 RUN apt-get update && \

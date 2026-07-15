@@ -26,6 +26,63 @@ docker run -p 2525:2525 zainalpour/rift-proxy:latest
 
 ---
 
+## Image Flavors
+
+Every release publishes two flavors of the same rift binary. They are interchangeable — same admin
+API, same imposter behaviour, same ports, same environment variables.
+
+| Tag | Base | Use it when |
+|:----|:-----|:------------|
+| `latest`, `X.Y.Z` | `debian:trixie-slim` | The default. |
+| `latest-static`, `X.Y.Z-static` | `scratch` | You want the smallest CVE surface — typically ephemeral CI/test environments. |
+
+```bash
+docker pull zainalpour/rift-proxy:latest-static
+docker run -p 2525:2525 zainalpour/rift-proxy:latest-static
+```
+
+The `-static` flavor is a statically-linked musl build on `FROM scratch`. It contains the rift
+binary, a CA certificate bundle, and a passwd entry — nothing else. No package manager ever runs in
+it, so an image scanner finds **no OS packages to report**: there is no base distro to keep patching
+just because rift is running in your test suite.
+
+Two consequences worth knowing before you switch:
+
+- **No shell.** There is no `/bin/sh`, so `docker exec ... sh`, string-form `command:` overrides, and
+  shell-form healthchecks do not work. Use exec form (`["rift", "healthcheck"]`) and pass flags
+  directly. The health probe is built into the binary precisely for this reason — see
+  [`rift healthcheck`]({{ site.baseurl }}/configuration/cli/).
+- **No mimalloc.** The musl binaries are built without the mimalloc allocator (it is a default
+  feature of the glibc builds). Scripting and the Redis backend are both present. If you are
+  benchmarking allocation-heavy workloads, use the default flavor.
+
+HTTPS upstream proxying works in both: the CA bundle is copied into the static image, because rift's
+TLS client loads the OS trust store at runtime.
+
+---
+
+## Verifying an Image
+
+Published images carry an SBOM and max-mode provenance, and are signed with
+[cosign](https://docs.sigstore.dev/) keyless — the signing identity is the release workflow itself,
+so there is no public key to distribute.
+
+```bash
+# Verify the signature and its provenance
+cosign verify \
+  --certificate-identity-regexp 'https://github.com/EtaCassiopeia/rift/.github/workflows/.+' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  zainalpour/rift-proxy:latest-static
+
+# Inspect the SBOM / provenance attestations
+docker buildx imagetools inspect zainalpour/rift-proxy:latest-static \
+  --format '{{ json .SBOM }}'
+docker buildx imagetools inspect zainalpour/rift-proxy:latest-static \
+  --format '{{ json .Provenance }}'
+```
+
+---
+
 ## Basic Configuration
 
 ### With Environment Variables
@@ -79,7 +136,7 @@ services:
       - ./imposters.json:/imposters.json:ro
     command: ["--configfile", "/imposters.json"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:2525/"]
+      test: ["CMD", "rift", "healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -146,7 +203,7 @@ services:
       - ./test/mocks:/mocks:ro
     command: ["--configfile", "/mocks/imposters.json"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:2525/"]
+      test: ["CMD", "rift", "healthcheck"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -162,7 +219,7 @@ services:
       - "2525:2525"
       - "4545:4545"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:2525/"]
+      test: ["CMD", "rift", "healthcheck"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -271,16 +328,25 @@ docker logs rift
 docker logs -f rift  # Follow
 ```
 
-### Execute Commands
+### Drive the Admin API
+
+The images ship the rift binary and nothing else — no curl, and in the `-static` flavor no shell
+either — so run these from the host against the published admin port rather than via `docker exec`.
 
 ```bash
 # Create imposter
-docker exec rift curl -X POST http://localhost:2525/imposters \
+curl -X POST http://localhost:2525/imposters \
   -H "Content-Type: application/json" \
   -d '{"port": 4545, "protocol": "http", "stubs": []}'
 
 # List imposters
-docker exec rift curl http://localhost:2525/imposters
+curl http://localhost:2525/imposters
+```
+
+The one thing worth running *inside* the container is the health probe, which is built in:
+
+```bash
+docker exec rift rift healthcheck && echo healthy
 ```
 
 ### Restart

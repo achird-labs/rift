@@ -47,3 +47,7 @@ pub mod script_cli;
 pub mod gateway;
 // CLI surface + ServerBuilder + metrics server; the `rift` binary is a thin caller
 pub mod server;
+
+/// `rift healthcheck` (issue #664): the container HEALTHCHECK probe, built into the binary so the
+/// image needs no shell or curl.
+pub mod healthcheck;

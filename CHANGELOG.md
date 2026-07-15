@@ -11,6 +11,41 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **A `-static` image flavor: the same rift, on `FROM scratch`.** Published alongside the existing
+  tags as `zainalpour/rift-proxy:<version>-static` and `:latest-static`, built from the musl release
+  binaries the release workflow already produced. It contains the rift binary, a CA bundle and a
+  passwd entry — nothing else. No package manager ever runs in it, so an image scanner finds no OS
+  packages to report, which is the point: teams running rift in ephemeral test environments were
+  patching a Debian userland that rift never uses. This is possible because rift's TLS is pure
+  rustls pinned to `ring` with no OpenSSL anywhere, so the musl binaries are genuinely static. Two
+  differences from the default flavor, both documented: there is no shell (use exec-form commands),
+  and the musl builds omit the mimalloc allocator. Scripting and the Redis backend are present in
+  both, and HTTPS upstream proxying works in both — the CA bundle is copied in.
+- **`rift healthcheck`** — probes the admin API's `/health` and exits 0/1, reading `--host`/`--port`
+  (so `MB_HOST`/`MB_PORT`) exactly as the server does. It exists so an image needs no shell and no
+  curl to report its own health; `--url` probes something else, `--timeout` bounds it.
+- **Published images now carry an SBOM and max-mode provenance, and are signed with cosign keyless.**
+  The signing identity is the release workflow itself, so there is no key to distribute; `cosign
+  verify` is documented under Deployment → Docker. Enterprise image-curation pipelines check exactly
+  these, and an unattested image is what gets rejected at their gate.
+
+### Changed
+
+- **Every image base is now digest-pinned** (`image:tag@sha256:...`), with Dependabot owning the
+  bumps. `rustlang/rust:nightly` floats daily, so builds of the same commit were not reproducible.
+
+### Security
+
+- **The container images no longer install `curl`** ([CVE-2025-10148]).
+  curl was in the image for exactly one reason — to run the `HEALTHCHECK` line — and that line now
+  execs the binary's own `rift healthcheck` instead. The image's intent was always "just the rift
+  binary"; nothing else in it used curl. Downstream consumers were carrying a medium-severity
+  advisory in their test infrastructure on account of a probe.
+
+[CVE-2025-10148]: https://nvd.nist.gov/vuln/detail/cve-2025-10148
+
 ### Fixed
 
 - **Two requests differing only in their query string no longer share one cached script decision.**

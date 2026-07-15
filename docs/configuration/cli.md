@@ -371,6 +371,29 @@ rift-http-proxy script run scripts/echo.js --request fixtures/get-resource.json 
 | `--engine <ENGINE>` | Script engine (`rhai`/`js`); inferred from the file extension when omitted | (from extension) |
 | `--hook <HOOK>` | Entrypoint to run; only `respond` is wired for both engines today | `respond` |
 
+### healthcheck
+
+Probe a running server's admin API and exit `0` when it answers `2xx`, `1` otherwise. This is what
+the container images run as their `HEALTHCHECK` — the probe is built into the binary so the image
+needs no shell and no `curl`, which is what lets the `-static` image be `FROM scratch`
+(see [Docker]({{ site.baseurl }}/deployment/docker/)).
+
+With no arguments it probes `/health` on the admin API, reading `--host`/`--port` (and therefore
+`MB_HOST`/`MB_PORT`) exactly as the server does — so inside a container `rift healthcheck` needs no
+configuration. A bind-any host (`0.0.0.0`, `::`) is probed on loopback, since that is where a server
+bound to every interface answers.
+
+```bash
+rift-http-proxy healthcheck                                        # probes http://127.0.0.1:2525/health
+MB_PORT=3000 rift-http-proxy healthcheck                           # follows MB_PORT
+rift-http-proxy healthcheck --url http://localhost:9090/metrics    # probe something else
+```
+
+| Flag | Description | Default |
+|:-----|:------------|:--------|
+| `--url <URL>` | URL to probe instead of the admin API's `/health` | (from `--host`/`--port`) |
+| `--timeout <SECONDS>` | Give up and report unhealthy after this long. Kept under the images' `HEALTHCHECK --timeout=3s` so a hung server makes the probe report the verdict itself instead of being killed mid-probe | `2` |
+
 ---
 
 ## Additional CLI Tools
