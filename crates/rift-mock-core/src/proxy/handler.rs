@@ -42,11 +42,12 @@ pub async fn handle_request(
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Infallible> {
     let start_time = std::time::Instant::now();
+    // Method is an enum tag for standard verbs (effectively free to clone) and is needed for
+    // metrics after `req` is consumed below. Uri/HeaderMap stay borrowed until a fault path
+    // actually needs owned copies (issue #545).
     let method = req.method().clone();
-    let uri = req.uri().clone();
-    let headers = req.headers().clone();
 
-    debug!("Received request: {} {}", method, uri);
+    debug!("Received request: {} {}", method, req.uri());
 
     let upstream = select_upstream(ctx.router, ctx.upstreams, &req)
         .map(|(url, name)| UpstreamService {
@@ -79,7 +80,7 @@ pub async fn handle_request(
         .iter()
         .enumerate()
         .find(|(idx, rule)| {
-            rule.matches(&method, &uri, &headers)
+            rule.matches(req.method(), req.uri(), req.headers())
                 && rule_applies_to_upstream(&ctx.rule_upstreams[*idx], upstream.name.as_deref())
         })
         .map(|(idx, _)| idx);
@@ -143,25 +144,26 @@ async fn handle_script_rules(
     upstream: &UpstreamService,
     start_time: std::time::Instant,
 ) -> RuleHandlingResult {
-    let request_info = RequestInfo::from_request(&req);
-
-    // Find first matching script rule that applies to selected upstream
+    // Match against borrows from `req` first so a request that hits no script rule (the common
+    // case when scripts are configured but this one doesn't apply) never pays for the
+    // Method/Uri/HeaderMap clones RequestInfo would build.
     let matching_script =
         scripting
             .compiled_scripts
             .iter()
             .find(|(_, compiled_rule, rule_upstream)| {
-                compiled_rule.matches(
-                    &request_info.method,
-                    &request_info.uri,
-                    &request_info.headers,
-                ) && rule_applies_to_upstream(rule_upstream, upstream.name.as_deref())
+                compiled_rule.matches(req.method(), req.uri(), req.headers())
+                    && rule_applies_to_upstream(rule_upstream, upstream.name.as_deref())
             });
 
     let Some((compiled_script, compiled_rule, _)) = matching_script else {
         return RuleHandlingResult::NoFault(req);
     };
     info!("Request matched script rule: {}", compiled_rule.id);
+
+    // A script matched, so `req` is committed to being consumed below (script context, cache
+    // key, forwarding) — build the owned RequestInfo now, immediately before body collection.
+    let request_info = RequestInfo::from_request(&req);
 
     // Collect body for script (needed for script context)
     let body_bytes = match req.collect().await {
@@ -464,9 +466,15 @@ async fn handle_yaml_rule(
 ) -> RuleHandlingResult {
     // Decide fault
     let fault_decision = decide_fault(&rule.rule.fault, &rule.id);
-    let request_info = RequestInfo::from_request(&req);
 
     match fault_decision {
+        // Sampled no-fault is the common case at low fault probabilities, and this arm hands
+        // `req` straight back — hoisted above the RequestInfo build so that path stays
+        // allocation-free (issue #545).
+        FaultDecision::None => {
+            debug!("No fault injected for matched rule: {}", rule.id);
+            RuleHandlingResult::NoFault(req)
+        }
         FaultDecision::TcpFault {
             fault_type,
             rule_id,
@@ -476,7 +484,7 @@ async fn handle_yaml_rule(
             // Record metrics
             metrics::record_error_injection(&rule_id, 0);
             let duration_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-            metrics::record_proxy_duration(request_info.method.as_str(), duration_ms, "tcp_fault");
+            metrics::record_proxy_duration(req.method().as_str(), duration_ms, "tcp_fault");
 
             // Return appropriate error based on fault type
             let (status, body) = match fault_type {
@@ -516,24 +524,24 @@ async fn handle_yaml_rule(
             // Record metrics
             metrics::record_error_injection(&rule_id, status);
             let duration_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-            metrics::record_proxy_duration(request_info.method.as_str(), duration_ms, "error");
-            metrics::record_request(request_info.method.as_str(), status);
+            metrics::record_proxy_duration(req.method().as_str(), duration_ms, "error");
+            metrics::record_request(req.method().as_str(), status);
 
             // Build request context for behaviors
             let request_context = RequestContext::from_request(
-                request_info.method.as_str(),
-                &request_info.uri,
-                &request_info.headers,
+                req.method().as_str(),
+                req.uri(),
+                req.headers(),
                 None, // Body not available for YAML rules
             );
 
             // Process template variables in response body if present
             let mut processed_body = if has_template_variables(&body) {
                 let request_data = RequestData::new(
-                    request_info.method.as_str(),
-                    request_info.uri.path(),
-                    request_info.uri.query(),
-                    &request_info.headers,
+                    req.method().as_str(),
+                    req.uri().path(),
+                    req.uri().query(),
+                    req.headers(),
                     None,
                 );
                 process_template(&body, &request_data)
@@ -657,6 +665,7 @@ async fn handle_yaml_rule(
             duration_ms,
             rule_id,
         } => {
+            let request_info = RequestInfo::from_request(&req);
             info!(
                 "Injecting latency fault: {}ms, rule={}",
                 duration_ms, rule_id
@@ -699,10 +708,6 @@ async fn handle_yaml_rule(
             response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
             response.set_header_value(&X_RIFT_LATENCY_MS, &duration_ms.to_string());
             RuleHandlingResult::Response(response.into_boxed())
-        }
-        FaultDecision::None => {
-            debug!("No fault injected for matched rule: {}", rule.id);
-            RuleHandlingResult::NoFault(req)
         }
     }
 }

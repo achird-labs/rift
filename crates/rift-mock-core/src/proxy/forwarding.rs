@@ -140,10 +140,6 @@ pub async fn forward_with_recording(
     req: Request<hyper::body::Incoming>,
     upstream_uri: &str,
 ) -> Response<BoxBody<Bytes, hyper::Error>> {
-    let method = req.method().clone();
-    let uri = req.uri().clone();
-    let headers = req.headers().clone();
-
     // For recording modes, we need to collect the body to create a signature
     let mode = recording_store.mode();
     if mode == ProxyMode::ProxyTransparent {
@@ -151,8 +147,15 @@ pub async fn forward_with_recording(
         return forward_request_streaming(http_client, req, upstream_uri).await;
     }
 
+    // Past this point every recording mode consumes the request body, so take ownership of the
+    // parts here rather than cloning Method/Uri/HeaderMap up front (issue #545).
+    let (parts, body) = req.into_parts();
+    let method = parts.method;
+    let uri = parts.uri;
+    let headers = parts.headers;
+
     // Collect body for signature creation
-    let body_bytes = match req.collect().await {
+    let body_bytes = match body.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
             error!("Failed to collect request body for recording: {}", e);
