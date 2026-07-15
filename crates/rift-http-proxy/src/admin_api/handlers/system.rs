@@ -148,12 +148,27 @@ pub async fn handle_reload(
     };
 
     // Parse before touching state — a bad config leaves the running imposters intact.
-    let configs = match crate::config_loader::load_configs(&source) {
-        Ok(configs) => configs,
-        Err(e) => {
+    //
+    // On the blocking pool (issue #550): `load_configs` is synchronous — many small `std::fs`
+    // reads plus EJS/regex/serde work — and unlike startup, reload is network-triggered and
+    // repeatable, so a large datadir or a stalled mount would pin a runtime worker for the whole
+    // read. Awaited here, so the parse still completes before anything mutates.
+    let configs = match tokio::task::spawn_blocking(move || {
+        crate::config_loader::load_configs(&source)
+    })
+    .await
+    {
+        Ok(Ok(configs)) => configs,
+        Ok(Err(e)) => {
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("Reload failed (imposters unchanged): {e}"),
+            );
+        }
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Reload task failed: {e}"),
             );
         }
     };
