@@ -192,10 +192,13 @@ rather than silently burning CPU.
 
 #### What makes two requests "the same"
 
-The key is the method, the path, the `key_headers` above, the rule id, and the **body**. Note the
-query string is **not** part of it — two requests differing only in `?query=...` share a cache
-entry, so a script that branches on `ctx.request.query` should not be cached (configure flow state,
-which disables the cache, or keep the decision independent of the query).
+The key is the method, the path, the **query string**, the `key_headers` above, the rule id, and the
+**body**.
+
+The query is keyed on its **raw spelling**, so `?a=1&b=2` and `?b=2&a=1` are two entries even though
+they mean the same thing. That is deliberate: it can only cost you a cache miss, whereas keying on
+the parsed form could hand one request another's decision. Clients serialize query strings
+deterministically, so in practice it costs nothing.
 
 How the body counts depends on whether it is JSON:
 

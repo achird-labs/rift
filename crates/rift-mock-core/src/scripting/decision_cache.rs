@@ -57,6 +57,11 @@ pub enum CacheKeyBody<'a> {
 const JSON_BODY_TAG: u8 = 0;
 const RAW_BODY_TAG: u8 = 1;
 
+/// The same technique for the query (issue #660): `/path` (no query at all) and `/path?` (an empty
+/// one) are different requests, so their hashes must differ by construction rather than by luck.
+const QUERY_TAG: u8 = 0;
+const NO_QUERY_TAG: u8 = 1;
+
 /// Cache key derived from request properties
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct CacheKey {
@@ -66,6 +71,9 @@ pub struct CacheKey {
     path: String,
     /// Sorted header keys and values (for deterministic hashing)
     headers: Vec<(String, String)>,
+    /// Query hash (issue #660). Hashed rather than stored: a query string is attacker-long
+    /// (~8 KB URLs) against a 10k-entry LRU, where `path` is bounded in practice.
+    query_hash: u64,
     /// Body hash (to avoid storing large bodies)
     body_hash: u64,
     /// Rule ID
@@ -77,6 +85,7 @@ impl CacheKey {
     pub fn new(
         method: String,
         path: String,
+        query: Option<&str>,
         mut headers: Vec<(String, String)>,
         body: CacheKeyBody<'_>,
         rule_id: String,
@@ -86,14 +95,41 @@ impl CacheKey {
 
         // Hash the body to avoid storing large payloads
         let body_hash = Self::hash_body(body);
+        let query_hash = Self::hash_query(query);
 
         Self {
             method,
             path,
             headers,
+            query_hash,
             body_hash,
             rule_id,
         }
+    }
+
+    /// Hash the raw query string for the cache key, tagged so an absent query and an empty one
+    /// cannot collide (issue #660).
+    ///
+    /// The **raw** string, deliberately, not the parsed map the script actually reads
+    /// (`ctx.request.query`). The map would be faithful today, but `parse_query_string` is lossy —
+    /// last-wins on duplicate keys, percent-decoding, order erased — so keying on it would need a
+    /// canonical ordering pass per request, and would silently under-split again the day a script
+    /// gains a raw-query or full-URI accessor. The raw string can only err the safe way: the same
+    /// raw string always parses to the same map, so it never under-splits; two spellings of one
+    /// logical query (`?a=1&b=2` vs `?b=2&a=1`) over-split, costing hit rate and nothing else.
+    ///
+    /// `FixedState` for the same reason as [`hash_body`](Self::hash_body): this `u64` is stored in
+    /// the key and compared by `Eq`, so a per-call seed would stop the cache ever hitting.
+    fn hash_query(query: Option<&str>) -> u64 {
+        let mut hasher = foldhash::fast::FixedState::default().build_hasher();
+        match query {
+            Some(q) => {
+                QUERY_TAG.hash(&mut hasher);
+                q.hash(&mut hasher);
+            }
+            None => NO_QUERY_TAG.hash(&mut hasher),
+        }
+        hasher.finish()
     }
 
     /// Hash the body for the cache key, tagged by domain (issue #652).
@@ -643,6 +679,7 @@ mod tests {
         let key1 = CacheKey::new(
             "GET".to_string(),
             "/api/test".to_string(),
+            None,
             headers.clone(),
             CacheKeyBody::Json(&json!({"foo": "bar"})),
             "rule1".to_string(),
@@ -651,6 +688,7 @@ mod tests {
         let key2 = CacheKey::new(
             "GET".to_string(),
             "/api/test".to_string(),
+            None,
             headers.clone(),
             CacheKeyBody::Json(&json!({"foo": "bar"})),
             "rule1".to_string(),
@@ -675,6 +713,7 @@ mod tests {
         let key1 = CacheKey::new(
             "GET".to_string(),
             "/api/test".to_string(),
+            None,
             headers1,
             CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
@@ -683,6 +722,7 @@ mod tests {
         let key2 = CacheKey::new(
             "GET".to_string(),
             "/api/test".to_string(),
+            None,
             headers2,
             CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
@@ -706,6 +746,7 @@ mod tests {
         let key = CacheKey::new(
             "GET".to_string(),
             "/api/test".to_string(),
+            None,
             vec![],
             CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
@@ -752,6 +793,7 @@ mod tests {
         let key = CacheKey::new(
             "GET".to_string(),
             "/api/test".to_string(),
+            None,
             vec![],
             CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
@@ -790,6 +832,7 @@ mod tests {
             let key = CacheKey::new(
                 "GET".to_string(),
                 format!("/api/test{i}"),
+                None,
                 vec![],
                 CacheKeyBody::Json(&json!({})),
                 format!("rule{i}"),
@@ -803,6 +846,7 @@ mod tests {
         let key1 = CacheKey::new(
             "GET".to_string(),
             "/api/test1".to_string(),
+            None,
             vec![],
             CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
@@ -812,6 +856,7 @@ mod tests {
         let key2 = CacheKey::new(
             "GET".to_string(),
             "/api/test2".to_string(),
+            None,
             vec![],
             CacheKeyBody::Json(&json!({})),
             "rule2".to_string(),
@@ -822,6 +867,7 @@ mod tests {
         let key3 = CacheKey::new(
             "GET".to_string(),
             "/api/test3".to_string(),
+            None,
             vec![],
             CacheKeyBody::Json(&json!({})),
             "rule3".to_string(),
@@ -834,6 +880,7 @@ mod tests {
         let key0 = CacheKey::new(
             "GET".to_string(),
             "/api/test0".to_string(),
+            None,
             vec![],
             CacheKeyBody::Json(&json!({})),
             "rule0".to_string(),
@@ -862,6 +909,7 @@ mod tests {
         let key = CacheKey::new(
             "GET".to_string(),
             "/api/test".to_string(),
+            None,
             vec![],
             CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
@@ -885,6 +933,7 @@ mod tests {
             let key = CacheKey::new(
                 "GET".to_string(),
                 format!("/api/test{i}"),
+                None,
                 vec![],
                 CacheKeyBody::Json(&json!({})),
                 format!("rule{i}"),
@@ -906,6 +955,7 @@ mod tests {
         let key = CacheKey::new(
             "GET".to_string(),
             "/api/test".to_string(),
+            None,
             vec![],
             CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
@@ -943,6 +993,7 @@ mod tests {
             let key = CacheKey::new(
                 "GET".to_string(),
                 format!("/api/test{i}"),
+                None,
                 vec![],
                 CacheKeyBody::Json(&json!({})),
                 format!("rule{i}"),
@@ -968,6 +1019,7 @@ mod tests {
         CacheKey::new(
             "GET".to_string(),
             format!("/api/test{i}"),
+            None,
             vec![],
             CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
@@ -1131,6 +1183,7 @@ mod tests {
         CacheKey::new(
             "GET".to_string(),
             "/api".to_string(),
+            None,
             cache.key_headers(headers),
             CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
@@ -1235,6 +1288,7 @@ mod tests {
         CacheKey::new(
             "POST".to_string(),
             "/api/upload".to_string(),
+            None,
             vec![(
                 "content-type".to_string(),
                 "application/octet-stream".to_string(),
@@ -1242,6 +1296,86 @@ mod tests {
             body,
             "rule1".to_string(),
         )
+    }
+
+    // ===== The query's participation in the key (issue #660) =====
+    //
+    // Same invariant as #652, next component over: the memoised script reads `ctx.request.query`,
+    // so the key must cover it. It covered only `uri.path()`, which excludes the query — so
+    // `?page=1` and `?page=2` shared one entry and the second was served the first's decision.
+
+    fn key_with_query(query: Option<&str>) -> CacheKey {
+        CacheKey::new(
+            "GET".to_string(),
+            "/api/widgets".to_string(),
+            query,
+            vec![("accept".to_string(), "application/json".to_string())],
+            CacheKeyBody::Raw(b""),
+            "rule1".to_string(),
+        )
+    }
+
+    /// The reported defect: everything equal but the query value.
+    #[test]
+    fn different_query_values_get_different_keys() {
+        assert_ne!(
+            key_with_query(Some("page=1")),
+            key_with_query(Some("page=2")),
+            "two different queries must not share a cached script decision"
+        );
+    }
+
+    /// The cache must still cache.
+    #[test]
+    fn identical_queries_share_a_key() {
+        assert_eq!(
+            key_with_query(Some("page=1&sort=asc")),
+            key_with_query(Some("page=1&sort=asc")),
+            "the same query must still hit the same entry"
+        );
+    }
+
+    /// No query at all is not the same request as an empty query (`/path` vs `/path?`), so they
+    /// must not share an entry.
+    ///
+    /// Unlike the body tag, which is load-bearing (`Value::Null` and `b""` genuinely collide
+    /// untagged), this one is belt-and-braces: `Hash for str` appends a `0xff` terminator, so
+    /// `Some("")` already differs from hashing nothing. Verified by mutation — this test still
+    /// passes with `QUERY_TAG`/`NO_QUERY_TAG` removed. The tag stays because it makes the property
+    /// structural rather than a consequence of a `str` hashing detail, but do not mistake this
+    /// test for a proof of it.
+    #[test]
+    fn absent_query_and_empty_query_are_different_keys() {
+        assert_ne!(
+            key_with_query(None),
+            key_with_query(Some("")),
+            "an absent query and an empty one are different requests"
+        );
+    }
+
+    /// Keying on the RAW spelling means two orderings of the same logical query are two entries.
+    /// That is deliberate (issue #660): it can only cost hit rate, never correctness, whereas
+    /// keying on the parsed map would under-split the day a script gains a raw-query accessor.
+    /// Pinned so a future "canonicalise the query" optimisation trips a test, not a reviewer.
+    #[test]
+    fn reordered_query_over_splits_deliberately() {
+        assert_ne!(
+            key_with_query(Some("a=1&b=2")),
+            key_with_query(Some("b=2&a=1")),
+            "raw-spelling keying over-splits on purpose — the safe direction"
+        );
+    }
+
+    /// The query hash is stored in the key and compared by `Eq`, so — exactly like `hash_body`
+    /// (issue #654) — its seed must be fixed, or the same query would hash differently per call
+    /// and the cache would never hit again while every other test stayed green.
+    #[test]
+    fn hash_query_is_stable_across_calls() {
+        assert_eq!(
+            CacheKey::hash_query(Some("page=1")),
+            CacheKey::hash_query(Some("page=1"))
+        );
+        assert_eq!(CacheKey::hash_query(None), CacheKey::hash_query(None));
     }
 
     /// The reported bug, as a regression test: the exact probe from issue #652.
@@ -1343,6 +1477,7 @@ mod tests {
         let other_rule = CacheKey::new(
             "POST".to_string(),
             "/api/upload".to_string(),
+            None,
             vec![(
                 "content-type".to_string(),
                 "application/octet-stream".to_string(),

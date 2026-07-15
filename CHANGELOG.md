@@ -13,6 +13,20 @@ record.
 
 ### Fixed
 
+- **Two requests differing only in their query string no longer share one cached script decision.**
+  The decision-cache key was built from `Uri::path()`, which excludes the query — but scripts read
+  the query as `ctx.request.query`. So `?scenario=timeout` and `?scenario=none`, identical in every
+  other respect, produced the same key, and the second request was served **the first one's fault
+  decision**: silently, for up to the cache TTL. Query-driven scenarios are an ordinary way to drive
+  a fault-injection proxy, and this affected the default configuration (cache on, 300s TTL) for any
+  deployment not using flow state. This is the same defect as the non-JSON-body collision below, one
+  component over: the key must cover every request-varying input the memoised script can observe —
+  headers came under that rule earlier, the body did too, the query never had. The query now enters
+  the key on its raw spelling, so `?a=1&b=2` and `?b=2&a=1` are two entries — deliberate, since the
+  only cost is a cache miss, where keying on the parsed form could hand one request another's
+  decision. **Breaking (embedders only):** `CacheKey::new` takes a `query: Option<&str>` after
+  `path`.
+
 - **Two requests with different non-JSON bodies no longer share one cached script decision.** The
   decision-cache key hashed only the *parsed* body, and every body that is not JSON — every
   protobuf, gzip or image upload, every text payload, every malformed body, and the empty body —

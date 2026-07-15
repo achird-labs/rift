@@ -432,6 +432,19 @@ mod tests {
     /// Lives in-crate rather than `tests/` because `RequestHandlerContext` is private and
     /// `handle_request` takes a `hyper::body::Incoming`, which only a real connection can produce.
     async fn hits_after_two_bodies(first: &'static [u8], second: &'static [u8]) -> (u64, u64) {
+        hits_after_two_requests((None, first), (None, second)).await
+    }
+
+    /// Same harness, varying the query instead of the body (issue #660).
+    async fn hits_after_two_queries(first: &'static str, second: &'static str) -> (u64, u64) {
+        hits_after_two_requests((Some(first), b""), (Some(second), b"")).await
+    }
+
+    /// Drive a real bound proxy with two requests and report the cache's (hits, misses).
+    async fn hits_after_two_requests(
+        first: (Option<&str>, &'static [u8]),
+        second: (Option<&str>, &'static [u8]),
+    ) -> (u64, u64) {
         let listener = create_reusable_listener(SocketAddr::from(([127, 0, 0, 1], 0)))
             .expect("bind probe listener");
         let port = listener.local_addr().expect("addr").port();
@@ -467,9 +480,13 @@ mod tests {
         }
 
         let client = reqwest::Client::new();
-        for body in [first, second] {
+        for (query, body) in [first, second] {
+            let url = match query {
+                Some(q) => format!("http://127.0.0.1:{port}/upload?{q}"),
+                None => format!("http://127.0.0.1:{port}/upload"),
+            };
             let _ = client
-                .post(format!("http://127.0.0.1:{port}/upload"))
+                .post(url)
                 .header("content-type", "application/octet-stream")
                 .body(body.to_vec())
                 .send()
@@ -500,5 +517,25 @@ mod tests {
             hits, 1,
             "an identical retried payload must still hit the cache"
         );
+    }
+
+    /// The wiring gate for #660: unit tests prove the key separates queries; only this proves
+    /// `handler.rs` feeds the real query string in. A handler passing a constant would satisfy
+    /// every unit test — that is exactly how #652 nearly shipped.
+    #[tokio::test]
+    async fn two_different_queries_do_not_share_a_cached_decision() {
+        let (hits, misses) = hits_after_two_queries("page=1", "page=2").await;
+        assert_eq!(
+            hits, 0,
+            "the second request must not be served the first's cached decision (issue #660)"
+        );
+        assert_eq!(misses, 2, "two different queries are two different keys");
+    }
+
+    /// The opposite failure: keying on something per-request would make the cache useless.
+    #[tokio::test]
+    async fn identical_queries_still_hit_the_cache() {
+        let (hits, _) = hits_after_two_queries("page=1", "page=1").await;
+        assert_eq!(hits, 1, "the same query twice must still hit the cache");
     }
 }

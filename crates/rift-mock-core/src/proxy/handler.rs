@@ -230,6 +230,9 @@ async fn handle_script_rules(
     let cache_key = CacheKey::new(
         request_info.method.to_string(),
         request_info.uri.path().to_string(),
+        // `Uri::path()` excludes the query, but the script reads it as `ctx.request.query` — so
+        // without this the key could not tell `?page=1` from `?page=2` (issue #660).
+        request_info.uri.query(),
         scripting.decision_cache.key_headers(&headers_map),
         parsed_body
             .as_ref()
