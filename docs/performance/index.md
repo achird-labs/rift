@@ -190,6 +190,26 @@ headers either way — this only changes what makes two requests "the same" for 
 If the cache degenerates to a ~0% hit rate, Rift logs a warning once per process telling you so,
 rather than silently burning CPU.
 
+#### What makes two requests "the same"
+
+The key is the method, the path, the `key_headers` above, the rule id, and the **body**. Note the
+query string is **not** part of it — two requests differing only in `?query=...` share a cache
+entry, so a script that branches on `ctx.request.query` should not be cached (configure flow state,
+which disables the cache, or keep the decision independent of the query).
+
+How the body counts depends on whether it is JSON:
+
+- **JSON** — keyed *structurally*, so whitespace and key order do not split the key. Two requests
+  whose bodies parse to the same value share one entry. The corollary: a script that branches on
+  the raw *formatting* of a valid-JSON body is outside the cache-key contract, the same way one
+  that reads a header you left out of `key_headers` is.
+- **Anything else** — binary, plain text, malformed JSON, or an empty body — is keyed on its raw
+  bytes, which is what your script reads via `ctx.request.raw_body`. Two different uploads are two
+  different keys.
+
+The two are kept in separate hash domains, so a JSON `null` body, an empty body, and a binary body
+are always three distinct keys.
+
 > The cache is only consulted on the fault-injection proxy path with `script_rules` configured and
 > flow state **not** configured — stateful scripts are never cached.
 

@@ -11,6 +11,26 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two requests with different non-JSON bodies no longer share one cached script decision.** The
+  decision-cache key hashed only the *parsed* body, and every body that is not JSON — every
+  protobuf, gzip or image upload, every text payload, every malformed body, and the empty body —
+  parsed to `null`. So any two of them with the same method, path, keyed headers and rule produced
+  an identical key, and the second request was served the **first one's fault decision**: silently,
+  for up to the cache TTL, with nothing logged to correlate. Scripts read the body as
+  `ctx.request.raw_body`, so this was the cache discarding an input the memoised script can branch
+  on. The body now enters the key as its raw bytes whenever it is not JSON, in a separate hash
+  domain from parsed JSON — so a JSON `null`, an empty body and a binary body are three distinct
+  keys by construction. JSON bodies keep their structural key (formatting and key order still do
+  not split it), identical payloads still hit the cache, and the non-JSON path is *cheaper* than
+  before: hashing bytes beats walking a JSON tree. The script-visible contract is unchanged —
+  `ctx.request.body` is still `null` for a non-JSON body, with the bytes on `raw_body`/`mode`.
+  Affects the default configuration (cache on, 300s TTL) for any deployment not using flow state.
+  **Breaking (embedders only):** `rift_mock_core`'s `CacheKey::new` now takes a `CacheKeyBody<'_>`
+  (`Json(&Value)` / `Raw(&[u8])`) in place of `&serde_json::Value`. In-process callers building
+  cache keys directly must wrap the argument; no configuration or wire format changes.
+
 ### Security
 
 - **`POST /intercept/rules` now obeys `--allowInjection`.** An intercept rule's predicates are

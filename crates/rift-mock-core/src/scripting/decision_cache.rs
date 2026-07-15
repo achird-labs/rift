@@ -33,6 +33,30 @@ impl Default for DecisionCacheConfig {
     }
 }
 
+/// How the request body participates in the cache key (issue #652).
+///
+/// The memoised function is a user script, and it reads the body as `ctx.request.raw_body` — so the
+/// key must cover the *bytes*, not only whatever they parsed into. The caller hands [`Json`] when
+/// the body parsed and [`Raw`] otherwise: binary, text, malformed JSON, and the empty body.
+///
+/// [`Json`]: CacheKeyBody::Json
+/// [`Raw`]: CacheKeyBody::Raw
+#[derive(Clone, Copy, Debug)]
+pub enum CacheKeyBody<'a> {
+    /// The body parsed as JSON. Hashed structurally, so formatting and key order — which a script
+    /// cannot observe through `ctx.request.body` — do not split the key (issue #653).
+    Json(&'a serde_json::Value),
+    /// The body did not parse as JSON, so the script sees `body == null` and branches on the bytes
+    /// instead. Hashed as bytes, which is also cheaper than the JSON tree walk.
+    Raw(&'a [u8]),
+}
+
+/// Domain tags mixed into the body hash so [`CacheKeyBody::Json`] and [`CacheKeyBody::Raw`] are
+/// hashed in separate domains — a raw body can never share a hash with the JSON it happens to
+/// spell, by construction rather than by luck.
+const JSON_BODY_TAG: u8 = 0;
+const RAW_BODY_TAG: u8 = 1;
+
 /// Cache key derived from request properties
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct CacheKey {
@@ -54,14 +78,14 @@ impl CacheKey {
         method: String,
         path: String,
         mut headers: Vec<(String, String)>,
-        body: &serde_json::Value,
+        body: CacheKeyBody<'_>,
         rule_id: String,
     ) -> Self {
         // Sort headers for deterministic key generation
         headers.sort_by(|a, b| a.0.cmp(&b.0));
 
         // Hash the body to avoid storing large payloads
-        let body_hash = Self::hash_json(body);
+        let body_hash = Self::hash_body(body);
 
         Self {
             method,
@@ -72,7 +96,19 @@ impl CacheKey {
         }
     }
 
-    /// Hash a JSON value for cache key generation.
+    /// Hash the body for the cache key, tagged by domain (issue #652).
+    ///
+    /// The tag is what makes [`CacheKeyBody::Json`] and [`CacheKeyBody::Raw`] incapable of sharing
+    /// a hash: without it, `Raw(br#"{"a":1}"#)` and the `Value` it parses to would be two spellings
+    /// of one key. It also costs nothing — one byte into the hasher that is already running.
+    ///
+    /// The `Raw` arm exists because the memoised script reads `ctx.request.raw_body`. Keying only
+    /// on the parsed `Value` meant every non-JSON body — every binary upload, every text payload,
+    /// the empty body — hashed as `Null` and shared **one** entry, so the second request was served
+    /// the first's fault decision with nothing logged (issue #652). It is also the cheaper arm: a
+    /// contiguous byte hash rather than a tree walk.
+    ///
+    /// ## The `Json` arm
     ///
     /// Walks the `Value` in place. This previously serialised a canonical JSON `String` first,
     /// which put an allocation and a full render of the body on the per-request hot path — the key
@@ -93,13 +129,25 @@ impl CacheKey {
     /// Caveat inherited from `Hash for serde_json::Number`: it hashes the numeric payload without
     /// an arm tag, so values that differ only across `u64`/`i64`/`f64` but share a bit pattern
     /// (`18446744073709551615` vs `-1`; `1.0` vs `4607182418800017408`) collide where the old
-    /// render did not. This is accepted rather than fixed by hand-rolling a tagged walk, because
-    /// the caller collapses an incomparably larger class already: `proxy/handler.rs` maps *every*
-    /// non-JSON body to `Value::Null`, so all binary and text bodies share a single key (issue
-    /// #652). Tagging the number arms while that stands would buy nothing.
-    fn hash_json(value: &serde_json::Value) -> u64 {
+    /// render did not. This is accepted rather than fixed by hand-rolling a tagged walk over
+    /// `Number`. It takes two requests whose bodies differ *only* in a number that spans those arms
+    /// with a shared bit pattern, at the same method/path/keyed-headers/rule; the cost is one wrong
+    /// cached decision for one TTL, and re-owning serde_json's number hashing to prevent it costs
+    /// more than that is worth.
+    fn hash_body(body: CacheKeyBody<'_>) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        value.hash(&mut hasher);
+        match body {
+            CacheKeyBody::Json(value) => {
+                JSON_BODY_TAG.hash(&mut hasher);
+                value.hash(&mut hasher);
+            }
+            CacheKeyBody::Raw(bytes) => {
+                RAW_BODY_TAG.hash(&mut hasher);
+                // `Hash for [u8]` writes the length before the bytes, so no two byte strings can
+                // be confused by concatenation.
+                bytes.hash(&mut hasher);
+            }
+        }
         hasher.finish()
     }
 }
@@ -458,10 +506,12 @@ mod tests {
     fn hashing_a_body_allocates_nothing() {
         let body = large_body();
         // Warm anything lazy (hasher construction, TLS) so the measured window is the hash alone.
-        let _ = CacheKey::hash_json(&body);
+        let _ = CacheKey::hash_body(CacheKeyBody::Json(&body));
 
         let before = counting_alloc::count();
-        std::hint::black_box(CacheKey::hash_json(std::hint::black_box(&body)));
+        std::hint::black_box(CacheKey::hash_body(CacheKeyBody::Json(
+            std::hint::black_box(&body),
+        )));
         let allocations = counting_alloc::count() - before;
 
         assert_eq!(
@@ -483,8 +533,8 @@ mod tests {
 
         assert_eq!(a, b, "fixture precondition: these are the same JSON value");
         assert_eq!(
-            CacheKey::hash_json(&a),
-            CacheKey::hash_json(&b),
+            CacheKey::hash_body(CacheKeyBody::Json(&a)),
+            CacheKey::hash_body(CacheKeyBody::Json(&b)),
             "equal JSON must hash equally whatever order the keys arrived in"
         );
     }
@@ -501,8 +551,8 @@ mod tests {
             "fixture precondition: these are == as Values"
         );
         assert_eq!(
-            CacheKey::hash_json(&json!(-0.0)),
-            CacheKey::hash_json(&json!(0.0)),
+            CacheKey::hash_body(CacheKeyBody::Json(&json!(-0.0))),
+            CacheKey::hash_body(CacheKeyBody::Json(&json!(0.0))),
             "values that compare equal must hash equally, or they split the key on nothing"
         );
     }
@@ -514,7 +564,7 @@ mod tests {
     /// collides with its two's-complement negative. The old `to_string` hash did not do this.
     /// Accepted because the caller already collapses every non-JSON body onto `Value::Null`
     /// (issue #652), an incomparably larger class. If this test fails, that trade-off changed and
-    /// the doc comment on `hash_json` needs revisiting — it is not automatically a bug.
+    /// the doc comment on `hash_body` needs revisiting — it is not automatically a bug.
     #[test]
     fn known_accepted_collision_across_number_arms_is_unchanged() {
         assert_ne!(
@@ -523,9 +573,9 @@ mod tests {
             "fixture precondition: these are different JSON values"
         );
         assert_eq!(
-            CacheKey::hash_json(&json!(u64::MAX)),
-            CacheKey::hash_json(&json!(-1i64)),
-            "documented accepted collision: u64/i64 arms share a bit pattern (see hash_json's docs)"
+            CacheKey::hash_body(CacheKeyBody::Json(&json!(u64::MAX))),
+            CacheKey::hash_body(CacheKeyBody::Json(&json!(-1i64))),
+            "documented accepted collision: u64/i64 arms share a bit pattern (see hash_body's docs)"
         );
     }
 
@@ -555,8 +605,8 @@ mod tests {
         for (i, a) in shapes.iter().enumerate() {
             for b in &shapes[i + 1..] {
                 assert_ne!(
-                    CacheKey::hash_json(a),
-                    CacheKey::hash_json(b),
+                    CacheKey::hash_body(CacheKeyBody::Json(a)),
+                    CacheKey::hash_body(CacheKeyBody::Json(b)),
                     "distinct JSON shapes must not share a cache key: {a} vs {b}"
                 );
             }
@@ -574,7 +624,7 @@ mod tests {
             "GET".to_string(),
             "/api/test".to_string(),
             headers.clone(),
-            &json!({"foo": "bar"}),
+            CacheKeyBody::Json(&json!({"foo": "bar"})),
             "rule1".to_string(),
         );
 
@@ -582,7 +632,7 @@ mod tests {
             "GET".to_string(),
             "/api/test".to_string(),
             headers.clone(),
-            &json!({"foo": "bar"}),
+            CacheKeyBody::Json(&json!({"foo": "bar"})),
             "rule1".to_string(),
         );
 
@@ -606,7 +656,7 @@ mod tests {
             "GET".to_string(),
             "/api/test".to_string(),
             headers1,
-            &json!({}),
+            CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
         );
 
@@ -614,7 +664,7 @@ mod tests {
             "GET".to_string(),
             "/api/test".to_string(),
             headers2,
-            &json!({}),
+            CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
         );
 
@@ -637,7 +687,7 @@ mod tests {
             "GET".to_string(),
             "/api/test".to_string(),
             vec![],
-            &json!({}),
+            CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
         );
 
@@ -683,7 +733,7 @@ mod tests {
             "GET".to_string(),
             "/api/test".to_string(),
             vec![],
-            &json!({}),
+            CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
         );
 
@@ -721,7 +771,7 @@ mod tests {
                 "GET".to_string(),
                 format!("/api/test{i}"),
                 vec![],
-                &json!({}),
+                CacheKeyBody::Json(&json!({})),
                 format!("rule{i}"),
             );
             cache.insert(key, FaultDecision::None);
@@ -734,7 +784,7 @@ mod tests {
             "GET".to_string(),
             "/api/test1".to_string(),
             vec![],
-            &json!({}),
+            CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
         );
         cache.get(&key1);
@@ -743,7 +793,7 @@ mod tests {
             "GET".to_string(),
             "/api/test2".to_string(),
             vec![],
-            &json!({}),
+            CacheKeyBody::Json(&json!({})),
             "rule2".to_string(),
         );
         cache.get(&key2);
@@ -753,7 +803,7 @@ mod tests {
             "GET".to_string(),
             "/api/test3".to_string(),
             vec![],
-            &json!({}),
+            CacheKeyBody::Json(&json!({})),
             "rule3".to_string(),
         );
         cache.insert(key3, FaultDecision::None);
@@ -765,7 +815,7 @@ mod tests {
             "GET".to_string(),
             "/api/test0".to_string(),
             vec![],
-            &json!({}),
+            CacheKeyBody::Json(&json!({})),
             "rule0".to_string(),
         );
         assert!(cache.get(&key0).is_none());
@@ -793,7 +843,7 @@ mod tests {
             "GET".to_string(),
             "/api/test".to_string(),
             vec![],
-            &json!({}),
+            CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
         );
 
@@ -816,7 +866,7 @@ mod tests {
                 "GET".to_string(),
                 format!("/api/test{i}"),
                 vec![],
-                &json!({}),
+                CacheKeyBody::Json(&json!({})),
                 format!("rule{i}"),
             );
             cache.insert(key, FaultDecision::None);
@@ -837,7 +887,7 @@ mod tests {
             "GET".to_string(),
             "/api/test".to_string(),
             vec![],
-            &json!({}),
+            CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
         );
 
@@ -874,7 +924,7 @@ mod tests {
                 "GET".to_string(),
                 format!("/api/test{i}"),
                 vec![],
-                &json!({}),
+                CacheKeyBody::Json(&json!({})),
                 format!("rule{i}"),
             );
             cache.insert(key, FaultDecision::None);
@@ -899,7 +949,7 @@ mod tests {
             "GET".to_string(),
             format!("/api/test{i}"),
             vec![],
-            &json!({}),
+            CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
         )
     }
@@ -1062,7 +1112,7 @@ mod tests {
             "GET".to_string(),
             "/api".to_string(),
             cache.key_headers(headers),
-            &json!({}),
+            CacheKeyBody::Json(&json!({})),
             "rule1".to_string(),
         )
     }
@@ -1152,5 +1202,113 @@ mod tests {
             DEGENERATE_MIN_LOOKUPS
         ));
         assert!(!is_degenerate(50, 50));
+    }
+
+    // ===== The body's participation in the key (issue #652) =====
+    //
+    // The memoised function is a user script that reads the body as `ctx.request.raw_body`, so the
+    // key must cover the bytes. It used to cover only the *parsed* Value, and every non-JSON body
+    // parsed to `Null` — so two different uploads shared one entry and the second was served the
+    // first's fault decision, silently.
+
+    fn key_with(body: CacheKeyBody<'_>) -> CacheKey {
+        CacheKey::new(
+            "POST".to_string(),
+            "/api/upload".to_string(),
+            vec![(
+                "content-type".to_string(),
+                "application/octet-stream".to_string(),
+            )],
+            body,
+            "rule1".to_string(),
+        )
+    }
+
+    /// The reported bug, as a regression test: the exact probe from issue #652.
+    #[test]
+    fn different_binary_bodies_get_different_keys() {
+        let a = b"\x00\x01PROTOBUF-PAYLOAD-A";
+        let b = b"\xff\xfeTOTALLY-DIFFERENT-B";
+        assert_ne!(
+            key_with(CacheKeyBody::Raw(a)),
+            key_with(CacheKeyBody::Raw(b)),
+            "two different binary bodies must not share a cached script decision"
+        );
+    }
+
+    #[test]
+    fn different_text_bodies_get_different_keys() {
+        assert_ne!(
+            key_with(CacheKeyBody::Raw(b"hello world")),
+            key_with(CacheKeyBody::Raw(b"goodbye world")),
+            "two different text bodies must not share a cached script decision"
+        );
+    }
+
+    /// The cache must still cache: an identical retried payload keeps hitting.
+    #[test]
+    fn identical_non_json_bodies_share_a_key() {
+        assert_eq!(
+            key_with(CacheKeyBody::Raw(b"\x00\x01PROTOBUF-PAYLOAD-A")),
+            key_with(CacheKeyBody::Raw(b"\x00\x01PROTOBUF-PAYLOAD-A")),
+            "the same bytes must still hit the same entry"
+        );
+    }
+
+    /// The domain tag: a JSON value and raw bytes are hashed in separate domains, so a literal
+    /// `null` body, an empty body, and a non-JSON body are three distinct keys — the three that
+    /// all collapsed onto one hash before.
+    #[test]
+    fn json_null_empty_and_raw_bodies_are_three_distinct_keys() {
+        let json_null = key_with(CacheKeyBody::Json(&serde_json::Value::Null));
+        let empty = key_with(CacheKeyBody::Raw(b""));
+        let raw = key_with(CacheKeyBody::Raw(b"\x00\x01binary"));
+
+        assert_ne!(json_null, empty, "a literal JSON null is not an empty body");
+        assert_ne!(json_null, raw, "a literal JSON null is not a binary body");
+        assert_ne!(empty, raw, "an empty body is not a binary body");
+    }
+
+    /// A raw body whose bytes are the JSON text of a value must not collide with that parsed value:
+    /// the tag separates the domains even when the payload is byte-identical.
+    #[test]
+    fn raw_bytes_do_not_collide_with_the_json_they_spell() {
+        let value = serde_json::json!({"a": 1});
+        assert_ne!(
+            key_with(CacheKeyBody::Json(&value)),
+            key_with(CacheKeyBody::Raw(br#"{"a":1}"#)),
+            "the domain tag must keep parsed JSON and raw bytes apart"
+        );
+    }
+
+    /// #653's invariant survives: JSON is keyed structurally, so formatting and key order — which
+    /// the script cannot observe through `ctx.request.body` — do not split the key.
+    #[test]
+    fn structurally_equal_json_still_shares_a_key() {
+        let a: serde_json::Value = serde_json::from_str(r#"{"a":1,"b":[2,3]}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str("{ \"b\" : [2, 3], \"a\" : 1 }").unwrap();
+        assert_eq!(
+            key_with(CacheKeyBody::Json(&a)),
+            key_with(CacheKeyBody::Json(&b)),
+            "structurally equal JSON must keep sharing one entry (issue #653)"
+        );
+    }
+
+    /// The body is only one component: the rest of the key still separates entries, and a raw body
+    /// does not accidentally swallow them.
+    #[test]
+    fn raw_body_keys_still_separate_on_the_other_components() {
+        let base = key_with(CacheKeyBody::Raw(b"same-bytes"));
+        let other_rule = CacheKey::new(
+            "POST".to_string(),
+            "/api/upload".to_string(),
+            vec![(
+                "content-type".to_string(),
+                "application/octet-stream".to_string(),
+            )],
+            CacheKeyBody::Raw(b"same-bytes"),
+            "rule2".to_string(),
+        );
+        assert_ne!(base, other_rule, "rule_id still separates identical bodies");
     }
 }
