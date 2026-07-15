@@ -74,6 +74,13 @@ at boot. It is no longer the only way to enable it: a server started without the
 the runtime lifecycle endpoints (`POST`/`GET`/`DELETE /intercept`), so intercept can be turned on at
 runtime over the admin API. The flag and the endpoints drive the same single listener.
 
+A third way, and the only declarative one, is an
+[`intercept` block in `--configfile`]({{ site.baseurl }}/features/intercept-proxy/#declare-it-in-the-config-file):
+it starts the listener **with its rules already installed**, so a container needs no post-boot admin
+call. The block and these `--intercept-*` flags are two spellings of one listener — supplying both
+is a startup error rather than a silent precedence guess, so pick one. (Each flag also has a
+`RIFT_INTERCEPT_*` environment variable, which counts as supplying it.)
+
 ### API-key authentication
 
 `--api-key` (or `MB_APIKEY`) requires every admin API request to carry the token in the

@@ -40,6 +40,17 @@ docker run -v $(pwd)/imposters.json:/imposters.json \
   zainalpour/rift-proxy:latest --configfile /imposters.json
 ```
 
+### Top-level keys
+
+| Key | Purpose |
+|---|---|
+| `imposters` | The imposters to create — the Mountebank format above. |
+| `intercept` | *Optional, Rift extension.* Declares the [HTTPS intercept listener](../features/intercept-proxy.md#declare-it-in-the-config-file) and its rules, so a container needs no post-boot admin call to install them. |
+
+A file may also be a single imposter object (`{"port": 4545, ...}`) or a bare array of them; those
+shapes have nowhere to put an `intercept` block, so declaring one there is a startup error naming
+the fix rather than a block that silently does nothing.
+
 Or create dynamically via API:
 
 ```bash

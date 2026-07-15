@@ -68,6 +68,25 @@ A successful reload returns `200` with the change set:
 }
 ```
 
+Reload applies **imposters only**. If the config file also declares an
+[`intercept` block](intercept-proxy.md#declare-it-in-the-config-file), it is *not* re-applied —
+re-seeding would duplicate or clobber rules added at runtime, and rebinding the listener is a
+lifecycle change reload does not own. So that an edit to the block never *looks* applied, the
+response says so explicitly (the field is absent otherwise):
+
+```json
+{
+  "message": "Reloaded 3 imposter(s)",
+  "warnings": [
+    "the config file's `intercept` block is applied at startup only and was NOT re-applied; ..."
+  ],
+  "created": [], "replaced": [], "stubPatched": [], "deleted": []
+}
+```
+
+Change intercept rules at runtime with `POST`/`DELETE /intercept/rules`, or restart to re-read the
+block.
+
 If some ports apply and others fail, the call returns `500` and reports both sides — the ports that
 did apply and the ones that failed:
 
