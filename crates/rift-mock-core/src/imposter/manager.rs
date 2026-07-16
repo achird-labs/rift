@@ -375,13 +375,15 @@ impl ImposterManager {
                 // immediately after the previous imposter's listener is torn down.
                 let addr = (bind_host, p)
                     .to_socket_addrs()
-                    .map_err(|e| ImposterError::BindError(p, e.to_string()))?
+                    .map_err(|e| ImposterError::BindError(p, anyhow::Error::new(e)))?
                     .next()
-                    .ok_or_else(|| ImposterError::BindError(p, "no socket address".to_string()))?;
+                    .ok_or_else(|| {
+                        ImposterError::BindError(p, anyhow::anyhow!("no socket address"))
+                    })?;
                 (
                     p,
                     crate::proxy::network::create_reusable_listener(addr)
-                        .map_err(|e| ImposterError::BindError(p, e.to_string()))?,
+                        .map_err(|e| ImposterError::BindError(p, anyhow::Error::new(e)))?,
                 )
             }
             _ => {
@@ -564,7 +566,7 @@ impl ImposterManager {
 
         Err(ImposterError::BindError(
             0,
-            "No available ports in range 49152-65535".to_string(),
+            anyhow::anyhow!("No available ports in range 49152-65535"),
         ))
     }
 
@@ -1007,10 +1009,15 @@ impl ImposterManager {
         snapshot.stubs = imposter.get_stubs();
         let path = datadir.join(format!("{port}.json"));
         let json = serde_json::to_string_pretty(&snapshot).map_err(|e| {
-            ImposterError::PersistError(format!("Failed to serialize imposter {port}: {e}"))
+            ImposterError::PersistError(
+                anyhow::Error::new(e).context(format!("Failed to serialize imposter {port}")),
+            )
         })?;
         tokio::fs::write(&path, json).await.map_err(|e| {
-            ImposterError::PersistError(format!("Failed to write imposter {port} to {path:?}: {e}"))
+            ImposterError::PersistError(
+                anyhow::Error::new(e)
+                    .context(format!("Failed to write imposter {port} to {path:?}")),
+            )
         })
     }
 

@@ -305,21 +305,22 @@ async fn handle_script_rules(
     };
 
     RuleHandlingResult::Response(
-        handle_script_result(
-            ctx,
-            result.map_err(|e| e.to_string()),
-            compiled_rule,
-            &forwarding_ctx,
-            script_duration,
-        )
-        .await,
+        handle_script_result(ctx, result, compiled_rule, &forwarding_ctx, script_duration).await,
     )
+}
+
+/// Log a failed proxy script execution with its whole cause chain (issue #688). The value arrives as
+/// `anyhow::Error` — no longer flattened to a `String` before this sink — so `{e:#}` renders the
+/// engine/pool/timeout causes an operator needs, not just the outermost frame. Split out so the
+/// rendering is pinned by a `#[traced_test]` rather than only reachable through the full handler.
+fn log_script_execution_error(rule_id: &str, e: &anyhow::Error) {
+    error!("Script execution error for rule {rule_id}: {e:#}");
 }
 
 /// Handle the result of a script execution.
 async fn handle_script_result(
     ctx: &RequestHandlerContext<'_>,
-    result: Result<ScriptFaultDecision, String>,
+    result: Result<ScriptFaultDecision, anyhow::Error>,
     compiled_rule: &CompiledRule,
     forwarding_ctx: &ForwardingContext,
     script_duration: f64,
@@ -467,10 +468,7 @@ async fn handle_script_result(
             response.into_boxed()
         }
         Err(e) => {
-            error!(
-                "Script execution error for rule {}: {}",
-                compiled_rule.id, e
-            );
+            log_script_execution_error(&compiled_rule.id, &e);
             metrics::record_script_execution(&compiled_rule.id, script_duration, "error");
             metrics::record_script_error(&compiled_rule.id, "runtime");
 
@@ -790,6 +788,33 @@ pub fn rule_applies_to_upstream(
         (Some(_), None) => true,
         // Both specified - must match
         (Some(rule_upstream), Some(selected)) => rule_upstream == selected,
+    }
+}
+
+#[cfg(test)]
+mod script_error_log_tests {
+    use super::log_script_execution_error;
+    use tracing_test::traced_test;
+
+    // Issue #688: the script-pool result is no longer flattened to a String before this log site, so
+    // a context-chained execution error (engine eval → pool queue → timeout) reaches the operator's
+    // log in full instead of only its outermost frame.
+    #[traced_test]
+    #[test]
+    fn script_execution_error_log_names_the_whole_chain() {
+        let e = anyhow::anyhow!("deadline exceeded after 5s")
+            .context("boa evaluate")
+            .context("script pool execute");
+        log_script_execution_error("rule-7", &e);
+        assert!(logs_contain("rule-7"), "the rule id must be present");
+        assert!(
+            logs_contain("script pool execute"),
+            "outermost context survives"
+        );
+        assert!(
+            logs_contain("deadline exceeded after 5s"),
+            "the root cause must reach the log — the whole point of #688"
+        );
     }
 }
 
