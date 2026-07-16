@@ -305,3 +305,198 @@ async fn decorate_timeout_strict_returns_504() {
 
     let _ = manager.delete_imposter(19764).await;
 }
+
+// ---------------------------------------------------------------------------
+// Issue #682: these doors hand-built their JSON by interpolating the error into a string literal,
+// so a message holding a `"` produced a body the client could not decode (the #611 class), in a
+// legacy `{"error"}` shape that 0.13.6/#681 had unified everywhere else. Assert the envelope AND
+// that a quoted message survives — a script's error text is user JavaScript, so quotes are ordinary.
+// ---------------------------------------------------------------------------
+
+/// The canonical envelope, parsed. Panics with the raw body when it is not valid JSON — which is
+/// exactly the pre-#682 failure for a quoted message.
+fn envelope(body: &str) -> serde_json::Value {
+    serde_json::from_str(body)
+        .unwrap_or_else(|e| panic!("body must be valid JSON ({e}), got: {body}"))
+}
+
+// A rhai script whose error message carries quotes, the way real user code reads:
+//   throw new Error('expected "ready", got "pending"')
+#[tokio::test]
+async fn script_error_with_quotes_yields_valid_json_envelope() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19771, "protocol": "http",
+            "stubs": [
+                { "responses": [{ "_rift": { "script": { "engine": "rhai",
+                  "code": r#"fn respond(ctx) { throw `expected "ready", got "pending"`; }"# } } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let resp = get(19771).await;
+    assert_eq!(resp.status(), 500, "a broken script is a 500");
+    assert!(resp.headers().contains_key("x-rift-script-error"));
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(v["errors"][0]["code"], "500", "envelope code is the status");
+    let msg = v["errors"][0]["message"]
+        .as_str()
+        .expect("message is a string");
+    assert!(
+        msg.contains("Script error:"),
+        "message keeps its prefix, got: {msg}"
+    );
+    assert!(
+        msg.contains(r#""ready""#),
+        "the quoted text must survive escaping intact, got: {msg}"
+    );
+    assert!(v.get("error").is_none(), "the legacy shape must be gone");
+
+    let _ = manager.delete_imposter(19771).await;
+}
+
+#[tokio::test]
+async fn script_timeout_body_is_the_canonical_envelope() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19772, "protocol": "http",
+            "_rift": { "scriptEngine": { "timeoutMs": 50 } },
+            "stubs": [
+                { "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "let i = 0; loop { i += 1; }" } } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let resp = get(19772).await;
+    assert_eq!(resp.status(), 504, "a deadline miss stays a 504");
+    // The markers are the contract #499 established — the envelope change must not disturb them.
+    assert!(resp.headers().contains_key("x-rift-script-error"));
+    assert!(resp.headers().contains_key("x-rift-script-timeout"));
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(v["errors"][0]["code"], "504", "envelope code is the status");
+    assert!(
+        v["errors"][0]["message"]
+            .as_str()
+            .expect("string")
+            .contains("Script timeout"),
+        "the 504 must still name the timeout: {body}"
+    );
+
+    let _ = manager.delete_imposter(19772).await;
+}
+
+#[tokio::test]
+async fn strict_decorate_error_body_is_the_canonical_envelope() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19773, "protocol": "http", "strictBehaviors": true, "stubs": [
+                { "responses": [{ "is": { "statusCode": 200, "body": "original" },
+                  "_behaviors": { "decorate": "function (request, response) { throw new Error('boom-decorate'); }" } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let resp = get(19773).await;
+    assert_eq!(resp.status(), 500);
+    assert!(resp.headers().contains_key("x-rift-decorate-error"));
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(v["errors"][0]["code"], "500");
+    assert!(
+        v["errors"][0]["message"]
+            .as_str()
+            .expect("string")
+            .contains("decorate failed"),
+        "the strict failure must still be named: {body}"
+    );
+
+    let _ = manager.delete_imposter(19773).await;
+}
+
+// A static body (no error interpolated) — always valid JSON before and after, so this covers only
+// the shape half of the change. Note this door's marker is `x-rift-imposter-disabled`, NOT the
+// usual `x-rift-imposter`; the envelope change must not quietly normalise it.
+#[tokio::test]
+async fn disabled_imposter_body_is_the_canonical_envelope() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19774, "protocol": "http", "stubs": [
+                { "responses": [{ "is": { "statusCode": 200, "body": "never served" } }] }
+            ]
+        }),
+    )
+    .await;
+    manager
+        .get_imposter(19774)
+        .expect("imposter exists")
+        .set_enabled(false);
+
+    let resp = get(19774).await;
+    assert_eq!(resp.status(), 503);
+    assert!(resp.headers().contains_key("x-rift-imposter-disabled"));
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(v["errors"][0]["code"], "503");
+    assert!(
+        v["errors"][0]["message"]
+            .as_str()
+            .expect("string")
+            .contains("disabled"),
+        "got: {body}"
+    );
+
+    let _ = manager.delete_imposter(19774).await;
+}
+
+// The decorate door is the only one whose status is a VARIABLE (500 when the script throws, 504
+// when it misses the deadline), and the same variable feeds the envelope's `code`. That coupling is
+// what the CHANGELOG claims, so it gets pinned: its two neighbours (shellTransform, binary decode)
+// pass a hardcoded 500, and "harmonising" this site to match them would ship a 504 whose body says
+// `"code": "500"` — with every other test still green.
+#[tokio::test]
+async fn strict_decorate_timeout_envelope_code_follows_the_504() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19775, "protocol": "http", "strictBehaviors": true,
+            "_rift": { "scriptEngine": { "timeoutMs": 5 } },
+            "stubs": [
+                { "responses": [{ "is": { "statusCode": 200, "body": "original" },
+                  "_behaviors": { "decorate": SLOW_RHAI_LOOP } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let resp = get(19775).await;
+    assert_eq!(resp.status(), 504, "a strict decorate timeout is a 504");
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(
+        v["errors"][0]["code"], "504",
+        "the envelope code must track the door's OWN status, not a hardcoded 500: {body}"
+    );
+    assert!(
+        v["errors"][0]["message"]
+            .as_str()
+            .expect("string")
+            .contains("decorate failed"),
+        "got: {body}"
+    );
+
+    let _ = manager.delete_imposter(19775).await;
+}

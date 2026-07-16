@@ -104,6 +104,24 @@ record.
   failure answering in two shapes depending on which door the request came through. Status and the
   `x-rift-imposter` / `x-rift-proxy-error` / `x-rift-default-forward-error` markers are unchanged.
 
+- **Every remaining imposter error body is valid JSON, in the one standard envelope.** A script that
+  failed with a quote in its message — `throw new Error('expected "ready", got "pending"')`, which is
+  how error messages ordinarily read — produced a **body the client could not decode**. Ten doors
+  built their JSON by interpolating the message into a string literal, so the quote closed the string
+  early: the reply was a 500 whose payload died in the caller's parser, replacing a legible script
+  error with a JSON syntax error. They all now go through the same builder the rest of the crate
+  uses, which escapes via serde. The doors: script execution (500) and its timeout (504), template
+  rendering, the three `strictBehaviors` failures (decorate, shellTransform, binary decode), a
+  disabled imposter (503), an over-size request body (413), an unresolved `file:`/`ref:` script, and
+  the debug-response serialize fallback. **The body shape changes** from `{"error": "..."}` to
+  `{"errors":[{"code":"<status>","message":"..."}]}` — the same move the previous entry made for the
+  proxy doors, finishing the class: no imposter door hand-builds JSON now. Statuses and every marker
+  header (`x-rift-script-error`, `x-rift-script-timeout`, `x-rift-decorate-error`,
+  `x-rift-template-error`, `x-rift-imposter-disabled`) are untouched, and each envelope's `code` is
+  its own response's status — including the decorate door, whose status varies with whether it timed
+  out. As with the proxy doors, the client still gets only the error's outermost context; the cause
+  chain stays in the server log.
+
 ### Security
 
 - **`POST /intercept/rules` now obeys `--allowInjection`.** An intercept rule's predicates are

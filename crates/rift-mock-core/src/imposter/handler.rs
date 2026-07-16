@@ -253,7 +253,7 @@ async fn handle_request_inner(
         return Ok(build_response_with_headers(
             StatusCode::SERVICE_UNAVAILABLE,
             [("x-rift-imposter-disabled", "true")],
-            r#"{"error": "Imposter is disabled"}"#,
+            crate::response::error_body(StatusCode::SERVICE_UNAVAILABLE, "Imposter is disabled"),
         ));
     }
 
@@ -312,8 +312,9 @@ async fn handle_request_inner(
             return Ok(build_response_with_headers(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 [("x-rift-imposter", "true")],
-                format!(
-                    r#"{{"error": "Request body exceeds maximum size of {MAX_REQUEST_BODY_SIZE} bytes"}}"#
+                crate::response::error_body(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    &format!("Request body exceeds maximum size of {MAX_REQUEST_BODY_SIZE} bytes"),
                 ),
             ));
         }
@@ -618,7 +619,10 @@ async fn handle_request_inner(
                 return Ok(build_response_with_headers(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [("x-rift-imposter", "true"), ("x-rift-script-error", "true")],
-                    r#"{"error": "script not resolved: `file:`/`ref:` sources must be resolved before serving"}"#,
+                    crate::response::error_body(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "script not resolved: `file:`/`ref:` sources must be resolved before serving",
+                    ),
                 ));
             };
             let engine = script_config
@@ -833,12 +837,18 @@ async fn handle_request_inner(
                     let (status, body) = if timed_out {
                         (
                             StatusCode::GATEWAY_TIMEOUT,
-                            format!(r#"{{"error": "Script timeout: {e}"}}"#),
+                            crate::response::error_body(
+                                StatusCode::GATEWAY_TIMEOUT,
+                                &format!("Script timeout: {e}"),
+                            ),
                         )
                     } else {
                         (
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            format!(r#"{{"error": "Script error: {e}"}}"#),
+                            crate::response::error_body(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                &format!("Script error: {e}"),
+                            ),
                         )
                     };
                     return Ok(build_response_with_headers(status, headers, body));
@@ -942,7 +952,10 @@ async fn handle_request_inner(
                             ("x-rift-imposter", "true"),
                             ("x-rift-template-error", "true"),
                         ],
-                        format!(r#"{{"error": "template rendering failed: {e}"}}"#),
+                        crate::response::error_body(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("template rendering failed: {e}"),
+                        ),
                     ));
                 }
             }
@@ -1115,8 +1128,9 @@ async fn handle_request_inner(
                                 return Ok(build_response_with_headers(
                                     status,
                                     hdrs,
-                                    format!(
-                                        r#"{{"error": "decorate failed (strictBehaviors): {e}"}}"#
+                                    crate::response::error_body(
+                                        status,
+                                        &format!("decorate failed (strictBehaviors): {e}"),
                                     ),
                                 ));
                             }
@@ -1168,8 +1182,9 @@ async fn handle_request_inner(
                                         ("x-rift-imposter", "true"),
                                         ("x-rift-shelltransform-error", "true"),
                                     ],
-                                    format!(
-                                        r#"{{"error": "shellTransform failed (strictBehaviors): {e}"}}"#
+                                    crate::response::error_body(
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        &format!("shellTransform failed (strictBehaviors): {e}"),
                                     ),
                                 ));
                             }
@@ -1207,8 +1222,11 @@ async fn handle_request_inner(
                                 return Ok(build_response_with_headers(
                                     StatusCode::INTERNAL_SERVER_ERROR,
                                     [("x-rift-imposter", "true"), ("x-rift-binary-error", "true")],
-                                    format!(
-                                        r#"{{"error": "binary base64 decode failed (strictBehaviors): {e}"}}"#
+                                    crate::response::error_body(
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        &format!(
+                                            "binary base64 decode failed (strictBehaviors): {e}"
+                                        ),
                                     ),
                                 ));
                             }
@@ -1453,7 +1471,10 @@ fn debug_serialize_or_500<T: serde::Serialize>(payload: &T) -> (StatusCode, Stri
             tracing::error!(error = %e, "failed to serialize debug response");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                r#"{"error": "Failed to serialize debug response"}"#.to_string(),
+                crate::response::error_body(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to serialize debug response",
+                ),
             )
         }
     }
@@ -1691,12 +1712,15 @@ mod debug_serialize_tests {
     // the #606 shape one endpoint over. It is a server fault and must be a 500.
     #[test]
     fn debug_serialize_failure_maps_to_500() {
-        let (status, _body) = debug_serialize_or_500(&Unserializable);
+        let (status, body) = debug_serialize_or_500(&Unserializable);
         assert_eq!(
             status,
             StatusCode::INTERNAL_SERVER_ERROR,
             "a serialize failure must be a 500, not a 200 carrying an error string"
         );
+        // Issue #682: the body is the canonical envelope now, not a hand-built `{"error"}` literal.
+        let v: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
+        assert_eq!(v["errors"][0]["code"], "500", "envelope code is the status");
     }
 
     #[test]
