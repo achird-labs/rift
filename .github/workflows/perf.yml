@@ -9,14 +9,19 @@ name: Performance
 # Gated benches (BENCH_TARGETS below): the imposter matcher, the scripting decision cache, and the
 # proxy rule scan.
 
+# TEMPORARILY manual-only (issue #692). The per-PR bench run is the slowest check on shared runners
+# and was gating release turnaround, so it is off the PR hot path for now. Re-enable it as a side-job
+# (nightly schedule on master, or a label-gated / non-blocking PR lane) per #692. The original
+# trigger, restore verbatim:
+#   pull_request:
+#     # Only when code that can affect benched performance changes (keeps the job off doc/CI-only PRs).
+#     paths:
+#       - "crates/rift-mock-core/**"
+#       - "crates/rift-http-proxy/**"
+#       - "crates/rift-types/**"
+#       - ".github/workflows/perf.yml"
 on:
-  pull_request:
-    # Only when code that can affect benched performance changes (keeps the job off doc/CI-only PRs).
-    paths:
-      - "crates/rift-mock-core/**"
-      - "crates/rift-http-proxy/**"
-      - "crates/rift-types/**"
-      - ".github/workflows/perf.yml"
+  workflow_dispatch:
 
 # One in-flight run per PR; a new push cancels the previous (benches are expensive).
 concurrency:
