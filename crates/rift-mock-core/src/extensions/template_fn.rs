@@ -279,7 +279,7 @@ fn eval_base(head: &str, args: &[String], ctx: &TemplateContext<'_>) -> Result<S
                 let found = ctx
                     .flow_store
                     .get(ctx.flow_id, key)
-                    .map_err(|e| format!("state.{key}: flow store error: {e}"))?;
+                    .map_err(|e| format!("state.{key}: flow store error: {e:#}"))?;
                 return found
                     .map(|v| value_to_string(&v))
                     .ok_or_else(|| format!("no such state key: '{key}'"));
