@@ -660,6 +660,10 @@ jobs:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
     permissions:
       contents: read
+      # docker-publish.yml signs with cosign keyless (#664), whose jobs request id-token: write.
+      # A called workflow cannot exceed its caller's grant, and that is validated at STARTUP --
+      # so without this the whole release run dies before any job starts, on a tag push too.
+      id-token: write
     uses: ./.github/workflows/docker-publish.yml
     with:
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
