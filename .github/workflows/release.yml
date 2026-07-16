@@ -312,7 +312,7 @@ jobs:
           echo "FFI_CHECKSUM_PATH=target/${{ matrix.target }}/release/$FFI_NAME.sha256" >> $env:GITHUB_ENV
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
