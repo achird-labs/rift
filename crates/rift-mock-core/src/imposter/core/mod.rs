@@ -501,7 +501,7 @@ impl Imposter {
                     Ok(Arc::new(store))
                 }
                 Err(e) => {
-                    error!("Failed to create Redis FlowStore: {}", e);
+                    error!("Failed to create Redis FlowStore: {e:#}");
                     anyhow::bail!("failed to build the Redis flow store: {e}");
                 }
             }

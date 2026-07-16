@@ -20,6 +20,9 @@ crate-type = ["cdylib", "rlib"]
 workspace = true
 
 [dependencies]
+# Renders the whole cause chain of an engine-side anyhow::Error before it collapses into a C
+# sentinel (issue #683) — see `warn_anyhow_failure`.
+anyhow.workspace = true
 # Features are forwarded (not hard-coded) so the per-platform cdylib build can drop optional
 # features that can't cross-compile for a given target — issue #205.
 rift-mock-core = { path = "../rift-mock-core", default-features = false }
@@ -43,6 +46,8 @@ reqwest.workspace = true
 rcgen = "0.13"
 # Write imposter config files on disk for the `configFile` allowInjection gate tests (issue #616).
 tempfile = "3.8"
+# Assert `warn_anyhow_failure` renders the whole cause chain, not just its outermost context (#683).
+tracing-test = "0.2"
 
 [features]
 default = ["redis-backend", "javascript"]
