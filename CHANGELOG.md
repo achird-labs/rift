@@ -80,6 +80,30 @@ record.
   (`Json(&Value)` / `Raw(&[u8])`) in place of `&serde_json::Value`. In-process callers building
   cache keys directly must wrap the argument; no configuration or wire format changes.
 
+- **A failed proxy now logs *why*, instead of the same opaque line for every cause.** An imposter
+  whose upstream could not be reached logged `Proxy request failed: Failed to send proxy request to
+  <url>` — the outermost context and nothing else, because the error was formatted with `{}`, which
+  renders only the top of an `anyhow` chain. A DNS failure, a TLS certificate rejection, a refused
+  connection and a timeout were therefore indistinguishable in the log, on a 502 whose whole job is
+  to say the upstream did not answer. The cause was never lost by the code — it rides on the error
+  from the moment it is captured — only by the format specifier; the log now renders the whole chain
+  (`dns error: failed to lookup address information: Name does not resolve`). The same fix applies
+  to the `defaultForward` upstream error and to the `inject` and script-execution failures, which
+  dropped their chains the same way. **The client-facing body deliberately does not change in this
+  respect:** a cause chain can name internal hosts and resolver detail, so the 502 still carries
+  only the outermost context — the chain's audience is the operator, who now has it.
+
+- **Proxy and `defaultForward` 502 bodies are valid JSON, in the same envelope as every other proxy
+  error.** Both hand-built their body by interpolating the error into a JSON string literal, so any
+  message containing a `"` produced a body the client's decoder rejected — the defect class issue
+  #611 swept elsewhere. They now go through the crate's canonical Mountebank error builder.
+  **The body shape changes** from `{"error": "..."}` to the standard
+  `{"errors":[{"code":"502","message":"..."}]}`, and now carries `Content-Type: application/json`,
+  which it previously omitted. This completes the unification 0.13.6 claimed — that release moved
+  the standalone proxy paths onto the one envelope but missed this imposter door, leaving the same
+  failure answering in two shapes depending on which door the request came through. Status and the
+  `x-rift-imposter` / `x-rift-proxy-error` / `x-rift-default-forward-error` markers are unchanged.
+
 ### Security
 
 - **`POST /intercept/rules` now obeys `--allowInjection`.** An intercept rule's predicates are

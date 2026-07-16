@@ -87,6 +87,53 @@ fn inject_timeout_response(code: &str, message: &str) -> Response<Full<Bytes>> {
 /// timeout` a client can retry — checked first, since it too surfaces during matching. Every other
 /// matcher error (e.g. a scenario-state backend failure, issue #318) keeps the existing
 /// [`backend_error_response`] 5xx mapping.
+/// Log a failure with its whole cause chain (issue #679).
+///
+/// `{e:#}` is anyhow's alternate Display: the entire chain on one line, which is what a log pipeline
+/// wants (`{e:?}` renders a multi-line `Caused by:` block for a terminal). Plain `{}` renders only
+/// the outermost context — which is how a DNS failure, a certificate rejection and a refused
+/// connection all became the same opaque line, on a 502 whose only job is to say why the upstream
+/// did not answer. `rift-ffi`'s CA setup path reaches for `{err:#}` for exactly this reason.
+///
+/// Every site that logs an `anyhow` failure here routes through this function, so the chain cannot
+/// be dropped again one `warn!` at a time.
+fn log_upstream_failure(context: &str, e: &anyhow::Error) {
+    warn!("{context}: {e:#}");
+}
+
+/// The 502 for an upstream a proxy response could not reach, plus the log line that explains it.
+///
+/// Issue #679: the two audiences get different detail, deliberately. The operator gets the whole
+/// chain (see [`log_upstream_failure`]); the client gets `client_prefix` plus the outermost context
+/// only, since a chain can name internal hosts and resolver detail that is none of the caller's
+/// business — and the operator already has it in the log.
+///
+/// The body goes through the crate's canonical Mountebank builder rather than a JSON string
+/// literal, which produced invalid JSON the moment a message held a quote (the #611 class), and
+/// which left this door emitting a legacy `{"error"}` shape that 0.13.6 had already unified
+/// everywhere else.
+fn upstream_error_response(
+    e: &anyhow::Error,
+    log_context: &str,
+    marker: &'static str,
+    client_prefix: &str,
+) -> Response<Full<Bytes>> {
+    log_upstream_failure(log_context, e);
+    build_response_with_headers(
+        StatusCode::BAD_GATEWAY,
+        [
+            ("x-rift-imposter", "true"),
+            (marker, "true"),
+            ("content-type", "application/json"),
+        ],
+        // The client's message is built here, from a prefix, rather than taken ready-made: `{e}`
+        // and `{e:#}` differ by exactly the chain, so a caller that formatted its own message could
+        // leak it with a one-character edit and no test would notice. Taking a prefix leaves the
+        // caller nothing to get wrong.
+        crate::response::error_body(StatusCode::BAD_GATEWAY, &format!("{client_prefix}: {e}")),
+    )
+}
+
 fn matcher_error_response(e: &anyhow::Error) -> Response<Full<Bytes>> {
     if let Some(t) = e.downcast_ref::<crate::scripting::ScriptTimeoutError>() {
         return inject_timeout_response("predicate injection timeout", &t.to_string());
@@ -477,11 +524,11 @@ async fn handle_request_inner(
                         }));
                 }
                 Err(e) => {
-                    warn!("Proxy request failed: {}", e);
-                    return Ok(build_response_with_headers(
-                        StatusCode::BAD_GATEWAY,
-                        [("x-rift-imposter", "true"), ("x-rift-proxy-error", "true")],
-                        format!(r#"{{"error": "Proxy error: {e}"}}"#),
+                    return Ok(upstream_error_response(
+                        &e,
+                        "Proxy request failed",
+                        "x-rift-proxy-error",
+                        "Proxy error",
                     ));
                 }
             }
@@ -534,7 +581,7 @@ async fn handle_request_inner(
                         }));
                 }
                 Err(e) => {
-                    warn!("Inject function failed: {}", e);
+                    log_upstream_failure("Inject function failed", &e);
                     // A deadline miss (issue #499) is a transient 504 a client can retry, not the
                     // permanent-config 400 below — distinguish it before the parity mapping.
                     if let Some(t) = e.downcast_ref::<crate::scripting::ScriptTimeoutError>() {
@@ -767,7 +814,7 @@ async fn handle_request_inner(
                     return Ok(response);
                 }
                 Err(e) => {
-                    warn!("Rift script execution failed: {}", e);
+                    log_upstream_failure("Rift script execution failed", &e);
                     // A deadline miss (issue #499) is a transient 504 + `x-rift-script-timeout`,
                     // distinct from the permanent 500 a broken script produces.
                     let timed_out = e
@@ -1222,17 +1269,12 @@ async fn handle_request_inner(
                         build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
                     }))
             }
-            Err(e) => {
-                warn!("defaultForward proxy to {} failed: {}", upstream, e);
-                Ok(build_response_with_headers(
-                    StatusCode::BAD_GATEWAY,
-                    [
-                        ("x-rift-imposter", "true"),
-                        ("x-rift-default-forward-error", "true"),
-                    ],
-                    format!(r#"{{"error": "defaultForward upstream error: {e}"}}"#),
-                ))
-            }
+            Err(e) => Ok(upstream_error_response(
+                &e,
+                &format!("defaultForward proxy to {upstream} failed"),
+                "x-rift-default-forward-error",
+                "defaultForward upstream error",
+            )),
         };
     }
 
@@ -1920,5 +1962,149 @@ mod fault_precedence_tests {
             (observed - 0.3).abs() < 0.05,
             "expected ~0.3 reset rate, got {observed}"
         );
+    }
+}
+
+// Issue #679: an upstream failure logged only its outermost context, so a DNS failure, a cert
+// rejection and a refused connection were the same opaque line — the cause was captured by
+// `.with_context()` and then dropped by the `{}` format specifier. The 502 body had the same
+// hole, plus the string-interpolated JSON of the #611 class.
+#[cfg(test)]
+mod upstream_error_tests {
+    use super::{log_upstream_failure, upstream_error_response};
+    use http_body_util::BodyExt;
+    use hyper::StatusCode;
+    use tracing_test::traced_test;
+
+    /// A three-level chain shaped like the real one from the issue: the outermost context is what
+    /// the client may see, the root cause is the operator's alone.
+    fn chained_error() -> anyhow::Error {
+        anyhow::anyhow!("failed to lookup address information: Name does not resolve")
+            .context("dns error")
+            .context("Failed to send proxy request to https://upstream.internal/")
+    }
+
+    async fn body_of(response: hyper::Response<http_body_util::Full<bytes::Bytes>>) -> String {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        String::from_utf8(bytes.to_vec()).expect("utf8")
+    }
+
+    // Covers all four anyhow log sites at once: they share this function, so none of them can
+    // regress to a bare `{}` without failing here.
+    #[traced_test]
+    #[tokio::test]
+    async fn log_upstream_failure_names_the_whole_chain() {
+        log_upstream_failure("Inject function failed", &chained_error());
+        assert!(
+            logs_contain("Inject function failed"),
+            "context must survive"
+        );
+        assert!(
+            logs_contain("dns error"),
+            "the log must name the CAUSE — that is the whole point of #679"
+        );
+        assert!(
+            logs_contain("Name does not resolve"),
+            "the log must reach the ROOT cause, not stop one level down"
+        );
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn upstream_error_response_logs_the_whole_chain() {
+        let _ = upstream_error_response(
+            &chained_error(),
+            "Proxy request failed",
+            "x-rift-proxy-error",
+            "Proxy error",
+        );
+        assert!(logs_contain("Proxy request failed"));
+        assert!(
+            logs_contain("Name does not resolve"),
+            "the 502 path must log the root cause, not just build the body"
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_error_body_is_the_canonical_envelope() {
+        let response =
+            upstream_error_response(&chained_error(), "l", "x-rift-proxy-error", "Proxy error");
+        let body = body_of(response).await;
+        let v: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
+        // The shape the standalone proxy door already emits via crate::response::error_response —
+        // matching it is what makes 0.13.6's "all proxy modes emit one envelope" actually true.
+        assert_eq!(v["errors"][0]["code"], "502", "envelope code is the status");
+        assert!(
+            v["errors"][0]["message"]
+                .as_str()
+                .expect("message is a string")
+                .contains("Proxy error: Failed to send proxy request"),
+            "the client keeps the prefix and the outermost context: {body}"
+        );
+        assert!(
+            v.get("error").is_none(),
+            "the legacy {{\"error\"}} shape must be gone"
+        );
+    }
+
+    // The helper — not the caller — decides what the client sees, so this test is load-bearing:
+    // it hands over a full chain and asserts the boundary holds.
+    #[tokio::test]
+    async fn upstream_error_body_withholds_the_cause_chain() {
+        let response =
+            upstream_error_response(&chained_error(), "l", "x-rift-proxy-error", "Proxy error");
+        let body = body_of(response).await;
+        assert!(
+            !body.contains("dns error"),
+            "cause chain must not cross to the client: {body}"
+        );
+        assert!(
+            !body.contains("Name does not resolve"),
+            "root cause must not cross to the client: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_quote_in_the_upstream_error_still_yields_valid_json() {
+        // Issue #611's class: interpolating into a JSON string literal breaks the instant the
+        // message holds a quote. The quote has to ride on the error's *outermost* context — that is
+        // what reaches the body — and a target URL is caller-supplied config, so this is not
+        // hypothetical.
+        let e = anyhow::anyhow!("root cause")
+            .context(r#"Failed to send proxy request to https://x/?q="a""#);
+        let response = upstream_error_response(&e, "l", "x-rift-proxy-error", "Proxy error");
+        let body = body_of(response).await;
+        let v: serde_json::Value = serde_json::from_str(&body)
+            .unwrap_or_else(|err| panic!("a quote must not break the body: {err}\nbody: {body}"));
+        assert!(
+            v["errors"][0]["message"]
+                .as_str()
+                .expect("message is a string")
+                .contains(r#"?q="a""#),
+            "the quoted text must survive escaping, not be mangled: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_error_keeps_status_and_rift_markers() {
+        let response = upstream_error_response(
+            &chained_error(),
+            "l",
+            "x-rift-default-forward-error",
+            "defaultForward upstream error",
+        );
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.headers()["x-rift-imposter"], "true");
+        assert_eq!(
+            response.headers()["x-rift-default-forward-error"],
+            "true",
+            "the per-door marker must survive"
+        );
+        assert_eq!(response.headers()["content-type"], "application/json");
     }
 }

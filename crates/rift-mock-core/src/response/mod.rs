@@ -20,17 +20,25 @@ pub struct ErrorDetail {
     pub message: String,
 }
 
-/// Create a Mountebank-format error response.
-pub fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
+/// The serialized body of a Mountebank-format error, for callers that need to attach their own
+/// headers and so cannot use [`error_response`]'s finished response (issue #679).
+///
+/// The `unwrap_or_else` is a terminal last resort, not a swallow: `ErrorResponse` is plain `String`
+/// fields, so serde has no data-dependent way to fail here.
+pub(crate) fn error_body(status: StatusCode, message: &str) -> String {
     let error = ErrorResponse {
         errors: vec![ErrorDetail {
             code: status.as_str().to_string(),
             message: message.to_string(),
         }],
     };
-    let json = serde_json::to_string_pretty(&error).unwrap_or_else(|_| "{}".to_string());
+    serde_json::to_string_pretty(&error).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Create a Mountebank-format error response.
+pub fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
     ErrorResponseBuilder::new(status)
-        .body(json)
+        .body(error_body(status, message))
         .header("Content-Type", "application/json")
         .build_full()
 }
