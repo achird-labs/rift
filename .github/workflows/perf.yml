@@ -9,19 +9,26 @@ name: Performance
 # Gated benches (BENCH_TARGETS below): the imposter matcher, the scripting decision cache, and the
 # proxy rule scan.
 
-# TEMPORARILY manual-only (issue #692). The per-PR bench run is the slowest check on shared runners
-# and was gating release turnaround, so it is off the PR hot path for now. Re-enable it as a side-job
-# (nightly schedule on master, or a label-gated / non-blocking PR lane) per #692. The original
-# trigger, restore verbatim:
-#   pull_request:
-#     # Only when code that can affect benched performance changes (keeps the job off doc/CI-only PRs).
-#     paths:
-#       - "crates/rift-mock-core/**"
-#       - "crates/rift-http-proxy/**"
-#       - "crates/rift-types/**"
-#       - ".github/workflows/perf.yml"
+# Label-gated side-job (issue #692). The bench run is the slowest check on shared runners, so it is
+# off the PR hot path: it triggers only on a PR that touches benched code AND carries the existing
+# `performance` label (the job's `if:` below). Everything else — an unlabeled PR — sees the job as
+# *skipped*, so it neither blocks the merge nor spends the wall-clock. `labeled` is in `types` on
+# purpose: the default pull_request activity types omit it, so without it, adding `performance` to an
+# already-open PR would not start a run; with it, labeling an open PR kicks off the benches. The
+# `performance` label already exists in the repo, so no new label needs managing. `workflow_dispatch` is kept only so
+# the workflow stays manually listable — the job itself diffs a PR's base against its head, so a bare
+# dispatch (no PR) has nothing to compare and its `if:` guard skips it; a functional on-demand/nightly
+# lane would need the non-PR baseline redesign that #692 deliberately scoped out.
 on:
   workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    # Only when code that can affect benched performance changes (keeps the job off doc/CI-only PRs).
+    paths:
+      - "crates/rift-mock-core/**"
+      - "crates/rift-http-proxy/**"
+      - "crates/rift-types/**"
+      - ".github/workflows/perf.yml"
 
 # One in-flight run per PR; a new push cancels the previous (benches are expensive).
 concurrency:
@@ -54,6 +61,10 @@ env:
 jobs:
   bench-regression:
     name: Benchmark regression gate
+    # Opt-in (issue #692): only a PR carrying the `performance` label runs the benches; an unlabeled
+    # PR (or a bare workflow_dispatch, which carries no PR labels) skips this job entirely rather than
+    # pending on it, keeping it off the merge hot path.
+    if: contains(github.event.pull_request.labels.*.name, 'performance')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (full history for base/head)
