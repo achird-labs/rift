@@ -45,6 +45,58 @@ use tracing::{debug, warn};
 /// Maximum allowed request body size (10 MB)
 const MAX_REQUEST_BODY_SIZE: usize = 10 * 1024 * 1024;
 
+/// Why a request body could not be collected (issue #694). `Limited::collect` funnels both the
+/// size-cap breach and a genuine transport failure (connection reset, truncated stream) through one
+/// `Err`; conflating them reported every network failure to the client as `413` "body too large"
+/// and logged nothing. Splitting the two lets the handler answer the right status and log the cause.
+#[derive(Debug)]
+enum BodyReadError {
+    /// The body exceeded the size cap — a real `413`.
+    TooLarge,
+    /// The body could not be read to completion — a client transmission failure (`400`). The cause
+    /// is kept boxed, not stringified (the #688 lesson), so the log site renders it in full.
+    Read(Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// Collect a request body under a size cap, distinguishing the cap breach from a read failure.
+/// Body-generic so the classification is unit-testable against a synthetic body without a live
+/// listener (mirrors `admin_api::collect_limited`, issue #546 — but kept here, not shared, because
+/// `rift-http-proxy` depends on this crate, not the reverse).
+async fn collect_body_limited<B>(body: B, limit: usize) -> Result<Bytes, BodyReadError>
+where
+    B: hyper::body::Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    match Limited::new(body, limit).collect().await {
+        Ok(collected) => Ok(collected.to_bytes()),
+        // `Limited` boxes the error; a cap breach is specifically `LengthLimitError`, anything else
+        // is the underlying body failing to produce its bytes.
+        Err(e)
+            if e.downcast_ref::<http_body_util::LengthLimitError>()
+                .is_some() =>
+        {
+            Err(BodyReadError::TooLarge)
+        }
+        Err(e) => Err(BodyReadError::Read(e)),
+    }
+}
+
+/// The `400` door for a request body that could not be read (issue #694). Logs the real cause —
+/// previously this failure was silent — then serves the canonical envelope. A read failure is the
+/// client's transmission going wrong, so it is a `400`, distinct from the `413` size-cap door; a
+/// `5xx` here would blame the server for the client's dropped connection.
+fn body_read_error_response(e: &dyn std::error::Error) -> Response<Full<Bytes>> {
+    warn!("failed to read request body: {e}");
+    build_response_with_headers(
+        StatusCode::BAD_REQUEST,
+        [
+            ("x-rift-imposter", "true"),
+            ("content-type", "application/json"),
+        ],
+        crate::response::error_body(StatusCode::BAD_REQUEST, "Failed to read request body"),
+    )
+}
+
 /// Process-wide cache for `lookup` behavior CSV data sources, shared across all
 /// imposters so a file is parsed once and reused on subsequent requests.
 fn csv_cache() -> &'static CsvCache {
@@ -328,14 +380,18 @@ async fn handle_request_inner(
         ));
     }
 
-    // Collect request body with size limit to prevent memory exhaustion
-    let limited_body = Limited::new(body, MAX_REQUEST_BODY_SIZE);
-    let body_bytes = match limited_body.collect().await {
-        Ok(collected) => {
-            let bytes = collected.to_bytes();
-            if bytes.is_empty() { None } else { Some(bytes) }
+    // Collect request body with size limit to prevent memory exhaustion. A cap breach stays a 413;
+    // a transport failure mid-read (connection reset, truncated stream) is the client's problem — a
+    // 400 — not the size error it was previously mislabeled as (issue #694).
+    let body_bytes = match collect_body_limited(body, MAX_REQUEST_BODY_SIZE).await {
+        Ok(bytes) => {
+            if bytes.is_empty() {
+                None
+            } else {
+                Some(bytes)
+            }
         }
-        Err(_) => {
+        Err(BodyReadError::TooLarge) => {
             return Ok(build_response_with_headers(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 [
@@ -347,6 +403,9 @@ async fn handle_request_inner(
                     &format!("Request body exceeds maximum size of {MAX_REQUEST_BODY_SIZE} bytes"),
                 ),
             ));
+        }
+        Err(BodyReadError::Read(e)) => {
+            return Ok(body_read_error_response(e.as_ref()));
         }
     };
     // Borrow the body as UTF-8 without forcing an allocation for the common valid-UTF-8 case
@@ -1762,6 +1821,108 @@ mod template_error_tests {
                 .as_str()
                 .is_some_and(|m| m.contains("template rendering failed")),
             "the 500 must name the render failure, got: {body}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod body_collect_tests {
+    use super::{
+        BodyReadError, MAX_REQUEST_BODY_SIZE, body_read_error_response, collect_body_limited,
+    };
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper::StatusCode;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tracing_test::traced_test;
+
+    // A body that fails mid-read — the shape of a connection reset or a truncated chunked stream,
+    // distinct from a body that merely exceeds the size cap.
+    struct FailingBody;
+    impl hyper::body::Body for FailingBody {
+        type Data = Bytes;
+        type Error = std::io::Error;
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+            Poll::Ready(Some(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "connection reset by peer",
+            ))))
+        }
+    }
+
+    #[tokio::test]
+    async fn under_limit_returns_the_bytes() {
+        let got = collect_body_limited(Full::new(Bytes::from_static(b"hello")), 4096)
+            .await
+            .expect("under limit");
+        assert_eq!(got, Bytes::from_static(b"hello"));
+    }
+
+    #[tokio::test]
+    async fn at_the_cap_boundary_is_accepted() {
+        // Exactly at the limit is not over it — guards the `>` vs `>=` off-by-one in the cap check.
+        let got = collect_body_limited(Full::new(Bytes::from(vec![b'x'; 4096])), 4096)
+            .await
+            .expect("a body exactly at the cap must be accepted");
+        assert_eq!(got.len(), 4096);
+    }
+
+    #[tokio::test]
+    async fn oversize_is_flagged_too_large_not_read() {
+        let body = Full::new(Bytes::from(vec![b'x'; 4097]));
+        let err = collect_body_limited(body, 4096)
+            .await
+            .expect_err("over limit");
+        assert!(
+            matches!(err, BodyReadError::TooLarge),
+            "a size-cap hit must be TooLarge, not a Read"
+        );
+    }
+
+    // Issue #694: a transport failure must be classified Read — not silently folded into the 413
+    // cap door — and the boxed cause preserved (not stringified) so the log can name it.
+    #[tokio::test]
+    async fn transport_failure_is_flagged_read_with_cause_preserved() {
+        let err = collect_body_limited(FailingBody, MAX_REQUEST_BODY_SIZE)
+            .await
+            .expect_err("transport failure");
+        match err {
+            BodyReadError::Read(e) => assert!(
+                e.to_string().contains("connection reset"),
+                "the underlying cause must survive to the sink, got: {e}"
+            ),
+            BodyReadError::TooLarge => panic!("a transport failure is not a size-cap hit"),
+        }
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn read_error_door_is_400_envelope_and_logs_the_cause() {
+        let e = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "truncated chunked body");
+        let resp = body_read_error_response(&e);
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a read failure is the client's 400, not the 413 cap door nor a 500"
+        );
+        assert_eq!(resp.headers()["content-type"], "application/json");
+        assert!(resp.headers().contains_key("x-rift-imposter"));
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON envelope");
+        assert_eq!(v["errors"][0]["code"], "400", "envelope code is the status");
+        assert!(
+            v["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("Failed to read request body")),
+            "got: {v}"
+        );
+        assert!(
+            logs_contain("truncated chunked body"),
+            "the previously-silent read failure must now be logged with its cause"
         );
     }
 }

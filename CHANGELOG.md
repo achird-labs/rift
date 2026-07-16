@@ -11,6 +11,17 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A request whose body fails mid-read now answers `400`, not `413`, and is no longer silent.** The
+  imposter body reader funneled the size-cap breach and a genuine transport failure — a connection
+  reset, a truncated chunked body — through one error arm that always answered `413` "Request body
+  exceeds maximum size" and logged nothing. A dropped connection was reported to the client as a
+  payload-size problem, with no server-side trace to correlate. The two are now distinguished: the
+  cap breach is still `413` byte-identical, while a read failure is a `400` "Failed to read request
+  body" (the client's transmission, not a server fault) and its cause is logged. Mirrors the
+  admin-plane body reader (issue #546), which already drew this line.
+
 ## [0.14.0] - 2026-07-16
 
 ### Added
