@@ -56,6 +56,20 @@ use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 use tracing::warn;
 
+/// Log an `anyhow`-typed failure from an FFI entry point, whole chain included (issue #683).
+///
+/// `{e}` renders only the outermost context, so a `flow_set` that failed on a Redis timeout and one
+/// that failed on a bad URL logged the same line. These callers all take the same shape — an
+/// `anyhow::Error` from `rift_mock_core::imposter::core`, plus the port — so they share one format
+/// specifier here rather than repeating `%format_args!("{e:#}")` eight times and drifting apart.
+/// `%format_args!` avoids the `format!` allocation the field style would otherwise cost.
+///
+/// The `ImposterManager`-level calls do NOT belong here: they return `ImposterError`, whose
+/// `Backend` variant already renders its wrapped chain via `#[error("backend error: {0:#}")]`.
+fn warn_anyhow_failure(e: &anyhow::Error, port: u16, what: &str) {
+    warn!(error = %format_args!("{e:#}"), port, "{what}");
+}
+
 /// Run an FFI body under a panic guard (issue #484): a Rust panic must never unwind across the
 /// `extern "C"` boundary (that is undefined behaviour). A caught panic records its message in
 /// [`rift_last_error`], emits a `tracing` event, and returns the function's `$sentinel`
@@ -495,7 +509,7 @@ pub unsafe extern "C" fn rift_verify(
             Ok(o) => o,
             Err(e) => {
                 set_last_error(format!("rift_verify: {e}"));
-                warn!(error = %e, port, "rift_verify: predicate evaluation failed");
+                warn_anyhow_failure(&e, port, "rift_verify: predicate evaluation failed");
                 return std::ptr::null_mut();
             }
         };
@@ -890,7 +904,7 @@ pub unsafe extern "C" fn rift_clear_recorded(h: *mut RiftHandle, port: u16) -> i
             Ok(()) => 0,
             Err(e) => {
                 set_last_error(format!("rift_clear_recorded: {e}"));
-                warn!(error = %e, port, "rift_clear_recorded failed");
+                warn_anyhow_failure(&e, port, "rift_clear_recorded failed");
                 -1
             }
         }
@@ -986,7 +1000,7 @@ pub unsafe extern "C" fn rift_scenarios(
                 Ok(state) => scenarios.push(json!({ "name": name, "state": state })),
                 Err(e) => {
                     set_last_error(format!("rift_scenarios: {e}"));
-                    warn!(error = %e, port, "rift_scenarios failed");
+                    warn_anyhow_failure(&e, port, "rift_scenarios failed");
                     return std::ptr::null_mut();
                 }
             }
@@ -1042,7 +1056,7 @@ pub unsafe extern "C" fn rift_set_scenario_state(
             Ok(()) => 0,
             Err(e) => {
                 set_last_error(format!("rift_set_scenario_state: {e}"));
-                warn!(error = %e, port, "rift_set_scenario_state failed");
+                warn_anyhow_failure(&e, port, "rift_set_scenario_state failed");
                 -1
             }
         }
@@ -1079,7 +1093,7 @@ pub unsafe extern "C" fn rift_reset_scenarios(
         for name in imposter.scenario_names() {
             if let Err(e) = imposter.delete_scenario_state(&flow, &name) {
                 set_last_error(format!("rift_reset_scenarios: {e}"));
-                warn!(error = %e, port, "rift_reset_scenarios failed");
+                warn_anyhow_failure(&e, port, "rift_reset_scenarios failed");
                 return -1;
             }
         }
@@ -1130,7 +1144,7 @@ pub unsafe extern "C" fn rift_flow_state_get(
             ),
             Err(e) => {
                 set_last_error(format!("rift_flow_state_get: {e}"));
-                warn!(error = %e, port, "rift_flow_state_get failed");
+                warn_anyhow_failure(&e, port, "rift_flow_state_get failed");
                 std::ptr::null_mut()
             }
         }
@@ -1176,7 +1190,7 @@ pub unsafe extern "C" fn rift_flow_state_put(
             Ok(()) => 0,
             Err(e) => {
                 set_last_error(format!("rift_flow_state_put: {e}"));
-                warn!(error = %e, port, "rift_flow_state_put failed");
+                warn_anyhow_failure(&e, port, "rift_flow_state_put failed");
                 -1
             }
         }
@@ -1212,7 +1226,7 @@ pub unsafe extern "C" fn rift_flow_state_delete(
             Ok(()) => 0,
             Err(e) => {
                 set_last_error(format!("rift_flow_state_delete: {e}"));
-                warn!(error = %e, port, "rift_flow_state_delete failed");
+                warn_anyhow_failure(&e, port, "rift_flow_state_delete failed");
                 -1
             }
         }
@@ -2090,6 +2104,54 @@ pub unsafe extern "C" fn rift_stop(h: *mut RiftHandle) {
             handle.manager.shutdown().await;
         });
     })
+}
+
+#[cfg(test)]
+mod anyhow_chain_log_tests {
+    use super::warn_anyhow_failure;
+    use tracing_test::traced_test;
+
+    /// The shape #683 exists for: the outermost context names *what* failed, the causes name *why*.
+    fn chained_error() -> anyhow::Error {
+        anyhow::anyhow!("connection refused (os error 61)")
+            .context("redis flow store unreachable")
+            .context("flow_set failed")
+    }
+
+    #[traced_test]
+    #[test]
+    fn warn_anyhow_failure_names_the_whole_chain() {
+        warn_anyhow_failure(&chained_error(), 4545, "rift_flow_state_put failed");
+        assert!(
+            logs_contain("rift_flow_state_put failed"),
+            "message survives"
+        );
+        assert!(
+            logs_contain("redis flow store unreachable"),
+            "the log must name the CAUSE — the whole point of #683"
+        );
+        assert!(
+            logs_contain("connection refused"),
+            "the log must reach the ROOT cause, not stop one level down"
+        );
+    }
+
+    // Documents the defect #683 fixes, so the sibling test above reads as a real assertion and not
+    // a tautology: plain Display — what every one of these sites used before #683 — renders ONLY the
+    // outermost context, and `{:#}` is what recovers the chain.
+    #[test]
+    fn plain_display_drops_the_chain() {
+        let rendered = format!("{}", chained_error());
+        assert_eq!(rendered, "flow_set failed");
+        assert!(
+            !rendered.contains("connection refused"),
+            "plain Display must NOT reach the root cause; if it did, #683 would be a non-issue"
+        );
+        assert!(
+            format!("{:#}", chained_error()).contains("connection refused"),
+            "the alternate form is what recovers the chain"
+        );
+    }
 }
 
 #[cfg(test)]

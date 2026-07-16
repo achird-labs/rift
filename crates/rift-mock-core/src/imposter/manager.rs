@@ -628,7 +628,7 @@ impl ImposterManager {
             // GC clear is best-effort: a failed backend clear must not fail the delete, but it
             // is logged rather than dropped (issue #330).
             if let Err(e) = journal.clear(port) {
-                warn!("failed to clear request journal for deleted imposter on port {port}: {e}");
+                warn!("failed to clear request journal for deleted imposter on port {port}: {e:#}");
             }
         }
         // Reclaim the shared proxy store's port slice so a later imposter reusing the port

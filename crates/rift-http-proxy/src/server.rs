@@ -378,7 +378,7 @@ impl ServerBuilder {
         let metrics = match bind_metrics_server(metrics_addr).await {
             Ok(running) => Some(running),
             Err(e) => {
-                error!("Metrics server error: {}", e);
+                error!("Metrics server error: {e:#}");
                 None
             }
         };
@@ -563,7 +563,7 @@ pub async fn bind_metrics_server(addr: SocketAddr) -> anyhow::Result<RunningMetr
         // Preserve the pre-#342 behavior: an accept-loop failure is logged. Otherwise it would
         // only surface via join(), which RunningServer does not call for the metrics task.
         if let Err(ref e) = result {
-            error!("Metrics server error: {}", e);
+            error!("Metrics server error: {e:#}");
         }
         result
     });

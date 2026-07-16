@@ -1970,7 +1970,7 @@ fn execute_predicate_inject_in(
     let request_obj = match create_mountebank_request_object(&mut *context, request) {
         Ok(obj) => obj,
         Err(e) => {
-            tracing::warn!("inject predicate: failed to build request object: {e}");
+            tracing::warn!("inject predicate: failed to build request object: {e:#}");
             return Err(
                 PredicateInjectionError(format!("failed to build request object: {e}")).into(),
             );
@@ -1986,7 +1986,7 @@ fn execute_predicate_inject_in(
     let state_obj = match json_to_js(&mut *context, &Value::Object(state_map)) {
         Ok(obj) => obj,
         Err(e) => {
-            tracing::warn!("inject predicate: failed to build state object: {e}");
+            tracing::warn!("inject predicate: failed to build state object: {e:#}");
             return Err(
                 PredicateInjectionError(format!("failed to build state object: {e}")).into(),
             );
@@ -1999,7 +1999,7 @@ fn execute_predicate_inject_in(
     let logger_obj = match create_script_logger_object(&mut *context, imposter_port, None) {
         Ok(obj) => obj,
         Err(e) => {
-            tracing::warn!("inject predicate: failed to build logger object: {e}");
+            tracing::warn!("inject predicate: failed to build logger object: {e:#}");
             return Err(
                 PredicateInjectionError(format!("failed to build logger object: {e}")).into(),
             );

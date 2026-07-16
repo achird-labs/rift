@@ -3296,6 +3296,7 @@ dependencies = [
 name = "rift-ffi"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "parking_lot",
  "rcgen",
  "reqwest",
@@ -3306,6 +3307,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-test",
 ]
 
 [[package]]

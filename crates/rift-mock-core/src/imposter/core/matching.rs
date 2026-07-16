@@ -478,12 +478,12 @@ impl Imposter {
         // clean teardown while stale recorded requests or scenario state persist in the backend.
         let mut first_err = None;
         if let Err(e) = self.journal.clear_flow(self.journal_port(), space) {
-            warn!("space teardown: failed to clear recorded requests for '{space}': {e}");
+            warn!("space teardown: failed to clear recorded requests for '{space}': {e:#}");
             first_err.get_or_insert(e);
         }
         for scenario in scenarios {
             if let Err(e) = self.delete_scenario_state(space, &scenario) {
-                warn!("space teardown: failed to reset scenario '{scenario}' for '{space}': {e}");
+                warn!("space teardown: failed to reset scenario '{scenario}' for '{space}': {e:#}");
                 first_err.get_or_insert(e);
             }
         }

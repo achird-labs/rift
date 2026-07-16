@@ -161,7 +161,7 @@ impl InterceptRules {
                         // matching) — log and treat the rule as non-matching rather than panic the
                         // intercept listener on a bad script.
                         .unwrap_or_else(|e| {
-                            tracing::warn!(error = %e, "intercept rule predicate match failed");
+                            tracing::warn!(error = %format_args!("{e:#}"), "intercept rule predicate match failed");
                             false
                         }))
             })
