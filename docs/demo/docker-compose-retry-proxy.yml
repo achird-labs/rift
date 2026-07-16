@@ -21,6 +21,13 @@ services:
   # Simple upstream service that returns success
   upstream:
     image: hashicorp/http-echo:latest
-    command: ["-text", "{\"status\":\"success\",\"message\":\"Request reached upstream service\",\"timestamp\":\"$(date -Iseconds)\"}"]
+    # http-echo serves one fixed string. It runs no shell and cannot template, and compose escapes
+    # `$(` to `$$(` anyway, so a `$(date -Iseconds)` here was echoed to the client verbatim rather
+    # than as a time (issue #676). Dropping the field rather than freezing it: this demo has you
+    # send the same request several times, and `test-retry-proxy.sh` prints every response — an
+    # identical timestamp on each one would read as a cached reply, which is the opposite of what a
+    # retry demo is teaching. That the retried request reached the upstream at all is the point, and
+    # `message` already says so.
+    command: ["-text", "{\"status\":\"success\",\"message\":\"Request reached upstream service\"}"]
     ports:
       - "8080:5678"
