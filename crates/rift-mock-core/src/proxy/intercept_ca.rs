@@ -321,7 +321,7 @@ impl ResolvesServerCert for SniCertResolver {
             Err(e) => {
                 // resolve() must return Option; log before dropping so a failed MITM handshake
                 // is diagnosable instead of a silent generic TLS abort.
-                tracing::warn!(host, error = %e, "intercept TLS: failed to mint leaf certificate");
+                tracing::warn!(host, error = %format_args!("{e:#}"), "intercept TLS: failed to mint leaf certificate");
                 None
             }
         }

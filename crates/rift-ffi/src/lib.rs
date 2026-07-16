@@ -32,6 +32,7 @@
 //! (error or caught panic) returns its sentinel, records the reason in [`rift_last_error`], and
 //! emits a `tracing` event.
 
+use anyhow::Context;
 use parking_lot::Mutex;
 use rift_http_proxy::admin_api::{
     AdminApiServer, RunningAdminApi, filter_proxy_responses, filter_proxy_stubs,
@@ -55,6 +56,20 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 use tracing::warn;
+
+/// Log an `anyhow`-typed failure from an FFI entry point, whole chain included (issue #683).
+///
+/// `{e}` renders only the outermost context, so a `flow_set` that failed on a Redis timeout and one
+/// that failed on a bad URL logged the same line. These callers all take the same shape — an
+/// `anyhow::Error` from `rift_mock_core::imposter::core`, plus the port — so they share one format
+/// specifier here rather than repeating `%format_args!("{e:#}")` eight times and drifting apart.
+/// `%format_args!` avoids the `format!` allocation the field style would otherwise cost.
+///
+/// The `ImposterManager`-level calls do NOT belong here: they return `ImposterError`, whose
+/// `Backend` variant already renders its wrapped chain via `#[error("backend error: {0:#}")]`.
+fn warn_anyhow_failure(e: &anyhow::Error, port: u16, what: &str) {
+    warn!(error = %format_args!("{e:#}"), port, "{what}");
+}
 
 /// Run an FFI body under a panic guard (issue #484): a Rust panic must never unwind across the
 /// `extern "C"` boundary (that is undefined behaviour). A caught panic records its message in
@@ -495,7 +510,7 @@ pub unsafe extern "C" fn rift_verify(
             Ok(o) => o,
             Err(e) => {
                 set_last_error(format!("rift_verify: {e}"));
-                warn!(error = %e, port, "rift_verify: predicate evaluation failed");
+                warn_anyhow_failure(&e, port, "rift_verify: predicate evaluation failed");
                 return std::ptr::null_mut();
             }
         };
@@ -890,7 +905,7 @@ pub unsafe extern "C" fn rift_clear_recorded(h: *mut RiftHandle, port: u16) -> i
             Ok(()) => 0,
             Err(e) => {
                 set_last_error(format!("rift_clear_recorded: {e}"));
-                warn!(error = %e, port, "rift_clear_recorded failed");
+                warn_anyhow_failure(&e, port, "rift_clear_recorded failed");
                 -1
             }
         }
@@ -986,7 +1001,7 @@ pub unsafe extern "C" fn rift_scenarios(
                 Ok(state) => scenarios.push(json!({ "name": name, "state": state })),
                 Err(e) => {
                     set_last_error(format!("rift_scenarios: {e}"));
-                    warn!(error = %e, port, "rift_scenarios failed");
+                    warn_anyhow_failure(&e, port, "rift_scenarios failed");
                     return std::ptr::null_mut();
                 }
             }
@@ -1042,7 +1057,7 @@ pub unsafe extern "C" fn rift_set_scenario_state(
             Ok(()) => 0,
             Err(e) => {
                 set_last_error(format!("rift_set_scenario_state: {e}"));
-                warn!(error = %e, port, "rift_set_scenario_state failed");
+                warn_anyhow_failure(&e, port, "rift_set_scenario_state failed");
                 -1
             }
         }
@@ -1079,7 +1094,7 @@ pub unsafe extern "C" fn rift_reset_scenarios(
         for name in imposter.scenario_names() {
             if let Err(e) = imposter.delete_scenario_state(&flow, &name) {
                 set_last_error(format!("rift_reset_scenarios: {e}"));
-                warn!(error = %e, port, "rift_reset_scenarios failed");
+                warn_anyhow_failure(&e, port, "rift_reset_scenarios failed");
                 return -1;
             }
         }
@@ -1130,7 +1145,7 @@ pub unsafe extern "C" fn rift_flow_state_get(
             ),
             Err(e) => {
                 set_last_error(format!("rift_flow_state_get: {e}"));
-                warn!(error = %e, port, "rift_flow_state_get failed");
+                warn_anyhow_failure(&e, port, "rift_flow_state_get failed");
                 std::ptr::null_mut()
             }
         }
@@ -1176,7 +1191,7 @@ pub unsafe extern "C" fn rift_flow_state_put(
             Ok(()) => 0,
             Err(e) => {
                 set_last_error(format!("rift_flow_state_put: {e}"));
-                warn!(error = %e, port, "rift_flow_state_put failed");
+                warn_anyhow_failure(&e, port, "rift_flow_state_put failed");
                 -1
             }
         }
@@ -1212,7 +1227,7 @@ pub unsafe extern "C" fn rift_flow_state_delete(
             Ok(()) => 0,
             Err(e) => {
                 set_last_error(format!("rift_flow_state_delete: {e}"));
-                warn!(error = %e, port, "rift_flow_state_delete failed");
+                warn_anyhow_failure(&e, port, "rift_flow_state_delete failed");
                 -1
             }
         }
@@ -1726,8 +1741,8 @@ pub unsafe extern "C" fn rift_serve_admin(
                 into_c_string(response)
             }
             Err(e) => {
-                set_last_error(format!("rift_serve_admin: {e}"));
-                warn!(error = %e, "rift_serve_admin failed");
+                set_last_error(format!("rift_serve_admin: {e:#}"));
+                warn!(error = %format_args!("{e:#}"), "rift_serve_admin failed");
                 std::ptr::null_mut()
             }
         }
@@ -1799,7 +1814,8 @@ fn gated_intercept_rules_error(
 }
 
 /// Bind the admin (and optional metrics) plane per `opts`, returning the plane plus the JSON
-/// response body. Errors are `String`s (mapped to `last_error` by the caller).
+/// response body. Errors are `anyhow::Error` (issue #688) so a failing step's whole cause chain
+/// survives to `last_error`, which the caller renders with `{e:#}`.
 ///
 /// A `configFile` `intercept` block binds a listener partway through (issue #655), so a later
 /// failure must not leave it running: the handle survives a failed `rift_serve_admin`, and an
@@ -1809,7 +1825,7 @@ fn gated_intercept_rules_error(
 async fn build_admin_plane(
     handle: &RiftHandle,
     opts: &ServeOptions,
-) -> Result<(AdminPlane, String), String> {
+) -> anyhow::Result<(AdminPlane, String)> {
     let mut started_intercept = false;
     let result = build_admin_plane_inner(handle, opts, &mut started_intercept).await;
     if result.is_err() && started_intercept {
@@ -1822,7 +1838,7 @@ async fn build_admin_plane_inner(
     handle: &RiftHandle,
     opts: &ServeOptions,
     started_intercept: &mut bool,
-) -> Result<(AdminPlane, String), String> {
+) -> anyhow::Result<(AdminPlane, String)> {
     let host = opts.host.as_deref().unwrap_or("127.0.0.1");
     let port = opts.port.unwrap_or(0);
     let api_key = opts.api_key.clone();
@@ -1831,12 +1847,12 @@ async fn build_admin_plane_inner(
     // Parse both addresses up front, before any side effects (imposter creation / binding).
     let addr: SocketAddr = format!("{host}:{port}")
         .parse()
-        .map_err(|e| format!("invalid host/port `{host}:{port}`: {e}"))?;
+        .with_context(|| format!("invalid host/port `{host}:{port}`"))?;
     let metrics_addr: Option<SocketAddr> = match opts.metrics_port {
         Some(mp) => Some(
             format!("{host}:{mp}")
                 .parse()
-                .map_err(|e| format!("invalid metrics addr `{host}:{mp}`: {e}"))?,
+                .with_context(|| format!("invalid metrics addr `{host}:{mp}`"))?,
         ),
         None => None,
     };
@@ -1852,10 +1868,9 @@ async fn build_admin_plane_inner(
                 path: PathBuf::from(path),
                 no_parse: false,
             };
-            let loaded = config_loader::load_configs_full(&source)
-                .map_err(|e| format!("configFile load: {e}"))?;
+            let loaded = config_loader::load_configs_full(&source).context("configFile load")?;
             if let Some(err) = gated_config_file_error(&loaded.imposters, allow_injection) {
-                return Err(err);
+                return Err(anyhow::anyhow!(err));
             }
             // The file's `intercept` block (issue #655) gives an embedded host the same
             // declarative listener the CLI gets — started before the imposters are applied so a
@@ -1863,20 +1878,20 @@ async fn build_admin_plane_inner(
             // Gated identically to the imposters around it: the file crossed the same boundary.
             if let Some(block) = loaded.intercept {
                 if let Some(err) = gated_intercept_rules_error(&block.rules, allow_injection) {
-                    return Err(err);
+                    return Err(anyhow::anyhow!(err));
                 }
                 handle
                     .intercept
                     .start(block)
                     .await
-                    .map_err(|e| format!("configFile intercept: {e}"))?;
+                    .context("configFile intercept")?;
                 *started_intercept = true;
             }
             let report = handle
                 .manager
                 .apply_config(loaded.imposters)
                 .await
-                .map_err(|e| format!("configFile apply: {e}"))?;
+                .context("configFile apply")?;
             warn_failed(&report, "configFile");
             Some(source)
         }
@@ -1885,23 +1900,19 @@ async fn build_admin_plane_inner(
 
     // Inline config is the desired state applied via apply_config (reconcile), mirroring reload.
     if let Some(cfg) = opts.config.as_ref().filter(|v| !v.is_null()) {
-        let configs = parse_imposter_configs(cfg)?;
+        let configs = parse_imposter_configs(cfg).map_err(anyhow::Error::msg)?;
         let report = handle
             .manager
             .apply_config(configs)
             .await
-            .map_err(|e| format!("inline config apply: {e}"))?;
+            .context("inline config apply")?;
         warn_failed(&report, "inline config");
     }
 
     // Bind metrics first (optional), then admin — so if the second bind fails, the first
     // listener is explicitly shut down rather than orphaned holding its port.
     let metrics = match metrics_addr {
-        Some(maddr) => Some(
-            bind_metrics_server(maddr)
-                .await
-                .map_err(|e| format!("metrics bind: {e}"))?,
-        ),
+        Some(maddr) => Some(bind_metrics_server(maddr).await.context("metrics bind")?),
         None => None,
     };
 
@@ -1921,7 +1932,7 @@ async fn build_admin_plane_inner(
             if let Some(metrics) = metrics {
                 metrics.shutdown().await;
             }
-            return Err(format!("admin bind: {e}"));
+            return Err(e.context("admin bind"));
         }
     };
     let admin_addr = admin.local_addr();
@@ -2090,6 +2101,130 @@ pub unsafe extern "C" fn rift_stop(h: *mut RiftHandle) {
             handle.manager.shutdown().await;
         });
     })
+}
+
+#[cfg(test)]
+mod build_admin_plane_chain_tests {
+    use super::*;
+
+    fn test_handle() -> RiftHandle {
+        RiftHandle {
+            runtime: Runtime::new().expect("runtime"),
+            manager: Arc::new(ImposterManager::new()),
+            admin: Mutex::new(None),
+            intercept: InterceptControl::default(),
+        }
+    }
+
+    // Issue #688: build_admin_plane returns `anyhow::Result` now, not `Result<_, String>`, so a
+    // failing step's cause chain (here: a configFile that cannot be read) reaches `rift_last_error`
+    // through `{e:#}` instead of being flattened at the boundary. `.chain()` is an `anyhow::Error`
+    // method — this test does not compile against the old `String` return, which is the point.
+    #[test]
+    fn build_admin_plane_surfaces_the_load_error_as_an_anyhow_chain() {
+        let handle = test_handle();
+        let opts = ServeOptions {
+            host: None,
+            port: Some(0),
+            api_key: None,
+            metrics_port: None,
+            config_file: Some("/nonexistent/rift-688/does-not-exist.json".to_string()),
+            config: None,
+            allow_injection: None,
+        };
+        let Err(err) = handle.runtime.block_on(build_admin_plane(&handle, &opts)) else {
+            panic!("a missing configFile must fail the admin build");
+        };
+        assert!(err.chain().next().is_some(), "carries an anyhow chain");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("configFile load"),
+            "the boundary context is preserved: {rendered}"
+        );
+        assert!(
+            rendered.contains("No such file") || rendered.contains("os error"),
+            "the OS-level cause survives to the sink: {rendered}"
+        );
+    }
+
+    // AC3(c) end-to-end: the literal sink named by the issue. A failing `rift_serve_admin` must
+    // leave the whole chain in `rift_last_error`, not just the outermost frame — the string all four
+    // SDKs surface in their exceptions.
+    #[test]
+    fn rift_serve_admin_leaves_the_whole_chain_in_last_error() {
+        let handle = rift_start();
+        assert!(!handle.is_null(), "rift_start returns a handle");
+        let opts =
+            std::ffi::CString::new(r#"{"configFile":"/nonexistent/rift-688/does-not-exist.json"}"#)
+                .expect("no interior NUL");
+
+        let served = unsafe { rift_serve_admin(handle, opts.as_ptr()) };
+        assert!(served.is_null(), "a missing configFile must fail the serve");
+
+        let err_ptr = rift_last_error();
+        assert!(!err_ptr.is_null(), "the failure recorded a last-error");
+        let rendered = unsafe { CStr::from_ptr(err_ptr) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { rift_free(err_ptr) };
+        unsafe { rift_stop(handle) };
+
+        assert!(rendered.starts_with("rift_serve_admin: "), "{rendered}");
+        assert!(rendered.contains("configFile load"), "{rendered}");
+        assert!(
+            rendered.contains("No such file") || rendered.contains("os error"),
+            "the OS-level cause must reach rift_last_error, not just the outermost frame: {rendered}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod anyhow_chain_log_tests {
+    use super::warn_anyhow_failure;
+    use tracing_test::traced_test;
+
+    /// The shape #683 exists for: the outermost context names *what* failed, the causes name *why*.
+    fn chained_error() -> anyhow::Error {
+        anyhow::anyhow!("connection refused (os error 61)")
+            .context("redis flow store unreachable")
+            .context("flow_set failed")
+    }
+
+    #[traced_test]
+    #[test]
+    fn warn_anyhow_failure_names_the_whole_chain() {
+        warn_anyhow_failure(&chained_error(), 4545, "rift_flow_state_put failed");
+        assert!(
+            logs_contain("rift_flow_state_put failed"),
+            "message survives"
+        );
+        assert!(
+            logs_contain("redis flow store unreachable"),
+            "the log must name the CAUSE — the whole point of #683"
+        );
+        assert!(
+            logs_contain("connection refused"),
+            "the log must reach the ROOT cause, not stop one level down"
+        );
+    }
+
+    // Documents the defect #683 fixes, so the sibling test above reads as a real assertion and not
+    // a tautology: plain Display — what every one of these sites used before #683 — renders ONLY the
+    // outermost context, and `{:#}` is what recovers the chain.
+    #[test]
+    fn plain_display_drops_the_chain() {
+        let rendered = format!("{}", chained_error());
+        assert_eq!(rendered, "flow_set failed");
+        assert!(
+            !rendered.contains("connection refused"),
+            "plain Display must NOT reach the root cause; if it did, #683 would be a non-issue"
+        );
+        assert!(
+            format!("{:#}", chained_error()).contains("connection refused"),
+            "the alternate form is what recovers the chain"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -236,7 +236,7 @@ async fn handle_connection(
     match action {
         Some(InterceptAction::Serve(stub)) => {
             if let Err(e) = write_stub_response(&mut tls_stream, &stub).await {
-                tracing::warn!(%target, error = %e, "failed to render intercept stub response");
+                tracing::warn!(%target, error = %format_args!("{e:#}"), "failed to render intercept stub response");
             }
         }
         Some(InterceptAction::Forward(forward)) => {
@@ -252,7 +252,7 @@ async fn handle_connection(
             )
             .await;
             if let Err(e) = forward_result {
-                tracing::warn!(%target, port = forward.port, error = %e, "intercept forward failed");
+                tracing::warn!(%target, port = forward.port, error = %format_args!("{e:#}"), "intercept forward failed");
                 let _ = write_bad_gateway(&mut tls_stream).await;
             }
         }

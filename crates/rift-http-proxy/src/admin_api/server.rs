@@ -119,7 +119,7 @@ impl AdminApiServer {
             // Log an accept-loop failure so it is observable even for an embedder that holds
             // the handle and never calls join() (join() still returns it for run()/RunningServer).
             if let Err(ref e) = result {
-                tracing::error!("Admin API server error: {}", e);
+                tracing::error!("Admin API server error: {e:#}");
             }
             result
         });

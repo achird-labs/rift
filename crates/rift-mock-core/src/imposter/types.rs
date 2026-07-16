@@ -1276,8 +1276,8 @@ pub enum ImposterError {
     PortInUse(u16),
     #[error("Imposter not found on port {0}")]
     NotFound(u16),
-    #[error("Failed to bind port {0}: {1}")]
-    BindError(u16, String),
+    #[error("Failed to bind port {0}: {1:#}")]
+    BindError(u16, anyhow::Error),
     #[error("Invalid protocol: {0}")]
     InvalidProtocol(String),
     #[error("Stub index {0} out of bounds")]
@@ -1286,14 +1286,83 @@ pub enum ImposterError {
     StubNotFound(String),
     #[error("A stub with id '{0}' already exists")]
     StubIdConflict(String),
-    #[error("Failed to persist imposter: {0}")]
-    PersistError(String),
+    #[error("Failed to persist imposter: {0:#}")]
+    PersistError(anyhow::Error),
     #[error("TLS configuration error: {0}")]
     Tls(String),
     #[error("flow store configuration error: {0}")]
     FlowStoreConfig(String),
     #[error("backend error: {0:#}")]
     Backend(anyhow::Error),
+}
+
+#[cfg(test)]
+mod imposter_error_chain_tests {
+    use super::ImposterError;
+
+    // Issue #688: BindError/PersistError carry an anyhow::Error now, not a flattened String, so a
+    // chain-bearing source reaches the sink intact. Displayed with `{:#}`, the whole chain renders.
+    #[test]
+    fn bind_error_display_renders_the_whole_chain() {
+        let source = anyhow::anyhow!("address already in use (os error 48)")
+            .context("SO_REUSEADDR bind of 0.0.0.0:8080");
+        let rendered = format!("{}", ImposterError::BindError(8080, source));
+        assert!(
+            rendered.starts_with("Failed to bind port 8080: "),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("SO_REUSEADDR bind of 0.0.0.0:8080"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("address already in use"),
+            "the root cause must survive to the sink: {rendered}"
+        );
+    }
+
+    #[test]
+    fn persist_error_display_renders_the_whole_chain() {
+        let source = anyhow::Error::new(std::io::Error::other("no space left on device"))
+            .context("write imposter 8080 to \"/data/8080.json\"");
+        let rendered = format!("{}", ImposterError::PersistError(source));
+        assert!(
+            rendered.starts_with("Failed to persist imposter: "),
+            "{rendered}"
+        );
+        assert!(rendered.contains("write imposter 8080"), "{rendered}");
+        assert!(
+            rendered.contains("no space left on device"),
+            "the root cause must survive to the sink: {rendered}"
+        );
+    }
+
+    // AC2: for a single-level (leaf) source — every construction that exists today — `{:#}` renders
+    // exactly what the old `String` field did, so admin `failed[].error` and the hot-reload body are
+    // byte-identical. These pin that the type change did not perturb the current messages.
+    #[test]
+    fn bind_error_leaf_display_is_byte_identical_to_the_old_string() {
+        let err = ImposterError::BindError(8080, anyhow::anyhow!("no socket address"));
+        assert_eq!(
+            format!("{err}"),
+            "Failed to bind port 8080: no socket address"
+        );
+    }
+
+    #[test]
+    fn persist_error_leaf_display_is_byte_identical_to_the_old_string() {
+        // Mirror the exact shape manager.rs builds — `Error::new(io).context("...")`, a 2-level
+        // chain — so this pins the real construction, not a degenerate single-level stand-in. Under
+        // `{0:#}` it must render what the old `PersistError(format!("...: {e}"))` String produced.
+        let io = std::io::Error::other("no space left on device");
+        let err = ImposterError::PersistError(
+            anyhow::Error::new(io).context("Failed to serialize imposter 8080"),
+        );
+        assert_eq!(
+            format!("{err}"),
+            "Failed to persist imposter: Failed to serialize imposter 8080: no space left on device"
+        );
+    }
 }
 
 #[cfg(test)]

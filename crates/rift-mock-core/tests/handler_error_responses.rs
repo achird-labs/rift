@@ -34,6 +34,20 @@ async fn get(port: u16) -> reqwest::Response {
         .expect("send")
 }
 
+/// Issue #687: a door that serves the canonical JSON envelope must also declare it. The proxy doors
+/// (#681) and the admin plane already did, so the same `{"errors":[...]}` envelope reached clients
+/// typed on one path and untyped on another. Asserted per door rather than once, so a door added
+/// later that forgets the header fails here rather than shipping the inconsistency again.
+fn assert_json_content_type(resp: &reqwest::Response, door: &str) {
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+        "the {door} door serves the JSON error envelope, so it must declare content-type"
+    );
+}
+
 // Contract 1: a throwing response `inject` → 400 Mountebank error body + inject-error header.
 #[tokio::test]
 async fn throwing_inject_response_returns_400() {
@@ -55,6 +69,7 @@ async fn throwing_inject_response_returns_400() {
         resp.headers().contains_key("x-rift-inject-error"),
         "the inject-error marker header must be present"
     );
+    assert_json_content_type(&resp, "response inject error");
     let body: serde_json::Value = resp.json().await.expect("json body");
     assert_eq!(body["errors"][0]["code"], "invalid injection");
     assert!(
@@ -122,6 +137,7 @@ async fn decorate_error_strict_returns_500() {
     let resp = get(19752).await;
     let status = resp.status();
     let has_header = resp.headers().contains_key("x-rift-decorate-error");
+    assert_json_content_type(&resp, "strict decorate error");
     let body = resp.text().await.expect("body");
     assert_eq!(status, 500, "strict decorate failure fails loud with 500");
     assert!(has_header, "the 500 must still carry x-rift-decorate-error");
@@ -158,6 +174,7 @@ async fn predicate_inject_error_returns_400() {
     let resp = get(19753).await;
     assert_eq!(resp.status(), 400, "a throwing predicate inject is a 400");
     assert!(resp.headers().contains_key("x-rift-inject-error"));
+    assert_json_content_type(&resp, "predicate inject error");
     let body: serde_json::Value = resp.json().await.expect("json body");
     assert_eq!(
         body["errors"][0]["code"], "invalid predicate injection",
@@ -217,6 +234,7 @@ async fn rift_script_timeout_returns_504() {
     );
     assert!(resp.headers().contains_key("x-rift-script-error"));
     assert!(resp.headers().contains_key("x-rift-script-timeout"));
+    assert_json_content_type(&resp, "script timeout");
     let body = resp.text().await.expect("body");
     assert!(
         body.contains("Script timeout"),
@@ -291,6 +309,7 @@ async fn decorate_timeout_strict_returns_504() {
     let status = resp.status();
     let has_decorate_err = resp.headers().contains_key("x-rift-decorate-error");
     let has_timeout = resp.headers().contains_key("x-rift-script-timeout");
+    assert_json_content_type(&resp, "strict decorate timeout");
     let body = resp.text().await.expect("body");
     assert_eq!(
         status, 504,
@@ -304,4 +323,380 @@ async fn decorate_timeout_strict_returns_504() {
     );
 
     let _ = manager.delete_imposter(19764).await;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #682: these doors hand-built their JSON by interpolating the error into a string literal,
+// so a message holding a `"` produced a body the client could not decode (the #611 class), in a
+// legacy `{"error"}` shape that 0.13.6/#681 had unified everywhere else. Assert the envelope AND
+// that a quoted message survives — a script's error text is user JavaScript, so quotes are ordinary.
+// ---------------------------------------------------------------------------
+
+/// The canonical envelope, parsed. Panics with the raw body when it is not valid JSON — which is
+/// exactly the pre-#682 failure for a quoted message.
+fn envelope(body: &str) -> serde_json::Value {
+    serde_json::from_str(body)
+        .unwrap_or_else(|e| panic!("body must be valid JSON ({e}), got: {body}"))
+}
+
+// A rhai script whose error message carries quotes, the way real user code reads:
+//   throw new Error('expected "ready", got "pending"')
+#[tokio::test]
+async fn script_error_with_quotes_yields_valid_json_envelope() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19771, "protocol": "http",
+            "stubs": [
+                { "responses": [{ "_rift": { "script": { "engine": "rhai",
+                  "code": r#"fn respond(ctx) { throw `expected "ready", got "pending"`; }"# } } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let resp = get(19771).await;
+    assert_eq!(resp.status(), 500, "a broken script is a 500");
+    assert!(resp.headers().contains_key("x-rift-script-error"));
+    assert_json_content_type(&resp, "script error");
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(v["errors"][0]["code"], "500", "envelope code is the status");
+    let msg = v["errors"][0]["message"]
+        .as_str()
+        .expect("message is a string");
+    assert!(
+        msg.contains("Script error:"),
+        "message keeps its prefix, got: {msg}"
+    );
+    assert!(
+        msg.contains(r#""ready""#),
+        "the quoted text must survive escaping intact, got: {msg}"
+    );
+    assert!(v.get("error").is_none(), "the legacy shape must be gone");
+
+    let _ = manager.delete_imposter(19771).await;
+}
+
+#[tokio::test]
+async fn script_timeout_body_is_the_canonical_envelope() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19772, "protocol": "http",
+            "_rift": { "scriptEngine": { "timeoutMs": 50 } },
+            "stubs": [
+                { "responses": [{ "_rift": { "script": { "engine": "rhai", "code": "let i = 0; loop { i += 1; }" } } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let resp = get(19772).await;
+    assert_eq!(resp.status(), 504, "a deadline miss stays a 504");
+    // The markers are the contract #499 established — the envelope change must not disturb them.
+    assert!(resp.headers().contains_key("x-rift-script-error"));
+    assert!(resp.headers().contains_key("x-rift-script-timeout"));
+    assert_json_content_type(&resp, "script timeout");
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(v["errors"][0]["code"], "504", "envelope code is the status");
+    assert!(
+        v["errors"][0]["message"]
+            .as_str()
+            .expect("string")
+            .contains("Script timeout"),
+        "the 504 must still name the timeout: {body}"
+    );
+
+    let _ = manager.delete_imposter(19772).await;
+}
+
+#[tokio::test]
+async fn strict_decorate_error_body_is_the_canonical_envelope() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19773, "protocol": "http", "strictBehaviors": true, "stubs": [
+                { "responses": [{ "is": { "statusCode": 200, "body": "original" },
+                  "_behaviors": { "decorate": "function (request, response) { throw new Error('boom-decorate'); }" } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let resp = get(19773).await;
+    assert_eq!(resp.status(), 500);
+    assert!(resp.headers().contains_key("x-rift-decorate-error"));
+    assert_json_content_type(&resp, "strict decorate error");
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(v["errors"][0]["code"], "500");
+    assert!(
+        v["errors"][0]["message"]
+            .as_str()
+            .expect("string")
+            .contains("decorate failed"),
+        "the strict failure must still be named: {body}"
+    );
+
+    let _ = manager.delete_imposter(19773).await;
+}
+
+// A static body (no error interpolated) — always valid JSON before and after, so this covers only
+// the shape half of the change. Note this door's marker is `x-rift-imposter-disabled`, NOT the
+// usual `x-rift-imposter`; the envelope change must not quietly normalise it.
+#[tokio::test]
+async fn disabled_imposter_body_is_the_canonical_envelope() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19774, "protocol": "http", "stubs": [
+                { "responses": [{ "is": { "statusCode": 200, "body": "never served" } }] }
+            ]
+        }),
+    )
+    .await;
+    manager
+        .get_imposter(19774)
+        .expect("imposter exists")
+        .set_enabled(false);
+
+    let resp = get(19774).await;
+    assert_eq!(resp.status(), 503);
+    assert!(resp.headers().contains_key("x-rift-imposter-disabled"));
+    assert_json_content_type(&resp, "disabled imposter");
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(v["errors"][0]["code"], "503");
+    assert!(
+        v["errors"][0]["message"]
+            .as_str()
+            .expect("string")
+            .contains("disabled"),
+        "got: {body}"
+    );
+
+    let _ = manager.delete_imposter(19774).await;
+}
+
+// The decorate door is the only one whose status is a VARIABLE (500 when the script throws, 504
+// when it misses the deadline), and the same variable feeds the envelope's `code`. That coupling is
+// what the CHANGELOG claims, so it gets pinned: its two neighbours (shellTransform, binary decode)
+// pass a hardcoded 500, and "harmonising" this site to match them would ship a 504 whose body says
+// `"code": "500"` — with every other test still green.
+#[tokio::test]
+async fn strict_decorate_timeout_envelope_code_follows_the_504() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19775, "protocol": "http", "strictBehaviors": true,
+            "_rift": { "scriptEngine": { "timeoutMs": 5 } },
+            "stubs": [
+                { "responses": [{ "is": { "statusCode": 200, "body": "original" },
+                  "_behaviors": { "decorate": SLOW_RHAI_LOOP } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let resp = get(19775).await;
+    assert_eq!(resp.status(), 504, "a strict decorate timeout is a 504");
+    assert_json_content_type(&resp, "strict decorate timeout");
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(
+        v["errors"][0]["code"], "504",
+        "the envelope code must track the door's OWN status, not a hardcoded 500: {body}"
+    );
+    assert!(
+        v["errors"][0]["message"]
+            .as_str()
+            .expect("string")
+            .contains("decorate failed"),
+        "got: {body}"
+    );
+
+    let _ = manager.delete_imposter(19775).await;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #687: the remaining envelope doors, which had no end-to-end coverage at all — so the
+// content-type they now declare is pinned here rather than assumed. One door is not reachable from
+// here: the template door fires only under `RIFT_DEBUG`, a process-global these parallel tests
+// cannot toggle without racing each other, so it is pinned by a unit test instead
+// (`handler::template_error_tests`).
+// ---------------------------------------------------------------------------
+
+// The over-size door is reached before any stub matching, by exceeding the handler's 10 MiB
+// `MAX_REQUEST_BODY_SIZE`.
+#[tokio::test]
+async fn oversize_request_body_door_declares_json() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19776, "protocol": "http", "stubs": [
+                { "responses": [{ "is": { "statusCode": 200, "body": "never served" } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post("http://127.0.0.1:19776/x")
+        .body(vec![b'x'; 11 * 1024 * 1024])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 413, "an over-size body is a 413");
+    assert_json_content_type(&resp, "over-size request body");
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(v["errors"][0]["code"], "413");
+
+    let _ = manager.delete_imposter(19776).await;
+}
+
+#[tokio::test]
+async fn strict_shelltransform_door_declares_json() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19777, "protocol": "http", "strictBehaviors": true, "stubs": [
+                { "responses": [{ "is": { "statusCode": 200, "body": "original" },
+                  "_behaviors": { "shellTransform": ["rift-no-such-command-687"] } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let resp = get(19777).await;
+    assert_eq!(
+        resp.status(),
+        500,
+        "a strict shellTransform failure is a 500"
+    );
+    assert!(resp.headers().contains_key("x-rift-shelltransform-error"));
+    assert_json_content_type(&resp, "strict shellTransform error");
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(v["errors"][0]["code"], "500");
+    assert!(
+        v["errors"][0]["message"]
+            .as_str()
+            .expect("string")
+            .contains("shellTransform failed"),
+        "got: {body}"
+    );
+
+    let _ = manager.delete_imposter(19777).await;
+}
+
+#[tokio::test]
+async fn strict_binary_decode_door_declares_json() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19778, "protocol": "http", "strictBehaviors": true, "stubs": [
+                { "responses": [{ "is": { "statusCode": 200, "body": "not!valid!base64", "_mode": "binary" } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let resp = get(19778).await;
+    assert_eq!(
+        resp.status(),
+        500,
+        "a strict base64 decode failure is a 500"
+    );
+    assert!(resp.headers().contains_key("x-rift-binary-error"));
+    assert_json_content_type(&resp, "strict binary decode error");
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(v["errors"][0]["code"], "500");
+    assert!(
+        v["errors"][0]["message"]
+            .as_str()
+            .expect("string")
+            .contains("binary base64 decode failed"),
+        "got: {body}"
+    );
+
+    let _ = manager.delete_imposter(19778).await;
+}
+
+// The unresolved-script door. `file:`/`ref:` sources are populated by the config-time resolve pass,
+// which lives in rift-http-proxy — `ImposterManager::create_imposter` (what `create()` calls here,
+// and what an embedded/FFI host calls) never runs it. So a stub declaring `file:` arrives with
+// `code: None` and takes this door, rather than silently serving an empty script.
+#[tokio::test]
+async fn unresolved_script_door_declares_json() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19780, "protocol": "http", "stubs": [
+                { "responses": [{ "_rift": { "script": { "engine": "rhai",
+                  "file": "never-resolved-687.rhai" } } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let resp = get(19780).await;
+    assert_eq!(resp.status(), 500, "an unresolved script source is a 500");
+    assert!(resp.headers().contains_key("x-rift-script-error"));
+    assert_json_content_type(&resp, "unresolved file:/ref: script");
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(v["errors"][0]["code"], "500");
+    assert!(
+        v["errors"][0]["message"]
+            .as_str()
+            .expect("string")
+            .contains("script not resolved"),
+        "got: {body}"
+    );
+
+    let _ = manager.delete_imposter(19780).await;
+}
+
+// The counter-case: an unrecognised `fault` serves a PLAIN-TEXT body, so the sweep that added
+// content-type to the envelope doors must not have labelled it `application/json` — which would be
+// a lie a client would act on. Pins the boundary of the #687 change, not the change itself.
+#[tokio::test]
+async fn unknown_fault_door_is_not_labelled_json() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19779, "protocol": "http", "stubs": [
+                { "responses": [{ "fault": "NOT_A_REAL_FAULT" }] }
+            ]
+        }),
+    )
+    .await;
+
+    let resp = get(19779).await;
+    assert_eq!(resp.status(), 500);
+    assert_ne!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+        "this door serves plain text; claiming JSON would be a lie"
+    );
+    let body = resp.text().await.expect("body");
+    assert!(body.contains("Unknown fault"), "got: {body}");
+
+    let _ = manager.delete_imposter(19779).await;
 }

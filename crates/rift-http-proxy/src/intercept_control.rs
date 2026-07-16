@@ -17,6 +17,17 @@ use crate::intercept_rules::{InterceptRule, InterceptRules, InterceptState, Rule
 use rift_mock_core::proxy::intercept_ca::{CaSource, CertificateAuthority, SniCertResolver};
 use serde::Serialize;
 
+/// Log an `anyhow`-typed intercept-start failure with its whole cause chain (issue #683).
+///
+/// `{e}` renders only the outermost context, so "CA setup failed" read identically whether the PEM
+/// was malformed, the key mismatched, or the file was unreadable. The `&anyhow::Error` parameter is
+/// load-bearing: it makes the type rule compile-enforced, so the sibling `rule seeding failed` site
+/// — whose error is a concrete `RulesAtCapacity` with no chain to render — cannot be routed through
+/// here by mistake.
+fn warn_intercept_start_failure(e: &anyhow::Error, what: &str) {
+    tracing::warn!(error = %format_args!("{e:#}"), "intercept start: {what}");
+}
+
 /// A running intercept plane: the listener plus the control-plane [`InterceptState`] (rule store +
 /// CA) the admin routes and FFI mutate/export.
 pub struct InterceptPlane {
@@ -213,7 +224,7 @@ impl InterceptControl {
             opts.ca_key_pem,
         )
         .map_err(|e| {
-            tracing::warn!(error = %e, "intercept start: invalid CA options");
+            warn_intercept_start_failure(&e, "invalid CA options");
             InterceptStartError::Ca(e)
         })?;
 
@@ -228,7 +239,7 @@ impl InterceptControl {
         }
 
         let ca = Arc::new(CertificateAuthority::from_source(&source).map_err(|e| {
-            tracing::warn!(error = %e, "intercept start: CA setup failed");
+            warn_intercept_start_failure(&e, "CA setup failed");
             InterceptStartError::Ca(e)
         })?);
         let ca_export = return_ca_key.then(|| (ca.ca_cert_pem().to_string(), ca.ca_key_pem()));
@@ -248,7 +259,7 @@ impl InterceptControl {
         let listener = InterceptListener::bind(addr, resolver, rules.clone())
             .await
             .map_err(|e| {
-                tracing::warn!(error = %e, "intercept start: bind failed");
+                warn_intercept_start_failure(&e, "bind failed");
                 InterceptStartError::Bind(e)
             })?;
         let bound = listener.local_addr();
@@ -291,6 +302,48 @@ impl InterceptControl {
     /// Cheap: `InterceptState` is `Arc`-backed rules + an `Arc` CA.
     pub fn state(&self) -> Option<InterceptState> {
         self.lock().as_ref().map(|p| p.state.clone())
+    }
+}
+
+#[cfg(test)]
+mod anyhow_chain_log_tests {
+    use super::warn_intercept_start_failure;
+    use tracing_test::traced_test;
+
+    fn chained_error() -> anyhow::Error {
+        anyhow::anyhow!("PEM section is not a private key")
+            .context("failed to read CA key")
+            .context("CA setup failed")
+    }
+
+    #[traced_test]
+    #[test]
+    fn warn_intercept_start_failure_names_the_whole_chain() {
+        warn_intercept_start_failure(&chained_error(), "CA setup failed");
+        assert!(
+            logs_contain("intercept start: CA setup failed"),
+            "message survives"
+        );
+        assert!(
+            logs_contain("failed to read CA key"),
+            "the log must name the CAUSE — the whole point of #683"
+        );
+        assert!(
+            logs_contain("PEM section is not a private key"),
+            "the log must reach the ROOT cause, not stop one level down"
+        );
+    }
+
+    // Documents the defect #683 fixes, so the sibling test above reads as a real assertion and not
+    // a tautology: plain Display stops at the outermost context, and `{:#}` is what recovers the rest.
+    #[test]
+    fn plain_display_drops_the_chain() {
+        let rendered = format!("{}", chained_error());
+        assert_eq!(rendered, "CA setup failed");
+        assert!(
+            !rendered.contains("PEM section"),
+            "plain Display must NOT reach the root cause; if it did, #683 would be a non-issue"
+        );
     }
 }
 
