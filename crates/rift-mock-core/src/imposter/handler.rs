@@ -72,8 +72,28 @@ fn inject_timeout_response(code: &str, message: &str) -> Response<Full<Bytes>> {
             ("x-rift-imposter", "true"),
             ("x-rift-inject-error", "true"),
             (SCRIPT_TIMEOUT_HEADER, "true"),
+            ("content-type", "application/json"),
         ],
         body,
+    )
+}
+
+/// Build the 500 for a failed `{{ }}` render (issue #359). Split out from the request path — as
+/// `debug_serialize_or_500` was for #611 — so this door can be pinned by a test: it fires only
+/// under `RIFT_DEBUG`, a process-global a shared-process test cannot set without racing its
+/// siblings, so end-to-end coverage is not available to it.
+fn template_error_response(e: &str) -> Response<Full<Bytes>> {
+    build_response_with_headers(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [
+            ("x-rift-imposter", "true"),
+            ("x-rift-template-error", "true"),
+            ("content-type", "application/json"),
+        ],
+        crate::response::error_body(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("template rendering failed: {e}"),
+        ),
     )
 }
 
@@ -150,7 +170,11 @@ fn matcher_error_response(e: &anyhow::Error) -> Response<Full<Bytes>> {
             .to_string();
             return build_response_with_headers(
                 StatusCode::BAD_REQUEST,
-                [("x-rift-imposter", "true"), ("x-rift-inject-error", "true")],
+                [
+                    ("x-rift-imposter", "true"),
+                    ("x-rift-inject-error", "true"),
+                    ("content-type", "application/json"),
+                ],
                 body,
             );
         }
@@ -252,7 +276,10 @@ async fn handle_request_inner(
     if !imposter.is_enabled() {
         return Ok(build_response_with_headers(
             StatusCode::SERVICE_UNAVAILABLE,
-            [("x-rift-imposter-disabled", "true")],
+            [
+                ("x-rift-imposter-disabled", "true"),
+                ("content-type", "application/json"),
+            ],
             crate::response::error_body(StatusCode::SERVICE_UNAVAILABLE, "Imposter is disabled"),
         ));
     }
@@ -311,7 +338,10 @@ async fn handle_request_inner(
         Err(_) => {
             return Ok(build_response_with_headers(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                [("x-rift-imposter", "true")],
+                [
+                    ("x-rift-imposter", "true"),
+                    ("content-type", "application/json"),
+                ],
                 crate::response::error_body(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     &format!("Request body exceeds maximum size of {MAX_REQUEST_BODY_SIZE} bytes"),
@@ -601,7 +631,11 @@ async fn handle_request_inner(
                     .to_string();
                     return Ok(build_response_with_headers(
                         StatusCode::BAD_REQUEST,
-                        [("x-rift-imposter", "true"), ("x-rift-inject-error", "true")],
+                        [
+                            ("x-rift-imposter", "true"),
+                            ("x-rift-inject-error", "true"),
+                            ("content-type", "application/json"),
+                        ],
                         body,
                     ));
                 }
@@ -618,7 +652,11 @@ async fn handle_request_inner(
             let Some(code) = script_config.code.clone() else {
                 return Ok(build_response_with_headers(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    [("x-rift-imposter", "true"), ("x-rift-script-error", "true")],
+                    [
+                        ("x-rift-imposter", "true"),
+                        ("x-rift-script-error", "true"),
+                        ("content-type", "application/json"),
+                    ],
                     crate::response::error_body(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "script not resolved: `file:`/`ref:` sources must be resolved before serving",
@@ -834,6 +872,7 @@ async fn handle_request_inner(
                     if let Some(trace) = trace_header {
                         headers.push(("x-rift-script-trace".to_string(), trace));
                     }
+                    headers.push(("content-type".to_string(), "application/json".to_string()));
                     let (status, body) = if timed_out {
                         (
                             StatusCode::GATEWAY_TIMEOUT,
@@ -946,17 +985,7 @@ async fn handle_request_inner(
                 });
                 if let Some(e) = template_error {
                     warn!("Response template rendering failed: {e}");
-                    return Ok(build_response_with_headers(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        [
-                            ("x-rift-imposter", "true"),
-                            ("x-rift-template-error", "true"),
-                        ],
-                        crate::response::error_body(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            &format!("template rendering failed: {e}"),
-                        ),
-                    ));
+                    return Ok(template_error_response(&e));
                 }
             }
 
@@ -1121,6 +1150,7 @@ async fn handle_request_inner(
                                 let mut hdrs = vec![
                                     ("x-rift-imposter", "true"),
                                     ("x-rift-decorate-error", "true"),
+                                    ("content-type", "application/json"),
                                 ];
                                 if timed_out {
                                     hdrs.push((SCRIPT_TIMEOUT_HEADER, "true"));
@@ -1181,6 +1211,7 @@ async fn handle_request_inner(
                                     [
                                         ("x-rift-imposter", "true"),
                                         ("x-rift-shelltransform-error", "true"),
+                                        ("content-type", "application/json"),
                                     ],
                                     crate::response::error_body(
                                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1221,7 +1252,11 @@ async fn handle_request_inner(
                                 );
                                 return Ok(build_response_with_headers(
                                     StatusCode::INTERNAL_SERVER_ERROR,
-                                    [("x-rift-imposter", "true"), ("x-rift-binary-error", "true")],
+                                    [
+                                        ("x-rift-imposter", "true"),
+                                        ("x-rift-binary-error", "true"),
+                                        ("content-type", "application/json"),
+                                    ],
                                     crate::response::error_body(
                                         StatusCode::INTERNAL_SERVER_ERROR,
                                         &format!(
@@ -1635,6 +1670,14 @@ mod matcher_error_response_tests {
             resp.headers().contains_key("x-rift-script-timeout"),
             "the timeout marker distinguishes a deadline miss from a broken inject"
         );
+        // Issue #687: this door's 400 sibling (`matcher_error_response`) declares the envelope it
+        // serves, so the 504 must too — the two are one contract, reached by one predicate failing
+        // two different ways.
+        assert_eq!(
+            resp.headers()["content-type"],
+            "application/json",
+            "the inject-timeout 504 serves the JSON envelope, so it must declare it"
+        );
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         let body = String::from_utf8(bytes.to_vec()).expect("utf8");
         assert!(
@@ -1688,6 +1731,37 @@ mod matcher_error_response_tests {
         assert!(
             resp.headers().contains_key("x-rift-inject-error"),
             "a predicate-inject timeout keeps the inject-error marker"
+        );
+    }
+}
+
+#[cfg(test)]
+mod template_error_tests {
+    use super::template_error_response;
+    use http_body_util::BodyExt;
+    use hyper::StatusCode;
+
+    // Issue #687: the template door fires only under `RIFT_DEBUG` (a process-global this binary's
+    // parallel tests cannot toggle safely), so its contract is pinned here instead of end-to-end.
+    #[tokio::test]
+    async fn template_error_response_is_500_with_marker_and_json_envelope() {
+        let resp = template_error_response("template error in `{{ nope }}`: unknown token");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(resp.headers().contains_key("x-rift-template-error"));
+        assert_eq!(
+            resp.headers()["content-type"],
+            "application/json",
+            "the template door serves the JSON envelope, so it must declare it"
+        );
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).expect("utf8");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
+        assert_eq!(v["errors"][0]["code"], "500", "envelope code is the status");
+        assert!(
+            v["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("template rendering failed")),
+            "the 500 must name the render failure, got: {body}"
         );
     }
 }

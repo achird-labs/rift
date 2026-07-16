@@ -122,6 +122,21 @@ record.
   out. As with the proxy doors, the client still gets only the error's outermost context; the cause
   chain stays in the server log.
 
+- **Every imposter error door that serves the JSON envelope now declares `Content-Type:
+  application/json`.** The previous two
+  entries unified what these doors *say*; they left the same envelope typed on one path and untyped
+  on another. The proxy doors and the admin plane announced `application/json`, while every imposter
+  door omitted it — so a client branching on content-type, or a strict proxy or logging middleware
+  that requires it, treated one shape as two depending on which door answered. The doors: the
+  response and predicate `inject` errors (400) **and their timeouts (504)**, script execution (500)
+  and its timeout (504), template rendering, the three `strictBehaviors` failures (decorate,
+  shellTransform, binary decode), a disabled imposter (503), an over-size request body (413), and an
+  unresolved `file:`/`ref:` script. Statuses, bodies and every marker header are unchanged — this
+  adds a header and nothing else. Doors that do **not** serve the envelope keep their typing — the
+  empty-body 502 fault passthrough, and the plain-text replies (`Unknown fault`, the debug-matching
+  failures), are untouched, since labelling any of them `application/json` would be a lie a client
+  would act on.
+
 ### Security
 
 - **`POST /intercept/rules` now obeys `--allowInjection`.** An intercept rule's predicates are
