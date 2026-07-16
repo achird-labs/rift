@@ -22,6 +22,17 @@ record.
   body" (the client's transmission, not a server fault) and its cause is logged. Mirrors the
   admin-plane body reader (issue #546), which already drew this line.
 
+- **The last imposter error doors that served plain text now serve the standard JSON envelope.** Nine
+  doors — a debug-matching task panic and its timeout, plus the seven "Response build error"
+  fallbacks that fire when a stub/inject/script/upstream header value is one the HTTP layer rejects —
+  answered a bare string instead of the `{"errors":[{"code","message"}]}` envelope every other door
+  uses (issues #682/#686/#687). They now serve the envelope with `Content-Type: application/json`,
+  finishing that unification. **The debug-matching timeout also changes status from `500` to `504`**
+  and gains the `x-rift-script-timeout` marker: it is a miss of the same `_rift.scriptEngine.timeoutMs`
+  budget every other script deadline maps to `504` (issues #476/#499), so `500` contradicted that
+  contract. Two doors stay plain text by design — the `Unknown fault` config diagnostic and the
+  minimal internal-error last resort — since neither answers the envelope's audience.
+
 ## [0.14.0] - 2026-07-16
 
 ### Added

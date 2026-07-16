@@ -26,7 +26,7 @@ use crate::scripting::{
 };
 #[cfg(feature = "javascript")]
 use crate::scripting::{MountebankRequest, execute_mountebank_inject_bounded};
-use crate::util::{build_response, build_response_with_headers};
+use crate::util::build_response_with_headers;
 use base64::Engine;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
@@ -146,6 +146,57 @@ fn template_error_response(e: &str) -> Response<Full<Bytes>> {
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("template rendering failed: {e}"),
         ),
+    )
+}
+
+// The debug-endpoint doors (issue #695). The debug success path answers JSON (`X-Rift-Debug-Response`),
+// so these error paths do too — plain text here was the same-endpoint gap #687 closed elsewhere.
+// Split out from the match arms so each can be pinned by a test: neither is safely provokable
+// end-to-end (a task panic must be injected; a timeout needs a busy-loop that starves the shared
+// script pool). The caller keeps its own `warn!` — these build the response only.
+
+/// A `_rift`-debug matching task that panicked → 500, canonical envelope.
+fn debug_matching_error_response() -> Response<Full<Bytes>> {
+    build_response_with_headers(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [
+            ("x-rift-imposter", "true"),
+            ("content-type", "application/json"),
+        ],
+        crate::response::error_body(StatusCode::INTERNAL_SERVER_ERROR, "Debug matching failed"),
+    )
+}
+
+/// A debug matching run that missed the `_rift.scriptEngine.timeoutMs` deadline → 504 + the timeout
+/// marker (issues #476/#499), like every other script deadline. It was a 500 before #695, which
+/// contradicted that transient-vs-permanent contract.
+fn debug_matching_timeout_response() -> Response<Full<Bytes>> {
+    build_response_with_headers(
+        StatusCode::GATEWAY_TIMEOUT,
+        [
+            ("x-rift-imposter", "true"),
+            (SCRIPT_TIMEOUT_HEADER, "true"),
+            ("content-type", "application/json"),
+        ],
+        crate::response::error_body(StatusCode::GATEWAY_TIMEOUT, "Debug matching timed out"),
+    )
+}
+
+/// The terminal 500 for a response whose own header/body hyper rejected (issue #695) — a bad
+/// upstream/inject/script/stub header value that fails `.body(...)`. Serves the canonical envelope
+/// so the last-resort door matches every other imposter error door instead of a bare string, and
+/// logs the caller's `what` context so the failing door is named. Safe as a terminal fallback:
+/// `error_body` is infallible by construction and `build_response_with_headers` with literal headers
+/// falls back to `internal_error_fallback` — the chain cannot itself panic.
+fn build_failure_response(e: &hyper::http::Error, log_context: &str) -> Response<Full<Bytes>> {
+    warn!("{log_context}: {e}");
+    build_response_with_headers(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [
+            ("x-rift-imposter", "true"),
+            ("content-type", "application/json"),
+        ],
+        crate::response::error_body(StatusCode::INTERNAL_SERVER_ERROR, "Response build error"),
     )
 }
 
@@ -498,20 +549,14 @@ async fn handle_request_inner(
             Ok(Ok(response)) => response,
             Ok(Err(join_err)) => {
                 warn!("debug matching task panicked: {join_err}");
-                Ok(build_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Debug matching failed",
-                ))
+                Ok(debug_matching_error_response())
             }
             Err(_elapsed) => {
                 warn!(
                     "debug matching timed out after {}ms",
                     script_timeout.as_millis()
                 );
-                Ok(build_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Debug matching timed out",
-                ))
+                Ok(debug_matching_timeout_response())
             }
         };
     }
@@ -606,10 +651,9 @@ async fn handle_request_inner(
                     return Ok(response
                         .body(Full::new(Bytes::from(body)))
                         .unwrap_or_else(|e| {
-                            warn!("proxy response build failed (bad upstream header?): {e}");
-                            build_response(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "Response build error",
+                            build_failure_response(
+                                &e,
+                                "proxy response build failed (bad upstream header?)",
                             )
                         }));
                 }
@@ -663,10 +707,9 @@ async fn handle_request_inner(
                     return Ok(response
                         .body(Full::new(Bytes::from(inject_response.body)))
                         .unwrap_or_else(|e| {
-                            warn!("inject response build failed (bad injected header?): {e}");
-                            build_response(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "Response build error",
+                            build_failure_response(
+                                &e,
+                                "inject response build failed (bad injected header?)",
                             )
                         }));
                 }
@@ -855,10 +898,9 @@ async fn handle_request_inner(
                     return Ok(response
                         .body(Full::new(Bytes::from(body)))
                         .unwrap_or_else(|e| {
-                            warn!("script response build failed (bad script header?): {e}");
-                            build_response(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "Response build error",
+                            build_failure_response(
+                                &e,
+                                "script response build failed (bad script header?)",
                             )
                         }));
                 }
@@ -1339,8 +1381,7 @@ async fn handle_request_inner(
             }
 
             return Ok(response.body(Full::new(body_bytes)).unwrap_or_else(|e| {
-                warn!("stub response build failed (bad stub header?): {e}");
-                build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
+                build_failure_response(&e, "stub response build failed (bad stub header?)")
             }));
         }
     }
@@ -1377,8 +1418,10 @@ async fn handle_request_inner(
                 Ok(response
                     .body(Full::new(Bytes::from(body)))
                     .unwrap_or_else(|e| {
-                        warn!("defaultForward response build failed (bad upstream header?): {e}");
-                        build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
+                        build_failure_response(
+                            &e,
+                            "defaultForward response build failed (bad upstream header?)",
+                        )
                     }))
             }
             Err(e) => Ok(upstream_error_response(
@@ -1435,8 +1478,7 @@ async fn handle_request_inner(
         response = response.header("x-rift-default-response", "true");
 
         return Ok(response.body(Full::new(body_bytes)).unwrap_or_else(|e| {
-            warn!("defaultResponse build failed (bad default header?): {e}");
-            build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
+            build_failure_response(&e, "defaultResponse build failed (bad default header?)")
         }));
     }
 
@@ -1695,8 +1737,10 @@ async fn apply_rift_fault(
             response
                 .body(Full::new(Bytes::from(error_body)))
                 .unwrap_or_else(|e| {
-                    warn!("error-fault response build failed (bad fault header?): {e}");
-                    build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
+                    build_failure_response(
+                        &e,
+                        "error-fault response build failed (bad fault header?)",
+                    )
                 }),
         );
     }
@@ -1923,6 +1967,98 @@ mod body_collect_tests {
         assert!(
             logs_contain("truncated chunked body"),
             "the previously-silent read failure must now be logged with its cause"
+        );
+    }
+}
+
+#[cfg(test)]
+mod plaintext_door_tests {
+    use super::{
+        SCRIPT_TIMEOUT_HEADER, build_failure_response, debug_matching_error_response,
+        debug_matching_timeout_response,
+    };
+    use http_body_util::BodyExt;
+    use hyper::StatusCode;
+    use tracing_test::traced_test;
+
+    async fn envelope(
+        resp: hyper::Response<http_body_util::Full<bytes::Bytes>>,
+    ) -> serde_json::Value {
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("body must be the canonical JSON envelope")
+    }
+
+    // Issue #695: the debug endpoint's success path already answers JSON (`X-Rift-Debug-Response`),
+    // so its error path must too — plain text was the same-endpoint gap #687 closed elsewhere.
+    #[tokio::test]
+    async fn debug_matching_error_door_is_500_envelope() {
+        let resp = debug_matching_error_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.headers()["content-type"], "application/json");
+        assert!(resp.headers().contains_key("x-rift-imposter"));
+        let v = envelope(resp).await;
+        assert_eq!(v["errors"][0]["code"], "500");
+        assert!(
+            v["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("Debug matching failed")),
+            "got: {v}"
+        );
+    }
+
+    // The timeout door is a miss of the same `_rift.scriptEngine.timeoutMs` budget every other
+    // script deadline maps to 504 + the timeout marker (#499/#476) — not the 500 it used to answer.
+    #[tokio::test]
+    async fn debug_matching_timeout_door_is_504_with_timeout_marker() {
+        let resp = debug_matching_timeout_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::GATEWAY_TIMEOUT,
+            "a debug-matching deadline miss is a 504, like every other script timeout"
+        );
+        assert!(
+            resp.headers().contains_key(SCRIPT_TIMEOUT_HEADER),
+            "the timeout marker distinguishes a deadline miss from a permanent failure"
+        );
+        assert_eq!(resp.headers()["content-type"], "application/json");
+        assert!(resp.headers().contains_key("x-rift-imposter"));
+        let v = envelope(resp).await;
+        assert_eq!(
+            v["errors"][0]["code"], "504",
+            "envelope code tracks the status"
+        );
+        assert!(
+            v["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("Debug matching timed out")),
+            "got: {v}"
+        );
+    }
+
+    // The terminal fallback shared by all seven response-build sites: it must answer the canonical
+    // envelope (not a bare string) and still log the caller's context so the failing door is named.
+    #[traced_test]
+    #[tokio::test]
+    async fn build_failure_response_is_500_envelope_and_logs_context() {
+        let e = hyper::Response::builder()
+            .header("x-bad", "line1\nline2")
+            .body(())
+            .expect_err("an invalid header value must be a build error");
+        let resp = build_failure_response(&e, "stub response build failed (bad stub header?)");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.headers()["content-type"], "application/json");
+        assert!(resp.headers().contains_key("x-rift-imposter"));
+        let v = envelope(resp).await;
+        assert_eq!(v["errors"][0]["code"], "500");
+        assert!(
+            v["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("Response build error")),
+            "got: {v}"
+        );
+        assert!(
+            logs_contain("stub response build failed"),
+            "the failing door's context must still be logged"
         );
     }
 }

@@ -700,3 +700,51 @@ async fn unknown_fault_door_is_not_labelled_json() {
 
     let _ = manager.delete_imposter(19779).await;
 }
+
+// Issue #695: the terminal "Response build error" door — reached when a stub's own header value is
+// one hyper rejects (here a newline), so building the response fails — now serves the canonical
+// envelope like every other imposter error door, not a bare plain-text string. Drives a live door
+// end-to-end, proving the config path actually routes through the shared fallback.
+#[tokio::test]
+async fn response_build_error_door_declares_json() {
+    let manager = ImposterManager::new();
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19781, "protocol": "http", "stubs": [
+                { "responses": [{ "is": {
+                    "statusCode": 200,
+                    "headers": { "X-Bad": "line1\nline2" },
+                    "body": "unreached"
+                } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let resp = get(19781).await;
+    assert_eq!(
+        resp.status(),
+        500,
+        "a response that cannot be built is a 500"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+        "the build-error door serves the JSON envelope now"
+    );
+    let body = resp.text().await.expect("body");
+    let v = envelope(&body);
+    assert_eq!(v["errors"][0]["code"], "500");
+    assert!(
+        v["errors"][0]["message"]
+            .as_str()
+            .expect("string")
+            .contains("Response build error"),
+        "got: {body}"
+    );
+
+    let _ = manager.delete_imposter(19781).await;
+}
