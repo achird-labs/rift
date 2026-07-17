@@ -30,8 +30,14 @@ pub use copy::{CopyBehavior, CopySource, apply_copy_behaviors};
 pub use cycler::{HasRepeatBehavior, ResponseCycler, RuleCycler};
 
 pub mod sequencer;
+#[cfg(test)]
+pub(crate) use extraction::counters;
 #[allow(unused_imports)]
-pub use extraction::{ExtractionMethod, extract_jsonpath, extract_xpath, extract_xpath_with_ns};
+pub use extraction::{
+    ExtractionMethod, extract_jsonpath, extract_jsonpath_value, extract_xpath,
+    extract_xpath_with_ns,
+};
+pub(crate) use extraction::{LazyXmlDom, eval_xpath_on};
 #[allow(unused_imports)]
 pub use lookup::{
     CsvCache, CsvData, CsvDataSource, DataSource, LookupBehavior, LookupKey, apply_lookup_behaviors,
