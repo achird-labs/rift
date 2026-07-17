@@ -272,6 +272,8 @@ fn event_matches(
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .is_some_and(|(_, values)| values.iter().any(|v| v == value)),
+        MatchClause::Method(value) => request.method == *value,
+        MatchClause::Path(value) => request.path == *value,
     })
 }
 

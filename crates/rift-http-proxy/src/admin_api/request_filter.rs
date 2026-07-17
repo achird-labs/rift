@@ -1,7 +1,8 @@
 //! Server-side filtering of recorded requests by `match=` query clauses.
 //!
-//! Supports `header:<Name>=<Value>` and `flow_id=<Value>` (the latter resolved
-//! via the imposter's `flow_id_source`). Multiple clauses are AND'd together.
+//! Supports `header:<Name>=<Value>`, `flow_id=<Value>` (the latter resolved via
+//! the imposter's `flow_id_source`), `method=<Verb>`, and `path=<Path>` — the last
+//! two exact-equality against the recorded request. Multiple clauses are AND'd together.
 
 use crate::imposter::RecordedRequest;
 
@@ -13,7 +14,9 @@ pub(crate) enum MatchClauseError {
     MissingHeaderValue(String),
     #[error("invalid match clause '{0}' (empty header name)")]
     EmptyHeaderName(String),
-    #[error("unsupported match clause '{0}' (expected header:<Name>=<Value> or flow_id=<Value>)")]
+    #[error(
+        "unsupported match clause '{0}' (expected header:<Name>=<Value>, flow_id=<Value>, method=<Verb> or path=<Path>)"
+    )]
     Unsupported(String),
 }
 
@@ -24,13 +27,17 @@ pub(crate) enum MatchClause {
     Header { name: String, value: String },
     /// Match the request's resolved `flow_id`.
     FlowId(String),
+    /// Match the request's method by exact, case-sensitive equality.
+    Method(String),
+    /// Match the request's bare path by exact equality (`query` is a separate field).
+    Path(String),
 }
 
 /// Parse every `match=` query parameter into clauses.
 ///
-/// Returns `Err` for a `match` value that is neither `header:<Name>=<Value>` nor
-/// `flow_id=<Value>`: a malformed filter must not silently fall back to returning
-/// every request, which would cross-contaminate correlated scenarios.
+/// Returns `Err` for a `match` value outside the closed grammar (`header:<Name>=<Value>`,
+/// `flow_id=<Value>`, `method=<Verb>`, `path=<Path>`): a malformed filter must not silently
+/// fall back to returning every request, which would cross-contaminate correlated scenarios.
 pub(crate) fn parse_match_clauses(
     query: Option<&str>,
 ) -> Result<Vec<MatchClause>, MatchClauseError> {
@@ -91,6 +98,10 @@ fn parse_one(value: &str) -> Result<MatchClause, MatchClauseError> {
         })
     } else if let Some(flow_id) = value.strip_prefix("flow_id=") {
         Ok(MatchClause::FlowId(flow_id.to_string()))
+    } else if let Some(method) = value.strip_prefix("method=") {
+        Ok(MatchClause::Method(method.to_string()))
+    } else if let Some(path) = value.strip_prefix("path=") {
+        Ok(MatchClause::Path(path.to_string()))
     } else {
         Err(MatchClauseError::Unsupported(value.to_string()))
     }
@@ -132,6 +143,8 @@ pub(crate) fn request_matches(
         MatchClause::FlowId(value) => {
             resolve_flow_id(req, flow_id_source, port).as_deref() == Some(value.as_str())
         }
+        MatchClause::Method(value) => req.method == *value,
+        MatchClause::Path(value) => req.path == *value,
     })
 }
 
@@ -192,8 +205,106 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_clause() {
-        assert!(parse_match_clauses(Some("match=path=/foo")).is_err());
+        // `query=`/`body=` are deliberately outside the closed grammar.
+        assert!(parse_match_clauses(Some("match=query=a=b")).is_err());
+        assert!(parse_match_clauses(Some("match=body=x")).is_err());
         assert!(parse_match_clauses(Some("match=header:X-Name")).is_err());
+    }
+
+    #[test]
+    fn unsupported_clause_message_enumerates_the_grammar() {
+        // The Display text is served verbatim as the 400 body, so it is part of the admin API
+        // contract — assert it exactly.
+        let err = parse_match_clauses(Some("match=query=a")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "unsupported match clause 'query=a' (expected header:<Name>=<Value>, flow_id=<Value>, method=<Verb> or path=<Path>)"
+        );
+    }
+
+    #[test]
+    fn parses_method_and_path_clauses() {
+        let clauses = parse_match_clauses(Some("match=method=POST&match=path=/orders")).unwrap();
+        assert_eq!(
+            clauses,
+            vec![
+                MatchClause::Method("POST".to_string()),
+                MatchClause::Path("/orders".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_url_encoded_method_and_path() {
+        // A path carrying structural `=`/spaces survives one level of percent-decoding intact.
+        let clauses = parse_match_clauses(Some("match=path%3D%2Ffoo%20bar")).unwrap();
+        assert_eq!(clauses, vec![MatchClause::Path("/foo bar".to_string())]);
+        let clauses = parse_match_clauses(Some("match=path%3D%2Fa%3Db")).unwrap();
+        assert_eq!(clauses, vec![MatchClause::Path("/a=b".to_string())]);
+    }
+
+    #[test]
+    fn method_match_is_case_sensitive() {
+        let mut req = req_with_header("X-Mock-Space", "abc");
+        req.method = "GET".to_string();
+        assert!(request_matches(
+            &req,
+            &[MatchClause::Method("GET".to_string())],
+            "imposter_port",
+            4545
+        ));
+        assert!(
+            !request_matches(
+                &req,
+                &[MatchClause::Method("get".to_string())],
+                "imposter_port",
+                4545
+            ),
+            "method comparison is case-sensitive"
+        );
+    }
+
+    #[test]
+    fn path_match_is_exact_not_prefix() {
+        let mut req = req_with_header("X-Mock-Space", "abc");
+        req.path = "/foo".to_string();
+        assert!(request_matches(
+            &req,
+            &[MatchClause::Path("/foo".to_string())],
+            "imposter_port",
+            4545
+        ));
+        assert!(
+            !request_matches(
+                &req,
+                &[MatchClause::Path("/foo/bar".to_string())],
+                "imposter_port",
+                4545
+            ),
+            "path comparison is exact, not a prefix"
+        );
+    }
+
+    #[test]
+    fn method_path_and_header_and_together() {
+        let mut req = req_with_header("X-Mock-Space", "abc");
+        req.method = "POST".to_string();
+        req.path = "/orders".to_string();
+        let clauses = vec![
+            MatchClause::Method("POST".to_string()),
+            MatchClause::Path("/orders".to_string()),
+            MatchClause::Header {
+                name: "X-Mock-Space".to_string(),
+                value: "abc".to_string(),
+            },
+        ];
+        assert!(request_matches(&req, &clauses, "imposter_port", 4545));
+        // One mismatched clause fails the whole AND.
+        let clauses = vec![
+            MatchClause::Method("GET".to_string()),
+            MatchClause::Path("/orders".to_string()),
+        ];
+        assert!(!request_matches(&req, &clauses, "imposter_port", 4545));
     }
 
     #[test]

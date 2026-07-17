@@ -364,6 +364,8 @@ Get recorded requests (if `recordRequests: true`). Also available under the alia
 **Query Parameters:**
 - `match=header:<Name>=<Value>` — keep only requests carrying a matching header
 - `match=flow_id=<Value>` — keep only requests whose resolved flow id matches
+- `match=method=<Verb>` — keep only requests whose method matches exactly (case-sensitive)
+- `match=path=<Path>` — keep only requests whose bare path matches exactly (the query string is not compared)
 - `since=<index>` — keep only requests newer than a cursor (see [Tailing with a cursor](#tailing-with-a-cursor))
 
 Multiple `match` clauses are AND-ed together. `since` is applied first, then the `match` clauses.
@@ -511,11 +513,12 @@ falls back to polling.
 **Query parameters:**
 - `types=requests,lifecycle` — which event families to stream (default: both).
 - `port=<port>` — restrict to one imposter.
-- `match=header:<Name>=<Value>` / `match=flow_id=<Value>` — filter **request** events (AND-ed).
-  `flow_id=` compares the request's record-time resolved flow id (per the imposter's
-  `flow_id_source`); a `header:`-source imposter whose request lacks that header falls back to the
-  port, which `GET /savedRequests?match=flow_id=` treats as "no match" instead — the only edge where
-  the two disagree.
+- `match=header:<Name>=<Value>` / `match=flow_id=<Value>` / `match=method=<Verb>` /
+  `match=path=<Path>` — filter **request** events (AND-ed). `method=`/`path=` are exact-equality
+  against the recorded request. `flow_id=` compares the request's record-time resolved flow id (per
+  the imposter's `flow_id_source`); a `header:`-source imposter whose request lacks that header falls
+  back to the port, which `GET /savedRequests?match=flow_id=` treats as "no match" instead — the only
+  edge where the two disagree.
 
 **Event stream** (`Content-Type: text/event-stream`):
 ```

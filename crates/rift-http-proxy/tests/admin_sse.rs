@@ -399,6 +399,52 @@ async fn match_flow_id_filter_scopes_request_events() {
 }
 
 #[tokio::test]
+async fn match_method_and_path_filter_scopes_request_events() {
+    // #700: `method=`/`path=` filter the SSE request stream, AND-ed like every other clause.
+    let (addr, mgr, running) = start_server(None).await;
+    let iport = create(
+        &mgr,
+        serde_json::json!({"port":18815,"protocol":"http","recordRequests":true,
+            "stubs":[{"responses":[{"is":{"statusCode":200}}]}]}),
+    )
+    .await;
+    let (mut sse, _s) = Sse::connect(
+        addr,
+        "/events?types=requests&match=method%3DPOST&match=path%3D%2Forders",
+        None,
+    )
+    .await;
+    sse.wait_for("hello", Duration::from_secs(5))
+        .await
+        .expect("hello");
+
+    let client = reqwest::Client::new();
+    // Rejected: right path, wrong method.
+    client
+        .get(format!("http://127.0.0.1:{iport}/orders"))
+        .send()
+        .await
+        .expect("get /orders");
+    // Accepted: POST /orders.
+    client
+        .post(format!("http://127.0.0.1:{iport}/orders"))
+        .send()
+        .await
+        .expect("post /orders");
+    let ev = sse
+        .wait_for("request", Duration::from_secs(5))
+        .await
+        .expect("request event");
+    assert_eq!(json(&ev)["request"]["method"], "POST");
+    assert_eq!(
+        json(&ev)["request"]["path"],
+        "/orders",
+        "must skip the GET /orders request"
+    );
+    running.shutdown().await;
+}
+
+#[tokio::test]
 async fn unauthorized_without_api_key() {
     let (addr, _mgr, running) = start_server(Some("s3cret")).await;
     let (_sse, status) = Sse::connect(addr, "/events", None).await;

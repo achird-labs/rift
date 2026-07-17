@@ -11,6 +11,20 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **The `match=` filter grammar on recorded traffic gains `method=` and `path=` exact-equality
+  clauses.** Alongside `header:<Name>=<Value>` and `flow_id=<Value>`, `GET`/`DELETE
+  /imposters/{port}/savedRequests` and the SSE streams (`GET /events`,
+  `GET /imposters/{port}/savedRequests/stream`) now accept `match=method=<Verb>` (case-sensitive)
+  and `match=path=<Path>` (the bare path; the query string is not compared). Clauses AND together
+  and compose with `since=`. This unblocks downstream SDKs filtering a cursor tail server-side by
+  method/path (rift-java#148, rift-scala#37). The grammar stays closed and exact — query-param and
+  body predicates remain out of scope. **Contract note:** the `400` body for an unknown clause now
+  enumerates the new forms (`unsupported match clause '…' (expected header:<Name>=<Value>,
+  flow_id=<Value>, method=<Verb> or path=<Path>)`). Older engines still fail closed with a clear
+  `400` on the new clauses, so SDKs gate on a minimum engine version rather than sniffing.
+
 ### Fixed
 
 - **A request whose body fails mid-read now answers `400`, not `413`, and is no longer silent.** The

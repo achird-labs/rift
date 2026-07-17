@@ -1270,9 +1270,108 @@ mod requests_filter_tests {
     #[tokio::test]
     async fn get_requests_malformed_match_400() {
         let m = manager_with(19738, None, &[rec("A", None)]).await;
-        let resp = handle_get_requests(19738, Some("match=path=/foo"), m.clone()).await;
+        let resp = handle_get_requests(19738, Some("match=query=a"), m.clone()).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let _ = m.delete_imposter(19738).await;
+    }
+
+    fn rec_mp(method: &str, path: &str, space: &str) -> RecordedRequest {
+        let mut r = rec(space, None);
+        r.method = method.to_string();
+        r.path = path.to_string();
+        r
+    }
+
+    // #700: `method=`/`path=` filter GET, compose with header/flow_id/since, and (like every other
+    // clause) advance the cursor past rejected entries so a filtered tail never re-scans.
+    #[tokio::test]
+    async fn get_requests_filters_by_method_and_path() {
+        let m = manager_with(
+            19759,
+            Some("header:X-Mock-Space"),
+            &[
+                rec_mp("GET", "/orders", "alice"),
+                rec_mp("POST", "/orders", "alice"),
+                rec_mp("POST", "/orders", "bob"),
+                rec_mp("POST", "/items", "alice"),
+            ],
+        )
+        .await;
+
+        // method= alone
+        let got =
+            requests(handle_get_requests(19759, Some("match=method=POST"), m.clone()).await).await;
+        assert_eq!(got.len(), 3, "three POSTs");
+
+        // path= alone
+        let got =
+            requests(handle_get_requests(19759, Some("match=path=/orders"), m.clone()).await).await;
+        assert_eq!(got.len(), 3, "three /orders");
+
+        // method + path + flow_id, AND-ed
+        let resp = handle_get_requests(
+            19759,
+            Some("match=flow_id=alice&match=method=POST&match=path=/orders"),
+            m.clone(),
+        )
+        .await;
+        let got = requests(resp).await;
+        assert_eq!(got.len(), 1, "only alice's POST /orders");
+        assert_eq!(got[0].method, "POST");
+        assert_eq!(got[0].path, "/orders");
+
+        let _ = m.delete_imposter(19759).await;
+    }
+
+    // #700 (AC4): a `since` window filtered by method/path still advances the cursor across every
+    // scanned entry, even the ones the filter rejects.
+    #[tokio::test]
+    async fn get_requests_since_composes_with_method_path() {
+        let m = manager_with(
+            19760,
+            None,
+            &[
+                rec_mp("GET", "/a", "A"),
+                rec_mp("POST", "/b", "A"),
+                rec_mp("GET", "/c", "A"),
+                rec_mp("POST", "/d", "A"),
+            ],
+        )
+        .await;
+
+        // since=2 cuts to entries 3 & 4 (/c GET, /d POST); the method filter rejects /c but the
+        // cursor still advances past it to 4, so a filtered tail never re-scans the window.
+        let resp = handle_get_requests(19760, Some("since=2&match=method=POST"), m.clone()).await;
+        assert_eq!(next_index(&resp), Some("4"), "cursor spans scanned entries");
+        let got = requests(resp).await;
+        assert_eq!(
+            got.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            vec!["/d"],
+            "cut at 2, then keep only POST"
+        );
+
+        let _ = m.delete_imposter(19760).await;
+    }
+
+    // #700: `method=`/`path=` scope a targeted DELETE too — both surfaces share the parser.
+    #[tokio::test]
+    async fn delete_requests_targeted_clear_by_method() {
+        let m = manager_with(
+            19761,
+            None,
+            &[
+                rec_mp("GET", "/x", "A"),
+                rec_mp("POST", "/x", "A"),
+                rec_mp("GET", "/y", "A"),
+            ],
+        )
+        .await;
+        let base = "http://localhost:2525";
+        handle_clear_requests(19761, Some("match=method=POST"), base, m.clone()).await;
+        let remaining = requests(handle_get_requests(19761, None, m.clone()).await).await;
+        assert_eq!(remaining.len(), 2, "only the POST was cleared");
+        assert!(remaining.iter().all(|r| r.method == "GET"));
+        let _ = m.delete_imposter(19761).await;
     }
 
     #[tokio::test]
@@ -1360,7 +1459,7 @@ mod requests_filter_tests {
     async fn delete_requests_malformed_match_400() {
         let m = manager_with(19741, None, &[rec("A", None)]).await;
         let base = "http://localhost:2525";
-        let resp = handle_clear_requests(19741, Some("match=path=/foo"), base, m.clone()).await;
+        let resp = handle_clear_requests(19741, Some("match=query=a"), base, m.clone()).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         // a rejected clear must leave the buffer untouched
         let remaining = requests(handle_get_requests(19741, None, m.clone()).await).await;
