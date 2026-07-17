@@ -101,6 +101,18 @@ record.
 
 ### Changed
 
+<<<<<<< HEAD
+- **The imposter port registry is now lock-free on every request-serving lookup.** It was a
+  `RwLock<HashMap<u16, Arc<Imposter>>>`; the admin gateway (`/__rift/:port/...`) and embedded
+  per-request dispatch resolved a port through that read lock on the hot path. Because the port
+  keyspace is `u16`, it is now a fixed 65536-slot `ArcSwapOption` table (one slot per possible port,
+  ~512 KB) — a lookup is a single wait-free atomic load, no hashing and no lock. Mutations
+  (create/delete) are serialized by a small mutation mutex that preserves the previous
+  check-then-insert duplicate-port semantics exactly. Admin listings (`GET /imposters`, metrics) now
+  enumerate ports in deterministic ascending order (previously arbitrary hash order). No admin API
+  shape changed.
+||||||| 24dbcc3
+=======
 - **XPath/JSONPath selectors are compiled once and the XML DOM is parsed once per request, not
   per predicate per stub.** Rift's slowest scenario was XPath, because every XPath predicate
   evaluation re-parsed the whole request body into a DOM and recompiled the XPath expression — so N
@@ -112,6 +124,7 @@ record.
   reuses the request body already parsed once for `deepEquals` (#290). Matching semantics are
   unchanged — the same engines against cached artifacts. The parse-/compile-once guarantees are
   asserted directly by test counters.
+>>>>>>> origin/master
 
 - **Path `startsWith`/`contains`/`endsWith` stubs are matched in a single Aho-Corasick pass, and
   `endsWith` is now indexed at all.** The Stage-1 prefilter previously walked a linear bucket per
