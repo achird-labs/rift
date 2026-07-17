@@ -1329,7 +1329,10 @@ mod prepared_response_tests {
             None,
             None,
         );
-        assert_eq!(legacy_serve(&resp), prepared_serve(prepared_of(&resp).unwrap()));
+        assert_eq!(
+            legacy_serve(&resp),
+            prepared_serve(prepared_of(&resp).unwrap())
+        );
         let (_s, headers, _b) = prepared_serve(prepared_of(&resp).unwrap());
         let cts: Vec<_> = headers
             .iter()
