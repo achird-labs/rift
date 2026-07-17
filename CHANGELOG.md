@@ -101,6 +101,18 @@ record.
 
 ### Changed
 
+- **Path `startsWith`/`contains`/`endsWith` stubs are matched in a single Aho-Corasick pass, and
+  `endsWith` is now indexed at all.** The Stage-1 prefilter previously walked a linear bucket per
+  distinct prefix/substring literal, so the prefilter's own cost grew with the number of literal
+  stubs even when one matched; `endsWith` was never indexed and every such stub was evaluated in
+  full. All three literal kinds on `path` are now compiled into two multi-pattern automata (one per
+  case class), and one overlapping pass answers which literals match — `startsWith`/`endsWith` are
+  distinguished by match position, so no separate automata are needed. On a corpus of
+  `startsWith`-anchored stubs matching the last, per-request matching went from ~1.69 µs to ~197 ns
+  at 1000 stubs (~8.5x); exact-path matching is unchanged. Matching *semantics* are unchanged: the
+  index only ever over-approximates and full predicate evaluation remains the single source of
+  truth. A pattern set the automaton build rejects falls back to full evaluation and warns.
+
 - **Path-regex stubs are matched in a single pass, instead of one regex execution per stub.** A
   `matches` predicate on `path` was previously invisible to the Stage-1 prefilter, so every regex
   stub was a candidate for every request and each ran its own compiled regex — the cost grew

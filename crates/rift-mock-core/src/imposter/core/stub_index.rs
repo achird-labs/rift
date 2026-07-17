@@ -7,8 +7,8 @@
 //! # The dimension framework (issue #707)
 //!
 //! The index is a set of independent **dimensions**, one per request attribute (path, method, path
-//! regexes (#709), and — via the sibling issues built on this seam — deepEquals bodies (#708) and
-//! literals (#710)). Each dimension answers one question for a request: *which stubs can this
+//! literals (#710), path regexes (#709), and — via the sibling issue built on this seam — deepEquals
+//! bodies (#708)). Each dimension answers one question for a request: *which stubs can this
 //! attribute not rule out?* The answers are [`CandidateBits`] — dense bitsets over stub ids, where
 //! a stub's id is its position in the snapshot's stub vector (declaration-ordered).
 //!
@@ -52,6 +52,7 @@ use super::StubState;
 use super::bitset::CandidateBits;
 use crate::imposter::types::Stub;
 use crate::util::FastMap;
+use aho_corasick::{AhoCorasick, MatchKind as AcMatchKind};
 use regex_automata::util::syntax;
 use regex_automata::{Input, MatchKind, PatternSet, meta};
 use rift_types::predicate::{Predicate, PredicateOperation};
@@ -79,10 +80,12 @@ trait Dimension {
 }
 
 /// A required path constraint extracted from a stub's top-level predicates.
+///
+/// `startsWith`/`contains`/`endsWith` moved off this enum in #710 — they are now the literal
+/// dimension's `LiteralAnchor`, indexed by Aho-Corasick instead of a per-anchor bucket walk. Only
+/// `equals` remains here.
 enum PathAnchor {
     Exact(String),
-    Prefix(String),
-    Contains(String),
 }
 
 /// The `path` value of a predicate's field map, folded for indexing, if present and a string.
@@ -131,15 +134,14 @@ fn is_safely_indexable(p: &rift_types::predicate::PredicateParameters) -> bool {
     is_value_preserving(p) && p.case_sensitive != Some(true)
 }
 
-/// A single predicate's path anchor, if it is a safely-indexable required path constraint.
+/// A single predicate's path anchor, if it is a safely-indexable required `equals` path
+/// constraint. `startsWith`/`contains`/`endsWith` are the literal dimension's concern (#710).
 fn path_anchor(pred: &Predicate) -> Option<PathAnchor> {
     if !is_safely_indexable(&pred.parameters) {
         return None;
     }
     match &pred.operation {
         PredicateOperation::Equals(fields) => field_path(fields).map(PathAnchor::Exact),
-        PredicateOperation::StartsWith(fields) => field_path(fields).map(PathAnchor::Prefix),
-        PredicateOperation::Contains(fields) => field_path(fields).map(PathAnchor::Contains),
         _ => None,
     }
 }
@@ -150,21 +152,23 @@ fn classify(stub: &Stub) -> Option<PathAnchor> {
     stub.predicates.iter().find_map(path_anchor)
 }
 
-/// The path dimension (issue #292, ported onto the #707 bitset framework).
+/// The exact-path dimension (issue #292, ported onto the #707 bitset framework).
 ///
-/// Buckets stay `Vec<usize>` rather than a bitset each: a bucket holds only the stubs sharing an
+/// Handles only `equals` on `path` — an O(1) hashmap lookup per request. `startsWith`/`contains`/
+/// `endsWith` used to be linear-walked buckets on this same type; #710 supersedes both walks with
+/// the literal dimension's Aho-Corasick pass, so this type shrinks to just the exact bucket. A
+/// stub can be indexed on both: an `equals` anchor here and a `startsWith` anchor on the literal
+/// dimension are independent required constraints, and both are allowed to prune.
+///
+/// The bucket stays `Vec<usize>` rather than a bitset: a bucket holds only the stubs sharing an
 /// anchor, so materializing it costs O(matched) rather than O(stubs/64), and build memory stays
 /// O(stubs) instead of O(stubs x buckets).
-///
-/// The prefix/contains buckets are walked linearly, exactly as pre-#707. Issue #710 replaces both
-/// walks with an anchored/unanchored Aho-Corasick pass behind this same `Dimension` seam.
 struct PathDimension {
     // Rebuilt on every stub-set replace/mutation (issue #704); its keys come from operator stub
     // config, not request traffic — see `crate::util::fastmap` doc for the HashDoS policy.
     exact: FastMap<String, Vec<usize>>,
-    prefix: Vec<(String, Vec<usize>)>,
-    contains: Vec<(String, Vec<usize>)>,
-    /// Stubs with no indexable top-level path constraint — always candidates on this dimension.
+    /// Stubs with no indexable top-level `equals` path constraint — always candidates on this
+    /// dimension.
     always: CandidateBits,
 }
 
@@ -176,20 +180,10 @@ impl Dimension for PathDimension {
         if let Some(v) = self.exact.get(&p) {
             v.iter().for_each(|i| out.set(*i));
         }
-        for (prefix, v) in &self.prefix {
-            if p.starts_with(prefix.as_str()) {
-                v.iter().for_each(|i| out.set(*i));
-            }
-        }
-        for (sub, v) in &self.contains {
-            if p.contains(sub.as_str()) {
-                v.iter().for_each(|i| out.set(*i));
-            }
-        }
     }
 
     fn prunes(&self) -> bool {
-        !self.exact.is_empty() || !self.prefix.is_empty() || !self.contains.is_empty()
+        !self.exact.is_empty()
     }
 }
 
@@ -239,6 +233,180 @@ impl Dimension for MethodDimension {
 
     fn prunes(&self) -> bool {
         self.slots.iter().any(|s| !s.is_empty())
+    }
+}
+
+/// Which relation a literal anchor requires between the pattern and the path.
+///
+/// `Copy` because [`LiteralSet::mark`] reads one out of `entries` through `&self` on every match —
+/// see the field doc there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiteralKind {
+    Contains,
+    StartsWith,
+    EndsWith,
+}
+
+/// One case class's Aho-Corasick automaton, plus the (stub, relation) each pattern id speaks for.
+struct LiteralSet {
+    ac: AhoCorasick,
+    /// Indexed by pattern id — 1:1 with the patterns handed to `AhoCorasick::build`, so identical
+    /// literals from two stubs get two ids, not one (mirrors [`MultiRegex::pattern_stubs`]).
+    entries: Vec<(usize, LiteralKind)>,
+}
+
+impl LiteralSet {
+    /// Set a bit for every stub whose literal anchor holds against `path`, in one overlapping pass
+    /// over the haystack.
+    ///
+    /// `startsWith`/`endsWith` are not separate automata: a hit's *position* proves which relation
+    /// holds, since `find_overlapping_iter` already reports the match span. `contains` needs no
+    /// further check — the substring itself is the constraint.
+    fn mark(&self, path: &str, out: &mut CandidateBits) {
+        for m in self.ac.find_overlapping_iter(path) {
+            let (stub, kind) = self.entries[m.pattern().as_usize()];
+            let hit = match kind {
+                LiteralKind::Contains => true,
+                LiteralKind::StartsWith => m.start() == 0,
+                LiteralKind::EndsWith => m.end() == path.len(),
+            };
+            if hit {
+                out.set(stub);
+            }
+        }
+    }
+}
+
+/// Build one case class's automaton, falling back that class's stubs wholesale on failure.
+///
+/// Unlike the regex dimension's per-pattern retry ([`build_case_class`]), a literal string cannot
+/// be individually invalid the way a regex can — there is no analogue of "this one pattern is a
+/// typo". A build failure here is only ever aho-corasick's own construction limits being overrun
+/// in aggregate, so there is nothing to retry pattern-by-pattern: every entry in this case class
+/// falls back to `always_bits`, which over-approximates it safely (Stage 2 still evaluates it).
+fn build_literal_class(
+    entries: Vec<(usize, String, LiteralKind)>,
+    case_insensitive: bool,
+) -> (Option<LiteralSet>, Vec<usize>) {
+    if entries.is_empty() {
+        return (None, Vec::new());
+    }
+    let patterns: Vec<&str> = entries.iter().map(|(_, p, _)| p.as_str()).collect();
+    match AhoCorasick::builder()
+        .match_kind(AcMatchKind::Standard)
+        .ascii_case_insensitive(case_insensitive)
+        .build(&patterns)
+    {
+        Ok(ac) => {
+            let entries = entries
+                .into_iter()
+                .map(|(stub, _, kind)| (stub, kind))
+                .collect();
+            (Some(LiteralSet { ac, entries }), Vec::new())
+        }
+        Err(e) => {
+            tracing::warn!(
+                stubs = entries.len(),
+                case_insensitive,
+                error = %e,
+                "literal dimension: multi-pattern build failed for the whole set; all its stubs \
+                 fall back to full predicate evaluation"
+            );
+            (None, entries.into_iter().map(|(stub, _, _)| stub).collect())
+        }
+    }
+}
+
+/// A stub's required literal-path constraint: the text, the relation it requires, and which case
+/// class it belongs to.
+struct LiteralAnchor<'a> {
+    text: &'a str,
+    kind: LiteralKind,
+    case_sensitive: bool,
+}
+
+/// A single predicate's literal anchor, if it is an indexable required constraint.
+///
+/// Deliberately narrower than the evaluator, same rationale as [`regex_anchor`]: only a **string**
+/// literal qualifies. A non-string value is still a real constraint (the evaluator renders it via
+/// `to_string`) — just not one worth the eligibility bookkeeping — so it falls to `always_bits`,
+/// which over-approximates it safely.
+fn literal_anchor(pred: &Predicate) -> Option<LiteralAnchor<'_>> {
+    if !is_value_preserving(&pred.parameters) {
+        return None;
+    }
+    let (fields, kind) = match &pred.operation {
+        PredicateOperation::Contains(fields) => (fields, LiteralKind::Contains),
+        PredicateOperation::StartsWith(fields) => (fields, LiteralKind::StartsWith),
+        PredicateOperation::EndsWith(fields) => (fields, LiteralKind::EndsWith),
+        _ => return None,
+    };
+    match fields.get("path") {
+        Some(serde_json::Value::String(text)) => Some(LiteralAnchor {
+            text,
+            kind,
+            case_sensitive: pred.parameters.case_sensitive == Some(true),
+        }),
+        _ => None,
+    }
+}
+
+/// The literal dimension (issue #710) — supersedes the path dimension's old prefix/contains
+/// linear-bucket walks, and additionally indexes `endsWith`, which was never indexed before it.
+///
+/// # One automaton per case class, not one per (case class, relation)
+///
+/// A stub is eligible on `contains`/`startsWith`/`endsWith`, and case-sensitive/insensitive, which
+/// suggests up to six automata. This type builds only two — one per case class — because which
+/// relation a hit proves is a property of *where* it landed, not of which automaton found it:
+/// `find_overlapping_iter` already reports the match span, so [`LiteralSet::mark`] resolves
+/// `startsWith` as `m.start() == 0` and `endsWith` as `m.end() == path.len()` after the fact, with
+/// `contains` needing no further check. One overlapping pass per case class answers all three.
+///
+/// # Why `MatchKind::Standard` + `find_overlapping_iter`, not a single-winner search
+///
+/// A non-overlapping search, or a search under `LeftmostFirst`/`LeftmostLongest`, reports only the
+/// winning pattern at a position and moves on — so of two literals that both match the same path
+/// (e.g. `startsWith "/api"` and `startsWith "/api/v1"` against `/api/v1/x`), only one would be
+/// reported and the other's stub would silently drop out of the candidate set: an
+/// under-approximation, i.e. a silent no-match in production. This is exactly the bug class #709's
+/// regex dimension guards against with `MatchKind::All`; `overlapping_literals_are_all_candidates`
+/// below is its regression test here. `find_overlapping_iter` requires `MatchKind::Standard` (the
+/// non-overlapping, single-winner kinds cannot drive it at all) — it is the only combination that
+/// is a sound, all-reporting search.
+///
+/// # Case semantics — an exact mirror, not merely an over-approximation
+///
+/// `predicates/mod.rs:255-277` dispatches `case_sensitive` to either an exact-byte compare or to
+/// `contains_ignore_ascii_case`/`starts_with_ignore_ascii_case`/`ends_with_ignore_ascii_case`
+/// (`mod.rs:123-142`) — all of which are byte-level ASCII folds (`eq_ignore_ascii_case`), not
+/// Unicode. `AhoCorasick::ascii_case_insensitive(true)` is that exact same byte-level ASCII fold,
+/// so the CI automaton matches the evaluator's default precisely and the CS automaton (flag off)
+/// matches its exact-byte compare precisely — neither over- nor under-approximates. This is
+/// UNLIKE the sibling regex dimension, whose `matches` predicate folds with *Unicode*
+/// case-insensitivity ([`RegexDimension`]'s doc); do not carry that automaton-per-flag reasoning
+/// over here without re-checking which fold the predicate in question actually uses.
+struct LiteralDimension {
+    /// The default class: `ascii_case_insensitive(true)`, matching the evaluator's default fold.
+    insensitive: Option<LiteralSet>,
+    /// `caseSensitive: true`, matching the evaluator's exact-byte compare.
+    sensitive: Option<LiteralSet>,
+    /// Stubs with no indexable top-level literal constraint, an empty-string literal (an
+    /// unconditional pass in the evaluator — see `empty_literal_always_matches`), or whose case
+    /// class's automaton build failed — always candidates on this dimension.
+    always: CandidateBits,
+}
+
+impl Dimension for LiteralDimension {
+    fn select(&self, request: &DimensionRequest<'_>, out: &mut CandidateBits) {
+        out.copy_from(&self.always);
+        for s in [&self.insensitive, &self.sensitive].into_iter().flatten() {
+            s.mark(request.path, out);
+        }
+    }
+
+    fn prunes(&self) -> bool {
+        self.insensitive.is_some() || self.sensitive.is_some()
     }
 }
 
@@ -464,6 +632,7 @@ pub(crate) struct StubIndex {
     len: usize,
     path: PathDimension,
     method: MethodDimension,
+    literal: LiteralDimension,
     regex: RegexDimension,
 }
 
@@ -473,12 +642,14 @@ impl StubIndex {
     fn build(stubs: &[Arc<StubState>]) -> Self {
         let len = stubs.len();
         let mut exact: FastMap<String, Vec<usize>> = FastMap::default();
-        let mut prefix: FastMap<String, Vec<usize>> = FastMap::default();
-        let mut contains: FastMap<String, Vec<usize>> = FastMap::default();
         let mut path_always = CandidateBits::zeros(len);
 
         let mut slots: [Vec<usize>; METHOD_SLOTS] = Default::default();
         let mut method_always = CandidateBits::zeros(len);
+
+        let mut literal_ci: Vec<(usize, String, LiteralKind)> = Vec::new();
+        let mut literal_cs: Vec<(usize, String, LiteralKind)> = Vec::new();
+        let mut literal_always = CandidateBits::zeros(len);
 
         let mut regex_ci: Vec<(usize, String)> = Vec::new();
         let mut regex_cs: Vec<(usize, String)> = Vec::new();
@@ -487,13 +658,23 @@ impl StubIndex {
         for (i, state) in stubs.iter().enumerate() {
             match classify(&state.stub) {
                 Some(PathAnchor::Exact(k)) => exact.entry(k).or_default().push(i),
-                Some(PathAnchor::Prefix(k)) => prefix.entry(k).or_default().push(i),
-                Some(PathAnchor::Contains(k)) => contains.entry(k).or_default().push(i),
                 None => path_always.set(i),
             }
             match state.stub.predicates.iter().find_map(method_anchor) {
                 Some(m) => slots[method_slot(m)].push(i),
                 None => method_always.set(i),
+            }
+            // Only the first literal anchor is indexed — same rule as `classify`/`regex_anchor`.
+            // An empty literal is an unconditional pass in the evaluator (see
+            // `empty_literal_always_matches`), so it must never reach the automaton: feeding it in
+            // would ask aho-corasick to match the empty string, and even if that "worked" it would
+            // be solving the wrong problem — the stub must be a candidate for every path, not just
+            // ones the empty pattern happens to hit.
+            match state.stub.predicates.iter().find_map(literal_anchor) {
+                Some(a) if a.text.is_empty() => literal_always.set(i),
+                Some(a) if a.case_sensitive => literal_cs.push((i, a.text.to_owned(), a.kind)),
+                Some(a) => literal_ci.push((i, a.text.to_owned(), a.kind)),
+                None => literal_always.set(i),
             }
             // Only the first regex anchor is indexed. A stub's further `matches` predicates are
             // also required, so ignoring them only ever over-approximates — Stage 2 still checks
@@ -505,29 +686,42 @@ impl StubIndex {
             }
         }
 
+        let (literal_insensitive, literal_ci_fallback) = build_literal_class(literal_ci, true);
+        let (literal_sensitive, literal_cs_fallback) = build_literal_class(literal_cs, false);
+        for i in literal_ci_fallback.into_iter().chain(literal_cs_fallback) {
+            literal_always.set(i);
+        }
+
         let (insensitive, ci_fallback) = build_case_class(regex_ci, true);
         let (sensitive, cs_fallback) = build_case_class(regex_cs, false);
         for i in ci_fallback.into_iter().chain(cs_fallback) {
             regex_always.set(i);
         }
 
+        let path = PathDimension {
+            exact,
+            always: path_always,
+        };
+        let method = MethodDimension {
+            slots,
+            always: method_always,
+        };
+        let literal = LiteralDimension {
+            insensitive: literal_insensitive,
+            sensitive: literal_sensitive,
+            always: literal_always,
+        };
+        let regex = RegexDimension {
+            insensitive,
+            sensitive,
+            always: regex_always,
+        };
         StubIndex {
             len,
-            path: PathDimension {
-                exact,
-                prefix: prefix.into_iter().collect(),
-                contains: contains.into_iter().collect(),
-                always: path_always,
-            },
-            method: MethodDimension {
-                slots,
-                always: method_always,
-            },
-            regex: RegexDimension {
-                insensitive,
-                sensitive,
-                always: regex_always,
-            },
+            path,
+            method,
+            literal,
+            regex,
         }
     }
 
@@ -537,7 +731,14 @@ impl StubIndex {
     }
 
     /// Intersect one dimension's bitset into the accumulator, seeding it on the first dimension
-    /// that actually runs.
+    /// that actually runs. Returns whether any candidate survives — `false` means the caller can
+    /// stop, because intersection is monotone and no later dimension can put a bit back.
+    ///
+    /// The emptiness test is deliberately *inside* here, and only on the path where the dimension
+    /// actually ran: `is_empty()` scans the whole bitset (16 words at 1000 stubs), so testing it
+    /// after a dimension that was skipped is pure cost for an answer that cannot have changed.
+    /// Returning `true` for a skipped dimension also means an unseeded (all-zeros) accumulator can
+    /// never be mistaken for "everything was pruned" — the caller needs no `seeded` guard.
     ///
     /// Generic over the dimension rather than taking `&dyn Dimension`, so each call site
     /// monomorphizes to a static dispatch — see the module docs on why dimensions are concrete
@@ -548,9 +749,9 @@ impl StubIndex {
         acc: &mut CandidateBits,
         seeded: &mut bool,
         len: usize,
-    ) {
+    ) -> bool {
         if !dimension.prunes() {
-            return;
+            return true;
         }
         if *seeded {
             let mut scratch = CandidateBits::zeros(len);
@@ -562,6 +763,7 @@ impl StubIndex {
             dimension.select(request, acc);
             *seeded = true;
         }
+        !acc.is_empty()
     }
 
     /// Candidate stub ids for a request: the intersection of every dimension's bitset. A superset
@@ -572,27 +774,27 @@ impl StubIndex {
     /// * a dimension no stub is indexed on is skipped ([`Dimension::prunes`]) — otherwise a corpus
     ///   that never constrains the method would pay the method dimension a full-width copy and
     ///   intersect to produce all-ones;
-    /// * an empty accumulator short-circuits the rest. Method runs first because it is both the
-    ///   cheapest (a slot lookup, no allocation) and, on method-partitioned corpora, the most
-    ///   selective — so the exit can skip the path dimension's fold allocation, and the regex
-    ///   dimension's automaton pass, entirely. Regex runs last: it is the only dimension that
-    ///   walks the haystack.
+    /// * an empty accumulator short-circuits the rest. Dimensions run cheapest-first: method (a
+    ///   slot lookup, no allocation) is both the cheapest and, on method-partitioned corpora, the
+    ///   most selective, so its early exit can skip every later dimension's work entirely. Path
+    ///   (a hashmap lookup) is next. Literal and regex both walk the haystack through an automaton,
+    ///   so they run last and in that order: the literal dimension's Aho-Corasick pass is cheaper
+    ///   per byte than the regex meta engine's, so it gets first crack at shrinking (or emptying)
+    ///   the accumulator before the more expensive dimension has to run at all.
     ///
-    /// The `seeded` guard on each early exit is load-bearing: an unseeded accumulator is all-zeros,
-    /// which `is_empty()` cannot distinguish from "everything was pruned".
+    /// Short-circuits through [`Self::fold_in`]'s return value rather than re-testing emptiness
+    /// between dimensions: intersection is monotone, so once nothing survives no later dimension can
+    /// put a bit back.
     pub(crate) fn candidates(&self, request: &DimensionRequest<'_>) -> CandidateBits {
         let mut acc = CandidateBits::zeros(self.len);
         let mut seeded = false;
 
-        Self::fold_in(&self.method, request, &mut acc, &mut seeded, self.len);
-        if seeded && acc.is_empty() {
-            return acc;
+        if Self::fold_in(&self.method, request, &mut acc, &mut seeded, self.len)
+            && Self::fold_in(&self.path, request, &mut acc, &mut seeded, self.len)
+            && Self::fold_in(&self.literal, request, &mut acc, &mut seeded, self.len)
+        {
+            Self::fold_in(&self.regex, request, &mut acc, &mut seeded, self.len);
         }
-        Self::fold_in(&self.path, request, &mut acc, &mut seeded, self.len);
-        if seeded && acc.is_empty() {
-            return acc;
-        }
-        Self::fold_in(&self.regex, request, &mut acc, &mut seeded, self.len);
 
         // No dimension indexes anything (e.g. every stub is a body regex): everyone is a candidate.
         if seeded {
@@ -1138,7 +1340,7 @@ mod tests {
             .map(|_| {
                 let seg = SEGS[rng.gen_range(0..SEGS.len())];
                 let m = METHODS[rng.gen_range(0..METHODS.len())];
-                match rng.gen_range(0..21) {
+                match rng.gen_range(0..28) {
                     // Indexable on both dimensions (one predicate, two fields).
                     0 => json!([{"equals": {"method": m, "path": seg}}]),
                     // Indexable on both dimensions (two separate top-level predicates).
@@ -1167,6 +1369,21 @@ mod tests {
                     16 => json!([{"not": {"equals": {"path": seg}}}]),
                     17 => json!([{"equals": {"method": m}, "caseSensitive": true}]),
                     18 => json!([{"equals": {"method": m}, "except": "X"}]),
+                    // Literal shapes (#710). `endsWith` was never indexed before it, and the
+                    // case-sensitive and empty-literal shapes are the edges the issue names.
+                    20 => json!([{"endsWith": {"path": seg}}]),
+                    21 => json!([{"startsWith": {"path": seg}, "caseSensitive": true}]),
+                    22 => json!([{"contains": {"path": seg}, "caseSensitive": true}]),
+                    23 => json!([{"endsWith": {"path": seg}, "caseSensitive": true}]),
+                    // An empty literal is an unconditional pass in the evaluator — it must never
+                    // be pruned.
+                    24 => json!([{"contains": {"path": ""}}]),
+                    25 => json!([{"startsWith": {"path": ""}}]),
+                    // A deliberately broad literal, drawn from the same SEGS as the anchored
+                    // shapes so it frequently OVERLAPS one of them on the same path — the shape
+                    // that distinguishes an all-reporting automaton from a single-winner one.
+                    26 => json!([{"contains": {"path": "/"}}]),
+                    27 => json!([{"startsWith": {"path": &seg[..2.min(seg.len())]}}]),
                     // A deliberately BROAD path regex, drawn from the same `SEGS` as the anchored
                     // shapes above so it frequently overlaps one of them on the same path. Two
                     // patterns matching one path is the only shape that can distinguish
@@ -1241,6 +1458,174 @@ mod tests {
                     "index diverged from linear oracle: corpus {corpus_n}, {m} {p} q={query:?} b={body:?}"
                 );
             }
+        }
+    }
+
+    // ---- issue #710: the literal dimension -----------------------------------------------
+
+    // AC1: one pass answers which of N literals match — a request targeting one stub out of many
+    // literal-anchored stubs must leave a small candidate set, not all N. Before #710 the prefix
+    // and contains buckets were walked linearly, so the prefilter itself scaled with the number of
+    // distinct literals even though one stub matched.
+    #[test]
+    fn literal_dimension_collapses_candidates() {
+        let mut preds: Vec<Value> = Vec::new();
+        for i in 0..200 {
+            preds.push(json!([{"startsWith": {"path": format!("/pre{i}/")}}]));
+            preds.push(json!([{"contains": {"path": format!("~mid{i}~")}}]));
+            preds.push(json!([{"endsWith": {"path": format!("/end{i}")}}]));
+        }
+        let snap = snapshot(&preds);
+
+        // A startsWith target: only its own stub survives.
+        let c = snap.candidates("GET", "/pre199/detail");
+        assert_eq!(c.count(), 1, "one startsWith stub survives");
+        assert!(c.contains(199 * 3));
+
+        // A contains target.
+        let c = snap.candidates("GET", "/x~mid150~y");
+        assert_eq!(c.count(), 1, "one contains stub survives");
+        assert!(c.contains(150 * 3 + 1));
+
+        // An endsWith target — a kind the index could not see at all before #710.
+        let c = snap.candidates("GET", "/whatever/end42");
+        assert_eq!(c.count(), 1, "one endsWith stub survives");
+        assert!(c.contains(42 * 3 + 2));
+
+        // A path no literal matches prunes everything.
+        assert_eq!(snap.candidates("GET", "/nothing").count(), 0);
+    }
+
+    // The #709 lesson, applied: a multi-pattern automaton must report EVERY matching pattern, not
+    // just one. `MatchKind::LeftmostFirst`/`LeftmostLongest` + a non-overlapping search would
+    // report a single winner per position and silently prune the others' stubs — an
+    // under-approximation. Only `MatchKind::Standard` + an overlapping search reports all.
+    // Every literal here is matched by the one path, in all three kinds and both nesting shapes.
+    #[test]
+    fn overlapping_literals_are_all_candidates() {
+        let snap = snapshot(&[
+            json!([{"startsWith": {"path": "/api"}}]), // 0 prefix of the path
+            json!([{"startsWith": {"path": "/api/v1"}}]), // 1 longer prefix — overlaps 0
+            json!([{"contains": {"path": "api"}}]),    // 2 substring — overlaps 0 and 1
+            json!([{"contains": {"path": "api/v1/x"}}]), // 3 longer substring
+            json!([{"endsWith": {"path": "/x"}}]),     // 4 suffix
+            json!([{"endsWith": {"path": "v1/x"}}]),   // 5 longer suffix — overlaps 4
+            json!([{"contains": {"path": "/"}}]),      // 6 occurs many times over
+        ]);
+        let c = snap.candidates("GET", "/api/v1/x");
+        for i in 0..7 {
+            assert!(
+                c.contains(i),
+                "stub {i}'s literal matches /api/v1/x and must survive — every overlapping \
+                 pattern must be reported"
+            );
+        }
+    }
+
+    // The empty literal is an unconditional pass in the evaluator: `contains_ignore_ascii_case`
+    // returns true on an empty needle, and starts/ends reduce to comparing an empty slice. The
+    // case-sensitive side agrees (`"x".contains("") == true`). So an empty-literal stub must be a
+    // candidate for EVERY path — the one edge the issue calls out by name.
+    #[test]
+    fn empty_literal_always_matches() {
+        let imp = imposter(&[
+            json!([{"contains": {"path": ""}}]),   // 0
+            json!([{"startsWith": {"path": ""}}]), // 1
+            json!([{"endsWith": {"path": ""}}]),   // 2
+        ]);
+        let no_headers: HashMap<String, String> = HashMap::new();
+        for (m, p) in [("GET", "/anything"), ("GET", "/"), ("POST", "/x/y/z")] {
+            let linear =
+                idx(imp.find_matching_stub_linear(m, p, &no_headers, None, None, None, None));
+            let indexed =
+                idx(imp.find_matching_stub_with_client(m, p, &no_headers, None, None, None, None));
+            assert_eq!(indexed, linear, "index diverged from linear for {m} {p}");
+            assert_eq!(
+                linear,
+                Some(0),
+                "the empty contains stub matches everything"
+            );
+        }
+        // All three stay candidates regardless of path.
+        let snap = snapshot(&[
+            json!([{"contains": {"path": ""}}]),
+            json!([{"startsWith": {"path": ""}}]),
+            json!([{"endsWith": {"path": ""}}]),
+        ]);
+        let c = snap.candidates("GET", "/zzz");
+        for i in 0..3 {
+            assert!(
+                c.contains(i),
+                "empty-literal stub {i} must always be a candidate"
+            );
+        }
+    }
+
+    // The case flag routes to the CS or CI automaton, and the fold must be the evaluator's:
+    // byte-level ASCII (`eq_ignore_ascii_case`), which is exactly aho-corasick's
+    // `ascii_case_insensitive`. Asserted against the linear oracle, including the non-ASCII
+    // boundary where an ASCII fold deliberately does NOT fold (the Greek-sigma trap #707 documents).
+    #[test]
+    fn literal_case_semantics_match_the_evaluator() {
+        let imp = imposter(&[
+            json!([{"startsWith": {"path": "/Pre"}}]), // 0 default => ASCII case-insensitive
+            json!([{"startsWith": {"path": "/Pre2"}, "caseSensitive": true}]), // 1 case-sensitive
+            json!([{"contains": {"path": "MiD"}}]),    // 2 CI contains
+            json!([{"contains": {"path": "MiD2"}, "caseSensitive": true}]), // 3 CS contains
+            json!([{"endsWith": {"path": "/End"}}]),   // 4 CI endsWith
+            json!([{"endsWith": {"path": "/End2"}, "caseSensitive": true}]), // 5 CS endsWith
+            json!([{"startsWith": {"path": "/ΟΣ"}}]),  // 6 non-ASCII: ASCII fold leaves Greek alone
+            json!([{"contains": {"path": "ΑΣ"}}]),     // 7 the same via contains
+        ]);
+        let no_headers: HashMap<String, String> = HashMap::new();
+        for (m, p) in [
+            ("GET", "/pre/x"),
+            ("GET", "/PRE/x"),
+            ("GET", "/Pre2/x"),
+            ("GET", "/pre2/x"),
+            ("GET", "/a-mid-b"),
+            ("GET", "/a-MiD-b"),
+            ("GET", "/a-MiD2-b"),
+            ("GET", "/a-mid2-b"),
+            ("GET", "/x/end"),
+            ("GET", "/x/END"),
+            ("GET", "/x/End2"),
+            ("GET", "/x/end2"),
+            ("GET", "/ΟΣΑ"),
+            ("GET", "/οσα"),
+            ("GET", "/xΑΣy"),
+        ] {
+            let linear =
+                idx(imp.find_matching_stub_linear(m, p, &no_headers, None, None, None, None));
+            let indexed =
+                idx(imp.find_matching_stub_with_client(m, p, &no_headers, None, None, None, None));
+            assert_eq!(indexed, linear, "index diverged from linear for {m} {p}");
+        }
+    }
+
+    // The soundness rule for the literal dimension: every shape it cannot index must stay a
+    // candidate for EVERY request. `except` rewrites the compared value, `selector` re-scopes it,
+    // a non-string literal is still a real constraint (the evaluator renders it), and or/not/and
+    // nesting is not a required top-level constraint.
+    #[test]
+    fn ineligible_literal_shapes_are_always_candidates() {
+        let snap = snapshot(&[
+            json!([{"startsWith": {"path": "/idx"}}]), // 0 indexable
+            json!([{"startsWith": {"path": "/x"}, "except": "Y"}]), // 1 except
+            json!([{"contains": {"path": "/x"}, "jsonpath": {"selector": "$.id"}}]), // 2 selector
+            json!([{"or": [{"startsWith": {"path": "/x"}}, {"equals": {"path": "/y"}}]}]), // 3 or
+            json!([{"not": {"contains": {"path": "/x"}}}]), // 4 not
+            json!([{"and": [{"endsWith": {"path": "/x"}}, {"equals": {"method": "GET"}}]}]), // 5 and
+            json!([{"contains": {"body": "ping"}}]), // 6 non-path field
+            json!([{"startsWith": {"path": 7}}]),    // 7 non-string literal
+        ]);
+        let c = snap.candidates("GET", "/other");
+        assert!(!c.contains(0), "the indexable /idx stub must be pruned");
+        for i in 1..8 {
+            assert!(
+                c.contains(i),
+                "stub {i} is un-indexable → must always be a candidate"
+            );
         }
     }
 

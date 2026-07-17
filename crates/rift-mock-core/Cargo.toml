@@ -72,6 +72,9 @@ regex = "1.11"
 # `regex`; naming it directly keeps one automata stack rather than a second, so the version must
 # stay compatible with `regex` above.
 regex-automata = "0.4"
+# The multi-pattern literal engine behind `regex`'s own prefilter (issue #710). Already in the
+# tree transitively via `regex`; naming it directly keeps one automata stack rather than a second.
+aho-corasick = "1.1"
 memchr.workspace = true
 rand.workspace = true
 urlencoding = "2.1"

@@ -3386,6 +3386,7 @@ dependencies = [
 name = "rift-mock-core"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "arc-swap",
  "base64 0.22.1",

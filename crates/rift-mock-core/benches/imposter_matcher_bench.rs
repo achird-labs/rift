@@ -127,9 +127,13 @@ fn imposter_with_stubs(
 ///   `path_anchor` would not index these, so all `count` stubs sat in fallback and each was fully
 ///   predicate-evaluated — the O(stubs) worst case. #709's regex dimension answers "which of these
 ///   `count` patterns match" in one automaton pass, so this is now the headline before/after.
-/// * `prefix_anchored` — every stub is `startsWith`-anchored. Those *are* indexed, but
-///   `candidates()` walks each distinct prefix bucket linearly, so the prefilter itself scales
-///   with the number of distinct prefixes even though exactly one stub matches.
+/// * `prefix_anchored` — every stub is `startsWith`-anchored. Before #710 `candidates()` walked
+///   each distinct prefix bucket linearly, so the prefilter itself scaled with the number of
+///   distinct prefixes even though exactly one stub matched; the literal dimension's Aho-Corasick
+///   pass replaces that walk.
+/// * `literal_mixed` — a corpus mixing all three literal kinds (`startsWith`/`contains`/`endsWith`)
+///   over one automaton, targeting the last stub. `endsWith` was not indexed at all before #710, so
+///   a third of this corpus used to sit in the always-visited fallback.
 fn bench_find_matching_stub(c: &mut Criterion) {
     let headers: HashMap<String, String> = HashMap::new();
 
@@ -183,6 +187,22 @@ fn bench_find_matching_stub(c: &mut Criterion) {
         "find_matching_stub_prefix_anchored",
         &|i| json!({ "startsWith": { "path": format!("/api/endpoint{i}/") } }),
         &|count| format!("/api/endpoint{}/detail", count - 1),
+    );
+    scan(
+        "find_matching_stub_literal_mixed",
+        &|i| match i % 3 {
+            0 => json!({ "startsWith": { "path": format!("/api/pre{i}/") } }),
+            1 => json!({ "contains": { "path": format!("~mid{i}~") } }),
+            _ => json!({ "endsWith": { "path": format!("/end{i}") } }),
+        },
+        &|count| {
+            let i = count - 1;
+            match i % 3 {
+                0 => format!("/api/pre{i}/detail"),
+                1 => format!("/x~mid{i}~y"),
+                _ => format!("/whatever/end{i}"),
+            }
+        },
     );
 }
 
