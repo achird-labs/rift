@@ -87,6 +87,28 @@ of `S` and only then climbs is healthy; one that climbs at 50 % points at backpr
 accept-loop contention — exactly the structural changes the Turbo Tier-3/Tier-4 issues
 target.
 
+### Allocator bake-off (issue #717, Rift-only)
+
+`--allocator {mimalloc,jemalloc,system}` benches one allocator variant: it builds the binary
+with the matching feature set into its own `target/alloc-<name>/` (so the three builds coexist;
+an explicit `--rift-bin` skips the build and is trusted verbatim), samples the engine's RSS once
+a second (`rss_mb_peak`/`rss_mb_end` CSV columns + an RSS matrix in the report), and writes
+suffixed artefacts (`direct_rift_<name>.csv`, `DIRECT_RIFT_SWEEP_REPORT_<name>.md`) so runs
+never overwrite each other:
+
+```bash
+for alloc in mimalloc jemalloc system; do
+  python3 scripts/bench_direct.py --run-all --allocator $alloc \
+      --sweep-connections 50,200 --duration 15s --warmup 2s
+done
+```
+
+The three variants differ **only** in the allocator — `redis-backend`+`javascript` stay enabled
+in all of them — and each binary logs `Global allocator: <name>` at startup, so a report can
+never mislabel its build. Decision rule and result recording live in #717 (pre-registered: a
+default switch needs ≥5% RPS or ≥20% p999/RSS on the majority of scenarios, macOS numbers are
+indicative — the decision run is Linux x86_64).
+
 Both scripts run each engine **one at a time on disjoint port ranges** (no CPU
 contention, no cross-talk), launch it in its own process group and hard-kill it by
 group + `lsof` before the next engine starts, and post **identical** imposter JSON to

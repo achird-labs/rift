@@ -25,6 +25,22 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// jemalloc bake-off build (issue #717): active only when `jemalloc` is enabled and
+// `mimalloc` is not — under `--all-features` (CI) mimalloc keeps precedence, so the
+// two allocator features can coexist without a compile_error.
+#[cfg(all(feature = "jemalloc", not(feature = "mimalloc")))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// Which global allocator this binary was built with — logged at startup so benchmark
+/// results are labeled by the binary itself, not by whoever invoked the build (#717).
+#[cfg(feature = "mimalloc")]
+const ACTIVE_ALLOCATOR: &str = "mimalloc";
+#[cfg(all(feature = "jemalloc", not(feature = "mimalloc")))]
+const ACTIVE_ALLOCATOR: &str = "jemalloc";
+#[cfg(not(any(feature = "mimalloc", feature = "jemalloc")))]
+const ACTIVE_ALLOCATOR: &str = "system";
+
 use clap::Parser;
 use rift_http_proxy::admin_api::DEFAULT_ADMIN_PORT;
 use rift_http_proxy::healthcheck;
@@ -150,6 +166,7 @@ fn main() -> Result<(), anyhow::Error> {
 
     // Start in Mountebank mode
     info!("Starting Rift on port {}", cli.port);
+    info!("Global allocator: {}", ACTIVE_ALLOCATOR);
     run_mountebank_mode(cli)
 }
 

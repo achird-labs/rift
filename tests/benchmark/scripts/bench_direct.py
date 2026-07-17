@@ -20,7 +20,7 @@ Run everything (launches + stops both engines, writes the report):
 Must be run OUTSIDE the CLI sandbox (via the sidecar) because `oha` needs
 macOS keychain access to initialise TLS even for plain-HTTP targets.
 """
-import argparse, csv, json, subprocess, sys, time, urllib.request, urllib.error, os, signal, shutil
+import argparse, csv, json, subprocess, sys, threading, time, urllib.request, urllib.error, os, signal, shutil
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "..", "results")
 
@@ -335,9 +335,92 @@ def metric(j):
         "codes": codes,
     }
 
-# ---- results CSV (extended with `connections` + `mode` + `p999_ms`, issue #702) ----
+# ---- allocator bake-off (issue #717): build-arg selection + RSS sampling ----
 
-CSV_HEADER = "scenario,connections,mode,rps,p50_ms,p90_ms,p99_ms,p999_ms,avg_ms"
+REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "..")
+ALLOCATORS = ("mimalloc", "jemalloc", "system")
+DEFAULT_RIFT_BIN = os.path.join(REPO_ROOT, "target", "release", "rift-http-proxy")
+
+def allocator_build_args(name):
+    """Cargo flags that swap ONLY the global allocator, keeping redis-backend+javascript on in
+    every variant so the three builds are functionally identical apart from the allocator (#717)."""
+    if name == "mimalloc":
+        return []   # default features already include mimalloc
+    if name == "jemalloc":
+        return ["--no-default-features", "--features", "redis-backend,javascript,jemalloc"]
+    if name == "system":
+        return ["--no-default-features", "--features", "redis-backend,javascript"]
+    raise ValueError(f"unknown allocator {name!r}: choose from {','.join(ALLOCATORS)}")
+
+def allocator_bin_path(name):
+    """Per-allocator binary path; a separate --target-dir per allocator so three builds can
+    coexist on disk instead of clobbering each other's `target/release` (#717)."""
+    return os.path.join(REPO_ROOT, "target", f"alloc-{name}", "release", "rift-http-proxy")
+
+def resolve_rift_bin(rift_bin_arg, allocator):
+    """Resolve (path, needs_build). An explicit --rift-bin is always trusted verbatim (no build,
+    even if --allocator is also set). No allocator selected: fall back to the default release
+    path, unchanged from pre-#717 behaviour. Allocator selected with no --rift-bin: build into
+    the per-allocator target dir."""
+    if rift_bin_arg is not None:
+        return rift_bin_arg, False
+    if allocator is None:
+        return DEFAULT_RIFT_BIN, False
+    return allocator_bin_path(allocator), True
+
+def build_allocator_binary(name):
+    """Build the bake-off binary for one allocator into target/alloc-<name>/ (#717)."""
+    print(f"building rift with allocator={name}")
+    cmd = ["cargo", "build", "--release", "-p", "rift-http-proxy",
+           "--target-dir", os.path.join("target", f"alloc-{name}")] + allocator_build_args(name)
+    out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    if out.returncode != 0:
+        tail = "\n".join((out.stdout + out.stderr).splitlines()[-40:])
+        raise SystemExit(f"build failed for allocator={name}:\n{tail}")
+    print(f"  built target/alloc-{name}/release/rift-http-proxy")
+
+def parse_rss_kb(text):
+    """Parse `ps -o rss=` output (KB); absent/garbage reads as None, never 0 (#717)."""
+    try:
+        return int(text.strip())
+    except ValueError:
+        return None
+
+class RssSampler(threading.Thread):
+    """Samples the engine's RSS (ps -o rss=, KB) once a second while a bench runs, so each
+    scenario row can report peak/end memory (#717). Daemon: never blocks harness exit."""
+
+    def __init__(self, pid):
+        super().__init__(daemon=True)
+        self.pid = pid
+        self.samples = []
+        self._stop = threading.Event()
+
+    def run(self):
+        while not self._stop.wait(1.0):
+            try:
+                out = subprocess.run(["ps", "-o", "rss=", "-p", str(self.pid)],
+                                      capture_output=True, text=True)
+                kb = parse_rss_kb(out.stdout)
+            except Exception:
+                kb = None   # engine may be restarting/gone — a missing sample is not an error
+            if kb is not None:
+                self.samples.append((time.time(), kb))
+
+    def stop(self):
+        self._stop.set()
+        self.join(timeout=2)
+
+    def window(self, since_ts):
+        """(peak_mb, end_mb) over samples with ts >= since_ts; (None, None) if none in window."""
+        kbs = [kb for ts, kb in self.samples if ts >= since_ts]
+        if not kbs:
+            return None, None
+        return round(max(kbs) / 1024, 1), round(kbs[-1] / 1024, 1)
+
+# ---- results CSV (extended with `connections` + `mode` + `p999_ms`, issue #702; +rss, #717) ----
+
+CSV_HEADER = "scenario,connections,mode,rps,p50_ms,p90_ms,p99_ms,p999_ms,avg_ms,rss_mb_peak,rss_mb_end"
 
 def _csv_num(v):
     # A percentile can be legitimately absent (oha omits a p99.9 when a point has too few samples,
@@ -346,7 +429,8 @@ def _csv_num(v):
 
 def csv_row(name, conns, mode, m):
     cells = [name, conns, mode, m["rps"], _csv_num(m["p50_ms"]), _csv_num(m["p90_ms"]),
-             _csv_num(m["p99_ms"]), _csv_num(m["p999_ms"]), m["avg_ms"]]
+             _csv_num(m["p99_ms"]), _csv_num(m["p999_ms"]), m["avg_ms"],
+             _csv_num(m.get("rss_mb_peak")), _csv_num(m.get("rss_mb_end"))]
     return ",".join(str(c) for c in cells)
 
 def write_rift_csv(path, rows):
@@ -379,7 +463,8 @@ def assert_journal_filled(engine, admin, offset):
             f"(numberOfRequests={n}, recorded={recorded}, cap={MAX_RECORDED_REQUESTS}) — aborting")
     print(f"  journal ok: numberOfRequests={n}, recorded={recorded} (cap {MAX_RECORDED_REQUESTS})")
 
-def bench(engine, admin_port, offset, duration, warmup, conn_list, rate=None, recording=False):
+def bench(engine, admin_port, offset, duration, warmup, conn_list, rate=None, recording=False,
+          pid=None, csv_suffix=""):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     admin = f"http://localhost:{admin_port}"
     if not wait_ready(admin_port):
@@ -390,23 +475,33 @@ def bench(engine, admin_port, offset, duration, warmup, conn_list, rate=None, re
     mode = mode_label(rate)
     scenarios = SCENARIOS + ([RECORDING_SCENARIO] if recording else [])
     rows = []
-    for conns in conn_list:
-        for name, base_port, method, path, body, headers in scenarios:
-            url = f"http://localhost:{base_port + offset}{path}"
-            verify_body(engine, name, method, url, body, headers)   # prove the stub matched (not fall-through)
-            run_oha(url, method, body, headers, warmup, conns)      # warmup (discarded)
-            m = metric(run_oha(url, method, body, headers, duration, conns, rate))
-            total = sum(m["codes"].values())
-            good = all(c.startswith("2") for c in m["codes"])
-            status = "ok" if good and total > 0 else f"BAD codes={m['codes']}"
-            print(f"  {name:20s} c={conns:<4d} {m['rps']:>10.1f} rps  "
-                  f"p50={m['p50_ms']}ms p99={m['p99_ms']}ms p999={m['p999_ms']}ms  {status}")
-            if not (good and total > 0):
-                raise SystemExit(f"{engine}/{name}: unexpected status distribution {m['codes']} — aborting")
-            if name == RECORDING_SCENARIO[0]:
-                assert_journal_filled(engine, admin, offset)
-            rows.append((name, conns, mode, m))
-    csv_path = os.path.join(RESULTS_DIR, f"direct_{engine}.csv")
+    sampler = RssSampler(pid) if pid is not None else None
+    if sampler is not None:
+        sampler.start()
+    try:
+        for conns in conn_list:
+            for name, base_port, method, path, body, headers in scenarios:
+                url = f"http://localhost:{base_port + offset}{path}"
+                verify_body(engine, name, method, url, body, headers)   # prove the stub matched (not fall-through)
+                run_oha(url, method, body, headers, warmup, conns)      # warmup (discarded)
+                t0 = time.time()
+                m = metric(run_oha(url, method, body, headers, duration, conns, rate))
+                if sampler is not None:
+                    m["rss_mb_peak"], m["rss_mb_end"] = sampler.window(t0)
+                total = sum(m["codes"].values())
+                good = all(c.startswith("2") for c in m["codes"])
+                status = "ok" if good and total > 0 else f"BAD codes={m['codes']}"
+                print(f"  {name:20s} c={conns:<4d} {m['rps']:>10.1f} rps  "
+                      f"p50={m['p50_ms']}ms p99={m['p99_ms']}ms p999={m['p999_ms']}ms  {status}")
+                if not (good and total > 0):
+                    raise SystemExit(f"{engine}/{name}: unexpected status distribution {m['codes']} — aborting")
+                if name == RECORDING_SCENARIO[0]:
+                    assert_journal_filled(engine, admin, offset)
+                rows.append((name, conns, mode, m))
+    finally:
+        if sampler is not None:
+            sampler.stop()
+    csv_path = os.path.join(RESULTS_DIR, f"direct_{engine}{csv_suffix}.csv")
     write_rift_csv(csv_path, rows)
     print(f"[{engine}] wrote {csv_path}")
 
@@ -458,9 +553,50 @@ def launch(cmd, logpath):
     lf = open(logpath, "w")
     return subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
 
-def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, recording=False):
+# The binary self-reports its allocator at startup: `Global allocator: <name>` (#717). That line
+# is info-level, and bench engines run at --loglevel warn (per #718, extra logging on a measured
+# run is itself a perf distortion) — so verification is a separate one-second probe launch, not
+# part of the measured run.
+ALLOC_MARKER = "Global allocator: "
+ALLOC_PROBE_PORT = 3525
+
+def extract_allocator_marker(text):
+    """Pull the self-reported allocator name out of an engine log, or None if absent."""
+    for line in text.splitlines():
+        if ALLOC_MARKER in line:
+            return line.split(ALLOC_MARKER, 1)[1].strip()
+    return None
+
+def verify_allocator_marker(rift_bin, expected):
+    """Probe-launch the binary (info level, scratch admin port) and require its self-reported
+    allocator to equal the requested one. Without this, a stale/wrong --rift-bin — or a
+    mis-featured build — would stamp a whole sweep with the wrong label and feed #717's
+    pre-registered decision rule bogus data, silently."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    free_ports([ALLOC_PROBE_PORT])
+    logpath = os.path.join(RESULTS_DIR, "allocator-probe.log")
+    proc = launch([rift_bin, "--port", str(ALLOC_PROBE_PORT), "--loglevel", "info"], logpath)
+    try:
+        name = None
+        for _ in range(40):
+            time.sleep(0.25)
+            with open(logpath) as f:
+                name = extract_allocator_marker(f.read())
+            if name is not None:
+                break
+        if name != expected:
+            raise SystemExit(
+                f"allocator probe: binary reports {name!r}, expected {expected!r} ({rift_bin}) "
+                f"— aborting so the sweep is not mislabeled")
+        print(f"  allocator probe ok: {name}")
+    finally:
+        stop(proc, [ALLOC_PROBE_PORT])
+
+def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, recording=False,
+            allocator=None):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     node = shutil.which("node") or "node"
+    csv_suffix = f"_{allocator}" if allocator else ""
     full_plan = [
         ("rift", 0,   [rift_bin, "--port", str(admin_port_for(0)), "--allow-injection", "--loglevel", "warn"]),
         ("mb",   100, [node, mb_bin, "start", "--port", str(admin_port_for(100)), "--allowInjection", "--loglevel", "warn"]),
@@ -475,8 +611,10 @@ def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, r
         proc = launch(cmd, os.path.join(RESULTS_DIR, f"{engine}-engine.log"))
         try:
             # recording_on only applies to Rift's journal write path; MB never records here.
+            # RSS sampling (#717) likewise only makes sense for the rift process itself.
             bench(engine, admin_port_for(offset), offset, duration, warmup, conn_list,
-                  rate=rate, recording=recording and engine == "rift")
+                  rate=rate, recording=recording and engine == "rift",
+                  pid=proc.pid if engine == "rift" else None, csv_suffix=csv_suffix)
         finally:
             stop(proc, ports)
     rift_ver = subprocess.run([rift_bin, "--version"], capture_output=True, text=True).stdout.strip() or "local"
@@ -484,17 +622,19 @@ def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, r
         mb_ver = subprocess.run([node, mb_bin, "--version"], capture_output=True, text=True).stdout.strip() or "2.9.1"
         report(rift_ver, mb_ver, duration, conn_list[0])
     elif engines == ["rift"]:
-        rift_only_report(rift_ver, duration, conn_list, rate, recording)
+        rift_only_report(rift_ver, duration, conn_list, rate, recording,
+                          allocator=allocator, csv_suffix=csv_suffix)
     else:
         # engines == ["mb"]: no comparison possible (needs Rift too) and no Rift-only report to write.
         print(f"[report] engines={engines}: benched only Mountebank; no report written "
               f"(the comparison needs both rift and mb)")
 
-def rift_only_report(rift_ver, duration, conn_list, rate, recording):
+def rift_only_report(rift_ver, duration, conn_list, rate, recording, allocator=None, csv_suffix=""):
     """Rift-only sweep / open-loop report: scenario × (connections, mode) matrices of RPS and p999.
     The MB-comparison report is deliberately untouched so its historical single-point numbers stay
-    comparable; this is the extra artefact the Turbo round consumes."""
-    path = os.path.join(RESULTS_DIR, "direct_rift.csv")
+    comparable; this is the extra artefact the Turbo round consumes. Allocator bake-off runs (#717)
+    keep their own suffixed CSV/report so mimalloc/jemalloc/system results never overwrite each other."""
+    path = os.path.join(RESULTS_DIR, f"direct_rift{csv_suffix}.csv")
     with open(path) as f:
         rows = load_rift_csv(f)
     cols = list(dict.fromkeys((int(r["connections"]), r["mode"]) for r in rows))
@@ -512,10 +652,13 @@ def rift_only_report(rift_ver, duration, conn_list, rate, recording):
             mark = " **(recording)**" if name == RECORDING_SCENARIO[0] else ""
             f.write(f"| {name}{mark} | " + " | ".join(cells) + " |\n")
     lat = lambda v: "n/a" if v in (None, "") else v   # an absent percentile renders n/a, not blank
-    out = os.path.join(RESULTS_DIR, "DIRECT_RIFT_SWEEP_REPORT.md")
+    has_rss = any(r.get("rss_mb_peak", "") != "" for r in rows)
+    out = os.path.join(RESULTS_DIR, f"DIRECT_RIFT_SWEEP_REPORT{csv_suffix}.md")
     with open(out, "w") as f:
         f.write("# Rift — Concurrency Sweep / Open-Loop (issue #702)\n\n")
         f.write(f"- **Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n- **Rift:** {rift_ver}\n")
+        if allocator:
+            f.write(f"- **Allocator:** {allocator}\n")
         f.write(f"- **Load generator:** oha, {duration} per point (after warmup)\n")
         f.write(f"- **Connections:** {','.join(str(c) for c in conn_list)}\n")
         if rate is not None:
@@ -528,6 +671,8 @@ def rift_only_report(rift_ver, duration, conn_list, rate, recording):
         matrix(f, "Latency p50 (ms, lower is better)", "p50_ms", lat)
         matrix(f, "Latency p99 (ms, lower is better)", "p99_ms", lat)
         matrix(f, "Tail latency p999 (ms, lower is better)", "p999_ms", lat)
+        if has_rss:
+            matrix(f, "RSS peak (MB, during measurement)", "rss_mb_peak", lat)
     print(f"wrote {out}")
 
 def report(rift_ver, mb_ver, duration, conns):
@@ -578,10 +723,16 @@ if __name__ == "__main__":
                          "Rift-only and override this to rift.")
     ap.add_argument("--run-all", action="store_true")
     ap.add_argument("--report", action="store_true")
-    ap.add_argument("--rift-bin", default=os.path.join(os.path.dirname(__file__), "..", "..", "..", "target", "release", "rift-http-proxy"))
+    ap.add_argument("--rift-bin", default=None,
+                    help="path to a prebuilt rift-http-proxy binary; overrides --allocator's "
+                         "own build (default: target/release/rift-http-proxy, or "
+                         "target/alloc-<name>/release/rift-http-proxy when --allocator is set)")
     ap.add_argument("--mb-bin", default=os.path.expanduser("~/bench-mb/node_modules/mountebank/bin/mb"))
     ap.add_argument("--rift-version", default="local")
     ap.add_argument("--mb-version", default="2.9.1")
+    ap.add_argument("--allocator", choices=list(ALLOCATORS),
+                    help="build+bench one allocator variant (Rift-only; #717 bake-off). Builds "
+                         "into target/alloc-<name>/ unless --rift-bin is given.")
     a = ap.parse_args()
     if a.run_all:
         try:
@@ -590,10 +741,19 @@ if __name__ == "__main__":
         except ValueError as e:
             raise SystemExit(str(e))
         requested = [e.strip() for e in a.engines.split(",") if e.strip()]
+        if a.allocator and engines != ["rift"]:
+            engines = ["rift"]
         if engines != requested:
-            print("note: sweep/open-loop is Rift-only; running --engines rift")
-        run_all(a.duration, a.warmup, conn_list, a.rift_bin, a.mb_bin, engines,
-                rate=rate, recording=recording)
+            print("note: sweep/open-loop/allocator is Rift-only; running --engines rift")
+        rift_bin, needs_build = resolve_rift_bin(a.rift_bin, a.allocator)
+        if needs_build:
+            build_allocator_binary(a.allocator)
+        if a.allocator:
+            # Applies to explicit --rift-bin AND harness-built binaries alike: the label on the
+            # results must come from the binary itself, never from the invocation.
+            verify_allocator_marker(rift_bin, a.allocator)
+        run_all(a.duration, a.warmup, conn_list, rift_bin, a.mb_bin, engines,
+                rate=rate, recording=recording, allocator=a.allocator)
     elif a.report:
         report(a.rift_version, a.mb_version, a.duration, a.connections)
     else:

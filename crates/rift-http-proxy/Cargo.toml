@@ -86,6 +86,9 @@ crossbeam = "0.8"
 # Feature-gated (default-on) so FFI/cdylib and cross-compile builds can drop it;
 # it is wired only into the `rift-http-proxy` binary, never rift-mock-core/rift-ffi.
 mimalloc = { version = "0.1", optional = true }
+# Allocator bake-off candidate (issue #717): opt-in alternative to mimalloc for A/B
+# throughput/RSS comparison; never both wired as the active allocator (see [features]).
+tikv-jemallocator = { version = "0.6", optional = true }
 
 # XML/XPath support for Mountebank compatibility
 sxd-document = "0.3"
@@ -119,6 +122,10 @@ javascript = ["rift-mock-core/javascript"]
 # High-throughput global allocator for the server binary; drop it (e.g.
 # `--no-default-features`) for FFI/cross-compile builds that must not link it.
 mimalloc = ["dep:mimalloc"]
+# Opt-in bake-off allocator (#717): when both `mimalloc` and `jemalloc` are enabled
+# (e.g. CI's --all-features lanes) mimalloc wins by cfg precedence in main.rs — deliberately
+# NOT a compile_error! because CI builds --all-features.
+jemalloc = ["dep:tikv-jemallocator"]
 
 [[bin]]
 name = "rift-verify"
