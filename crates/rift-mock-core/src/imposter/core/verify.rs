@@ -124,6 +124,11 @@ impl Imposter {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        // One recorded request evaluated against (possibly several, e.g. via `closest_non_match`)
+        // predicates — same parse-once-per-evaluation shape as `body_json` above, applied to the
+        // XML DOM (issue #711): an XPath predicate re-evaluated for this same request reuses one
+        // parse rather than re-parsing per predicate.
+        let xml_dom = req.body.as_deref().map(crate::behaviors::LazyXmlDom::new);
         stub_matches_inner(
             predicates,
             &req.method,
@@ -136,6 +141,7 @@ impl Imposter {
             form.as_ref(),
             self.script_state_key(),
             body_json.as_ref(),
+            xml_dom.as_ref(),
             Some(&query_map),
         )
     }

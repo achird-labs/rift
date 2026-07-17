@@ -3,7 +3,9 @@
 //! Supports: equals, deepEquals, contains, startsWith, endsWith, matches, exists, not, or, and
 //! Also supports requestFrom, ip, and form fields.
 
-use crate::behaviors::{extract_jsonpath, extract_xpath_with_ns};
+use crate::behaviors::{
+    LazyXmlDom, eval_xpath_on, extract_jsonpath, extract_jsonpath_value, extract_xpath_with_ns,
+};
 use crate::imposter::types::{Predicate, PredicateOperation, PredicateSelector};
 use crate::util::FastMap;
 use std::collections::HashMap;
@@ -41,6 +43,9 @@ where
     let query_map = parse_query(query);
     let form_fast: Option<FastMap<String, String>> =
         form.map(|f| f.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+    // Standalone callers of this wrapper aren't a per-request hot loop, so there's no shared DOM
+    // to thread in — `None` here just means an XPath predicate falls back to its own per-call parse
+    // (correct, just not cached; see `stub_matches_inner`).
     stub_matches_inner(
         predicates,
         method,
@@ -53,6 +58,7 @@ where
         form_fast.as_ref(),
         imposter_port,
         body_json.as_ref(),
+        None,
         Some(&query_map),
     )
 }
@@ -77,6 +83,12 @@ pub(crate) fn stub_matches_inner<SH>(
     form: Option<&FastMap<String, String>>,
     imposter_port: u16,
     body_json: Option<&serde_json::Value>,
+    // The once-per-request lazily-parsed XML DOM (issue #711): `Some` on the request hot path
+    // (`find_matching_stub_with_client`/`_linear`), which constructs one `LazyXmlDom` before the
+    // stub loop and shares it across every stub's XPath predicates, so the body is parsed at most
+    // once per request no matter how many XPath predicates evaluate it. `None` for standalone
+    // callers (the `stub_matches` wrapper, tests) — they fall back to a per-call parse.
+    xml_dom: Option<&LazyXmlDom<'_>>,
     // Always sourced from `parse_query`/`parse_query_string` (issue #704); same reasoning as `form`.
     query_map: Option<&FastMap<String, String>>,
 ) -> anyhow::Result<bool>
@@ -102,6 +114,7 @@ where
             form,
             imposter_port,
             body_json,
+            xml_dom,
             query_map,
         )? {
             return Ok(false);
@@ -170,6 +183,8 @@ where
     let query_map = parse_query(query);
     let form_fast: Option<FastMap<String, String>> =
         form.map(|f| f.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+    // Not the request hot loop — no shared DOM to thread in (see `stub_matches` for the same
+    // reasoning); an XPath predicate degrades to its own per-call parse.
     predicate_matches_inner(
         predicate,
         method,
@@ -182,6 +197,7 @@ where
         form_fast.as_ref(),
         imposter_port,
         body_json.as_ref(),
+        None,
         Some(&query_map),
     )
 }
@@ -209,6 +225,8 @@ pub(crate) fn predicate_matches_inner<SH>(
     form: Option<&FastMap<String, String>>,
     imposter_port: u16,
     body_json: Option<&serde_json::Value>,
+    // The once-per-request lazily-parsed XML DOM (issue #711) — see `stub_matches_inner`.
+    xml_dom: Option<&LazyXmlDom<'_>>,
     // Concretely `FastMap` — see `stub_matches_inner`.
     query_map: Option<&FastMap<String, String>>,
 ) -> anyhow::Result<bool>
@@ -292,15 +310,27 @@ where
     let extracted_body: String;
     let effective_body = match &predicate.parameters.selector {
         Some(PredicateSelector::JsonPath { selector }) => {
-            extracted_body = extract_jsonpath(body_str, selector).unwrap_or_default();
+            // Reuse the once-per-request body parse when the caller threaded it (issue #290) —
+            // `extract_jsonpath_value` also reuses the process-wide compiled-selector cache
+            // (issue #711) so this doesn't recompile `selector` per stub/predicate either way.
+            extracted_body = match body_json {
+                Some(json) => extract_jsonpath_value(json, selector),
+                None => extract_jsonpath(body_str, selector),
+            }
+            .unwrap_or_default();
             &extracted_body
         }
         Some(PredicateSelector::XPath {
             selector,
             namespaces,
         }) => {
-            extracted_body =
-                extract_xpath_with_ns(body_str, selector, namespaces.as_ref()).unwrap_or_default();
+            // Reuse the once-per-request DOM when the caller threaded it (issue #711) — the DOM is
+            // parsed at most once no matter how many XPath predicates/stubs evaluate it this request.
+            extracted_body = match xml_dom.and_then(LazyXmlDom::document) {
+                Some(document) => eval_xpath_on(&document, selector, namespaces.as_ref()),
+                None => extract_xpath_with_ns(body_str, selector, namespaces.as_ref()),
+            }
+            .unwrap_or_default();
             &extracted_body
         }
         None => body_str,
@@ -434,6 +464,7 @@ where
             form,
             imposter_port,
             body_json,
+            xml_dom,
             Some(query_map),
         )?),
         PredicateOperation::Or(children) => {
@@ -453,6 +484,7 @@ where
                     form,
                     imposter_port,
                     body_json,
+                    xml_dom,
                     Some(query_map),
                 )? {
                     return Ok(true);
@@ -476,6 +508,7 @@ where
                     form,
                     imposter_port,
                     body_json,
+                    xml_dom,
                     Some(query_map),
                 )? {
                     return Ok(false);
@@ -2331,6 +2364,7 @@ mod tests {
                 0,
                 None,
                 None,
+                None,
             )
             .is_err(),
             "an `or` must propagate a nested inject error rather than short-circuit past it"
@@ -2351,6 +2385,7 @@ mod tests {
                 0,
                 None,
                 None,
+                None,
             )
             .is_err(),
             "an `and` must propagate a nested inject error"
@@ -2369,6 +2404,7 @@ mod tests {
                 None,
                 None,
                 0,
+                None,
                 None,
                 None,
             )
@@ -2429,6 +2465,7 @@ mod tests {
             None,
             0,
             None,
+            None,
             Some(&parsed),
         )
         .unwrap();
@@ -2443,6 +2480,7 @@ mod tests {
             None,
             None,
             0,
+            None,
             None,
             None,
         )
