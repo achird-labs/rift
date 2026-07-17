@@ -39,6 +39,54 @@ python3 scripts/bench_admin.py --run-all \
 cat results/ADMIN_BENCHMARK_REPORT.md
 ```
 
+The default `--run-all` is the Rift-vs-Mountebank comparison and is unchanged
+(`results/DIRECT_BENCHMARK_REPORT.md`). `direct_rift.csv`/`direct_mb.csv` now carry
+three extra columns — `connections`, `mode` (`closed` or `open@<rate>`), and `p999_ms`.
+Readers key off the header (`csv.DictReader`), so the added columns don't break parsing;
+the Turbo-round modes below reuse the same schema.
+
+### Turbo round: concurrency sweep, recording, and open-loop (Rift-only)
+
+These modes measure *Rift's* scaling and tail behaviour; they force `--engines rift`
+(the Mountebank comparison stays the single-point run above). Output is
+`results/DIRECT_RIFT_SWEEP_REPORT.md` (a scenario × connection matrix of RPS and p999)
+plus the extended `direct_rift.csv`.
+
+**Step 1 — sweep to find saturation.** Run every scenario across a range of connection
+counts and read where RPS stops climbing:
+
+```bash
+python3 scripts/bench_direct.py --run-all --engines rift \
+    --sweep-connections 1,10,50,200 \
+    --rift-bin ../../target/release/rift-http-proxy
+cat results/DIRECT_RIFT_SWEEP_REPORT.md
+```
+
+The sweep also runs the **`recording_on`** scenario — the `api_middle` stub set on an
+imposter with `recordRequests: true`, so the journal write path is under load. After each
+point the harness asserts the journal recorded requests and stayed within the 10,000-entry
+cap (at any point above a trickle of traffic it fills to that cap); its row is marked
+`**(recording)**` in the report.
+
+**Step 2 — open-loop at fractions of saturation.** Closed-loop hides tail latency
+(coordinated omission). Take the saturation RPS `S` from the sweep and re-run at a *fixed
+arrival rate* (`oha -q`) of 50 % / 80 % / 95 % of `S` to see the real tail:
+
+```bash
+# e.g. saturation S ≈ 200000 → run at 100000, 160000, 190000
+for rate in 100000 160000 190000; do
+  python3 scripts/bench_direct.py --run-all --engines rift \
+      --open-loop $rate --connections 200 \
+      --rift-bin ../../target/release/rift-http-proxy
+  cp results/DIRECT_RIFT_SWEEP_REPORT.md results/open_loop_$rate.md
+done
+```
+
+Compare the `p999_ms` rows across the three fractions: a tail that stays flat up to 95 %
+of `S` and only then climbs is healthy; one that climbs at 50 % points at backpressure or
+accept-loop contention — exactly the structural changes the Turbo Tier-3/Tier-4 issues
+target.
+
 Both scripts run each engine **one at a time on disjoint port ranges** (no CPU
 contention, no cross-talk), launch it in its own process group and hard-kill it by
 group + `lsof` before the next engine starts, and post **identical** imposter JSON to
