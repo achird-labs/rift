@@ -101,6 +101,16 @@ record.
 
 ### Changed
 
+- **The imposter port registry is now lock-free on every request-serving lookup.** It was a
+  `RwLock<HashMap<u16, Arc<Imposter>>>`; the admin gateway (`/__rift/:port/...`) and embedded
+  per-request dispatch resolved a port through that read lock on the hot path. Because the port
+  keyspace is `u16`, it is now a fixed 65536-slot `ArcSwapOption` table (one slot per possible port,
+  ~512 KB) — a lookup is a single wait-free atomic load, no hashing and no lock. Mutations
+  (create/delete) are serialized by a small mutation mutex that preserves the previous
+  check-then-insert duplicate-port semantics exactly. Admin listings (`GET /imposters`, metrics) now
+  enumerate ports in deterministic ascending order (previously arbitrary hash order). No admin API
+  shape changed.
+
 - **Path `startsWith`/`contains`/`endsWith` stubs are matched in a single Aho-Corasick pass, and
   `endsWith` is now indexed at all.** The Stage-1 prefilter previously walked a linear bucket per
   distinct prefix/substring literal, so the prefilter's own cost grew with the number of literal
