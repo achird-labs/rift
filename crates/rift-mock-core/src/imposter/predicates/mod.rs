@@ -557,7 +557,7 @@ where
 }
 
 mod fields;
-mod json;
+pub(crate) mod json;
 pub(crate) mod regex_cache;
 use fields::{check_predicate_fields, check_predicate_fields_regex};
 use json::check_exists_predicate;

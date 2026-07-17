@@ -334,11 +334,61 @@ fn bench_xpath_heavy(c: &mut Criterion) {
     group.finish();
 }
 
+/// Issue #708: the deepEquals-body dimension's headline. Every stub asserts one exact JSON body via
+/// `deepEquals`, all sharing one path/method so no other dimension can prune — before #708 that meant
+/// a full recursive structural comparison of every stub's body on every request (O(stubs × body)).
+/// The request body equals the *last* stub's, so nothing short-circuits early. With the body-hash
+/// dimension the candidate set collapses to ~1 via a single hash probe.
+fn bench_deepequals_body(c: &mut Criterion) {
+    let headers: HashMap<String, String> = HashMap::new();
+    let mut group = c.benchmark_group("find_matching_stub_deepequals_body");
+    for count in [10usize, 100, 500] {
+        let imposter = imposter_with_stubs(
+            count,
+            &|i| json!({ "deepEquals": { "body": { "id": i, "kind": "order", "note": "x" } } }),
+        );
+        let body = format!(r#"{{"id":{},"kind":"order","note":"x"}}"#, count - 1);
+        assert!(
+            imposter
+                .find_matching_stub_with_client(
+                    "POST",
+                    "/orders",
+                    &headers,
+                    None,
+                    Some(&body),
+                    None,
+                    None
+                )
+                .expect("matching must not error")
+                .is_some(),
+            "deepequals_body/{count}: fixture no longer matches its target stub",
+        );
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
+            b.iter(|| {
+                imposter
+                    .find_matching_stub_with_client(
+                        "POST",
+                        black_box("/orders"),
+                        black_box(&headers),
+                        None,
+                        black_box(Some(body.as_str())),
+                        None,
+                        None,
+                    )
+                    .expect("matching must not error")
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_stub_matches,
     bench_find_matching_stub,
     bench_method_dimension,
-    bench_xpath_heavy
+    bench_xpath_heavy,
+    bench_deepequals_body
 );
 criterion_main!(benches);

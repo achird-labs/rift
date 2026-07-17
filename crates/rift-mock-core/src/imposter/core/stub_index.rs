@@ -50,6 +50,7 @@
 
 use super::StubState;
 use super::bitset::CandidateBits;
+use crate::imposter::predicates::json::structural_hash;
 use crate::imposter::types::Stub;
 use crate::util::FastMap;
 use aho_corasick::{AhoCorasick, MatchKind as AcMatchKind};
@@ -64,6 +65,9 @@ use std::sync::Arc;
 pub(crate) struct DimensionRequest<'a> {
     pub(crate) method: &'a str,
     pub(crate) path: &'a str,
+    /// The request body parsed as JSON once per request (#290), if it parsed. `None` for a non-JSON
+    /// or absent body — the body dimension (#708) can only prune JSON request bodies.
+    pub(crate) body: Option<&'a serde_json::Value>,
 }
 
 /// One pruning dimension of the index. See the module docs for the soundness rule this contract
@@ -656,6 +660,70 @@ impl Dimension for RegexDimension {
     }
 }
 
+/// The structural hash of a stub predicate's eligible `deepEquals`-on-`body` constraint (#708).
+///
+/// Eligible (conservative first cut): a top-level `deepEquals` whose `body` field is an object or
+/// array (a scalar `body` compares against the raw request string, not the parse — `fields.rs`),
+/// that is safely indexable ([`is_safely_indexable`]: no `except`, no selector, not
+/// `caseSensitive: true`) and not `keyCaseSensitive: true`, and whose expected body has no JSON-ish
+/// string leaf ([`structural_hash`] → `Some`). Anything else → `None` → `always_bits`.
+///
+/// Other fields on the same `deepEquals`, and the stub's other predicates, are further required
+/// constraints; ignoring them here only over-approximates (Stage-2 still checks them), exactly as
+/// the path/regex/literal classifiers index only their first anchor.
+fn body_anchor(pred: &Predicate) -> Option<u64> {
+    if !is_safely_indexable(&pred.parameters) || pred.parameters.key_case_sensitive == Some(true) {
+        return None;
+    }
+    let PredicateOperation::DeepEquals(fields) = &pred.operation else {
+        return None;
+    };
+    match fields.get("body") {
+        Some(v @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) => {
+            structural_hash(v)
+        }
+        _ => None,
+    }
+}
+
+/// The deepEquals-body dimension (issue #708): collapses "which of N `deepEquals`-on-body stubs
+/// equals this request body" from O(stubs × body) structural comparisons into one hash probe.
+struct BodyHashDimension {
+    /// `structural_hash(expected body)` → the stubs sharing it. A `Vec` bucket (not a bitset) like
+    /// [`PathDimension`], since it holds only the stubs at one hash. Keyed by our own `FixedState`-
+    /// derived `u64`, so the request-scoped `FastMap` hasher just re-hashes an already-good `u64`.
+    by_hash: FastMap<u64, Vec<usize>>,
+    /// Stubs with no eligible `deepEquals` body anchor — always candidates on this dimension.
+    always: CandidateBits,
+    len: usize,
+}
+
+impl Dimension for BodyHashDimension {
+    fn select(&self, request: &DimensionRequest<'_>, out: &mut CandidateBits) {
+        match request.body {
+            // A non-JSON (or absent) body can never `deepEquals` an object/array expected body, so
+            // every indexed stub is soundly excluded — only `always` stubs survive.
+            None => out.copy_from(&self.always),
+            Some(body) => match structural_hash(body) {
+                // A JSON-ish string leaf in the request body is equivalent (both directions) to a
+                // container an indexed stub may expect, which no structural hash can reconcile — so
+                // this dimension must not prune this request. Widen to all; Stage-2 decides.
+                None => out.copy_from(&CandidateBits::all(self.len)),
+                Some(h) => {
+                    out.copy_from(&self.always);
+                    if let Some(ids) = self.by_hash.get(&h) {
+                        ids.iter().for_each(|i| out.set(*i));
+                    }
+                }
+            },
+        }
+    }
+
+    fn prunes(&self) -> bool {
+        !self.by_hash.is_empty()
+    }
+}
+
 /// The multi-dimensional candidate prefilter over a stub snapshot. See the module docs.
 pub(crate) struct StubIndex {
     len: usize,
@@ -663,6 +731,7 @@ pub(crate) struct StubIndex {
     method: MethodDimension,
     literal: LiteralDimension,
     regex: RegexDimension,
+    body: BodyHashDimension,
 }
 
 impl StubIndex {
@@ -683,6 +752,9 @@ impl StubIndex {
         let mut regex_ci: Vec<(usize, String)> = Vec::new();
         let mut regex_cs: Vec<(usize, String)> = Vec::new();
         let mut regex_always = CandidateBits::zeros(len);
+
+        let mut body_by_hash: FastMap<u64, Vec<usize>> = FastMap::default();
+        let mut body_always = CandidateBits::zeros(len);
 
         for (i, state) in stubs.iter().enumerate() {
             match classify(&state.stub) {
@@ -712,6 +784,12 @@ impl StubIndex {
                 Some(a) if a.case_sensitive => regex_cs.push((i, a.pattern.to_owned())),
                 Some(a) => regex_ci.push((i, a.pattern.to_owned())),
                 None => regex_always.set(i),
+            }
+            // Only the first eligible deepEquals-body anchor is indexed — same first-anchor rule as
+            // above; a stub's further body constraints stay required and are checked by Stage 2.
+            match state.stub.predicates.iter().find_map(body_anchor) {
+                Some(h) => body_by_hash.entry(h).or_default().push(i),
+                None => body_always.set(i),
             }
         }
 
@@ -745,12 +823,18 @@ impl StubIndex {
             sensitive,
             always: regex_always,
         };
+        let body = BodyHashDimension {
+            by_hash: body_by_hash,
+            always: body_always,
+            len,
+        };
         StubIndex {
             len,
             path,
             method,
             literal,
             regex,
+            body,
         }
     }
 
@@ -821,8 +905,11 @@ impl StubIndex {
         if Self::fold_in(&self.method, request, &mut acc, &mut seeded, self.len)
             && Self::fold_in(&self.path, request, &mut acc, &mut seeded, self.len)
             && Self::fold_in(&self.literal, request, &mut acc, &mut seeded, self.len)
+            && Self::fold_in(&self.regex, request, &mut acc, &mut seeded, self.len)
         {
-            Self::fold_in(&self.regex, request, &mut acc, &mut seeded, self.len);
+            // Body last: hashing the request body is O(body), so let the cheap path/method/automaton
+            // dimensions empty the accumulator first (short-circuiting the hash away) where they can.
+            Self::fold_in(&self.body, request, &mut acc, &mut seeded, self.len);
         }
 
         // No dimension indexes anything (e.g. every stub is a body regex): everyone is a candidate.
@@ -901,9 +988,25 @@ impl StubSnapshot {
         self.has_scenario_gate
     }
 
-    /// Candidate stub ids for a request — see [`StubIndex::candidates`].
+    /// Candidate stub ids for a request that carries no (or a non-JSON) body — see
+    /// [`StubIndex::candidates`]. The body dimension then contributes only its `always` stubs.
     pub(crate) fn candidates(&self, method: &str, path: &str) -> CandidateBits {
-        self.index.candidates(&DimensionRequest { method, path })
+        self.candidates_with_body(method, path, None)
+    }
+
+    /// Candidate stub ids for a request, threading the once-per-request parsed body (#290/#708) so
+    /// the deepEquals-body dimension can prune. `body_json` is `None` for a non-JSON/absent body.
+    pub(crate) fn candidates_with_body(
+        &self,
+        method: &str,
+        path: &str,
+        body_json: Option<&serde_json::Value>,
+    ) -> CandidateBits {
+        self.index.candidates(&DimensionRequest {
+            method,
+            path,
+            body: body_json,
+        })
     }
 
     /// The index over these stubs (tests assert dimension-level behaviour through it).
@@ -946,6 +1049,18 @@ mod tests {
     /// existing coverage/ordering assertions read unchanged.
     fn candidate_ids(snap: &StubSnapshot, method: &str, path: &str) -> Vec<usize> {
         snap.candidates(method, path).iter().collect()
+    }
+
+    /// The candidate ids for a request with a JSON body, ascending (#708 body dimension).
+    fn candidate_ids_body(
+        snap: &StubSnapshot,
+        method: &str,
+        path: &str,
+        body: &Value,
+    ) -> Vec<usize> {
+        snap.candidates_with_body(method, path, Some(body))
+            .iter()
+            .collect()
     }
 
     fn imposter(preds: &[Value]) -> Imposter {
@@ -1369,7 +1484,7 @@ mod tests {
             .map(|_| {
                 let seg = SEGS[rng.gen_range(0..SEGS.len())];
                 let m = METHODS[rng.gen_range(0..METHODS.len())];
-                match rng.gen_range(0..28) {
+                match rng.gen_range(0..32) {
                     // Indexable on both dimensions (one predicate, two fields).
                     0 => json!([{"equals": {"method": m, "path": seg}}]),
                     // Indexable on both dimensions (two separate top-level predicates).
@@ -1420,6 +1535,14 @@ mod tests {
                     // a shape that reliably produces it this oracle cannot see that whole class of
                     // under-approximation — it passed against exactly that bug during #709.
                     19 => json!([{"matches": {"path": format!("^{seg}")}}]),
+                    // deepEquals-body (#708): eligible object/array bodies the body-hash dimension
+                    // indexes, drawn from the same templates the request generator sends so they
+                    // frequently match — the shape that exercises the dimension, not just its always
+                    // set. `caseSensitive`/json-in-string are the carve-outs that must stay always.
+                    28 => json!([{"deepEquals": {"body": {"k": 1}}}]),
+                    29 => json!([{"deepEquals": {"body": [1, 2]}}]),
+                    30 => json!([{"deepEquals": {"body": {"n": {"a": 1}}}}]),
+                    31 => json!([{"deepEquals": {"body": {"k": 1}}, "caseSensitive": true}]),
                     _ => json!([]),
                 }
             })
@@ -1460,10 +1583,18 @@ mod tests {
             for _ in 0..1250 {
                 let m = METHODS[rng.gen_range(0..METHODS.len())];
                 let p = PATHS[rng.gen_range(0..PATHS.len())];
-                let body = if rng.gen_bool(0.25) {
-                    Some("ping")
-                } else {
-                    None
+                // Mix non-JSON, absent, and several JSON bodies — exact matches, a type-coercion
+                // variant, an array, a JSON-in-string leaf (the bail path), and a nested object —
+                // so the body-hash dimension (#708) is exercised against the linear oracle.
+                let body = match rng.gen_range(0..8) {
+                    0 => Some("ping"),
+                    1 => Some(r#"{"k":1}"#),
+                    2 => Some(r#"{"k":"1"}"#),
+                    3 => Some(r#"[1,2]"#),
+                    4 => Some(r#"{"n":{"a":1}}"#),
+                    5 => Some(r#"{"j":"{\"x\":1}"}"#),
+                    6 => None,
+                    _ => None,
                 };
                 let query = if rng.gen_bool(0.25) {
                     Some("a=1")
@@ -2013,5 +2144,91 @@ mod tests {
             {"or": [{"equals": {"path": "/a"}}, {"not": {"inject": "function (config) { return true; }"}}]}
         ])]));
         assert!(under_not_in_or.has_inject());
+    }
+
+    // ---- issue #708: deepEquals body-hash dimension ----
+
+    fn deep_body(expected: Value) -> Value {
+        json!([{"deepEquals": {"body": expected}}])
+    }
+
+    #[test]
+    fn body_dimension_collapses_candidates() {
+        // 500 deepEquals-body stubs, each expecting a distinct object. A request equal to one must
+        // probe down to just that stub — O(stubs) structural comparisons collapse to one hash probe.
+        let preds: Vec<Value> = (0..500)
+            .map(|i| deep_body(json!({"id": i, "kind": "order"})))
+            .collect();
+        let snap = snapshot(&preds);
+
+        let target = 437usize;
+        let ids = candidate_ids_body(&snap, "POST", "/x", &json!({"id": target, "kind": "order"}));
+        assert_eq!(ids.len(), 1, "collapses to a single candidate, got {ids:?}");
+        assert_eq!(ids, vec![target]);
+
+        // A body equal to none of them prunes the whole dimension to empty.
+        assert!(
+            candidate_ids_body(&snap, "POST", "/x", &json!({"id": 9999, "kind": "order"}))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn body_dimension_matches_across_coercion_key_order_and_case() {
+        let snap = snapshot(&[
+            deep_body(json!({"a": 1, "b": "x"})), // 0
+            deep_body(json!({"a": 2})),           // 1
+        ]);
+        // number↔string coercion, object key order, and ASCII key/value case all fold to stub 0.
+        let ids = candidate_ids_body(&snap, "POST", "/p", &json!({"B": "X", "a": "1"}));
+        assert_eq!(ids, vec![0]);
+    }
+
+    #[test]
+    fn body_dimension_ineligible_stubs_are_never_pruned() {
+        let snap = snapshot(&[
+            json!([{"deepEquals": {"body": {"a": 1}}, "caseSensitive": true}]), // 0 caseSensitive
+            json!([{"deepEquals": {"body": {"a": 1}}, "keyCaseSensitive": true}]), // 1 keyCaseSensitive
+            json!([{"deepEquals": {"body": {"a": 1}}, "jsonpath": {"selector": "$.x"}}]), // 2 selector
+            json!([{"deepEquals": {"body": "hello"}}]), // 3 scalar body (raw-string compare)
+            json!([{"deepEquals": {"body": {"a": "{\"k\":1}"}}}]), // 4 JSON-in-string leaf in expected
+            json!([{"deepEquals": {"body": {"a": 1}}, "except": "x"}]), // 5 except (rewrites the value)
+            deep_body(json!({"eligible": true})),                       // 6 ELIGIBLE (indexed)
+        ]);
+        // A body matching only stub 6: the eligible stub is hit by the probe; the six ineligible
+        // stubs are `always` and must all remain — none can be hash-pruned.
+        let hit = candidate_ids_body(&snap, "POST", "/p", &json!({"eligible": true}));
+        assert_eq!(hit, vec![0, 1, 2, 3, 4, 5, 6]);
+        // A body matching none: only the eligible stub 6 is pruned; the carve-outs stay candidates.
+        let miss = candidate_ids_body(&snap, "POST", "/p", &json!({"zzz": 0}));
+        assert_eq!(miss, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn body_dimension_non_json_body_excludes_indexed_stubs() {
+        let snap = snapshot(&[
+            deep_body(json!({"a": 1})),          // 0 indexed body stub
+            json!([{"equals": {"path": "/p"}}]), // 1 path stub
+        ]);
+        // `candidate_ids` sends no body (the non-JSON/absent case): the indexed body stub cannot
+        // match, so it is excluded; the path stub still matches /p.
+        assert_eq!(candidate_ids(&snap, "GET", "/p"), vec![1]);
+    }
+
+    #[test]
+    fn body_dimension_json_in_string_request_widens() {
+        let snap = snapshot(&[
+            deep_body(json!({"a": {"b": 1}})), // 0 expects a nested object
+            deep_body(json!({"z": 9})),        // 1
+        ]);
+        // The request body carries a JSON-ish string leaf, equivalent (both directions) to the
+        // object stub 0 expects. The dimension must not prune — it widens to every candidate so
+        // Stage-2 can confirm stub 0. (Soundness over precision: stub 1 rides along.)
+        let ids = candidate_ids_body(&snap, "POST", "/p", &json!({"a": "{\"b\":1}"}));
+        assert_eq!(
+            ids,
+            vec![0, 1],
+            "a JSON-ish string leaf disables pruning for the dimension"
+        );
     }
 }
