@@ -37,6 +37,17 @@ record.
   flow_id=<Value>, method=<Verb> or path=<Path>)`). Older engines still fail closed with a clear
   `400` on the new clauses, so SDKs gate on a minimum engine version rather than sniffing.
 
+### Changed
+
+- **`deepEquals`-on-body matching is now indexed by a structural body hash** instead of being
+  compared stub-by-stub. For the classic contract-test workload — hundreds of stubs on one
+  path/method, each asserting one exact JSON body — selecting the matching stub drops from an
+  `O(stubs × body)` scan of structural comparisons to a single `O(body)` hash probe. Matching
+  results are unchanged; this is purely a prefilter. The index applies to default-mode `deepEquals`
+  whose `body` is a JSON object or array; `caseSensitive`/`keyCaseSensitive`, a `jsonpath`/`xpath`
+  selector, an `except`, a scalar `body`, or an expected body containing a string that is itself
+  JSON all fall back to the existing full comparison (correctness is never affected, only pruning).
+
 ### Fixed
 
 - **A stub whose configured `Content-Type` used a nonstandard casing (e.g. `CONTENT-TYPE`) with a

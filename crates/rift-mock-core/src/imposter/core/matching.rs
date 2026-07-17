@@ -65,7 +65,10 @@ impl Imposter {
         // shared across every remaining stub in this request's scan — one parse per request, not
         // one per XPath predicate evaluation.
         let xml_dom = body.map(crate::behaviors::LazyXmlDom::new);
-        for stub_idx in snapshot.candidates(method, path).iter() {
+        for stub_idx in snapshot
+            .candidates_with_body(method, path, body_json.as_ref())
+            .iter()
+        {
             let stub_state = &stubs[stub_idx];
             let stub = &stub_state.stub;
             // Correlated-isolation gate (issue #223, runs first): a space-scoped stub only
