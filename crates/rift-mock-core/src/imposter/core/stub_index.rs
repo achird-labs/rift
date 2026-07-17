@@ -56,6 +56,7 @@ use aho_corasick::{AhoCorasick, MatchKind as AcMatchKind};
 use regex_automata::util::syntax;
 use regex_automata::{Input, MatchKind, PatternSet, meta};
 use rift_types::predicate::{Predicate, PredicateOperation};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -175,9 +176,17 @@ struct PathDimension {
 impl Dimension for PathDimension {
     fn select(&self, request: &DimensionRequest<'_>, out: &mut CandidateBits) {
         out.copy_from(&self.always);
-        // Anchors were folded at build; fold the request the same way — see `fold`.
-        let p = fold(request.path);
-        if let Some(v) = self.exact.get(&p) {
+        // Anchors were folded at build; fold the request the same way — see `fold`. Request paths
+        // are overwhelmingly already lowercase, so probe the map with the borrowed `&str` directly
+        // and pay for the folded `String` only when an uppercase ASCII byte is actually present
+        // (issue #731 — the fold's only effect is ASCII case, so a path with no uppercase byte
+        // folds to itself).
+        let matched = if request.path.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.exact.get(&fold(request.path))
+        } else {
+            self.exact.get(request.path)
+        };
+        if let Some(v) = matched {
             v.iter().for_each(|i| out.set(*i));
         }
     }
@@ -433,15 +442,35 @@ struct MultiRegex {
     pattern_stubs: Vec<usize>,
 }
 
+thread_local! {
+    /// Scratch [`PatternSet`] for [`MultiRegex::mark`]. regex-automata recommends reusing a
+    /// `PatternSet` across searches (clearing between calls) rather than allocating one per call.
+    /// `StubSnapshot`/dimensions are `Arc`-shared and read concurrently, so the reuse buffer must
+    /// be per-thread. Matching runs synchronously in both of its homes (inline on a tokio worker,
+    /// or on a `spawn_blocking` thread for inject/scenario snapshots) and never holds this borrow
+    /// across an `.await`, so the scoped borrow is sound in both (issue #731).
+    static PATTERN_SCRATCH: RefCell<PatternSet> = RefCell::new(PatternSet::new(0));
+}
+
 impl MultiRegex {
     /// Set a bit for every stub whose pattern matches `path`, in one pass over the haystack.
     fn mark(&self, path: &str, out: &mut CandidateBits) {
-        let mut set = PatternSet::new(self.re.pattern_len());
-        self.re
-            .which_overlapping_matches(&Input::new(path), &mut set);
-        for pid in set.iter() {
-            out.set(self.pattern_stubs[pid.as_usize()]);
-        }
+        PATTERN_SCRATCH.with_borrow_mut(|set| {
+            // `which_overlapping_matches` needs a `PatternSet` sized for this automaton. Grow the
+            // reused buffer only when this automaton has more patterns than any seen before on
+            // this thread; otherwise `clear` it — a larger capacity is fine, `iter` yields only
+            // the pids actually inserted by this search.
+            let needed = self.re.pattern_len();
+            if set.capacity() < needed {
+                *set = PatternSet::new(needed);
+            } else {
+                set.clear();
+            }
+            self.re.which_overlapping_matches(&Input::new(path), set);
+            for pid in set.iter() {
+                out.set(self.pattern_stubs[pid.as_usize()]);
+            }
+        });
     }
 }
 
@@ -1656,6 +1685,58 @@ mod tests {
         }
         // A path no pattern matches prunes every stub.
         assert_eq!(snap.candidates("GET", "/nothing").count(), 0);
+    }
+
+    // #731: `MultiRegex::mark` reuses a thread-local `PatternSet` (grow-then-clear). Verify the
+    // reuse is correct when (a) automata of different `pattern_len` run on the same thread — a
+    // larger capacity must not leak stale pids into a smaller search — and (b) both regex case
+    // classes run within one request's `select`, i.e. `mark` is called twice in a row.
+    #[test]
+    fn regex_scratch_reuse_is_correct() {
+        // (a) Large automaton first — grows the thread-local scratch capacity to 100.
+        let big: Vec<Value> = (0..100)
+            .map(|i| json!([{"matches": {"path": format!("^/e{i}$")}}]))
+            .collect();
+        let big_snap = snapshot(&big);
+        assert_eq!(candidate_ids(&big_snap, "GET", "/e42"), vec![42]);
+
+        // (b) Then a small automaton on the same thread — reuses the larger scratch via `clear`;
+        // `iter` must yield only this search's pids, none left over from the 100-pattern search.
+        let small = snapshot(&[
+            json!([{"matches": {"path": "^/only$"}}]),
+            json!([{"matches": {"path": "^/other$"}}]),
+        ]);
+        assert_eq!(candidate_ids(&small, "GET", "/only"), vec![0]);
+        assert!(candidate_ids(&small, "GET", "/nomatch").is_empty());
+
+        // (c) Two case classes in one request → `mark` runs twice sequentially on this thread.
+        let mixed = snapshot(&[
+            json!([{"matches": {"path": "^/mix$"}}]), // 0 default (case-insensitive) class
+            json!([{"matches": {"path": "^/MIX$"}, "caseSensitive": true}]), // 1 case-sensitive class
+        ]);
+        assert_eq!(candidate_ids(&mixed, "GET", "/mix"), vec![0]);
+        assert_eq!(candidate_ids(&mixed, "GET", "/MIX"), vec![0, 1]);
+
+        // (d) Back to the large automaton on the same thread — scratch already at capacity 100.
+        assert_eq!(candidate_ids(&big_snap, "GET", "/e7"), vec![7]);
+    }
+
+    // #731: `PathDimension::select` probes the map with the borrowed `&str` when the request path
+    // has no uppercase ASCII byte (no allocation) and folds only when one is present. Both branches
+    // must resolve identically to the previous fold-always behavior.
+    #[test]
+    fn path_dimension_fast_path_matches_regardless_of_case() {
+        let snap = snapshot(&[
+            json!([{"equals": {"path": "/users"}}]), // 0 anchor folds to "/users"
+            json!([{"equals": {"path": "/Admin"}}]), // 1 anchor folds to "/admin"
+        ]);
+        // Already-lowercase request → borrowed-&str fast path, matches stub 0.
+        assert_eq!(candidate_ids(&snap, "GET", "/users"), vec![0]);
+        // Uppercase in the request → folded, matches stub 1's folded anchor.
+        assert_eq!(candidate_ids(&snap, "GET", "/ADMIN"), vec![1]);
+        // Lowercase request equal to the folded anchor also matches via the fast path.
+        assert_eq!(candidate_ids(&snap, "GET", "/admin"), vec![1]);
+        assert!(candidate_ids(&snap, "GET", "/nope").is_empty());
     }
 
     // The regex dimension must report EVERY pattern that matches a path, not just the
