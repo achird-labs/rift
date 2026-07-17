@@ -20,9 +20,14 @@ Run everything (launches + stops both engines, writes the report):
 Must be run OUTSIDE the CLI sandbox (via the sidecar) because `oha` needs
 macOS keychain access to initialise TLS even for plain-HTTP targets.
 """
-import argparse, json, subprocess, sys, time, urllib.request, urllib.error, os, signal, shutil
+import argparse, csv, json, subprocess, sys, time, urllib.request, urllib.error, os, signal, shutil
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "..", "results")
+
+# Mirrors rift's journal cap (crates/rift-mock-core/src/imposter/journal.rs: MAX_RECORDED_REQUESTS).
+# Under load the retained-entries count saturates here while numberOfRequests keeps climbing, so the
+# recording_on assertion checks "journal filled AND cap respected" against this bound.
+MAX_RECORDED_REQUESTS = 10_000
 
 # ---- imposter config generation (identical JSON posted to both engines) ----
 
@@ -183,7 +188,20 @@ EXPECT_BODY = {
     "template": '"template": 25',
     "header_last": '"routed_to": 100',
     "query_last": '"page": 100',
+    # recording_on hits the same api_middle path on a recordRequests imposter, so it matches
+    # the same stub and returns the same body marker.
+    "recording_on": '"name": "resource5_5"',
 }
+
+# recording_on (issue #702): the same stub set as api_middle, but on an imposter with
+# `recordRequests: true` so the journal write path is exercised under load. It is ADDITIVE —
+# never part of the MB-comparison SCENARIOS above — and only runs in the Rift-only sweep.
+RECORDING_PORT = 4556
+RECORDING_SCENARIO = ("recording_on", RECORDING_PORT, "GET", "/api/v1/resource5/5", None, {})
+
+def recording_imposter_config(offset):
+    return {"port": RECORDING_PORT + offset, "protocol": "http", "name": "Recording",
+            "recordRequests": True, "stubs": api_stubs()}
 
 # ---- admin API helpers ----
 
@@ -218,26 +236,65 @@ def wait_ready(admin_port, tries=120):
         time.sleep(0.5)
     return False
 
-def load_imposters(admin, offset):
+def load_imposters(admin, offset, recording=False):
     delete(admin + "/imposters")
-    for port, name, stubs in IMPOSTERS:
-        status, body = post_json(admin + "/imposters",
-                                 {"port": port + offset, "protocol": "http", "name": name, "stubs": stubs})
+    configs = [{"port": port + offset, "protocol": "http", "name": name, "stubs": stubs}
+               for port, name, stubs in IMPOSTERS]
+    if recording:
+        configs.append(recording_imposter_config(offset))
+    for cfg in configs:
+        status, body = post_json(admin + "/imposters", cfg)
         if status != 201:
-            raise SystemExit(f"  ! create imposter {port+offset} ({name}) failed: HTTP {status}: {body[:200]}")
-    print(f"  loaded {len(IMPOSTERS)} imposters "
-          f"({sum(len(s) for _, _, s in IMPOSTERS)} stubs) at offset +{offset}")
+            raise SystemExit(f"  ! create imposter {cfg['port']} ({cfg['name']}) failed: HTTP {status}: {body[:200]}")
+    print(f"  loaded {len(configs)} imposters "
+          f"({sum(len(c['stubs']) for c in configs)} stubs) at offset +{offset}")
 
 # ---- oha runner ----
 
-def run_oha(url, method, body, headers, duration, conns):
+def parse_conn_list(s):
+    """Parse a --sweep-connections value like "1,10,50,200" into a list of positive ints."""
+    vals = [int(x.strip()) for x in s.split(",") if x.strip()]
+    if not vals or any(v <= 0 for v in vals):
+        raise ValueError(f"invalid connection list {s!r}: need one or more positive integers")
+    return vals
+
+def mode_label(rate):
+    """CSV `mode` column: closed-loop, or open-loop tagged with the fixed arrival rate."""
+    return "closed" if rate is None else f"open@{rate}"
+
+VALID_ENGINES = ("rift", "mb")
+
+def resolve_run_mode(engines_str, sweep_arg, open_loop, connections):
+    """Resolve (engines, conn_list, rate, recording) from CLI inputs, rejecting unknown engines.
+    Sweep and open-loop are Rift-only: they force engines=[rift] and enable the recording_on
+    scenario. The default run keeps the requested engines and runs closed-loop at one connection
+    count. Returning this as a pure tuple keeps the dispatch testable."""
+    engines = [e.strip() for e in engines_str.split(",") if e.strip()]
+    if not engines or any(e not in VALID_ENGINES for e in engines):
+        raise ValueError(f"invalid --engines {engines_str!r}: choose from {','.join(VALID_ENGINES)}")
+    sweep, open_loop_on = sweep_arg is not None, open_loop is not None
+    if sweep or open_loop_on:
+        engines = ["rift"]
+    conn_list = parse_conn_list(sweep_arg) if sweep else [connections]
+    recording = engines == ["rift"] and (sweep or open_loop_on)
+    return engines, conn_list, open_loop, recording
+
+def build_oha_cmd(url, method, body, headers, duration, conns, rate=None):
+    """Build the oha argv. `rate` (requests/sec) switches oha to open-loop (`-q`), a fixed
+    arrival rate that exposes coordinated-omission tail latency the closed-loop run hides."""
     cmd = ["oha", "-z", duration, "-c", str(conns), "--no-tui",
            "--output-format", "json", "-m", method]
+    if rate is not None:
+        cmd += ["-q", str(rate)]
     for k, v in headers.items():
         cmd += ["-H", f"{k}: {v}"]
     if body is not None:
         cmd += ["-d", body]
     cmd.append(url)
+    return cmd
+
+def run_oha(url, method, body, headers, duration, conns, rate=None):
+    cmd = build_oha_cmd(url, method, body, headers, duration, conns, rate)
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=int(duration.rstrip("s")) + 30)
     if out.returncode != 0:
         raise RuntimeError(f"oha failed: {out.stderr[:300]}")
@@ -271,43 +328,93 @@ def metric(j):
     codes = j.get("statusCodeDistribution", {})
     return {
         "rps": round(s["requestsPerSec"], 1),
-        "p50_ms": ms("p50"), "p90_ms": ms("p90"), "p99_ms": ms("p99"),
+        # oha reports the 99.9th percentile under the "p99.9" key; capture it for tail-latency
+        # comparisons (closed-loop hides the tail, open-loop exposes it).
+        "p50_ms": ms("p50"), "p90_ms": ms("p90"), "p99_ms": ms("p99"), "p999_ms": ms("p99.9"),
         "avg_ms": round(s["average"] * 1000, 3),
         "codes": codes,
     }
 
-def bench(engine, admin_port, offset, duration, warmup, conns):
+# ---- results CSV (extended with `connections` + `mode` + `p999_ms`, issue #702) ----
+
+CSV_HEADER = "scenario,connections,mode,rps,p50_ms,p90_ms,p99_ms,p999_ms,avg_ms"
+
+def _csv_num(v):
+    # A percentile can be legitimately absent (oha omits a p99.9 when a point has too few samples,
+    # e.g. c=1); record it as an empty cell, never the literal string "None".
+    return "" if v is None else v
+
+def csv_row(name, conns, mode, m):
+    cells = [name, conns, mode, m["rps"], _csv_num(m["p50_ms"]), _csv_num(m["p90_ms"]),
+             _csv_num(m["p99_ms"]), _csv_num(m["p999_ms"]), m["avg_ms"]]
+    return ",".join(str(c) for c in cells)
+
+def write_rift_csv(path, rows):
+    with open(path, "w") as f:
+        f.write(CSV_HEADER + "\n")
+        for name, conns, mode, m in rows:
+            f.write(csv_row(name, conns, mode, m) + "\n")
+
+def load_rift_csv(fh):
+    """Read the extended results CSV into a list of dict rows (keyed by header name), so callers
+    are insensitive to the added columns' positions."""
+    return list(csv.DictReader(fh))
+
+def journal_ok(number_of_requests, recorded_len, cap=MAX_RECORDED_REQUESTS):
+    """The recording_on journal-depth invariant: the imposter counted requests AND retained a
+    non-empty, cap-bounded window of them (the cap being respected under a flood is the point)."""
+    return number_of_requests > 0 and 0 < recorded_len <= cap
+
+def assert_journal_filled(engine, admin, offset):
+    """After the recording_on run, prove the journal write path actually recorded and honoured the
+    cap — otherwise a broken recorder would measure as fast while silently recording nothing."""
+    port = RECORDING_PORT + offset
+    with urllib.request.urlopen(f"{admin}/imposters/{port}", timeout=15) as r:
+        detail = json.loads(r.read())
+    n = detail.get("numberOfRequests", 0)
+    recorded = len(detail.get("requests", []))
+    if not journal_ok(n, recorded):
+        raise SystemExit(
+            f"{engine}/recording_on: journal assertion failed "
+            f"(numberOfRequests={n}, recorded={recorded}, cap={MAX_RECORDED_REQUESTS}) — aborting")
+    print(f"  journal ok: numberOfRequests={n}, recorded={recorded} (cap {MAX_RECORDED_REQUESTS})")
+
+def bench(engine, admin_port, offset, duration, warmup, conn_list, rate=None, recording=False):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     admin = f"http://localhost:{admin_port}"
     if not wait_ready(admin_port):
         raise SystemExit(f"{engine}: admin API not ready on {admin_port}")
     print(f"[{engine}] admin ready on {admin_port}; loading imposters")
-    load_imposters(admin, offset)
+    load_imposters(admin, offset, recording=recording)
     time.sleep(1)
+    mode = mode_label(rate)
+    scenarios = SCENARIOS + ([RECORDING_SCENARIO] if recording else [])
     rows = []
-    for name, base_port, method, path, body, headers in SCENARIOS:
-        url = f"http://localhost:{base_port + offset}{path}"
-        verify_body(engine, name, method, url, body, headers)       # prove the stub matched (not fall-through)
-        run_oha(url, method, body, headers, warmup, conns)          # warmup (discarded)
-        m = metric(run_oha(url, method, body, headers, duration, conns))
-        total = sum(m["codes"].values())
-        good = all(c.startswith("2") for c in m["codes"])
-        status = "ok" if good and total > 0 else f"BAD codes={m['codes']}"
-        print(f"  {name:20s} {m['rps']:>10.1f} rps  p50={m['p50_ms']}ms p99={m['p99_ms']}  {status}")
-        if not (good and total > 0):
-            raise SystemExit(f"{engine}/{name}: unexpected status distribution {m['codes']} — aborting")
-        rows.append((name, m))
-    csv = os.path.join(RESULTS_DIR, f"direct_{engine}.csv")
-    with open(csv, "w") as f:
-        f.write("scenario,rps,p50_ms,p90_ms,p99_ms,avg_ms\n")
-        for name, m in rows:
-            f.write(f"{name},{m['rps']},{m['p50_ms']},{m['p90_ms']},{m['p99_ms']},{m['avg_ms']}\n")
-    print(f"[{engine}] wrote {csv}")
+    for conns in conn_list:
+        for name, base_port, method, path, body, headers in scenarios:
+            url = f"http://localhost:{base_port + offset}{path}"
+            verify_body(engine, name, method, url, body, headers)   # prove the stub matched (not fall-through)
+            run_oha(url, method, body, headers, warmup, conns)      # warmup (discarded)
+            m = metric(run_oha(url, method, body, headers, duration, conns, rate))
+            total = sum(m["codes"].values())
+            good = all(c.startswith("2") for c in m["codes"])
+            status = "ok" if good and total > 0 else f"BAD codes={m['codes']}"
+            print(f"  {name:20s} c={conns:<4d} {m['rps']:>10.1f} rps  "
+                  f"p50={m['p50_ms']}ms p99={m['p99_ms']}ms p999={m['p999_ms']}ms  {status}")
+            if not (good and total > 0):
+                raise SystemExit(f"{engine}/{name}: unexpected status distribution {m['codes']} — aborting")
+            if name == RECORDING_SCENARIO[0]:
+                assert_journal_filled(engine, admin, offset)
+            rows.append((name, conns, mode, m))
+    csv_path = os.path.join(RESULTS_DIR, f"direct_{engine}.csv")
+    write_rift_csv(csv_path, rows)
+    print(f"[{engine}] wrote {csv_path}")
 
 # ---- engine orchestration ----
 
 def engine_ports(offset):
-    return [admin_port_for(offset)] + [p + offset for p, _, _ in IMPOSTERS] + ([9090] if offset == 0 else [])
+    return ([admin_port_for(offset)] + [p + offset for p, _, _ in IMPOSTERS]
+            + [RECORDING_PORT + offset] + ([9090] if offset == 0 else []))
 
 def admin_port_for(offset):
     return 2525 + offset
@@ -351,13 +458,14 @@ def launch(cmd, logpath):
     lf = open(logpath, "w")
     return subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
 
-def run_all(duration, warmup, conns, rift_bin, mb_bin):
+def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, recording=False):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     node = shutil.which("node") or "node"
-    plan = [
+    full_plan = [
         ("rift", 0,   [rift_bin, "--port", str(admin_port_for(0)), "--allow-injection", "--loglevel", "warn"]),
         ("mb",   100, [node, mb_bin, "start", "--port", str(admin_port_for(100)), "--allowInjection", "--loglevel", "warn"]),
     ]
+    plan = [p for p in full_plan if p[0] in engines]
     for engine, offset, cmd in plan:
         ports = engine_ports(offset)
         free_ports(ports)                       # clean slate
@@ -366,22 +474,71 @@ def run_all(duration, warmup, conns, rift_bin, mb_bin):
         print(f"[{engine}] launching: {' '.join(cmd)}")
         proc = launch(cmd, os.path.join(RESULTS_DIR, f"{engine}-engine.log"))
         try:
-            bench(engine, admin_port_for(offset), offset, duration, warmup, conns)
+            # recording_on only applies to Rift's journal write path; MB never records here.
+            bench(engine, admin_port_for(offset), offset, duration, warmup, conn_list,
+                  rate=rate, recording=recording and engine == "rift")
         finally:
             stop(proc, ports)
     rift_ver = subprocess.run([rift_bin, "--version"], capture_output=True, text=True).stdout.strip() or "local"
-    mb_ver = subprocess.run([node, mb_bin, "--version"], capture_output=True, text=True).stdout.strip() or "2.9.1"
-    report(rift_ver, mb_ver, duration, conns)
+    if "rift" in engines and "mb" in engines:
+        mb_ver = subprocess.run([node, mb_bin, "--version"], capture_output=True, text=True).stdout.strip() or "2.9.1"
+        report(rift_ver, mb_ver, duration, conn_list[0])
+    elif engines == ["rift"]:
+        rift_only_report(rift_ver, duration, conn_list, rate, recording)
+    else:
+        # engines == ["mb"]: no comparison possible (needs Rift too) and no Rift-only report to write.
+        print(f"[report] engines={engines}: benched only Mountebank; no report written "
+              f"(the comparison needs both rift and mb)")
+
+def rift_only_report(rift_ver, duration, conn_list, rate, recording):
+    """Rift-only sweep / open-loop report: scenario × (connections, mode) matrices of RPS and p999.
+    The MB-comparison report is deliberately untouched so its historical single-point numbers stay
+    comparable; this is the extra artefact the Turbo round consumes."""
+    path = os.path.join(RESULTS_DIR, "direct_rift.csv")
+    with open(path) as f:
+        rows = load_rift_csv(f)
+    cols = list(dict.fromkeys((int(r["connections"]), r["mode"]) for r in rows))
+    cell = {(r["scenario"], (int(r["connections"]), r["mode"])): r for r in rows}
+    scen_order = [s[0] for s in SCENARIOS] + ([RECORDING_SCENARIO[0]] if recording else [])
+    def colhdr(k):
+        c, mode = k
+        return f"c={c}" if mode == "closed" else f"c={c} {mode}"
+    def matrix(f, title, field, fmt):
+        f.write(f"\n## {title}\n\n")
+        f.write("| Scenario | " + " | ".join(colhdr(k) for k in cols) + " |\n")
+        f.write("|---" + "|--:" * len(cols) + "|\n")
+        for name in scen_order:
+            cells = [fmt(cell[(name, k)][field]) if (name, k) in cell else "—" for k in cols]
+            mark = " **(recording)**" if name == RECORDING_SCENARIO[0] else ""
+            f.write(f"| {name}{mark} | " + " | ".join(cells) + " |\n")
+    lat = lambda v: "n/a" if v in (None, "") else v   # an absent percentile renders n/a, not blank
+    out = os.path.join(RESULTS_DIR, "DIRECT_RIFT_SWEEP_REPORT.md")
+    with open(out, "w") as f:
+        f.write("# Rift — Concurrency Sweep / Open-Loop (issue #702)\n\n")
+        f.write(f"- **Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n- **Rift:** {rift_ver}\n")
+        f.write(f"- **Load generator:** oha, {duration} per point (after warmup)\n")
+        f.write(f"- **Connections:** {','.join(str(c) for c in conn_list)}\n")
+        if rate is not None:
+            f.write(f"- **Open-loop rate:** {rate} req/s (oha -q, fixed arrival rate)\n")
+        if recording:
+            f.write(f"- **recording_on:** imposter with recordRequests=true; journal-depth asserted "
+                    f"per point (filled, cap {MAX_RECORDED_REQUESTS} respected)\n")
+        matrix(f, "Throughput (requests/sec, higher is better)", "rps",
+               lambda v: f"{float(v):,.0f}")
+        matrix(f, "Latency p50 (ms, lower is better)", "p50_ms", lat)
+        matrix(f, "Latency p99 (ms, lower is better)", "p99_ms", lat)
+        matrix(f, "Tail latency p999 (ms, lower is better)", "p999_ms", lat)
+    print(f"wrote {out}")
 
 def report(rift_ver, mb_ver, duration, conns):
     def load(engine):
         path = os.path.join(RESULTS_DIR, f"direct_{engine}.csv")
-        d = {}
         with open(path) as f:
-            next(f)
-            for line in f:
-                p = line.strip().split(",")
-                d[p[0]] = {"rps": float(p[1]), "p50": p[2], "p99": p[4]}
+            # The comparison is single-point closed-loop; ignore any sweep/open-loop rows a prior
+            # run may have left in the CSV so a standalone --report can't blend the wrong point in.
+            d = {r["scenario"]: {"rps": float(r["rps"]), "p50": r["p50_ms"], "p99": r["p99_ms"]}
+                 for r in load_rift_csv(f)
+                 if r["mode"] == "closed" and int(r["connections"]) == conns}
         return d
     rift, mb = load("rift"), load("mb")
     out = os.path.join(RESULTS_DIR, "DIRECT_BENCHMARK_REPORT.md")
@@ -410,6 +567,15 @@ if __name__ == "__main__":
     ap.add_argument("--duration", default="20s")
     ap.add_argument("--warmup", default="3s")
     ap.add_argument("--connections", type=int, default=50)
+    ap.add_argument("--sweep-connections",
+                    help="comma-separated connection counts, e.g. 1,10,50,200 — run each scenario at "
+                         "each count (Rift-only; forces --engines rift)")
+    ap.add_argument("--open-loop", type=int, metavar="RATE",
+                    help="open-loop mode: fixed arrival rate (oha -q RATE) instead of closed-loop "
+                         "(Rift-only; forces --engines rift)")
+    ap.add_argument("--engines", default="rift,mb",
+                    help="comma-separated engines to run (default: rift,mb). Sweep/open-loop are "
+                         "Rift-only and override this to rift.")
     ap.add_argument("--run-all", action="store_true")
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--rift-bin", default=os.path.join(os.path.dirname(__file__), "..", "..", "..", "target", "release", "rift-http-proxy"))
@@ -418,7 +584,16 @@ if __name__ == "__main__":
     ap.add_argument("--mb-version", default="2.9.1")
     a = ap.parse_args()
     if a.run_all:
-        run_all(a.duration, a.warmup, a.connections, a.rift_bin, a.mb_bin)
+        try:
+            engines, conn_list, rate, recording = resolve_run_mode(
+                a.engines, a.sweep_connections, a.open_loop, a.connections)
+        except ValueError as e:
+            raise SystemExit(str(e))
+        requested = [e.strip() for e in a.engines.split(",") if e.strip()]
+        if engines != requested:
+            print("note: sweep/open-loop is Rift-only; running --engines rift")
+        run_all(a.duration, a.warmup, conn_list, a.rift_bin, a.mb_bin, engines,
+                rate=rate, recording=recording)
     elif a.report:
         report(a.rift_version, a.mb_version, a.duration, a.connections)
     else:
