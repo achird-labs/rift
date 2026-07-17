@@ -827,7 +827,13 @@ mod bounded_matching_tests {
                 None,
                 None,
                 None,
-                Duration::from_millis(60_000),
+                // Never-fire sentinel: this asserts the inject *outcome*, not latency. It is 600s
+                // (not a round 60s) because this trivial inject can queue behind the process-global
+                // mb_js_pool workers (js_engine.rs:393, 4 on CI) while concurrent runaway-script
+                // tests park every worker until the 10M-iteration loop cap throws — tens of seconds
+                // on a loaded/unoptimized-build runner. A genuine hang is still bounded (the CI job
+                // timeout backstops); don't tidy this back down. See #726.
+                Duration::from_millis(600_000),
             )
             .await
             .expect("matcher must not error");
@@ -845,7 +851,7 @@ mod bounded_matching_tests {
                 None,
                 None,
                 None,
-                Duration::from_millis(60_000),
+                Duration::from_millis(600_000), // never-fire sentinel, see the note above (#726)
             )
             .await
             .expect("matcher must not error");
@@ -917,7 +923,9 @@ mod bounded_matching_tests {
                 None,
                 None,
                 None,
-                Duration::from_millis(60_000),
+                // Scriptless: takes the inline path and never arms the deadline. Kept at the same
+                // 600s never-fire sentinel as the inject tests above for uniformity (#726).
+                Duration::from_millis(600_000),
             )
             .await
             .expect("matcher must not error");
