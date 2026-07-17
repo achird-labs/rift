@@ -41,7 +41,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 /// Maximum allowed request body size (10 MB)
 const MAX_REQUEST_BODY_SIZE: usize = 10 * 1024 * 1024;
@@ -628,7 +628,9 @@ async fn handle_request_inner(
             proxy: proxy_config,
         }) = response
         {
-            debug!("Handling proxy request to {}", proxy_config.to);
+            // Per-request entry announcement — `trace!` so it compiles out of release (issue #706);
+            // the outcome (status/latency) is captured by metrics and the response's x-rift-* headers.
+            trace!("Handling proxy request to {}", proxy_config.to);
             match imposter
                 .handle_proxy_request(
                     proxy_config,
@@ -678,7 +680,7 @@ async fn handle_request_inner(
         // Check if this is an inject response (JavaScript function)
         #[cfg(feature = "javascript")]
         if let Some(StubResponse::Inject { inject: inject_fn }) = response {
-            debug!("Handling inject response");
+            trace!("Handling inject response");
 
             // Build request for inject function
             let mb_request = MountebankRequest {
@@ -781,7 +783,7 @@ async fn handle_request_inner(
                 .engine
                 .clone()
                 .unwrap_or_else(|| "rhai".to_string());
-            debug!("Handling Rift script response (engine: {})", engine);
+            trace!("Handling Rift script response (engine: {})", engine);
 
             // Build script request. Expose headers with lowercase keys so scripts can read
             // them case-insensitively (e.g. `request.headers["x-flow-id"]`) regardless of the

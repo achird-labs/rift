@@ -3403,6 +3403,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "lru",
+ "memchr",
  "num_cpus",
  "p12",
  "parking_lot",
