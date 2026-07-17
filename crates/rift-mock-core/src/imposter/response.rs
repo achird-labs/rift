@@ -46,6 +46,12 @@ impl HasRepeatBehavior for StubResponse {
     }
 }
 
+fn has_content_type_header(headers: &HashMap<String, Vec<String>>) -> bool {
+    headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("content-type"))
+}
+
 /// Create response preview from a StubResponse (for debug mode)
 pub fn create_response_preview(response: &StubResponse) -> DebugResponsePreview {
     match response {
@@ -146,9 +152,7 @@ pub fn execute_stub_response_with_rift(
             // request. A string body (or no body) has no `rendered_body` and is used as-is.
             let body = match rendered_body {
                 Some(rb) => {
-                    if !headers.contains_key("content-type")
-                        && !headers.contains_key("Content-Type")
-                    {
+                    if !has_content_type_header(&headers) {
                         headers.insert(
                             "Content-Type".to_string(),
                             vec!["application/json".to_string()],
@@ -256,13 +260,9 @@ impl PreparedResponse {
             return None;
         }
 
-        // The Content-Type default must match the execute path's check EXACTLY for byte-identity: it
-        // tests the raw config map for the two literal casings only (a `HashMap`, case-sensitive), NOT
-        // a case-insensitive `HeaderMap` lookup — otherwise a config header like `CONTENT-TYPE` would
-        // diverge (execute adds a duplicate default; a case-insensitive check would not). Computed on
-        // `is.headers` before the `HeaderMap` normalizes casing.
-        let has_content_type =
-            is.headers.contains_key("content-type") || is.headers.contains_key("Content-Type");
+        // The Content-Type default must match the execute path's check exactly for byte-identity.
+        // Computed on `is.headers` before the `HeaderMap` normalizes casing.
+        let has_content_type = has_content_type_header(&is.headers);
 
         // Parse & validate every header once; an invalid name/value stores no prepared form so the
         // error surfaces at serve time exactly as today (issue #703: no config-validation change).
@@ -1262,9 +1262,7 @@ mod prepared_response_tests {
             ),
             // JSON (non-string) body with no Content-Type: exercises the application/json default.
             StubResponse::new_is(is_response(200, &[], Some(json!({"k": "v"}))), None, None),
-            // JSON body with an oddly-cased Content-Type header: the execute path's case-sensitive
-            // two-casing check still adds the default (a duplicate), so the fast path must reproduce
-            // that exactly — locks the parity the case-sensitivity fix guarantees.
+            // JSON body with an oddly-cased Content-Type header: the default must not be duplicated.
             StubResponse::new_is(
                 is_response(
                     200,
@@ -1318,6 +1316,29 @@ mod prepared_response_tests {
             "no duplicate Content-Type when one is configured"
         );
         assert_eq!(cts[0].1, "application/xml");
+    }
+
+    #[test]
+    fn oddly_cased_content_type_is_not_duplicated() {
+        let resp = StubResponse::new_is(
+            is_response(
+                200,
+                &[("CONTENT-TYPE", "application/xml")],
+                Some(json!({"k": "v"})),
+            ),
+            None,
+            None,
+        );
+        assert_eq!(legacy_serve(&resp), prepared_serve(prepared_of(&resp).unwrap()));
+        let (_s, headers, _b) = prepared_serve(prepared_of(&resp).unwrap());
+        let cts: Vec<_> = headers
+            .iter()
+            .filter(|(k, _)| k == "content-type")
+            .collect();
+        assert_eq!(
+            cts,
+            vec![&("content-type".to_string(), "application/xml".to_string())]
+        );
     }
 
     #[test]
