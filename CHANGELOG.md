@@ -39,6 +39,14 @@ record.
 
 ### Fixed
 
+- **A stub whose configured `Content-Type` used a nonstandard casing (e.g. `CONTENT-TYPE`) with a
+  JSON (non-string) body emitted two `Content-Type` headers.** The default-injection gate only
+  checked the two literal casings `content-type` and `Content-Type`, so any other casing failed the
+  check and Rift appended its own `Content-Type: application/json` alongside the configured header.
+  The check is now case-insensitive (matching Mountebank, whose header handling is case-insensitive),
+  so such stubs emit a single, configured `Content-Type`. Only stubs combining a nonstandard-cased
+  `Content-Type` header with a JSON body were affected (issue #723).
+
 - **A path-anchored stub could silently stop matching when its anchor contained non-ASCII text.**
   The Stage-1 path prefilter folded case with Unicode `to_lowercase`, while predicate evaluation
   folds with ASCII (`eq_ignore_ascii_case`). Unicode folding is length-changing and
