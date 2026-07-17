@@ -41,3 +41,5 @@ pub use forwarding::error_response;
 pub use handler::rule_applies_to_upstream;
 #[allow(unused_imports)]
 pub use server::ProxyServer;
+// TLS session-resumption config, shared with the intercept listener in rift-http-proxy (issue #705).
+pub use tls::{TLS_SESSION_CACHE_SIZE, configure_session_resumption};

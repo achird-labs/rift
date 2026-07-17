@@ -155,6 +155,9 @@ fn build_tls_acceptor(resolver: Arc<SniCertResolver>) -> anyhow::Result<TlsAccep
             .with_cert_resolver(resolver);
     // Only HTTP/1.1 for now (non-goal: h2/websocket, see #394).
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    // Explicit TLS session resumption (issue #705): the intercept listener sees the same
+    // handshake-storm reconnect pattern as the imposters, so it shares their resumption config.
+    rift_mock_core::proxy::configure_session_resumption(&mut config)?;
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 

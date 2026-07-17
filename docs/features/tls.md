@@ -70,6 +70,38 @@ Require client certificate:
 
 ---
 
+## TLS Performance
+
+### Session resumption
+
+Mock-server load is *handshake-storm-shaped*: load generators and test suites open many short-lived
+TLS connections rather than a few long-lived ones. A **resumed** handshake skips the expensive
+asymmetric crypto of a full handshake, so resumption is the dominant TLS throughput lever for a mock.
+
+Every HTTPS imposter (custom-cert and auto-generated self-signed alike) and the intercept listener
+are configured for resumption out of the box — no configuration is required:
+
+- a sized in-memory **session cache** (TLS 1.2 session IDs and TLS 1.3 stateful resumption), and
+- a **session ticketer** for stateless resumption (TLS 1.3 tickets and TLS 1.2 RFC 5077) — the client
+  presents a ticket on reconnect. Its encryption key auto-rotates roughly every 6 hours.
+
+A client that reuses its TLS session (most HTTP clients and load generators do by default) will
+resume on reconnect. You can confirm resumption with `openssl s_client`:
+
+```bash
+# -reconnect performs 5 handshakes reusing the session; look for "Reused" on the later ones
+openssl s_client -connect localhost:4545 -reconnect 2>/dev/null | grep -E "New|Reused"
+```
+
+### Crypto provider
+
+Rift pins the **`ring`** rustls crypto provider. `aws-lc-rs` (rustls' newer default) has a bulk-transfer
+edge but its C build fails on the windows-msvc CI runner and breaks the FFI cross-compile matrix, so it
+is not a portable option — and for the small responses a mock serves, handshake rate (where `ring` is
+competitive) matters far more than bulk throughput. The provider is not user-configurable.
+
+---
+
 ## HTTPS Proxy
 
 ### Proxy to HTTPS Backend
