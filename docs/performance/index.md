@@ -276,7 +276,17 @@ cargo build --release
 
 # Drop it (e.g. for a cross-compile or FFI build) by opting out of default features
 cargo build --release --no-default-features --features redis-backend,javascript
+
+# Or swap in jemalloc (bake-off candidate, issue #717)
+cargo build --release --no-default-features --features redis-backend,javascript,jemalloc
 ```
+
+An opt-in `jemalloc` feature builds the binary with
+[tikv-jemallocator](https://github.com/tikv/jemallocator) instead, for A/B allocator
+comparison; if both allocator features are enabled (e.g. `--all-features`), mimalloc takes
+precedence. The startup log reports which allocator is active (`Global allocator: …`), and the
+benchmark harness automates the three-way comparison — see the allocator bake-off section in
+`tests/benchmark/README.md`.
 
 Only the `rift-http-proxy` binary is affected; `rift-mock-core` and the FFI crate use the system
 allocator.

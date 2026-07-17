@@ -11,6 +11,17 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in `jemalloc` allocator feature for the server binary** (allocator bake-off, part of
+  #717). `cargo build --release --no-default-features --features redis-backend,javascript,jemalloc`
+  builds `rift-http-proxy` with tikv-jemallocator instead of the default mimalloc; when both
+  allocator features are enabled (e.g. `--all-features`), mimalloc takes precedence. The binary
+  logs `Global allocator: <name>` at startup, and the direct benchmark harness gained
+  `--allocator {mimalloc,jemalloc,system}` — per-allocator builds, RSS sampling
+  (`rss_mb_peak`/`rss_mb_end`), and suffixed result artefacts for three-way comparison. The
+  default allocator is unchanged; any switch is gated on #717's pre-registered decision rule.
+
 ### Fixed
 
 - **Recording-path throughput collapse once the journal hit its 10,000-entry cap.** A full

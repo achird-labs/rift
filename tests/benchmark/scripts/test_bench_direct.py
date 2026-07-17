@@ -230,5 +230,104 @@ class DefaultRunUnchanged(unittest.TestCase):
         self.assertEqual(names[-1], "query_last")
 
 
+class AllocatorBuildArgs(unittest.TestCase):
+    """Issue #717: each allocator maps to cargo flags that swap ONLY the allocator, keeping the
+    functional feature set (redis-backend, javascript) identical so the comparison is fair."""
+
+    def test_mimalloc_is_the_default_build(self):
+        self.assertEqual(bd.allocator_build_args("mimalloc"), [])
+
+    def test_jemalloc_swaps_allocator_only(self):
+        self.assertEqual(
+            bd.allocator_build_args("jemalloc"),
+            ["--no-default-features", "--features", "redis-backend,javascript,jemalloc"],
+        )
+
+    def test_system_drops_the_allocator_only(self):
+        self.assertEqual(
+            bd.allocator_build_args("system"),
+            ["--no-default-features", "--features", "redis-backend,javascript"],
+        )
+
+    def test_rejects_unknown_allocator(self):
+        with self.assertRaises(ValueError):
+            bd.allocator_build_args("tcmalloc")
+
+
+class ResolveRiftBin(unittest.TestCase):
+    """Issue #717: --allocator builds its own binary into a per-allocator target dir unless the
+    caller supplied an explicit --rift-bin (then it is trusted verbatim, no build)."""
+
+    def test_no_allocator_uses_default_path(self):
+        path, build = bd.resolve_rift_bin(None, None)
+        self.assertEqual(path, bd.DEFAULT_RIFT_BIN)
+        self.assertFalse(build)
+
+    def test_explicit_bin_is_used_verbatim_even_with_allocator(self):
+        path, build = bd.resolve_rift_bin("/tmp/custom-rift", "jemalloc")
+        self.assertEqual(path, "/tmp/custom-rift")
+        self.assertFalse(build)
+
+    def test_allocator_without_bin_builds_into_per_allocator_target(self):
+        path, build = bd.resolve_rift_bin(None, "jemalloc")
+        self.assertIn("alloc-jemalloc", path)
+        self.assertTrue(build)
+
+
+class ParseRssKb(unittest.TestCase):
+    """Issue #717: `ps -o rss=` output (KB) parsing; absent/garbage reads as None, never 0."""
+
+    def test_parses_ps_output(self):
+        self.assertEqual(bd.parse_rss_kb(" 123456\n"), 123456)
+
+    def test_empty_is_none(self):
+        self.assertIsNone(bd.parse_rss_kb(""))
+
+    def test_garbage_is_none(self):
+        self.assertIsNone(bd.parse_rss_kb("abc"))
+
+
+class CsvRssColumns(unittest.TestCase):
+    """Issue #717: the CSV grows rss_mb_peak/rss_mb_end; rows without RSS keep empty cells so
+    DictReader consumers and pre-#717 rows stay compatible."""
+
+    _BASE = {"rps": 1000, "p50_ms": 0.5, "p90_ms": 0.8, "p99_ms": 1.2,
+             "p999_ms": 3.1, "avg_ms": 0.6, "codes": {"200": 1}}
+
+    def test_header_gains_rss_columns(self):
+        cols = bd.CSV_HEADER.split(",")
+        self.assertIn("rss_mb_peak", cols)
+        self.assertIn("rss_mb_end", cols)
+
+    def test_rows_without_rss_have_empty_cells(self):
+        row = bd.csv_row("api_middle", 50, "closed", dict(self._BASE))
+        parsed = bd.load_rift_csv(io.StringIO(bd.CSV_HEADER + "\n" + row + "\n"))[0]
+        self.assertEqual(parsed["rss_mb_peak"], "")
+        self.assertEqual(parsed["rss_mb_end"], "")
+
+    def test_rss_round_trips(self):
+        m = dict(self._BASE, rss_mb_peak=61.2, rss_mb_end=58.9)
+        row = bd.csv_row("api_middle", 50, "closed", m)
+        parsed = bd.load_rift_csv(io.StringIO(bd.CSV_HEADER + "\n" + row + "\n"))[0]
+        self.assertEqual(float(parsed["rss_mb_peak"]), 61.2)
+        self.assertEqual(float(parsed["rss_mb_end"]), 58.9)
+
+
+class AllocatorMarker(unittest.TestCase):
+    """Issue #717: the results label must come from the binary's own startup self-report
+    (`Global allocator: <name>`), so a wrong --rift-bin can never silently mislabel a sweep."""
+
+    def test_extracts_name_from_log(self):
+        log = ("2026-07-17T00:00:00Z  INFO rift: Starting Rift on port 3525\n"
+               "2026-07-17T00:00:00Z  INFO rift: Global allocator: jemalloc\n")
+        self.assertEqual(bd.extract_allocator_marker(log), "jemalloc")
+
+    def test_absent_marker_is_none(self):
+        self.assertIsNone(bd.extract_allocator_marker("INFO rift: Starting Rift on port 3525\n"))
+
+    def test_empty_log_is_none(self):
+        self.assertIsNone(bd.extract_allocator_marker(""))
+
+
 if __name__ == "__main__":
     unittest.main()
