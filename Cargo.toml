@@ -62,8 +62,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 anyhow = "1.0"
 thiserror = "2.0"
 
-# Logging
-tracing = "0.1"
+# Logging. `release_max_level_debug` compiles `trace!` out of release builds entirely (issue #706),
+# so per-request `trace!` sites cost nothing in production — not even the cached-interest atomic load.
+tracing = { version = "0.1", features = ["release_max_level_debug"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Time
@@ -72,6 +73,8 @@ chrono = { version = "0.4", features = ["serde"] }
 # Misc utilities
 futures = "0.3"
 bytes = "1.7"
+# SIMD substring search for fixed literals probed per request (issue #706).
+memchr = "2.7"
 uuid = { version = "1.8", features = ["v4", "serde"] }
 rand = "0.8"
 

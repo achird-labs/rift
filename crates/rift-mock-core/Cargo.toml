@@ -68,6 +68,7 @@ bytes.workspace = true
 base64 = "0.22"
 chrono.workspace = true
 regex = "1.11"
+memchr.workspace = true
 rand.workspace = true
 urlencoding = "2.1"
 similar = "2.6"

@@ -182,11 +182,17 @@ fn now_regex() -> &'static Regex {
 /// that skips the three regex scans for the overwhelmingly common token-free body.
 #[must_use]
 pub fn contains_date_templates(body: &str) -> bool {
-    body.contains("{{")
+    DOUBLE_BRACE_FINDER.find(body.as_bytes()).is_some()
         && (days_regex().is_match(body)
             || months_regex().is_match(body)
             || now_regex().is_match(body))
 }
+
+/// Prebuilt SIMD substring searcher for the `{{` marker probed on every candidate response body
+/// (issue #706). Building the `Finder` once amortizes its setup; `str::contains` rebuilds its search
+/// state on each call.
+static DOUBLE_BRACE_FINDER: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+    std::sync::LazyLock::new(|| memchr::memmem::Finder::new(b"{{"));
 
 /// Expand legacy-recorder relative-date templates in a response body (issue #195):
 /// `{{DAYS+N}}` / `{{DAYS-N}}` / `{{MONTHS+N}}` / `{{MONTHS-N}}` → an RFC3339 timestamp `N`
