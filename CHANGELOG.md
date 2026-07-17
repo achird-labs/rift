@@ -101,7 +101,14 @@ record.
 
 ### Changed
 
-<<<<<<< HEAD
+- **The compiled-regex cache does lock-free reads and no longer flushes wholesale on overflow.** It
+  was a `RwLock<HashMap>` taking a shared read lock on every cache hit — a lock on the matching hot
+  path, per regex predicate per request — and on reaching its 1024-entry ceiling it `clear()`ed the
+  entire cache, so a workload cycling just over the cap recompiled everything repeatedly. It is now
+  a lock-free `papaya` map (hits are a wait-free guarded lookup, no lock) that evicts a bounded
+  batch (~a quarter of the cap) on overflow instead of clearing, so the bulk of the working set
+  stays hot across the boundary. Compile semantics and keying are unchanged.
+
 - **The imposter port registry is now lock-free on every request-serving lookup.** It was a
   `RwLock<HashMap<u16, Arc<Imposter>>>`; the admin gateway (`/__rift/:port/...`) and embedded
   per-request dispatch resolved a port through that read lock on the hot path. Because the port
@@ -111,8 +118,7 @@ record.
   check-then-insert duplicate-port semantics exactly. Admin listings (`GET /imposters`, metrics) now
   enumerate ports in deterministic ascending order (previously arbitrary hash order). No admin API
   shape changed.
-||||||| 24dbcc3
-=======
+
 - **XPath/JSONPath selectors are compiled once and the XML DOM is parsed once per request, not
   per predicate per stub.** Rift's slowest scenario was XPath, because every XPath predicate
   evaluation re-parsed the whole request body into a DOM and recompiled the XPath expression — so N
@@ -124,7 +130,6 @@ record.
   reuses the request body already parsed once for `deepEquals` (#290). Matching semantics are
   unchanged — the same engines against cached artifacts. The parse-/compile-once guarantees are
   asserted directly by test counters.
->>>>>>> origin/master
 
 - **Path `startsWith`/`contains`/`endsWith` stubs are matched in a single Aho-Corasick pass, and
   `endsWith` is now indexed at all.** The Stage-1 prefilter previously walked a linear bucket per

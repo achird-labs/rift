@@ -99,6 +99,9 @@ serde_json_path = "0.7"
 p12 = "0.6.3"
 yasna = "0.5"
 ring = "0.17"
+# Lock-free concurrent HashMap for the predicate regex cache (issue #715): reads on the imposter
+# matching hot path proceed without contending a lock.
+papaya = "0.2.4"
 
 [dev-dependencies]
 tempfile = "3.8"
