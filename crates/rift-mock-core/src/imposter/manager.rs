@@ -13,10 +13,10 @@ use crate::extensions::decorate::ResponseDecorator;
 use crate::extensions::flow_state::FlowStoreProvider;
 use crate::imposter::journal::RequestJournal;
 use crate::recording::ProxyRecordingStore;
+use arc_swap::ArcSwapOption;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use parking_lot::{Mutex, RwLock};
-use std::collections::HashMap;
+use parking_lot::Mutex;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -113,10 +113,104 @@ async fn run_http1<I>(
     }
 }
 
+/// A fixed slot table over the full `u16` port keyspace (issue #713), replacing
+/// `RwLock<HashMap<u16, Arc<Imposter>>>` on the admin gateway's per-request port lookup.
+/// A port is a `u16`, so a boxed slice of 65536 slots is a perfect hash: every port maps to
+/// exactly one slot with no hashing, no resizing, and no contention between concurrent readers.
+/// Reads (`get`/`contains`/`len`/`ports`/`imposters`) are wait-free — they only ever load an
+/// `ArcSwapOption`, never take a lock. Only mutations (`try_claim`/`remove`) take `mutations`,
+/// which serializes them against each other so the check-then-store inside `try_claim` stays
+/// atomic (the same atomicity the old write-lock gave the create path's duplicate-port check).
+pub(crate) struct PortTable {
+    /// One `ArcSwapOption` per possible port. A `Box<[_]>` rather than `[_; 65536]`: `ArcSwapOption`
+    /// isn't `Copy`, so a fixed-size array literal has no ergonomic init syntax, while a boxed
+    /// slice built from an iterator indexes identically and is exactly as fixed-size at runtime.
+    slots: Box<[ArcSwapOption<Imposter>]>,
+    /// Live-entry count, maintained alongside the slots rather than derived by scanning them on
+    /// every `len()` call (the admin `count()` hot path).
+    count: std::sync::atomic::AtomicUsize,
+    /// Serializes mutations (`try_claim`/`remove`) only; reads never take this. Mirrors the
+    /// existing `stubs_write`-style mutation serialization elsewhere in this crate.
+    mutations: parking_lot::Mutex<()>,
+}
+
+impl PortTable {
+    fn new() -> Self {
+        Self {
+            slots: (0..=u16::MAX)
+                .map(|_| ArcSwapOption::empty())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            count: std::sync::atomic::AtomicUsize::new(0),
+            mutations: parking_lot::Mutex::new(()),
+        }
+    }
+
+    /// Wait-free lookup: a single `ArcSwapOption` load, no lock.
+    fn get(&self, port: u16) -> Option<Arc<Imposter>> {
+        self.slots[port as usize].load_full()
+    }
+
+    /// Wait-free membership check.
+    fn contains(&self, port: u16) -> bool {
+        self.slots[port as usize].load().is_some()
+    }
+
+    /// Claim an empty slot, or refuse if it's already occupied. The `mutations` lock makes the
+    /// check-then-store atomic across concurrent claimants — without it, two callers could both
+    /// observe an empty slot and both store, silently losing one imposter (the same race the old
+    /// write-lock's `contains_key` + `insert` pair closed).
+    fn try_claim(&self, port: u16, imposter: Arc<Imposter>) -> Result<(), ()> {
+        let _guard = self.mutations.lock();
+        let slot = &self.slots[port as usize];
+        if slot.load().is_some() {
+            return Err(());
+        }
+        slot.store(Some(imposter));
+        self.count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Vacate a slot, returning what was there (if anything).
+    fn remove(&self, port: u16) -> Option<Arc<Imposter>> {
+        let _guard = self.mutations.lock();
+        let previous = self.slots[port as usize].swap(None);
+        if previous.is_some() {
+            self.count
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        previous
+    }
+
+    /// Live-entry count.
+    fn len(&self) -> usize {
+        self.count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Occupied ports, ascending. A full 65536-slot scan, but only ever called from
+    /// low-frequency admin paths (list/auto-assign/delete-all), never per-request.
+    fn ports(&self) -> Vec<u16> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.load().is_some().then_some(i as u16))
+            .collect()
+    }
+
+    /// Occupied imposters, ascending by port (see `ports`).
+    fn imposters(&self) -> Vec<Arc<Imposter>> {
+        self.slots
+            .iter()
+            .filter_map(|slot| slot.load_full())
+            .collect()
+    }
+}
+
 /// Manages the lifecycle of multiple imposters
 pub struct ImposterManager {
-    /// Active imposters by port
-    imposters: RwLock<HashMap<u16, Arc<Imposter>>>,
+    /// Active imposters by port, one wait-free slot per possible `u16` port (issue #713).
+    imposters: PortTable,
     /// Global shutdown signal (for future graceful shutdown)
     shutdown_tx: broadcast::Sender<()>,
     /// Optional data directory for persistence write-through
@@ -160,7 +254,7 @@ impl ImposterManager {
     pub fn with_datadir(datadir: Option<PathBuf>) -> Self {
         let (shutdown_tx, _) = broadcast::channel(16);
         Self {
-            imposters: RwLock::new(HashMap::new()),
+            imposters: PortTable::new(),
             shutdown_tx,
             datadir: datadir.map(Arc::new),
             tls_defaults: TlsDefaults::default(),
@@ -368,7 +462,7 @@ impl ImposterManager {
         let (port, listener) = match config.port {
             Some(p) if p != 0 => {
                 // Check if specified port is already in use
-                if self.imposters.read().contains_key(&p) {
+                if self.imposters.contains(p) {
                     return Err(ImposterError::PortInUse(p));
                 }
                 // Bind with SO_REUSEADDR/REUSEPORT so a hot-reload (#197) can re-bind the same port
@@ -509,17 +603,18 @@ impl ImposterManager {
         // (issue #596). Stored post-spawn because the loop needs the `Arc`-wrapped imposter.
         *imposter.serve_handle.lock() = Some(serve_handle);
 
-        // Store imposter. Re-check the port under the write lock to close the TOCTOU between the
-        // earlier read-only check and the bind: with SO_REUSEADDR/REUSEPORT two concurrent creates
-        // for the same explicit port can both bind, so the loser of the insert race must stop the
-        // listener it just started rather than leave an orphan accepting on the shared port.
+        // Store imposter. `try_claim`'s internal mutex closes the same TOCTOU the old write lock
+        // did between the earlier read-only check and the bind: with SO_REUSEADDR/REUSEPORT two
+        // concurrent creates for the same explicit port can both bind, so the loser of the claim
+        // race must stop the listener it just started rather than leave an orphan accepting on
+        // the shared port.
+        if self
+            .imposters
+            .try_claim(port, Arc::clone(&imposter))
+            .is_err()
         {
-            let mut imposters = self.imposters.write();
-            if imposters.contains_key(&port) {
-                let _ = shutdown_tx.send(());
-                return Err(ImposterError::PortInUse(port));
-            }
-            imposters.insert(port, Arc::clone(&imposter));
+            let _ = shutdown_tx.send(());
+            return Err(ImposterError::PortInUse(port));
         }
 
         // Persist synchronously and surface the result: a create that can't be durably recorded
@@ -527,7 +622,7 @@ impl ImposterManager {
         // On failure roll back the insert and stop the listener so `Err` keeps meaning "not
         // running" for every caller (create_for_apply / replace_imposter rely on that).
         if let Err(e) = self.persist_imposter_checked(&imposter).await {
-            self.imposters.write().remove(&port);
+            self.imposters.remove(port);
             // A write that failed partway (e.g. ENOSPC) can leave a truncated {port}.json; drop it
             // so a later restart doesn't try to load a corrupt file for a create that never took.
             self.remove_persisted_imposter(port);
@@ -541,10 +636,8 @@ impl ImposterManager {
     /// Bind to an available port for auto-assignment
     /// Starts from port 49152 (start of dynamic/private port range) and finds first available
     async fn find_available_port(&self, host: &str) -> Result<(u16, TcpListener), ImposterError> {
-        let existing_ports: std::collections::HashSet<u16> = {
-            let imposters = self.imposters.read();
-            imposters.keys().copied().collect()
-        };
+        let existing_ports: std::collections::HashSet<u16> =
+            self.imposters.ports().into_iter().collect();
 
         // Start from dynamic port range (49152-65535)
         // If we could allow random ports, rather than requiring the minimum available port,
@@ -579,12 +672,10 @@ impl ImposterManager {
 
     /// Delete without emitting an event (see `create_imposter_inner`).
     async fn delete_imposter_inner(&self, port: u16) -> Result<ImposterConfig, ImposterError> {
-        let imposter = {
-            let mut imposters = self.imposters.write();
-            imposters
-                .remove(&port)
-                .ok_or(ImposterError::NotFound(port))?
-        };
+        let imposter = self
+            .imposters
+            .remove(port)
+            .ok_or(ImposterError::NotFound(port))?;
 
         // Signal the accept loop and every live connection to stop (issue #207), then **await** the
         // teardown so this delete does not return until the old generation can no longer serve
@@ -647,26 +738,20 @@ impl ImposterManager {
 
     /// Get an imposter by port
     pub fn get_imposter(&self, port: u16) -> Result<Arc<Imposter>, ImposterError> {
-        let imposters = self.imposters.read();
-        imposters
-            .get(&port)
-            .cloned()
+        self.imposters
+            .get(port)
             .ok_or(ImposterError::NotFound(port))
     }
 
-    /// List all imposters
+    /// List all imposters, ascending by port (issue #713) — was arbitrary `HashMap` order.
     pub fn list_imposters(&self) -> Vec<Arc<Imposter>> {
-        let imposters = self.imposters.read();
-        imposters.values().cloned().collect()
+        self.imposters.imposters()
     }
 
     /// Delete all imposters. Emits a single `AllDeleted` event rather than one `Deleted`
     /// per port.
     pub async fn delete_all(&self) -> Vec<ImposterConfig> {
-        let ports: Vec<u16> = {
-            let imposters = self.imposters.read();
-            imposters.keys().copied().collect()
-        };
+        let ports = self.imposters.ports();
 
         let mut configs = Vec::new();
         for port in ports {
@@ -758,16 +843,14 @@ impl ImposterManager {
         // Deletes first, so ports freed here can be re-bound by creates below.
         let desired_ports: std::collections::HashSet<u16> =
             desired.iter().filter_map(|c| c.port).collect();
-        let removed_ports: Vec<u16> = {
-            let imposters = self.imposters.read();
-            let mut ports: Vec<u16> = imposters
-                .keys()
-                .copied()
-                .filter(|port| !desired_ports.contains(port))
-                .collect();
-            ports.sort_unstable();
-            ports
-        };
+        // `ports()` already scans ascending, so no separate sort is needed here (was needed for
+        // the old HashMap's arbitrary key order).
+        let removed_ports: Vec<u16> = self
+            .imposters
+            .ports()
+            .into_iter()
+            .filter(|port| !desired_ports.contains(port))
+            .collect();
         for port in removed_ports {
             match self.delete_imposter_inner(port).await {
                 Ok(_) => {
@@ -863,7 +946,7 @@ impl ImposterManager {
 
     /// Get imposter count (for future metrics)
     pub fn count(&self) -> usize {
-        self.imposters.read().len()
+        self.imposters.len()
     }
 
     /// Add stub to an imposter
@@ -1070,6 +1153,101 @@ fn imposter_level_differs(a: &ImposterConfig, b: &ImposterConfig) -> bool {
             );
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod port_table_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn imposter(port: u16) -> Arc<Imposter> {
+        let cfg = serde_json::from_value(json!({ "port": port, "protocol": "http", "stubs": [] }))
+            .expect("valid imposter config");
+        Arc::new(Imposter::new(cfg).expect("test imposter"))
+    }
+
+    // A lookup returns exactly what was claimed, and a missing port is None — the wait-free read
+    // path (issue #713), replacing the RwLock<HashMap> read.
+    #[test]
+    fn claim_then_get_and_miss() {
+        let table = PortTable::new();
+        let imp = imposter(8080);
+        assert!(table.try_claim(8080, Arc::clone(&imp)).is_ok());
+        assert!(Arc::ptr_eq(&table.get(8080).expect("present"), &imp));
+        assert!(table.get(9090).is_none(), "an unclaimed port is a miss");
+        assert!(table.contains(8080));
+        assert!(!table.contains(9090));
+    }
+
+    // The duplicate-port claim is rejected — the semantics the lock-serialized check-then-insert
+    // guaranteed (manager create returns PortInUse). The first claim wins; the second is refused
+    // and does NOT overwrite it.
+    #[test]
+    fn duplicate_claim_is_rejected() {
+        let table = PortTable::new();
+        let first = imposter(3000);
+        let second = imposter(3000);
+        assert!(table.try_claim(3000, Arc::clone(&first)).is_ok());
+        assert!(
+            table.try_claim(3000, Arc::clone(&second)).is_err(),
+            "a second claim on an occupied port must be refused"
+        );
+        assert!(
+            Arc::ptr_eq(&table.get(3000).expect("present"), &first),
+            "the first claim must be preserved, not overwritten by the rejected second"
+        );
+    }
+
+    // Remove frees the slot (a re-claim then succeeds) and returns the removed imposter; removing
+    // an empty slot is None.
+    #[test]
+    fn remove_frees_the_slot() {
+        let table = PortTable::new();
+        let imp = imposter(4000);
+        table.try_claim(4000, Arc::clone(&imp)).expect("claim");
+        let removed = table.remove(4000).expect("removed");
+        assert!(Arc::ptr_eq(&removed, &imp));
+        assert!(table.get(4000).is_none(), "slot is empty after remove");
+        assert!(
+            table.remove(4000).is_none(),
+            "removing an empty slot is None"
+        );
+        // The slot is reusable.
+        assert!(table.try_claim(4000, imposter(4000)).is_ok());
+    }
+
+    // `count` tracks live entries across claims and removes (backs the admin `len`).
+    #[test]
+    fn count_tracks_live_entries() {
+        let table = PortTable::new();
+        assert_eq!(table.len(), 0);
+        table.try_claim(1, imposter(1)).expect("claim");
+        table.try_claim(2, imposter(2)).expect("claim");
+        assert_eq!(table.len(), 2);
+        // A rejected duplicate must not inflate the count.
+        assert!(table.try_claim(1, imposter(1)).is_err());
+        assert_eq!(table.len(), 2, "a rejected claim does not change the count");
+        table.remove(1).expect("removed");
+        assert_eq!(table.len(), 1);
+    }
+
+    // Iteration yields ports (and imposters) in ASCENDING port order — deterministic, unlike the
+    // old HashMap's arbitrary order. Claims are made out of order to prove the ordering is the
+    // scan's, not insertion's.
+    #[test]
+    fn iteration_is_ascending_by_port() {
+        let table = PortTable::new();
+        for p in [9000u16, 80, 65535, 443, 1] {
+            table.try_claim(p, imposter(p)).expect("claim");
+        }
+        assert_eq!(table.ports(), vec![1, 80, 443, 9000, 65535]);
+        let ports_from_imposters: Vec<u16> = table
+            .imposters()
+            .iter()
+            .filter_map(|i| i.config.port)
+            .collect();
+        assert_eq!(ports_from_imposters, vec![1, 80, 443, 9000, 65535]);
     }
 }
 

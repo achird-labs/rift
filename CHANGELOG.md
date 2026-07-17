@@ -109,6 +109,28 @@ record.
   batch (~a quarter of the cap) on overflow instead of clearing, so the bulk of the working set
   stays hot across the boundary. Compile semantics and keying are unchanged.
 
+- **The imposter port registry is now lock-free on every request-serving lookup.** It was a
+  `RwLock<HashMap<u16, Arc<Imposter>>>`; the admin gateway (`/__rift/:port/...`) and embedded
+  per-request dispatch resolved a port through that read lock on the hot path. Because the port
+  keyspace is `u16`, it is now a fixed 65536-slot `ArcSwapOption` table (one slot per possible port,
+  ~512 KB) — a lookup is a single wait-free atomic load, no hashing and no lock. Mutations
+  (create/delete) are serialized by a small mutation mutex that preserves the previous
+  check-then-insert duplicate-port semantics exactly. Admin listings (`GET /imposters`, metrics) now
+  enumerate ports in deterministic ascending order (previously arbitrary hash order). No admin API
+  shape changed.
+
+- **XPath/JSONPath selectors are compiled once and the XML DOM is parsed once per request, not
+  per predicate per stub.** Rift's slowest scenario was XPath, because every XPath predicate
+  evaluation re-parsed the whole request body into a DOM and recompiled the XPath expression — so N
+  XPath stubs sharing a path cost N DOM parses + N compilations per request; JSONPath likewise
+  re-parsed both the body and the selector each time. Now the request body's XML DOM is parsed at
+  most once per request and shared across every stub/predicate that evaluates it; compiled XPath
+  expressions are cached per thread (the `sxd` XPath type is not shareable across threads) and
+  compiled JSONPath selectors in a process-wide bounded cache; and JSONPath predicate matching
+  reuses the request body already parsed once for `deepEquals` (#290). Matching semantics are
+  unchanged — the same engines against cached artifacts. The parse-/compile-once guarantees are
+  asserted directly by test counters.
+
 - **Path `startsWith`/`contains`/`endsWith` stubs are matched in a single Aho-Corasick pass, and
   `endsWith` is now indexed at all.** The Stage-1 prefilter previously walked a linear bucket per
   distinct prefix/substring literal, so the prefilter's own cost grew with the number of literal

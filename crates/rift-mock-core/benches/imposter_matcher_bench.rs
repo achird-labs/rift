@@ -272,10 +272,73 @@ fn bench_method_dimension(c: &mut Criterion) {
     group.finish();
 }
 
+/// Issue #711: the XPath scenario, Rift's slowest. Each of `count` stubs carries an XPath predicate
+/// selecting a distinct node of one shared XML body; the request targets the last, so every stub's
+/// XPath predicate is evaluated. Before #711 that meant `count` XML DOM parses **and** `count` XPath
+/// compilations per request; after, one DOM parse and (warm) zero compilations. This is the
+/// before/after headline for the slowest path.
+///
+/// XPath predicates are never candidate-indexable (they sit in `always_bits`), so the bitset
+/// framework can't prune here — the win is purely the parse/compile-once change this benches.
+fn bench_xpath_heavy(c: &mut Criterion) {
+    let headers: HashMap<String, String> = HashMap::new();
+    let mut group = c.benchmark_group("find_matching_stub_xpath_heavy");
+    for count in [10usize, 100, 1000] {
+        // Each stub extracts its own node and equals-checks it against "MATCH"; only the last node
+        // holds "MATCH", so all `count` XPath predicates evaluate but only the last matches.
+        let imposter = imposter_with_stubs(count, &|i| {
+            json!({ "equals": { "body": "MATCH" },
+                    "xpath": { "selector": format!("//item[@id='{i}']") } })
+        });
+        let body = format!(
+            "<root>{}</root>",
+            (0..count)
+                .map(|i| format!(
+                    "<item id='{i}'>{}</item>",
+                    if i == count - 1 { "MATCH" } else { "x" }
+                ))
+                .collect::<String>()
+        );
+        assert!(
+            imposter
+                .find_matching_stub_with_client(
+                    "POST",
+                    "/x",
+                    &headers,
+                    None,
+                    Some(&body),
+                    None,
+                    None
+                )
+                .expect("matching must not error")
+                .is_some(),
+            "xpath_heavy/{count}: fixture no longer matches its target stub",
+        );
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
+            b.iter(|| {
+                imposter
+                    .find_matching_stub_with_client(
+                        "POST",
+                        black_box("/x"),
+                        black_box(&headers),
+                        None,
+                        black_box(Some(body.as_str())),
+                        None,
+                        None,
+                    )
+                    .expect("matching must not error")
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_stub_matches,
     bench_find_matching_stub,
-    bench_method_dimension
+    bench_method_dimension,
+    bench_xpath_heavy
 );
 criterion_main!(benches);

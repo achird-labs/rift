@@ -61,6 +61,10 @@ impl Imposter {
         let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
         // Likewise parse the query string once per request rather than per predicate (issue #480).
         let query_map = crate::imposter::predicates::parse_query(query);
+        // Likewise the XML DOM (issue #711): lazily parsed on first XPath predicate touched, then
+        // shared across every remaining stub in this request's scan — one parse per request, not
+        // one per XPath predicate evaluation.
+        let xml_dom = body.map(crate::behaviors::LazyXmlDom::new);
         for stub_idx in snapshot.candidates(method, path).iter() {
             let stub_state = &stubs[stub_idx];
             let stub = &stub_state.stub;
@@ -93,6 +97,7 @@ impl Imposter {
                 form.as_ref(),
                 imposter_port,
                 body_json.as_ref(),
+                xml_dom.as_ref(),
                 Some(&query_map),
             )? {
                 // Bump the refcount instead of deep-cloning the whole `StubState` (issue #287).
@@ -225,6 +230,7 @@ impl Imposter {
         let flow_id = self.resolve_flow_id(headers_map);
         let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
         let query_map = crate::imposter::predicates::parse_query(query);
+        let xml_dom = body.map(crate::behaviors::LazyXmlDom::new);
         for (index, stub_state) in stubs.iter().enumerate() {
             let stub = &stub_state.stub;
             if let Some(space) = &stub.space
@@ -250,6 +256,7 @@ impl Imposter {
                 form.as_ref(),
                 imposter_port,
                 body_json.as_ref(),
+                xml_dom.as_ref(),
                 Some(&query_map),
             )? {
                 return Ok(Some((Arc::clone(stub_state), index)));
@@ -915,5 +922,217 @@ mod bounded_matching_tests {
             .await
             .expect("matcher must not error");
         assert!(matched.is_some());
+    }
+
+    // ---- issue #711: parse the XML DOM once per request, compile selectors once ----------
+
+    use crate::behaviors::counters;
+
+    // Each stub extracts a DIFFERENT node via its own XPath selector, then `equals`-checks the
+    // extracted (effective) body against the fixed string "MATCH". In the body below only item 19
+    // holds "MATCH"; items 0..18 hold "x". So every stub's XPath predicate is *evaluated* (each
+    // extracts and compares — that's the DOM touch), but only stub 19 matches. Crucially this means
+    // first-match-wins does NOT short-circuit before stub 19, so all 20 XPath evaluations run —
+    // which is what makes the DOM-parse count meaningful: 20 parses before #711, one after.
+    fn xpath_stub(i: usize) -> serde_json::Value {
+        json!({
+            "predicates": [{ "equals": { "body": "MATCH" },
+                             "xpath": { "selector": format!("//item[@id='{i}']") } }],
+            "responses": [{ "is": { "statusCode": 200 } }]
+        })
+    }
+
+    // AC1: the XML body is parsed into a DOM exactly ONCE per request, no matter how many XPath
+    // predicates/stubs evaluate it. Before #711 every XPath predicate evaluation re-parsed the body
+    // (N stubs sharing a path = N DOM parses); the whole point is one parse shared across the match.
+    #[test]
+    fn one_dom_parse_per_request_many_xpath_stubs() {
+        let stubs: Vec<serde_json::Value> = (0..20).map(xpath_stub).collect();
+        let imp = imposter(json!(stubs));
+        // Only item 19 holds "MATCH"; the rest hold "x", so stubs 0..18 evaluate their XPath (a DOM
+        // touch) but don't match, and evaluation continues to stub 19.
+        let body = format!(
+            "<root>{}</root>",
+            (0..20)
+                .map(|i| format!(
+                    "<item id='{i}'>{}</item>",
+                    if i == 19 { "MATCH" } else { "x" }
+                ))
+                .collect::<String>()
+        );
+        let headers = no_headers();
+
+        counters::reset();
+        let hit = imp
+            .find_matching_stub_with_client("POST", "/x", &headers, None, Some(&body), None, None)
+            .expect("no backend error");
+        assert_eq!(
+            hit.map(|(_, i)| i),
+            Some(19),
+            "only the last XPath stub matches; the earlier 19 evaluate their XPath but don't match"
+        );
+        assert_eq!(
+            counters::dom_parses(),
+            1,
+            "the DOM must be parsed exactly once for the whole request, not once per XPath predicate"
+        );
+    }
+
+    // AC1 boundary: a request that touches no XPath predicate must not parse a DOM at all — the
+    // parse is lazy, paid only when an XPath predicate is actually evaluated.
+    #[test]
+    fn no_dom_parse_when_no_xpath_touched() {
+        let imp = imposter(json!([
+            { "predicates": [{ "equals": { "path": "/a" } }],
+              "responses": [{ "is": { "statusCode": 200 } }] }
+        ]));
+        let headers = no_headers();
+        counters::reset();
+        let _ = imp
+            .find_matching_stub_with_client("GET", "/a", &headers, None, Some("<r/>"), None, None)
+            .expect("no backend error");
+        assert_eq!(
+            counters::dom_parses(),
+            0,
+            "no XPath predicate touched → the DOM must never be parsed"
+        );
+    }
+
+    // AC2: an XPath selector is compiled once and reused across requests — the per-request compile
+    // (Factory::build) is gone. Drive the same XPath stub through several requests; after the first
+    // warms the cache, no further compiles occur.
+    #[test]
+    fn xpath_compiled_once_across_requests() {
+        let imp = imposter(json!([xpath_stub(7)]));
+        let body = "<root><item id='7'>v7</item></root>";
+        let headers = no_headers();
+
+        counters::reset();
+        for _ in 0..5 {
+            let _ = imp
+                .find_matching_stub_with_client(
+                    "POST",
+                    "/x",
+                    &headers,
+                    None,
+                    Some(body),
+                    None,
+                    None,
+                )
+                .expect("no backend error");
+        }
+        assert!(
+            counters::xpath_compiles() <= 1,
+            "the XPath selector must be compiled at most once across 5 identical requests, not per \
+             request (saw {})",
+            counters::xpath_compiles()
+        );
+    }
+
+    // AC2: same for JSONPath — the selector string is compiled once, not re-parsed per request.
+    #[test]
+    fn jsonpath_compiled_once_across_requests() {
+        let imp = imposter(json!([
+            { "predicates": [{ "equals": { "body": "42" },
+                               "jsonpath": { "selector": "$.a.b" } }],
+              "responses": [{ "is": { "statusCode": 200 } }] }
+        ]));
+        let body = r#"{"a":{"b":42}}"#;
+        let headers = no_headers();
+
+        counters::reset();
+        for _ in 0..5 {
+            let _ = imp
+                .find_matching_stub_with_client(
+                    "POST",
+                    "/x",
+                    &headers,
+                    None,
+                    Some(body),
+                    None,
+                    None,
+                )
+                .expect("no backend error");
+        }
+        assert!(
+            counters::jsonpath_compiles() <= 1,
+            "the JSONPath selector must be compiled at most once across 5 identical requests (saw {})",
+            counters::jsonpath_compiles()
+        );
+    }
+
+    // Semantics unchanged: the parse-once / compile-once XPath path returns exactly what a
+    // per-call parse would. A namespaced selector is included because the namespace map is part of
+    // the XPath cache key — a cache that ignored it would cross-contaminate.
+    #[test]
+    fn xpath_dom_once_matches_per_call_semantics() {
+        let imp = imposter(json!([
+            { "predicates": [{ "equals": { "body": "found" },
+                               "xpath": { "selector": "//x:v", "ns": { "x": "urn:e" } } }],
+              "responses": [{ "is": { "statusCode": 200 } }] },
+            { "predicates": [{ "equals": { "body": "other" },
+                               "xpath": { "selector": "//v" } }],
+              "responses": [{ "is": { "statusCode": 200 } }] },
+        ]));
+        let headers = no_headers();
+        let ns_body = r#"<r xmlns:x="urn:e"><x:v>found</x:v></r>"#;
+        let plain_body = "<r><v>other</v></r>";
+
+        assert_eq!(
+            imp.find_matching_stub_with_client(
+                "POST",
+                "/x",
+                &headers,
+                None,
+                Some(ns_body),
+                None,
+                None
+            )
+            .expect("no error")
+            .map(|(_, i)| i),
+            Some(0),
+            "namespaced XPath resolves against its ns map"
+        );
+        assert_eq!(
+            imp.find_matching_stub_with_client(
+                "POST",
+                "/x",
+                &headers,
+                None,
+                Some(plain_body),
+                None,
+                None
+            )
+            .expect("no error")
+            .map(|(_, i)| i),
+            Some(1),
+            "plain XPath still resolves — the ns-keyed cache did not cross-contaminate"
+        );
+    }
+
+    // Fix 3: JSONPath predicate matching reuses the once-parsed request body and still returns the
+    // correct extraction. (The distinct concern — that the *effective body* after extraction is not
+    // the raw parse — stays guarded by `deep_equals_with_jsonpath_selector_uses_extracted_body_not_raw_parse`
+    // in predicates::mod.)
+    #[test]
+    fn jsonpath_reuses_parsed_body() {
+        let imp = imposter(json!([
+            { "predicates": [{ "equals": { "body": "hello" },
+                               "jsonpath": { "selector": "$.msg" } }],
+              "responses": [{ "is": { "statusCode": 200 } }] }
+        ]));
+        let headers = no_headers();
+        let hit = imp
+            .find_matching_stub_with_client(
+                "POST",
+                "/x",
+                &headers,
+                None,
+                Some(r#"{"msg":"hello"}"#),
+                None,
+                None,
+            )
+            .expect("no error");
+        assert_eq!(hit.map(|(_, i)| i), Some(0));
     }
 }

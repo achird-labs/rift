@@ -3,6 +3,61 @@
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::cell::{OnceCell, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::{Arc, LazyLock};
+
+/// Test-only counters proving the parse/compile-once guarantees of issue #711.
+///
+/// These are the verifier for two acceptance criteria that are, literally, "N parses become one"
+/// and "zero per-request selector compilation": there is no behavioural proxy for "the DOM was
+/// parsed exactly once", so the count is asserted directly. `#[cfg(test)]` so release builds carry
+/// neither the counters nor the increments.
+///
+/// **Thread-local, not global atomics.** `cargo test` runs the suite in parallel, and many other
+/// tests evaluate jsonpath/xpath predicates concurrently — a process-global counter would be bumped
+/// by all of them, so a `reset(); drive one request; read count` assertion would race. The counted
+/// work (DOM parse, selector compile) all runs synchronously on the thread driving the request, so a
+/// thread-local counter captures exactly that request's activity and nothing else.
+#[cfg(test)]
+pub(crate) mod counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Bumped once each time an XML body is parsed into a DOM `Package`.
+        static DOM_PARSE: Cell<usize> = const { Cell::new(0) };
+        /// Bumped on an XPath compile (a thread-local cache miss).
+        static XPATH_COMPILE: Cell<usize> = const { Cell::new(0) };
+        /// Bumped on a JSONPath selector compile (a global cache miss).
+        static JSONPATH_COMPILE: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn bump_dom_parse() {
+        DOM_PARSE.with(|c| c.set(c.get() + 1));
+    }
+    pub(crate) fn bump_xpath_compile() {
+        XPATH_COMPILE.with(|c| c.set(c.get() + 1));
+    }
+    pub(crate) fn bump_jsonpath_compile() {
+        JSONPATH_COMPILE.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(crate) fn reset() {
+        DOM_PARSE.with(|c| c.set(0));
+        XPATH_COMPILE.with(|c| c.set(0));
+        JSONPATH_COMPILE.with(|c| c.set(0));
+    }
+    pub(crate) fn dom_parses() -> usize {
+        DOM_PARSE.with(Cell::get)
+    }
+    pub(crate) fn xpath_compiles() -> usize {
+        XPATH_COMPILE.with(Cell::get)
+    }
+    pub(crate) fn jsonpath_compiles() -> usize {
+        JSONPATH_COMPILE.with(Cell::get)
+    }
+}
 
 /// Regex matching options (Mountebank-compatible)
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -86,17 +141,75 @@ fn normalize_jsonpath(path: &str) -> Cow<'_, str> {
     }
 }
 
+/// Process-wide cache of compiled JSONPath selectors (issue #711).
+///
+/// Every predicate/copy-behavior evaluation that uses a `jsonpath` selector recompiled it from its
+/// source string per call — for a stub set with N jsonpath-selectored stubs, one request paid N
+/// compiles even when every stub shares the same selector string across requests. `JsonPath` (unlike
+/// `sxd_xpath::XPath`, see the thread-local cache below) is `Send + Sync`, so a process-global cache
+/// mirroring [`regex_cache`](super::super::imposter::predicates::regex_cache) is sufficient — no
+/// thread-local needed.
+///
+/// Bounded for the same reason as the regex cache: it's a process-global static, so imposter churn
+/// with ever-distinct selectors must not grow it forever.
+const MAX_CACHED_JSONPATHS: usize = 1024;
+
+static JSONPATH_CACHE: LazyLock<
+    parking_lot::RwLock<HashMap<String, Arc<serde_json_path::JsonPath>>>,
+> = LazyLock::new(|| parking_lot::RwLock::new(HashMap::new()));
+
+/// Return the compiled selector for `selector`, compiling and caching it on first use. The cache key
+/// is the *normalized* (rooted) selector string, so a bare and a `$`-rooted form of the same
+/// selector share one cache entry. Returns `None` when `selector` fails to parse (callers treat this
+/// as "no extraction"), preserving today's behavior on a bad selector.
+fn cached_jsonpath(selector: &str) -> Option<Arc<serde_json_path::JsonPath>> {
+    let rooted = normalize_jsonpath(selector);
+
+    // Fast path: shared read lock, no allocation or compile on a hit.
+    {
+        let cache = JSONPATH_CACHE.read();
+        if let Some(jp) = cache.get(rooted.as_ref()) {
+            return Some(Arc::clone(jp));
+        }
+    }
+
+    // Slow path (cache miss): compile once (outside the lock), then insert under the write lock.
+    #[cfg(test)]
+    counters::bump_jsonpath_compile();
+    let compiled = Arc::new(serde_json_path::JsonPath::parse(&rooted).ok()?);
+    let mut cache = JSONPATH_CACHE.write();
+    // Another thread may have inserted this selector while we compiled — reuse its entry.
+    if let Some(jp) = cache.get(rooted.as_ref()) {
+        return Some(Arc::clone(jp));
+    }
+    if cache.len() >= MAX_CACHED_JSONPATHS {
+        cache.clear();
+    }
+    cache.insert(rooted.into_owned(), Arc::clone(&compiled));
+    Some(compiled)
+}
+
 /// Extract value using JSONPath (RFC 9535 compliant via serde_json_path)
 /// Used by copy behaviors and predicate jsonpath parameter.
 /// Supports the full JSONPath spec: wildcards, descendant segments, filters,
 /// negative indices, selector sequences, bracket notation, etc.
 /// Bare selectors (no leading `$`) are treated as root-relative for
 /// Mountebank compatibility.
+///
+/// String-only entry point for callers that only have the raw body (copy/lookup behaviors); it
+/// parses the body once and delegates to [`extract_jsonpath_value`], which is also what the matching
+/// hot path calls directly with an already-parsed `Value` to avoid a second parse (issue #711).
 pub fn extract_jsonpath(json_str: &str, path: &str) -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(json_str).ok()?;
-    let rooted = normalize_jsonpath(path);
-    let json_path = serde_json_path::JsonPath::parse(&rooted).ok()?;
-    let node_list = json_path.query(&json);
+    extract_jsonpath_value(&json, path)
+}
+
+/// Extract value using JSONPath against an already-parsed JSON value. Reuses the caller's parse
+/// (the matching hot path parses the request body once per request, issue #290) and the process-wide
+/// compiled-selector cache (issue #711) instead of recompiling `path` on every call.
+pub fn extract_jsonpath_value(json: &serde_json::Value, path: &str) -> Option<String> {
+    let json_path = cached_jsonpath(path)?;
+    let node_list = json_path.query(json);
 
     // Return the first matched node as a string
     let first = node_list.first()?;
@@ -116,19 +229,99 @@ pub fn extract_xpath(xml_str: &str, path: &str) -> Option<String> {
 }
 
 /// Extract value using XPath with optional namespace prefix→URI map.
+///
+/// String-only entry point for callers that only have the raw body (copy behaviors, and any
+/// predicate caller that hasn't pre-parsed a DOM). It parses the body itself — bumping `DOM_PARSE` —
+/// then delegates to [`eval_xpath_on`], which is also what the matching hot path calls directly
+/// against a DOM shared across a whole request (issue #711).
 pub fn extract_xpath_with_ns(
     xml_str: &str,
     path: &str,
-    ns: Option<&std::collections::HashMap<String, String>>,
+    ns: Option<&HashMap<String, String>>,
 ) -> Option<String> {
     use sxd_document::parser;
-    use sxd_xpath::{Context, Factory, Value};
 
+    #[cfg(test)]
+    counters::bump_dom_parse();
     let package = parser::parse(xml_str).ok()?;
     let document = package.as_document();
+    eval_xpath_on(&document, path, ns)
+}
 
-    let factory = Factory::new();
-    let xpath = factory.build(path).ok()??;
+// Thread-local cache of compiled XPath selectors, keyed by `(selector, namespace-map key)`.
+//
+// `sxd_xpath::XPath` is `!Send`/`!Sync` (its internal AST holds `Rc`s), so it cannot live in a
+// process-global cache the way the JSONPath cache above does — every thread must compile and keep
+// its own copy. That's still a large win: the request-handling threads in the pool are long-lived,
+// so a per-thread cache amortizes the compile across every request that thread ever handles, not
+// just within one request. `Rc` (not `Arc`) mirrors the type's own `!Send` bound.
+thread_local! {
+    static XPATH_CACHE: RefCell<HashMap<(String, String), Rc<sxd_xpath::XPath>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Per-thread ceiling on distinct cached XPath selectors, mirroring [`MAX_CACHED_JSONPATHS`]/the
+/// regex cache's bound — imposter churn with ever-distinct selectors must not grow this forever.
+const MAX_CACHED_XPATHS: usize = 1024;
+
+/// Deterministic key for a namespace prefix→URI map: sorted `(prefix, uri)` pairs joined, so two
+/// equal maps (in any iteration order) always produce the same string, and an absent/empty map
+/// always produces the same fixed empty key. Part of the cache key alongside the selector string —
+/// the same selector text resolves differently under different namespace bindings.
+fn ns_key(ns: Option<&HashMap<String, String>>) -> String {
+    let Some(ns) = ns else {
+        return String::new();
+    };
+    let mut pairs: Vec<(&str, &str)> = ns.iter().map(|(p, u)| (p.as_str(), u.as_str())).collect();
+    pairs.sort_unstable();
+    pairs
+        .into_iter()
+        .map(|(p, u)| format!("{p}={u}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Return the compiled XPath for `(selector, ns)`, compiling and caching it in this thread's cache
+/// on first use. Returns `None` when `selector` fails to compile (callers treat this as "no
+/// extraction"), preserving today's behavior on a bad selector.
+///
+/// `ns` is part of the key defensively, not because compilation depends on it: `sxd_xpath` compiles
+/// a namespace-independent `XPath` and the real prefix→URI bindings are applied at *evaluation* time
+/// in [`eval_xpath_on`]. So the key's `ns_key` component can at worst duplicate an entry (or, on the
+/// theoretical `ns_key` collision where a URI contains the `,`/`=` delimiters, share one) — either
+/// way the compiled selector returned is correct, because it carries no namespace state.
+fn cached_xpath(
+    selector: &str,
+    ns: Option<&HashMap<String, String>>,
+) -> Option<Rc<sxd_xpath::XPath>> {
+    let key = (selector.to_string(), ns_key(ns));
+    XPATH_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(xpath) = cache.get(&key) {
+            return Some(Rc::clone(xpath));
+        }
+        #[cfg(test)]
+        counters::bump_xpath_compile();
+        let xpath = Rc::new(sxd_xpath::Factory::new().build(selector).ok()??);
+        if cache.len() >= MAX_CACHED_XPATHS {
+            cache.clear();
+        }
+        cache.insert(key, Rc::clone(&xpath));
+        Some(xpath)
+    })
+}
+
+/// Evaluate an XPath selector against an already-parsed DOM `Document`, using the thread-local
+/// compiled-selector cache. The matching hot path calls this directly with a `Document` shared
+/// across every predicate/stub in one request (issue #711) instead of parsing per predicate.
+pub(crate) fn eval_xpath_on(
+    document: &sxd_document::dom::Document,
+    selector: &str,
+    ns: Option<&HashMap<String, String>>,
+) -> Option<String> {
+    use sxd_xpath::{Context, Value};
+
+    let xpath = cached_xpath(selector, ns)?;
 
     let mut context = Context::new();
     if let Some(namespaces) = ns {
@@ -144,6 +337,41 @@ pub fn extract_xpath_with_ns(
         Ok(Value::Boolean(b)) => Some(b.to_string()),
         Ok(Value::Nodeset(nodes)) => nodes.iter().next().map(|n| n.string_value()),
         _ => None,
+    }
+}
+
+/// Parse-once-per-request primitive for the XML DOM (issue #711).
+///
+/// `sxd_document::Package` is `!Send`, and every borrow off it (`Document<'d>`) is lifetime-bound to
+/// it — it cannot be stored in `Arc<StubState>` or held across an `.await` point, so this type is
+/// deliberately scoped to live only for the synchronous duration of one matching pass: constructed
+/// before the stub loop, dropped when matching returns. Within that scope it memoizes the parse (and
+/// the parse failure) so N XPath predicates across N stubs in one request share a single
+/// `sxd_document::parser::parse` call instead of one each.
+pub(crate) struct LazyXmlDom<'a> {
+    body: &'a str,
+    parsed: OnceCell<Option<sxd_document::Package>>,
+}
+
+impl<'a> LazyXmlDom<'a> {
+    pub(crate) fn new(body: &'a str) -> Self {
+        Self {
+            body,
+            parsed: OnceCell::new(),
+        }
+    }
+
+    /// The parsed DOM, parsing (and bumping `DOM_PARSE`) on the first call only. `None` if the body
+    /// isn't well-formed XML — cached too, so a malformed body doesn't retry the parse per predicate.
+    pub(crate) fn document(&self) -> Option<sxd_document::dom::Document<'_>> {
+        self.parsed
+            .get_or_init(|| {
+                #[cfg(test)]
+                counters::bump_dom_parse();
+                sxd_document::parser::parse(self.body).ok()
+            })
+            .as_ref()
+            .map(sxd_document::Package::as_document)
     }
 }
 
