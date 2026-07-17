@@ -101,6 +101,18 @@ record.
 
 ### Changed
 
+- **Path-regex stubs are matched in a single pass, instead of one regex execution per stub.** A
+  `matches` predicate on `path` was previously invisible to the Stage-1 prefilter, so every regex
+  stub was a candidate for every request and each ran its own compiled regex — the cost grew
+  linearly with the number of regex stubs. Those patterns are now compiled into two multi-pattern
+  automata (one per case class), and one pass over the request path answers which of them match.
+  On a corpus of regex-anchored stubs matching the last, per-request matching went from ~13.0 µs to
+  ~211 ns at 100 stubs (~62x) and from ~211 µs to ~487 ns at 1000 stubs (~433x) — the cost is now
+  effectively flat in regex-stub count rather than linear. Matching *semantics* are unchanged: the
+  index only ever over-approximates and full predicate evaluation remains the single source of
+  truth. Patterns the multi-pattern build rejects (an oversized or unparseable pattern) simply keep
+  the previous per-stub behaviour, and say so in a `warn` naming the stub.
+
 - **Stub matching prunes candidates on request *method*, not just path.** The Stage-1 prefilter is
   now a multi-dimensional candidate-bitset index (the Lucent Bit Vector technique from packet
   classification): each dimension answers which stubs a request attribute cannot rule out, and the

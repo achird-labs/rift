@@ -3413,6 +3413,7 @@ dependencies = [
  "rcgen",
  "redis",
  "regex",
+ "regex-automata",
  "reqwest",
  "rhai",
  "rift-types",

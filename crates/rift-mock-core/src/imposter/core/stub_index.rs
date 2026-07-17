@@ -6,8 +6,8 @@
 //!
 //! # The dimension framework (issue #707)
 //!
-//! The index is a set of independent **dimensions**, one per request attribute (path, method, and
-//! — via the sibling issues built on this seam — deepEquals bodies (#708), regexes (#709), and
+//! The index is a set of independent **dimensions**, one per request attribute (path, method, path
+//! regexes (#709), and — via the sibling issues built on this seam — deepEquals bodies (#708) and
 //! literals (#710)). Each dimension answers one question for a request: *which stubs can this
 //! attribute not rule out?* The answers are [`CandidateBits`] — dense bitsets over stub ids, where
 //! a stub's id is its position in the snapshot's stub vector (declaration-ordered).
@@ -33,9 +33,12 @@
 //! a semantics question.
 //!
 //! Eligibility is deliberately conservative and uniform across dimensions: a stub is indexed only
-//! when a *top-level* (implicitly AND-ed) predicate is a plain `equals`/`startsWith`/`contains` on
-//! the raw field — no `selector`, no `except`, not `caseSensitive`. Such a predicate is *required*
-//! for the stub to match, so a request failing it can never match the stub → safe to exclude.
+//! when a *top-level* (implicitly AND-ed) predicate constrains the raw field — no `selector`, no
+//! `except` ([`is_value_preserving`]). Such a predicate is *required* for the stub to match, so a
+//! request failing it can never match the stub → safe to exclude. The dimensions that compare
+//! strings themselves additionally require not-`caseSensitive` ([`is_safely_indexable`]), because
+//! they fold both sides eagerly at build; the regex dimension instead routes the case flag to one
+//! of two automata, which is why the two gates are separate.
 //!
 //! ## Adding a dimension
 //!
@@ -49,6 +52,8 @@ use super::StubState;
 use super::bitset::CandidateBits;
 use crate::imposter::types::Stub;
 use crate::util::FastMap;
+use regex_automata::util::syntax;
+use regex_automata::{Input, MatchKind, PatternSet, meta};
 use rift_types::predicate::{Predicate, PredicateOperation};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -104,15 +109,26 @@ fn fold(s: &str) -> String {
     s.to_ascii_lowercase()
 }
 
-/// Whether a predicate's parameters leave its field values comparable as raw request values — the
-/// soundness gate every dimension's eligibility rule shares.
+/// Whether a predicate compares its field values against the **raw** request value — the soundness
+/// gate every dimension's eligibility rule shares.
 ///
 /// Anything that transforms or re-scopes the compared value cannot be indexed against the raw
-/// field: `except` rewrites the value before comparison, `selector` re-scopes it, and
-/// `caseSensitive` opts out of the fold [`fold`] assumes. One home for the rule, because the
-/// dimensions added on this seam (#708-#710) must not let their copies of it drift.
+/// field: `except` rewrites the value before comparison and `selector` re-scopes it. One home for
+/// the rule, because the dimensions added on this seam (#708-#710) must not let their copies of it
+/// drift.
+fn is_value_preserving(p: &rift_types::predicate::PredicateParameters) -> bool {
+    p.except.is_empty() && p.selector.is_none()
+}
+
+/// [`is_value_preserving`] plus the fold requirement, for the dimensions that compare *strings*
+/// themselves.
+///
+/// `caseSensitive` opts out of the fold [`fold`] assumes, and the path/method dimensions have no
+/// way to represent a case-sensitive compare — they fold both sides eagerly at build. The regex
+/// dimension does not share that limitation (the automaton carries its own case flag), so it gates
+/// on [`is_value_preserving`] and routes on the flag instead.
 fn is_safely_indexable(p: &rift_types::predicate::PredicateParameters) -> bool {
-    p.case_sensitive != Some(true) && p.except.is_empty() && p.selector.is_none()
+    is_value_preserving(p) && p.case_sensitive != Some(true)
 }
 
 /// A single predicate's path anchor, if it is a safely-indexable required path constraint.
@@ -226,11 +242,229 @@ impl Dimension for MethodDimension {
     }
 }
 
+/// Ceiling on the NFA a single multi-pattern build may occupy. Matches the `regex` crate's own
+/// default `size_limit`, so a pattern set this rejects is one whose patterns the evaluator would
+/// have struggled to compile individually anyway — and rejection is only ever a fall back to
+/// `always_bits`, never an error.
+const NFA_SIZE_LIMIT: usize = 10 * (1 << 20);
+
+/// Lazy-DFA budgets, raised well above the defaults on purpose.
+///
+/// These do not gate whether a build *succeeds* — they decide which engine the meta regex picks at
+/// search time. A multi-pattern set that overruns them silently degrades to the PikeVM
+/// (rust-lang/regex#881), which is the slow path this dimension exists to avoid; the whole point is
+/// one prefiltered automaton pass, so buy the cache rather than the fallback.
+const DFA_SIZE_LIMIT: usize = 32 * (1 << 20);
+const HYBRID_CACHE_CAPACITY: usize = 16 * (1 << 20);
+
+/// One multi-pattern automaton plus the stub each pattern id speaks for.
+struct MultiRegex {
+    re: meta::Regex,
+    /// Indexed by pattern id. One entry per pattern handed to `build_many`, so this is 1:1 with
+    /// the automaton's pattern ids — identical patterns from two stubs get two ids, not one.
+    pattern_stubs: Vec<usize>,
+}
+
+impl MultiRegex {
+    /// Set a bit for every stub whose pattern matches `path`, in one pass over the haystack.
+    fn mark(&self, path: &str, out: &mut CandidateBits) {
+        let mut set = PatternSet::new(self.re.pattern_len());
+        self.re
+            .which_overlapping_matches(&Input::new(path), &mut set);
+        for pid in set.iter() {
+            out.set(self.pattern_stubs[pid.as_usize()]);
+        }
+    }
+}
+
+/// Build one automaton over `patterns`. `case_insensitive` is the *default* for the set; inline
+/// flags in a pattern still override it, exactly as they do for the evaluator's `RegexBuilder`.
+fn build_multi_regex(
+    patterns: &[&str],
+    case_insensitive: bool,
+) -> Result<meta::Regex, Box<meta::BuildError>> {
+    meta::Regex::builder()
+        .syntax(syntax::Config::new().case_insensitive(case_insensitive))
+        .configure(
+            meta::Config::new()
+                // Load-bearing, and the whole reason this dimension is equivalent to per-pattern
+                // `is_match`. `which_overlapping_matches` reports *every* matching pattern only
+                // under `MatchKind::All`; under the default (`LeftmostFirst`) it reports the
+                // leftmost-first winner and stops, so of two patterns that both match a path only
+                // one would be reported and the other's stub would be dropped from the candidate
+                // set — an under-approximation, i.e. a silent no-match in production.
+                .match_kind(MatchKind::All)
+                .nfa_size_limit(Some(NFA_SIZE_LIMIT))
+                .dfa_size_limit(Some(DFA_SIZE_LIMIT))
+                .hybrid_cache_capacity(HYBRID_CACHE_CAPACITY),
+        )
+        .build_many(patterns)
+        .map_err(Box::new)
+}
+
+/// A log-safe rendering of an operator-supplied pattern.
+///
+/// A rejected pattern is frequently rejected *because* it is enormous, so cap what reaches the log
+/// line — and cut on a char boundary, since patterns may be non-ASCII.
+fn pattern_preview(p: &str) -> String {
+    const MAX: usize = 80;
+    if p.len() <= MAX {
+        return p.to_owned();
+    }
+    let cut = (0..=MAX)
+        .rev()
+        .find(|i| p.is_char_boundary(*i))
+        .unwrap_or(0);
+    format!("{}… ({} bytes total)", &p[..cut], p.len())
+}
+
+/// Assemble the automaton for one case class, returning the stubs that must fall back to
+/// `always_bits` because no automaton can speak for them.
+///
+/// `build_many` fails the *whole set* on the first pattern it rejects, so one typo'd or oversized
+/// pattern would otherwise cost every other regex stub its pruning. The happy path pays nothing for
+/// that: only on failure do we re-validate pattern-by-pattern, drop the offenders, and rebuild.
+///
+/// Falling back is always sound in the direction that matters: `always_bits` over-approximates, so
+/// the stub simply keeps the pre-#709 behaviour of being fully evaluated by Stage 2. (Note the
+/// rejected set is what *this* multi-pattern build rejects, which is not necessarily what the
+/// evaluator's own `Regex::new` would reject — the soundness argument rests on
+/// over-approximation, not on parity with the evaluator.)
+fn build_case_class(
+    entries: Vec<(usize, String)>,
+    case_insensitive: bool,
+) -> (Option<MultiRegex>, Vec<usize>) {
+    let assemble = |entries: &[(usize, String)]| -> Option<MultiRegex> {
+        if entries.is_empty() {
+            return None;
+        }
+        let patterns: Vec<&str> = entries.iter().map(|(_, p)| p.as_str()).collect();
+        let re = build_multi_regex(&patterns, case_insensitive).ok()?;
+        Some(MultiRegex {
+            re,
+            pattern_stubs: entries.iter().map(|(stub, _)| *stub).collect(),
+        })
+    };
+
+    if entries.is_empty() {
+        return (None, Vec::new());
+    }
+    if let Some(m) = assemble(&entries) {
+        return (Some(m), Vec::new());
+    }
+
+    // Something in the set is unbuildable. Find it by pattern, so its neighbours keep their
+    // pruning and the operator learns which stub lost its index and why.
+    let mut ok: Vec<(usize, String)> = Vec::new();
+    let mut fallback: Vec<usize> = Vec::new();
+    for (stub, pattern) in entries {
+        match build_multi_regex(&[pattern.as_str()], case_insensitive) {
+            Ok(_) => ok.push((stub, pattern)),
+            Err(e) => {
+                tracing::warn!(
+                    stub,
+                    pattern = %pattern_preview(&pattern),
+                    case_insensitive,
+                    error = %e,
+                    "regex dimension: pattern rejected by the multi-pattern build; this stub falls \
+                     back to full predicate evaluation"
+                );
+                fallback.push(stub);
+            }
+        }
+    }
+
+    // With every individually-bad pattern removed, retry. If none was individually bad, the set
+    // only overruns the limits in aggregate and rebuilding the same patterns would fail again.
+    if !fallback.is_empty()
+        && let Some(m) = assemble(&ok)
+    {
+        return (Some(m), fallback);
+    }
+
+    tracing::warn!(
+        stubs = ok.len(),
+        case_insensitive,
+        "regex dimension: multi-pattern build failed for the whole set (aggregate size); all its \
+         stubs fall back to full predicate evaluation"
+    );
+    fallback.extend(ok.into_iter().map(|(stub, _)| stub));
+    (None, fallback)
+}
+
+/// A stub's required path-regex constraint: the pattern, and which case class it belongs to.
+struct RegexAnchor<'a> {
+    pattern: &'a str,
+    case_sensitive: bool,
+}
+
+/// A single predicate's path-regex anchor, if it is an indexable required constraint.
+///
+/// Deliberately narrower than the evaluator: only a **string** pattern qualifies. The evaluator
+/// renders a non-string value with `to_string` and matches that (`fields.rs`), so such a predicate
+/// is still a real constraint — just not one worth the eligibility bookkeeping. It falls to
+/// `always_bits`, which over-approximates it safely.
+fn regex_anchor(pred: &Predicate) -> Option<RegexAnchor<'_>> {
+    if !is_value_preserving(&pred.parameters) {
+        return None;
+    }
+    let PredicateOperation::Matches(fields) = &pred.operation else {
+        return None;
+    };
+    match fields.get("path") {
+        Some(serde_json::Value::String(pattern)) => Some(RegexAnchor {
+            pattern,
+            case_sensitive: pred.parameters.case_sensitive == Some(true),
+        }),
+        _ => None,
+    }
+}
+
+/// The regex dimension (issue #709).
+///
+/// Answers "which of these N path patterns match?" in a single pass per case class, rather than the
+/// N independent `is_match` calls Stage 2 would otherwise run — the meta engine extracts the
+/// patterns' required literals and prefilters with memchr/Teddy, so most requests never enter an
+/// automaton state.
+///
+/// # Why two automata
+///
+/// `matches` does **not** fold like the string operators, and this is the one thing to get right
+/// here. `fields.rs` builds its regex as `cached_regex(pattern, !case_sensitive)`, so the default
+/// (no `caseSensitive`) is `RegexBuilder::case_insensitive(true)` — the regex crate's *Unicode*
+/// fold, not the ASCII `eq_ignore_ascii_case` that [`fold`] above mirrors. The case flag is a
+/// per-automaton syntax config, not something that can be folded into a pattern string, so the two
+/// classes get one automaton each. Inline flags (`(?i)`/`(?-i)`) override the automaton default
+/// per pattern exactly as they override `RegexBuilder`'s, so they need no special handling.
+struct RegexDimension {
+    /// The default class: `case_insensitive(true)`, matching `cached_regex(p, true)`.
+    insensitive: Option<MultiRegex>,
+    /// `caseSensitive: true`, matching `cached_regex(p, false)`.
+    sensitive: Option<MultiRegex>,
+    /// Stubs with no indexable top-level path-regex constraint, plus any whose pattern no
+    /// automaton could take — always candidates on this dimension.
+    always: CandidateBits,
+}
+
+impl Dimension for RegexDimension {
+    fn select(&self, request: &DimensionRequest<'_>, out: &mut CandidateBits) {
+        out.copy_from(&self.always);
+        for m in [&self.insensitive, &self.sensitive].into_iter().flatten() {
+            m.mark(request.path, out);
+        }
+    }
+
+    fn prunes(&self) -> bool {
+        self.insensitive.is_some() || self.sensitive.is_some()
+    }
+}
+
 /// The multi-dimensional candidate prefilter over a stub snapshot. See the module docs.
 pub(crate) struct StubIndex {
     len: usize,
     path: PathDimension,
     method: MethodDimension,
+    regex: RegexDimension,
 }
 
 impl StubIndex {
@@ -246,6 +480,10 @@ impl StubIndex {
         let mut slots: [Vec<usize>; METHOD_SLOTS] = Default::default();
         let mut method_always = CandidateBits::zeros(len);
 
+        let mut regex_ci: Vec<(usize, String)> = Vec::new();
+        let mut regex_cs: Vec<(usize, String)> = Vec::new();
+        let mut regex_always = CandidateBits::zeros(len);
+
         for (i, state) in stubs.iter().enumerate() {
             match classify(&state.stub) {
                 Some(PathAnchor::Exact(k)) => exact.entry(k).or_default().push(i),
@@ -257,6 +495,20 @@ impl StubIndex {
                 Some(m) => slots[method_slot(m)].push(i),
                 None => method_always.set(i),
             }
+            // Only the first regex anchor is indexed. A stub's further `matches` predicates are
+            // also required, so ignoring them only ever over-approximates — Stage 2 still checks
+            // them. Same rule as the path dimension's `classify`.
+            match state.stub.predicates.iter().find_map(regex_anchor) {
+                Some(a) if a.case_sensitive => regex_cs.push((i, a.pattern.to_owned())),
+                Some(a) => regex_ci.push((i, a.pattern.to_owned())),
+                None => regex_always.set(i),
+            }
+        }
+
+        let (insensitive, ci_fallback) = build_case_class(regex_ci, true);
+        let (sensitive, cs_fallback) = build_case_class(regex_cs, false);
+        for i in ci_fallback.into_iter().chain(cs_fallback) {
+            regex_always.set(i);
         }
 
         StubIndex {
@@ -271,12 +523,45 @@ impl StubIndex {
                 slots,
                 always: method_always,
             },
+            regex: RegexDimension {
+                insensitive,
+                sensitive,
+                always: regex_always,
+            },
         }
     }
 
     /// The number of stubs this index spans.
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+
+    /// Intersect one dimension's bitset into the accumulator, seeding it on the first dimension
+    /// that actually runs.
+    ///
+    /// Generic over the dimension rather than taking `&dyn Dimension`, so each call site
+    /// monomorphizes to a static dispatch — see the module docs on why dimensions are concrete
+    /// fields.
+    fn fold_in<D: Dimension>(
+        dimension: &D,
+        request: &DimensionRequest<'_>,
+        acc: &mut CandidateBits,
+        seeded: &mut bool,
+        len: usize,
+    ) {
+        if !dimension.prunes() {
+            return;
+        }
+        if *seeded {
+            let mut scratch = CandidateBits::zeros(len);
+            dimension.select(request, &mut scratch);
+            acc.intersect_with(&scratch);
+        } else {
+            // `select` overwrites, so the first dimension seeds `acc` directly — no `all()` fill to
+            // intersect against, and no scratch buffer.
+            dimension.select(request, acc);
+            *seeded = true;
+        }
     }
 
     /// Candidate stub ids for a request: the intersection of every dimension's bitset. A superset
@@ -287,35 +572,27 @@ impl StubIndex {
     /// * a dimension no stub is indexed on is skipped ([`Dimension::prunes`]) — otherwise a corpus
     ///   that never constrains the method would pay the method dimension a full-width copy and
     ///   intersect to produce all-ones;
-    /// * the first dimension that does run seeds the accumulator directly, since `select`
-    ///   overwrites — no `all()` fill to intersect against, and no scratch buffer;
     /// * an empty accumulator short-circuits the rest. Method runs first because it is both the
     ///   cheapest (a slot lookup, no allocation) and, on method-partitioned corpora, the most
-    ///   selective — so the exit can skip the path dimension's fold allocation entirely.
+    ///   selective — so the exit can skip the path dimension's fold allocation, and the regex
+    ///   dimension's automaton pass, entirely. Regex runs last: it is the only dimension that
+    ///   walks the haystack.
     ///
-    /// Sibling dimensions (#708-#710) slot in as further blocks in the same shape.
+    /// The `seeded` guard on each early exit is load-bearing: an unseeded accumulator is all-zeros,
+    /// which `is_empty()` cannot distinguish from "everything was pruned".
     pub(crate) fn candidates(&self, request: &DimensionRequest<'_>) -> CandidateBits {
         let mut acc = CandidateBits::zeros(self.len);
         let mut seeded = false;
 
-        if self.method.prunes() {
-            self.method.select(request, &mut acc);
-            seeded = true;
-            if acc.is_empty() {
-                return acc;
-            }
+        Self::fold_in(&self.method, request, &mut acc, &mut seeded, self.len);
+        if seeded && acc.is_empty() {
+            return acc;
         }
-
-        if self.path.prunes() {
-            if seeded {
-                let mut scratch = CandidateBits::zeros(self.len);
-                self.path.select(request, &mut scratch);
-                acc.intersect_with(&scratch);
-            } else {
-                self.path.select(request, &mut acc);
-                seeded = true;
-            }
+        Self::fold_in(&self.path, request, &mut acc, &mut seeded, self.len);
+        if seeded && acc.is_empty() {
+            return acc;
         }
+        Self::fold_in(&self.regex, request, &mut acc, &mut seeded, self.len);
 
         // No dimension indexes anything (e.g. every stub is a body regex): everyone is a candidate.
         if seeded {
@@ -414,6 +691,7 @@ mod tests {
     use rand::{Rng, SeedableRng};
     use serde_json::{Value, json};
     use std::collections::HashMap;
+    use tracing_test::traced_test;
 
     fn stub_states(preds: &[Value]) -> Vec<Arc<StubState>> {
         preds
@@ -458,7 +736,7 @@ mod tests {
             json!([{"equals": {"path": "/EXACT"}}]),       // 1 exact, other case
             json!([{"startsWith": {"path": "/pre"}}]),     // 2 prefix
             json!([{"contains": {"path": "mid"}}]),        // 3 contains
-            json!([{"matches": {"path": "^/re[0-9]+$"}}]), // 4 regex -> fallback
+            json!([{"matches": {"path": "^/re[0-9]+$"}}]), // 4 regex -> regex dimension (#709)
             json!([{"exists": {"query": true}}]),          // 5 exists -> fallback
             json!([{"equals": {"method": "POST"}}]),       // 6 method-only -> fallback
             json!([{"equals": {"body": "ping"}}]),         // 7 body -> fallback
@@ -559,7 +837,8 @@ mod tests {
     // The path dimension genuinely narrows (excludes non-matching anchored stubs) yet never drops a
     // stub the linear scan would consider (always-bits + matching anchors are all present).
     // Stub 6 is method-only (`equals {method: POST}`), so a GET request now prunes it on the method
-    // dimension — the #707 pruning the path dimension alone could never do.
+    // dimension — the #707 pruning the path dimension alone could never do. Stub 4 is a path regex,
+    // which #709's regex dimension prunes for a path its pattern cannot match.
     #[test]
     fn stub_index_narrows_and_covers() {
         let snap = snapshot(&corpus());
@@ -576,6 +855,10 @@ mod tests {
             !cands.contains(&6),
             "POST-only stub excluded for a GET request (method dimension, #707)"
         );
+        assert!(
+            !cands.contains(&4),
+            "regex stub ^/re[0-9]+$ excluded for /exact (regex dimension, #709)"
+        );
 
         // Coverage: both exact stubs (case-insensitive collision) and every stub no dimension can
         // index remain candidates.
@@ -583,7 +866,7 @@ mod tests {
             cands.contains(&0) && cands.contains(&1),
             "exact stubs present"
         );
-        for fb in [4, 5, 7, 8, 9, 10, 12] {
+        for fb in [5, 7, 8, 9, 10, 12] {
             assert!(
                 cands.contains(&fb),
                 "un-indexable stub {fb} must always be a candidate"
@@ -844,9 +1127,10 @@ mod tests {
         );
     }
 
-    /// A randomized stub corpus spanning every dimension the index prunes on (method, path) and
-    /// every shape it must *not* prune on (regex, body, exists, or/not/and, caseSensitive, except,
-    /// empty). Seeded, so a differential failure is reproducible from the seed alone.
+    /// A randomized stub corpus spanning every dimension the index prunes on (method, path, and —
+    /// since #709 — path regexes) and every shape it must *not* prune on (body/exists regexes,
+    /// or/not/and, caseSensitive, except, selector, non-string patterns, invalid patterns, empty).
+    /// Seeded, so a differential failure is reproducible from the seed alone.
     fn random_corpus(rng: &mut StdRng, n: usize) -> Vec<Value> {
         const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "TRACE"];
         const SEGS: &[&str] = &["/a", "/b", "/api/v1", "/api/v2", "/x/y", "/mid"];
@@ -854,7 +1138,7 @@ mod tests {
             .map(|_| {
                 let seg = SEGS[rng.gen_range(0..SEGS.len())];
                 let m = METHODS[rng.gen_range(0..METHODS.len())];
-                match rng.gen_range(0..12) {
+                match rng.gen_range(0..21) {
                     // Indexable on both dimensions (one predicate, two fields).
                     0 => json!([{"equals": {"method": m, "path": seg}}]),
                     // Indexable on both dimensions (two separate top-level predicates).
@@ -865,12 +1149,31 @@ mod tests {
                     3 => json!([{"equals": {"path": seg}}]),
                     4 => json!([{"startsWith": {"path": seg}}]),
                     5 => json!([{"contains": {"path": seg}}]),
-                    // Not indexable on either dimension — must be always-candidate.
+                    // Indexable on the regex dimension (#709): a top-level `matches` on `path`.
                     6 => json!([{"matches": {"path": format!("^{seg}[0-9]*$")}}]),
-                    7 => json!([{"or": [{"equals": {"method": m}}, {"equals": {"path": seg}}]}]),
-                    8 => json!([{"not": {"equals": {"path": seg}}}]),
-                    9 => json!([{"equals": {"method": m}, "caseSensitive": true}]),
-                    10 => json!([{"equals": {"method": m}, "except": "X"}]),
+                    // Case-sensitive regex — the other automaton.
+                    7 => json!([{"matches": {"path": format!("^{seg}$")}, "caseSensitive": true}]),
+                    // Inline flags must override the automaton's default in both directions.
+                    8 => json!([{"matches": {"path": format!("(?i)^{seg}[0-9]*$")}}]),
+                    9 => json!([{"matches": {"path": format!("(?-i)^{seg}[0-9]*$")}}]),
+                    // Unanchored regex — `which_overlapping_matches` must agree with `is_match`.
+                    10 => json!([{"matches": {"path": "[0-9]+"}}]),
+                    // Regex shapes the dimension must NOT index — all must stay always-candidates.
+                    11 => json!([{"matches": {"path": format!("^{seg}$"), "except": "X"}}]),
+                    12 => json!([{"matches": {"path": format!("^{seg}$")}, "jsonpath": {"selector": "$.id"}}]),
+                    13 => json!([{"matches": {"path": 7}}]),
+                    14 => json!([{"matches": {"path": "^/unclosed["}}]),
+                    15 => json!([{"or": [{"equals": {"method": m}}, {"matches": {"path": format!("^{seg}$")}}]}]),
+                    16 => json!([{"not": {"equals": {"path": seg}}}]),
+                    17 => json!([{"equals": {"method": m}, "caseSensitive": true}]),
+                    18 => json!([{"equals": {"method": m}, "except": "X"}]),
+                    // A deliberately BROAD path regex, drawn from the same `SEGS` as the anchored
+                    // shapes above so it frequently overlaps one of them on the same path. Two
+                    // patterns matching one path is the only shape that can distinguish
+                    // `MatchKind::All` from the meta engine's `LeftmostFirst` default, and without
+                    // a shape that reliably produces it this oracle cannot see that whole class of
+                    // under-approximation — it passed against exactly that bug during #709.
+                    19 => json!([{"matches": {"path": format!("^{seg}")}}]),
                     _ => json!([]),
                 }
             })
@@ -939,6 +1242,249 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- issue #709: the regex dimension -------------------------------------------------
+
+    // AC1: the dimension answers "which of these N patterns match" in one pass — a request that
+    // targets one stub out of many regex-anchored stubs must leave exactly that one candidate.
+    // Before #709 every regex stub was `always_bits`, so all N were candidates for every request
+    // and Stage 2 ran N regex executions. This is the headline the `regex_anchored` bench measures.
+    #[test]
+    fn regex_dimension_collapses_candidates() {
+        let preds: Vec<Value> = (0..100)
+            .map(|i| json!([{"matches": {"path": format!("^/api/endpoint{i}$")}}]))
+            .collect();
+        let snap = snapshot(&preds);
+
+        for target in [0usize, 42, 99] {
+            let c = snap.candidates("GET", &format!("/api/endpoint{target}"));
+            assert_eq!(
+                c.count(),
+                1,
+                "exactly one regex stub survives for /api/endpoint{target}"
+            );
+            assert!(
+                c.contains(target),
+                "the {target}-anchored stub is the survivor"
+            );
+        }
+        // A path no pattern matches prunes every stub.
+        assert_eq!(snap.candidates("GET", "/nothing").count(), 0);
+    }
+
+    // The regex dimension must report EVERY pattern that matches a path, not just the
+    // leftmost-first winner. Two patterns in one case class that can both match the same path is
+    // the ONLY shape that distinguishes `MatchKind::All` from the meta engine's default
+    // (`LeftmostFirst`) — under the default, `which_overlapping_matches` reports one of them and
+    // the other stub is silently pruned even though its regex matches. Regression test for exactly
+    // that under-approximation, which every mutually-exclusive-pattern test above cannot see.
+    #[test]
+    fn overlapping_patterns_are_all_candidates() {
+        let snap = snapshot(&[
+            json!([{"matches": {"path": "^/api"}}]),      // 0 broad
+            json!([{"matches": {"path": "^/api/v1$"}}]),  // 1 specific — both match /api/v1
+            json!([{"matches": {"path": "[0-9]+"}}]),     // 2 unanchored — matches /a0
+            json!([{"matches": {"path": "^/a[0-9]*$"}}]), // 3 anchored — also matches /a0
+        ]);
+        let c = snap.candidates("GET", "/api/v1");
+        assert!(
+            c.contains(0) && c.contains(1),
+            "both overlapping /api patterns must survive (earlier masking later)"
+        );
+        let c = snap.candidates("GET", "/a0");
+        assert!(
+            c.contains(2) && c.contains(3),
+            "both overlapping /a0 patterns must survive (later masking earlier)"
+        );
+
+        // ...and the end-to-end consequence: a stub whose pattern matches must stay reachable even
+        // when an earlier stub's pattern also matches the same path but the earlier stub is
+        // rejected by Stage 2 on another field.
+        let imp = imposter(&[
+            json!([{"matches": {"path": "^/api"}}, {"equals": {"method": "POST"}}]),
+            json!([{"matches": {"path": "^/api/v1$"}}]),
+        ]);
+        let no_headers: HashMap<String, String> = HashMap::new();
+        assert_eq!(
+            idx(imp.find_matching_stub_with_client(
+                "GET",
+                "/api/v1",
+                &no_headers,
+                None,
+                None,
+                None,
+                None
+            )),
+            Some(1),
+            "the GET must fall through the POST-gated stub to the stub that matches"
+        );
+    }
+
+    // AC4 (the load-bearing semantics test): `matches` does NOT fold like the other operators.
+    // `fields.rs:227` builds the regex as `cached_regex(pattern, !case_sensitive)`, i.e. the
+    // default is `RegexBuilder::case_insensitive(true)` — the regex crate's *Unicode* fold, not
+    // the ASCII `eq_ignore_ascii_case` the path dimension's `fold()` mirrors. The dimension must
+    // reproduce the evaluator's fold exactly, for case-sensitive, case-insensitive, and
+    // inline-flag patterns alike — so this asserts against the linear oracle, not against a
+    // hand-written expectation.
+    #[test]
+    fn regex_dimension_case_semantics_match_the_evaluator() {
+        let imp = imposter(&[
+            json!([{"matches": {"path": "^/Case$"}}]), // 0 default => Unicode case-INsensitive
+            json!([{"matches": {"path": "^/Case2$"}, "caseSensitive": true}]), // 1 case-sensitive
+            json!([{"matches": {"path": "(?i)^/inline$"}, "caseSensitive": true}]), // 2 inline (?i) overrides CS
+            json!([{"matches": {"path": "(?-i)^/noinline$"}}]), // 3 inline (?-i) overrides the CI default
+            json!([{"matches": {"path": "^/ünï$"}}]), // 4 non-ASCII under the Unicode fold
+            json!([{"matches": {"path": "^/STRASSE$"}}]), // 5 non-ASCII fold edge
+        ]);
+        let no_headers: HashMap<String, String> = HashMap::new();
+        for (m, p) in [
+            ("GET", "/case"),
+            ("GET", "/Case"),
+            ("GET", "/CASE"),
+            ("GET", "/case2"),
+            ("GET", "/Case2"),
+            ("GET", "/inline"),
+            ("GET", "/INLINE"),
+            ("GET", "/noinline"),
+            ("GET", "/NOINLINE"),
+            ("GET", "/ünï"),
+            ("GET", "/ÜNÏ"),
+            ("GET", "/strasse"),
+            ("GET", "/STRASSE"),
+            ("GET", "/straße"),
+        ] {
+            let linear =
+                idx(imp.find_matching_stub_linear(m, p, &no_headers, None, None, None, None));
+            let indexed =
+                idx(imp.find_matching_stub_with_client(m, p, &no_headers, None, None, None, None));
+            assert_eq!(indexed, linear, "index diverged from linear for {m} {p}");
+        }
+    }
+
+    // AC2 + the soundness rule: every regex shape the dimension cannot index must stay a candidate
+    // for EVERY request. `except` rewrites the compared value and `selector` re-scopes it, so
+    // neither can be matched against the raw path; a non-string pattern is still a real constraint
+    // (the evaluator renders it via `to_string`); and or/not/and nesting is not a *required*
+    // top-level constraint. Under-approximating any of these is a silent no-match.
+    #[test]
+    fn ineligible_regex_shapes_are_always_candidates() {
+        let snap = snapshot(&[
+            json!([{"matches": {"path": "^/idx$"}}]), // 0 indexable
+            json!([{"matches": {"path": "^/x$"}, "except": "Y"}]), // 1 except rewrites the value
+            json!([{"matches": {"path": "^/x$"}, "jsonpath": {"selector": "$.id"}}]), // 2 selector
+            json!([{"or": [{"matches": {"path": "^/x$"}}, {"equals": {"path": "/y"}}]}]), // 3 or
+            json!([{"not": {"matches": {"path": "^/x$"}}}]), // 4 not
+            json!([{"and": [{"matches": {"path": "^/x$"}}, {"equals": {"method": "GET"}}]}]), // 5 and
+            json!([{"matches": {"body": "^ping$"}}]), // 6 non-path field
+            json!([{"matches": {"path": 7}}]),        // 7 non-string pattern is still a constraint
+            json!([{"matches": {"path": "^/unclosed["}}]), // 8 invalid pattern never compiles
+        ]);
+        // A path matching no indexable pattern: only stubs the dimension cannot index may survive.
+        let c = snap.candidates("GET", "/other");
+        assert!(!c.contains(0), "the indexable /idx stub must be pruned");
+        for i in [1, 2, 3, 4, 5, 6, 7, 8] {
+            assert!(
+                c.contains(i),
+                "stub {i} is un-indexable → must always be a candidate"
+            );
+        }
+    }
+
+    // AC2: an invalid pattern must not take the whole automaton down with it. `new_many` fails on
+    // the first bad pattern in the set, so a single typo'd stub would otherwise cost every other
+    // regex stub its pruning. The bad stub lands in always_bits (sound: the evaluator's
+    // `build_regex` returns None → the predicate is false → it never matches anyway) while its
+    // well-formed neighbours keep being indexed.
+    #[test]
+    fn invalid_pattern_does_not_disable_the_dimension() {
+        let imp = imposter(&[
+            json!([{"matches": {"path": "^/good1$"}}]),
+            json!([{"matches": {"path": "^/unclosed["}}]), // never compiles
+            json!([{"matches": {"path": "^/good2$"}}]),
+        ]);
+        let no_headers: HashMap<String, String> = HashMap::new();
+        for (m, p) in [
+            ("GET", "/good1"),
+            ("GET", "/good2"),
+            ("GET", "/unclosed["),
+            ("GET", "/other"),
+        ] {
+            let linear =
+                idx(imp.find_matching_stub_linear(m, p, &no_headers, None, None, None, None));
+            let indexed =
+                idx(imp.find_matching_stub_with_client(m, p, &no_headers, None, None, None, None));
+            assert_eq!(indexed, linear, "index diverged from linear for {m} {p}");
+        }
+
+        // The valid neighbours are still pruned by the dimension — the bad pattern only costs
+        // itself.
+        let snap = snapshot(&[
+            json!([{"matches": {"path": "^/good1$"}}]),
+            json!([{"matches": {"path": "^/unclosed["}}]),
+            json!([{"matches": {"path": "^/good2$"}}]),
+        ]);
+        let c = snap.candidates("GET", "/good1");
+        assert!(c.contains(0), "the matching stub survives");
+        assert!(
+            !c.contains(2),
+            "the non-matching valid stub is still pruned"
+        );
+        assert!(c.contains(1), "the invalid-pattern stub stays a candidate");
+    }
+
+    // AC2: a pattern the many-build rejects on size lands its stub in always_bits and leaves
+    // behaviour unchanged — the index degrades to the pre-#709 fallback for that stub rather than
+    // pruning it or failing the build.
+    #[test]
+    fn oversized_regex_set_falls_back_to_always_bits() {
+        // A bounded repeat of a large Unicode class explodes the NFA well past NFA_SIZE_LIMIT.
+        let huge = format!("^/{}$", r"\p{L}{5000}".repeat(4));
+        let imp = imposter(&[
+            json!([{"matches": {"path": huge}}]),
+            json!([{"matches": {"path": "^/small$"}}]),
+        ]);
+        let no_headers: HashMap<String, String> = HashMap::new();
+        for (m, p) in [("GET", "/small"), ("GET", "/abc"), ("GET", "/other")] {
+            let linear =
+                idx(imp.find_matching_stub_linear(m, p, &no_headers, None, None, None, None));
+            let indexed =
+                idx(imp.find_matching_stub_with_client(m, p, &no_headers, None, None, None, None));
+            assert_eq!(indexed, linear, "index diverged from linear for {m} {p}");
+        }
+        // The oversized stub is never pruned; its well-formed neighbour still is.
+        let snap = snapshot(&[
+            json!([{"matches": {"path": huge}}]),
+            json!([{"matches": {"path": "^/small$"}}]),
+        ]);
+        let c = snap.candidates("GET", "/nothing-matches");
+        assert!(
+            c.contains(0),
+            "the oversized-pattern stub must stay a candidate"
+        );
+        assert!(!c.contains(1), "the small-pattern stub is still pruned");
+    }
+
+    // AC2: the fallback is *logged* at build, naming the stub and the offending pattern. Without
+    // this an operator whose stub quietly stopped being indexed (a latency regression, not a
+    // behaviour change) has nothing to correlate against.
+    #[traced_test]
+    #[test]
+    fn rejected_pattern_warns_at_build_naming_the_stub() {
+        let huge = format!("^/{}$", r"\p{L}{5000}".repeat(4));
+        let _snap = snapshot(&[
+            json!([{"matches": {"path": "^/small$"}}]),
+            json!([{"matches": {"path": huge}}]),
+        ]);
+        assert!(
+            logs_contain("regex dimension: pattern rejected by the multi-pattern build"),
+            "the rejected pattern must be warned about at build time"
+        );
+        assert!(
+            logs_contain("stub=1"),
+            "the warn must name which stub lost its index"
+        );
     }
 
     // Issue #475: the has_scenario_gate flag — computed once at index build — detects a

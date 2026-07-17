@@ -123,9 +123,10 @@ fn imposter_with_stubs(
 /// * `indexed_exact` — every stub is `equals`-anchored, so `candidates()` resolves the request
 ///   path through a `HashMap` to a single candidate and Stage 2 evaluates one predicate. Flat in
 ///   stub count: this is the well-indexed common shape, and it is the *best* case, not the worst.
-/// * `unindexed_fallback` — every stub matches on a path *regex*, which `path_anchor` will not
-///   index, so all `count` stubs sit in fallback and each is fully predicate-evaluated. This is
-///   the real O(stubs) worst case.
+/// * `regex_anchored` — every stub matches on a path *regex*, targeting the last. Before #709
+///   `path_anchor` would not index these, so all `count` stubs sat in fallback and each was fully
+///   predicate-evaluated — the O(stubs) worst case. #709's regex dimension answers "which of these
+///   `count` patterns match" in one automaton pass, so this is now the headline before/after.
 /// * `prefix_anchored` — every stub is `startsWith`-anchored. Those *are* indexed, but
 ///   `candidates()` walks each distinct prefix bucket linearly, so the prefilter itself scales
 ///   with the number of distinct prefixes even though exactly one stub matches.
@@ -174,7 +175,7 @@ fn bench_find_matching_stub(c: &mut Criterion) {
         &|count| format!("/api/endpoint{}", count - 1),
     );
     scan(
-        "find_matching_stub_unindexed_fallback",
+        "find_matching_stub_regex_anchored",
         &|i| json!({ "matches": { "path": format!("^/api/endpoint{i}$") } }),
         &|count| format!("/api/endpoint{}", count - 1),
     );
