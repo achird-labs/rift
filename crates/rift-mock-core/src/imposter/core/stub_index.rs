@@ -1836,7 +1836,7 @@ mod tests {
             .map(|_| {
                 let seg = SEGS[rng.gen_range(0..SEGS.len())];
                 let m = METHODS[rng.gen_range(0..METHODS.len())];
-                match rng.gen_range(0..32) {
+                match rng.gen_range(0..36) {
                     // Indexable on both dimensions (one predicate, two fields).
                     0 => json!([{"equals": {"method": m, "path": seg}}]),
                     // Indexable on both dimensions (two separate top-level predicates).
@@ -1895,6 +1895,16 @@ mod tests {
                     29 => json!([{"deepEquals": {"body": [1, 2]}}]),
                     30 => json!([{"deepEquals": {"body": {"n": {"a": 1}}}}]),
                     31 => json!([{"deepEquals": {"body": {"k": 1}}, "caseSensitive": true}]),
+                    // equals-on-body (#767): field-level equals the quamina dimension indexes,
+                    // drawn from the same body templates the request generator sends so they
+                    // frequently match. Case 32's numeric `{"k":1}` is deliberately hit by the
+                    // request body `{"k":"1"}` too — the string-coercion axis the dimension must
+                    // mirror (a type-matching automaton would under-approximate here). 34/35 are
+                    // the carve-outs (caseSensitive, json-in-string leaf) that must stay `always`.
+                    32 => json!([{"equals": {"body": {"k": 1}}}]),
+                    33 => json!([{"equals": {"body": {"n": {"a": 1}}}}]),
+                    34 => json!([{"equals": {"body": {"k": 1}}, "caseSensitive": true}]),
+                    35 => json!([{"equals": {"body": {"j": "{\"x\":1}"}}}]),
                     _ => json!([]),
                 }
             })
@@ -1905,7 +1915,7 @@ mod tests {
     // return exactly the stub the linear oracle returns — same index, same first-match-wins order —
     // for every request. This is a *characterization* gate: it holds for the pre-#707 index too, and
     // must keep holding through the snapshot/bitset refactor and every dimension added on top of it
-    // (#708/#709/#710). Any dimension that under-approximates (prunes a stub that could match)
+    // (#708/#709/#710/#767). Any dimension that under-approximates (prunes a stub that could match)
     // fails here.
     #[test]
     fn differential_index_matches_linear_oracle() {
@@ -1936,16 +1946,20 @@ mod tests {
                 let m = METHODS[rng.gen_range(0..METHODS.len())];
                 let p = PATHS[rng.gen_range(0..PATHS.len())];
                 // Mix non-JSON, absent, and several JSON bodies — exact matches, a type-coercion
-                // variant, an array, a JSON-in-string leaf (the bail path), and a nested object —
-                // so the body-hash dimension (#708) is exercised against the linear oracle.
-                let body = match rng.gen_range(0..8) {
+                // variant, an array, a JSON-in-string leaf (the bail path), a nested object, and a
+                // superset body — so the body-hash (#708) AND body-field (#767) dimensions are both
+                // exercised against the linear oracle. `{"k":"1"}` (string) must still match a
+                // numeric equals stub; `{"k":1,"z":9}` matches the equals-subset stub but NOT the
+                // length-exact deepEquals stub, so the two body dimensions diverge on it.
+                let body = match rng.gen_range(0..9) {
                     0 => Some("ping"),
                     1 => Some(r#"{"k":1}"#),
                     2 => Some(r#"{"k":"1"}"#),
                     3 => Some(r#"[1,2]"#),
                     4 => Some(r#"{"n":{"a":1}}"#),
                     5 => Some(r#"{"j":"{\"x\":1}"}"#),
-                    6 => None,
+                    6 => Some(r#"{"k":1,"z":9}"#),
+                    7 => None,
                     _ => None,
                 };
                 let query = if rng.gen_bool(0.25) {
