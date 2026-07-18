@@ -394,10 +394,14 @@ class RssSampler(threading.Thread):
         super().__init__(daemon=True)
         self.pid = pid
         self.samples = []
-        self._stop = threading.Event()
+        # NOT named `_stop`: threading.Thread has an internal `_stop()` method that
+        # `join()` calls on Python <=3.12 — shadowing it with an Event makes every
+        # join() raise `TypeError: 'Event' object is not callable` (found the hard
+        # way on ubuntu runners; macOS's Python 3.13 join() never calls it).
+        self._stop_event = threading.Event()
 
     def run(self):
-        while not self._stop.wait(1.0):
+        while not self._stop_event.wait(1.0):
             try:
                 out = subprocess.run(["ps", "-o", "rss=", "-p", str(self.pid)],
                                       capture_output=True, text=True)
@@ -408,7 +412,7 @@ class RssSampler(threading.Thread):
                 self.samples.append((time.time(), kb))
 
     def stop(self):
-        self._stop.set()
+        self._stop_event.set()
         self.join(timeout=2)
 
     def window(self, since_ts):

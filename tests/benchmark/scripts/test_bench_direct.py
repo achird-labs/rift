@@ -11,6 +11,7 @@ Run: python3 -m unittest test_bench_direct   (from tests/benchmark/scripts)
 import io
 import os
 import sys
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -382,6 +383,29 @@ class ResultSuffix(unittest.TestCase):
 
     def test_both_compose(self):
         self.assertEqual(bd.result_suffix("jemalloc", "per-core"), "_jemalloc_per-core")
+
+
+
+
+class RssSamplerLifecycle(unittest.TestCase):
+    """Issue #746 follow-up: RssSampler must not shadow threading.Thread internals.
+    Naming its stop flag `_stop` broke every `join()` on Python <=3.12
+    (`Thread._stop()` is called internally) — invisible on Python 3.13 dev boxes."""
+
+    def test_start_sample_stop_joins_cleanly(self):
+        sampler = bd.RssSampler(os.getpid())
+        sampler.start()
+        import time as _time
+        _time.sleep(1.3)  # at least one sample tick
+        sampler.stop()    # join() raised TypeError on 3.12 before the rename
+        self.assertFalse(sampler.is_alive())
+
+    def test_no_thread_internal_shadowing(self):
+        sampler = bd.RssSampler(os.getpid())
+        shadowed = [a for a in ("_stop", "_started", "_tstate_lock", "_handle")
+                    if type(sampler).__mro__[0] is bd.RssSampler
+                    and a in sampler.__dict__ and hasattr(threading.Thread, a)]
+        self.assertEqual(shadowed, [], f"Thread internals shadowed: {shadowed}")
 
 
 if __name__ == "__main__":
