@@ -29,6 +29,13 @@ the source, the source wins — please file an issue.
 | Observe reconciliation events or decorate responses | `ImposterEventListener` / `ResponseDecorator` | [Extension Points (SPI)]({{ site.baseurl }}/embedding/spi/) |
 | Drive Rift from a non-Rust host (JVM, Node, Go, …) | The C-ABI (`rift-ffi`) | [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/) |
 
+> **Runtime topology is yours to choose when embedding.** The `--runtime per-core` flag
+> ([Performance → Runtime Topology]({{ site.baseurl }}/performance/#runtime-topology-per-core-experimental))
+> is a property of the `rift` **binary's** bootstrap — an embedded host runs `ServerBuilder` on
+> whatever Tokio runtime it already owns. To opt into the same per-core listener fan-out from a
+> host, pass your worker runtime handles to `ServerBuilder::accept_runtimes(...)` (or
+> `ImposterManager::with_accept_runtimes(...)`); omit them for the default single-listener topology.
+
 ---
 
 ## Crate map
