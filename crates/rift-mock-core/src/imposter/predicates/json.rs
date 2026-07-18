@@ -7,7 +7,7 @@ use std::hash::BuildHasher;
 
 /// Convert a JSON value to its string representation for predicate comparison.
 /// Strings are unwrapped (no quotes), other primitives use their natural representation.
-fn json_value_to_string(val: &serde_json::Value) -> String {
+pub(crate) fn json_value_to_string(val: &serde_json::Value) -> String {
     match val {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Number(n) => n.to_string(),

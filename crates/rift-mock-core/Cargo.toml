@@ -75,6 +75,9 @@ regex-automata = "0.4"
 # The multi-pattern literal engine behind `regex`'s own prefilter (issue #710). Already in the
 # tree transitively via `regex`; naming it directly keeps one automata stack rather than a second.
 aho-corasick = "1.1"
+# Automaton-based JSON body-field matching (issue #767); default-on, droppable for
+# minimal/FFI builds via `--no-default-features`.
+quamina = { version = "0.6", optional = true }
 memchr.workspace = true
 rand.workspace = true
 urlencoding = "2.1"
@@ -128,8 +131,11 @@ name = "response_serve_bench"
 harness = false
 
 [features]
-default = ["redis-backend", "javascript"]
+default = ["redis-backend", "javascript", "quamina-matching"]
 redis-backend = ["redis", "r2d2"]
 javascript = ["boa_engine"]
+# Quamina-backed body-field candidate dimension (issue #767). Off ⇒ the dimension
+# compiles to a no-op that never prunes; Stage-2 still evaluates every body predicate.
+quamina-matching = ["dep:quamina"]
 # Deliberately failing flow-store backend for backend-outage tests (issue #318)
 test-backend = []

@@ -2868,6 +2868,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "quamina"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df76083668e1d8c46e9ae515d4f0281f47db222306904c6b7c6636f3c6c655c5"
+dependencies = [
+ "arc-swap",
+ "fast-float2",
+ "memchr",
+ "parking_lot",
+ "rustc-hash",
+ "smallvec",
+]
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3433,6 +3447,7 @@ dependencies = [
  "papaya",
  "parking_lot",
  "prometheus",
+ "quamina",
  "r2d2",
  "rand 0.8.5",
  "rcgen",

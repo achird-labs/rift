@@ -50,7 +50,7 @@
 
 use super::StubState;
 use super::bitset::CandidateBits;
-use crate::imposter::predicates::json::structural_hash;
+use crate::imposter::predicates::json::{json_value_to_string, structural_hash};
 use crate::imposter::types::Stub;
 use crate::util::FastMap;
 use aho_corasick::{AhoCorasick, MatchKind as AcMatchKind};
@@ -725,6 +725,147 @@ impl Dimension for BodyHashDimension {
 }
 
 /// The multi-dimensional candidate prefilter over a stub snapshot. See the module docs.
+/// Fold a scalar JSON leaf to the exact string the default `equals` comparator compares on:
+/// [`json_value_to_string`] (number→decimal, bool→`"true"`/`"false"`, null→`""`, string→raw) then
+/// ASCII-lowercase (the comparator's `eq_ignore_ascii_case`). This is the crux of soundness: the
+/// comparator **string-coerces** leaves — `5` ≡ `"5"`, `true` ≡ `"true"` — so a *type-matching*
+/// automaton would under-approximate (drop stubs Stage-2 matches). Applying this same stringify to
+/// **both** the pattern and the event makes quamina match the comparator's canonical form, never
+/// the JSON type. It is exactly the leaf normalization [`structural_hash`] uses for #708.
+fn folded_leaf_string(v: &serde_json::Value) -> String {
+    json_value_to_string(v).to_ascii_lowercase()
+}
+
+/// Normalize a request body for the automaton: recurse containers (lowercasing object keys), and
+/// replace **every scalar leaf** with its [`folded_leaf_string`], so the event carries the same
+/// stringified-and-folded values the `equals` comparator compares on (issue #767). Called only
+/// after [`structural_hash`] has confirmed the body has no JSON-ish string leaf (which no purely
+/// structural matcher can reconcile — the request side widens to all in that case).
+fn normalize_json_value(v: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, val)| (k.to_ascii_lowercase(), normalize_json_value(val)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(normalize_json_value).collect()),
+        scalar => Value::String(folded_leaf_string(scalar)),
+    }
+}
+
+/// Translate one expected `body` sub-tree into a quamina exact-match pattern value: each scalar
+/// leaf becomes `[folded_leaf_string(leaf)]` (a one-element array of the comparator's folded string
+/// form), object keys lowercased. Returns `None` if any leaf is ineligible, so the whole stub falls
+/// back to `always_bits` (issue #767):
+///
+/// * **arrays** — MB `equals` on an array is ordered whole-array equality; a quamina array pattern
+///   is OR-over-values. Different semantics ⇒ ineligible.
+/// * **null** — excluded in v1 (`null` vs absent field is subtle; conservative fallback is sound).
+///
+/// Numbers (any) and bools are fine because they are stringified, not type-matched — the same
+/// reason [`structural_hash`] handles them. JSON-ish string leaves are rejected earlier by the
+/// `structural_hash(body).is_some()` gate in [`body_field_pattern`].
+fn to_quamina_pattern_value(v: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    match v {
+        Value::String(_) | Value::Bool(_) | Value::Number(_) => {
+            Some(Value::Array(vec![Value::String(folded_leaf_string(v))]))
+        }
+        Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, val) in map {
+                out.insert(k.to_ascii_lowercase(), to_quamina_pattern_value(val)?);
+            }
+            Some(Value::Object(out))
+        }
+        // Array, Null → ineligible.
+        _ => None,
+    }
+}
+
+/// A single predicate's body-field pattern for the quamina dimension (issue #767), if it is a
+/// safely-indexable required `equals` whose `body` field is an object with only exact-matchable
+/// leaves. Mirrors [`body_anchor`]'s eligibility (default flags — no `except`/`selector`, not
+/// `caseSensitive`/`keyCaseSensitive`), but on `Equals` (field-level subset) rather than
+/// `DeepEquals` (whole-body exactness, which stays #708's hash dimension). Only the first eligible
+/// predicate is indexed; the stub's other constraints stay required and are checked by Stage-2.
+fn body_field_pattern(pred: &Predicate) -> Option<String> {
+    if !is_safely_indexable(&pred.parameters) || pred.parameters.key_case_sensitive == Some(true) {
+        return None;
+    }
+    let PredicateOperation::Equals(fields) = &pred.operation else {
+        return None;
+    };
+    let body = match fields.get("body") {
+        Some(v @ serde_json::Value::Object(map)) if !map.is_empty() => v,
+        _ => return None, // scalar/array/absent/empty body ⇒ not this dimension
+    };
+    // A JSON-ish string leaf (`"{...}"`) is equivalent to a container in both directions for the
+    // comparator, which no structural pattern can reconcile — reject so the stub is `always_bits`
+    // (the same guard #708's `body_anchor` applies via `structural_hash`).
+    structural_hash(body)?;
+    let pattern = to_quamina_pattern_value(body)?;
+    serde_json::to_string(&pattern).ok()
+}
+
+/// The body-field dimension (issue #767): a quamina automaton over field-level `equals`-on-body
+/// predicates, so "which of N field-equals stubs matches this body" is one automaton pass instead
+/// of an O(N) Stage-2 scan. Complements #708's [`BodyHashDimension`] (whole-body `deepEquals`),
+/// which quamina's subset semantics cannot express.
+struct BodyFieldDimension {
+    /// Patterns keyed by stub id; `None` when zero stubs are eligible (or the feature is off), in
+    /// which case [`Dimension::prunes`] is false and this dimension is skipped entirely.
+    #[cfg(feature = "quamina-matching")]
+    quamina: Option<quamina::Quamina<usize>>,
+    /// Stubs not indexed here (ineligible predicate, or a per-stub `add_pattern` failure) — always
+    /// candidates on this dimension.
+    always: CandidateBits,
+    len: usize,
+}
+
+impl Dimension for BodyFieldDimension {
+    fn select(&self, request: &DimensionRequest<'_>, out: &mut CandidateBits) {
+        out.copy_from(&self.always);
+        #[cfg(feature = "quamina-matching")]
+        {
+            let Some(q) = &self.quamina else { return };
+            // A field-equals-on-object predicate can never match a non-JSON/absent body, so only
+            // `always` stubs survive — exactly like the body-hash dimension.
+            let Some(body) = request.body else { return };
+            // A JSON-ish string leaf in the request body is equivalent to a container an indexed
+            // stub may expect (both directions), which no structural pass can reconcile — so this
+            // dimension must not prune this request. Widen to all; Stage-2 decides (mirrors the
+            // body-hash dimension's identical `structural_hash` guard).
+            if structural_hash(body).is_none() {
+                out.copy_from(&CandidateBits::all(self.len));
+                return;
+            }
+            // Serializing a `Value` cannot fail, but never under-approximate: fail OPEN.
+            let Ok(event) = serde_json::to_vec(&normalize_json_value(body)) else {
+                out.copy_from(&CandidateBits::all(self.len));
+                return;
+            };
+            match q.matches_for_event(&event) {
+                Ok(ids) => ids.into_iter().for_each(|i| out.set(i)),
+                // Fail OPEN to over-approximation, never closed (Stage-2 decides).
+                Err(_) => out.copy_from(&CandidateBits::all(self.len)),
+            }
+        }
+    }
+
+    fn prunes(&self) -> bool {
+        #[cfg(feature = "quamina-matching")]
+        {
+            self.quamina.is_some()
+        }
+        #[cfg(not(feature = "quamina-matching"))]
+        {
+            false
+        }
+    }
+}
+
 pub(crate) struct StubIndex {
     len: usize,
     path: PathDimension,
@@ -732,6 +873,7 @@ pub(crate) struct StubIndex {
     literal: LiteralDimension,
     regex: RegexDimension,
     body: BodyHashDimension,
+    body_field: BodyFieldDimension,
 }
 
 impl StubIndex {
@@ -755,6 +897,10 @@ impl StubIndex {
 
         let mut body_by_hash: FastMap<u64, Vec<usize>> = FastMap::default();
         let mut body_always = CandidateBits::zeros(len);
+
+        #[cfg(feature = "quamina-matching")]
+        let mut body_field_quamina: Option<quamina::Quamina<usize>> = None;
+        let mut body_field_always = CandidateBits::zeros(len);
 
         for (i, state) in stubs.iter().enumerate() {
             match classify(&state.stub) {
@@ -790,6 +936,25 @@ impl StubIndex {
             match state.stub.predicates.iter().find_map(body_anchor) {
                 Some(h) => body_by_hash.entry(h).or_default().push(i),
                 None => body_always.set(i),
+            }
+            // First eligible field-level equals-on-body predicate → one quamina pattern (#767).
+            // A per-stub `add_pattern` failure (PatternLimits/malformed) falls that stub back to
+            // `always_bits` — a build-time (admin-rate) warn, never the per-request trap of #741.
+            match state.stub.predicates.iter().find_map(body_field_pattern) {
+                Some(_pattern) => {
+                    #[cfg(feature = "quamina-matching")]
+                    {
+                        let q = body_field_quamina.get_or_insert_with(quamina::Quamina::new);
+                        if let Err(e) = q.add_pattern(i, &_pattern) {
+                            tracing::warn!(stub = i, error = %e,
+                                "body-field dimension: pattern rejected; stub falls back to full evaluation");
+                            body_field_always.set(i);
+                        }
+                    }
+                    #[cfg(not(feature = "quamina-matching"))]
+                    body_field_always.set(i);
+                }
+                None => body_field_always.set(i),
             }
         }
 
@@ -828,6 +993,12 @@ impl StubIndex {
             always: body_always,
             len,
         };
+        let body_field = BodyFieldDimension {
+            #[cfg(feature = "quamina-matching")]
+            quamina: body_field_quamina,
+            always: body_field_always,
+            len,
+        };
         StubIndex {
             len,
             path,
@@ -835,6 +1006,7 @@ impl StubIndex {
             literal,
             regex,
             body,
+            body_field,
         }
     }
 
@@ -907,9 +1079,12 @@ impl StubIndex {
             && Self::fold_in(&self.literal, request, &mut acc, &mut seeded, self.len)
             && Self::fold_in(&self.regex, request, &mut acc, &mut seeded, self.len)
         {
-            // Body last: hashing the request body is O(body), so let the cheap path/method/automaton
-            // dimensions empty the accumulator first (short-circuiting the hash away) where they can.
-            Self::fold_in(&self.body, request, &mut acc, &mut seeded, self.len);
+            // Body dimensions last: each touches the request body (hash / normalize+automaton), so
+            // let the cheap path/method/automaton dimensions empty the accumulator first where they
+            // can. The body-field automaton (#767) runs only if the hash dimension left survivors.
+            if Self::fold_in(&self.body, request, &mut acc, &mut seeded, self.len) {
+                Self::fold_in(&self.body_field, request, &mut acc, &mut seeded, self.len);
+            }
         }
 
         // No dimension indexes anything (e.g. every stub is a body regex): everyone is a candidate.
@@ -1178,6 +1353,175 @@ mod tests {
                 idx(imp.find_matching_stub_with_client(m, p, &no_headers, None, None, None, None));
             assert_eq!(indexed, linear, "index diverged from linear for {m} {p}");
         }
+    }
+
+    // ── Body-field dimension (#767): differential gate + unit tests ──────────────────────────
+
+    // The #767 gate: the indexed path (through the quamina body-field dimension) returns the SAME
+    // matched stub as the linear scan for every JSON-body request — over a corpus mixing eligible
+    // field-equals shapes with every carve-out that must fall to always_bits. This is the
+    // executable soundness proof; a dimension that ever UNDER-approximates diverges here.
+    #[test]
+    fn body_field_dimension_matches_linear() {
+        let imp = imposter(&[
+            json!([{"equals": {"body": {"user": {"id": 5}}}}]), // 0 nested numeric
+            json!([{"equals": {"body": {"user": {"id": 7}}}}]), // 1 nested numeric, other id
+            json!([{"equals": {"body": {"name": "Alice"}}}]), // 2 string (case-insensitive default)
+            json!([{"equals": {"body": {"active": true}}}]),  // 3 boolean
+            json!([{"equals": {"body": {"a": 1, "b": 2}}}]),  // 4 multi-field
+            json!([{"equals": {"body": {"tags": [1, 2]}}}]),  // 5 array leaf -> INELIGIBLE (always)
+            json!([{"equals": {"body": {"x": null}}}]),       // 6 null leaf -> INELIGIBLE (always)
+            json!([{"equals": {"body": {"n": 1.5}}}]), // 7 float leaf -> eligible (stringified)
+            json!([{"equals": {"body": {"K": "V"}}, "caseSensitive": true}]), // 8 caseSensitive -> INELIGIBLE
+            json!([{"equals": {"body": {"K": "v"}}, "keyCaseSensitive": true}]), // 9 keyCaseSensitive -> INELIGIBLE
+            json!([{"deepEquals": {"body": {"whole": 1}}}]), // 10 deepEquals -> #708, not this dim
+            json!([{"equals": {"body": {"u": {"id": 5}}}, "except": "x"}]), // 11 except -> INELIGIBLE
+            json!([{"equals": {"body": {"deep": {"a": {"b": 3}}}}}]),       // 12 depth-3 nesting
+            json!([{"equals": {"body": {"code": "5"}}}]), // 13 STRING "5" (cross-type vs numeric request)
+            json!([{"equals": {"body": {"j": "{\"x\":1}"}}}]), // 14 json-ish string leaf -> INELIGIBLE
+            json!([{"equals": {"body": {"empt": ""}}}]), // 15 empty-string leaf (≡ null via json_value_to_string)
+            json!([]),                                   // 16 match-all trailer
+        ]);
+        let no_headers: HashMap<String, String> = HashMap::new();
+        // Bodies chosen to exercise the comparator's TYPE COERCION on both sides — the axis a
+        // type-matching automaton gets wrong — plus mixed case, carve-outs, depth-3, and non-JSON.
+        let bodies: &[&str] = &[
+            r#"{"user":{"id":5}}"#,
+            r#"{"user":{"id":7}}"#,
+            r#"{"user":{"id":9}}"#,   // no matching id -> trailer
+            r#"{"USER":{"ID":5}}"#,   // upper keys fold to stub 0
+            r#"{"user":{"id":"5"}}"#, // STRING "5" still matches numeric stub 0 (coercion)
+            r#"{"name":"Alice"}"#,
+            r#"{"NAME":"ALICE"}"#, // key+value fold to stub 2
+            r#"{"name":"bob"}"#,
+            r#"{"active":true}"#,
+            r#"{"active":"true"}"#, // STRING "true" matches bool stub 3 (coercion)
+            r#"{"a":1,"b":2}"#,
+            r#"{"a":1,"b":3}"#,  // partial -> trailer
+            r#"{"tags":[1,2]}"#, // array-leaf stub is always; linear decides
+            r#"{"x":null}"#,
+            r#"{"n":1.5}"#,
+            r#"{"n":"1.5"}"#, // STRING "1.5" matches float stub 7 (coercion)
+            r#"{"whole":1}"#, // deepEquals stub 10
+            r#"{"K":"V"}"#,   // caseSensitive/keyCaseSensitive stubs
+            r#"{"deep":{"a":{"b":3}}}"#, // depth-3 stub 12
+            r#"{"code":5}"#,  // NUMBER 5 matches string stub 13 (reverse coercion)
+            r#"{"code":"5"}"#,
+            r#"{"j":{"x":1}}"#, // container matches the json-ish-string stub 14 (widen path)
+            r#"{"j":"{\"x\":1}"}"#, // the json-ish string itself
+            r#"{"empt":""}"#,   // empty-string request matches empty-string stub 15
+            r#"{"empt":null}"#, // null ≡ "" via json_value_to_string -> must also match stub 15
+            r#"not json at all"#, // non-JSON body -> body dims contribute always only
+            r#"{}"#,
+        ];
+        for b in bodies {
+            let linear = idx(imp.find_matching_stub_linear(
+                "POST",
+                "/x",
+                &no_headers,
+                None,
+                Some(b),
+                None,
+                None,
+            ));
+            let indexed = idx(imp.find_matching_stub_with_client(
+                "POST",
+                "/x",
+                &no_headers,
+                None,
+                Some(b),
+                None,
+                None,
+            ));
+            assert_eq!(
+                indexed, linear,
+                "body-field index diverged from linear for body {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn body_field_pattern_eligibility() {
+        let pat = |p: Value| -> Option<String> {
+            let stub: crate::imposter::types::Stub = serde_json::from_value(
+                json!({"predicates": p, "responses": [{"is": {"statusCode": 200}}]}),
+            )
+            .expect("stub");
+            stub.predicates.iter().find_map(body_field_pattern)
+        };
+        // Eligible → pattern of the comparator's folded STRING leaf form (every leaf a one-element
+        // array of `json_value_to_string(leaf).to_ascii_lowercase()`), object keys lowercased.
+        assert_eq!(
+            pat(json!([{"equals": {"body": {"User": {"Id": 5}}}}])).as_deref(),
+            Some(r#"{"user":{"id":["5"]}}"#)
+        );
+        assert_eq!(
+            pat(json!([{"equals": {"body": {"Name": "Alice"}}}])).as_deref(),
+            Some(r#"{"name":["alice"]}"#)
+        );
+        assert_eq!(
+            pat(json!([{"equals": {"body": {"ok": true}}}])).as_deref(),
+            Some(r#"{"ok":["true"]}"#)
+        );
+        assert_eq!(
+            pat(json!([{"equals": {"body": {"n": 1.5}}}])).as_deref(),
+            Some(r#"{"n":["1.5"]}"#) // floats eligible: stringified, not type-matched
+        );
+        // Ineligible → None (fall back to always_bits).
+        for ineligible in [
+            json!([{"equals": {"body": {"tags": [1, 2]}}}]), // array leaf
+            json!([{"equals": {"body": {"x": null}}}]),      // null leaf
+            json!([{"equals": {"body": {"j": "{\"x\":1}"}}}]), // json-ish string leaf
+            json!([{"equals": {"body": {}}}]),               // empty object
+            json!([{"equals": {"body": "scalar"}}]),         // scalar body
+            json!([{"equals": {"path": "/p"}}]),             // no body
+            json!([{"deepEquals": {"body": {"a": 1}}}]),     // deepEquals, not equals
+            json!([{"equals": {"body": {"a": 1}}, "caseSensitive": true}]),
+            json!([{"equals": {"body": {"a": 1}}, "keyCaseSensitive": true}]),
+            json!([{"equals": {"body": {"a": 1}}, "except": "x"}]), // except
+            json!([{"equals": {"body": {"a": 1}}, "jsonpath": {"selector": "$.a"}}]), // selector
+        ] {
+            assert!(
+                pat(ineligible.clone()).is_none(),
+                "should be ineligible: {ineligible}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_json_value_folds_to_comparator_string_form() {
+        // Every scalar leaf becomes its folded `json_value_to_string` form (numbers/bools → strings)
+        // so the event mirrors what the `equals` comparator compares on.
+        let out = normalize_json_value(&json!({"User": {"Name": "ALICE", "Id": 5, "OK": true}}));
+        assert_eq!(
+            out,
+            json!({"user": {"name": "alice", "id": "5", "ok": "true"}})
+        );
+        // Non-ASCII passes through unfolded (matches eq_ignore_ascii_case).
+        assert_eq!(normalize_json_value(&json!("CAFÉ")), json!("cafÉ"));
+    }
+
+    // #767: the automaton actually PRUNES (not merely doesn't-under-approximate), the sibling of
+    // body_dimension_collapses_candidates (#708) / literal/regex collapse tests — the unit-speed
+    // stand-in for the #719 recovery bench.
+    #[test]
+    fn body_field_dimension_collapses_candidates() {
+        // 500 field-equals-on-body stubs, each a distinct nested id. A matching body probes down to
+        // just that stub instead of an O(stubs) Stage-2 scan.
+        let preds: Vec<Value> = (0..500)
+            .map(|i| json!([{"equals": {"body": {"user": {"id": i}}}}]))
+            .collect();
+        let snap = snapshot(&preds);
+
+        let target = 437usize;
+        let ids = candidate_ids_body(&snap, "POST", "/x", &json!({"user": {"id": target}}));
+        assert_eq!(
+            ids,
+            vec![target],
+            "collapses to the single matching stub, got {ids:?}"
+        );
+        // A body equal to none prunes the whole dimension to empty.
+        assert!(candidate_ids_body(&snap, "POST", "/x", &json!({"user": {"id": 9999}})).is_empty());
     }
 
     // The path dimension genuinely narrows (excludes non-matching anchored stubs) yet never drops a

@@ -13,6 +13,16 @@ record.
 
 ### Added
 
+- **Field-level `equals`-on-body predicates are now indexed by an automaton** (quamina), so
+  "which of N field-equals-on-body stubs matches this request body" is one automaton pass
+  instead of an `O(N)` scan of structural comparisons in the second matching stage. At 1000
+  such stubs this recovers throughput from ~6.8× collapsed toward the indexed-path ceiling;
+  matching results are unchanged — this is purely a prefilter (any predicate it cannot express
+  — arrays, `null`, floats, `caseSensitive`/`keyCaseSensitive`, `except`/selector — safely
+  falls through to full evaluation). It complements the `deepEquals`-on-body hash index. The
+  capability is behind a default-on `quamina-matching` Cargo feature, droppable for minimal or
+  FFI builds via `--no-default-features`. (#767)
+
 - **Per-worker accept counters + runtime-topology bench support** (part of the RFC-712 gate,
   #746). `rift_accepted_connections_total{worker=…}` counts accepted connections per
   accept-loop slot — under `--runtime per-core` that is the worker index, so SO_REUSEPORT
