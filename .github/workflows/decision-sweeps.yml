@@ -1,0 +1,127 @@
+# Decision sweeps for the Turbo round's two open measurement gates (issues #717 and #746),
+# run on GitHub-hosted Linux x86_64 runners. Manual-only (workflow_dispatch): these are
+# measurement runs a human triggers deliberately, never a PR gate.
+#
+# Environment honesty (recorded in the artifacts): standard public-repo runners are 4-vCPU
+# Azure VMs. Per #717's own text a CI runner is decision-grade for the allocator matrix
+# (3 reps + medians; the RSS criterion is noise-robust). For #746 the ≥15%-RPS-at-c≥256
+# clause is measurable here, but the pre-registered ≥8-core slope clause is NOT — a per-core
+# loss at 4 cores is expected and is not a no-go; only a win is a (strong) early signal.
+name: Decision Sweeps
+
+on:
+  workflow_dispatch:
+    inputs:
+      sweep:
+        description: "Which sweep to run"
+        type: choice
+        options: [both, allocator, topology]
+        default: both
+      reps:
+        description: "Repetitions per variant (medians taken offline)"
+        default: "3"
+      duration:
+        description: "oha duration per point"
+        default: "12s"
+
+permissions:
+  contents: read
+
+jobs:
+  allocator:
+    if: ${{ inputs.sweep == 'both' || inputs.sweep == 'allocator' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install oha
+        run: |
+          curl -sfL -o /usr/local/bin/oha \
+            https://github.com/hatoo/oha/releases/download/v1.12.0/oha-linux-amd64 \
+            && chmod +x /usr/local/bin/oha && oha --version \
+            || cargo install oha --locked
+      - name: Record environment
+        run: |
+          mkdir -p tests/benchmark/results
+          { uname -a; nproc; lscpu | head -25; free -h; } \
+            | tee tests/benchmark/results/environment.txt
+      - name: Allocator matrix (mimalloc/jemalloc/system x reps)
+        working-directory: tests/benchmark
+        run: |
+          set -euo pipefail
+          for rep in $(seq 1 ${{ inputs.reps }}); do
+            for alloc in mimalloc jemalloc system; do
+              echo "===== allocator=$alloc rep=$rep ====="
+              python3 scripts/bench_direct.py --run-all --allocator "$alloc" \
+                --sweep-connections 50,200 --duration "${{ inputs.duration }}" --warmup 2s
+              cp "results/direct_rift_${alloc}.csv" "results/direct_rift_${alloc}_rep${rep}.csv"
+            done
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: allocator-sweep-results
+          path: |
+            tests/benchmark/results/*.csv
+            tests/benchmark/results/*.md
+            tests/benchmark/results/environment.txt
+          retention-days: 30
+
+  topology:
+    if: ${{ inputs.sweep == 'both' || inputs.sweep == 'topology' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install oha
+        run: |
+          curl -sfL -o /usr/local/bin/oha \
+            https://github.com/hatoo/oha/releases/download/v1.12.0/oha-linux-amd64 \
+            && chmod +x /usr/local/bin/oha && oha --version \
+            || cargo install oha --locked
+      - name: Record environment
+        run: |
+          mkdir -p tests/benchmark/results
+          { uname -a; nproc; lscpu | head -25; free -h; } \
+            | tee tests/benchmark/results/environment.txt
+      - name: Build engine once
+        run: cargo build --release -p rift-http-proxy
+      - name: Topology matrix (work-stealing/per-core x reps)
+        working-directory: tests/benchmark
+        run: |
+          set -euo pipefail
+          for rep in $(seq 1 ${{ inputs.reps }}); do
+            for rt in work-stealing per-core; do
+              echo "===== runtime=$rt rep=$rep ====="
+              python3 scripts/bench_direct.py --run-all --runtime "$rt" \
+                --rift-bin ../../target/release/rift-http-proxy \
+                --sweep-connections 4,256 --duration "${{ inputs.duration }}" --warmup 2s
+              cp "results/direct_rift_${rt}.csv" "results/direct_rift_${rt}_rep${rep}.csv"
+            done
+          done
+      - name: Per-worker accept counts (skew evidence, single spot-check)
+        run: |
+          set -euo pipefail
+          ./target/release/rift-http-proxy --port 2525 --runtime per-core \
+            --loglevel info --nologfile > /tmp/rift-skew.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:2525/ >/dev/null 2>&1 && break; sleep 0.5; done
+          curl -sf -X POST http://127.0.0.1:2525/imposters -H 'Content-Type: application/json' \
+            -d '{"port":4600,"protocol":"http","stubs":[{"predicates":[{"equals":{"path":"/p"}}],"responses":[{"is":{"statusCode":200,"body":"ok"}}]}]}' >/dev/null
+          oha -z 20s -c 256 --no-tui http://127.0.0.1:4600/p > /dev/null 2>&1 || true
+          { grep -o "Runtime topology: .*" /tmp/rift-skew.log | head -1;
+            curl -sf http://127.0.0.1:9090/metrics | grep "^rift_accepted_connections_total"; } \
+            | tee tests/benchmark/results/skew-evidence.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: topology-sweep-results
+          path: |
+            tests/benchmark/results/*.csv
+            tests/benchmark/results/*.md
+            tests/benchmark/results/environment.txt
+            tests/benchmark/results/skew-evidence.txt
+          retention-days: 30
