@@ -29,21 +29,46 @@ pub(crate) mod multi_value_headers {
         map.end()
     }
 
+    /// A single header value on the wire. Mountebank tolerates non-string scalars — its recorders
+    /// routinely emit `"Content-Length": 124` (a JSON number) and `"X-Flag": true` — and coerces
+    /// them to their string form. Rift matches that so real recorded imposters load unchanged
+    /// (issue #754); previously a numeric/bool value failed both `OneOrMany` variants and rejected
+    /// the whole imposter with a 400.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Scalar {
+        Str(String),
+        Num(serde_json::Number),
+        Bool(bool),
+    }
+
+    impl Scalar {
+        fn into_string(self) -> String {
+            match self {
+                Scalar::Str(s) => s,
+                Scalar::Num(n) => n.to_string(),
+                Scalar::Bool(b) => b.to_string(),
+            }
+        }
+    }
+
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<HashMap<String, Vec<String>>, D::Error> {
+        // Order matters for `#[serde(untagged)]`: a scalar can never match `Many` and an array can
+        // never match `One`, so either order is sound — `One` first keeps the common case first.
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum OneOrMany {
-            One(String),
-            Many(Vec<String>),
+            One(Scalar),
+            Many(Vec<Scalar>),
         }
         let raw = HashMap::<String, OneOrMany>::deserialize(deserializer)?;
         Ok(raw
             .into_iter()
             .map(|(k, v)| match v {
-                OneOrMany::One(s) => (k, vec![s]),
-                OneOrMany::Many(v) => (k, v),
+                OneOrMany::One(s) => (k, vec![s.into_string()]),
+                OneOrMany::Many(v) => (k, v.into_iter().map(Scalar::into_string).collect()),
             })
             .collect())
     }
@@ -1626,6 +1651,29 @@ mod tests {
         assert_eq!(
             many.headers["Set-Cookie"],
             vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    // Issue #754: Mountebank tolerates non-string scalar header values (e.g. `"Content-Length":124`,
+    // `"X-Flag":true`) and coerces them to strings; Rift previously 400'd the whole imposter. These
+    // must deserialize and coerce to their string form, singly and inside arrays.
+    #[test]
+    fn multi_value_headers_coerce_numeric_and_bool_values() {
+        let r: IsResponse = serde_json::from_str(
+            r#"{"statusCode":200,"headers":{"Content-Length":124,"X-Flag":true,"X-Ratio":1.5}}"#,
+        )
+        .expect("numeric/bool header values must be accepted (mb parity)");
+        assert_eq!(r.headers["Content-Length"], vec!["124".to_string()]);
+        assert_eq!(r.headers["X-Flag"], vec!["true".to_string()]);
+        assert_eq!(r.headers["X-Ratio"], vec!["1.5".to_string()]);
+
+        // Arrays may mix scalar kinds too.
+        let mixed: IsResponse =
+            serde_json::from_str(r#"{"statusCode":200,"headers":{"X-Multi":[200,"x",false]}}"#)
+                .unwrap();
+        assert_eq!(
+            mixed.headers["X-Multi"],
+            vec!["200".to_string(), "x".to_string(), "false".to_string()]
         );
     }
 
