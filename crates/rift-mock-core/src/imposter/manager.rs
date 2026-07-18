@@ -23,6 +23,101 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
+
+// ── Accept-error handling (issue #750) ───────────────────────────────────────────────────────
+//
+// A bare `accept(2)` error arm that logs and immediately retries has two coupled defects, both
+// amplified ×N under the per-core listener fan-out (#745): it spins hot on a *systemic* error
+// (fd exhaustion cannot be cured by retrying), and it logs per failed accept — the exact
+// per-event-rate logging trap the journal-cap fix (#741) removed. The pieces below fix both with
+// no cost on the happy path.
+
+/// How an `accept(2)` error should be handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcceptErrorClass {
+    /// Expected under load; the next accept is likely fine — retry immediately, log at `debug`.
+    Transient,
+    /// Resource exhaustion (or an unknown error): retrying now cannot succeed until something
+    /// frees, so back off. Unknown errors land here deliberately — spinning on an unrecognized
+    /// failure is the worse outcome.
+    Systemic,
+}
+
+/// Classify via [`std::io::ErrorKind`] so no `libc` dependency is needed: only the transient
+/// classes are named (`ECONNABORTED`/`EINTR`/`ECONNRESET`); everything else — resource exhaustion
+/// like `EMFILE`/`ENFILE`/`ENOBUFS` (`Uncategorized`) or `ENOMEM` (`OutOfMemory`), and any truly
+/// unknown error — falls through `_` to systemic.
+fn classify_accept_error(e: &std::io::Error) -> AcceptErrorClass {
+    use std::io::ErrorKind::{ConnectionAborted, ConnectionReset, Interrupted};
+    match e.kind() {
+        ConnectionAborted | Interrupted | ConnectionReset => AcceptErrorClass::Transient,
+        _ => AcceptErrorClass::Systemic,
+    }
+}
+
+/// Exponential backoff for the systemic accept-error path: 1ms doubling to a 1s cap, reset on the
+/// first successful accept. Pure and clock-free so the schedule is unit-testable without sockets.
+struct AcceptBackoff {
+    current: Duration,
+}
+
+impl AcceptBackoff {
+    const INITIAL: Duration = Duration::from_millis(1);
+    const MAX: Duration = Duration::from_secs(1);
+
+    fn new() -> Self {
+        Self {
+            current: Self::INITIAL,
+        }
+    }
+
+    /// The delay to wait now; advances the schedule (double, capped) for the next call.
+    fn next_delay(&mut self) -> Duration {
+        let delay = self.current;
+        self.current = (self.current * 2).min(Self::MAX);
+        delay
+    }
+
+    fn reset(&mut self) {
+        self.current = Self::INITIAL;
+    }
+}
+
+/// Once-per-transition logging for the systemic accept-error path, mirroring the journal-cap warn
+/// fix (#741): one `error!` on entering the error state, silence while in it (counting suppressed
+/// errors), one `info!` carrying the suppressed count on recovery.
+#[derive(Default)]
+struct AcceptErrorLog {
+    in_error: bool,
+    suppressed: u64,
+}
+
+impl AcceptErrorLog {
+    /// Record a systemic error. Returns `true` **only** on the transition *into* the error state
+    /// (emit the single `error!`); later errors return `false` and bump the suppressed count.
+    fn on_error(&mut self) -> bool {
+        if self.in_error {
+            self.suppressed += 1;
+            false
+        } else {
+            self.in_error = true;
+            self.suppressed = 0;
+            true
+        }
+    }
+
+    /// Record a successful accept. Returns `Some(suppressed)` **only** on the transition *out* of
+    /// the error state (emit the single recovery `info!`); `None` in steady state, so a healthy
+    /// accept path pays just one branch.
+    fn on_success(&mut self) -> Option<u64> {
+        if self.in_error {
+            self.in_error = false;
+            Some(std::mem::take(&mut self.suppressed))
+        } else {
+            None
+        }
+    }
+}
 use tracing::{debug, error, info, warn};
 
 /// Server-level TLS defaults for HTTPS imposters that don't carry their own cert/key (issue #206).
@@ -673,6 +768,11 @@ impl ImposterManager {
         port: u16,
         accept_counter: prometheus::Counter,
     ) {
+        // Per-loop, unshared: N loops on one port degrade independently, and cross-loop
+        // coordination would add a shared cache line to the accept path for no behavioral gain
+        // (issue #750).
+        let mut backoff = AcceptBackoff::new();
+        let mut error_log = AcceptErrorLog::default();
         loop {
             // Acquire a permit *before* accepting so a cap holds connections back in the
             // listener backlog/kernel SYN queue rather than accepting them and then failing
@@ -703,6 +803,17 @@ impl ImposterManager {
                     match result {
                         Ok((stream, addr)) => {
                             accept_counter.inc();
+                            // Recovery: only the transition out of a systemic-error state logs
+                            // and resets the backoff, so a healthy accept path pays one branch.
+                            if let Some(suppressed) = error_log.on_success() {
+                                info!(
+                                    port,
+                                    suppressed,
+                                    "accept loop on port {port} recovered after {suppressed} \
+                                     suppressed error(s)"
+                                );
+                                backoff.reset();
+                            }
                             crate::proxy::network::apply_stream_tuning(&stream, &socket_tuning);
                             let imposter = Arc::clone(&imposter_clone);
                             // Each connection watches the shutdown signal so existing
@@ -768,9 +879,33 @@ impl ImposterManager {
                                 }
                             });
                         }
-                        Err(e) => {
-                            error!("Accept error on port {}: {}", port, e);
-                        }
+                        Err(e) => match classify_accept_error(&e) {
+                            // Expected under load — retry immediately, no backoff, no error spam.
+                            AcceptErrorClass::Transient => {
+                                debug!("transient accept error on port {port}: {e}");
+                            }
+                            // Systemic (fd exhaustion / unknown): log once on entry, then back off.
+                            AcceptErrorClass::Systemic => {
+                                if error_log.on_error() {
+                                    error!(
+                                        port,
+                                        "accept error on port {port}: {e}; backing off \
+                                         (further errors suppressed until recovery)"
+                                    );
+                                }
+                                // Raced against shutdown exactly like the permit acquire above:
+                                // `delete_imposter_inner` awaits this task, so an un-raced sleep
+                                // would stall delete/drain for up to the 1s cap × N loops (#745).
+                                let delay = backoff.next_delay();
+                                tokio::select! {
+                                    _ = tokio::time::sleep(delay) => {}
+                                    _ = shutdown_rx.recv() => {
+                                        info!("Imposter on port {} shutting down", port);
+                                        break;
+                                    }
+                                }
+                            }
+                        },
                     }
                 }
                 _ = shutdown_rx.recv() => {
@@ -1404,6 +1539,94 @@ mod port_table_tests {
 mod tests {
     use super::*;
     use crate::imposter::ResponseMode;
+
+    // ── Accept-error handling (issue #750) ───────────────────────────────────────────────────
+    mod accept_error {
+        use super::*;
+        use std::io::{Error, ErrorKind};
+
+        #[test]
+        fn classify_transient_vs_systemic() {
+            for kind in [
+                ErrorKind::ConnectionAborted,
+                ErrorKind::Interrupted,
+                ErrorKind::ConnectionReset,
+            ] {
+                assert_eq!(
+                    classify_accept_error(&Error::from(kind)),
+                    AcceptErrorClass::Transient,
+                    "{kind:?} must be transient (retry immediately)"
+                );
+            }
+            // EMFILE (24) / ENFILE (23) map to Uncategorized -> systemic; and a named non-transient
+            // kind is systemic too. Unknown must never be treated as transient.
+            for e in [
+                Error::from_raw_os_error(24), // EMFILE
+                Error::from_raw_os_error(23), // ENFILE
+                Error::from(ErrorKind::OutOfMemory),
+                Error::from(ErrorKind::Other),
+            ] {
+                assert_eq!(
+                    classify_accept_error(&e),
+                    AcceptErrorClass::Systemic,
+                    "{e:?} must back off, not spin"
+                );
+            }
+        }
+
+        #[test]
+        fn backoff_doubles_from_1ms_caps_at_1s_and_resets() {
+            let mut b = AcceptBackoff::new();
+            assert_eq!(
+                b.next_delay(),
+                Duration::from_millis(1),
+                "first delay is 1ms, not 0"
+            );
+            assert_eq!(b.next_delay(), Duration::from_millis(2));
+            assert_eq!(b.next_delay(), Duration::from_millis(4));
+            assert_eq!(b.next_delay(), Duration::from_millis(8));
+            // Fast-forward well past the cap.
+            for _ in 0..20 {
+                b.next_delay();
+            }
+            assert_eq!(b.next_delay(), Duration::from_secs(1), "capped at 1s");
+            b.reset();
+            assert_eq!(
+                b.next_delay(),
+                Duration::from_millis(1),
+                "reset returns to 1ms"
+            );
+        }
+
+        // The log state machine backs the "exactly one error!, exactly one info! with the
+        // suppressed count" AC without sockets: on_error transitions once, on_success reports the
+        // count once, steady state stays silent.
+        #[test]
+        fn log_emits_once_per_transition_with_suppressed_count() {
+            let mut log = AcceptErrorLog::default();
+            assert!(
+                log.on_error(),
+                "first systemic error -> emit the one error!"
+            );
+            assert!(!log.on_error(), "second is suppressed");
+            assert!(!log.on_error(), "third is suppressed");
+            assert_eq!(
+                log.on_success(),
+                Some(2),
+                "recovery emits one info! carrying the 2 suppressed errors"
+            );
+            assert_eq!(log.on_success(), None, "steady state is silent");
+            assert_eq!(log.on_success(), None);
+
+            // A fresh outage re-arms: one error!, count restarts from 0.
+            assert!(log.on_error());
+            assert_eq!(
+                log.on_success(),
+                Some(0),
+                "immediate recovery suppressed nothing"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_create_imposter_writes_to_datadir() {
