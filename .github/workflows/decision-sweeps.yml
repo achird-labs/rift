@@ -23,6 +23,12 @@ on:
       duration:
         description: "oha duration per point"
         default: "12s"
+      runner:
+        description: "Runner label (e.g. ubuntu-latest, ubuntu-latest-16-cores if the plan has larger runners)"
+        default: "ubuntu-latest"
+      connections:
+        description: "Topology sweep connection counts"
+        default: "4,256"
 
 permissions:
   contents: read
@@ -30,7 +36,7 @@ permissions:
 jobs:
   allocator:
     if: ${{ inputs.sweep == 'both' || inputs.sweep == 'allocator' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
@@ -71,7 +77,7 @@ jobs:
 
   topology:
     if: ${{ inputs.sweep == 'both' || inputs.sweep == 'topology' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
@@ -99,7 +105,7 @@ jobs:
               echo "===== runtime=$rt rep=$rep ====="
               python3 scripts/bench_direct.py --run-all --runtime "$rt" \
                 --rift-bin ../../target/release/rift-http-proxy \
-                --sweep-connections 4,256 --duration "${{ inputs.duration }}" --warmup 2s
+                --sweep-connections "${{ inputs.connections }}" --duration "${{ inputs.duration }}" --warmup 2s
               cp "results/direct_rift_${rt}.csv" "results/direct_rift_${rt}_rep${rep}.csv"
             done
           done
