@@ -84,7 +84,7 @@ jobs:
           echo "  Linux x86_64: $SHA_LINUX_X86_64"
 
       - name: Checkout homebrew tap
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.TAP_REPO }}
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
