@@ -13,6 +13,17 @@ record.
 
 ### Added
 
+- **Opt-in per-core runtime topology (experimental, RFC-712).** `--runtime per-core[=N]` (or
+  `RIFT_RUNTIME`) boots N single-threaded worker runtimes behind per-worker command channels,
+  with the control plane (admin API, metrics, mutations) on a small multi-thread runtime, and
+  `--runtime-affinity` optionally pins workers to cores. In this release the workers are
+  topology plumbing only — imposter listener fan-out lands in a follow-up — and the default
+  work-stealing runtime is completely unchanged. Linux-first by design: macOS falls back to
+  work-stealing with a warning (its SO_REUSEPORT does not hash-balance accepts), Windows
+  rejects the flag. The binary logs `Runtime topology: <mode>` at startup. (#744)
+
+### Added
+
 - **Opt-in `jemalloc` allocator feature for the server binary** (allocator bake-off, part of
   #717). `cargo build --release --no-default-features --features redis-backend,javascript,jemalloc`
   builds `rift-http-proxy` with tikv-jemallocator instead of the default mimalloc; when both

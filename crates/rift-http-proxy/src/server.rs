@@ -79,6 +79,17 @@ pub struct Cli {
     #[arg(long, default_value = "info", env = "MB_LOGLEVEL")]
     pub loglevel: String,
 
+    /// Runtime topology: work-stealing (default) or per-core[=N] — N single-threaded worker
+    /// runtimes with SO_REUSEPORT sharded accept (RFC-712; experimental, Linux-first: macOS
+    /// falls back to work-stealing with a warning, Windows rejects it)
+    #[arg(long, value_name = "MODE", env = "RIFT_RUNTIME")]
+    pub runtime: Option<String>,
+
+    /// Pin per-core worker threads to CPU cores (only meaningful with --runtime per-core;
+    /// effective on Linux, advisory elsewhere)
+    #[arg(long, env = "RIFT_RUNTIME_AFFINITY")]
+    pub runtime_affinity: bool,
+
     /// Don't write to log file (stdout only)
     #[arg(long)]
     pub nologfile: bool,

@@ -40,6 +40,8 @@ Options:
       --allow-injection            Enable JavaScript injection in responses (alias: --allowInjection)
       --local-only                 Only accept connections from localhost
       --loglevel <LEVEL>           Log level: debug, info, warn, error [default: info]
+      --runtime <MODE>             Runtime topology: work-stealing (default) or per-core[=N] (RFC-712; experimental, Linux-first — macOS falls back with a warning, Windows rejects it)
+      --runtime-affinity           Pin per-core worker threads to CPU cores (with --runtime per-core; effective on Linux)
       --metrics-port <PORT>        Prometheus metrics port [default: 9090]
       --ip-whitelist <IPS>         Comma-separated allowed IPs
       --mock                       Run in mock mode
@@ -144,6 +146,8 @@ Environment variables override CLI defaults:
 | `MB_APIKEY` | Admin API authorization token (see `--api-key`) | |
 | `RIFT_SCRIPTS_DIR` | Root directory for admin-API `file:`/`ref:` script resolution (env alias of `--scripts-dir`); references escaping it are rejected | |
 | `RIFT_DEBUG` | Enable debug mode (truthy: `1`/`true`/`yes`/`on`); same as `--debug`. Adds an `x-rift-script-trace` response header and makes response-template errors return a request-time error instead of an empty substitution | off |
+| `RIFT_RUNTIME` | Runtime topology (env alias of `--runtime`): `work-stealing` or `per-core[=N]` (RFC-712; experimental) | `work-stealing` |
+| `RIFT_RUNTIME_AFFINITY` | Pin per-core worker threads to CPU cores (env alias of `--runtime-affinity`) | off |
 | `RIFT_METRICS_PORT` | Prometheus metrics port | `9090` |
 | `RIFT_DEFAULT_TLS_CERT` | Default TLS certificate (PEM) for HTTPS imposters | |
 | `RIFT_DEFAULT_TLS_KEY` | Default TLS private key (PEM) | |

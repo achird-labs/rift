@@ -44,6 +44,7 @@ const ACTIVE_ALLOCATOR: &str = "system";
 use clap::Parser;
 use rift_http_proxy::admin_api::DEFAULT_ADMIN_PORT;
 use rift_http_proxy::healthcheck;
+use rift_http_proxy::runtime;
 use rift_http_proxy::script_cli;
 use rift_http_proxy::server::{Cli, Commands, ServerBuilder};
 use std::path::PathBuf;
@@ -172,11 +173,50 @@ fn main() -> Result<(), anyhow::Error> {
 
 /// Run in Mountebank-compatible mode
 fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    // Topology selection (RFC-712, issue #744). Clap already applied RIFT_RUNTIME env fallback
+    // into `cli.runtime`, so resolve() only sees the merged value; the platform gate then
+    // downgrades or rejects per RFC D5 (macOS falls back with a warning, Windows refuses).
+    let requested = runtime::RuntimeTopology::resolve(cli.runtime.as_deref(), None)
+        .map_err(anyhow::Error::msg)?;
+    let (topology, platform_warning) =
+        runtime::platform_gate(requested, runtime::current_os()).map_err(anyhow::Error::msg)?;
+    if let Some(warning) = platform_warning {
+        warn!("{warning}");
+    }
+    info!("Runtime topology: {}", topology.describe());
 
-    runtime.block_on(ServerBuilder::from_cli(cli).run())
+    match topology {
+        runtime::RuntimeTopology::WorkStealing => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(ServerBuilder::from_cli(cli).run())
+        }
+        runtime::RuntimeTopology::PerCore { workers } => {
+            // Control plane: admin API, metrics, savefile machinery, and imposter mutations
+            // stay on one small multi-thread runtime; the workers exist for imposter accept
+            // loops, whose Bind/Unbind fan-out arrives with issue #745. Until then the worker
+            // set is topology plumbing only — verified live via the Ping handshake below.
+            let control = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?;
+            let workers = runtime::WorkerSet::spawn(workers, cli.runtime_affinity)?;
+            let total = workers.worker_count();
+            let alive = control.block_on(workers.ping_all());
+            if alive.len() != total {
+                workers.shutdown();
+                return Err(anyhow::anyhow!(
+                    "per-core bootstrap: only {}/{total} workers came up; refusing to start degraded",
+                    alive.len()
+                ));
+            }
+            info!("Per-core workers up: {}", alive.len());
+            let result = control.block_on(ServerBuilder::from_cli(cli).run());
+            workers.shutdown();
+            result
+        }
+    }
 }
 
 /// Stop a running server by PID file

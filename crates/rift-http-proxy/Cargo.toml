@@ -81,6 +81,8 @@ num_cpus = "1.16"
 libc = "0.2"
 parking_lot = "0.12"
 crossbeam = "0.8"
+# Per-core worker pinning (RFC-712 D4, issue #744); opt-in via --runtime-affinity.
+core_affinity = "0.8"
 
 # Optional high-throughput global allocator for the server binary (issue #293).
 # Feature-gated (default-on) so FFI/cdylib and cross-compile builds can drop it;
