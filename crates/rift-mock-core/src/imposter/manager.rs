@@ -598,6 +598,10 @@ impl ImposterManager {
 
         let mut serve_handles = Vec::with_capacity(listeners.len());
         for (index, listener) in listeners.into_iter().enumerate() {
+            // Resolved once per loop: `inc()` on the returned Counter is a bare atomic add,
+            // so the accept path pays no label lookup or allocation (issue #746).
+            let accept_counter = crate::extensions::metrics::ACCEPTED_CONNECTIONS_TOTAL
+                .with_label_values(&[index.to_string().as_str()]);
             let loop_future = Self::run_accept_loop(
                 listener,
                 Arc::clone(&imposter),
@@ -609,6 +613,7 @@ impl ImposterManager {
                 socket_tuning,
                 http_tuning,
                 port,
+                accept_counter,
             );
             serve_handles.push(match &self.accept_runtimes {
                 Some(runtimes) => runtimes[index].spawn(loop_future),
@@ -666,6 +671,7 @@ impl ImposterManager {
         socket_tuning: crate::proxy::network::SocketTuning,
         http_tuning: crate::proxy::network::HttpTuning,
         port: u16,
+        accept_counter: prometheus::Counter,
     ) {
         loop {
             // Acquire a permit *before* accepting so a cap holds connections back in the
@@ -696,6 +702,7 @@ impl ImposterManager {
                 result = listener.accept() => {
                     match result {
                         Ok((stream, addr)) => {
+                            accept_counter.inc();
                             crate::proxy::network::apply_stream_tuning(&stream, &socket_tuning);
                             let imposter = Arc::clone(&imposter_clone);
                             // Each connection watches the shutdown signal so existing

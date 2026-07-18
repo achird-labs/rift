@@ -18,6 +18,18 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Connections accepted per accept-loop slot (issue #746). Under `--runtime per-core`
+    /// the slot index IS the worker index, which makes SO_REUSEPORT 4-tuple skew observable
+    /// in production instead of inferred; in the default topology every accept lands on
+    /// slot 0. Resolved to a plain Counter once per accept loop, so the hot path pays one
+    /// atomic inc per accepted connection and no label lookup.
+    pub static ref ACCEPTED_CONNECTIONS_TOTAL: CounterVec = register_counter_vec!(
+        "rift_accepted_connections_total",
+        "Connections accepted, labeled by accept-loop worker slot (RFC-712 skew observability)",
+        &["worker"]
+    )
+    .unwrap();
+
     /// Total number of faults injected
     pub static ref FAULTS_INJECTED_TOTAL: CounterVec = register_counter_vec!(
         "rift_faults_injected_total",

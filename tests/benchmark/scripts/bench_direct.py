@@ -592,13 +592,76 @@ def verify_allocator_marker(rift_bin, expected):
     finally:
         stop(proc, [ALLOC_PROBE_PORT])
 
+# ---- runtime topology pass-through (issue #746): same discipline as --allocator ----
+
+RUNTIME_MODES = ("work-stealing", "per-core")
+TOPOLOGY_MARKER = "Runtime topology: "
+TOPOLOGY_PROBE_PORT = 3526
+
+def runtime_launch_args(mode):
+    """Engine flags for the requested topology; None = engine default (today's work-stealing)."""
+    if mode is None:
+        return []
+    if mode in RUNTIME_MODES:
+        return ["--runtime", mode]
+    raise ValueError(f"unknown runtime mode {mode!r}: choose from {','.join(RUNTIME_MODES)}")
+
+def extract_topology_marker(text):
+    """Pull the self-reported EFFECTIVE topology out of an engine log, or None if absent."""
+    for line in text.splitlines():
+        if TOPOLOGY_MARKER in line:
+            return line.split(TOPOLOGY_MARKER, 1)[1].strip()
+    return None
+
+def topology_matches(reported, requested):
+    """`per-core` self-reports as `per-core xN`; work-stealing reports itself verbatim."""
+    return reported == requested or reported.startswith(requested + " ")
+
+def verify_runtime_marker(rift_bin, mode, extra_args):
+    """Probe-launch and require the binary's self-reported topology to match the request.
+    This is what refuses a mislabeled sweep on macOS, where a requested per-core falls back
+    to work-stealing with a warning (RFC-712 D5) — the fallback is correct engine behavior,
+    but benching it under a per-core label would poison the #746 decision data."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    free_ports([TOPOLOGY_PROBE_PORT])
+    logpath = os.path.join(RESULTS_DIR, "topology-probe.log")
+    proc = launch(
+        [rift_bin, "--port", str(TOPOLOGY_PROBE_PORT), "--loglevel", "info"] + extra_args,
+        logpath,
+    )
+    try:
+        reported = None
+        for _ in range(40):
+            time.sleep(0.25)
+            with open(logpath) as f:
+                reported = extract_topology_marker(f.read())
+            if reported is not None:
+                break
+        if reported is None or not topology_matches(reported, mode):
+            raise SystemExit(
+                f"topology probe: binary reports {reported!r}, requested {mode!r} ({rift_bin}) "
+                f"— aborting so the sweep is not mislabeled (on macOS per-core falls back to "
+                f"work-stealing by design; run the per-core sweep on Linux)")
+        print(f"  topology probe ok: {reported}")
+    finally:
+        stop(proc, [TOPOLOGY_PROBE_PORT])
+
+def result_suffix(allocator, runtime_mode):
+    """Allocator and runtime dimensions compose into one artefact suffix so no combination
+    overwrites another's CSV/report (#717, #746)."""
+    suffix = f"_{allocator}" if allocator else ""
+    if runtime_mode:
+        suffix += f"_{runtime_mode}"
+    return suffix
+
 def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, recording=False,
-            allocator=None):
+            allocator=None, runtime=None):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     node = shutil.which("node") or "node"
-    csv_suffix = f"_{allocator}" if allocator else ""
+    csv_suffix = result_suffix(allocator, runtime)
     full_plan = [
-        ("rift", 0,   [rift_bin, "--port", str(admin_port_for(0)), "--allow-injection", "--loglevel", "warn"]),
+        ("rift", 0,   [rift_bin, "--port", str(admin_port_for(0)), "--allow-injection", "--loglevel", "warn"]
+                      + runtime_launch_args(runtime)),
         ("mb",   100, [node, mb_bin, "start", "--port", str(admin_port_for(100)), "--allowInjection", "--loglevel", "warn"]),
     ]
     plan = [p for p in full_plan if p[0] in engines]
@@ -623,13 +686,14 @@ def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, r
         report(rift_ver, mb_ver, duration, conn_list[0])
     elif engines == ["rift"]:
         rift_only_report(rift_ver, duration, conn_list, rate, recording,
-                          allocator=allocator, csv_suffix=csv_suffix)
+                          allocator=allocator, runtime=runtime, csv_suffix=csv_suffix)
     else:
         # engines == ["mb"]: no comparison possible (needs Rift too) and no Rift-only report to write.
         print(f"[report] engines={engines}: benched only Mountebank; no report written "
               f"(the comparison needs both rift and mb)")
 
-def rift_only_report(rift_ver, duration, conn_list, rate, recording, allocator=None, csv_suffix=""):
+def rift_only_report(rift_ver, duration, conn_list, rate, recording, allocator=None,
+                     runtime=None, csv_suffix=""):
     """Rift-only sweep / open-loop report: scenario × (connections, mode) matrices of RPS and p999.
     The MB-comparison report is deliberately untouched so its historical single-point numbers stay
     comparable; this is the extra artefact the Turbo round consumes. Allocator bake-off runs (#717)
@@ -659,6 +723,8 @@ def rift_only_report(rift_ver, duration, conn_list, rate, recording, allocator=N
         f.write(f"- **Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n- **Rift:** {rift_ver}\n")
         if allocator:
             f.write(f"- **Allocator:** {allocator}\n")
+        if runtime:
+            f.write(f"- **Runtime:** {runtime}\n")
         f.write(f"- **Load generator:** oha, {duration} per point (after warmup)\n")
         f.write(f"- **Connections:** {','.join(str(c) for c in conn_list)}\n")
         if rate is not None:
@@ -733,6 +799,10 @@ if __name__ == "__main__":
     ap.add_argument("--allocator", choices=list(ALLOCATORS),
                     help="build+bench one allocator variant (Rift-only; #717 bake-off). Builds "
                          "into target/alloc-<name>/ unless --rift-bin is given.")
+    ap.add_argument("--runtime", choices=list(RUNTIME_MODES),
+                    help="bench one runtime topology (Rift-only; #746 RFC-712 gate). The probe "
+                         "verifies the binary's Runtime-topology self-report, so a per-core "
+                         "request on macOS (which falls back) aborts instead of mislabeling.")
     a = ap.parse_args()
     if a.run_all:
         try:
@@ -741,7 +811,7 @@ if __name__ == "__main__":
         except ValueError as e:
             raise SystemExit(str(e))
         requested = [e.strip() for e in a.engines.split(",") if e.strip()]
-        if a.allocator and engines != ["rift"]:
+        if (a.allocator or a.runtime) and engines != ["rift"]:
             engines = ["rift"]
         if engines != requested:
             print("note: sweep/open-loop/allocator is Rift-only; running --engines rift")
@@ -752,8 +822,10 @@ if __name__ == "__main__":
             # Applies to explicit --rift-bin AND harness-built binaries alike: the label on the
             # results must come from the binary itself, never from the invocation.
             verify_allocator_marker(rift_bin, a.allocator)
+        if a.runtime:
+            verify_runtime_marker(rift_bin, a.runtime, runtime_launch_args(a.runtime))
         run_all(a.duration, a.warmup, conn_list, rift_bin, a.mb_bin, engines,
-                rate=rate, recording=recording, allocator=a.allocator)
+                rate=rate, recording=recording, allocator=a.allocator, runtime=a.runtime)
     elif a.report:
         report(a.rift_version, a.mb_version, a.duration, a.connections)
     else:

@@ -109,6 +109,22 @@ never mislabel its build. Decision rule and result recording live in #717 (pre-r
 default switch needs ≥5% RPS or ≥20% p999/RSS on the majority of scenarios, macOS numbers are
 indicative — the decision run is Linux x86_64).
 
+### Runtime topology sweep (issue #746, Rift-only, Linux)
+
+`--runtime {work-stealing,per-core}` benches one topology and composes with `--allocator`
+(artefacts get a combined suffix, e.g. `direct_rift_per-core.csv`). A probe launch checks the
+binary's `Runtime topology:` self-report first — on macOS a requested `per-core` falls back to
+work-stealing by design (RFC-712 D5), so the probe **aborts rather than mislabel the sweep**;
+run per-core sweeps on Linux. Per-worker accept counts are exported as
+`rift_accepted_connections_total{worker=…}` for skew evidence:
+
+```bash
+for rt in work-stealing per-core; do
+  python3 scripts/bench_direct.py --run-all --runtime $rt \
+      --sweep-connections 1,64,256,512 --duration 15s --warmup 2s
+done
+```
+
 Both scripts run each engine **one at a time on disjoint port ranges** (no CPU
 contention, no cross-talk), launch it in its own process group and hard-kill it by
 group + `lsof` before the next engine starts, and post **identical** imposter JSON to

@@ -13,6 +13,14 @@ record.
 
 ### Added
 
+- **Per-worker accept counters + runtime-topology bench support** (part of the RFC-712 gate,
+  #746). `rift_accepted_connections_total{worker=…}` counts accepted connections per
+  accept-loop slot — under `--runtime per-core` that is the worker index, so SO_REUSEPORT
+  4-tuple skew is observable in production rather than inferred. The direct benchmark harness
+  gained `--runtime {work-stealing,per-core}` with a topology self-report probe (a per-core
+  request on macOS aborts instead of benching the fallback under a wrong label) and
+  suffix-composed artefacts alongside `--allocator`.
+
 - **Per-core topology now serves imposter traffic (experimental, RFC-712).** Under
   `--runtime per-core[=N]` every imposter port binds one SO_REUSEPORT listener per worker
   runtime and each accept loop runs pinned to its worker; the kernel spreads connections by

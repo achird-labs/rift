@@ -329,5 +329,60 @@ class AllocatorMarker(unittest.TestCase):
         self.assertIsNone(bd.extract_allocator_marker(""))
 
 
+
+
+class RuntimeLaunchArgs(unittest.TestCase):
+    """Issue #746: --runtime pass-through builds the engine flag; unknown modes are hard errors."""
+
+    def test_none_adds_nothing(self):
+        self.assertEqual(bd.runtime_launch_args(None), [])
+
+    def test_work_stealing_is_explicit(self):
+        self.assertEqual(bd.runtime_launch_args("work-stealing"), ["--runtime", "work-stealing"])
+
+    def test_per_core_passes_through(self):
+        self.assertEqual(bd.runtime_launch_args("per-core"), ["--runtime", "per-core"])
+
+    def test_rejects_unknown_mode(self):
+        with self.assertRaises(ValueError):
+            bd.runtime_launch_args("thread-per-request")
+
+
+class TopologyMarker(unittest.TestCase):
+    """Issue #746: results are labeled by the binary's own `Runtime topology:` self-report —
+    on macOS a requested per-core falls back to work-stealing, and the probe must refuse to
+    run a sweep that would be mislabeled."""
+
+    def test_extracts_marker(self):
+        log = "INFO rift: Runtime topology: per-core x8\n"
+        self.assertEqual(bd.extract_topology_marker(log), "per-core x8")
+
+    def test_absent_is_none(self):
+        self.assertIsNone(bd.extract_topology_marker("INFO rift: Starting Rift\n"))
+
+    def test_match_exact_and_prefixed(self):
+        self.assertTrue(bd.topology_matches("work-stealing", "work-stealing"))
+        self.assertTrue(bd.topology_matches("per-core x8", "per-core"))
+        self.assertFalse(bd.topology_matches("work-stealing", "per-core"))
+        self.assertFalse(bd.topology_matches("per-core x8", "work-stealing"))
+
+
+class ResultSuffix(unittest.TestCase):
+    """Issue #746: allocator and runtime dimensions compose into one artefact suffix so no
+    combination overwrites another's results."""
+
+    def test_neither(self):
+        self.assertEqual(bd.result_suffix(None, None), "")
+
+    def test_allocator_only(self):
+        self.assertEqual(bd.result_suffix("jemalloc", None), "_jemalloc")
+
+    def test_runtime_only(self):
+        self.assertEqual(bd.result_suffix(None, "per-core"), "_per-core")
+
+    def test_both_compose(self):
+        self.assertEqual(bd.result_suffix("jemalloc", "per-core"), "_jemalloc_per-core")
+
+
 if __name__ == "__main__":
     unittest.main()

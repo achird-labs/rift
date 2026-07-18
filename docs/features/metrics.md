@@ -57,6 +57,7 @@ Histogram metrics expand into the usual `_bucket{le="…"}`, `_sum`, and `_count
 | `rift_active_flows` | gauge | `backend` | Currently-tracked flows, by backend. |
 | `rift_proxy_request_duration_ms` | histogram | `method`, `fault_applied` | Proxy handling time, in milliseconds. |
 | `rift_upstream_request_duration_ms` | histogram | `method`, `status` | Upstream (proxied) request time, in milliseconds. |
+| `rift_accepted_connections_total` | counter | `worker` | Connections accepted per accept-loop worker slot. Under `--runtime per-core` the slot is the worker index, making SO_REUSEPORT skew observable; in the default topology everything lands on slot `0`. |
 
 Example scrape output:
 
