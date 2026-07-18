@@ -291,6 +291,97 @@ benchmark harness automates the three-way comparison — see the allocator bake-
 Only the `rift-http-proxy` binary is affected; `rift-mock-core` and the FFI crate use the system
 allocator.
 
+## Runtime Topology (per-core, experimental)
+
+By default the `rift-http-proxy` binary runs one multi-threaded, work-stealing Tokio runtime that
+serves everything — imposter accept loops, per-connection work, the admin API, and metrics. That
+is the right default and is unchanged. For **many-core Linux hosts under high connection counts**,
+an opt-in alternative topology (RFC-712) can change the shape of throughput-vs-cores:
+
+```bash
+# Default — one work-stealing runtime (unchanged behaviour)
+rift-http-proxy --runtime work-stealing
+
+# Per-core: N single-threaded runtimes, N = physical cores
+rift-http-proxy --runtime per-core
+
+# …or pin the worker count explicitly
+rift-http-proxy --runtime per-core=8
+
+# Env-var equivalent (the CLI flag wins if both are set)
+RIFT_RUNTIME=per-core rift-http-proxy
+```
+
+In per-core mode each imposter port binds **one `SO_REUSEPORT` listener per worker runtime**, and
+each accept loop runs on its own single-threaded runtime. The kernel spreads incoming connections
+across the listeners by 4-tuple hash, so a connection lives and dies on one core — no cross-core
+wake-ups and no work-stealing overhead. The control plane (admin API, metrics, imposter
+create/delete) stays on a small shared runtime; only the request-serving accept loops fan out.
+
+At startup the binary reports the topology it actually resolved to, next to the allocator line:
+
+```
+INFO rift: Runtime topology: per-core x8
+```
+
+### When to use it
+
+- **Use per-core** on an 8-core-or-larger **Linux** server that must sustain high concurrency, and
+  measure it against work-stealing for *your* workload before committing (see
+  [Running Benchmarks](#running-benchmarks); the harness's `--runtime` flag benches both).
+- **Keep the default** on small hosts, latency-light workloads, or any non-Linux platform.
+
+> **Experimental.** Per-core mode is opt-in and off by default. Its functional behaviour is
+> validated on Linux, but the throughput decision on ≥8-core hardware is still being finalised
+> (tracking issue [#746](https://github.com/EtaCassiopeia/rift/issues/746)); treat it as a knob to
+> benchmark, not a blanket recommendation, until that lands.
+
+### Platform matrix
+
+| Platform | Per-core mode | Behaviour |
+|:---------|:--------------|:----------|
+| **Linux** (x86-64 / aarch64) | First-class | `SO_REUSEPORT` balances accepts across the listener group by 4-tuple hash — the design's premise. |
+| **macOS** | Falls back, with a warning | BSD/XNU `SO_REUSEPORT` does **not** hash-balance TCP accepts across the group (they skew to one socket), so per-core would funnel most connections to one worker — worse than work-stealing. The binary logs the fallback and runs work-stealing; dev boxes lose nothing. |
+| **Windows** | Not offered | No `SO_REUSEPORT` semantics; the flag is rejected at startup. |
+
+Because macOS silently falls back, always confirm the effective topology from the startup
+`Runtime topology:` line rather than assuming the requested mode took effect.
+
+### CPU affinity
+
+`--runtime-affinity` (or `RIFT_RUNTIME_AFFINITY=1`) pins each per-core worker thread to a CPU core.
+It is **off by default** and only meaningful with `--runtime per-core`; the effect is real on Linux
+and advisory elsewhere. Leave it off when other processes contend for the same cores — pinning under
+contention hurts tail latency more than the cache-locality gain is worth.
+
+### Blocking pool
+
+Each per-core runtime owns its own `spawn_blocking` pool (used by JavaScript inject scripts and
+blocking flow-store backends). To keep the *total* thread count near a single runtime's, each
+worker's pool is clamped rather than defaulting to 512 threads apiece — so N workers do not
+multiply into N×512 blocking threads. Note that a few synchronous script paths — notably a
+JavaScript `wait` function that computes a delay — run inline on the calling worker rather than on
+the blocking pool, so keep such scripts cheap under per-core.
+
+### Observing load spread
+
+`SO_REUSEPORT` balances by connection 4-tuple, so a load generator using **few source addresses**
+(or few connections) can leave workers unevenly loaded. Benchmark with many connections (≥256) and
+watch the per-worker accept counter to see the real spread:
+
+```bash
+curl -s localhost:9090/metrics | grep rift_accepted_connections_total
+# rift_accepted_connections_total{worker="0"} 63
+# rift_accepted_connections_total{worker="1"} 54
+# rift_accepted_connections_total{worker="2"} 75
+# rift_accepted_connections_total{worker="3"} 64
+```
+
+The `worker` label is the accept-loop slot — the worker index under per-core, or a single `0` in
+the default topology. See [Metrics]({{ site.baseurl }}/features/metrics/) for the full metric set,
+and the [CLI Reference]({{ site.baseurl }}/configuration/cli/) for `--runtime` / `--runtime-affinity`
+and their env-var aliases.
+
 ## Build Tuning
 
 The shipped release profile is already aggressive:
