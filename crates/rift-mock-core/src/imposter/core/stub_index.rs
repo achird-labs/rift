@@ -741,6 +741,7 @@ fn folded_leaf_string(v: &serde_json::Value) -> String {
 /// stringified-and-folded values the `equals` comparator compares on (issue #767). Called only
 /// after [`structural_hash`] has confirmed the body has no JSON-ish string leaf (which no purely
 /// structural matcher can reconcile — the request side widens to all in that case).
+#[cfg(feature = "quamina-matching")]
 fn normalize_json_value(v: &serde_json::Value) -> serde_json::Value {
     use serde_json::Value;
     match v {
@@ -821,12 +822,16 @@ struct BodyFieldDimension {
     /// Stubs not indexed here (ineligible predicate, or a per-stub `add_pattern` failure) — always
     /// candidates on this dimension.
     always: CandidateBits,
+    /// Only read on the fail-open widen path, which is feature-gated.
+    #[cfg(feature = "quamina-matching")]
     len: usize,
 }
 
 impl Dimension for BodyFieldDimension {
     fn select(&self, request: &DimensionRequest<'_>, out: &mut CandidateBits) {
         out.copy_from(&self.always);
+        #[cfg(not(feature = "quamina-matching"))]
+        let _ = request; // the automaton (and its `request` read) is feature-gated below
         #[cfg(feature = "quamina-matching")]
         {
             let Some(q) = &self.quamina else { return };
@@ -997,6 +1002,7 @@ impl StubIndex {
             #[cfg(feature = "quamina-matching")]
             quamina: body_field_quamina,
             always: body_field_always,
+            #[cfg(feature = "quamina-matching")]
             len,
         };
         StubIndex {
@@ -1488,6 +1494,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "quamina-matching")]
     #[test]
     fn normalize_json_value_folds_to_comparator_string_form() {
         // Every scalar leaf becomes its folded `json_value_to_string` form (numbers/bools → strings)
@@ -1504,6 +1511,7 @@ mod tests {
     // #767: the automaton actually PRUNES (not merely doesn't-under-approximate), the sibling of
     // body_dimension_collapses_candidates (#708) / literal/regex collapse tests — the unit-speed
     // stand-in for the #719 recovery bench.
+    #[cfg(feature = "quamina-matching")]
     #[test]
     fn body_field_dimension_collapses_candidates() {
         // 500 field-equals-on-body stubs, each a distinct nested id. A matching body probes down to
