@@ -19,9 +19,6 @@
 #   scripts/gen-ffi-manifest.sh --self-test                          # prove the generator works
 set -euo pipefail
 
-SERVER_URL="${GITHUB_SERVER_URL:-https://github.com}"
-REPO="${GITHUB_REPOSITORY:-EtaCassiopeia/rift}"
-
 fail() { echo "[FAIL] $*" >&2; exit 1; }
 
 # Build the manifest from every `librift_ffi-*.sha256` under <search-dir> (recursively, matching
@@ -31,7 +28,15 @@ generate() {
   [ -n "$version" ] || fail "version argument is required"
   [ -d "$search_dir" ] || fail "search dir not found: $search_dir"
 
-  local base_url="$SERVER_URL/$REPO/releases/download/$version"
+  # Resolved at call time (not once at script top level) so a per-invocation
+  # GITHUB_REPOSITORY/GITHUB_SERVER_URL override reaches this function — the hermetic
+  # --self-test relies on that. In CI these carry the ambient repo values, so the real
+  # release-manifest output is unchanged. (Top-level resolution silently ignored the
+  # self-test's override and only "passed" while the repo slug matched the hardcoded
+  # expectation — it broke the moment the repo moved orgs.)
+  local server_url="${GITHUB_SERVER_URL:-https://github.com}"
+  local repo="${GITHUB_REPOSITORY:-achird-labs/rift}"
+  local base_url="$server_url/$repo/releases/download/$version"
   local artifacts="[]"
   local count=0
 
@@ -75,8 +80,11 @@ self_test() {
   printf 'cccc3333  librift_ffi-windows-x86_64.dll\n' \
     >"$tmp/x86_64-pc-windows-msvc/librift_ffi-windows-x86_64.dll.sha256"
 
+  # Inject a deliberately-synthetic repo so the self-test is hermetic and immune to the real
+  # repo's slug (e.g. an org rename/transfer) — it asserts the generator threads
+  # GITHUB_REPOSITORY into the URL, nothing about which org actually owns the repo.
   local out="$tmp/ffi-manifest.json"
-  GITHUB_SERVER_URL="https://github.com" GITHUB_REPOSITORY="EtaCassiopeia/rift" \
+  GITHUB_SERVER_URL="https://example.com" GITHUB_REPOSITORY="example-org/example-repo" \
     generate "v9.9.9" "$tmp" "$out"
 
   jq -e . "$out" >/dev/null || fail "output is not valid JSON"
@@ -90,7 +98,7 @@ self_test() {
   [ "$(jq -r .file <<<"$lx")" = "librift_ffi-linux-x86_64.so" ] || fail "linux file wrong"
   [ "$(jq -r .sha256 <<<"$lx")" = "aaaa1111" ] || fail "linux sha256 wrong"
   [ "$(jq -r .url <<<"$lx")" = \
-    "https://github.com/EtaCassiopeia/rift/releases/download/v9.9.9/librift_ffi-linux-x86_64.so" ] \
+    "https://example.com/example-org/example-repo/releases/download/v9.9.9/librift_ffi-linux-x86_64.so" ] \
     || fail "linux url wrong"
 
   jq -e '.artifacts[] | select(.platform == "darwin-aarch64" and .sha256 == "bbbb2222"
