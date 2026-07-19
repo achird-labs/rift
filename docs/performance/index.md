@@ -295,8 +295,8 @@ allocator.
 
 By default the `rift-http-proxy` binary runs one multi-threaded, work-stealing Tokio runtime that
 serves everything — imposter accept loops, per-connection work, the admin API, and metrics. That
-is the right default and is unchanged. For **many-core Linux hosts under high connection counts**,
-an opt-in alternative topology (RFC-712) can change the shape of throughput-vs-cores:
+is the right default and is unchanged. For **Linux hosts under high connection counts**, an opt-in
+alternative topology (RFC-712) trades a little complexity for **materially lower tail latency**:
 
 ```bash
 # Default — one work-stealing runtime (unchanged behaviour)
@@ -324,17 +324,37 @@ At startup the binary reports the topology it actually resolved to, next to the 
 INFO rift: Runtime topology: per-core x8
 ```
 
+### What it actually buys you
+
+Measured on Linux x86-64 (AMD EPYC, engine pinned to 2/4/8 vCPU with the load generator on disjoint
+physical cores, 3 repetitions, 14 scenarios — issue
+[#746](https://github.com/achird-labs/rift/issues/746)):
+
+| | per-core vs work-stealing |
+|:---|:---|
+| **p99 latency** | **18–35% lower** at every core count tested, at both 256 and 512 connections |
+| **p999 latency** | lower in **every** scenario measured (84/84 points) |
+| **Oversubscription** | at 2 vCPU / 512 connections work-stealing hit a ~20 ms p99 cliff; per-core stayed at ~5.6 ms |
+| **Throughput** | **+1–4%** — at or below run-to-run noise; treat it as unchanged |
+| **Scaling with cores** | **no measured difference**: both topologies scaled ~4.2× for 4× the cores |
+
+The headline is tail latency, not throughput. If your mock server's p99 shows up in someone's CI
+timing budget, per-core is worth benchmarking; if you are chasing raw RPS, it will not move.
+
 ### When to use it
 
-- **Use per-core** on an 8-core-or-larger **Linux** server that must sustain high concurrency, and
-  measure it against work-stealing for *your* workload before committing (see
+- **Use per-core** on a **Linux** host that serves high connection counts and where **tail latency
+  matters** — and measure it for *your* workload before committing (see
   [Running Benchmarks](#running-benchmarks); the harness's `--runtime` flag benches both).
-- **Keep the default** on small hosts, latency-light workloads, or any non-Linux platform.
+- **Keep the default** on small hosts, low-concurrency workloads, or any non-Linux platform.
+- **Do not** switch expecting more throughput, or better scaling as you add cores. Neither was
+  observed.
 
 > **Experimental.** Per-core mode is opt-in and off by default. Its functional behaviour is
-> validated on Linux, but the throughput decision on ≥8-core hardware is still being finalised
-> (tracking issue [#746](https://github.com/EtaCassiopeia/rift/issues/746)); treat it as a knob to
-> benchmark, not a blanket recommendation, until that lands.
+> validated on Linux and the latency benefit above is measured, but on a single machine class at up
+> to 4 physical cores. Behaviour on much larger hosts is not yet characterised
+> ([#774](https://github.com/achird-labs/rift/issues/774)) — benchmark it for your workload rather
+> than enabling it blanket.
 
 ### Platform matrix
 
