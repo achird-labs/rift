@@ -20,11 +20,8 @@ record.
   matching results are unchanged — this is purely a prefilter (any predicate it cannot express
   — arrays, `null`, floats, `caseSensitive`/`keyCaseSensitive`, `except`/selector — safely
   falls through to full evaluation). It complements the `deepEquals`-on-body hash index. The
-  capability is behind a `quamina-matching` Cargo feature, default-on for `rift-mock-core`.
-  **Note:** `rift-http-proxy` and `rift-ffi` take `rift-mock-core` with `default-features = false`
-  and do not forward this feature, so the dimension is not currently active in the `rift` binary or
-  the C-ABI — see #777. Because it is a pure prefilter, this affects throughput only, never which
-  stub matches. (#767)
+  capability is behind a default-on `quamina-matching` Cargo feature, droppable for minimal or
+  FFI builds via `--no-default-features`. (#767, #777)
 
 - **Per-worker accept counters + runtime-topology bench support** (part of the RFC-712 gate,
   #746). `rift_accepted_connections_total{worker=…}` counts accepted connections per
@@ -120,6 +117,18 @@ record.
   JSON all fall back to the existing full comparison (correctness is never affected, only pruning).
 
 ### Fixed
+
+- **The quamina body-field dimension never reached the `rift` binary or the C-ABI.** It was
+  default-on for `rift-mock-core`, but `rift-http-proxy` and `rift-ffi` take that crate with
+  `default-features = false` and did not forward the feature — so the `#[cfg(not(...))]` no-op
+  branch is what shipped, and every body predicate fell through to a full Stage-2 scan in the
+  binary and in the C-ABI used by all four SDKs. CI stayed green throughout because the dimension's
+  tests run inside `rift-mock-core`, the one crate where it *was* enabled. Both crates now forward
+  it, and `scripts/verify-feature-propagation.sh` gates the invariant in CI: every default feature
+  of `rift-mock-core` must be forwarded by, and default-on in, every crate that takes it with
+  `default-features = false`. Matching **results** were never affected — the dimension is a pure
+  prefilter — so this is a throughput fix, not a correctness one. The end-to-end win has not yet
+  been measured in the binary (#779). (#777)
 
 - **An imposter with a numeric or boolean header value was rejected with a `400`.** Mountebank
   tolerates non-string scalar header values — its own recorders routinely emit

@@ -118,9 +118,14 @@ tracing-test = "0.2"
 port_check = "0.2"
 
 [features]
-default = ["redis-backend", "javascript", "mimalloc"]
+default = ["redis-backend", "javascript", "mimalloc", "quamina-matching"]
 redis-backend = ["rift-mock-core/redis-backend"]
 javascript = ["rift-mock-core/javascript"]
+# The quamina body-field candidate dimension (#767). rift-mock-core is taken with
+# `default-features = false`, so a feature that is default-on THERE reaches nothing users run
+# unless it is forwarded here — which is exactly how #777 shipped the dimension into the library
+# and out of the binary. `scripts/verify-feature-propagation.sh` now gates that invariant.
+quamina-matching = ["rift-mock-core/quamina-matching"]
 # High-throughput global allocator for the server binary; drop it (e.g.
 # `--no-default-features`) for FFI/cross-compile builds that must not link it.
 mimalloc = ["dep:mimalloc"]

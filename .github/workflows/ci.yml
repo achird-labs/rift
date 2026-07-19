@@ -163,6 +163,16 @@ jobs:
           ./scripts/verify-docs-coverage.sh --self-test
           ./scripts/verify-docs-coverage.sh
 
+      # Issue #777: rift-http-proxy and rift-ffi take rift-mock-core with default-features = false,
+      # so a feature that is default-ON for the library reaches nothing users run unless it is
+      # forwarded. That is how the quamina dimension shipped into the library and out of the binary
+      # with CI green — its tests live in the one crate where it was enabled. --self-test first
+      # proves the checker isn't a no-op.
+      - name: Verify engine features reach the shipped artifacts
+        run: |
+          ./scripts/verify-feature-propagation.sh --self-test
+          ./scripts/verify-feature-propagation.sh
+
   image-hardening:
     name: Image Hardening
     runs-on: ubuntu-latest

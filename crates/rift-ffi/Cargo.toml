@@ -50,8 +50,12 @@ tempfile = "3.8"
 tracing-test = "0.2"
 
 [features]
-default = ["redis-backend", "javascript"]
+default = ["redis-backend", "javascript", "quamina-matching"]
 # Engine features are forwarded to BOTH rift-mock-core and rift-http-proxy so the two share one
 # feature set (mimalloc is deliberately never forwarded — see the dependency note above).
 redis-backend = ["rift-mock-core/redis-backend", "rift-http-proxy/redis-backend"]
 javascript = ["rift-mock-core/javascript", "rift-http-proxy/javascript"]
+# The quamina body-field candidate dimension (#767) — forwarded for the same reason as the two
+# above: without it the cdylib silently ships without the dimension (#777). Unlike mimalloc this
+# imposes nothing on the host process; it is an ordinary Rust dependency.
+quamina-matching = ["rift-mock-core/quamina-matching", "rift-http-proxy/quamina-matching"]

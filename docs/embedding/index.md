@@ -60,13 +60,13 @@ The engines and allocator are feature-gated. Relevant features:
 | `javascript` | on | on | JavaScript scripting engine (Boa) |
 | `mimalloc` | on | **never forwarded** | mimalloc global allocator (a `cdylib` must not impose an allocator on its host, so `rift-ffi` deliberately never enables it) |
 | `jemalloc` | off | n/a | Opt-in alternative allocator, kept for the #717 bake-off. If both `mimalloc` and `jemalloc` are enabled (as in CI's `--all-features` lanes), **mimalloc wins** — this is resolved by `cfg` precedence, not an error. mimalloc remains the shipped default. |
-| `quamina-matching` | **not forwarded** (see note) | **not forwarded** (see note) | Quamina-backed body-field candidate dimension. Defined on `rift-mock-core`, where it is on by default. Off ⇒ the dimension compiles to a no-op that never prunes and every body predicate is decided by the full Stage-2 evaluation — **matching results are identical either way**, only the prefilter speed differs. |
+| `quamina-matching` | on | on | Quamina-backed body-field candidate dimension. Off ⇒ the dimension compiles to a no-op that never prunes and every body predicate is decided by the full Stage-2 evaluation — **matching results are identical either way**, only the prefilter speed differs. |
 
-> **`quamina-matching` does not currently reach the server binary or the C-ABI.** Both
-> `rift-http-proxy` and `rift-ffi` depend on `rift-mock-core` with `default-features = false` and do
-> not forward this feature, so it is active only when you depend on `rift-mock-core` directly with
-> its defaults. Tracked in [#777](https://github.com/achird-labs/rift/issues/777). Because the
-> dimension is a pure prefilter, this affects throughput only — never which stub matches.
+> Because `rift-http-proxy` and `rift-ffi` take `rift-mock-core` with `default-features = false`,
+> each engine feature above must be explicitly forwarded to reach what actually ships.
+> `scripts/verify-feature-propagation.sh` enforces that in CI, so a feature cannot be default-on for
+> the library and silently absent from the binary — which is what
+> [#777](https://github.com/achird-labs/rift/issues/777) fixed.
 
 ---
 
