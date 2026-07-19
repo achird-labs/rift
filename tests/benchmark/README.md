@@ -125,6 +125,34 @@ for rt in work-stealing per-core; do
 done
 ```
 
+#### Core-count axis (the RFC-712 slope clause)
+
+Connections alone do not test RFC-712's thesis, which is about the *slope* of RPS vs cores.
+`--server-cores N` adds that axis: it confines the engine to N CPUs with `taskset`, and confines
+`oha` to the remaining **physical** cores. Two properties make the comparison honest:
+
+- **Both topologies size their workers from N.** Per-core and tokio's work-stealing pool both
+  derive their count from `available_parallelism()`, which honours `sched_getaffinity` — so one
+  `taskset` sizes them identically, and the probe asserts per-core self-reports `per-core xN`
+  (a mismatch means the pinning never reached the engine, and the run aborts).
+- **The generator never shares a core with the engine.** The split falls on physical-core
+  boundaries, so `oha` cannot land on the SMT sibling of a core under measurement — contention
+  that otherwise reads as a scaling ceiling. A budget that splits a hyperthread pair, or that
+  leaves the generator no cores, is rejected with the host's valid budgets.
+
+```bash
+for n in 2 4 8; do
+  for rt in work-stealing per-core; do
+    python3 scripts/bench_direct.py --run-all --runtime $rt --server-cores $n \
+        --sweep-connections 256,512 --duration 12s --warmup 2s
+  done
+done   # -> direct_rift_{work-stealing,per-core}_cores{2,4,8}.csv
+```
+
+Linux only (`taskset`/`lscpu`). Note the ceiling this implies: on an M-vCPU box the generator
+needs its own cores, so the engine tops out well below M — an ≥8-*physical*-core point needs a
+bigger box or an off-box generator, and any verdict quoting these numbers should say so.
+
 Both scripts run each engine **one at a time on disjoint port ranges** (no CPU
 contention, no cross-talk), launch it in its own process group and hard-kill it by
 group + `lsof` before the next engine starts, and post **identical** imposter JSON to

@@ -367,6 +367,15 @@ class TopologyMarker(unittest.TestCase):
         self.assertFalse(bd.topology_matches("work-stealing", "per-core"))
         self.assertFalse(bd.topology_matches("per-core x8", "work-stealing"))
 
+    def test_core_budget_must_equal_reported_worker_count(self):
+        # The core-count axis is only real if taskset reached available_parallelism().
+        self.assertTrue(bd.topology_matches("per-core x4", "per-core", expected_workers=4))
+        self.assertFalse(bd.topology_matches("per-core x16", "per-core", expected_workers=4))
+        self.assertFalse(bd.topology_matches("work-stealing", "per-core", expected_workers=4))
+
+    def test_work_stealing_reports_no_count_to_check(self):
+        self.assertTrue(bd.topology_matches("work-stealing", "work-stealing", expected_workers=4))
+
 
 class ResultSuffix(unittest.TestCase):
     """Issue #746: allocator and runtime dimensions compose into one artefact suffix so no
@@ -383,6 +392,93 @@ class ResultSuffix(unittest.TestCase):
 
     def test_both_compose(self):
         self.assertEqual(bd.result_suffix("jemalloc", "per-core"), "_jemalloc_per-core")
+
+    def test_core_count_is_its_own_dimension(self):
+        self.assertEqual(bd.result_suffix(None, "per-core", 8), "_per-core_cores8")
+        self.assertEqual(bd.result_suffix(None, "work-stealing", 8), "_work-stealing_cores8")
+
+    def test_all_three_compose(self):
+        self.assertEqual(bd.result_suffix("mimalloc", "per-core", 4),
+                         "_mimalloc_per-core_cores4")
+
+
+class CpuTopology(unittest.TestCase):
+    """Issue #746 core-count axis: `lscpu -p=CPU,CORE` parsing. Real output carries a comment
+    header that must not be read as data."""
+
+    def test_parses_cpu_core_pairs(self):
+        pairs = bd.parse_lscpu_topology("# hdr\n0,0\n1,0\n2,1\n3,1\n")
+        self.assertEqual(pairs, [(0, 0), (1, 0), (2, 1), (3, 1)])
+
+    def test_ignores_extra_columns(self):
+        self.assertEqual(bd.parse_lscpu_topology("0,0,0,0\n1,1,0,0\n"), [(0, 0), (1, 1)])
+
+    def test_rejects_empty(self):
+        with self.assertRaises(ValueError):
+            bd.parse_lscpu_topology("# only comments\n")
+
+
+class PlanCpuSplit(unittest.TestCase):
+    """Issue #746: the engine/generator split must fall on physical-core boundaries — handing oha
+    the SMT sibling of an engine core is the contention this axis exists to eliminate."""
+
+    # 8 physical cores x 2 threads, siblings interleaved (0/8, 1/9, ...) as on the 16-core runner.
+    SMT = [(c, c % 8) for c in range(16)]
+    # A no-SMT host: 8 cores, 8 CPUs.
+    FLAT = [(c, c) for c in range(8)]
+
+    def test_splits_smt_host_on_core_boundary(self):
+        engine, gen = bd.plan_cpu_split(self.SMT, 8)
+        self.assertEqual(engine, [0, 1, 2, 3, 8, 9, 10, 11])   # 4 physical cores, both siblings
+        self.assertEqual(gen, [4, 5, 6, 7, 12, 13, 14, 15])
+
+    def test_no_cpu_is_in_both_sets(self):
+        engine, gen = bd.plan_cpu_split(self.SMT, 4)
+        self.assertEqual(set(engine) & set(gen), set())
+        self.assertEqual(sorted(engine + gen), list(range(16)))
+
+    def test_no_physical_core_is_shared(self):
+        engine, gen = bd.plan_cpu_split(self.SMT, 4)
+        core_of = dict(self.SMT)
+        self.assertEqual({core_of[c] for c in engine} & {core_of[c] for c in gen}, set())
+
+    def test_flat_host_splits_per_cpu(self):
+        engine, gen = bd.plan_cpu_split(self.FLAT, 2)
+        self.assertEqual(engine, [0, 1])
+        self.assertEqual(gen, [2, 3, 4, 5, 6, 7])
+
+    def test_rejects_budget_off_core_boundary(self):
+        # 1 CPU would split a hyperthread pair, leaving the sibling to the generator.
+        with self.assertRaises(ValueError) as cm:
+            bd.plan_cpu_split(self.SMT, 1)
+        self.assertIn("core boundary", str(cm.exception))
+
+    def test_rejects_budget_starving_the_generator(self):
+        with self.assertRaises(ValueError) as cm:
+            bd.plan_cpu_split(self.FLAT, 8)
+        self.assertIn("load generator", str(cm.exception))
+
+
+class TasksetPrefix(unittest.TestCase):
+    """Issue #746: pinning is a launcher prefix; absent a core budget it must vanish entirely so
+    the historical unpinned runs are reproduced byte-for-byte."""
+
+    def test_prefix_for_cpus(self):
+        self.assertEqual(bd.taskset_prefix([0, 1, 8, 9]), ["taskset", "-c", "0,1,8,9"])
+
+    def test_no_cpus_means_no_prefix(self):
+        self.assertEqual(bd.taskset_prefix(None), [])
+        self.assertEqual(bd.taskset_prefix([]), [])
+
+    def test_oha_cmd_is_unchanged_without_a_prefix(self):
+        self.assertEqual(bd.build_oha_cmd("http://x/", "GET", None, {}, "20s", 50)[0], "oha")
+
+    def test_oha_cmd_runs_under_the_prefix(self):
+        cmd = bd.build_oha_cmd("http://x/", "GET", None, {}, "20s", 50,
+                               prefix=["taskset", "-c", "4,5"])
+        self.assertEqual(cmd[:3], ["taskset", "-c", "4,5"])
+        self.assertEqual(cmd[3], "oha")
+        self.assertEqual(cmd[-1], "http://x/")
 
 
 

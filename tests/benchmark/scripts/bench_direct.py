@@ -279,11 +279,13 @@ def resolve_run_mode(engines_str, sweep_arg, open_loop, connections):
     recording = engines == ["rift"] and (sweep or open_loop_on)
     return engines, conn_list, open_loop, recording
 
-def build_oha_cmd(url, method, body, headers, duration, conns, rate=None):
+def build_oha_cmd(url, method, body, headers, duration, conns, rate=None, prefix=()):
     """Build the oha argv. `rate` (requests/sec) switches oha to open-loop (`-q`), a fixed
-    arrival rate that exposes coordinated-omission tail latency the closed-loop run hides."""
-    cmd = ["oha", "-z", duration, "-c", str(conns), "--no-tui",
-           "--output-format", "json", "-m", method]
+    arrival rate that exposes coordinated-omission tail latency the closed-loop run hides.
+    `prefix` is an optional launcher (e.g. `taskset -c ...`) that confines the generator to
+    its own CPUs when the engine is core-pinned (#746 core-count axis)."""
+    cmd = list(prefix) + ["oha", "-z", duration, "-c", str(conns), "--no-tui",
+                          "--output-format", "json", "-m", method]
     if rate is not None:
         cmd += ["-q", str(rate)]
     for k, v in headers.items():
@@ -293,8 +295,8 @@ def build_oha_cmd(url, method, body, headers, duration, conns, rate=None):
     cmd.append(url)
     return cmd
 
-def run_oha(url, method, body, headers, duration, conns, rate=None):
-    cmd = build_oha_cmd(url, method, body, headers, duration, conns, rate)
+def run_oha(url, method, body, headers, duration, conns, rate=None, prefix=()):
+    cmd = build_oha_cmd(url, method, body, headers, duration, conns, rate, prefix)
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=int(duration.rstrip("s")) + 30)
     if out.returncode != 0:
         raise RuntimeError(f"oha failed: {out.stderr[:300]}")
@@ -468,7 +470,7 @@ def assert_journal_filled(engine, admin, offset):
     print(f"  journal ok: numberOfRequests={n}, recorded={recorded} (cap {MAX_RECORDED_REQUESTS})")
 
 def bench(engine, admin_port, offset, duration, warmup, conn_list, rate=None, recording=False,
-          pid=None, csv_suffix=""):
+          pid=None, csv_suffix="", oha_prefix=()):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     admin = f"http://localhost:{admin_port}"
     if not wait_ready(admin_port):
@@ -487,9 +489,11 @@ def bench(engine, admin_port, offset, duration, warmup, conn_list, rate=None, re
             for name, base_port, method, path, body, headers in scenarios:
                 url = f"http://localhost:{base_port + offset}{path}"
                 verify_body(engine, name, method, url, body, headers)   # prove the stub matched (not fall-through)
-                run_oha(url, method, body, headers, warmup, conns)      # warmup (discarded)
+                run_oha(url, method, body, headers, warmup, conns,
+                        prefix=oha_prefix)                             # warmup (discarded)
                 t0 = time.time()
-                m = metric(run_oha(url, method, body, headers, duration, conns, rate))
+                m = metric(run_oha(url, method, body, headers, duration, conns, rate,
+                                   prefix=oha_prefix))
                 if sampler is not None:
                     m["rss_mb_peak"], m["rss_mb_end"] = sampler.window(t0)
                 total = sum(m["codes"].values())
@@ -617,11 +621,18 @@ def extract_topology_marker(text):
             return line.split(TOPOLOGY_MARKER, 1)[1].strip()
     return None
 
-def topology_matches(reported, requested):
-    """`per-core` self-reports as `per-core xN`; work-stealing reports itself verbatim."""
+def topology_matches(reported, requested, expected_workers=None):
+    """`per-core` self-reports as `per-core xN`; work-stealing reports itself verbatim.
+
+    Under the core-count axis `expected_workers` is the pinned CPU budget, and per-core's N must
+    equal it — that is the one observable proving `taskset` actually reached the engine's worker
+    sizing. It transitively covers work-stealing too: both topologies size from the same
+    `available_parallelism()`, which work-stealing never reports."""
+    if expected_workers is not None and requested == "per-core":
+        return reported == f"per-core x{expected_workers}"
     return reported == requested or reported.startswith(requested + " ")
 
-def verify_runtime_marker(rift_bin, mode, extra_args):
+def verify_runtime_marker(rift_bin, mode, extra_args, prefix=(), expected_workers=None):
     """Probe-launch and require the binary's self-reported topology to match the request.
     This is what refuses a mislabeled sweep on macOS, where a requested per-core falls back
     to work-stealing with a warning (RFC-712 D5) — the fallback is correct engine behavior,
@@ -630,7 +641,8 @@ def verify_runtime_marker(rift_bin, mode, extra_args):
     free_ports([TOPOLOGY_PROBE_PORT])
     logpath = os.path.join(RESULTS_DIR, "topology-probe.log")
     proc = launch(
-        [rift_bin, "--port", str(TOPOLOGY_PROBE_PORT), "--loglevel", "info"] + extra_args,
+        list(prefix)
+        + [rift_bin, "--port", str(TOPOLOGY_PROBE_PORT), "--loglevel", "info"] + extra_args,
         logpath,
     )
     try:
@@ -641,32 +653,125 @@ def verify_runtime_marker(rift_bin, mode, extra_args):
                 reported = extract_topology_marker(f.read())
             if reported is not None:
                 break
-        if reported is None or not topology_matches(reported, mode):
+        if reported is None or not topology_matches(reported, mode, expected_workers):
+            want = mode if expected_workers is None else f"{mode} x{expected_workers}"
             raise SystemExit(
-                f"topology probe: binary reports {reported!r}, requested {mode!r} ({rift_bin}) "
+                f"topology probe: binary reports {reported!r}, requested {want!r} ({rift_bin}) "
                 f"— aborting so the sweep is not mislabeled (on macOS per-core falls back to "
-                f"work-stealing by design; run the per-core sweep on Linux)")
+                f"work-stealing by design; run the per-core sweep on Linux. A worker-count "
+                f"mismatch means the CPU pinning did not reach the engine's worker sizing, so "
+                f"the core-count axis would be a fiction)")
         print(f"  topology probe ok: {reported}")
     finally:
         stop(proc, [TOPOLOGY_PROBE_PORT])
 
-def result_suffix(allocator, runtime_mode):
-    """Allocator and runtime dimensions compose into one artefact suffix so no combination
-    overwrites another's CSV/report (#717, #746)."""
+# ---- core-count axis (#746 / RFC-712): pin the engine to N CPUs, the generator to the rest ----
+#
+# RFC-712's thesis is about the *slope* of RPS vs cores, so the sweep has to vary cores, not just
+# connections. Two hazards make a naive `--runtime per-core=N` insufficient:
+#
+#   1. Work-stealing must be sized to the same N, or the comparison is 16-thread-vs-N-thread.
+#      Both modes derive their worker count from `available_parallelism()`, which on Linux honours
+#      sched_getaffinity — so one `taskset` sizes *both* topologies identically and truthfully.
+#   2. oha runs on the same box. Unpinned, it steals from the very cores under measurement, and on
+#      an SMT host it can land on the sibling thread of an engine core — contention that reads as
+#      a scaling ceiling. So the split is made on *physical-core* boundaries: the generator never
+#      shares a core with the engine.
+
+def parse_lscpu_topology(text):
+    """Parse `lscpu -p=CPU,CORE` output into [(cpu_id, core_id), ...] in file order.
+    Comment lines (`#`) carry the header and are skipped."""
+    pairs = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        cpu, core = line.split(",")[:2]
+        pairs.append((int(cpu), int(core)))
+    if not pairs:
+        raise ValueError("could not parse any CPU/core rows from lscpu output")
+    return pairs
+
+def plan_cpu_split(pairs, server_cpus):
+    """Split the machine's CPUs into (engine_cpus, generator_cpus) so that no physical core is
+    shared between the two — whole cores go to the engine, whole cores to the generator.
+
+    `server_cpus` is the CPU budget the engine sees (what `available_parallelism()` returns, hence
+    the worker count for both topologies). It must fall on a core boundary; SMT siblings are
+    indivisible here on purpose, since handing the generator an engine core's sibling is exactly
+    the contamination this split exists to prevent."""
+    cores = {}
+    for cpu, core in pairs:
+        cores.setdefault(core, []).append(cpu)
+    order = list(cores)                      # cores in first-seen order
+    engine, taken = [], []
+    for core in order:
+        if len(engine) >= server_cpus:
+            break
+        engine += cores[core]
+        taken.append(core)
+    if len(engine) != server_cpus:
+        boundaries = []
+        acc = 0
+        for core in order:
+            acc += len(cores[core])
+            boundaries.append(acc)
+        raise ValueError(
+            f"server core budget {server_cpus} does not fall on a physical-core boundary; "
+            f"valid budgets on this host: {','.join(str(b) for b in boundaries)}")
+    generator = [cpu for core in order if core not in taken for cpu in cores[core]]
+    if not generator:
+        raise ValueError(
+            f"server core budget {server_cpus} leaves no CPUs for the load generator "
+            f"(host has {len(pairs)}) — the generator must never share the engine's cores")
+    return sorted(engine), sorted(generator)
+
+def cpuset_arg(cpus):
+    """Render a CPU list as a taskset -c argument."""
+    return ",".join(str(c) for c in cpus)
+
+def taskset_prefix(cpus):
+    """Launcher prefix confining a process to `cpus`; empty when no pinning was requested."""
+    return ["taskset", "-c", cpuset_arg(cpus)] if cpus else []
+
+def resolve_cpu_split(server_cpus):
+    """Read this host's topology and plan the engine/generator split, or (None, None) when the
+    core-count axis is off. Linux-only: taskset and lscpu -p are the mechanism."""
+    if server_cpus is None:
+        return None, None
+    if shutil.which("taskset") is None or shutil.which("lscpu") is None:
+        raise SystemExit("--server-cores needs taskset and lscpu (Linux only) — "
+                         "run the core-count axis on the Linux runner, per RFC-712 D5")
+    out = subprocess.run(["lscpu", "-p=CPU,CORE"], capture_output=True, text=True)
+    if out.returncode != 0:
+        raise SystemExit(f"lscpu -p failed: {out.stderr[:300]}")
+    try:
+        return plan_cpu_split(parse_lscpu_topology(out.stdout), server_cpus)
+    except ValueError as e:
+        raise SystemExit(str(e))
+
+def result_suffix(allocator, runtime_mode, server_cpus=None):
+    """Allocator, runtime and core-count dimensions compose into one artefact suffix so no
+    combination overwrites another's CSV/report (#717, #746)."""
     suffix = f"_{allocator}" if allocator else ""
     if runtime_mode:
         suffix += f"_{runtime_mode}"
+    if server_cpus:
+        suffix += f"_cores{server_cpus}"
     return suffix
 
 def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, recording=False,
-            allocator=None, runtime=None):
+            allocator=None, runtime=None, server_cpus=None, engine_cpus=None, gen_cpus=None):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     node = shutil.which("node") or "node"
-    csv_suffix = result_suffix(allocator, runtime)
+    csv_suffix = result_suffix(allocator, runtime, server_cpus)
+    engine_prefix, oha_prefix = taskset_prefix(engine_cpus), taskset_prefix(gen_cpus)
     full_plan = [
-        ("rift", 0,   [rift_bin, "--port", str(admin_port_for(0)), "--allow-injection", "--loglevel", "warn"]
+        ("rift", 0,   engine_prefix
+                      + [rift_bin, "--port", str(admin_port_for(0)), "--allow-injection", "--loglevel", "warn"]
                       + runtime_launch_args(runtime)),
-        ("mb",   100, [node, mb_bin, "start", "--port", str(admin_port_for(100)), "--allowInjection", "--loglevel", "warn"]),
+        ("mb",   100, engine_prefix
+                      + [node, mb_bin, "start", "--port", str(admin_port_for(100)), "--allowInjection", "--loglevel", "warn"]),
     ]
     plan = [p for p in full_plan if p[0] in engines]
     for engine, offset, cmd in plan:
@@ -681,7 +786,8 @@ def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, r
             # RSS sampling (#717) likewise only makes sense for the rift process itself.
             bench(engine, admin_port_for(offset), offset, duration, warmup, conn_list,
                   rate=rate, recording=recording and engine == "rift",
-                  pid=proc.pid if engine == "rift" else None, csv_suffix=csv_suffix)
+                  pid=proc.pid if engine == "rift" else None, csv_suffix=csv_suffix,
+                  oha_prefix=oha_prefix)
         finally:
             stop(proc, ports)
     rift_ver = subprocess.run([rift_bin, "--version"], capture_output=True, text=True).stdout.strip() or "local"
@@ -690,14 +796,15 @@ def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, r
         report(rift_ver, mb_ver, duration, conn_list[0])
     elif engines == ["rift"]:
         rift_only_report(rift_ver, duration, conn_list, rate, recording,
-                          allocator=allocator, runtime=runtime, csv_suffix=csv_suffix)
+                          allocator=allocator, runtime=runtime, csv_suffix=csv_suffix,
+                          engine_cpus=engine_cpus, gen_cpus=gen_cpus)
     else:
         # engines == ["mb"]: no comparison possible (needs Rift too) and no Rift-only report to write.
         print(f"[report] engines={engines}: benched only Mountebank; no report written "
               f"(the comparison needs both rift and mb)")
 
 def rift_only_report(rift_ver, duration, conn_list, rate, recording, allocator=None,
-                     runtime=None, csv_suffix=""):
+                     runtime=None, csv_suffix="", engine_cpus=None, gen_cpus=None):
     """Rift-only sweep / open-loop report: scenario × (connections, mode) matrices of RPS and p999.
     The MB-comparison report is deliberately untouched so its historical single-point numbers stay
     comparable; this is the extra artefact the Turbo round consumes. Allocator bake-off runs (#717)
@@ -729,6 +836,11 @@ def rift_only_report(rift_ver, duration, conn_list, rate, recording, allocator=N
             f.write(f"- **Allocator:** {allocator}\n")
         if runtime:
             f.write(f"- **Runtime:** {runtime}\n")
+        if engine_cpus:
+            f.write(f"- **Engine CPUs:** {len(engine_cpus)} (`{cpuset_arg(engine_cpus)}`) — the "
+                    f"worker count both topologies derive from `available_parallelism()`\n")
+            f.write(f"- **Generator CPUs:** {len(gen_cpus)} (`{cpuset_arg(gen_cpus)}`) — disjoint "
+                    f"physical cores, so oha never shares a core (or SMT sibling) with the engine\n")
         f.write(f"- **Load generator:** oha, {duration} per point (after warmup)\n")
         f.write(f"- **Connections:** {','.join(str(c) for c in conn_list)}\n")
         if rate is not None:
@@ -807,6 +919,10 @@ if __name__ == "__main__":
                     help="bench one runtime topology (Rift-only; #746 RFC-712 gate). The probe "
                          "verifies the binary's Runtime-topology self-report, so a per-core "
                          "request on macOS (which falls back) aborts instead of mislabeling.")
+    ap.add_argument("--server-cores", type=int, metavar="N",
+                    help="core-count axis (#746): confine the engine to N CPUs with taskset — "
+                         "both topologies size their workers from it — and confine oha to the "
+                         "remaining physical cores. N must fall on a core boundary; Linux only.")
     a = ap.parse_args()
     if a.run_all:
         try:
@@ -826,10 +942,22 @@ if __name__ == "__main__":
             # Applies to explicit --rift-bin AND harness-built binaries alike: the label on the
             # results must come from the binary itself, never from the invocation.
             verify_allocator_marker(rift_bin, a.allocator)
+        if a.server_cores is not None and a.server_cores < 1:
+            raise SystemExit(f"--server-cores must be >= 1 (got {a.server_cores})")
+        engine_cpus, gen_cpus = resolve_cpu_split(a.server_cores)
+        if engine_cpus:
+            print(f"  cpu split: engine on {cpuset_arg(engine_cpus)} "
+                  f"({len(engine_cpus)} CPUs), oha on {cpuset_arg(gen_cpus)} "
+                  f"({len(gen_cpus)} CPUs)")
         if a.runtime:
-            verify_runtime_marker(rift_bin, a.runtime, runtime_launch_args(a.runtime))
+            # Probe under the same pinning: per-core self-reports `per-core xN`, so this is also
+            # what proves the core budget actually reached the engine's worker sizing.
+            verify_runtime_marker(rift_bin, a.runtime, runtime_launch_args(a.runtime),
+                                  prefix=taskset_prefix(engine_cpus),
+                                  expected_workers=a.server_cores)
         run_all(a.duration, a.warmup, conn_list, rift_bin, a.mb_bin, engines,
-                rate=rate, recording=recording, allocator=a.allocator, runtime=a.runtime)
+                rate=rate, recording=recording, allocator=a.allocator, runtime=a.runtime,
+                server_cpus=a.server_cores, engine_cpus=engine_cpus, gen_cpus=gen_cpus)
     elif a.report:
         report(a.rift_version, a.mb_version, a.duration, a.connections)
     else:

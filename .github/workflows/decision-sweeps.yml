@@ -7,6 +7,13 @@
 # (3 reps + medians; the RSS criterion is noise-robust). For #746 the ≥15%-RPS-at-c≥256
 # clause is measurable here, but the pre-registered ≥8-core slope clause is NOT — a per-core
 # loss at 4 cores is expected and is not a no-go; only a win is a (strong) early signal.
+#
+# The `cores` input adds the slope axis the first #746 run lacked (it varied connections only, at
+# a fixed unpinned 16 vCPU, with oha stealing from the cores under measurement). It is still not
+# the full pre-registered clause: on the 16-vCPU/8-physical-core runner the generator needs its
+# own cores, so the engine tops out at 8 vCPU = 4 physical cores. What this measures is the slope
+# 2→4→8 engine vCPU with zero generator contention; an ≥8-*physical*-core point needs a bigger
+# runner or an off-box generator, and that limit belongs in any verdict quoting these numbers.
 name: Decision Sweeps
 
 on:
@@ -29,6 +36,14 @@ on:
       connections:
         description: "Topology sweep connection counts"
         default: "4,256"
+      cores:
+        description: >-
+          Topology core-count axis: engine CPU budgets (comma-separated). Each budget pins the
+          engine with taskset — both topologies size their workers from it — and pins oha to the
+          remaining physical cores. Budgets must fall on a physical-core boundary and must leave
+          the generator some cores (on the 16-vCPU/8-core runner: 2,4,8 works; 16 does not).
+          Empty = no core-count axis (unpinned, as the first #746 run).
+        default: "2,4,8"
 
 permissions:
   contents: read
@@ -96,17 +111,29 @@ jobs:
             | tee tests/benchmark/results/environment.txt
       - name: Build engine once
         run: cargo build --release -p rift-http-proxy
-      - name: Topology matrix (work-stealing/per-core x reps)
+      - name: Record CPU topology (core-boundary evidence for the split)
+        run: lscpu -p=CPU,CORE,SOCKET | tee tests/benchmark/results/cpu-topology.txt
+      - name: Topology matrix (work-stealing/per-core x cores x reps)
         working-directory: tests/benchmark
         run: |
           set -euo pipefail
+          # The RFC-712 gate is a *slope*: RPS/p99 as the engine's core budget grows. Each budget
+          # runs both topologies under identical pinning, so the comparison is N-core vs N-core
+          # and oha can never steal a core (or SMT sibling) from the engine under measurement.
+          # An empty `cores` input reproduces the original unpinned run.
+          CORES="${{ inputs.cores }}"
+          if [ -z "$CORES" ]; then BUDGETS=(""); else IFS=',' read -ra BUDGETS <<< "$CORES"; fi
           for rep in $(seq 1 ${{ inputs.reps }}); do
-            for rt in work-stealing per-core; do
-              echo "===== runtime=$rt rep=$rep ====="
-              python3 scripts/bench_direct.py --run-all --runtime "$rt" \
-                --rift-bin ../../target/release/rift-http-proxy \
-                --sweep-connections "${{ inputs.connections }}" --duration "${{ inputs.duration }}" --warmup 2s
-              cp "results/direct_rift_${rt}.csv" "results/direct_rift_${rt}_rep${rep}.csv"
+            for n in "${BUDGETS[@]}"; do
+              for rt in work-stealing per-core; do
+                echo "===== runtime=$rt cores=${n:-all} rep=$rep ====="
+                python3 scripts/bench_direct.py --run-all --runtime "$rt" \
+                  ${n:+--server-cores "$n"} \
+                  --rift-bin ../../target/release/rift-http-proxy \
+                  --sweep-connections "${{ inputs.connections }}" --duration "${{ inputs.duration }}" --warmup 2s
+                cp "results/direct_rift_${rt}${n:+_cores$n}.csv" \
+                   "results/direct_rift_${rt}${n:+_cores$n}_rep${rep}.csv"
+              done
             done
           done
       - name: Per-worker accept counts (skew evidence, single spot-check)
@@ -129,5 +156,6 @@ jobs:
             tests/benchmark/results/*.csv
             tests/benchmark/results/*.md
             tests/benchmark/results/environment.txt
+            tests/benchmark/results/cpu-topology.txt
             tests/benchmark/results/skew-evidence.txt
           retention-days: 30
