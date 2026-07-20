@@ -111,6 +111,83 @@ def json_body_stubs(n=DEFAULT_JSON_BODY_STUBS):
         "responses": [{"is": {"statusCode": 200, "body": json.dumps({"matched": "equals", "id": i})}}],
     } for i in range(1, n + 1)]
 
+DEFAULT_BODY_FIELD_STUBS = 200
+
+def body_field_stubs(n=DEFAULT_BODY_FIELD_STUBS):
+    """N stubs on ONE shared path+method, discriminated ONLY by a body field value.
+
+    This is the workload the quamina body-field dimension (#767) exists for, and the suite had
+    nothing like it. `json_body_stubs` gives every stub a unique path, so the path dimension prunes
+    the candidate set to one before the body is consulted — the automaton then re-derives what the
+    path index already knew, and the run measures pure overhead rather than the dimension's benefit
+    (observed: -8% at every N in run 29738479074, flat with N, which is the signature of measuring
+    overhead alone).
+
+    Sharing the path across all N is what forces the body field to be the discriminator, so the
+    `O(N)` structural scan the dimension replaces is actually on the critical path."""
+    return [{
+        "predicates": [{"equals": {"method": "POST", "path": "/orders/submit",
+            "body": {"orderId": f"ord-{i}", "channel": "web"}}}],
+        "responses": [{"is": {"statusCode": 200,
+            "body": json.dumps({"body_field_matched": True, "order": i})}}],
+    } for i in range(1, n + 1)]
+
+def set_body_field_stub_count(n):
+    """Scale the BodyField imposter and retarget its scenario together (#784's lesson)."""
+    global IMPOSTERS, DIMENSION_SCENARIOS
+    IMPOSTERS = [(port, name, body_field_stubs(n) if name == "BodyField" else stubs)
+                 for port, name, stubs in IMPOSTERS]
+    target = max(1, n // 2)
+    DIMENSION_SCENARIOS = [
+        (name, port, method, path,
+         json.dumps({"orderId": f"ord-{target}", "channel": "web"}, separators=(",", ":")), headers)
+        if name == "body_field_scale" else (name, port, method, path, body, headers)
+        for name, port, method, path, body, headers in DIMENSION_SCENARIOS
+    ]
+
+def deepequals_body_stubs(n=50):
+    """`deepEquals`-on-body stubs — the dimension #740 indexes by structural body hash.
+
+    Distinct from `json_body_stubs`, which uses `equals`: the two take different index paths
+    (structural hash vs the quamina field automaton), and until now the suite exercised only the
+    latter, so #740's `O(stubs x body)` -> `O(body)` change was measured by nothing."""
+    return [{
+        "predicates": [{"deepEquals": {"method": "POST", "path": f"/deep/equals/{i}",
+            "body": {"order": {"id": i, "items": [{"sku": f"sku-{i}", "qty": i}]},
+                     "meta": {"source": "bench"}}}}],
+        "responses": [{"is": {"statusCode": 200,
+            "body": json.dumps({"matched": "deepEquals", "order": i})}}],
+    } for i in range(1, n + 1)]
+
+def literal_prefix_stubs(n=100):
+    """`startsWith` / `contains` path stubs — the anchored/unanchored Aho-Corasick literal
+    dimension (#732). The suite had exactly one `startsWith` and two `contains` across ~860 stubs,
+    so a single-pass literal scan over many anchors was effectively untested."""
+    out = []
+    for i in range(1, n + 1):
+        out.append({
+            "predicates": [{"startsWith": {"path": f"/literal/prefix{i}/"}}],
+            "responses": [{"is": {"statusCode": 200, "body": json.dumps({"literal": i, "kind": "prefix"})}}],
+        })
+        out.append({
+            "predicates": [{"contains": {"path": f"/needle{i}/"}}],
+            "responses": [{"is": {"statusCode": 200, "body": json.dumps({"literal": i, "kind": "contains"})}}],
+        })
+    return out
+
+def method_mix_stubs(n=50):
+    """Same path, different verbs — the method candidate dimension (#729).
+
+    Every pre-existing scenario is GET or POST, so a request whose method is the *only* thing
+    separating it from n-1 other stubs never happened. Sharing one path across the verbs is what
+    forces the method dimension to do the pruning."""
+    verbs = ("PUT", "DELETE", "PATCH", "OPTIONS")
+    return [{
+        "predicates": [{"equals": {"method": verb, "path": f"/method/{i}"}}],
+        "responses": [{"is": {"statusCode": 200,
+            "body": json.dumps({"method_matched": verb, "id": i})}}],
+    } for i in range(1, n + 1) for verb in verbs]
+
 def jsonpath_stubs(n=50):
     # Mountebank applies a jsonpath selector as a modifier on a SINGLE-operator predicate, so the
     # method/path match and the selected-value match must be separate predicates. Rift accepts the
@@ -175,6 +252,10 @@ IMPOSTERS = [
     (4553, "Template", template_stubs()),
     (4554, "Header", header_stubs()),
     (4555, "Query", query_stubs()),
+    (4556, "DeepEquals", deepequals_body_stubs()),
+    (4557, "Literal", literal_prefix_stubs()),
+    (4558, "MethodMix", method_mix_stubs()),
+    (4559, "BodyField", body_field_stubs()),
 ]
 
 # scenarios: (name, base_port, method, path, body, headers)
@@ -199,6 +280,26 @@ SCENARIOS = [
 # and would inflate throughput. Each scenario therefore declares a substring its MATCHED body must
 # contain (engine-agnostic: chosen to prove the match without asserting engine-specific rendering
 # like template substitution). `no_match` is the control: its body MUST be empty.
+# Scenarios covering optimizations the MB-comparison set does not reach. Kept SEPARATE because
+# that set is a stability contract — it must stay byte-comparable with previously published
+# Mountebank numbers (see `DefaultRunUnchanged` in the tests) — so these are additive, exactly like
+# `recording_on`. They run in Rift-only sweeps.
+DIMENSION_SCENARIOS = [
+    # Issue #740: deepEquals-on-body, indexed by structural body hash. Zero coverage before this.
+    ("deepequals_body",   4556, "POST", "/deep/equals/25",
+     '{"order":{"id":25,"items":[{"sku":"sku-25","qty":25}]},"meta":{"source":"bench"}}',
+     {"Content-Type": "application/json"}),
+    # Issue #732: single-pass literal dimension, anchored (startsWith) and unanchored (contains).
+    ("literal_prefix",    4557, "GET",  "/literal/prefix100/deep/path", None, {}),
+    ("literal_contains",  4557, "GET",  "/x/needle100/y", None, {}),
+    # Issue #729: method is the ONLY discriminator across these stubs.
+    ("method_mix",        4558, "DELETE", "/method/25", None, {}),
+    # Issue #767: one shared path, body field is the ONLY discriminator — the workload the
+    # quamina dimension indexes. Scale it with --body-field-stubs.
+    ("body_field_scale",  4559, "POST", "/orders/submit",
+     '{"orderId":"ord-100","channel":"web"}', {"Content-Type": "application/json"}),
+]
+
 EXPECT_BODY = {
     "simple_health": "OK",
     "api_first": '"total": 2',
@@ -213,6 +314,11 @@ EXPECT_BODY = {
     "template": '"template": 25',
     "header_last": '"routed_to": 100',
     "query_last": '"page": 100',
+    "deepequals_body": '"matched": "deepEquals"',
+    "literal_prefix": '"kind": "prefix"',
+    "literal_contains": '"kind": "contains"',
+    "method_mix": '"method_matched": "DELETE"',
+    "body_field_scale": '"body_field_matched": true',
     # recording_on hits the same api_middle path on a recordRequests imposter, so it matches
     # the same stub and returns the same body marker.
     "recording_on": '"name": "resource5_5"',
@@ -587,7 +693,8 @@ def bench(engine, admin_port, offset, duration, warmup, conn_list, rate=None, re
     load_imposters(admin, offset, recording=recording)
     time.sleep(1)
     mode = mode_label(rate)
-    scenarios = SCENARIOS + ([RECORDING_SCENARIO] if recording else [])
+    # Dimension scenarios ride with the Rift-only sweeps (same rule as recording_on).
+    scenarios = SCENARIOS + (DIMENSION_SCENARIOS + [RECORDING_SCENARIO] if recording else [])
     rows = []
     sampler = RssSampler(pid) if pid is not None else None
     if sampler is not None:
@@ -858,7 +965,7 @@ def resolve_cpu_split(server_cpus):
         raise SystemExit(str(e))
 
 def result_suffix(allocator, runtime_mode, server_cpus=None, rep=None,
-                  quamina=None, stub_count=None):
+                  quamina=None, stub_count=None, body_field_stubs=None):
     """Allocator, runtime, core-count and repetition dimensions compose into one artefact suffix so
     no combination overwrites another's CSV/report (#717, #746, #773).
 
@@ -876,6 +983,8 @@ def result_suffix(allocator, runtime_mode, server_cpus=None, rep=None,
         suffix += f"_quamina{quamina}"
     if stub_count:
         suffix += f"_stubs{stub_count}"
+    if body_field_stubs:
+        suffix += f"_bfstubs{body_field_stubs}"
     # rep stays outermost: every other dimension names a *variant*, a rep names a sample OF one.
     if rep is not None:
         suffix += f"_rep{rep}"
@@ -1022,10 +1131,11 @@ def aggregate_reps_to_report(base_suffix, rift_ver):
 
 def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, recording=False,
             allocator=None, runtime=None, server_cpus=None, engine_cpus=None, gen_cpus=None,
-            rep=None, quamina=None, stub_count=None):
+            rep=None, quamina=None, stub_count=None, body_field_stubs=None):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     node = shutil.which("node") or "node"
-    csv_suffix = result_suffix(allocator, runtime, server_cpus, rep, quamina, stub_count)
+    csv_suffix = result_suffix(allocator, runtime, server_cpus, rep, quamina, stub_count,
+                               body_field_stubs)
     engine_prefix, oha_prefix = taskset_prefix(engine_cpus), taskset_prefix(gen_cpus)
     full_plan = [
         ("rift", 0,   engine_prefix
@@ -1078,7 +1188,10 @@ def rift_only_report(rift_ver, duration, conn_list, rate, recording, allocator=N
         rows = load_rift_csv(f)
     cols = list(dict.fromkeys((int(r["connections"]), r["mode"]) for r in rows))
     cell = {(r["scenario"], (int(r["connections"]), r["mode"])): r for r in rows}
-    scen_order = [s[0] for s in SCENARIOS] + ([RECORDING_SCENARIO[0]] if recording else [])
+    # Must mirror the order `bench()` runs them in, or a measured scenario is silently missing
+    # from the report — the row would simply not be emitted, with nothing saying so.
+    scen_order = [s[0] for s in SCENARIOS] + (
+        [s[0] for s in DIMENSION_SCENARIOS] + [RECORDING_SCENARIO[0]] if recording else [])
     def colhdr(k):
         c, mode = k
         return f"c={c}" if mode == "closed" else f"c={c} {mode}"
@@ -1205,6 +1318,12 @@ if __name__ == "__main__":
                          f"default {DEFAULT_JSON_BODY_STUBS}). The quamina dimension replaces an "
                          "O(N) scan, so its win is a function of N — sweep it (e.g. 10/100/1000) "
                          "rather than measuring one arbitrary point.")
+    ap.add_argument("--body-field-stubs", type=int, metavar="N",
+                    help=f"number of stubs sharing one path and discriminated only by a body field "
+                         f"(#767/#779; default {DEFAULT_BODY_FIELD_STUBS}). This is the axis the "
+                         f"quamina body-field dimension is measured on — unlike --stub-count, whose "
+                         f"stubs have unique paths and are therefore pruned by the path dimension "
+                         f"before the body matters.")
     ap.add_argument("--rep", type=int, metavar="N",
                     help="repetition index (#773): artefacts get a _repN suffix, so each rep of a "
                          "sweep lands in its own file instead of overwriting the last. Re-running "
@@ -1228,6 +1347,10 @@ if __name__ == "__main__":
             "variable's effect to the other. Run them as separate sweeps.")
     if a.stub_count is not None:
         set_json_body_stub_count(a.stub_count)
+    if a.body_field_stubs is not None:
+        if a.body_field_stubs < 1:
+            raise SystemExit(f"--body-field-stubs must be >= 1 (got {a.body_field_stubs})")
+        set_body_field_stub_count(a.body_field_stubs)
     if a.run_all:
         try:
             engines, conn_list, rate, recording = resolve_run_mode(
@@ -1280,7 +1403,8 @@ if __name__ == "__main__":
         run_all(a.duration, a.warmup, conn_list, rift_bin, a.mb_bin, engines,
                 rate=rate, recording=recording, allocator=a.allocator, runtime=a.runtime,
                 server_cpus=a.server_cores, engine_cpus=engine_cpus, gen_cpus=gen_cpus,
-                rep=a.rep, quamina=a.quamina, stub_count=a.stub_count)
+                rep=a.rep, quamina=a.quamina, stub_count=a.stub_count,
+                body_field_stubs=a.body_field_stubs)
     elif a.report:
         report(a.rift_version, a.mb_version, a.duration, a.connections)
     else:

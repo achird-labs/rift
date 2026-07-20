@@ -155,6 +155,45 @@ Linux only (`taskset`/`lscpu`). Note the ceiling this implies: on an M-vCPU box 
 needs its own cores, so the engine tops out well below M — an ≥8-*physical*-core point needs a
 bigger box or an off-box generator, and any verdict quoting these numbers should say so.
 
+### Matching-dimension scenarios (Rift-only, additive)
+
+Several Turbo optimizations had **no benchmark coverage at all** — the suite could not have
+detected a regression in them. These scenarios close that, and are kept **separate** from the
+13-scenario Mountebank comparison set, which is a stability contract: it must stay comparable with
+previously published numbers (enforced by `DefaultRunUnchanged` in the tests). They ride with
+Rift-only sweeps, exactly like `recording_on`.
+
+| Scenario | Covers | Was measured before? |
+|---|---|---|
+| `deepequals_body` | #740 `deepEquals` structural-hash index | no — `deepEquals` appeared nowhere |
+| `literal_prefix` / `literal_contains` | #732 anchored/unanchored Aho-Corasick | barely — 1 `startsWith`, 2 `contains` in ~860 stubs |
+| `method_mix` | #729 method dimension | no — every scenario was GET or POST |
+| `body_field_scale` | #767 quamina body-field automaton | no — see the trap below |
+
+#### The trap `body_field_scale` exists to avoid
+
+`json_body_equals` gives every stub a **unique path**, so the path dimension prunes the candidate
+set to one stub *before* the body is consulted. The body-field automaton then re-derives what the
+path index already knew. Benchmarking the quamina dimension against it measures **pure overhead**:
+run 29738479074 showed −8% at 10, 100 *and* 1000 stubs — flat with N, which is the signature of
+measuring a cost with no corresponding benefit.
+
+`body_field_scale` puts N stubs on **one shared path and method**, discriminated only by a body
+field, so the `O(N)` structural scan the dimension replaces is actually on the critical path.
+Scale it with `--body-field-stubs N`:
+
+```bash
+for n in 10 100 1000; do
+  for q in on off; do
+    python3 scripts/bench_direct.py --run-all --quamina $q --body-field-stubs $n --rep 1 \
+        --sweep-connections 256 --duration 12s --warmup 2s
+  done
+done
+```
+
+A test asserts these stubs share exactly one path and one method — if that ever changes, the
+scenario silently stops testing the dimension while still appearing to.
+
 ### Body-field dimension A/B (issue #779, Rift-only)
 
 `--quamina {on,off}` builds and benches one variant of the quamina-backed body-field candidate

@@ -232,6 +232,42 @@ class DefaultRunUnchanged(unittest.TestCase):
         self.assertEqual(names[-1], "query_last")
 
 
+class DimensionSetIsAdditive(unittest.TestCase):
+    """The MB-comparison set is a stability contract; dimension scenarios must never leak into it,
+    or previously published Mountebank numbers stop being comparable."""
+
+    def test_dimension_scenarios_are_not_in_the_mb_set(self):
+        mb = {s[0] for s in bd.SCENARIOS}
+        for name, *_ in bd.DIMENSION_SCENARIOS:
+            self.assertNotIn(name, mb, f"{name} leaked into the MB-comparison set")
+
+    def test_dimension_scenarios_use_their_own_ports(self):
+        mb_ports = {s[1] for s in bd.SCENARIOS}
+        for name, port, *_ in bd.DIMENSION_SCENARIOS:
+            self.assertNotIn(port, mb_ports, f"{name} shares a port with the MB set")
+
+    def test_report_lists_every_scenario_the_sweep_measures(self):
+        # A scenario that is benched but missing from `scen_order` is measured and then silently
+        # dropped from the report — cost paid, number invisible.
+        import tempfile
+        rows = [(name, 256, "closed",
+                 {"rps": 1.0, "p50_ms": 0.5, "p90_ms": 0.8, "p99_ms": 1.2,
+                  "p999_ms": 3.1, "avg_ms": 0.6, "codes": {"200": 1}})
+                for name, *_ in bd.SCENARIOS + bd.DIMENSION_SCENARIOS + [bd.RECORDING_SCENARIO]]
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bd.RESULTS_DIR
+            bd.RESULTS_DIR = tmp
+            try:
+                bd.write_rift_csv(os.path.join(tmp, "direct_rift.csv"), rows)
+                bd.rift_only_report("0.1.0", "12s", [256], None, True)
+                with open(os.path.join(tmp, "DIRECT_RIFT_SWEEP_REPORT.md")) as f:
+                    text = f.read()
+            finally:
+                bd.RESULTS_DIR = orig
+        for name, *_ in bd.DIMENSION_SCENARIOS:
+            self.assertIn(name, text, f"{name} was benched but is absent from the report")
+
+
 class AllocatorBuildArgs(unittest.TestCase):
     """Issue #717: each allocator maps to cargo flags that swap ONLY the allocator, keeping the
     functional feature set (redis-backend, javascript) identical so the comparison is fair."""
@@ -671,6 +707,141 @@ class QuaminaVariant(unittest.TestCase):
         path, needs_build = bd.resolve_rift_bin(None, None, "off")
         self.assertIn("quamina-off", path)
         self.assertTrue(needs_build)
+
+
+class ScenarioReachability(unittest.TestCase):
+    """Every scenario must address a stub that actually exists.
+
+    #784 shipped a scenario pointing at `/json/equals/25` against a 10-stub imposter: the request
+    fell through to the no-match default and the run aborted after a full release build. The
+    runtime body assertion caught it, but only in CI. This is the same check, statically, for
+    every scenario — so adding a scenario whose target nothing serves fails in milliseconds."""
+
+    @staticmethod
+    def _predicate_serves(pred, method, path):
+        """Does this predicate plausibly match? Covers the operator forms the suite uses."""
+        import re as _re
+        for op, spec in pred.items():
+            if op in ("startsWith", "contains", "matches", "equals", "deepEquals", "exists"):
+                want_path = spec.get("path") if isinstance(spec, dict) else None
+                want_method = spec.get("method") if isinstance(spec, dict) else None
+                if want_method and want_method != method:
+                    return False
+                if want_path is None:
+                    continue
+                bare = path.split("?", 1)[0]
+                if op in ("equals", "deepEquals") and bare != want_path:
+                    return False
+                if op == "startsWith" and not bare.startswith(want_path):
+                    return False
+                if op == "contains" and want_path not in bare:
+                    return False
+                if op == "matches" and not _re.search(want_path, bare):
+                    return False
+            elif op in ("and", "or"):
+                results = [ScenarioReachability._predicate_serves(p, method, path) for p in spec]
+                if (op == "and" and not all(results)) or (op == "or" and not any(results)):
+                    return False
+        return True
+
+    def test_every_scenario_targets_a_stub_that_exists(self):
+        by_port = {port: stubs for port, _, stubs in bd.IMPOSTERS}
+        unreachable = []
+        for name, port, method, path, _body, _headers in bd.SCENARIOS + bd.DIMENSION_SCENARIOS:
+            if name == "no_match":
+                continue          # deliberately matches nothing — that IS the scenario
+            stubs = by_port.get(port)
+            self.assertIsNotNone(stubs, f"{name}: no imposter on port {port}")
+            if not any(all(self._predicate_serves(p, method, path) for p in st.get("predicates", []))
+                       for st in stubs):
+                unreachable.append(f"{name} -> {method} {path} (port {port})")
+        self.assertEqual(unreachable, [], "scenarios whose target no stub serves: " + str(unreachable))
+
+    def test_the_no_match_scenario_really_matches_nothing(self):
+        # Its whole point is the fall-through path; if a stub started serving it, the scenario
+        # would silently stop measuring what it claims to.
+        scen = {s[0]: s for s in bd.SCENARIOS}["no_match"]
+        stubs = {p: s for p, _, s in bd.IMPOSTERS}[scen[1]]
+        served = any(all(self._predicate_serves(p, scen[2], scen[3]) for p in st.get("predicates", []))
+                     for st in stubs)
+        self.assertFalse(served, "no_match now matches a stub — it no longer measures fall-through")
+
+    def test_every_scenario_has_a_body_marker(self):
+        for name, *_ in bd.SCENARIOS + bd.DIMENSION_SCENARIOS:
+            self.assertIn(name, bd.EXPECT_BODY,
+                          f"{name} has no EXPECT_BODY marker, so a fall-through would go unnoticed")
+
+    def test_imposter_ports_are_unique(self):
+        ports = [p for p, _, _ in bd.IMPOSTERS]
+        self.assertEqual(len(ports), len(set(ports)), f"duplicate imposter ports: {ports}")
+
+
+class NewDimensionCoverage(unittest.TestCase):
+    """The scenarios added for optimizations that previously had none."""
+
+    def test_deepequals_dimension_is_exercised(self):
+        # Issue #740's structural-hash index. Before this, `deepEquals` appeared nowhere.
+        stubs = {n: s for _, n, s in bd.IMPOSTERS}["DeepEquals"]
+        self.assertTrue(all("deepEquals" in st["predicates"][0] for st in stubs))
+        self.assertIn("deepequals_body", {s[0] for s in bd.DIMENSION_SCENARIOS})
+
+    def test_deepequals_bodies_are_objects_not_scalars(self):
+        # The index only applies to a JSON object/array body; a scalar falls back to full
+        # comparison, so a scalar-bodied scenario would measure the unindexed path by accident.
+        for st in {n: s for _, n, s in bd.IMPOSTERS}["DeepEquals"]:
+            self.assertIsInstance(st["predicates"][0]["deepEquals"]["body"], dict)
+
+    def test_literal_dimension_has_both_anchored_and_unanchored(self):
+        # #732 indexes startsWith (anchored) and contains (unanchored) differently.
+        ops = {op for st in {n: s for _, n, s in bd.IMPOSTERS}["Literal"]
+               for op in st["predicates"][0]}
+        self.assertEqual(ops, {"startsWith", "contains"})
+
+    def test_body_field_stubs_share_one_path_so_the_body_is_the_discriminator(self):
+        # THE lesson from run 29738479074: json_body_stubs gives every stub a unique path, so the
+        # path dimension prunes to one candidate before the body is consulted and the quamina
+        # automaton measures pure overhead (-8%, flat with N — the signature of measuring nothing).
+        # If these stubs ever gain distinct paths, this benchmark silently stops testing the
+        # dimension while still looking like it does.
+        stubs = {n: s for _, n, s in bd.IMPOSTERS}["BodyField"]
+        eqs = [st["predicates"][0]["equals"] for st in stubs]
+        self.assertEqual(len({e["path"] for e in eqs}), 1,
+                         "BodyField stubs must share ONE path, or the path dimension prunes first "
+                         "and this scenario measures overhead instead of the body-field index")
+        self.assertEqual(len({e["method"] for e in eqs}), 1, "and one method, for the same reason")
+        self.assertEqual(len({e["body"]["orderId"] for e in eqs}), len(stubs),
+                         "each stub must differ in the discriminating body field")
+
+    def test_body_field_scaling_retargets_its_scenario(self):
+        orig_i, orig_d = list(bd.IMPOSTERS), list(bd.DIMENSION_SCENARIOS)
+        try:
+            for n in (2, 10, 200, 1000):
+                bd.IMPOSTERS, bd.DIMENSION_SCENARIOS = list(orig_i), list(orig_d)
+                bd.set_body_field_stub_count(n)
+                stubs = {nm: s for _, nm, s in bd.IMPOSTERS}["BodyField"]
+                ids = {st["predicates"][0]["equals"]["body"]["orderId"] for st in stubs}
+                scen = {s[0]: s for s in bd.DIMENSION_SCENARIOS}["body_field_scale"]
+                self.assertIn(json.loads(scen[4])["orderId"], ids,
+                              f"n={n}: scenario body targets an orderId no stub serves")
+        finally:
+            bd.IMPOSTERS, bd.DIMENSION_SCENARIOS = orig_i, orig_d
+
+    def test_method_mix_shares_paths_across_verbs(self):
+        # If each verb had its own path, the path dimension would prune first and the method
+        # dimension would never be the discriminator.
+        stubs = {n: s for _, n, s in bd.IMPOSTERS}["MethodMix"]
+        by_path = {}
+        for st in stubs:
+            eq = st["predicates"][0]["equals"]
+            by_path.setdefault(eq["path"], set()).add(eq["method"])
+        self.assertTrue(all(len(v) > 1 for v in by_path.values()),
+                        "each path must be served by multiple verbs")
+
+    def test_non_get_post_methods_are_now_exercised(self):
+        methods = {s[2] for s in bd.SCENARIOS + bd.DIMENSION_SCENARIOS}
+        self.assertTrue(methods - {"GET", "POST"},
+                        "no scenario uses a verb beyond GET/POST, so #729's method dimension "
+                        "is still unmeasured")
 
 
 class StubCountAxis(unittest.TestCase):
