@@ -168,6 +168,14 @@ fn main() -> Result<(), anyhow::Error> {
     // Start in Mountebank mode
     info!("Starting Rift on port {}", cli.port);
     info!("Global allocator: {}", ACTIVE_ALLOCATOR);
+    info!(
+        "Matching dimensions: body-field(quamina)={}",
+        if rift_mock_core::QUAMINA_BODY_FIELD_DIMENSION {
+            "on"
+        } else {
+            "off"
+        }
+    );
     run_mountebank_mode(cli)
 }
 

@@ -22,7 +22,7 @@ on:
       sweep:
         description: "Which sweep to run"
         type: choice
-        options: [both, allocator, topology]
+        options: [both, allocator, topology, quamina]
         default: both
       reps:
         description: "Repetitions per variant (medians taken offline)"
@@ -36,6 +36,11 @@ on:
       connections:
         description: "Topology sweep connection counts"
         default: "4,256"
+      stub_counts:
+        description: >-
+          Quamina sweep: field-equals-on-body stub counts (comma-separated). The dimension replaces
+          an O(N) scan of structural comparisons, so N is the axis its win is a function of.
+        default: "10,100,1000"
       cores:
         description: >-
           Topology core-count axis: engine CPU budgets (comma-separated). Each budget pins the
@@ -167,4 +172,65 @@ jobs:
             tests/benchmark/results/environment.txt
             tests/benchmark/results/cpu-topology.txt
             tests/benchmark/results/skew-evidence.txt
+          retention-days: 30
+
+  quamina:
+    if: ${{ inputs.sweep == 'quamina' }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install oha
+        run: |
+          curl -sfL -o /usr/local/bin/oha \
+            https://github.com/hatoo/oha/releases/download/v1.12.0/oha-linux-amd64 \
+            && chmod +x /usr/local/bin/oha && oha --version \
+            || cargo install oha --locked
+      - name: Record environment
+        run: |
+          mkdir -p tests/benchmark/results
+          { uname -a; nproc; lscpu | head -25; free -h; } \
+            | tee tests/benchmark/results/environment.txt
+      # Issue #779: the dimension's go/no-go numbers were taken against rift-mock-core, the one
+      # crate where the feature was enabled — it was compiled out of the binary and the C-ABI
+      # until #777. This measures the shipped artefact. The harness verifies each build's own
+      # `Matching dimensions:` self-report before benching, because the two variants match
+      # identically by design: a mislabeled build has no other symptom.
+      - name: Quamina A/B (on/off x stub counts x reps)
+        working-directory: tests/benchmark
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra COUNTS <<< "${{ inputs.stub_counts }}"
+          for rep in $(seq 1 ${{ inputs.reps }}); do
+            for n in "${COUNTS[@]}"; do
+              for q in on off; do
+                echo "===== quamina=$q stubs=$n rep=$rep ====="
+                python3 scripts/bench_direct.py --run-all --quamina "$q" --stub-count "$n" \
+                  --rep "$rep" --sweep-connections "${{ inputs.connections }}" \
+                  --duration "${{ inputs.duration }}" --warmup 2s
+              done
+            done
+          done
+          for n in "${COUNTS[@]}"; do
+            for q in on off; do
+              python3 scripts/bench_direct.py --aggregate-reps "_quamina${q}_stubs${n}"
+            done
+          done
+      - name: Record binary sizes (the dimension's cost to embedders)
+        run: |
+          for q in on off; do
+            printf "quamina-%s %s bytes\n" "$q" \
+              "$(stat -c%s target/quamina-$q/release/rift-http-proxy)"
+          done | tee tests/benchmark/results/binary-sizes.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quamina-sweep-results
+          path: |
+            tests/benchmark/results/*.csv
+            tests/benchmark/results/*.md
+            tests/benchmark/results/environment.txt
+            tests/benchmark/results/binary-sizes.txt
           retention-days: 30

@@ -412,6 +412,23 @@ class ResultSuffix(unittest.TestCase):
         self.assertEqual(bd.result_suffix("mimalloc", "per-core", 4, rep=3),
                          "_mimalloc_per-core_cores4_rep3")
 
+    def test_quamina_and_stub_count_are_their_own_dimensions(self):
+        # Issue #779: the A/B variant and the stub count are what the measurement varies, so they
+        # must name the artefact — otherwise the two halves of the bake-off overwrite each other.
+        self.assertEqual(bd.result_suffix(None, None, None, quamina="on"), "_quaminaon")
+        self.assertEqual(bd.result_suffix(None, None, None, stub_count=1000), "_stubs1000")
+        self.assertEqual(bd.result_suffix(None, None, None, quamina="off", stub_count=100),
+                         "_quaminaoff_stubs100")
+
+    def test_rep_stays_outermost(self):
+        # Every other dimension names a variant; rep names a sample OF one, so it sorts last.
+        self.assertEqual(
+            bd.result_suffix(None, "per-core", 8, rep=2, quamina="on", stub_count=1000),
+            "_per-core_cores8_quaminaon_stubs1000_rep2")
+
+    def test_new_dimensions_absent_reproduces_the_old_names(self):
+        self.assertEqual(bd.result_suffix("jemalloc", "per-core", 4, rep=1), "_jemalloc_per-core_cores4_rep1")
+
     def test_rep_absent_reproduces_the_old_names(self):
         # The pre-#773 contract must be byte-identical when no rep is given, so artefacts from
         # earlier sweeps stay comparable.
@@ -606,6 +623,86 @@ class RepArtefacts(unittest.TestCase):
                 self.assertIn("5,510,000", text)  # the median, not rep3's degraded 4.35M
             finally:
                 bd.RESULTS_DIR = orig
+
+
+class QuaminaVariant(unittest.TestCase):
+    """Issue #779: the two variants match IDENTICALLY by design — the dimension is a pure
+    prefilter — so a mislabeled build produces no visible symptom anywhere else in the results.
+    That makes the build args and the self-report check the only things standing between the
+    bake-off and a silently meaningless number."""
+
+    def test_on_uses_default_features(self):
+        self.assertEqual(bd.quamina_build_args("on"), [])
+
+    def test_off_drops_only_the_dimension(self):
+        args = bd.quamina_build_args("off")
+        self.assertIn("--no-default-features", args)
+        feats = args[args.index("--features") + 1]
+        # Everything else the default build has must survive, or the two variants differ by more
+        # than the one thing under test.
+        for keep in ("redis-backend", "javascript", "mimalloc"):
+            self.assertIn(keep, feats)
+        self.assertNotIn("quamina", feats)
+
+    def test_rejects_unknown_variant(self):
+        with self.assertRaises(ValueError):
+            bd.quamina_build_args("maybe")
+
+    def test_marker_extraction_and_matching(self):
+        log = "INFO rift_http_proxy: Matching dimensions: body-field(quamina)=on\n"
+        self.assertEqual(bd.extract_quamina_marker(log), "body-field(quamina)=on")
+        self.assertTrue(bd.quamina_marker_matches("body-field(quamina)=on", "on"))
+        self.assertFalse(bd.quamina_marker_matches("body-field(quamina)=off", "on"))
+        self.assertFalse(bd.quamina_marker_matches("body-field(quamina)=on", "off"))
+
+    def test_absent_marker_is_none(self):
+        self.assertIsNone(bd.extract_quamina_marker("INFO rift: Starting Rift on port 2525\n"))
+
+    def test_variant_binaries_do_not_share_a_target_dir(self):
+        self.assertNotEqual(bd.quamina_bin_path("on"), bd.quamina_bin_path("off"))
+
+    def test_explicit_rift_bin_still_wins(self):
+        path, needs_build = bd.resolve_rift_bin("/tmp/custom-rift", None, "on")
+        self.assertEqual(path, "/tmp/custom-rift")
+        self.assertFalse(needs_build)
+
+    def test_quamina_selects_its_variant_binary(self):
+        path, needs_build = bd.resolve_rift_bin(None, None, "off")
+        self.assertIn("quamina-off", path)
+        self.assertTrue(needs_build)
+
+
+class StubCountAxis(unittest.TestCase):
+    """Issue #779: the dimension replaces an O(N) scan, so N is the axis."""
+
+    def test_scaling_rebuilds_only_the_jsonbody_imposter(self):
+        original = list(bd.IMPOSTERS)
+        try:
+            bd.set_json_body_stub_count(7)
+            by_name = {name: stubs for _, name, stubs in bd.IMPOSTERS}
+            self.assertEqual(len(by_name["JSONBody"]), 7)
+            # every other imposter is untouched, or the A/B varies more than one thing
+            for _, name, stubs in original:
+                if name != "JSONBody":
+                    self.assertEqual(len(by_name[name]), len(stubs), f"{name} changed")
+        finally:
+            bd.IMPOSTERS = original
+
+    def test_default_count_is_the_pre_779_value(self):
+        self.assertEqual(len(bd.json_body_stubs()), bd.DEFAULT_JSON_BODY_STUBS)
+
+
+class BinarySize(unittest.TestCase):
+    def test_missing_binary_reads_none_not_zero(self):
+        # A zero would render as a real measurement of "no bytes"; absent must stay absent.
+        self.assertIsNone(bd.binary_size_mb("/nonexistent/rift-http-proxy"))
+
+    def test_reports_megabytes(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(b"x" * (2 * 1024 * 1024))
+            f.flush()
+            self.assertEqual(bd.binary_size_mb(f.name), 2.0)
 
 
 class CpuTopology(unittest.TestCase):

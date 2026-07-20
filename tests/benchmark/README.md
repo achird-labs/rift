@@ -155,6 +155,46 @@ Linux only (`taskset`/`lscpu`). Note the ceiling this implies: on an M-vCPU box 
 needs its own cores, so the engine tops out well below M — an ≥8-*physical*-core point needs a
 bigger box or an off-box generator, and any verdict quoting these numbers should say so.
 
+### Body-field dimension A/B (issue #779, Rift-only)
+
+`--quamina {on,off}` builds and benches one variant of the quamina-backed body-field candidate
+dimension, into `target/quamina-<variant>/` (same discipline as `--allocator`). `--stub-count N`
+scales the JSONBody imposter's field-equals-on-body stubs off their default 50 — that count *is*
+the axis, because the dimension replaces an `O(N)` scan, so a single stub count measures one
+arbitrary point on the curve.
+
+```bash
+for n in 10 100 1000; do
+  for q in on off; do
+    for rep in 1 2 3; do
+      python3 scripts/bench_direct.py --run-all --quamina $q --stub-count $n --rep $rep \
+          --sweep-connections 256 --duration 12s --warmup 2s
+    done
+  done
+  for q in on off; do
+    python3 scripts/bench_direct.py --aggregate-reps "_quamina${q}_stubs${n}"
+  done
+done
+```
+
+**Why the probe matters here more than anywhere else.** The two variants are supposed to return
+**identical matching results** — the dimension is a pure over-approximating prefilter, and Stage-2
+always decides. So a mislabeled build produces *no* visible symptom: same responses, same status
+codes, same journal. Nothing but the label would be wrong. The harness therefore refuses to bench
+until the binary's own startup line agrees:
+
+```
+INFO rift_http_proxy: Matching dimensions: body-field(quamina)=on
+```
+
+That line is the third such self-report, alongside `Global allocator:` (#717) and
+`Runtime topology:` (RFC-712), and it exists because issue #777 shipped this dimension enabled in
+`rift-mock-core` and compiled out of both the binary and the C-ABI — with CI green throughout,
+because the dimension's tests run in the crate where it *was* enabled.
+
+The report also records **binary size**, since the dimension pulls a dependency into the server
+binary and into the `cdylib` embedders link into their own process.
+
 #### Repetitions and medians — never quote a single run
 
 **Always pass `--rep N`.** One run of one variant is one sample; a benchmark host is not a
