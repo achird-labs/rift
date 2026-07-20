@@ -95,7 +95,7 @@ docker pull zainalpour/rift-proxy:latest
 ### Homebrew (macOS/Linux)
 
 ```bash
-brew tap etacassiopeia/rift
+brew tap achird-labs/rift
 brew install rift
 ```
 
@@ -151,11 +151,11 @@ await server.close();
 For JVM projects, use the official [rift-java](https://github.com/achird-labs/rift-java) SDK.
 It runs the engine three ways — embedded in-process (Panama FFM, no Docker), connected to any
 running admin endpoint, or as a managed spawned binary — with a fluent DSL plus JUnit 5, Spring,
-and Testcontainers integrations. Available on Maven Central under `io.github.etacassiopeia`:
+and Testcontainers integrations. Available on Maven Central under `io.github.achird-labs`:
 
 ```xml
 <dependency>
-  <groupId>io.github.etacassiopeia</groupId>
+  <groupId>io.github.achird-labs</groupId>
   <artifactId>rift-java-core</artifactId>
   <scope>test</scope>
 </dependency>

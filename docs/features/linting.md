@@ -15,7 +15,7 @@ Rift includes a powerful configuration linter (`rift-lint`) that validates impos
 
 ```bash
 # Via Homebrew (macOS/Linux)
-brew tap etacassiopeia/rift
+brew tap achird-labs/rift
 brew install rift
 # rift-lint is included
 

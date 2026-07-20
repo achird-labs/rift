@@ -22,7 +22,7 @@ cargo install rift-lint
 ### Via Homebrew (macOS/Linux)
 
 ```bash
-brew tap etacassiopeia/rift
+brew tap achird-labs/rift
 brew install rift
 # rift-lint is included
 ```
