@@ -202,6 +202,23 @@ jobs:
       # until #777. This measures the shipped artefact. The harness verifies each build's own
       # `Matching dimensions:` self-report before benching, because the two variants match
       # identically by design: a mislabeled build has no other symptom.
+      # Build both variants ONCE, mirroring the topology job's "Build engine once". Previously
+      # every one of the 18 matrix invocations re-entered cargo, and the two cold builds ran with
+      # unbounded parallelism: run 29747275803 was OOM-killed (exit 137) ~100s into the first one,
+      # while the identical build had succeeded an hour earlier — a memory spike, not a code fault.
+      # --jobs bounds the peak so the build cost is paid once, predictably.
+      - name: Build both quamina variants once
+        run: |
+          set -euo pipefail
+          for q in on off; do
+            if [ "$q" = "on" ]; then FEATURES=(); else
+              FEATURES=(--no-default-features --features redis-backend,javascript,mimalloc); fi
+            echo "===== building quamina=$q ====="
+            cargo build --release -p rift-http-proxy --jobs 4 \
+              --target-dir "target/quamina-$q" "${FEATURES[@]}"
+          done
+          ls -l target/quamina-on/release/rift-http-proxy target/quamina-off/release/rift-http-proxy
+
       - name: Quamina A/B (on/off x stub counts x reps)
         working-directory: tests/benchmark
         run: |
@@ -211,7 +228,11 @@ jobs:
             for n in "${COUNTS[@]}"; do
               for q in on off; do
                 echo "===== quamina=$q stubs=$n rep=$rep ====="
+                # --rift-bin points at the prebuilt variant so the harness does not re-enter
+                # cargo 18 times. The marker probe still runs, so the label is still verified
+                # against the binary rather than trusted from the invocation.
                 python3 scripts/bench_direct.py --run-all --quamina "$q" --body-field-stubs "$n" \
+                  --rift-bin "../../target/quamina-$q/release/rift-http-proxy" \
                   --rep "$rep" --sweep-connections "${{ inputs.connections }}" \
                   --duration "${{ inputs.duration }}" --warmup 2s
               done
