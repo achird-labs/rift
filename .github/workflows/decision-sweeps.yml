@@ -224,6 +224,11 @@ jobs:
         run: |
           set -euo pipefail
           IFS=',' read -ra COUNTS <<< "${{ inputs.stub_counts }}"
+          # Run 29749512310 was SIGKILLed 2s in with no output: CI stdout is block-buffered, so
+          # everything printed before the kill was lost. `python3 -u` below fixes that. These
+          # snapshots bound whether memory is actually the cause, since the runner reported 60Gi
+          # free at step start.
+          echo "--- memory before matrix ---"; free -m; df -h / | tail -1
           for rep in $(seq 1 ${{ inputs.reps }}); do
             for n in "${COUNTS[@]}"; do
               for q in on off; do
@@ -231,7 +236,7 @@ jobs:
                 # --rift-bin points at the prebuilt variant so the harness does not re-enter
                 # cargo 18 times. The marker probe still runs, so the label is still verified
                 # against the binary rather than trusted from the invocation.
-                python3 scripts/bench_direct.py --run-all --quamina "$q" --body-field-stubs "$n" \
+                python3 -u scripts/bench_direct.py --run-all --quamina "$q" --body-field-stubs "$n" \
                   --rift-bin "../../target/quamina-$q/release/rift-http-proxy" \
                   --rep "$rep" --sweep-connections "${{ inputs.connections }}" \
                   --duration "${{ inputs.duration }}" --warmup 2s
@@ -243,6 +248,15 @@ jobs:
               python3 scripts/bench_direct.py --aggregate-reps "_quamina${q}_bfstubs${n}"
             done
           done
+      - name: Memory and engine logs on failure
+        if: failure()
+        run: |
+          echo "--- memory after failure ---"; free -m; df -h / | tail -1
+          echo "--- kernel OOM evidence (if any) ---"
+          sudo dmesg 2>/dev/null | grep -iE "out of memory|killed process|oom" | tail -20 || echo "(no dmesg access)"
+          echo "--- engine log tail ---"
+          tail -40 tests/benchmark/results/rift-engine.log 2>/dev/null || echo "(no engine log)"
+
       - name: Record binary sizes (the dimension's cost to embedders)
         run: |
           for q in on off; do
@@ -258,4 +272,5 @@ jobs:
             tests/benchmark/results/*.md
             tests/benchmark/results/environment.txt
             tests/benchmark/results/binary-sizes.txt
+            tests/benchmark/results/*.log
           retention-days: 30
