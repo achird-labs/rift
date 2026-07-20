@@ -1,0 +1,125 @@
+# Publishable benchmark numbers (issue #702 lineage).
+#
+# Manual-only: this produces the figures that go into README.md and docs/performance/, so it is a
+# deliberate act, not something that drifts in on a push.
+#
+# Two properties this workflow exists to guarantee, both learned the hard way:
+#
+#   1. Every published cell is a MEDIAN with its spread stated. A benchmark host is not a constant
+#      — issue #746 published a number from a single rep that landed on a degraded runner and had
+#      to be retracted. `--rep` plus the aggregation step below makes that structurally impossible.
+#   2. Mountebank is pinned and installed here, not taken from whoever ran it. The comparison is
+#      only meaningful if both engines are the same versions every time.
+name: Benchmark (publish)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner label. Absolute numbers are machine-specific; the report records the host."
+        default: "ubuntu-16core"
+      reps:
+        description: "Repetitions per engine (medians published, spread shown)"
+        default: "3"
+      duration:
+        description: "oha duration per scenario point"
+        default: "20s"
+      connections:
+        description: "Keep-alive connections for the comparison table"
+        default: "50"
+      mb_version:
+        description: "Mountebank version (pinned so the comparison is reproducible)"
+        default: "2.9.1"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Install oha and Mountebank ${{ inputs.mb_version }}
+        run: |
+          set -euo pipefail
+          curl -sfL -o /usr/local/bin/oha \
+            https://github.com/hatoo/oha/releases/download/v1.12.0/oha-linux-amd64 \
+            && chmod +x /usr/local/bin/oha && oha --version \
+            || cargo install oha --locked
+          npm install --prefix "$HOME/bench-mb" "mountebank@${{ inputs.mb_version }}"
+          "$HOME/bench-mb/node_modules/mountebank/bin/mb" --version
+
+      - name: Record environment
+        run: |
+          mkdir -p tests/benchmark/results
+          { uname -a; nproc; lscpu | head -25; free -h; } \
+            | tee tests/benchmark/results/environment.txt
+
+      - name: Build engine
+        run: cargo build --release -p rift-http-proxy
+
+      # The comparison table. Both engines get the SAME rep count — the aggregation refuses a
+      # mismatch, because a table built from unequal replication favours whichever engine got
+      # more samples and nothing in the output would say so.
+      - name: Rift vs Mountebank (repeated)
+        working-directory: tests/benchmark
+        run: |
+          set -euo pipefail
+          for rep in $(seq 1 ${{ inputs.reps }}); do
+            echo "===== comparison rep=$rep ====="
+            python3 -u scripts/bench_direct.py --run-all --engines rift,mb --rep "$rep" \
+              --connections "${{ inputs.connections }}" --duration "${{ inputs.duration }}" \
+              --warmup 3s --rift-bin ../../target/release/rift-http-proxy \
+              --mb-bin "$HOME/bench-mb/node_modules/mountebank/bin/mb"
+          done
+          python3 -u scripts/bench_direct.py --aggregate-comparison "" \
+            --connections "${{ inputs.connections }}" \
+            --rift-version "$(../../target/release/rift-http-proxy --version)" \
+            --mb-version "${{ inputs.mb_version }}"
+          # Both phases write direct_rift_repN.csv — same engine, same empty variant suffix — so
+          # the sweep below would silently overwrite the comparison's inputs and the published
+          # table would be built from whatever survived. Park the comparison artefacts first.
+          mkdir -p results/comparison
+          mv results/direct_rift_rep*.csv results/direct_mb_rep*.csv results/comparison/
+          mv results/DIRECT_BENCHMARK_REPORT*.md results/comparison/ 2>/dev/null || true
+          mv results/direct_rift.csv results/direct_mb.csv results/comparison/ 2>/dev/null || true
+          ls results/comparison
+
+      # Rift-only sweep: connection scaling plus the matching-dimension scenarios that the
+      # comparison set deliberately excludes (it is a stability contract).
+      - name: Rift concurrency sweep + matching dimensions (repeated)
+        working-directory: tests/benchmark
+        run: |
+          set -euo pipefail
+          for rep in $(seq 1 ${{ inputs.reps }}); do
+            echo "===== sweep rep=$rep ====="
+            python3 -u scripts/bench_direct.py --run-all --rep "$rep" \
+              --sweep-connections 1,50,256,512 --duration "${{ inputs.duration }}" --warmup 3s \
+              --rift-bin ../../target/release/rift-http-proxy
+          done
+          python3 -u scripts/bench_direct.py --aggregate-reps ""
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          free -m; df -h / | tail -1
+          tail -40 tests/benchmark/results/*.log 2>/dev/null || echo "(no logs)"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-publish-results
+          path: |
+            tests/benchmark/results/*.csv
+            tests/benchmark/results/*.md
+            tests/benchmark/results/comparison/*
+            tests/benchmark/results/environment.txt
+            tests/benchmark/results/*.log
+          retention-days: 90
