@@ -9,6 +9,7 @@ and its round-trip, the recording imposter config, and the journal-depth asserti
 Run: python3 -m unittest test_bench_direct   (from tests/benchmark/scripts)
 """
 import io
+import json
 import os
 import sys
 import threading
@@ -690,6 +691,37 @@ class StubCountAxis(unittest.TestCase):
 
     def test_default_count_is_the_pre_779_value(self):
         self.assertEqual(len(bd.json_body_stubs()), bd.DEFAULT_JSON_BODY_STUBS)
+
+    def test_scenario_target_still_exists_after_scaling(self):
+        # The bug this guards: scaling the imposter's stubs without retargeting the scenario left
+        # json_body_equals addressing /json/equals/25 against a 10-stub imposter. The request fell
+        # through to the no-match default and the run aborted on the body assertion — after paying
+        # for a full release build in CI.
+        original_imposters, original_scenarios = list(bd.IMPOSTERS), list(bd.SCENARIOS)
+        try:
+            for n in (1, 2, 10, 50, 1000):
+                bd.IMPOSTERS, bd.SCENARIOS = list(original_imposters), list(original_scenarios)
+                bd.set_json_body_stub_count(n)
+                stubs = {name: s for _, name, s in bd.IMPOSTERS}["JSONBody"]
+                paths = {st["predicates"][0]["equals"]["path"] for st in stubs}
+                scen = {s[0]: s for s in bd.SCENARIOS}["json_body_equals"]
+                self.assertIn(scen[3], paths,
+                              f"n={n}: scenario targets {scen[3]}, which no stub serves")
+                # the body must address the same stub as the path, or the equals predicate misses
+                self.assertEqual(json.loads(scen[4])["id"], int(scen[3].rsplit("/", 1)[1]))
+        finally:
+            bd.IMPOSTERS, bd.SCENARIOS = original_imposters, original_scenarios
+
+    def test_default_scaling_is_byte_identical_to_the_unscaled_scenario(self):
+        original_imposters, original_scenarios = list(bd.IMPOSTERS), list(bd.SCENARIOS)
+        before = {s[0]: s for s in bd.SCENARIOS}["json_body_equals"]
+        try:
+            bd.set_json_body_stub_count(bd.DEFAULT_JSON_BODY_STUBS)
+            after = {s[0]: s for s in bd.SCENARIOS}["json_body_equals"]
+            self.assertEqual(before[3], after[3])
+            self.assertEqual(json.loads(before[4]), json.loads(after[4]))
+        finally:
+            bd.IMPOSTERS, bd.SCENARIOS = original_imposters, original_scenarios
 
 
 class BinarySize(unittest.TestCase):

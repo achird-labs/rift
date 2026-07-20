@@ -86,10 +86,23 @@ def set_json_body_stub_count(n):
 
     Stub count is the axis this dimension is *about*: the quamina prefilter replaces an O(N) scan
     of structural comparisons, so its win is a function of how many such stubs compete for one
-    request. Benching only the default 50 would measure one arbitrary point on that curve."""
-    global IMPOSTERS
+    request. Benching only the default 50 would measure one arbitrary point on that curve.
+
+    The `json_body_equals` SCENARIO must be retargeted with the imposter: it addresses one specific
+    stub by index, so scaling the stubs alone leaves it pointing at a stub that no longer exists —
+    the request falls through to the no-match default and the run aborts on the body assertion.
+    The target stays the *middle* stub (`n // 2`), which is what the scenario has always used
+    (25 of 50), so the default configuration is byte-identical to before."""
+    global IMPOSTERS, SCENARIOS
     IMPOSTERS = [(port, name, json_body_stubs(n) if name == "JSONBody" else stubs)
                  for port, name, stubs in IMPOSTERS]
+    target = max(1, n // 2)
+    SCENARIOS = [
+        (name, port, method, f"/json/equals/{target}",
+         json.dumps({"id": target, "type": "request"}, separators=(",", ":")), headers)
+        if name == "json_body_equals" else (name, port, method, path, body, headers)
+        for name, port, method, path, body, headers in SCENARIOS
+    ]
 
 def json_body_stubs(n=DEFAULT_JSON_BODY_STUBS):
     return [{
