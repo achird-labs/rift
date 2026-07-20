@@ -373,10 +373,16 @@ def load_imposters(admin, offset, recording=False):
                for port, name, stubs in IMPOSTERS]
     if recording:
         configs.append(recording_imposter_config(offset))
-    for cfg in configs:
+    # Per-imposter progress. Without it, a crash during loading tells you only that it happened
+    # somewhere across 14 creations: run 29751530395 died here with SIGKILL, no OOM evidence and
+    # memory flat, and the summary print at the end meant there was nothing to localise it with.
+    for i, cfg in enumerate(configs, 1):
+        t0 = time.time()
         status, body = post_json(admin + "/imposters", cfg)
         if status != 201:
             raise SystemExit(f"  ! create imposter {cfg['port']} ({cfg['name']}) failed: HTTP {status}: {body[:200]}")
+        print(f"    [{i}/{len(configs)}] {cfg['name']} port={cfg['port']} "
+              f"stubs={len(cfg['stubs'])} in {time.time() - t0:.2f}s")
     print(f"  loaded {len(configs)} imposters "
           f"({sum(len(c['stubs']) for c in configs)} stubs) at offset +{offset}")
 
