@@ -3,6 +3,18 @@
 //! the `rift-http-proxy` server and the `rift-ffi` C-ABI are thin consumers.
 #![allow(dead_code)]
 
+/// Whether the quamina-backed body-field candidate dimension is compiled into this build.
+///
+/// Reported at startup by the server binary so a benchmark — or an operator — can read the answer
+/// off the artefact instead of inferring it from build flags, the same way `Global allocator:`
+/// (#717) and `Runtime topology:` (RFC-712) already are. It is deliberately defined *here*, in the
+/// crate whose `#[cfg]` gates the dimension, rather than in a consumer: issue #777 shipped this
+/// dimension enabled in `rift-mock-core` and compiled out of both the binary and the C-ABI,
+/// because each consumer takes this crate with `default-features = false` and nothing forwarded
+/// the feature. A marker sourced from a consumer would have reported that consumer's own opinion;
+/// this one reports what actually got compiled.
+pub const QUAMINA_BODY_FIELD_DIMENSION: bool = cfg!(feature = "quamina-matching");
+
 // ===== Core Mountebank-compatible modules =====
 pub mod behaviors;
 pub mod config;

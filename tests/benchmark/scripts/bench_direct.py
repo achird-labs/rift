@@ -79,7 +79,19 @@ def complex_stubs(n=50):
             "body": json.dumps({"complex": i, "matched": True})}}],
     } for i in range(1, n + 1)]
 
-def json_body_stubs(n=50):
+DEFAULT_JSON_BODY_STUBS = 50
+
+def set_json_body_stub_count(n):
+    """Rebuild the JSONBody imposter with `n` field-equals-on-body stubs (#779).
+
+    Stub count is the axis this dimension is *about*: the quamina prefilter replaces an O(N) scan
+    of structural comparisons, so its win is a function of how many such stubs compete for one
+    request. Benching only the default 50 would measure one arbitrary point on that curve."""
+    global IMPOSTERS
+    IMPOSTERS = [(port, name, json_body_stubs(n) if name == "JSONBody" else stubs)
+                 for port, name, stubs in IMPOSTERS]
+
+def json_body_stubs(n=DEFAULT_JSON_BODY_STUBS):
     return [{
         "predicates": [{"equals": {"method": "POST", "path": f"/json/equals/{i}",
             "body": {"id": i, "type": "request"}}}],
@@ -354,18 +366,101 @@ def allocator_build_args(name):
         return ["--no-default-features", "--features", "redis-backend,javascript"]
     raise ValueError(f"unknown allocator {name!r}: choose from {','.join(ALLOCATORS)}")
 
+# ---- quamina body-field dimension A/B (issue #779): same discipline as --allocator ----
+#
+# The dimension's go/no-go numbers (#767) were taken against rift-mock-core, the one crate where the
+# feature was enabled — it was compiled out of the binary and the C-ABI until #777. So the shipped
+# win has never been measured. This axis builds the two variants and benches them identically.
+
+QUAMINA_VARIANTS = ("on", "off")
+QUAMINA_MARKER = "Matching dimensions: "
+QUAMINA_PROBE_PORT = 3527
+
+def quamina_build_args(variant):
+    """Cargo flags that swap ONLY the body-field dimension, keeping redis-backend + javascript +
+    mimalloc on in both variants so the builds are functionally identical apart from it."""
+    if variant == "on":
+        return []   # default features include quamina-matching (#777)
+    if variant == "off":
+        return ["--no-default-features", "--features", "redis-backend,javascript,mimalloc"]
+    raise ValueError(f"unknown quamina variant {variant!r}: choose from {','.join(QUAMINA_VARIANTS)}")
+
+def quamina_bin_path(variant):
+    """Per-variant binary path, so the two builds coexist instead of clobbering target/release."""
+    return os.path.join(REPO_ROOT, "target", f"quamina-{variant}", "release", "rift-http-proxy")
+
+def build_quamina_binary(variant):
+    print(f"building rift with quamina body-field dimension={variant}")
+    cmd = ["cargo", "build", "--release", "-p", "rift-http-proxy",
+           "--target-dir", os.path.join("target", f"quamina-{variant}")] + quamina_build_args(variant)
+    out = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    if out.returncode != 0:
+        tail = "\n".join((out.stdout + out.stderr).splitlines()[-40:])
+        raise SystemExit(f"build failed for quamina={variant}:\n{tail}")
+    print(f"  built target/quamina-{variant}/release/rift-http-proxy")
+
+def extract_quamina_marker(text):
+    """Pull the self-reported dimension state out of an engine log, or None if absent."""
+    for line in text.splitlines():
+        if QUAMINA_MARKER in line:
+            return line.split(QUAMINA_MARKER, 1)[1].strip()
+    return None
+
+def quamina_marker_matches(reported, variant):
+    """The binary reports `body-field(quamina)=on|off`; the label must match the request."""
+    return reported == f"body-field(quamina)={variant}"
+
+def verify_quamina_marker(rift_bin, variant):
+    """Probe-launch and require the binary's OWN self-report to match the requested variant.
+
+    This is the #777 lesson made mechanical: that issue shipped a dimension enabled in the library
+    and compiled out of everything users run, and no artefact said so. Benching a build whose
+    dimension state is assumed rather than read would repeat it — with the added twist that the
+    two variants are supposed to produce identical matching RESULTS, so nothing else in the run
+    would look wrong."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    free_ports([QUAMINA_PROBE_PORT])
+    logpath = os.path.join(RESULTS_DIR, "quamina-probe.log")
+    proc = launch([rift_bin, "--port", str(QUAMINA_PROBE_PORT), "--loglevel", "info"], logpath)
+    try:
+        reported = None
+        for _ in range(40):
+            time.sleep(0.25)
+            with open(logpath) as f:
+                reported = extract_quamina_marker(f.read())
+            if reported is not None:
+                break
+        if reported is None or not quamina_marker_matches(reported, variant):
+            raise SystemExit(
+                f"quamina probe: binary reports {reported!r}, requested variant {variant!r} "
+                f"({rift_bin}) — aborting rather than benching a mislabeled build. Both variants "
+                f"match identically by design, so a mislabel would not show up anywhere else.")
+        print(f"  quamina probe ok: {reported}")
+    finally:
+        stop(proc, [QUAMINA_PROBE_PORT])
+
+def binary_size_mb(path):
+    """Size of the benched binary in MB — the dimension pulls a dependency into the server binary
+    and, for embedders, into the cdylib they link, so size is part of its cost (#779)."""
+    try:
+        return round(os.path.getsize(path) / (1024 * 1024), 2)
+    except OSError:
+        return None
+
 def allocator_bin_path(name):
     """Per-allocator binary path; a separate --target-dir per allocator so three builds can
     coexist on disk instead of clobbering each other's `target/release` (#717)."""
     return os.path.join(REPO_ROOT, "target", f"alloc-{name}", "release", "rift-http-proxy")
 
-def resolve_rift_bin(rift_bin_arg, allocator):
+def resolve_rift_bin(rift_bin_arg, allocator, quamina=None):
     """Resolve (path, needs_build). An explicit --rift-bin is always trusted verbatim (no build,
     even if --allocator is also set). No allocator selected: fall back to the default release
     path, unchanged from pre-#717 behaviour. Allocator selected with no --rift-bin: build into
     the per-allocator target dir."""
     if rift_bin_arg is not None:
         return rift_bin_arg, False
+    if quamina is not None:
+        return quamina_bin_path(quamina), True
     if allocator is None:
         return DEFAULT_RIFT_BIN, False
     return allocator_bin_path(allocator), True
@@ -749,7 +844,8 @@ def resolve_cpu_split(server_cpus):
     except ValueError as e:
         raise SystemExit(str(e))
 
-def result_suffix(allocator, runtime_mode, server_cpus=None, rep=None):
+def result_suffix(allocator, runtime_mode, server_cpus=None, rep=None,
+                  quamina=None, stub_count=None):
     """Allocator, runtime, core-count and repetition dimensions compose into one artefact suffix so
     no combination overwrites another's CSV/report (#717, #746, #773).
 
@@ -763,6 +859,11 @@ def result_suffix(allocator, runtime_mode, server_cpus=None, rep=None):
         suffix += f"_{runtime_mode}"
     if server_cpus:
         suffix += f"_cores{server_cpus}"
+    if quamina:
+        suffix += f"_quamina{quamina}"
+    if stub_count:
+        suffix += f"_stubs{stub_count}"
+    # rep stays outermost: every other dimension names a *variant*, a rep names a sample OF one.
     if rep is not None:
         suffix += f"_rep{rep}"
     return suffix
@@ -908,10 +1009,10 @@ def aggregate_reps_to_report(base_suffix, rift_ver):
 
 def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, recording=False,
             allocator=None, runtime=None, server_cpus=None, engine_cpus=None, gen_cpus=None,
-            rep=None):
+            rep=None, quamina=None, stub_count=None):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     node = shutil.which("node") or "node"
-    csv_suffix = result_suffix(allocator, runtime, server_cpus, rep)
+    csv_suffix = result_suffix(allocator, runtime, server_cpus, rep, quamina, stub_count)
     engine_prefix, oha_prefix = taskset_prefix(engine_cpus), taskset_prefix(gen_cpus)
     full_plan = [
         ("rift", 0,   engine_prefix
@@ -944,14 +1045,17 @@ def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, r
     elif engines == ["rift"]:
         rift_only_report(rift_ver, duration, conn_list, rate, recording,
                           allocator=allocator, runtime=runtime, csv_suffix=csv_suffix,
-                          engine_cpus=engine_cpus, gen_cpus=gen_cpus)
+                          engine_cpus=engine_cpus, gen_cpus=gen_cpus,
+                          quamina=quamina, stub_count=stub_count,
+                          binary_mb=binary_size_mb(rift_bin))
     else:
         # engines == ["mb"]: no comparison possible (needs Rift too) and no Rift-only report to write.
         print(f"[report] engines={engines}: benched only Mountebank; no report written "
               f"(the comparison needs both rift and mb)")
 
 def rift_only_report(rift_ver, duration, conn_list, rate, recording, allocator=None,
-                     runtime=None, csv_suffix="", engine_cpus=None, gen_cpus=None):
+                     runtime=None, csv_suffix="", engine_cpus=None, gen_cpus=None,
+                     quamina=None, stub_count=None, binary_mb=None):
     """Rift-only sweep / open-loop report: scenario × (connections, mode) matrices of RPS and p999.
     The MB-comparison report is deliberately untouched so its historical single-point numbers stay
     comparable; this is the extra artefact the Turbo round consumes. Allocator bake-off runs (#717)
@@ -983,6 +1087,13 @@ def rift_only_report(rift_ver, duration, conn_list, rate, recording, allocator=N
             f.write(f"- **Allocator:** {allocator}\n")
         if runtime:
             f.write(f"- **Runtime:** {runtime}\n")
+        if quamina:
+            f.write(f"- **Body-field dimension (quamina):** {quamina} "
+                    f"(verified from the binary's `Matching dimensions:` self-report)\n")
+        if stub_count:
+            f.write(f"- **Field-equals-on-body stubs:** {stub_count}\n")
+        if binary_mb is not None:
+            f.write(f"- **Binary size:** {binary_mb} MB\n")
         if engine_cpus:
             f.write(f"- **Engine CPUs:** {len(engine_cpus)} (`{cpuset_arg(engine_cpus)}`) — the "
                     f"worker count both topologies derive from `available_parallelism()`\n")
@@ -1070,6 +1181,17 @@ if __name__ == "__main__":
                     help="core-count axis (#746): confine the engine to N CPUs with taskset — "
                          "both topologies size their workers from it — and confine oha to the "
                          "remaining physical cores. N must fall on a core boundary; Linux only.")
+    ap.add_argument("--quamina", choices=list(QUAMINA_VARIANTS),
+                    help="build+bench one quamina body-field variant (Rift-only; #779). Builds "
+                         "into target/quamina-<on|off>/ unless --rift-bin is given, and verifies "
+                         "the binary's own `Matching dimensions:` self-report before benching — "
+                         "the two variants match identically by design, so a mislabeled build "
+                         "would not show up anywhere else in the results.")
+    ap.add_argument("--stub-count", type=int, metavar="N",
+                    help="number of field-equals-on-body stubs on the JSONBody imposter (#779; "
+                         f"default {DEFAULT_JSON_BODY_STUBS}). The quamina dimension replaces an "
+                         "O(N) scan, so its win is a function of N — sweep it (e.g. 10/100/1000) "
+                         "rather than measuring one arbitrary point.")
     ap.add_argument("--rep", type=int, metavar="N",
                     help="repetition index (#773): artefacts get a _repN suffix, so each rep of a "
                          "sweep lands in its own file instead of overwriting the last. Re-running "
@@ -1085,6 +1207,14 @@ if __name__ == "__main__":
         sys.exit(0)
     if a.rep is not None and a.rep < 1:
         raise SystemExit(f"--rep must be >= 1 (got {a.rep})")
+    if a.stub_count is not None and a.stub_count < 1:
+        raise SystemExit(f"--stub-count must be >= 1 (got {a.stub_count})")
+    if a.quamina and a.allocator:
+        raise SystemExit(
+            "--quamina and --allocator are separate bake-offs: combining them would attribute one "
+            "variable's effect to the other. Run them as separate sweeps.")
+    if a.stub_count is not None:
+        set_json_body_stub_count(a.stub_count)
     if a.run_all:
         try:
             engines, conn_list, rate, recording = resolve_run_mode(
@@ -1103,13 +1233,20 @@ if __name__ == "__main__":
                 "--rep is Rift-only: the rift-vs-mb report reads unsuffixed artefacts, so a "
                 "repped comparison run would report a stale file as this run's numbers. "
                 "Re-run with --engines rift.")
-        if (a.allocator or a.runtime) and engines != ["rift"]:
+        if (a.allocator or a.runtime or a.quamina) and engines != ["rift"]:
             engines = ["rift"]
         if engines != requested:
             print("note: sweep/open-loop/allocator is Rift-only; running --engines rift")
-        rift_bin, needs_build = resolve_rift_bin(a.rift_bin, a.allocator)
+        rift_bin, needs_build = resolve_rift_bin(a.rift_bin, a.allocator, a.quamina)
         if needs_build:
-            build_allocator_binary(a.allocator)
+            if a.quamina:
+                build_quamina_binary(a.quamina)
+            else:
+                build_allocator_binary(a.allocator)
+        if a.quamina:
+            # Applies to an explicit --rift-bin too: the label on the results must come from the
+            # binary, never from the invocation (#777).
+            verify_quamina_marker(rift_bin, a.quamina)
         if a.allocator:
             # Applies to explicit --rift-bin AND harness-built binaries alike: the label on the
             # results must come from the binary itself, never from the invocation.
@@ -1130,7 +1267,7 @@ if __name__ == "__main__":
         run_all(a.duration, a.warmup, conn_list, rift_bin, a.mb_bin, engines,
                 rate=rate, recording=recording, allocator=a.allocator, runtime=a.runtime,
                 server_cpus=a.server_cores, engine_cpus=engine_cpus, gen_cpus=gen_cpus,
-                rep=a.rep)
+                rep=a.rep, quamina=a.quamina, stub_count=a.stub_count)
     elif a.report:
         report(a.rift_version, a.mb_version, a.duration, a.connections)
     else:
