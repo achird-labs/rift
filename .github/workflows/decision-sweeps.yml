@@ -38,8 +38,12 @@ on:
         default: "4,256"
       stub_counts:
         description: >-
-          Quamina sweep: field-equals-on-body stub counts (comma-separated). The dimension replaces
-          an O(N) scan of structural comparisons, so N is the axis its win is a function of.
+          Quamina sweep: stub counts for the body_field_scale scenario (comma-separated), driving
+          --body-field-stubs. These stubs share ONE path and method and differ only in a body
+          field, so the body-field automaton is the discriminator. Do not point this at
+          --stub-count: those stubs have unique paths, so the path dimension prunes to one
+          candidate before the body is consulted and the sweep measures pure overhead (run
+          29738479074: -8% flat at 10/100/1000, the signature of a cost with no benefit).
         default: "10,100,1000"
       cores:
         description: >-
@@ -207,7 +211,7 @@ jobs:
             for n in "${COUNTS[@]}"; do
               for q in on off; do
                 echo "===== quamina=$q stubs=$n rep=$rep ====="
-                python3 scripts/bench_direct.py --run-all --quamina "$q" --stub-count "$n" \
+                python3 scripts/bench_direct.py --run-all --quamina "$q" --body-field-stubs "$n" \
                   --rep "$rep" --sweep-connections "${{ inputs.connections }}" \
                   --duration "${{ inputs.duration }}" --warmup 2s
               done
@@ -215,7 +219,7 @@ jobs:
           done
           for n in "${COUNTS[@]}"; do
             for q in on off; do
-              python3 scripts/bench_direct.py --aggregate-reps "_quamina${q}_stubs${n}"
+              python3 scripts/bench_direct.py --aggregate-reps "_quamina${q}_bfstubs${n}"
             done
           done
       - name: Record binary sizes (the dimension's cost to embedders)
