@@ -775,6 +775,45 @@ class ScenarioReachability(unittest.TestCase):
         ports = [p for p, _, _ in bd.IMPOSTERS]
         self.assertEqual(len(ports), len(set(ports)), f"duplicate imposter ports: {ports}")
 
+    def test_no_imposter_collides_with_a_reserved_port(self):
+        """The check that was missing.
+
+        The previous version compared imposter ports only against each other, so it happily
+        allowed DeepEquals onto 4556 — which is RECORDING_PORT. The recording imposter is created
+        last, hit `400 Port 4556 is already in use`, and the resulting error was then masked by
+        cleanup (see `free_ports`), costing four CI runs to find. Every port the harness reserves
+        belongs in this check, not just the imposter list."""
+        reserved = {
+            bd.RECORDING_PORT: "RECORDING_PORT",
+            bd.admin_port_for(0): "rift admin",
+            bd.admin_port_for(100): "mountebank admin",
+            9090: "metrics",
+            bd.ALLOC_PROBE_PORT: "allocator probe",
+            bd.TOPOLOGY_PROBE_PORT: "topology probe",
+            bd.QUAMINA_PROBE_PORT: "quamina probe",
+        }
+        for port, name, _ in bd.IMPOSTERS:
+            self.assertNotIn(port, reserved,
+                             f"imposter {name} is on port {port}, reserved for "
+                             f"{reserved.get(port)}")
+
+    def test_the_mb_offset_does_not_alias_a_rift_port(self):
+        """Mountebank runs at +100. If that offset ever mapped one engine's port onto another's,
+        the two engines would fight over a listener mid-run."""
+        rift_ports = {p for p, _, _ in bd.IMPOSTERS} | {bd.RECORDING_PORT, bd.admin_port_for(0)}
+        mb_ports = {p + 100 for p, _, _ in bd.IMPOSTERS} | {
+            bd.RECORDING_PORT + 100, bd.admin_port_for(100)}
+        self.assertEqual(rift_ports & mb_ports, set(),
+                         f"offset collision between engines: {rift_ports & mb_ports}")
+
+    def test_free_ports_only_targets_listeners(self):
+        """A bare `lsof -ti tcp:PORT` matches client sockets too, so the harness could SIGKILL
+        itself during cleanup and destroy the error it was reporting."""
+        import inspect
+        src = inspect.getsource(bd.free_ports)
+        self.assertIn("-sTCP:LISTEN", src)
+        self.assertIn("os.getpid()", src)
+
 
 class NewDimensionCoverage(unittest.TestCase):
     """The scenarios added for optimizations that previously had none."""

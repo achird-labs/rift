@@ -252,7 +252,7 @@ IMPOSTERS = [
     (4553, "Template", template_stubs()),
     (4554, "Header", header_stubs()),
     (4555, "Query", query_stubs()),
-    (4556, "DeepEquals", deepequals_body_stubs()),
+    (4560, "DeepEquals", deepequals_body_stubs()),
     (4557, "Literal", literal_prefix_stubs()),
     (4558, "MethodMix", method_mix_stubs()),
     (4559, "BodyField", body_field_stubs()),
@@ -286,7 +286,7 @@ SCENARIOS = [
 # `recording_on`. They run in Rift-only sweeps.
 DIMENSION_SCENARIOS = [
     # Issue #740: deepEquals-on-body, indexed by structural body hash. Zero coverage before this.
-    ("deepequals_body",   4556, "POST", "/deep/equals/25",
+    ("deepequals_body",   4560, "POST", "/deep/equals/25",
      '{"order":{"id":25,"items":[{"sku":"sku-25","qty":25}]},"meta":{"source":"bench"}}',
      {"Content-Type": "application/json"}),
     # Issue #732: single-pass literal dimension, anchored (startsWith) and unanchored (contains).
@@ -743,16 +743,34 @@ def admin_port_for(offset):
     return 2525 + offset
 
 def free_ports(ports):
-    """Force-free ports by killing whatever listens on them (lsof + SIGKILL)."""
+    """Force-free ports by killing whatever LISTENS on them (lsof + SIGKILL).
+
+    `-sTCP:LISTEN` is load-bearing, not tidiness. A bare `lsof -ti tcp:PORT` matches every socket
+    on that port including the *client* end, so the harness's own connections to the admin port
+    made it a candidate for its own SIGKILL. That is not hypothetical: it masked a real error for
+    four CI runs. `load_imposters` raised SystemExit("Port 4556 is already in use"), the `finally`
+    in `run_all` called this function during cleanup, and the interpreter was killed before it
+    could print the message — turning an actionable one-line error into a bare exit 137 with no
+    output at all. The self-PID guard below is belt-and-braces for the same reason: nothing here
+    should ever be able to kill the process doing the killing."""
+    own = {os.getpid(), os.getpgrp()}
     for p in ports:
         try:
-            pids = subprocess.run(["lsof", "-ti", f"tcp:{p}"], capture_output=True, text=True).stdout.split()
+            pids = subprocess.run(["lsof", "-ti", f"tcp:{p}", "-sTCP:LISTEN"],
+                                  capture_output=True, text=True).stdout.split()
         except Exception:
             pids = []
         for pid in pids:
             try:
-                os.kill(int(pid), signal.SIGKILL)
-                print(f"  freed port {p} (killed pid {pid})")
+                pid_i = int(pid)
+            except ValueError:
+                continue
+            if pid_i in own:
+                print(f"  refusing to kill self (pid {pid_i}) while freeing port {p}")
+                continue
+            try:
+                os.kill(pid_i, signal.SIGKILL)
+                print(f"  freed port {p} (killed pid {pid_i})")
             except Exception:
                 pass
 
