@@ -232,6 +232,95 @@ class DefaultRunUnchanged(unittest.TestCase):
         self.assertEqual(names[-1], "query_last")
 
 
+class ComparisonReps(unittest.TestCase):
+    """The Rift-vs-Mountebank table is the number people quote, so it must be replicable.
+    It previously could not be: report() read unsuffixed artefacts, so --rep was refused for
+    rift+mb and the headline table was always a single unreplicated sample per engine."""
+
+    @staticmethod
+    def _rows(rps):
+        # Every MB-set scenario: report() renders the full table and raises on a missing one,
+        # which is correct — a partial comparison should fail loudly, not render half a table.
+        return [(name, 50, "closed",
+                 {"rps": rps, "p50_ms": 0.5, "p90_ms": 0.8, "p99_ms": 1.2,
+                  "p999_ms": 3.1, "avg_ms": 0.6, "codes": {"200": 1}})
+                for name, *_ in bd.SCENARIOS]
+
+    def test_report_raises_on_an_incomplete_comparison(self):
+        # Guards the behaviour the fixture above accommodates: if a scenario is missing from one
+        # engine's results, the table must not quietly render without it.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bd.RESULTS_DIR
+            bd.RESULTS_DIR = tmp
+            try:
+                bd.write_rift_csv(os.path.join(tmp, "direct_rift_p.csv"), self._rows(100.0))
+                partial = [r for r in self._rows(10.0) if r[0] != "api_first"]
+                bd.write_rift_csv(os.path.join(tmp, "direct_mb_p.csv"), partial)
+                with self.assertRaises(KeyError):
+                    bd.report("0.1.0", "2.9.1", "20s", 50, "_p")
+            finally:
+                bd.RESULTS_DIR = orig
+
+    def test_report_is_suffix_aware(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bd.RESULTS_DIR
+            bd.RESULTS_DIR = tmp
+            try:
+                bd.write_rift_csv(os.path.join(tmp, "direct_rift_x.csv"), self._rows(100.0))
+                bd.write_rift_csv(os.path.join(tmp, "direct_mb_x.csv"), self._rows(10.0))
+                bd.report("0.1.0", "2.9.1", "20s", 50, "_x")
+                self.assertTrue(os.path.exists(os.path.join(tmp, "DIRECT_BENCHMARK_REPORT_x.md")))
+            finally:
+                bd.RESULTS_DIR = orig
+
+    def test_comparison_medians_both_engines_and_shows_spread(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bd.RESULTS_DIR
+            bd.RESULTS_DIR = tmp
+            try:
+                for rep, (r, m) in enumerate([(100.0, 10.0), (300.0, 12.0), (200.0, 11.0)], 1):
+                    bd.write_rift_csv(os.path.join(tmp, f"direct_rift_c_rep{rep}.csv"), self._rows(r))
+                    bd.write_rift_csv(os.path.join(tmp, f"direct_mb_c_rep{rep}.csv"), self._rows(m))
+                out = bd.aggregate_comparison_reps("_c", "0.1.0", "2.9.1", 50)
+                text = open(out).read()
+                self.assertIn("200", text)     # rift median, not 100 or 300
+                self.assertIn("11", text)      # mb median
+                self.assertIn("spread", text.lower())
+            finally:
+                bd.RESULTS_DIR = orig
+
+    def test_unequal_rep_counts_are_refused(self):
+        # A table comparing 3 Rift reps against 1 Mountebank rep favours whichever engine got
+        # more samples, and nothing in the output would say so.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bd.RESULTS_DIR
+            bd.RESULTS_DIR = tmp
+            try:
+                for rep in (1, 2, 3):
+                    bd.write_rift_csv(os.path.join(tmp, f"direct_rift_u_rep{rep}.csv"), self._rows(100.0))
+                bd.write_rift_csv(os.path.join(tmp, "direct_mb_u_rep1.csv"), self._rows(10.0))
+                with self.assertRaises(SystemExit) as cm:
+                    bd.aggregate_comparison_reps("_u", "0.1.0", "2.9.1", 50)
+                self.assertIn("rep-count mismatch", str(cm.exception))
+            finally:
+                bd.RESULTS_DIR = orig
+
+    def test_missing_engine_reps_is_an_error(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bd.RESULTS_DIR
+            bd.RESULTS_DIR = tmp
+            try:
+                with self.assertRaises(SystemExit):
+                    bd.aggregate_comparison_reps("_nothing", "0.1.0", "2.9.1", 50)
+            finally:
+                bd.RESULTS_DIR = orig
+
+
 class DimensionSetIsAdditive(unittest.TestCase):
     """The MB-comparison set is a stability contract; dimension scenarios must never leak into it,
     or previously published Mountebank numbers stop being comparable."""

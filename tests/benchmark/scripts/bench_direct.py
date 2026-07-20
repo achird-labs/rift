@@ -1092,6 +1092,54 @@ def find_rep_files(base_suffix):
             matched.append((int(m.group(1)), p))
     return [p for _, p in sorted(matched)]
 
+def aggregate_comparison_reps(base_suffix, rift_ver, mb_ver, conns):
+    """Median-of-reps Rift-vs-Mountebank table, with per-engine spread.
+
+    The comparison is the number people quote, so it must not rest on one sample of each engine —
+    a benchmark host is not a constant, and #746 showed what a single degraded rep does to a
+    published figure. Requires the same rep count for both engines; a mismatch is an error rather
+    than a table silently comparing 3 Rift reps against 1 Mountebank rep."""
+    per_engine = {}
+    for engine in ("rift", "mb"):
+        paths = sorted(glob.glob(os.path.join(RESULTS_DIR, f"direct_{engine}{base_suffix}_rep*.csv")))
+        if not paths:
+            raise SystemExit(
+                f"no rep files for {engine} matching direct_{engine}{base_suffix}_rep*.csv")
+        reps = []
+        for path in paths:
+            with open(path) as fh:
+                reps.append(load_rift_csv(fh))
+        per_engine[engine] = (paths, aggregate_reps(reps))
+
+    n_rift, n_mb = len(per_engine["rift"][0]), len(per_engine["mb"][0])
+    if n_rift != n_mb:
+        raise SystemExit(
+            f"rep-count mismatch: rift has {n_rift} reps, mountebank has {n_mb}. A comparison "
+            f"table built from unequal replication would favour whichever engine got more samples.")
+
+    rift_agg, mb_agg = per_engine["rift"][1], per_engine["mb"][1]
+    out = os.path.join(RESULTS_DIR, f"DIRECT_BENCHMARK_REPORT{base_suffix}_median.md")
+    with open(out, "w") as f:
+        f.write("# Rift vs Mountebank — median of repetitions\n\n")
+        f.write(f"- **Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"- **Rift:** {rift_ver}\n- **Mountebank:** {mb_ver}\n")
+        f.write(f"- **Connections:** {conns} (closed loop)\n")
+        f.write(f"- **Repetitions:** {n_rift} per engine. Every cell is a median; the spread "
+                f"columns are peak-to-peak as a percentage of the mean, so a rep that disagrees "
+                f"is visible instead of being averaged away.\n\n")
+        f.write("| Scenario | Mountebank | Rift | Speedup | MB spread | Rift spread |\n")
+        f.write("|---|--:|--:|--:|--:|--:|\n")
+        for name in [s[0] for s in SCENARIOS]:
+            key = (name, conns, "closed")
+            if key not in rift_agg or key not in mb_agg:
+                continue
+            r, m = rift_agg[key], mb_agg[key]
+            speedup = f"{r['rps'] / m['rps']:.1f}x" if m["rps"] else "n/a"
+            f.write(f"| {name} | {m['rps']:,.0f} | {r['rps']:,.0f} | **{speedup}** | "
+                    f"{m['rps_spread_pct']:.1f}% | {r['rps_spread_pct']:.1f}% |\n")
+    print(f"wrote {out}")
+    return out
+
 def aggregate_reps_to_report(base_suffix, rift_ver):
     """Read a variant's `_repN.csv` files, write the median-of-reps CSV + report, return the report
     path. This is the artefact the unsuffixed filename used to *imply* and never was (#773)."""
@@ -1188,7 +1236,7 @@ def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, r
     rift_ver = subprocess.run([rift_bin, "--version"], capture_output=True, text=True).stdout.strip() or "local"
     if "rift" in engines and "mb" in engines:
         mb_ver = subprocess.run([node, mb_bin, "--version"], capture_output=True, text=True).stdout.strip() or "2.9.1"
-        report(rift_ver, mb_ver, duration, conn_list[0])
+        report(rift_ver, mb_ver, duration, conn_list[0], csv_suffix)
     elif engines == ["rift"]:
         rift_only_report(rift_ver, duration, conn_list, rate, recording,
                           allocator=allocator, runtime=runtime, csv_suffix=csv_suffix,
@@ -1265,9 +1313,9 @@ def rift_only_report(rift_ver, duration, conn_list, rate, recording, allocator=N
             matrix(f, "RSS peak (MB, during measurement)", "rss_mb_peak", lat)
     print(f"wrote {out}")
 
-def report(rift_ver, mb_ver, duration, conns):
+def report(rift_ver, mb_ver, duration, conns, csv_suffix=""):
     def load(engine):
-        path = os.path.join(RESULTS_DIR, f"direct_{engine}.csv")
+        path = os.path.join(RESULTS_DIR, f"direct_{engine}{csv_suffix}.csv")
         with open(path) as f:
             # The comparison is single-point closed-loop; ignore any sweep/open-loop rows a prior
             # run may have left in the CSV so a standalone --report can't blend the wrong point in.
@@ -1276,7 +1324,7 @@ def report(rift_ver, mb_ver, duration, conns):
                  if r["mode"] == "closed" and int(r["connections"]) == conns}
         return d
     rift, mb = load("rift"), load("mb")
-    out = os.path.join(RESULTS_DIR, "DIRECT_BENCHMARK_REPORT.md")
+    out = os.path.join(RESULTS_DIR, f"DIRECT_BENCHMARK_REPORT{csv_suffix}.md")
     order = [s[0] for s in SCENARIOS]
     with open(out, "w") as f:
         f.write("# Rift vs Mountebank — Direct-Process Benchmark\n\n")
@@ -1353,11 +1401,19 @@ if __name__ == "__main__":
                          "sweep lands in its own file instead of overwriting the last. Re-running "
                          "the SAME rep overwrites it, with a printed note. Rift-only. Without "
                          "--rep the run writes the unsuffixed name as before.")
+    ap.add_argument("--aggregate-comparison", metavar="SUFFIX",
+                    help="offline: median-of-reps Rift-vs-Mountebank table from "
+                         "direct_{rift,mb}<SUFFIX>_rep*.csv, with per-engine spread. Refuses "
+                         "unequal rep counts between the engines.")
     ap.add_argument("--aggregate-reps", metavar="SUFFIX",
                     help="offline: read direct_rift<SUFFIX>_rep*.csv and write the median-of-reps "
                          "CSV + report (per-rep spread included). SUFFIX is the variant part of "
                          "the name, e.g. '_per-core_cores8' (use '' for a bare run).")
     a = ap.parse_args()
+    if a.aggregate_comparison is not None:
+        aggregate_comparison_reps(a.aggregate_comparison, a.rift_version, a.mb_version,
+                                  a.connections)
+        sys.exit(0)
     if a.aggregate_reps is not None:
         aggregate_reps_to_report(a.aggregate_reps, a.rift_version)
         sys.exit(0)
@@ -1382,17 +1438,10 @@ if __name__ == "__main__":
         except ValueError as e:
             raise SystemExit(str(e))
         requested = [e.strip() for e in a.engines.split(",") if e.strip()]
-        # --rep is Rift-only, and refused rather than silently coerced: the rift-vs-mb comparison
-        # report reads the UNSUFFIXED direct_{engine}.csv paths, so a repped rift+mb run would
-        # write direct_rift_repN.csv and then build DIRECT_BENCHMARK_REPORT.md from whatever stale
-        # unsuffixed file happened to be on disk — presenting numbers this run never measured,
-        # which is the exact failure #773 exists to close. Coercing engines silently would hide
-        # that the requested comparison was not run at all.
-        if a.rep is not None and engines != ["rift"]:
-            raise SystemExit(
-                "--rep is Rift-only: the rift-vs-mb report reads unsuffixed artefacts, so a "
-                "repped comparison run would report a stale file as this run's numbers. "
-                "Re-run with --engines rift.")
+        # --rep used to be refused for rift+mb because report() read unsuffixed artefacts, so a
+        # repped comparison would have reported a stale file as this run's numbers (#773). Now that
+        # report() is suffix-aware, replication is exactly what the comparison needs: publishing a
+        # headline table from a single unreplicated sample is the very thing #773 exists to stop.
         if (a.allocator or a.runtime or a.quamina) and engines != ["rift"]:
             engines = ["rift"]
         if engines != requested:
