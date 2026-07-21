@@ -821,6 +821,12 @@ struct BodyFieldDimension {
     quamina: Option<quamina::Quamina<usize>>,
     /// Stubs not indexed here (ineligible predicate, or a per-stub `add_pattern` failure) — always
     /// candidates on this dimension.
+    ///
+    /// Complete **only when `quamina.is_some()`**. When the dimension is deactivated (#792) the
+    /// eligible stubs are in neither `quamina` nor here, because [`Dimension::prunes`] is false and
+    /// [`Dimension::select`] is therefore never reached. Reading this bitset with `quamina == None`
+    /// would prune every body-field stub — an under-approximation, i.e. stubs silently ceasing to
+    /// match. `select` debug-asserts the coupling so a future refactor breaks loudly in tests.
     always: CandidateBits,
     /// Only read on the fail-open widen path, which is feature-gated.
     #[cfg(feature = "quamina-matching")]
@@ -829,6 +835,13 @@ struct BodyFieldDimension {
 
 impl Dimension for BodyFieldDimension {
     fn select(&self, request: &DimensionRequest<'_>, out: &mut CandidateBits) {
+        // `always` is only complete while the automaton exists — see its field doc (#792).
+        #[cfg(feature = "quamina-matching")]
+        debug_assert!(
+            self.quamina.is_some(),
+            "select() on a deactivated body-field dimension would under-approximate: its indexed \
+             stubs are in neither `quamina` nor `always`"
+        );
         out.copy_from(&self.always);
         #[cfg(not(feature = "quamina-matching"))]
         let _ = request; // the automaton (and its `request` read) is feature-gated below
@@ -871,6 +884,70 @@ impl Dimension for BodyFieldDimension {
     }
 }
 
+/// Whether the body-field automaton can tell two stubs apart for this stub set (issue #792).
+///
+/// Two body-field stubs are worth discriminating only if one request can reach both — their path
+/// sets must intersect AND their method sets must intersect. When every body-field stub owns a
+/// distinct `(path, method)`, the path and method dimensions have already narrowed the candidate
+/// set to at most one stub before the body is read.
+///
+/// Note this is *discrimination*, not pruning in general: with a single reachable stub the
+/// automaton can still prune it away (a body matching no pattern yields an empty set, skipping
+/// Stage-2 for that request). Deactivating trades that away — one Stage-2 predicate evaluation on
+/// the no-match request — to stop paying the automaton on every request, which #779 measured as a
+/// net ~6.5% throughput win on exactly this shape.
+///
+/// Conservative in both wildcard directions: a stub with no indexable path anchor is a candidate
+/// for *every* path, and one with no method anchor for *every* method, so either can co-occur with
+/// anything and keeps the dimension active. This is why counting distinct `(path, method)` tuples
+/// is not enough — `(/p, GET)`, `(/p, POST)` and `(/p, *)` are three distinct keys, yet one GET
+/// reaches two of them.
+#[cfg(feature = "quamina-matching")]
+fn body_field_discriminates(
+    indexed: &CandidateBits,
+    exact: &FastMap<String, Vec<usize>>,
+    path_always: &CandidateBits,
+    method_of: &[Option<usize>],
+) -> bool {
+    // Fewer than two indexed stubs ⇒ nothing to tell apart, whatever their anchors. Checked before
+    // the wildcard branch below, which would otherwise activate on a lone path-unanchored stub that
+    // has no sibling to collide with.
+    if indexed.count() < 2 {
+        return false;
+    }
+    if indexed.iter().any(|i| path_always.contains(i)) {
+        return true;
+    }
+    exact.values().any(|bucket| {
+        let members: Vec<usize> = bucket
+            .iter()
+            .copied()
+            .filter(|&i| indexed.contains(i))
+            .collect();
+        if members.len() < 2 {
+            return false;
+        }
+        // Slots are bounded by METHOD_SLOTS, so the dedup is a bitmask rather than a set. The
+        // assertion is what makes that safe to assume: widening METHOD_SLOTS past a u8 would
+        // otherwise shift out of range and silently stop detecting same-slot collisions.
+        const _: () = assert!(METHOD_SLOTS <= u8::BITS as usize);
+        let mut seen: u8 = 0;
+        for i in members {
+            match method_of[i] {
+                None => return true,
+                Some(slot) => {
+                    let bit = 1u8 << slot;
+                    if seen & bit != 0 {
+                        return true;
+                    }
+                    seen |= bit;
+                }
+            }
+        }
+        false
+    })
+}
+
 pub(crate) struct StubIndex {
     len: usize,
     path: PathDimension,
@@ -903,8 +980,15 @@ impl StubIndex {
         let mut body_by_hash: FastMap<u64, Vec<usize>> = FastMap::default();
         let mut body_always = CandidateBits::zeros(len);
 
+        // #792: the automaton is built only if it can prune, which is knowable once every stub's
+        // path/method anchor is known — i.e. after this loop. So the eligible patterns are
+        // collected here and added to a `Quamina` below, rather than as they are found.
         #[cfg(feature = "quamina-matching")]
-        let mut body_field_quamina: Option<quamina::Quamina<usize>> = None;
+        let mut body_field_patterns: Vec<(usize, String)> = Vec::new();
+        #[cfg(feature = "quamina-matching")]
+        let mut body_field_indexed = CandidateBits::zeros(len);
+        #[cfg(feature = "quamina-matching")]
+        let mut method_of: Vec<Option<usize>> = vec![None; len];
         let mut body_field_always = CandidateBits::zeros(len);
 
         for (i, state) in stubs.iter().enumerate() {
@@ -913,7 +997,14 @@ impl StubIndex {
                 None => path_always.set(i),
             }
             match state.stub.predicates.iter().find_map(method_anchor) {
-                Some(m) => slots[method_slot(m)].push(i),
+                Some(m) => {
+                    let slot = method_slot(m);
+                    slots[slot].push(i);
+                    #[cfg(feature = "quamina-matching")]
+                    {
+                        method_of[i] = Some(slot);
+                    }
+                }
                 None => method_always.set(i),
             }
             // Only the first literal anchor is indexed — same rule as `classify`/`regex_anchor`.
@@ -943,18 +1034,12 @@ impl StubIndex {
                 None => body_always.set(i),
             }
             // First eligible field-level equals-on-body predicate → one quamina pattern (#767).
-            // A per-stub `add_pattern` failure (PatternLimits/malformed) falls that stub back to
-            // `always_bits` — a build-time (admin-rate) warn, never the per-request trap of #741.
             match state.stub.predicates.iter().find_map(body_field_pattern) {
                 Some(_pattern) => {
                     #[cfg(feature = "quamina-matching")]
                     {
-                        let q = body_field_quamina.get_or_insert_with(quamina::Quamina::new);
-                        if let Err(e) = q.add_pattern(i, &_pattern) {
-                            tracing::warn!(stub = i, error = %e,
-                                "body-field dimension: pattern rejected; stub falls back to full evaluation");
-                            body_field_always.set(i);
-                        }
+                        body_field_indexed.set(i);
+                        body_field_patterns.push((i, _pattern));
                     }
                     #[cfg(not(feature = "quamina-matching"))]
                     body_field_always.set(i);
@@ -974,6 +1059,33 @@ impl StubIndex {
         for i in ci_fallback.into_iter().chain(cs_fallback) {
             regex_always.set(i);
         }
+
+        // #792: build the automaton only when one request can reach two body-field stubs at once.
+        // Otherwise the path/method dimensions have already narrowed to a single stub and it would
+        // cost ~6.5% to re-derive that. Skipping it leaves those stubs unpruned on this dimension,
+        // which is a pure over-approximation — Stage-2 still decides, so results are unchanged.
+        #[cfg(feature = "quamina-matching")]
+        let body_field_quamina = if body_field_discriminates(
+            &body_field_indexed,
+            &exact,
+            &path_always,
+            &method_of,
+        ) {
+            let mut q = quamina::Quamina::new();
+            for (i, pattern) in &body_field_patterns {
+                // A per-stub `add_pattern` failure (PatternLimits/malformed) falls that stub
+                // back to `always` — a build-time (admin-rate) warn, never the per-request
+                // trap of #741.
+                if let Err(e) = q.add_pattern(*i, pattern) {
+                    tracing::warn!(stub = *i, error = %e,
+                            "body-field dimension: pattern rejected; stub falls back to full evaluation");
+                    body_field_always.set(*i);
+                }
+            }
+            Some(q)
+        } else {
+            None
+        };
 
         let path = PathDimension {
             exact,
@@ -1530,6 +1642,192 @@ mod tests {
         );
         // A body equal to none prunes the whole dimension to empty.
         assert!(candidate_ids_body(&snap, "POST", "/x", &json!({"user": {"id": 9999}})).is_empty());
+    }
+
+    // ---- issue #792: the dimension deactivates when it provably cannot prune ---------------
+
+    /// Whether the built snapshot will actually run the body-field automaton.
+    #[cfg(feature = "quamina-matching")]
+    fn body_field_active(preds: &[Value]) -> bool {
+        snapshot(preds).index.body_field.prunes()
+    }
+
+    // #792 AC1: when every body-field stub owns a distinct (path, method), the path dimension has
+    // already pruned to one stub before the body is consulted — the automaton can only re-derive
+    // what is already known, at ~6.5% throughput. It must not be built.
+    #[cfg(feature = "quamina-matching")]
+    #[test]
+    fn body_field_dimension_inactive_when_no_path_method_is_shared() {
+        let preds: Vec<Value> = (0..50)
+            .map(|i| json!([{"equals": {"path": format!("/p{i}"), "body": {"user": {"id": i}}}}]))
+            .collect();
+        assert!(
+            !body_field_active(&preds),
+            "distinct paths ⇒ the automaton cannot discriminate; it must be skipped"
+        );
+    }
+
+    // The converse, so the test above cannot pass by disabling the dimension outright: stubs that
+    // share one path are exactly the shape the dimension exists for (#779: +380% at 1000).
+    #[cfg(feature = "quamina-matching")]
+    #[test]
+    fn body_field_dimension_active_when_a_path_method_is_shared() {
+        let preds: Vec<Value> = (0..50)
+            .map(|i| json!([{"equals": {"path": "/shared", "body": {"user": {"id": i}}}}]))
+            .collect();
+        assert!(
+            body_field_active(&preds),
+            "stubs sharing a path are what the dimension prunes; it must stay active"
+        );
+    }
+
+    // A body-field stub with no indexable path anchor is a candidate for EVERY path, so it can
+    // co-occur with any other body-field stub. Unanchored ⇒ conservative ⇒ active. (This is the
+    // shape `body_field_dimension_collapses_candidates` above relies on.)
+    #[cfg(feature = "quamina-matching")]
+    #[test]
+    fn body_field_dimension_active_when_a_stub_has_no_path_anchor() {
+        let mut preds: Vec<Value> = (0..10)
+            .map(|i| json!([{"equals": {"path": format!("/p{i}"), "body": {"user": {"id": i}}}}]))
+            .collect();
+        preds.push(json!([{"equals": {"body": {"user": {"id": 999}}}}]));
+        assert!(
+            body_field_active(&preds),
+            "a path-unanchored body-field stub can share a path with any other; stay active"
+        );
+    }
+
+    // Sharing a path is not enough to collide if the method dimension already separates the stubs:
+    // one GET stub and one POST stub on /shared can never be candidates for the same request.
+    #[cfg(feature = "quamina-matching")]
+    #[test]
+    fn body_field_dimension_inactive_when_a_shared_path_is_split_by_distinct_methods() {
+        let preds = vec![
+            json!([{"equals": {"path": "/shared", "method": "GET", "body": {"user": {"id": 1}}}}]),
+            json!([{"equals": {"path": "/shared", "method": "POST", "body": {"user": {"id": 2}}}}]),
+        ];
+        assert!(
+            !body_field_active(&preds),
+            "distinct methods on one path cannot co-occur; the automaton cannot discriminate"
+        );
+    }
+
+    // ...but a method-less stub on that same path matches every method, so it CAN co-occur with the
+    // method-anchored ones. This is the case a naive (path, method) tuple count gets wrong: three
+    // distinct keys, yet two of them are simultaneously reachable by one GET.
+    #[cfg(feature = "quamina-matching")]
+    #[test]
+    fn body_field_dimension_active_when_a_shared_path_stub_has_no_method_anchor() {
+        let preds = vec![
+            json!([{"equals": {"path": "/shared", "method": "GET", "body": {"user": {"id": 1}}}}]),
+            json!([{"equals": {"path": "/shared", "method": "POST", "body": {"user": {"id": 2}}}}]),
+            json!([{"equals": {"path": "/shared", "body": {"user": {"id": 3}}}}]),
+        ];
+        assert!(
+            body_field_active(&preds),
+            "a method-unanchored stub co-occurs with every method on its path; stay active"
+        );
+    }
+
+    // A lone body-field stub has no sibling to be told apart from, so the automaton buys nothing
+    // even though the stub is path-unanchored — the wildcard branch alone would wrongly activate
+    // here, since "co-occurs with everything" is vacuous when there is nothing to co-occur with.
+    #[cfg(feature = "quamina-matching")]
+    #[test]
+    fn body_field_dimension_inactive_for_a_lone_stub_even_when_path_unanchored() {
+        let preds = vec![
+            json!([{"equals": {"body": {"user": {"id": 1}}}}]),
+            json!([{"equals": {"path": "/other"}}]),
+        ];
+        assert!(
+            !body_field_active(&preds),
+            "one body-field stub has nothing to discriminate against; skip the automaton"
+        );
+    }
+
+    // Only body-field stubs count toward a collision. A non-body-field sibling on the same path is
+    // pruned by other dimensions and is never an argument for building the automaton.
+    #[cfg(feature = "quamina-matching")]
+    #[test]
+    fn body_field_dimension_inactive_when_the_shared_path_sibling_has_no_body_predicate() {
+        let preds = vec![
+            json!([{"equals": {"path": "/shared", "body": {"user": {"id": 1}}}}]),
+            json!([{"equals": {"path": "/shared"}}]),
+            json!([{"equals": {"path": "/shared", "method": "PUT"}}]),
+        ];
+        assert!(
+            !body_field_active(&preds),
+            "a lone body-field stub on a shared path still has no body-field sibling"
+        );
+    }
+
+    // #792 AC4: deactivating is a pure prefilter change, so matching results must be byte-identical
+    // to the linear oracle on a corpus where the dimension goes INACTIVE. The existing
+    // `differential_index_matches_linear_oracle` only covers the active shape (its body-field stubs
+    // carry no path anchor), so it cannot see a deactivation bug — this is that corpus.
+    #[test]
+    fn distinct_path_body_field_corpus_matches_linear_oracle() {
+        const BODIES: &[Option<&str>] = &[
+            Some(r#"{"k":1}"#),
+            Some(r#"{"k":"1"}"#),
+            Some(r#"{"n":{"a":1}}"#),
+            Some(r#"{"k":1,"z":9}"#),
+            Some("ping"),
+            None,
+        ];
+        // Each stub owns its own path, which is what deactivates the dimension. Paths, methods and
+        // bodies are drawn from the same small pools the requests are, so requests hit real stubs.
+        let preds: Vec<Value> = (0..24)
+            .map(|i| match i % 4 {
+                0 => json!([{"equals": {"path": format!("/p{i}"), "body": {"k": 1}}}]),
+                1 => json!([{"equals": {"path": format!("/p{i}"), "body": {"n": {"a": 1}}}}]),
+                2 => {
+                    json!([{"equals": {"path": format!("/p{i}"), "method": "POST", "body": {"k": 1}}}])
+                }
+                _ => json!([{"equals": {"path": format!("/p{i}")}}]),
+            })
+            .collect();
+        // Assert the premise, or the test silently stops testing what it claims: if a future change
+        // made this corpus keep the dimension ACTIVE, every assertion below would still pass while
+        // covering the shape the pre-existing oracle already covers.
+        #[cfg(feature = "quamina-matching")]
+        assert!(
+            !body_field_active(&preds),
+            "this corpus must deactivate the dimension — that is the shape under test"
+        );
+
+        let imp = imposter(&preds);
+        let no_headers: HashMap<String, String> = HashMap::new();
+
+        for i in 0..24 {
+            for m in ["GET", "POST", "PUT"] {
+                for body in BODIES {
+                    let p = format!("/p{i}");
+                    let linear = idx(imp.find_matching_stub_linear(
+                        m,
+                        &p,
+                        &no_headers,
+                        None,
+                        *body,
+                        None,
+                        None,
+                    ));
+                    let indexed = idx(imp.find_matching_stub_with_client(
+                        m,
+                        &p,
+                        &no_headers,
+                        None,
+                        *body,
+                        None,
+                        None,
+                    ));
+                    assert_eq!(
+                        indexed, linear,
+                        "index diverged from linear oracle with the body-field dimension inactive: {m} {p} b={body:?}"
+                    );
+                }
+            }
+        }
     }
 
     // The path dimension genuinely narrows (excludes non-matching anchored stubs) yet never drops a
