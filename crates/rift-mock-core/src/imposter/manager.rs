@@ -1878,6 +1878,9 @@ mod tests {
         use tokio::net::TcpStream;
 
         let manager = ImposterManager::new();
+        // Issue #809: this test probes the port *after* deleting the imposter, so it must keep a
+        // fixed port below the auto-assign range. See `delete_blocks_until_inflight_response_drains`
+        // for why the two halves of this file differ.
         let config: ImposterConfig = serde_json::from_value(serde_json::json!({
             "protocol": "http",
             "port": 19700,
@@ -1888,10 +1891,10 @@ mod tests {
         }))
         .unwrap();
 
-        manager.create_imposter(config).await.expect("create");
+        let port = manager.create_imposter(config).await.expect("create");
 
         // Open a keep-alive connection and confirm it is served.
-        let mut stream = TcpStream::connect(("127.0.0.1", 19700))
+        let mut stream = TcpStream::connect(("127.0.0.1", port))
             .await
             .expect("connect");
         stream
@@ -1908,7 +1911,7 @@ mod tests {
         // Delete the imposter. No settle: `delete` now awaits full teardown (issue #596) — the
         // accept loop has ended and established connections are drained by the time it returns — so
         // the assertions below must hold *immediately*, with no heuristic sleep.
-        manager.delete_imposter(19700).await.expect("delete");
+        manager.delete_imposter(port).await.expect("delete");
 
         // Criterion 1: reuse the SAME connection. The deleted imposter must serve
         // nothing AND the socket must be actively closed — an empty read proves
@@ -1924,7 +1927,7 @@ mod tests {
 
         // Criterion 2: a fresh connection must not be served either — the listener
         // is gone, so connect is refused or the socket yields EOF with no body.
-        match TcpStream::connect(("127.0.0.1", 19700)).await {
+        match TcpStream::connect(("127.0.0.1", port)).await {
             Err(_) => {} // connection refused — listener torn down, as expected
             Ok(mut fresh) => {
                 let _ = fresh
@@ -1952,33 +1955,46 @@ mod tests {
         let manager = ImposterManager::new();
         let config: ImposterConfig = serde_json::from_value(serde_json::json!({
             "protocol": "http",
-            "port": 19701,
             "stubs": [{
                 "predicates": [{"equals": {"path": "/slow"}}],
-                "responses": [{"is": {"statusCode": 200, "body": "done"}, "_behaviors": {"wait": 400}}]
+                "responses": [{"is": {"statusCode": 200, "body": "done"}, "_behaviors": {"wait": 1500}}]
             }]
         }))
         .unwrap();
-        manager.create_imposter(config).await.expect("create");
+        // Issue #809: OS-assigned. A hardcoded port collides with an unrelated listener during a
+        // full-workspace run (many test binaries at once) and fails the *create* — which is how
+        // this test actually flaked: it panicked at `create`, not at the drain assertion below.
+        //
+        // Auto-assign is only safe for a test that never touches the port again after deleting it.
+        // A test that re-binds or re-probes the port must keep a fixed one below the 49152+
+        // auto-assign range, because `delete` returns the port to that shared pool where a
+        // concurrent test's `find_available_port` can claim it — see
+        // `delete_then_recreate_same_port_serves_new_generation`.
+        let port = manager.create_imposter(config).await.expect("create");
 
-        // Send a request that will spend ~400ms in the imposter's `wait` before its response is
+        // Send a request that will spend ~1.5s in the imposter's `wait` before its response is
         // written; don't read yet — the response is still in flight on this connection.
-        let mut stream = TcpStream::connect(("127.0.0.1", 19701))
+        let mut stream = TcpStream::connect(("127.0.0.1", port))
             .await
             .expect("connect");
         stream
             .write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .await
             .unwrap();
-        // Let the request reach the server and enter the wait, well before its 400ms elapses.
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        // Let the request reach the server and enter the wait. Issue #809: the margins here are
+        // deliberately wide (1500ms wait / 400ms entry / 700ms floor rather than 400/80/250). The
+        // assertion below only means anything if the request is *already waiting* when delete runs,
+        // and under a saturated `cargo test --workspace` this task can be descheduled for far
+        // longer than a tight margin allows — which would fail the drain assertion for a scheduling
+        // reason rather than a real regression.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
         let started = std::time::Instant::now();
-        manager.delete_imposter(19701).await.expect("delete");
+        manager.delete_imposter(port).await.expect("delete");
         let elapsed = started.elapsed();
 
         assert!(
-            elapsed >= std::time::Duration::from_millis(250),
+            elapsed >= std::time::Duration::from_millis(700),
             "delete must block until the in-flight response drains (issue #596); returned in {elapsed:?}"
         );
         // The in-flight response was served gracefully (finished, not aborted mid-write).
@@ -1999,16 +2015,15 @@ mod tests {
         let manager = ImposterManager::new().with_conn_drain(std::time::Duration::from_millis(150));
         let config: ImposterConfig = serde_json::from_value(serde_json::json!({
             "protocol": "http",
-            "port": 19702,
             "stubs": [{
                 "predicates": [{"equals": {"path": "/stall"}}],
                 "responses": [{"is": {"statusCode": 200, "body": "eventually"}, "_behaviors": {"wait": 3000}}]
             }]
         }))
         .unwrap();
-        manager.create_imposter(config).await.expect("create");
+        let port = manager.create_imposter(config).await.expect("create");
 
-        let mut stream = TcpStream::connect(("127.0.0.1", 19702))
+        let mut stream = TcpStream::connect(("127.0.0.1", port))
             .await
             .expect("connect");
         stream
@@ -2018,7 +2033,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
         let started = std::time::Instant::now();
-        manager.delete_imposter(19702).await.expect("delete");
+        manager.delete_imposter(port).await.expect("delete");
         let elapsed = started.elapsed();
 
         assert!(
@@ -2040,6 +2055,11 @@ mod tests {
         use tokio::net::TcpStream;
 
         let manager = ImposterManager::new();
+        // Issue #809: re-binding the *same* port after a delete is the whole point here, so the
+        // port must stay fixed and below the auto-assign range. An OS-assigned port would be
+        // returned to the shared 49152+ pool by the delete, and a concurrently-running test's
+        // `find_available_port` can claim it before the re-create — measured at ~25% failure under
+        // `--test-threads=16`, where the fixed port never failed.
         let cfg = |body: &str| -> ImposterConfig {
             serde_json::from_value(serde_json::json!({
                 "protocol": "http",
