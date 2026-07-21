@@ -22,6 +22,8 @@ pub enum ImposterAction {
     Created,
     Replaced,
     StubsChanged,
+    /// The serve/pause flag flipped (issue #817).
+    EnabledChanged,
     Deleted,
     AllDeleted,
 }
@@ -34,6 +36,7 @@ impl ImposterAction {
             Self::Created => "created",
             Self::Replaced => "replaced",
             Self::StubsChanged => "stubsChanged",
+            Self::EnabledChanged => "enabledChanged",
             Self::Deleted => "deleted",
             Self::AllDeleted => "allDeleted",
         }

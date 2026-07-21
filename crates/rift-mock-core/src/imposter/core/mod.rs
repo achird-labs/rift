@@ -220,6 +220,7 @@ impl Imposter {
         // `_rift.flowState` selection.
         let flow_store = Self::create_flow_store(&config, provider)?;
 
+        let enabled = config.enabled;
         Ok(Self {
             config,
             stubs_snapshot: ArcSwap::from_pointee(StubSnapshot::build(stubs)),
@@ -228,7 +229,7 @@ impl Imposter {
             event_bus: None,
             journal: journal
                 .unwrap_or_else(|| Arc::new(crate::imposter::journal::LocalJournal::default())),
-            enabled: AtomicBool::new(true),
+            enabled: AtomicBool::new(enabled),
             created_at: chrono::Utc::now(),
             shutdown_tx: None,
             serve_handles: Mutex::new(Vec::new()),

@@ -503,6 +503,9 @@ impl ImposterManager {
             ImposterEvent::Created(p) => (ImposterAction::Created, Some(p)),
             ImposterEvent::Replaced(p) => (ImposterAction::Replaced, Some(p)),
             ImposterEvent::StubsChanged(p) => (ImposterAction::StubsChanged, Some(p)),
+            ImposterEvent::EnabledChanged { port, .. } => {
+                (ImposterAction::EnabledChanged, Some(port))
+            }
             ImposterEvent::Deleted(p) => (ImposterAction::Deleted, Some(p)),
             ImposterEvent::AllDeleted => (ImposterAction::AllDeleted, None),
         };
@@ -1109,7 +1112,10 @@ impl ImposterManager {
     /// Semantics per desired port: new port → create; missing port → delete; identical
     /// config → untouched; imposter-level field change or a degenerate stub diff (> 50 % of
     /// stubs changing) → wholesale replace (PUT semantics, state resets); otherwise the stub
-    /// set is patched in place and untouched slots keep their cycling state.
+    /// set is patched in place and untouched slots keep their cycling state. Exception
+    /// (issue #817): a diff whose only imposter-level change is `enabled` toggles in place —
+    /// pausing an imposter must never reset its runtime state — and is reported under
+    /// [`ApplyReport::toggled`].
     ///
     /// The whole set is validated up front — `Err` means nothing was mutated. Per-port apply
     /// failures after that (e.g. a bind failure on a freed port) land in
@@ -1157,9 +1163,20 @@ impl ImposterManager {
                 continue;
             };
 
-            if imposter_level_differs(&existing.config, &config) {
+            if imposter_level_differs_ignoring_enabled(&existing.config, &config) {
                 self.replace_imposter(port, config, &mut report).await;
                 continue;
+            }
+
+            // An enabled-only imposter-level diff applies IN PLACE (issue
+            // #817): pause/resume must never reset cursors, scenario state or
+            // recorded requests, which a wholesale replace would. Compared
+            // against the live flag, not the retained boot value.
+            if existing.is_enabled() != config.enabled {
+                if let Err(e) = self.set_imposter_enabled(port, config.enabled).await {
+                    report.failed.push((port, e));
+                }
+                report.toggled.push(port);
             }
 
             match existing.reconcile_stubs(config.stubs.clone()) {
@@ -1348,6 +1365,23 @@ impl ImposterManager {
         self.persist_imposter_checked(&imposter).await
     }
 
+    /// Enable or disable serving on `port` — a *config* write, not an
+    /// ephemeral toggle (issue #817): flips the runtime flag (the data plane
+    /// reacts immediately), emits [`ImposterEvent::EnabledChanged`], and
+    /// persists, so a restart with `--datadir` restores the operator's last
+    /// decision. Idempotent: re-asserting the current state still persists and
+    /// emits (an at-least-once contract is simpler than a read-modify-check).
+    pub async fn set_imposter_enabled(
+        &self,
+        port: u16,
+        enabled: bool,
+    ) -> Result<(), ImposterError> {
+        let imposter = self.get_imposter(port)?;
+        imposter.set_enabled(enabled);
+        self.emit(ImposterEvent::EnabledChanged { port, enabled });
+        self.persist_imposter_checked(&imposter).await
+    }
+
     /// Get a specific stub by index
     pub fn get_stub(&self, port: u16, index: usize) -> Result<Stub, ImposterError> {
         let imposter = self.get_imposter(port)?;
@@ -1374,6 +1408,10 @@ impl ImposterManager {
         };
         let mut snapshot = imposter.config.clone();
         snapshot.stubs = imposter.get_stubs();
+        // The atomic is the runtime truth; the retained config only holds the
+        // boot value. Snapshot the flag so every persist path (stub CRUD
+        // included) writes the operator's current decision.
+        snapshot.enabled = imposter.is_enabled();
         let path = datadir.join(format!("{port}.json"));
         let json = serde_json::to_string_pretty(&snapshot).map_err(|e| {
             ImposterError::PersistError(
@@ -1417,14 +1455,17 @@ impl Default for ImposterManager {
     }
 }
 
-/// Imposter-level diff for `apply_config`, comparing the configs with stubs stripped: any
-/// difference (protocol, TLS, recordRequests, name, …) replaces wholesale. A serialization
-/// failure on either side counts as "differs" — the conservative direction (worst case an
-/// unnecessary replace, never a silently skipped change).
-fn imposter_level_differs(a: &ImposterConfig, b: &ImposterConfig) -> bool {
+/// Imposter-level diff for `apply_config`, comparing the configs with stubs stripped and the
+/// `enabled` flag normalized away: any *other* difference (protocol, TLS, recordRequests,
+/// name, …) replaces wholesale, while an enabled-only diff is applied in place by the caller
+/// (issue #817 — pause/resume must not reset runtime state). A serialization failure on
+/// either side counts as "differs" — the conservative direction (worst case an unnecessary
+/// replace, never a silently skipped change).
+fn imposter_level_differs_ignoring_enabled(a: &ImposterConfig, b: &ImposterConfig) -> bool {
     let flatten = |config: &ImposterConfig| {
         let mut flat = config.clone();
         flat.stubs = Vec::new();
+        flat.enabled = true;
         serde_json::to_value(&flat)
     };
     match (flatten(a), flatten(b)) {
@@ -2229,6 +2270,129 @@ mod tests {
         assert_eq!(last["responses"][0]["is"]["body"], "z2");
 
         manager.delete_all().await;
+    }
+
+    // Issue #817: an enabled-only diff toggles in place — pausing must never
+    // reset runtime state the way a wholesale replace would.
+    #[tokio::test]
+    async fn apply_config_enabled_only_diff_toggles_in_place() {
+        let manager = ImposterManager::new();
+        let initial = imposter_cfg(json!({
+            "protocol": "http", "port": 19430, "recordRequests": true,
+            "stubs": [stub_json("a")]
+        }));
+        manager.apply_config(vec![initial]).await.expect("create");
+        let before = manager.get_imposter(19430).unwrap();
+        before.record_request(recorded("/a"));
+        assert!(before.is_enabled());
+
+        let paused = imposter_cfg(json!({
+            "protocol": "http", "port": 19430, "recordRequests": true, "enabled": false,
+            "stubs": [stub_json("a")]
+        }));
+        let report = manager.apply_config(vec![paused]).await.expect("pause");
+        assert_eq!(report.toggled, vec![19430]);
+        assert!(report.replaced.is_empty(), "never a wholesale replace");
+        assert!(report.stub_patched.is_empty());
+
+        let after = manager.get_imposter(19430).unwrap();
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "the toggle must not recreate the imposter"
+        );
+        assert!(!after.is_enabled());
+        assert_eq!(
+            after.get_recorded_requests().len(),
+            1,
+            "runtime state survives the pause"
+        );
+
+        // Resume via the (default, unserialized) enabled=true.
+        let resumed = imposter_cfg(json!({
+            "protocol": "http", "port": 19430, "recordRequests": true,
+            "stubs": [stub_json("a")]
+        }));
+        let report = manager.apply_config(vec![resumed]).await.expect("resume");
+        assert_eq!(report.toggled, vec![19430]);
+        assert!(manager.get_imposter(19430).unwrap().is_enabled());
+
+        manager.delete_all().await;
+    }
+
+    // Issue #817: the toggle is config — it persists, emits, and a reload of
+    // the persisted file restores the operator's decision.
+    #[tokio::test]
+    async fn set_imposter_enabled_persists_emits_and_reload_restores() {
+        let datadir = tempfile::tempdir().expect("tempdir");
+        let listener = Arc::new(RecordingListener(Mutex::new(Vec::new())));
+        let manager = ImposterManager::with_datadir(Some(datadir.path().to_path_buf()))
+            .with_event_listener(listener.clone());
+        let config = imposter_cfg(json!({
+            "protocol": "http", "port": 19431, "stubs": [stub_json("a")]
+        }));
+        manager.create_imposter(config).await.expect("create");
+
+        manager
+            .set_imposter_enabled(19431, false)
+            .await
+            .expect("disable");
+        assert!(!manager.get_imposter(19431).unwrap().is_enabled());
+        assert!(
+            listener.0.lock().iter().any(|e| matches!(
+                e,
+                ImposterEvent::EnabledChanged {
+                    port: 19431,
+                    enabled: false
+                }
+            )),
+            "the toggle must be observable"
+        );
+
+        let persisted =
+            std::fs::read_to_string(datadir.path().join("19431.json")).expect("persisted file");
+        assert!(persisted.contains("\"enabled\": false"), "{persisted}");
+
+        // A fresh manager loading that file restores the pause.
+        let reloaded: ImposterConfig = serde_json::from_str(&persisted).expect("parses");
+        assert!(!reloaded.enabled);
+        let fresh = ImposterManager::new();
+        // Rebind on a fresh ephemeral port to avoid racing the old listener.
+        let mut reloaded = reloaded;
+        reloaded.port = Some(19432);
+        fresh.create_imposter(reloaded).await.expect("recreate");
+        assert!(
+            !fresh.get_imposter(19432).unwrap().is_enabled(),
+            "a restart must not silently re-enable a paused imposter"
+        );
+
+        fresh.delete_all().await;
+        manager.delete_all().await;
+    }
+
+    // Issue #817: serialization stability — the (universal) enabled case emits
+    // no field, so existing configs, dumps and round-trips stay byte-identical.
+    #[test]
+    fn enabled_serialization_is_stable() {
+        let legacy: ImposterConfig =
+            serde_json::from_value(json!({ "protocol": "http", "port": 1 })).expect("parses");
+        assert!(legacy.enabled, "absent field defaults to enabled");
+        let value = serde_json::to_value(&legacy).expect("serialize");
+        assert!(
+            value.get("enabled").is_none(),
+            "enabled imposters serialize no field: {value}"
+        );
+
+        let mut paused = legacy;
+        paused.enabled = false;
+        let value = serde_json::to_value(&paused).expect("serialize");
+        assert_eq!(value["enabled"], false);
+        let back: ImposterConfig = serde_json::from_value(value).expect("round-trips");
+        assert!(!back.enabled);
+
+        assert!(
+            ImposterConfig::default().enabled,
+            "Default must agree with the serde default"
+        );
     }
 
     // AC2d: imposter-level field changes always replace wholesale.

@@ -19,6 +19,10 @@ pub struct ApplyReport {
     pub created: Vec<u16>,
     pub replaced: Vec<u16>,
     pub stub_patched: Vec<u16>,
+    /// Ports whose only imposter-level change was the `enabled` flag, applied
+    /// in place — runtime state intact (pausing an imposter must never reset
+    /// its scenario state).
+    pub toggled: Vec<u16>,
     pub deleted: Vec<u16>,
     pub failed: Vec<(u16, ImposterError)>,
 }
@@ -30,6 +34,12 @@ pub enum ImposterEvent {
     Created(u16),
     Replaced(u16),
     StubsChanged(u16),
+    /// The serve/pause flag flipped (issue #817): config, not ephemera — the
+    /// toggle persists and replicates like any other config change.
+    EnabledChanged {
+        port: u16,
+        enabled: bool,
+    },
     Deleted(u16),
     AllDeleted,
 }

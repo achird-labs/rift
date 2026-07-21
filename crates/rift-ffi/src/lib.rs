@@ -954,15 +954,18 @@ pub unsafe extern "C" fn rift_set_imposter_enabled(
             set_last_error("rift_set_imposter_enabled: null handle");
             return -1;
         };
-        let imposter = match handle.manager.get_imposter(port) {
-            Ok(i) => i,
+        // Through the manager (issue #817): the FFI door must persist and emit
+        // like the HTTP one, or embedders keep the runtime-only bug.
+        match handle
+            .runtime
+            .block_on(handle.manager.set_imposter_enabled(port, enabled != 0))
+        {
+            Ok(()) => 0,
             Err(e) => {
                 set_last_error(format!("rift_set_imposter_enabled: {e}"));
-                return -1;
+                -1
             }
-        };
-        imposter.set_enabled(enabled != 0);
-        0
+        }
     })
 }
 

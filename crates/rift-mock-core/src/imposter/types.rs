@@ -861,8 +861,17 @@ fn default_protocol() -> String {
     "http".to_string()
 }
 
+fn default_enabled() -> bool {
+    true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if contract
+fn is_default_enabled(enabled: &bool) -> bool {
+    *enabled
+}
+
 /// Configuration for creating an imposter
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImposterConfig {
     /// Port for the imposter. If not specified, an available port will be auto-assigned.
@@ -884,6 +893,16 @@ pub struct ImposterConfig {
     pub name: Option<String>,
     #[serde(default)]
     pub record_requests: bool,
+    /// Whether the imposter serves data-plane traffic. Toggled at runtime by
+    /// POST /imposters/:port/{enable,disable}; persisted so a restart with
+    /// --datadir restores the operator's last decision instead of silently
+    /// re-enabling a paused imposter. Serialized only when `false`, so configs
+    /// for the (universal) enabled case stay byte-identical.
+    #[serde(
+        default = "default_enabled",
+        skip_serializing_if = "is_default_enabled"
+    )]
+    pub enabled: bool,
     /// Record which stub matched each request (Mountebank compatible)
     #[serde(default)]
     pub record_matches: bool,
@@ -947,6 +966,33 @@ pub struct RiftConfig {
     /// `file:` script — not `ref:` (no chains).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub scripts: HashMap<String, RiftScriptConfig>,
+}
+
+// Hand-written (not derived) because `enabled` and `protocol` default to
+// non-zero values; the exhaustive literal makes adding a field without
+// deciding its default a compile error rather than a silent zero.
+impl Default for ImposterConfig {
+    fn default() -> Self {
+        Self {
+            port: None,
+            host: None,
+            protocol: default_protocol(),
+            cert: None,
+            key: None,
+            name: None,
+            record_requests: false,
+            enabled: default_enabled(),
+            record_matches: false,
+            stubs: Vec::new(),
+            default_response: None,
+            default_forward: None,
+            allow_cors: false,
+            strict_behaviors: false,
+            service_name: None,
+            service_info: None,
+            rift: None,
+        }
+    }
 }
 
 /// Flow state configuration for Rift extensions

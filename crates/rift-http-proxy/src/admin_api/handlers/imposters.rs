@@ -476,9 +476,10 @@ async fn handle_set_enabled(
     enabled: bool,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
-    match manager.get_imposter(port) {
-        Ok(imposter) => {
-            imposter.set_enabled(enabled);
+    // Through the manager, not the bare atomic: the toggle is config (issue
+    // #817) — it persists to datadir and emits an event.
+    match manager.set_imposter_enabled(port, enabled).await {
+        Ok(()) => {
             let state = if enabled { "enabled" } else { "disabled" };
             json_response(
                 StatusCode::OK,
