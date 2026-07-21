@@ -13,6 +13,16 @@ record.
 
 ### Fixed
 
+- **`examples/task-management-api.json` no longer ships two dead stubs.** The document loaded
+  cleanly and linted clean, but two of the behaviors it advertised never fired: matching is
+  first-match-wins, and the bare `GET /tasks` stub was listed before the `?status=OPEN` one (so the
+  filtered response was unreachable), as was `/tasks/task-\d+` before `/tasks/task-999` (so an
+  unknown task id answered `200` with a real task instead of the `404`). The stubs are now ordered
+  specific-before-general; no engine change was needed. Because `examples/` is what users copy, the
+  file was teaching that a query predicate narrows an already-matching path stub, which is not how
+  first-match-wins works. A new test drives the shipped example through the real matcher and asserts
+  the four served responses, so a future reordering cannot silently kill a stub again. (#805)
+
 - **The backend-error door now serves the standard error envelope.** An unavailable flow-store or
   proxy store — and any matcher failure that is not an injection error — used to answer with only
   its own pre-envelope shape (`{"error":"backendUnavailable","feature":…,"detail":…}`), with no

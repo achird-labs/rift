@@ -8,6 +8,26 @@
       "recordRequests": true,
       "stubs": [
         {
+          "scenarioName": "TaskAPI-GetTasks-FilterByStatus",
+          "predicates": [
+            { "endsWith": { "path": "/tasks" } },
+            { "equals": { "query": { "status": "OPEN" } } },
+            { "deepEquals": { "method": "GET" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": {
+                "count": 1,
+                "tasks": [
+                  { "taskId": "task-001", "name": "Review PR", "status": "OPEN", "priority": "HIGH" }
+                ]
+              }
+            }
+          }]
+        },
+        {
           "scenarioName": "TaskAPI-GetTasks-Success",
           "predicates": [
             { "endsWith": { "path": "/tasks" } },
@@ -29,22 +49,16 @@
           }]
         },
         {
-          "scenarioName": "TaskAPI-GetTasks-FilterByStatus",
+          "scenarioName": "TaskAPI-GetTaskById-NotFound",
           "predicates": [
-            { "endsWith": { "path": "/tasks" } },
-            { "equals": { "query": { "status": "OPEN" } } },
+            { "matches": { "path": "^/tasks/task-999$" } },
             { "deepEquals": { "method": "GET" } }
           ],
           "responses": [{
             "is": {
-              "statusCode": 200,
+              "statusCode": 404,
               "headers": { "Content-Type": "application/json" },
-              "body": {
-                "count": 1,
-                "tasks": [
-                  { "taskId": "task-001", "name": "Review PR", "status": "OPEN", "priority": "HIGH" }
-                ]
-              }
+              "body": { "error": "Task not found", "code": "TASK_NOT_FOUND" }
             }
           }]
         },
@@ -68,20 +82,6 @@
                 "createdAt": "2024-01-15T10:00:00Z",
                 "updatedAt": "2024-01-15T14:30:00Z"
               }
-            }
-          }]
-        },
-        {
-          "scenarioName": "TaskAPI-GetTaskById-NotFound",
-          "predicates": [
-            { "matches": { "path": "/tasks/task-999" } },
-            { "deepEquals": { "method": "GET" } }
-          ],
-          "responses": [{
-            "is": {
-              "statusCode": 404,
-              "headers": { "Content-Type": "application/json" },
-              "body": { "error": "Task not found", "code": "TASK_NOT_FOUND" }
             }
           }]
         },
