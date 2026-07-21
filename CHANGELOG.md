@@ -15,13 +15,22 @@ record.
 
 - **Field-level `equals`-on-body predicates are now indexed by an automaton** (quamina), so
   "which of N field-equals-on-body stubs matches this request body" is one automaton pass
-  instead of an `O(N)` scan of structural comparisons in the second matching stage. At 1000
-  such stubs this recovers throughput from ~6.8× collapsed toward the indexed-path ceiling;
-  matching results are unchanged — this is purely a prefilter (any predicate it cannot express
-  — arrays, `null`, floats, `caseSensitive`/`keyCaseSensitive`, `except`/selector — safely
-  falls through to full evaluation). It complements the `deepEquals`-on-body hash index. The
-  capability is behind a default-on `quamina-matching` Cargo feature, droppable for minimal or
-  FFI builds via `--no-default-features`. (#767, #777)
+  instead of an `O(N)` scan of structural comparisons in the second matching stage. Measured in
+  the shipped binary (#779) on stubs that share a path and differ only by a body field, where the
+  dimension is what does the discriminating:
+
+  | stubs sharing a path | without | with | Δ |
+  |--:|--:|--:|--:|
+  | 10 | 452,698 | 440,370 | −2.7% |
+  | 100 | 317,912 | 436,007 | **+37.1%** |
+  | 1000 | 84,210 | 404,809 | **+380.7%** |
+
+  Without it throughput collapses as such stubs accumulate (453k → 84k); with it, it stays flat
+  (440k → 405k). Matching results are unchanged — this is purely a prefilter (any predicate it
+  cannot express — arrays, `null`, floats, `caseSensitive`/`keyCaseSensitive`, `except`/selector
+  — safely falls through to full evaluation). It complements the `deepEquals`-on-body hash index.
+  The capability is behind a default-on `quamina-matching` Cargo feature, droppable for minimal
+  or FFI builds via `--no-default-features`; it costs ~0.49 MB of binary size. (#767, #777, #779)
 
 - **Per-worker accept counters + runtime-topology bench support** (part of the RFC-712 gate,
   #746). `rift_accepted_connections_total{worker=…}` counts accepted connections per
@@ -127,8 +136,8 @@ record.
   it, and `scripts/verify-feature-propagation.sh` gates the invariant in CI: every default feature
   of `rift-mock-core` must be forwarded by, and default-on in, every crate that takes it with
   `default-features = false`. Matching **results** were never affected — the dimension is a pure
-  prefilter — so this is a throughput fix, not a correctness one. The end-to-end win has not yet
-  been measured in the binary (#779). (#777)
+  prefilter — so this is a throughput fix, not a correctness one. The end-to-end win was
+  subsequently measured in the shipped binary and is quoted under *Added* above (#779). (#777)
 
 - **An imposter with a numeric or boolean header value was rejected with a `400`.** Mountebank
   tolerates non-string scalar header values — its own recorders routinely emit

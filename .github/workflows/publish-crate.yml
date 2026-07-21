@@ -42,6 +42,29 @@ jobs:
             exit 1
           fi
 
+      # The workspace version in git is a placeholder — `release.yml` rewrites it from the tag at
+      # build time, so nothing on a branch ever carries the real version. Publishing from here
+      # would therefore upload the placeholder: crates.io accepts it (it is a version that has
+      # never been published), leaving a `0.1.0` that is newer by upload date but *lower* than
+      # every real release by semver, so `cargo add rift-http-proxy` keeps resolving 0.14.x while
+      # the newest-looking artifact on the page is a fake. Refuse instead, and point at the
+      # workflow that does set the version.
+      - name: Refuse to publish the placeholder version
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import sys,json;p=[x for x in json.load(sys.stdin)['packages'] if x['name']=='${{ inputs.crate }}'];print(p[0]['version'] if p else '')")
+          echo "Resolved version for ${{ inputs.crate }}: ${VERSION:-<none>}"
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not resolve a version for ${{ inputs.crate }}"
+            exit 1
+          fi
+          if [ "$VERSION" = "0.1.0" ]; then
+            echo "::error::refusing to publish the placeholder version 0.1.0. Releases are cut by \
+          tagging (release.yml), which rewrites the workspace version from the tag and publishes \
+          every crate in dependency order. Use that instead of this workflow."
+            exit 1
+          fi
+
       - name: Run tests
         run: cargo test -p ${{ inputs.crate }}
 

@@ -14,19 +14,15 @@ Interactive Terminal User Interface for [Rift HTTP Proxy](https://github.com/ach
 
 ## Installation
 
-### From Source
-
-```bash
-cargo install rift-tui
-```
-
-### Build from Repository
+`rift-tui` is not published to crates.io — build it from the repository:
 
 ```bash
 git clone https://github.com/achird-labs/rift.git
 cd rift
 cargo build --release --bin rift-tui
 ```
+
+The binary lands at `target/release/rift-tui`.
 
 ## Usage
 
