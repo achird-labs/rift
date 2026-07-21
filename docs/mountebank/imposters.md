@@ -440,8 +440,12 @@ These are errors served on the **imposter port** — distinct from the admin API
 plane, with `Content-Type: application/json`:
 
 ```json
-{ "errors": [ { "code": "...", "message": "..." } ] }
+{ "errors": [ { "code": "...", "type": "...", "message": "..." } ] }
 ```
+
+Branch on **`type`** — it is always a stable symbolic slug. `code` is legacy: the HTTP status as a
+string on most doors, a slug on a few, frozen for backward compatibility. See
+[Error Responses](../api/index.md#error-responses) for the full type list.
 
 | Status | When |
 |:-------|:-----|

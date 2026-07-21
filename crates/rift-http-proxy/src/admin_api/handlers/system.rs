@@ -2,6 +2,7 @@
 
 use crate::admin_api::types::*;
 use crate::imposter::ImposterManager;
+use crate::response::ErrorKind;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
@@ -233,7 +234,8 @@ pub async fn handle_reload(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &serde_json::json!({
                     "errors": [{
-                        "code": "500",
+                        "code": StatusCode::INTERNAL_SERVER_ERROR.as_str(),
+                        "type": ErrorKind::InternalError.slug(),
                         "message": format!("Reload partially failed: {}", failures.join("; ")),
                     }],
                     "failed": failures,

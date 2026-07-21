@@ -114,9 +114,14 @@ const SCRIPT_TIMEOUT_HEADER: &str = "x-rift-script-timeout";
 /// `{"errors":[{code,message}]}` envelope with a timeout-specific `code`, plus the shared
 /// `x-rift-inject-error` marker and the [`SCRIPT_TIMEOUT_HEADER`] that tells a timeout apart from a
 /// genuinely broken inject (which stays a 400).
-fn inject_timeout_response(code: &str, message: &str) -> Response<Full<Bytes>> {
+/// On this door `code` is already a slug, so `type` is the same string (issue #797 invariant 3) —
+/// taking the kind rather than a `&str` is what keeps the two from drifting apart.
+fn inject_timeout_response(
+    kind: crate::response::ErrorKind,
+    message: &str,
+) -> Response<Full<Bytes>> {
     let body = serde_json::json!({
-        "errors": [{ "code": code, "message": message }]
+        "errors": [{ "code": kind.slug(), "type": kind.slug(), "message": message }]
     })
     .to_string();
     build_response_with_headers(
@@ -260,14 +265,18 @@ fn upstream_error_response(
 
 fn matcher_error_response(e: &anyhow::Error) -> Response<Full<Bytes>> {
     if let Some(t) = e.downcast_ref::<crate::scripting::ScriptTimeoutError>() {
-        return inject_timeout_response("predicate injection timeout", &t.to_string());
+        return inject_timeout_response(
+            crate::response::ErrorKind::PredicateInjectionTimeout,
+            &t.to_string(),
+        );
     }
     #[cfg(feature = "javascript")]
     {
         if let Some(pred_err) = e.downcast_ref::<crate::scripting::PredicateInjectionError>() {
             let body = serde_json::json!({
                 "errors": [{
-                    "code": "invalid predicate injection",
+                    "code": crate::response::ErrorKind::InvalidPredicateInjection.slug(),
+                    "type": crate::response::ErrorKind::InvalidPredicateInjection.slug(),
                     "message": pred_err.to_string(),
                 }]
             })
@@ -384,7 +393,11 @@ async fn handle_request_inner(
                 ("x-rift-imposter-disabled", "true"),
                 ("content-type", "application/json"),
             ],
-            crate::response::error_body(StatusCode::SERVICE_UNAVAILABLE, "Imposter is disabled"),
+            crate::response::error_body_typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                crate::response::ErrorKind::ImposterDisabled,
+                "Imposter is disabled",
+            ),
         ));
     }
 
@@ -732,7 +745,10 @@ async fn handle_request_inner(
                     // A deadline miss (issue #499) is a transient 504 a client can retry, not the
                     // permanent-config 400 below — distinguish it before the parity mapping.
                     if let Some(t) = e.downcast_ref::<crate::scripting::ScriptTimeoutError>() {
-                        return Ok(inject_timeout_response("injection timeout", &t.to_string()));
+                        return Ok(inject_timeout_response(
+                            crate::response::ErrorKind::InjectionTimeout,
+                            &t.to_string(),
+                        ));
                     }
                     // Mountebank-shaped error parity (issue #355 Item 5): a failing inject is a
                     // 400 with `{"errors":[{"code":"invalid injection","message":"..."}]}`, not a
@@ -740,7 +756,8 @@ async fn handle_request_inner(
                     // (config) problem, not a server fault.
                     let body = serde_json::json!({
                         "errors": [{
-                            "code": "invalid injection",
+                            "code": crate::response::ErrorKind::InvalidInjection.slug(),
+                            "type": crate::response::ErrorKind::InvalidInjection.slug(),
                             "message": format!("{e}"),
                         }]
                     })
@@ -997,16 +1014,18 @@ async fn handle_request_inner(
                     let (status, body) = if timed_out {
                         (
                             StatusCode::GATEWAY_TIMEOUT,
-                            crate::response::error_body(
+                            crate::response::error_body_typed(
                                 StatusCode::GATEWAY_TIMEOUT,
+                                crate::response::ErrorKind::ScriptTimeout,
                                 &format!("Script timeout: {e}"),
                             ),
                         )
                     } else {
                         (
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            crate::response::error_body(
+                            crate::response::error_body_typed(
                                 StatusCode::INTERNAL_SERVER_ERROR,
+                                crate::response::ErrorKind::ScriptError,
                                 &format!("Script error: {e}"),
                             ),
                         )
@@ -1293,8 +1312,9 @@ async fn handle_request_inner(
                                 return Ok(build_response_with_headers(
                                     status,
                                     hdrs,
-                                    crate::response::error_body(
+                                    crate::response::error_body_typed(
                                         status,
+                                        crate::response::ErrorKind::BehaviorError,
                                         &format!("decorate failed (strictBehaviors): {e}"),
                                     ),
                                 ));
@@ -1348,8 +1368,9 @@ async fn handle_request_inner(
                                         ("x-rift-shelltransform-error", "true"),
                                         ("content-type", "application/json"),
                                     ],
-                                    crate::response::error_body(
+                                    crate::response::error_body_typed(
                                         StatusCode::INTERNAL_SERVER_ERROR,
+                                        crate::response::ErrorKind::BehaviorError,
                                         &format!("shellTransform failed (strictBehaviors): {e}"),
                                     ),
                                 ));
@@ -1392,8 +1413,9 @@ async fn handle_request_inner(
                                         ("x-rift-binary-error", "true"),
                                         ("content-type", "application/json"),
                                     ],
-                                    crate::response::error_body(
+                                    crate::response::error_body_typed(
                                         StatusCode::INTERNAL_SERVER_ERROR,
+                                        crate::response::ErrorKind::BehaviorError,
                                         &format!(
                                             "binary base64 decode failed (strictBehaviors): {e}"
                                         ),
@@ -1802,7 +1824,10 @@ mod matcher_error_response_tests {
     #[tokio::test]
     async fn inject_timeout_response_is_504_with_code_and_markers() {
         use http_body_util::BodyExt;
-        let resp = inject_timeout_response("injection timeout", "inject timed out after 1ms");
+        let resp = inject_timeout_response(
+            crate::response::ErrorKind::InjectionTimeout,
+            "inject timed out after 1ms",
+        );
         assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
         assert!(resp.headers().contains_key("x-rift-inject-error"));
         assert!(
@@ -1822,6 +1847,34 @@ mod matcher_error_response_tests {
         assert!(
             body.contains("\"code\":\"injection timeout\""),
             "body must carry the timeout-specific code, got: {body}"
+        );
+        // Issue #797 invariant 3: `type` mirrors the slug `code` on this door.
+        assert!(
+            body.contains("\"type\":\"injection timeout\""),
+            "body must carry the matching type slug, got: {body}"
+        );
+    }
+
+    // The predicate-side sibling of the door above. It has no end-to-end coverage (a real Boa
+    // busy-loop parks a shared-pool worker), so its envelope is pinned here — otherwise
+    // `ErrorKind::PredicateInjectionTimeout` would ship with no test at all.
+    #[tokio::test]
+    async fn predicate_inject_timeout_response_carries_matching_code_and_type() {
+        use http_body_util::BodyExt;
+        let resp = inject_timeout_response(
+            crate::response::ErrorKind::PredicateInjectionTimeout,
+            "predicate inject timed out after 1ms",
+        );
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(
+            body.contains("\"code\":\"predicate injection timeout\""),
+            "code must stay the 0.14.0 slug, got: {body}"
+        );
+        assert!(
+            body.contains("\"type\":\"predicate injection timeout\""),
+            "type must mirror it, got: {body}"
         );
     }
 

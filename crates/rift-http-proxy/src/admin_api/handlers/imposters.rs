@@ -12,6 +12,7 @@ use crate::imposter::{
     Imposter, ImposterConfig, ImposterError, ImposterManager, ScriptBaseDir, Stub, StubResponse,
     VerifyOptions, resolve_scripts,
 };
+use crate::response::ErrorKind;
 use crate::scripting::validate_stubs;
 use bytes::Bytes;
 use http_body_util::Full;
@@ -66,7 +67,8 @@ pub(crate) fn reject_stubs_if_injection_disallowed(
 pub(crate) fn injection_disallowed_response() -> Response<Full<Bytes>> {
     let body = serde_json::json!({
         "errors": [{
-            "code": "invalid injection",
+            "code": ErrorKind::InvalidInjection.slug(),
+            "type": ErrorKind::InvalidInjection.slug(),
             "message": "inject requires --allowInjection to be set. See \
                         http://www.mbtest.org/docs/api/injection for more information.",
         }]
@@ -311,7 +313,8 @@ async fn replace_all_from_bytes(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &serde_json::json!({
                     "errors": [{
-                        "code": "500",
+                        "code": StatusCode::INTERNAL_SERVER_ERROR.as_str(),
+                        "type": ErrorKind::InternalError.slug(),
                         "message": format!(
                             "Replace partially failed: {}",
                             failures.join("; ")

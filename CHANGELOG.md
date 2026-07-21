@@ -13,6 +13,26 @@ record.
 
 ### Added
 
+- **Every error response now carries a `type` field** — a stable symbolic slug identifying the
+  error, on every door that serves the Mountebank `errors` envelope (issue #797):
+
+  ```json
+  {"errors":[{"code":"503","type":"imposter disabled","message":"Imposter is disabled"}]}
+  ```
+
+  Six of the slugs are Mountebank's own error types, copied verbatim from its `errors.js`
+  (`bad data`, `invalid injection`, `resource conflict`, `insufficient access`, `no such resource`,
+  `unauthorized`), so a client that already maps Mountebank error types keeps working. The rest name
+  doors Mountebank has no equivalent for (`script error`, `script timeout`, `behavior error`,
+  `imposter disabled`, `request too large`, `upstream failure`, `timeout`, …).
+
+  **`code` is unchanged on every door** — this release adds a field and rewrites none. `code` stays
+  what it has always been: the HTTP status as a string on most doors and a Mountebank slug on five
+  (the four `inject` doors plus admin auth), which is precisely the inconsistency that made it
+  unusable for branching. It is now documented as legacy; new consumers should read `type`.
+  A per-door test asserts both halves — that `type` is the pinned slug *and* that `code` is
+  byte-identical to 0.14.0 — so the non-breakage is enforced rather than asserted in prose.
+
 - **Field-level `equals`-on-body predicates are now indexed by an automaton** (quamina), so
   "which of N field-equals-on-body stubs matches this request body" is one automaton pass
   instead of an `O(N)` scan of structural comparisons in the second matching stage. Measured in

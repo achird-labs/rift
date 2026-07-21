@@ -383,7 +383,7 @@ fn box_full(resp: Response<Full<Bytes>>) -> Response<AdminBody> {
 }
 
 fn unauthorized_response() -> Response<Full<Bytes>> {
-    let body = r#"{"errors":[{"code":"unauthorized","message":"Invalid authorization token"}]}"#;
+    let body = r#"{"errors":[{"code":"unauthorized","type":"unauthorized","message":"Invalid authorization token"}]}"#;
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
         .header("Content-Type", "application/json")
@@ -413,6 +413,14 @@ mod tests {
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
         let json: serde_json::Value = serde_json::from_str(body_str).unwrap();
         assert_eq!(json["errors"][0]["code"], "unauthorized");
+        // Issue #797 invariant 3: on a door whose `code` is already a slug, `type` is that same
+        // slug. Asserted here because this envelope is a hand-written literal, not built by
+        // `error_body_typed` — nothing else would catch the two drifting apart.
+        assert_eq!(json["errors"][0]["type"], "unauthorized");
+        assert_eq!(
+            json["errors"][0]["type"], json["errors"][0]["code"],
+            "type and code must agree on a slug door"
+        );
         assert!(!json["errors"][0]["message"].as_str().unwrap().is_empty());
     }
 

@@ -690,6 +690,61 @@ Get server logs (if logging enabled).
 
 ## Error Responses
 
+Every error Rift serves in the Mountebank `errors` envelope — on the admin plane and on the imposter
+port alike — carries three fields:
+
+```json
+{ "errors": [ { "code": "...", "type": "...", "message": "..." } ] }
+```
+
+**One shape is not in this family.** A backend outage (an unavailable flow-store or proxy store, and
+any matcher failure that is not an injection error) is reported as:
+
+```json
+{ "error": "backendUnavailable", "feature": "...", "detail": "..." }
+```
+
+— a different envelope with no `errors` array and no `type`. Check for the `errors` key before
+indexing into it. Unifying the two is tracked separately.
+
+| Field | Read it? | What it is |
+|:------|:---------|:-----------|
+| `type` | **yes** | The stable symbolic error type. Always a lowercase slug, on every door. This is the field to branch on. |
+| `code` | legacy | The HTTP status as a string on most doors, but a slug on a few (`invalid injection`, `unauthorized`, …). Frozen for backward compatibility — it is *not* reliably parseable as either. |
+| `message` | human | Free text. Never pattern-match it. |
+
+`type` was added in 0.15.0 (issue #797). `code` is unchanged from earlier releases, so existing
+clients keep working; new clients should read `type` instead.
+
+### Error types
+
+Six are Mountebank's own error types, so a client that already maps Mountebank errors keeps working:
+
+| `type` | Typical status |
+|:-------|:---------------|
+| `bad data` | 400, 422 |
+| `unauthorized` | 401 |
+| `insufficient access` | 403 |
+| `no such resource` | 404 |
+| `resource conflict` | 409 |
+| `invalid injection` | 400 |
+
+The rest name doors Mountebank does not have:
+
+| `type` | Typical status |
+|:-------|:---------------|
+| `invalid predicate injection` | 400 |
+| `injection timeout` / `predicate injection timeout` | 504 |
+| `script error` / `script timeout` | 500 / 504 |
+| `behavior error` | 500 |
+| `imposter disabled` | 503 |
+| `request too large` | 413 |
+| `upstream failure` | 502 |
+| `unavailable` | 503 |
+| `timeout` | 504 |
+| `internal error` | 500 |
+| `client error` / `server error` | any other 4xx / 5xx |
+
 ### 400 Bad Request
 
 Invalid request body or parameters.
@@ -698,7 +753,8 @@ Invalid request body or parameters.
 {
   "errors": [
     {
-      "code": "bad data",
+      "code": "400",
+      "type": "bad data",
       "message": "invalid JSON"
     }
   ]
@@ -713,7 +769,8 @@ Imposter doesn't exist.
 {
   "errors": [
     {
-      "code": "no such resource",
+      "code": "404",
+      "type": "no such resource",
       "message": "Imposter not found on port 4545"
     }
   ]
@@ -722,13 +779,29 @@ Imposter doesn't exist.
 
 ### 409 Conflict
 
-Port already in use.
+A stub with that `id` already exists on the imposter.
 
 ```json
 {
   "errors": [
     {
-      "code": "port conflict",
+      "code": "409",
+      "type": "resource conflict",
+      "message": "A stub with id 'login' already exists"
+    }
+  ]
+}
+```
+
+Note that a port already being in use is **not** a 409 — it is a `400` / `bad data`, because the
+request describes an imposter that cannot be created:
+
+```json
+{
+  "errors": [
+    {
+      "code": "400",
+      "type": "bad data",
       "message": "Port 4545 is already in use"
     }
   ]
@@ -746,6 +819,7 @@ binds `0.0.0.0` and `--apikey` is optional.
   "errors": [
     {
       "code": "413",
+      "type": "request too large",
       "message": "Request body exceeds the 67108864-byte admin API limit"
     }
   ]
