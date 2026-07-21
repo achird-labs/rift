@@ -11,6 +11,8 @@ record.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-21
+
 ### Added
 
 - **Every error response now carries a `type` field** — a stable symbolic slug identifying the
@@ -79,8 +81,6 @@ record.
   work-stealing with a warning (its SO_REUSEPORT does not hash-balance accepts), Windows
   rejects the flag. The binary logs `Runtime topology: <mode>` at startup. (#744)
 
-### Added
-
 - **Opt-in `jemalloc` allocator feature for the server binary** (allocator bake-off, part of
   #717). `cargo build --release --no-default-features --features redis-backend,javascript,jemalloc`
   builds `rift-http-proxy` with tikv-jemallocator instead of the default mimalloc; when both
@@ -89,19 +89,6 @@ record.
   `--allocator {mimalloc,jemalloc,system}` — per-allocator builds, RSS sampling
   (`rss_mb_peak`/`rss_mb_end`), and suffixed result artefacts for three-way comparison. The
   default allocator is unchanged; any switch is gated on #717's pre-registered decision rule.
-
-### Fixed
-
-- **Recording-path throughput collapse once the journal hit its 10,000-entry cap.** A full
-  journal evicts on every recorded request, and the per-eviction warning emitted one log line
-  per request (87k+ lines/sec under load), serializing the whole recording path on the tracing
-  subscriber's writer lock — measured at −29% to −55% RPS versus recording-off, and flat
-  (non-scaling) throughput from 10 to 200 connections. The cap warning now fires once per
-  fill-up (re-armed by deliberate deletions: `DELETE .../requests`, scoped clears, retention),
-  and recording overhead drops to ~2% of throughput at saturation. Cap and eviction semantics
-  (10k entries, oldest-first, cursor truncation) are unchanged. (#718)
-
-### Added
 
 - **HTTP connection-builder tuning knobs and optional accept-side connection backpressure**
   (env-tunable, applied to the imposter, proxy, admin-API, and metrics listeners). The hyper
@@ -145,7 +132,24 @@ record.
   selector, an `except`, a scalar `body`, or an expected body containing a string that is itself
   JSON all fall back to the existing full comparison (correctness is never affected, only pruning).
 
+- **The body-field matching automaton is now skipped when it cannot tell two stubs apart.** It is
+  built per stub-snapshot only if some request could reach two field-`equals`-on-body stubs at once
+  (their path *and* method sets intersect). On the very common shape where every stub owns a
+  distinct path, the path dimension has already narrowed to one stub before the body is read, so the
+  automaton was costing a flat ~6.5% throughput to re-derive a known answer. Matching results are
+  unchanged either way — it is a pure over-approximating prefilter, and Stage-2 still decides.
+  (#792)
+
 ### Fixed
+
+- **Recording-path throughput collapse once the journal hit its 10,000-entry cap.** A full
+  journal evicts on every recorded request, and the per-eviction warning emitted one log line
+  per request (87k+ lines/sec under load), serializing the whole recording path on the tracing
+  subscriber's writer lock — measured at −29% to −55% RPS versus recording-off, and flat
+  (non-scaling) throughput from 10 to 200 connections. The cap warning now fires once per
+  fill-up (re-armed by deliberate deletions: `DELETE .../requests`, scoped clears, retention),
+  and recording overhead drops to ~2% of throughput at saturation. Cap and eviction semantics
+  (10k entries, oldest-first, cursor truncation) are unchanged. (#718)
 
 - **The quamina body-field dimension never reached the `rift` binary or the C-ABI.** It was
   default-on for `rift-mock-core`, but `rift-http-proxy` and `rift-ffi` take that crate with
@@ -1143,7 +1147,8 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/achird-labs/rift/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/achird-labs/rift/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/achird-labs/rift/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/achird-labs/rift/compare/v0.13.6...v0.14.0
 [0.13.6]: https://github.com/achird-labs/rift/compare/v0.13.5...v0.13.6
 [0.13.5]: https://github.com/achird-labs/rift/compare/v0.13.4...v0.13.5
