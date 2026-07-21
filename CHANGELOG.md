@@ -11,6 +11,27 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The backend-error door now serves the standard error envelope.** An unavailable flow-store or
+  proxy store — and any matcher failure that is not an injection error — used to answer with only
+  its own pre-envelope shape (`{"error":"backendUnavailable","feature":…,"detail":…}`), with no
+  `errors` array and no `type`. A client that followed 0.15.0's guidance and switched to reading
+  `errors[0].type` got nothing here and silently fell through to its default error mapping. This is
+  not an embedder-only path: it is reached from eight scenario handlers and the recorded-requests
+  clear on the admin plane, several imposter-handler paths, and the matcher fall-through, so any
+  Redis-backed flow-store outage hit it.
+
+  It now serves the envelope with a dedicated `backend unavailable` slug (a generic `unavailable`
+  would not tell a backend outage apart from any other 503), carrying `feature` and `detail` inside
+  `errors[0]` so the *which backend failed* context stays machine-readable rather than flattened
+  into prose. (#800)
+
+  **Deprecation:** the **top-level** `error`/`feature`/`detail` keys are unchanged and still
+  served, so nothing breaks — but they are deprecated and will be **removed in 0.17.0** (#801).
+  Read `errors[0]` instead.
+
+
 ## [0.15.0] - 2026-07-21
 
 ### Added

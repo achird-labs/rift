@@ -44,6 +44,7 @@ pub enum ErrorKind {
     InvalidPredicateInjection,
     InjectionTimeout,
     PredicateInjectionTimeout,
+    BackendUnavailable,
     ScriptError,
     ScriptTimeout,
     BehaviorError,
@@ -61,7 +62,7 @@ impl ErrorKind {
     /// Every variant as of writing — keep in sync by hand when adding one. The exhaustive,
     /// wildcard-free match in [`slug`](Self::slug) is the half of the guard the compiler enforces;
     /// this array is what lets the shape test iterate them.
-    pub const ALL: [ErrorKind; 20] = [
+    pub const ALL: [ErrorKind; 21] = [
         ErrorKind::BadData,
         ErrorKind::InvalidInjection,
         ErrorKind::ResourceConflict,
@@ -71,6 +72,7 @@ impl ErrorKind {
         ErrorKind::InvalidPredicateInjection,
         ErrorKind::InjectionTimeout,
         ErrorKind::PredicateInjectionTimeout,
+        ErrorKind::BackendUnavailable,
         ErrorKind::ScriptError,
         ErrorKind::ScriptTimeout,
         ErrorKind::BehaviorError,
@@ -97,6 +99,7 @@ impl ErrorKind {
             ErrorKind::InvalidPredicateInjection => "invalid predicate injection",
             ErrorKind::InjectionTimeout => "injection timeout",
             ErrorKind::PredicateInjectionTimeout => "predicate injection timeout",
+            ErrorKind::BackendUnavailable => "backend unavailable",
             ErrorKind::ScriptError => "script error",
             ErrorKind::ScriptTimeout => "script timeout",
             ErrorKind::BehaviorError => "behavior error",

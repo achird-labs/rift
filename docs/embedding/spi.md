@@ -165,9 +165,28 @@ pub struct BackendUnavailable {
 }
 ```
 
-`backend_error_response(&anyhow::Error)` maps such an error to a structured
-`503 {"error":"backendUnavailable", ...}`; any other error maps to `500`. This is how a down remote
-store becomes a clean 503 to the API caller rather than a silent fallback.
+`backend_error_response(&anyhow::Error)` maps such an error to a structured `503`; any other error
+maps to `500`. This is how a down remote store becomes a clean 503 to the API caller rather than a
+silent fallback. The body carries the standard error envelope, with `feature` naming which backend
+failed:
+
+```json
+{
+  "errors": [{
+    "code": "503",
+    "type": "backend unavailable",
+    "message": "flowState: redis connection refused",
+    "feature": "flowState",
+    "detail": "redis connection refused"
+  }],
+  "error": "backendUnavailable",
+  "feature": "flowState",
+  "detail": "redis connection refused"
+}
+```
+
+> **Deprecated:** the **top-level** `error`/`feature`/`detail` keys are retained for backward
+> compatibility and will be **removed in 0.17.0** (#801). Read `errors[0]` instead.
 
 Per-request operational metadata travels through a tokio task-local annotation scope:
 `annotate(key: &'static str, value: String)` records a `(key, value)` that a `ResponseDecorator` later

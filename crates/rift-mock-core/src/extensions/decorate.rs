@@ -72,13 +72,31 @@ pub trait ResponseDecorator: Send + Sync {
 }
 
 /// Map a backend/handler error to its response: [`BackendUnavailable`] anywhere in the
-/// chain → `503 {"error":"backendUnavailable",...}`; anything else → `500
-/// {"error":"internalError",...}`. Never a silent fallback.
+/// chain → `503`; anything else → `500`. Never a silent fallback.
+///
+/// Serves **two shapes in one body** (issue #800). This door predates the #611/#797 envelope
+/// sweeps and was the last one still serving only its own `{"error":"backendUnavailable",…}`
+/// shape, so a client that followed #797's guidance and switched to reading `errors[0].type` got
+/// nothing here. It now carries the Mountebank envelope *as well*:
+///
+/// - `errors[0]` — the envelope, with the `type` slug new consumers branch on. `feature`/`detail`
+///   ride inside the error object rather than being flattened into `message`, because naming
+///   *which* backend failed is this door's whole purpose.
+/// - top-level `error`/`feature`/`detail` — the legacy 0.15.0 keys, **frozen**. Deprecated in
+///   0.16.0, removed in 0.17.0 by issue #801. They stay because `rift-enterprise` parses
+///   them today; dropping them here would break the distributed edition mid-bump.
 pub fn backend_error_response(err: &anyhow::Error) -> Response<Full<Bytes>> {
     let (status, body) = match err.downcast_ref::<BackendUnavailable>() {
         Some(b) => (
             StatusCode::SERVICE_UNAVAILABLE,
             serde_json::json!({
+                "errors": [{
+                    "code": StatusCode::SERVICE_UNAVAILABLE.as_str(),
+                    "type": crate::response::ErrorKind::BackendUnavailable.slug(),
+                    "message": format!("{}: {}", b.feature, b.detail),
+                    "feature": b.feature,
+                    "detail": b.detail,
+                }],
                 "error": "backendUnavailable",
                 "feature": b.feature,
                 "detail": b.detail,
@@ -87,6 +105,11 @@ pub fn backend_error_response(err: &anyhow::Error) -> Response<Full<Bytes>> {
         None => (
             StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::json!({
+                "errors": [{
+                    "code": StatusCode::INTERNAL_SERVER_ERROR.as_str(),
+                    "type": crate::response::ErrorKind::InternalError.slug(),
+                    "message": format!("{err:#}"),
+                }],
                 "error": "internalError",
                 // "{err:#}" keeps the whole context chain — the outermost message alone
                 // rarely says why ("Redis GET failed" without the refused connection).
@@ -151,9 +174,33 @@ mod tests {
         assert_eq!(resp.status(), hyper::StatusCode::SERVICE_UNAVAILABLE);
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        // Legacy top-level keys (issue #800 AC2): byte-identical to 0.15.0. Deprecated in 0.16.0
+        // and removed in 0.17.0 — these three assertions are what the removal issue deletes, and
+        // until then they are what stops the deprecation window closing by accident.
         assert_eq!(json["error"], "backendUnavailable");
         assert_eq!(json["feature"], "flowState");
         assert_eq!(json["detail"], "redis connection refused");
+
+        // AC1: the door now also serves the Mountebank envelope with the #797 `type` slug.
+        assert_eq!(
+            json["errors"][0]["code"], "503",
+            "code is the status string, not a slug"
+        );
+        assert_eq!(
+            json["errors"][0]["type"], "backend unavailable",
+            "a dedicated slug — generic `unavailable` would not distinguish a backend outage \
+             from any other 503, which is the whole reason this door exists"
+        );
+        assert!(
+            json["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|m| !m.is_empty()),
+            "message must be non-empty, got: {json}"
+        );
+        // AC3: the structured split stays machine-readable inside the envelope — `feature` names
+        // WHICH backend failed, which is the door's entire value and must not be flattened away.
+        assert_eq!(json["errors"][0]["feature"], "flowState");
+        assert_eq!(json["errors"][0]["detail"], "redis connection refused");
     }
 
     #[tokio::test]
@@ -162,7 +209,45 @@ mod tests {
         assert_eq!(resp.status(), hyper::StatusCode::INTERNAL_SERVER_ERROR);
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        // Legacy key, frozen (AC2).
         assert_eq!(json["error"], "internalError");
+        // AC1: envelope on this branch too — a generic internal error is exactly what it is.
+        assert_eq!(json["errors"][0]["code"], "500");
+        assert_eq!(json["errors"][0]["type"], "internal error");
+        assert!(
+            json["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|m| !m.is_empty()),
+            "message must carry the context chain, got: {json}"
+        );
+        // The 500 branch has no feature/detail split to preserve — it must not invent one.
+        assert!(
+            json["errors"][0]["feature"].is_null() && json["errors"][0]["detail"].is_null(),
+            "the non-backend branch has neither `feature` nor `detail` inside the envelope, \
+             got: {json}"
+        );
+    }
+
+    // Drift tripwire, not an independent equivalence proof: both shapes are populated from the
+    // same `b.feature`/`b.detail` in one `json!` literal, so this passes trivially today. Its job
+    // is to fail the moment someone edits one shape and not the other — e.g. a fix applied only to
+    // the legacy keys — which is how the two would silently start describing different failures.
+    #[tokio::test]
+    async fn legacy_and_envelope_shapes_agree_on_the_same_error() {
+        let err = anyhow::Error::new(BackendUnavailable {
+            feature: "proxyStore",
+            detail: "connection reset".to_string(),
+        });
+        let resp = backend_error_response(&err);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(json["feature"], json["errors"][0]["feature"]);
+        assert_eq!(json["detail"], json["errors"][0]["detail"]);
+        let msg = json["errors"][0]["message"].as_str().expect("message");
+        assert!(
+            msg.contains("proxyStore") && msg.contains("connection reset"),
+            "message must carry both halves of the legacy split, got: {msg}"
+        );
     }
 
     // BackendUnavailable survives an anyhow context chain (backends wrap with .context()).

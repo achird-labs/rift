@@ -697,15 +697,30 @@ port alike — carries three fields:
 { "errors": [ { "code": "...", "type": "...", "message": "..." } ] }
 ```
 
-**One shape is not in this family.** A backend outage (an unavailable flow-store or proxy store, and
-any matcher failure that is not an injection error) is reported as:
+**One door carries extra keys.** A backend outage (an unavailable flow-store or proxy store, and any
+matcher failure that is not an injection error) serves the envelope *plus* a legacy shape it
+predates:
 
 ```json
-{ "error": "backendUnavailable", "feature": "...", "detail": "..." }
+{
+  "errors": [{
+    "code": "503",
+    "type": "backend unavailable",
+    "message": "flowState: redis connection refused",
+    "feature": "flowState",
+    "detail": "redis connection refused"
+  }],
+  "error": "backendUnavailable",
+  "feature": "flowState",
+  "detail": "redis connection refused"
+}
 ```
 
-— a different envelope with no `errors` array and no `type`. Check for the `errors` key before
-indexing into it. Unifying the two is tracked separately.
+`feature` names *which* backend failed and `detail` gives the underlying cause; both are available
+inside `errors[0]`, so nothing needs the legacy keys.
+
+> **Deprecated:** the **top-level** `error`, `feature` and `detail` keys are retained unchanged for
+> backward compatibility and will be **removed in 0.17.0**. Read `errors[0]` instead.
 
 | Field | Read it? | What it is |
 |:------|:---------|:-----------|
@@ -735,6 +750,7 @@ The rest name doors Mountebank does not have:
 |:-------|:---------------|
 | `invalid predicate injection` | 400 |
 | `injection timeout` / `predicate injection timeout` | 504 |
+| `backend unavailable` | 503 |
 | `script error` / `script timeout` | 500 / 504 |
 | `behavior error` | 500 |
 | `imposter disabled` | 503 |

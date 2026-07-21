@@ -1455,6 +1455,9 @@ mod requests_filter_tests {
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(json["error"], "backendUnavailable");
+        // Issue #800: the admin plane serves the envelope on this door as well.
+        assert_eq!(json["errors"][0]["code"], "503");
+        assert_eq!(json["errors"][0]["type"], "backend unavailable");
         let _ = manager.delete_imposter(19742).await;
     }
 
