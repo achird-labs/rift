@@ -78,6 +78,35 @@ await server.close();
 
 See the [Node.js Integration Guide]({{ site.baseurl }}/getting-started/nodejs/) for complete documentation.
 
+### Java / JVM
+
+For JVM projects, add the official [rift-java](https://github.com/achird-labs/rift-java) SDK to your
+test scope:
+
+```xml
+<dependency>
+  <groupId>io.github.achird-labs</groupId>
+  <artifactId>rift-java-core</artifactId>
+  <scope>test</scope>
+</dependency>
+```
+
+Usage:
+
+```java
+try (Rift rift = Rift.embedded()) {                  // or Rift.connect(uri) / Rift.spawn()
+    Imposter users = rift.create(
+        imposter("users").stub(onGet("/api/users/1").willReturn(okJson("{\"id\":1}"))));
+    users.verify(onGet("/api/users/1"), times(1));
+}
+```
+
+`Rift.embedded()` runs the engine in-process over Panama FFM, so no separate binary or container is
+needed; `Rift.spawn()` manages a downloaded binary for you, and `Rift.connect(uri)` targets any
+running admin endpoint. See the
+[rift-java documentation](https://achird-labs.github.io/rift-java/) for the JUnit 5, Spring, and
+Testcontainers integrations.
+
 ---
 
 ## Verify Installation
@@ -178,6 +207,7 @@ Example `imposters.json`:
 
 - [Quick Start Tutorial]({{ site.baseurl }}/getting-started/quickstart/) - Detailed walkthrough
 - [Node.js Integration]({{ site.baseurl }}/getting-started/nodejs/) - npm package for Node.js projects
+- [Java / JVM SDK](https://github.com/achird-labs/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
 - [Predicates Guide]({{ site.baseurl }}/mountebank/predicates/) - Request matching
 - [Responses Guide]({{ site.baseurl }}/mountebank/responses/) - Response configuration
 - [Migration Guide]({{ site.baseurl }}/getting-started/migration/) - Switching from Mountebank

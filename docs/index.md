@@ -122,6 +122,34 @@ await server.close();
 
 See the [Node.js Integration Guide]({{ site.baseurl }}/getting-started/nodejs/) for complete documentation.
 
+### Java / JVM Integration
+
+For JVM projects, use the official [rift-java](https://github.com/achird-labs/rift-java) SDK. It runs
+the engine three ways — embedded in-process (Panama FFM, no Docker), connected to any running admin
+endpoint, or as a managed spawned binary — with a fluent DSL plus JUnit 5, Spring, and Testcontainers
+integrations.
+
+```xml
+<dependency>
+  <groupId>io.github.achird-labs</groupId>
+  <artifactId>rift-java-core</artifactId>
+  <scope>test</scope>
+</dependency>
+```
+
+```java
+try (Rift rift = Rift.embedded()) {                  // or Rift.connect(uri) / Rift.spawn()
+    Imposter users = rift.create(
+        imposter("users").stub(onGet("/api/users/1").willReturn(okJson("{\"id\":1}"))));
+    // point your system under test at users.uri(), then assert:
+    users.verify(onGet("/api/users/1"), times(1));
+}
+```
+
+See the [rift-java documentation](https://achird-labs.github.io/rift-java/) for the full feature
+surface, and the [BOM](https://github.com/achird-labs/rift-java/blob/master/rift-java-bom/README.md)
+for version-pinning every module at once.
+
 ---
 
 ## Documentation
@@ -130,6 +158,7 @@ See the [Node.js Integration Guide]({{ site.baseurl }}/getting-started/nodejs/) 
 - [Installation]({{ site.baseurl }}/getting-started/) - Docker, binary, and build from source
 - [Quick Start]({{ site.baseurl }}/getting-started/quickstart/) - Create your first imposter
 - [Node.js Integration]({{ site.baseurl }}/getting-started/nodejs/) - npm package for Node.js projects
+- [Java / JVM SDK](https://github.com/achird-labs/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
 - [Migration from Mountebank]({{ site.baseurl }}/getting-started/migration/) - Switch from Mountebank to Rift
 
 ### Concepts
