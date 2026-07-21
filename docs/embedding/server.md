@@ -133,6 +133,49 @@ metrics.shutdown().await;
 
 ---
 
+## Bootstrap helpers
+
+`ServerBuilder` composes the *running* server, but a binary also has bootstrap concerns around it:
+applying an rcfile's defaults, stopping a server by PID file, and saving a running server's
+imposters. These live in `rift_http_proxy::bootstrap` so an alternative binary keeps CLI parity with
+`rift` instead of reimplementing them (issue #807).
+
+| Function | Signature | Purpose |
+|:---------|:----------|:--------|
+| `apply_rcfile_defaults` | `fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> anyhow::Result<()>` | Fill CLI fields **still at their clap defaults** from a Mountebank-compatible JSON rcfile. An explicitly-supplied flag always wins; unrecognised keys are warned and ignored. |
+| `stop_server` | `fn stop_server(pidfile: &Path) -> anyhow::Result<()>` | Signal the process named in `pidfile` (SIGTERM on unix, `taskkill /F` on Windows), then remove the file. |
+| `save_imposters` | `fn save_imposters(host: &str, port: u16, savefile: &Path, remove_proxies: bool) -> anyhow::Result<()>` | Fetch `GET /imposters?replayable=true` from a running admin API and write it to `savefile`. |
+
+Supported rcfile keys: `port`, `host`, `logLevel`/`loglevel`, `allowInjection`/`allow_injection`,
+`localOnly`/`local_only`, `datadir`, `configfile`.
+
+```rust
+use rift_http_proxy::bootstrap;
+use rift_http_proxy::server::{Cli, Commands};
+use clap::Parser;
+
+let mut cli = Cli::parse();
+if let Some(rcfile) = cli.rcfile.clone() {
+    bootstrap::apply_rcfile_defaults(&mut cli, &rcfile)?;
+}
+
+match &cli.command {
+    Some(Commands::Stop { pidfile }) => return bootstrap::stop_server(pidfile),
+    // `restart` is just `stop` followed by the normal start path.
+    Some(Commands::Restart { pidfile }) => bootstrap::stop_server(pidfile)?,
+    Some(Commands::Save { savefile, remove_proxies }) => {
+        return bootstrap::save_imposters(&cli.host, cli.port, savefile, *remove_proxies);
+    }
+    _ => {}
+}
+```
+
+`save_imposters` builds its own tokio runtime and blocks on it (it is a sync subcommand path), so do
+not call it from inside a running async runtime — use `tokio::task::spawn_blocking` if your caller
+is already async.
+
+---
+
 ## TLS: install the crypto provider
 
 Before serving any HTTPS imposter from an embedding host, install the default rustls (`ring`) crypto

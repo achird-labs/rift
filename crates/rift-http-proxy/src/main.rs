@@ -42,12 +42,11 @@ const ACTIVE_ALLOCATOR: &str = "jemalloc";
 const ACTIVE_ALLOCATOR: &str = "system";
 
 use clap::Parser;
-use rift_http_proxy::admin_api::DEFAULT_ADMIN_PORT;
+use rift_http_proxy::bootstrap::{apply_rcfile_defaults, save_imposters, stop_server};
 use rift_http_proxy::healthcheck;
 use rift_http_proxy::runtime;
 use rift_http_proxy::script_cli;
 use rift_http_proxy::server::{Cli, Commands, ServerBuilder};
-use std::path::PathBuf;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, Layer, fmt, prelude::*};
 
@@ -141,7 +140,7 @@ fn main() -> Result<(), anyhow::Error> {
             savefile,
             remove_proxies,
         }) => {
-            return save_imposters(&cli, savefile, *remove_proxies);
+            return save_imposters(&cli.host, cli.port, savefile, *remove_proxies);
         }
         Some(Commands::Replay { configfile }) => {
             // Load the config file and start
@@ -231,125 +230,4 @@ fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
             result
         }
     }
-}
-
-/// Stop a running server by PID file
-fn stop_server(pidfile: &PathBuf) -> Result<(), anyhow::Error> {
-    if !pidfile.exists() {
-        return Err(anyhow::anyhow!("PID file not found: {pidfile:?}"));
-    }
-
-    let pid_str = std::fs::read_to_string(pidfile)?;
-    let pid: i32 = pid_str.trim().parse()?;
-
-    info!("Stopping server with PID {}", pid);
-
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(pid, libc::SIGTERM);
-    }
-
-    #[cfg(windows)]
-    {
-        // On Windows, use taskkill
-        std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .status()?;
-    }
-
-    // Remove PID file
-    std::fs::remove_file(pidfile)?;
-
-    Ok(())
-}
-
-/// Apply defaults from a Mountebank-compatible rcfile (JSON) to the CLI struct.
-/// Only sets fields that are still at their clap defaults (i.e., not explicitly supplied
-/// on the command line). Only a subset of keys is supported; unrecognised keys are warned.
-fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &std::path::Path) -> Result<(), anyhow::Error> {
-    let raw = std::fs::read_to_string(rcfile)?;
-    let obj: serde_json::Value = serde_json::from_str(&raw)?;
-    let map = obj
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("rcfile must be a JSON object"))?;
-
-    for (key, val) in map {
-        match key.as_str() {
-            "port" => {
-                if cli.port == DEFAULT_ADMIN_PORT
-                    && let Some(p) = val.as_u64()
-                {
-                    cli.port = p as u16;
-                }
-            }
-            "host" => {
-                if cli.host == "0.0.0.0"
-                    && let Some(h) = val.as_str()
-                {
-                    cli.host = h.to_string();
-                }
-            }
-            "logLevel" | "loglevel" => {
-                if cli.loglevel == "info"
-                    && let Some(l) = val.as_str()
-                {
-                    cli.loglevel = l.to_string();
-                }
-            }
-            "allowInjection" | "allow_injection" => {
-                if !cli.allow_injection {
-                    cli.allow_injection = val.as_bool().unwrap_or(false);
-                }
-            }
-            "localOnly" | "local_only" => {
-                if !cli.local_only {
-                    cli.local_only = val.as_bool().unwrap_or(false);
-                }
-            }
-            "datadir" => {
-                if cli.datadir.is_none()
-                    && let Some(d) = val.as_str()
-                {
-                    cli.datadir = Some(std::path::PathBuf::from(d));
-                }
-            }
-            "configfile" => {
-                if cli.configfile.is_none()
-                    && let Some(f) = val.as_str()
-                {
-                    cli.configfile = Some(std::path::PathBuf::from(f));
-                }
-            }
-            other => {
-                warn!("--rcfile: unsupported key '{}' (ignored)", other);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Save imposters to a file
-fn save_imposters(
-    cli: &Cli,
-    savefile: &PathBuf,
-    remove_proxies: bool,
-) -> Result<(), anyhow::Error> {
-    let runtime = tokio::runtime::Runtime::new()?;
-
-    runtime.block_on(async {
-        let client = reqwest::Client::new();
-        let mut query = "replayable=true".to_string();
-        if remove_proxies {
-            query.push_str("&removeProxies=true");
-        }
-        let url = format!("http://{}:{}/imposters?{}", cli.host, cli.port, query);
-
-        let response = client.get(&url).send().await?;
-        let content = response.text().await?;
-
-        std::fs::write(savefile, &content)?;
-        info!("Saved imposters to {:?}", savefile);
-
-        Ok(())
-    })
 }

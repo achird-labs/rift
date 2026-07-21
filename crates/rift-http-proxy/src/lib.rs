@@ -48,6 +48,9 @@ pub mod gateway;
 // CLI surface + ServerBuilder + metrics server; the `rift` binary is a thin caller
 pub mod server;
 
+// rcfile/stop/save bootstrap helpers shared with alternative binaries (issue #807)
+pub mod bootstrap;
+
 /// Opt-in per-core runtime topology for the server binary (RFC-712, issue #744).
 pub mod runtime;
 

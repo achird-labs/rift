@@ -11,6 +11,21 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **`rift_http_proxy::bootstrap` — the rcfile/stop/save helpers are now a public seam** (issue #807).
+  Issue #317 moved server composition into the library, but three bootstrap concerns stayed private
+  in the `rift` binary's `main.rs`: `apply_rcfile_defaults`, `stop_server`, and `save_imposters`. An
+  alternative binary built on this crate therefore could not support `--rcfile` or the
+  `stop`/`restart`/`save` subcommands without copy-pasting them — forking behaviour meant to stay
+  identical across binaries (the "an explicit flag always beats the rcfile" rule is exactly the kind
+  of contract that rots when duplicated).
+
+  They are now public, unchanged, with `main.rs` as a thin caller. Two signature adjustments came
+  with the move: paths are `&Path` rather than `&PathBuf`, and `save_imposters` takes `(host, port)`
+  instead of the whole `Cli` — the only two fields it ever read. `restart` needs no new seam; it is
+  `stop_server(pidfile)?` followed by the normal start path.
+
 ### Fixed
 
 - **`examples/task-management-api.json` no longer ships two dead stubs.** The document loaded
