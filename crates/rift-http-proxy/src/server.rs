@@ -556,12 +556,38 @@ impl RunningServer {
         self.admin.join().await
     }
 
+    /// Run until the admin API accept loop exits, **without consuming the server** (issue #806).
+    ///
+    /// This is the seam for an embedder that must race the server against its own shutdown signal:
+    /// `join` moves the server, so the signal arm could no longer reach `shutdown`.
+    ///
+    /// ```no_run
+    /// # async fn example(server: rift_http_proxy::server::RunningServer) -> anyhow::Result<()> {
+    /// # async fn termination_signal() {}
+    /// tokio::select! {
+    ///     result = server.wait() => return result,   // the admin plane died — surface it
+    ///     () = termination_signal() => {}
+    /// }
+    /// server.shutdown().await;                      // still owned, still shutdownable
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// The accept loop's error is delivered to the first caller only; later calls return `Ok(())`.
+    /// Like `join`, this tracks the admin plane — the metrics server keeps serving in background.
+    pub async fn wait(&self) -> anyhow::Result<()> {
+        self.admin.wait().await
+    }
+
     /// Stop accepting on all listeners, giving in-flight connections a bounded grace. Stops
     /// whatever intercept listener is running at shutdown time, including one started over the API
     /// after this server was bound.
-    pub async fn shutdown(self) {
+    ///
+    /// Takes `&self` (issue #806) so it composes with [`wait`](Self::wait) and can be called
+    /// through a shared handle; every underlying shutdown is already idempotent.
+    pub async fn shutdown(&self) {
         self.admin.shutdown().await;
-        if let Some(metrics) = self.metrics {
+        if let Some(metrics) = &self.metrics {
             metrics.shutdown().await;
         }
         self.intercept.stop().await;

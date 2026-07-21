@@ -13,6 +13,19 @@ record.
 
 ### Added
 
+- **`RunningServer::wait(&self)` — await the embedded server without consuming it** (issue #806).
+  `join(self)` and `shutdown(self)` both moved the server, so a host could await the server *or*
+  await its own shutdown signal, never race them: the arm that won a `select!` against `join` could
+  no longer reach `shutdown`. `wait` borrows instead, so the host owns the shutdown policy — it can
+  run its own teardown between the signal and the server stopping, and still surface an admin-plane
+  failure if the accept loop dies on its own first. `RunningAdminApi::wait(&self)` is the same seam
+  one layer down.
+
+  `RunningServer::shutdown` now takes `&self` (it was `self`), which also allows holding the server
+  in an `Arc` and stopping it from another task. Method-call syntax is unchanged, so existing
+  callers keep compiling. The accept loop's error goes to the first `wait`/`join` caller; later
+  calls return `Ok(())`, since `anyhow::Error` is not `Clone`.
+
 - **`rift_http_proxy::bootstrap` — the rcfile/stop/save helpers are now a public seam** (issue #807).
   Issue #317 moved server composition into the library, but three bootstrap concerns stayed private
   in the `rift` binary's `main.rs`: `apply_rcfile_defaults`, `stop_server`, and `save_imposters`. An

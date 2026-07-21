@@ -103,7 +103,23 @@ impl AdminApiServer {
         let cancel = CancellationToken::new();
         let tracker = TaskTracker::new();
         let (loop_cancel, loop_tracker) = (cancel.clone(), tracker.clone());
+        // The accept loop's outcome is published to a slot rather than left solely in the
+        // JoinHandle, so `wait(&self)` can observe the exit without consuming the handle that
+        // `join(self)`/`shutdown(&self)` need (issue #806).
+        let done = CancellationToken::new();
+        let outcome: Arc<Mutex<Option<anyhow::Result<()>>>> = Arc::new(Mutex::new(None));
+        let (task_done, task_outcome) = (done.clone(), Arc::clone(&outcome));
+        let release_cancel = cancel.clone();
         let task = tokio::spawn(async move {
+            // Releasing waiters from a drop guard rather than the tail of this block covers every
+            // way the loop can end — normal return, panic unwind, and `shutdown`'s abort. Firing
+            // only on the normal path would leave `wait()` blocked forever on a panicking accept
+            // loop: precisely the death it exists to report (issue #806).
+            let _release = ReleaseWaiters {
+                done: task_done,
+                outcome: Arc::clone(&task_outcome),
+                shutdown_requested: release_cancel,
+            };
             let result = accept_loop(
                 listener,
                 self.manager,
@@ -121,7 +137,10 @@ impl AdminApiServer {
             if let Err(ref e) = result {
                 tracing::error!("Admin API server error: {e:#}");
             }
-            result
+            // Published before `_release` drops, so every released waiter sees the outcome.
+            *task_outcome
+                .lock()
+                .expect("admin API outcome mutex poisoned") = Some(result);
         });
 
         Ok(RunningAdminApi {
@@ -129,6 +148,8 @@ impl AdminApiServer {
             cancel,
             tracker,
             task: Mutex::new(Some(task)),
+            done,
+            outcome,
         })
     }
 
@@ -139,13 +160,50 @@ impl AdminApiServer {
     }
 }
 
+/// Releases `RunningAdminApi::wait` callers however the accept-loop task ends (issue #806).
+///
+/// A tail-of-the-block `cancel()` would be skipped by a panic unwind or a `shutdown` abort,
+/// stranding every waiter. Running it from `Drop` also lets an *unexpected* death be reported as
+/// an error instead of a silent `Ok`, which is the whole point of `wait` for an embedder.
+struct ReleaseWaiters {
+    done: CancellationToken,
+    outcome: Arc<Mutex<Option<anyhow::Result<()>>>>,
+    /// The server's own shutdown token: when it is set, the task ending is expected, so no
+    /// synthetic error is published.
+    shutdown_requested: CancellationToken,
+}
+
+impl Drop for ReleaseWaiters {
+    fn drop(&mut self) {
+        // Recover from a poisoned lock rather than panicking: this runs during unwind, where a
+        // second panic would abort the process.
+        let mut slot = self
+            .outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_none() && !self.shutdown_requested.is_cancelled() {
+            *slot = Some(Err(anyhow::anyhow!(
+                "admin API accept loop terminated unexpectedly"
+            )));
+        }
+        drop(slot);
+        self.done.cancel();
+    }
+}
+
 /// A bound, running admin API server (issue #342). Reports its listening address and offers a
 /// graceful shutdown that does not require dropping the runtime.
 pub struct RunningAdminApi {
     local_addr: SocketAddr,
     cancel: CancellationToken,
     tracker: TaskTracker,
-    task: Mutex<Option<JoinHandle<anyhow::Result<()>>>>,
+    task: Mutex<Option<JoinHandle<()>>>,
+    /// Fired once the accept loop has exited and its outcome is published — the signal
+    /// `wait(&self)` observes without touching `task` (issue #806).
+    done: CancellationToken,
+    /// The accept loop's result, delivered exactly once: the first caller of `wait`/`join` takes
+    /// it, later callers get `Ok(())`. `anyhow::Error` is not `Clone`, so it cannot be shared.
+    outcome: Arc<Mutex<Option<anyhow::Result<()>>>>,
 }
 
 impl RunningAdminApi {
@@ -179,17 +237,45 @@ impl RunningAdminApi {
                 "Admin API shutdown: in-flight connections did not drain within the grace period"
             );
         }
+
+        // Release any `wait(&self)` unconditionally. The abort above can kill the task before it
+        // publishes its outcome, which would otherwise strand every waiter forever (issue #806).
+        self.done.cancel();
     }
 
     /// Run until the accept loop exits (returns immediately if already shut down).
+    ///
+    /// Shares the exactly-once error delivery described on [`wait`](Self::wait): if a `wait` caller
+    /// already took the accept loop's error, `join` returns `Ok(())`.
     pub async fn join(self) -> anyhow::Result<()> {
         match take_task(&self.task) {
             Some(task) => match task.await {
-                Ok(result) => result,
+                Ok(()) => self.take_outcome(),
                 Err(join_err) => Err(anyhow::anyhow!("admin API task failed: {join_err}")),
             },
-            None => Ok(()),
+            None => self.take_outcome(),
         }
+    }
+
+    /// Wait for the accept loop to exit **without consuming the handle** — so a caller can race
+    /// "serve until the admin plane dies" against its own shutdown signal and still call
+    /// [`shutdown`](Self::shutdown) afterwards (issue #806).
+    ///
+    /// The accept loop's error is delivered to the **first** caller only; subsequent calls (and
+    /// calls after a `shutdown` that aborted the task) return `Ok(())`.
+    pub async fn wait(&self) -> anyhow::Result<()> {
+        self.done.cancelled().await;
+        self.take_outcome()
+    }
+
+    /// Take the published accept-loop result. `Ok(())` when it was already taken or when the task
+    /// was aborted before publishing.
+    fn take_outcome(&self) -> anyhow::Result<()> {
+        self.outcome
+            .lock()
+            .expect("admin API outcome mutex poisoned")
+            .take()
+            .unwrap_or(Ok(()))
     }
 }
 
@@ -466,5 +552,111 @@ mod tests {
         // Two empty strings are trivially equal — no key configured is handled
         // by the `Some(key)` guard at the call site, not here.
         assert!(api_key_matches("", ""));
+    }
+}
+
+/// Issue #806: white-box tests for the `wait` seam's failure interleavings. These construct a
+/// `RunningAdminApi` around a stand-in task rather than a real accept loop, because the paths that
+/// matter — an abort before the outcome is published, a panicking loop, and the exactly-once error
+/// hand-off — cannot be provoked through the public bind/shutdown API (a healthy loop always exits
+/// well inside the shutdown grace).
+#[cfg(test)]
+mod wait_seam_tests {
+    use super::*;
+
+    /// A `RunningAdminApi` whose "accept loop" is `task`, wired to the same release guard the real
+    /// one uses so the drop-path behaviour under test is the shipped behaviour.
+    fn running_with_task<F>(loop_body: F) -> RunningAdminApi
+    where
+        F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        let cancel = CancellationToken::new();
+        let done = CancellationToken::new();
+        let outcome: Arc<Mutex<Option<anyhow::Result<()>>>> = Arc::new(Mutex::new(None));
+        let (task_done, task_outcome) = (done.clone(), Arc::clone(&outcome));
+        let release_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let _release = ReleaseWaiters {
+                done: task_done,
+                outcome: Arc::clone(&task_outcome),
+                shutdown_requested: release_cancel,
+            };
+            let result = loop_body.await;
+            *task_outcome
+                .lock()
+                .expect("admin API outcome mutex poisoned") = Some(result);
+        });
+
+        RunningAdminApi {
+            local_addr: "127.0.0.1:0".parse().expect("test addr"),
+            cancel,
+            tracker: TaskTracker::new(),
+            task: Mutex::new(Some(task)),
+            done,
+            outcome,
+        }
+    }
+
+    /// `shutdown` aborts a loop that outlives the grace window, so the task never publishes an
+    /// outcome. Waiters must still be released — this is the interleaving the release guard and
+    /// `shutdown`'s unconditional cancel both exist to cover.
+    #[tokio::test]
+    async fn wait_is_released_when_shutdown_aborts_an_unresponsive_loop() {
+        let running = running_with_task(async {
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), running.shutdown())
+            .await
+            .expect("shutdown gives up on the wedged loop within its grace bound");
+
+        let waited = tokio::time::timeout(Duration::from_secs(2), running.wait())
+            .await
+            .expect("an aborted loop must not strand waiters");
+        assert!(
+            waited.is_ok(),
+            "an abort during a requested shutdown is not an error"
+        );
+    }
+
+    /// A panicking accept loop is the death `wait` exists to report. It must resolve — and as an
+    /// error, not a silent `Ok`, since no shutdown was requested.
+    #[tokio::test]
+    async fn wait_reports_a_panicking_loop_instead_of_hanging() {
+        let running = running_with_task(async { panic!("accept loop exploded") });
+
+        let waited = tokio::time::timeout(Duration::from_secs(2), running.wait())
+            .await
+            .expect("a panicking loop must release waiters");
+        let err = waited.expect_err("an unrequested death is an error");
+        assert!(
+            err.to_string().contains("terminated unexpectedly"),
+            "error should name the unexpected termination, got: {err}"
+        );
+    }
+
+    /// The documented exactly-once contract: the accept loop's error goes to the first caller, and
+    /// later callers get `Ok(())` rather than a duplicate or a hang.
+    #[tokio::test]
+    async fn accept_loop_error_is_delivered_exactly_once() {
+        let running = running_with_task(async { Err(anyhow::anyhow!("listener died")) });
+
+        let first = tokio::time::timeout(Duration::from_secs(2), running.wait())
+            .await
+            .expect("wait resolves once the loop has returned");
+        let err = first.expect_err("the first caller receives the accept loop's error");
+        assert!(
+            err.to_string().contains("listener died"),
+            "the real error must survive, got: {err}"
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(2), running.wait())
+            .await
+            .expect("a second wait returns immediately");
+        assert!(
+            second.is_ok(),
+            "the error is delivered once; later callers get Ok"
+        );
     }
 }

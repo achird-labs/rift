@@ -518,3 +518,181 @@ async fn server_builder_start_survives_metrics_bind_failure() {
         .await
         .expect("shutdown handles the None metrics branch");
 }
+
+// Issue #806: `join`/`shutdown` both consumed `self`, so an embedder could await the server OR
+// await a shutdown signal, never race them. `wait(&self)` is the seam; these cover both arms of
+// that race plus the abort path, which is what makes the seam safe rather than merely present.
+
+// AC1: wait() returns once the server is shut down from a *different* task — the borrow, not the
+// value, is what wait() holds, so the shutdown side is still reachable while wait() is in flight.
+#[tokio::test]
+async fn running_server_wait_completes_when_shutdown_from_another_task() {
+    let cli = Cli::try_parse_from([
+        "rift",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+        "--metrics-port",
+        "0",
+    ])
+    .expect("cli parse");
+    let running = Arc::new(
+        ServerBuilder::from_cli(cli)
+            .start()
+            .await
+            .expect("start returns once bound"),
+    );
+    wait_for_http(&format!("http://{}/health", running.admin_addr())).await;
+
+    let stopper = Arc::clone(&running);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stopper.shutdown().await;
+    });
+
+    let waited = tokio::time::timeout(Duration::from_secs(5), running.wait())
+        .await
+        .expect("wait returns once the admin accept loop exits");
+    assert!(waited.is_ok(), "a shutdown-driven exit is not an error");
+}
+
+// AC2: the rift-enterprise pattern — race wait() against a termination signal. The signal wins,
+// and the arm that wins can still call shutdown(): proof the select! borrow has ended.
+#[tokio::test]
+async fn running_server_wait_loses_race_to_signal_then_shuts_down() {
+    let cli = Cli::try_parse_from([
+        "rift",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+        "--metrics-port",
+        "0",
+    ])
+    .expect("cli parse");
+    let running = ServerBuilder::from_cli(cli)
+        .start()
+        .await
+        .expect("start returns once bound");
+    let addr = running.admin_addr();
+    wait_for_http(&format!("http://{addr}/health")).await;
+
+    let (signal_tx, signal_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = signal_tx.send(());
+    });
+
+    let admin_died = tokio::select! {
+        result = running.wait() => Some(result),
+        _ = signal_rx => None,
+    };
+    assert!(
+        admin_died.is_none(),
+        "the signal must win this race; the admin plane was healthy"
+    );
+
+    // The whole point of the issue: after racing wait(), the server is still owned and shutdownable.
+    tokio::time::timeout(Duration::from_secs(5), running.shutdown())
+        .await
+        .expect("shutdown is still callable after wait() was raced");
+    assert!(
+        connect_refused(addr).await,
+        "after shutdown the admin port must refuse connections"
+    );
+}
+
+// AC3: the other arm of the same race — the admin plane exits first, so wait() wins and the
+// embedder learns the server is gone instead of hanging on a signal that never comes.
+#[tokio::test]
+async fn running_server_wait_wins_race_when_admin_plane_exits() {
+    let cli = Cli::try_parse_from([
+        "rift",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+        "--metrics-port",
+        "0",
+    ])
+    .expect("cli parse");
+    let running = Arc::new(
+        ServerBuilder::from_cli(cli)
+            .start()
+            .await
+            .expect("start returns once bound"),
+    );
+    wait_for_http(&format!("http://{}/health", running.admin_addr())).await;
+
+    let stopper = Arc::clone(&running);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stopper.shutdown().await;
+    });
+
+    // A signal that never fires: only the admin plane's exit can resolve this select.
+    let (_signal_tx, signal_rx) = tokio::sync::oneshot::channel::<()>();
+    let admin_result = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            result = running.wait() => Some(result),
+            _ = signal_rx => None,
+        }
+    })
+    .await
+    .expect("the admin-plane arm must resolve the race");
+    assert!(
+        admin_result.is_some_and(|r| r.is_ok()),
+        "wait() wins the race and reports the accept loop's outcome"
+    );
+}
+
+// AC4: wait() is safe to call after the server has already stopped — it returns immediately rather
+// than blocking on a task that will never complete. (The abort-on-grace-timeout and panicking-loop
+// interleavings need a wedged loop, so they live in the white-box `wait_seam_tests` module beside
+// the implementation.)
+#[tokio::test]
+async fn running_server_wait_after_shutdown_returns_immediately() {
+    let cli = Cli::try_parse_from([
+        "rift",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+        "--metrics-port",
+        "0",
+    ])
+    .expect("cli parse");
+    let running = ServerBuilder::from_cli(cli)
+        .start()
+        .await
+        .expect("start returns once bound");
+    wait_for_http(&format!("http://{}/health", running.admin_addr())).await;
+
+    running.shutdown().await;
+
+    for _ in 0..2 {
+        let waited = tokio::time::timeout(Duration::from_secs(2), running.wait())
+            .await
+            .expect("wait after shutdown returns immediately");
+        assert!(waited.is_ok(), "a post-shutdown wait reports Ok");
+    }
+}
+
+// AC5: the same seam one layer down, where the accept loop actually lives.
+#[tokio::test]
+async fn admin_wait_returns_after_shutdown() {
+    let manager = Arc::new(ImposterManager::new());
+    let running = AdminApiServer::new("127.0.0.1:0".parse().unwrap(), manager, None)
+        .bind()
+        .await
+        .expect("bind admin on :0");
+    let addr = running.local_addr();
+    wait_for_http(&format!("http://{addr}/health")).await;
+
+    running.shutdown().await;
+    let waited = tokio::time::timeout(Duration::from_secs(2), running.wait())
+        .await
+        .expect("admin wait returns after the accept loop exits");
+    assert!(waited.is_ok(), "wait reports the accept loop's Ok result");
+}
