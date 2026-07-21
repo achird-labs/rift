@@ -41,8 +41,9 @@ Returned by `start()`; lets the host discover bound addresses and control lifecy
 |:-------|:----------|:--------|
 | `admin_addr` | `fn admin_addr(&self) -> SocketAddr` | The bound admin API address (resolve an ephemeral `:0` to the real port). |
 | `metrics_addr` | `fn metrics_addr(&self) -> Option<SocketAddr>` | The bound metrics address, or `None` if metrics weren't started. |
-| `join` | `async fn join(self) -> anyhow::Result<()>` | Await the server until it exits. |
-| `shutdown` | `async fn shutdown(self)` | Trigger a graceful shutdown. |
+| `join` | `async fn join(self) -> anyhow::Result<()>` | Await the server until it exits, consuming it. |
+| `wait` | `async fn wait(&self) -> anyhow::Result<()>` | Await the server until it exits **without consuming it** — so you can race it against your own shutdown signal. |
+| `shutdown` | `async fn shutdown(&self)` | Trigger a graceful shutdown. |
 
 ```rust
 use rift_http_proxy::{ServerBuilder, Cli};
@@ -53,6 +54,26 @@ println!("admin listening on {}", server.admin_addr());
 // ... run your test suite against server.admin_addr() ...
 server.shutdown().await;
 ```
+
+#### Racing the server against a shutdown signal
+
+`join` moves the server, so a `select!` arm that wins against it can no longer reach `shutdown`.
+`wait` borrows instead, which is what lets a host own the shutdown policy — run its own teardown
+between the signal and the server stopping, and still surface an admin-plane failure if the server
+dies on its own first:
+
+```rust
+tokio::select! {
+    result = server.wait() => return result,   // the admin plane exited — surface why
+    () = termination_signal() => {}            // asked to stop — fall through
+}
+// your own teardown here (drain a cluster, deregister from a load balancer, ...)
+server.shutdown().await;
+```
+
+The accept loop's error is delivered to the **first** caller of `wait`/`join`; later calls return
+`Ok(())` (`anyhow::Error` is not `Clone`). `shutdown` takes `&self`, so the server can also be held
+in an `Arc` and stopped from another task.
 
 ### Injecting a custom `ImposterManager`
 
@@ -108,7 +129,8 @@ println!("admin bound to {}", running.local_addr());
 | `with_allow_injection` | `fn with_allow_injection(self, allow: bool) -> Self` | Enable JavaScript `inject` responses. |
 | `bind` | `async fn bind(self) -> anyhow::Result<RunningAdminApi>` | Bind and start serving; returns once bound. |
 
-`RunningAdminApi`: `local_addr(&self) -> SocketAddr`, `shutdown(&self)`, `join(self) -> anyhow::Result<()>`.
+`RunningAdminApi`: `local_addr(&self) -> SocketAddr`, `shutdown(&self)`, `join(self) -> anyhow::Result<()>`,
+`wait(&self) -> anyhow::Result<()>` (the non-consuming form of `join`, as above).
 
 `ConfigSource` (from `rift-http-proxy`) is either `File { path, no_parse }` (a single `--configfile`,
 with optional EJS preprocessing) or `Dir(PathBuf)` (a `--datadir` of one-imposter-per-file configs).
