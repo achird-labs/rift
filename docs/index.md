@@ -159,6 +159,7 @@ for version-pinning every module at once.
 - [Quick Start]({{ site.baseurl }}/getting-started/quickstart/) - Create your first imposter
 - [Node.js Integration]({{ site.baseurl }}/getting-started/nodejs/) - npm package for Node.js projects
 - [Java / JVM SDK](https://github.com/achird-labs/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
+- [Scala SDK](https://github.com/achird-labs/rift-scala) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
 - [Migration from Mountebank]({{ site.baseurl }}/getting-started/migration/) - Switch from Mountebank to Rift
 
 ### Concepts

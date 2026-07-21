@@ -196,6 +196,36 @@ try (Rift rift = Rift.embedded()) {                  // or Rift.connect(uri) / R
 
 See the [rift-java docs](https://achird-labs.github.io/rift-java/) for the full feature surface.
 
+### Scala
+
+For Scala 3, use the official [rift-scala](https://github.com/achird-labs/rift-scala) SDK. It is
+effect-library-native — ZIO, Cats Effect 3 / FS2, Kyo, or no effect system at all — over the same
+four transports (embedded, connect, spawn, container):
+
+```scala
+libraryDependencies += "io.github.achird-labs" %% "rift-scala-zio" % "0.1.0" % Test
+```
+
+```scala
+import rift.dsl.*
+import rift.zio.Rift
+
+for
+  users <- Rift.create(
+             imposter("users").record.stub(
+               get("/api/users/1").reply(ok.json("""{"id":1}"""))
+             )
+           )
+  _     <- callSut(users.uri)                 // point your SUT at users.uri
+  _     <- users.verify(get("/api/users/1"), 1)
+yield ()
+// .provideShared(Rift.embedded)  — or Rift.connect(uri) / Rift.spawn() / Rift.container()
+```
+
+It also ships a [zio-bdd](https://github.com/EtaCassiopeia/zio-bdd) `MockControl` adapter, certified
+against zio-bdd's published conformance catalogue. See the
+[rift-scala docs](https://achird-labs.github.io/rift-scala/).
+
 ---
 
 ## Documentation
@@ -205,6 +235,7 @@ See the [rift-java docs](https://achird-labs.github.io/rift-java/) for the full 
 - [Quick Start](https://achird-labs.github.io/rift/getting-started/quickstart) - Create your first imposter
 - [Node.js Integration](https://achird-labs.github.io/rift/getting-started/nodejs/) - npm package for Node.js
 - [Java / JVM SDK](https://github.com/achird-labs/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
+- [Scala SDK](https://github.com/achird-labs/rift-scala) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
 - [Migration Guide](https://achird-labs.github.io/rift/getting-started/migration) - Using Rift with Mountebank configs
 
 ### Mountebank Compatibility

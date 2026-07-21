@@ -208,6 +208,7 @@ Example `imposters.json`:
 - [Quick Start Tutorial]({{ site.baseurl }}/getting-started/quickstart/) - Detailed walkthrough
 - [Node.js Integration]({{ site.baseurl }}/getting-started/nodejs/) - npm package for Node.js projects
 - [Java / JVM SDK](https://github.com/achird-labs/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
+- [Scala SDK](https://github.com/achird-labs/rift-scala) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
 - [Predicates Guide]({{ site.baseurl }}/mountebank/predicates/) - Request matching
 - [Responses Guide]({{ site.baseurl }}/mountebank/responses/) - Response configuration
 - [Migration Guide]({{ site.baseurl }}/getting-started/migration/) - Switching from Mountebank
