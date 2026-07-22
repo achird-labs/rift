@@ -11,6 +11,8 @@ record.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-22
+
 ### Added
 
 - **Accept-error metrics and a re-announcing outage log** (issue #838). Since #750/#826/#834 the
@@ -1312,7 +1314,8 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/achird-labs/rift/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/achird-labs/rift/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/achird-labs/rift/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/achird-labs/rift/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/achird-labs/rift/compare/v0.13.6...v0.14.0
 [0.13.6]: https://github.com/achird-labs/rift/compare/v0.13.5...v0.13.6
