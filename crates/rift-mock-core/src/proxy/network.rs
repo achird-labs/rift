@@ -242,6 +242,34 @@ pub fn apply_stream_tuning(stream: &TcpStream, tuning: &SocketTuning) {
 // per-event-rate logging trap the journal-cap fix (#741) removed. The pieces below fix both with
 // no cost on the happy path.
 
+/// Whether an `accept(2)` error means the listener itself is unusable, as opposed to a transient
+/// or resource-pressure condition that retrying can clear.
+///
+/// `EBADF` / `ENOTSOCK` / `EINVAL` say the descriptor is not a working listening socket; no amount
+/// of backoff fixes that, so a loop whose owner can observe its death should terminate and surface
+/// the error rather than retry forever (issues #826, #834). Everything else — including unknown
+/// errnos — is left to the two-way [`classify_accept_error`], which retries.
+///
+/// Not every loop wants this: the imposter serve loops deliberately never terminate, because a
+/// dying imposter loop is independently recoverable through the still-live admin API. Loops whose
+/// failure is the *only* signal an owner gets (the admin plane, the metrics plane, `ProxyServer::run`)
+/// consult this first.
+///
+/// Unix-only by construction: these are POSIX errnos. On other platforms nothing is treated as
+/// fatal, matching the conservative "retry rather than die" default.
+#[cfg(unix)]
+pub fn is_fatal_listener_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(libc::EBADF) | Some(libc::ENOTSOCK) | Some(libc::EINVAL)
+    )
+}
+
+#[cfg(not(unix))]
+pub fn is_fatal_listener_error(_e: &std::io::Error) -> bool {
+    false
+}
+
 /// How an `accept(2)` error should be handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcceptErrorClass {
@@ -502,6 +530,26 @@ mod tests {
 mod accept_error {
     use super::*;
     use std::io::{Error, ErrorKind};
+
+    // The fatal class (#826, shared by every owner-observable loop since #834): a broken listener fd
+    // must still end the loop so its owner can report the death instead of retrying forever.
+    #[cfg(unix)]
+    #[test]
+    fn broken_listener_errnos_are_fatal_but_pressure_is_not() {
+        for raw in [libc::EBADF, libc::ENOTSOCK, libc::EINVAL] {
+            assert!(
+                is_fatal_listener_error(&Error::from_raw_os_error(raw)),
+                "errno {raw} means the listener is unusable; retrying forever would hide a dead listener from its owner"
+            );
+        }
+        // Recoverable pressure and transient blips must never be treated as fatal.
+        for raw in [libc::EMFILE, libc::ENFILE, libc::ECONNABORTED, libc::EINTR] {
+            assert!(
+                !is_fatal_listener_error(&Error::from_raw_os_error(raw)),
+                "errno {raw} is recoverable and must be retried, not fatal"
+            );
+        }
+    }
 
     #[test]
     fn classify_transient_vs_systemic() {

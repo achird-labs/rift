@@ -71,6 +71,18 @@ record.
 
 ### Fixed
 
+- **The metrics and proxy listeners no longer die on a transient accept error** (issue #834). #826
+  fixed the admin API accept loop but left two siblings propagating any `listener.accept()` failure:
+  the `/metrics` listener and `ProxyServer::run`. The metrics case was the quieter of the two — its
+  task result is never joined, so a single `ECONNABORTED` killed `/metrics` with one log line and
+  scrapes simply stopped. Both now apply the same policy: transient errors retry immediately,
+  systemic ones back off (1 ms doubling to a 1 s cap) logging once per outage with a suppressed
+  count on recovery, and a genuinely broken listener (`EBADF`/`ENOTSOCK`/`EINVAL`) still terminates
+  so the owner can surface it. `is_fatal_listener_error` moved alongside the rest of the machinery
+  into `rift_mock_core::proxy`, so all four accept loops now share one implementation and their
+  policies cannot drift. The imposter serve loops keep their deliberate never-terminate behaviour —
+  a dying imposter loop is recoverable through the still-live admin API.
+
 - **A transient accept error no longer ends the admin API server** (issue #826). `accept_loop`
   propagated any `listener.accept()` failure straight out via `?`, so a single `ECONNABORTED` — or a
   momentary `EMFILE`/`ENFILE` under fd pressure — terminated the admin server. That was survivable

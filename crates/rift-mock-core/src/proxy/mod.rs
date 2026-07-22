@@ -49,4 +49,6 @@ pub use network::{DEFAULT_HTTP_MAX_BUF, HttpTuning};
 // Accept-error handling shared by every listener in the workspace: the imposter serve loop
 // (issue #750) and the admin API accept loop (issue #826), which must classify-and-retry rather
 // than let one transient accept failure end the server.
-pub use network::{AcceptBackoff, AcceptErrorClass, AcceptErrorLog, classify_accept_error};
+pub use network::{
+    AcceptBackoff, AcceptErrorClass, AcceptErrorLog, classify_accept_error, is_fatal_listener_error,
+};

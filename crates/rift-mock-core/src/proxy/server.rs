@@ -30,7 +30,7 @@ use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 /// The main proxy server struct.
 pub struct ProxyServer {
@@ -288,6 +288,12 @@ impl ProxyServer {
             .max_connections
             .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
 
+        // Accept-error handling, identical to the admin loop's (issues #826, #834). Previously any
+        // `accept()` failure propagated out of `run()`, permanently ending the proxy on a single
+        // transient `ECONNABORTED` or a momentary `EMFILE`.
+        let mut backoff = super::network::AcceptBackoff::new();
+        let mut error_log = super::network::AcceptErrorLog::default();
+
         loop {
             // Acquire a permit *before* accepting so a cap holds connections back in the listener
             // backlog/kernel SYN queue rather than accepting them and then failing downstream.
@@ -300,7 +306,45 @@ impl ProxyServer {
                 },
                 None => None,
             };
-            let (stream, remote_addr) = listener.accept().await?;
+            let (stream, remote_addr) = match listener.accept().await {
+                Ok(accepted) => {
+                    // Recovery: only the transition out of a systemic-error state logs and resets
+                    // the backoff, so a healthy accept path pays one branch.
+                    if let Some(suppressed) = error_log.on_success() {
+                        info!(
+                            suppressed,
+                            "proxy accept loop recovered after {suppressed} suppressed error(s)"
+                        );
+                        backoff.reset();
+                    }
+                    accepted
+                }
+                // A broken listener fd cannot be cured by waiting. `run()` returning `Err` is the
+                // only signal an embedder gets, so surface it instead of retrying forever (#834).
+                Err(e) if super::network::is_fatal_listener_error(&e) => {
+                    return Err(anyhow::anyhow!(
+                        "proxy listener is unusable, giving up: {e}"
+                    ));
+                }
+                Err(e) => match super::network::classify_accept_error(&e) {
+                    super::network::AcceptErrorClass::Transient => {
+                        debug!("transient accept error on the proxy listener: {e}");
+                        continue;
+                    }
+                    super::network::AcceptErrorClass::Systemic => {
+                        if error_log.on_error() {
+                            error!(
+                                "accept error on the proxy listener: {e}; backing off \
+                                 (further errors suppressed until recovery)"
+                            );
+                        }
+                        // This loop has no shutdown signal to race against (see the permit
+                        // acquire above), so a plain sleep is the whole story here.
+                        tokio::time::sleep(backoff.next_delay()).await;
+                        continue;
+                    }
+                },
+            };
             super::network::apply_stream_tuning(&stream, &socket_tuning);
             let server = Arc::clone(&server);
             let tls_acceptor = tls_acceptor.clone();

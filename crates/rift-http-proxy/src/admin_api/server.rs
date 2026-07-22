@@ -12,7 +12,7 @@ use hyper::service::service_fn;
 use hyper::{Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use rift_mock_core::proxy::{
-    AcceptBackoff, AcceptErrorClass, AcceptErrorLog, classify_accept_error,
+    AcceptBackoff, AcceptErrorClass, AcceptErrorLog, classify_accept_error, is_fatal_listener_error,
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -327,29 +327,6 @@ impl RunningAdminApi {
 
 fn take_task<T>(slot: &Mutex<Option<JoinHandle<T>>>) -> Option<JoinHandle<T>> {
     slot.lock().expect("admin API task mutex poisoned").take()
-}
-
-/// Whether an `accept(2)` error means the listener itself is unusable, as opposed to a transient
-/// or resource-pressure condition that retrying can clear.
-///
-/// `EBADF` / `ENOTSOCK` / `EINVAL` say the descriptor is not a working listening socket; no amount
-/// of backoff fixes that, so the admin accept loop terminates and lets
-/// [`RunningAdminApi::wait`] report the death (issue #826). Everything else — including unknown
-/// errnos — is left to the shared two-way classifier, which retries.
-///
-/// Unix-only by construction: these are POSIX errnos. On other platforms nothing is treated as
-/// fatal, matching the conservative "retry rather than die" default.
-#[cfg(unix)]
-fn is_fatal_listener_error(e: &std::io::Error) -> bool {
-    matches!(
-        e.raw_os_error(),
-        Some(libc::EBADF) | Some(libc::ENOTSOCK) | Some(libc::EINVAL)
-    )
-}
-
-#[cfg(not(unix))]
-fn is_fatal_listener_error(_e: &std::io::Error) -> bool {
-    false
 }
 
 /// Accept connections until `cancel` fires or the listener errors. Each connection is tracked
@@ -812,25 +789,5 @@ mod admin_accept_error_tests {
             "recovery reports the suppressed count"
         );
         assert_eq!(log.on_success(), None, "steady state is silent");
-    }
-
-    // The third class the issue asks for ("terminate only on genuinely fatal errors"): a broken
-    // listener fd must still end the loop so `RunningAdminApi::wait()` reports a dead admin plane.
-    #[cfg(unix)]
-    #[test]
-    fn broken_listener_errnos_are_fatal_but_pressure_is_not() {
-        for raw in [libc::EBADF, libc::ENOTSOCK, libc::EINVAL] {
-            assert!(
-                is_fatal_listener_error(&Error::from_raw_os_error(raw)),
-                "errno {raw} means the listener is unusable; retrying forever would hide a dead admin plane"
-            );
-        }
-        // Recoverable pressure and transient blips must never be treated as fatal.
-        for raw in [libc::EMFILE, libc::ENFILE, libc::ECONNABORTED, libc::EINTR] {
-            assert!(
-                !is_fatal_listener_error(&Error::from_raw_os_error(raw)),
-                "errno {raw} is recoverable and must be retried, not fatal"
-            );
-        }
     }
 }

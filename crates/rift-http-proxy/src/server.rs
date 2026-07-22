@@ -711,7 +711,10 @@ async fn metrics_accept_loop(
     use hyper::service::service_fn;
     use hyper::{Request, Response, body::Incoming};
     use hyper_util::rt::TokioIo;
-    use rift_mock_core::proxy::HttpTuning;
+    use rift_mock_core::proxy::{
+        AcceptBackoff, AcceptErrorClass, AcceptErrorLog, HttpTuning, classify_accept_error,
+        is_fatal_listener_error,
+    };
     use std::convert::Infallible;
 
     // Read HTTP tuning once per listener, not per accepted connection.
@@ -721,6 +724,13 @@ async fn metrics_accept_loop(
     let connection_semaphore = http_tuning
         .max_connections
         .map(|n| std::sync::Arc::new(tokio::sync::Semaphore::new(n)));
+
+    // Accept-error handling, identical to the admin loop's (issues #826, #834). Previously any
+    // `accept()` failure propagated out and ended the metrics server — and since `RunningServer`
+    // never joins this task, the death was a single log line and `/metrics` simply stopped
+    // answering until the process restarted.
+    let mut backoff = AcceptBackoff::new();
+    let mut error_log = AcceptErrorLog::default();
 
     loop {
         // Acquire a permit *before* accepting so a cap holds connections back in the listener
@@ -741,9 +751,51 @@ async fn metrics_accept_loop(
             }
             None => None,
         };
-        let (stream, _) = tokio::select! {
+        let accepted = tokio::select! {
             _ = cancel.cancelled() => break,
-            accepted = listener.accept() => accepted?,
+            accepted = listener.accept() => accepted,
+        };
+        let (stream, _) = match accepted {
+            Ok(accepted) => {
+                // Recovery: only the transition out of a systemic-error state logs and resets the
+                // backoff, so a healthy accept path pays one branch.
+                if let Some(suppressed) = error_log.on_success() {
+                    info!(
+                        suppressed,
+                        "metrics accept loop recovered after {suppressed} suppressed error(s)"
+                    );
+                    backoff.reset();
+                }
+                accepted
+            }
+            // A broken listener fd cannot be cured by waiting; end the loop so the failure reaches
+            // the `Metrics server error` log rather than spinning forever (issue #834).
+            Err(e) if is_fatal_listener_error(&e) => {
+                return Err(anyhow::anyhow!(
+                    "metrics listener is unusable, giving up: {e}"
+                ));
+            }
+            Err(e) => match classify_accept_error(&e) {
+                AcceptErrorClass::Transient => {
+                    debug!("transient accept error on the metrics listener: {e}");
+                    continue;
+                }
+                AcceptErrorClass::Systemic => {
+                    if error_log.on_error() {
+                        error!(
+                            "accept error on the metrics listener: {e}; backing off \
+                             (further errors suppressed until recovery)"
+                        );
+                    }
+                    // Raced against `cancel` so a backoff sleep never delays shutdown.
+                    let delay = backoff.next_delay();
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        _ = cancel.cancelled() => break,
+                    }
+                    continue;
+                }
+            },
         };
         let io = TokioIo::new(stream);
         let conn_cancel = cancel.clone();
