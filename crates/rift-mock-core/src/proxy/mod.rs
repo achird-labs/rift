@@ -46,3 +46,7 @@ pub use tls::{TLS_SESSION_CACHE_SIZE, configure_session_resumption};
 // HTTP connection-builder tuning, shared with the metrics/admin accept loops in rift-http-proxy
 // (issue #716) — `network` itself stays `pub(crate)`, only this type is exposed.
 pub use network::{DEFAULT_HTTP_MAX_BUF, HttpTuning};
+// Accept-error handling shared by every listener in the workspace: the imposter serve loop
+// (issue #750) and the admin API accept loop (issue #826), which must classify-and-retry rather
+// than let one transient accept failure end the server.
+pub use network::{AcceptBackoff, AcceptErrorClass, AcceptErrorLog, classify_accept_error};

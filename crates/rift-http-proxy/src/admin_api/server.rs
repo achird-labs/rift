@@ -11,6 +11,9 @@ use hyper::body::Bytes;
 use hyper::service::service_fn;
 use hyper::{Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use rift_mock_core::proxy::{
+    AcceptBackoff, AcceptErrorClass, AcceptErrorLog, classify_accept_error,
+};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -20,7 +23,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 /// Bounded grace given to in-flight connections on `shutdown()` before the wait is abandoned.
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
@@ -283,6 +286,29 @@ fn take_task<T>(slot: &Mutex<Option<JoinHandle<T>>>) -> Option<JoinHandle<T>> {
     slot.lock().expect("admin API task mutex poisoned").take()
 }
 
+/// Whether an `accept(2)` error means the listener itself is unusable, as opposed to a transient
+/// or resource-pressure condition that retrying can clear.
+///
+/// `EBADF` / `ENOTSOCK` / `EINVAL` say the descriptor is not a working listening socket; no amount
+/// of backoff fixes that, so the admin accept loop terminates and lets
+/// [`RunningAdminApi::wait`] report the death (issue #826). Everything else — including unknown
+/// errnos — is left to the shared two-way classifier, which retries.
+///
+/// Unix-only by construction: these are POSIX errnos. On other platforms nothing is treated as
+/// fatal, matching the conservative "retry rather than die" default.
+#[cfg(unix)]
+fn is_fatal_listener_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(libc::EBADF) | Some(libc::ENOTSOCK) | Some(libc::EINVAL)
+    )
+}
+
+#[cfg(not(unix))]
+fn is_fatal_listener_error(_e: &std::io::Error) -> bool {
+    false
+}
+
 /// Accept connections until `cancel` fires or the listener errors. Each connection is tracked
 /// so `shutdown` can wait for in-flight requests to drain.
 #[allow(clippy::too_many_arguments)]
@@ -304,6 +330,14 @@ async fn accept_loop(
         .max_connections
         .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
 
+    // Accept-error handling, identical to the data plane's (issue #750, now shared from
+    // `proxy::network`). Previously a single `accept()` failure propagated out of this loop and
+    // ended the admin server — and an embedder that races `RunningServer::wait()` turns that into
+    // a whole node leaving the cluster, so one transient ECONNABORTED or a momentary EMFILE became
+    // a fleet-wide correlated restart (issue #826).
+    let mut backoff = AcceptBackoff::new();
+    let mut error_log = AcceptErrorLog::default();
+
     loop {
         // Acquire a permit *before* accepting so a cap holds connections back in the listener
         // backlog rather than accepting-then-failing. Raced against `cancel` so a saturated cap
@@ -321,9 +355,57 @@ async fn accept_loop(
             }
             None => None,
         };
-        let (stream, _) = tokio::select! {
+        let accepted = tokio::select! {
             _ = cancel.cancelled() => break,
-            accepted = listener.accept() => accepted?,
+            accepted = listener.accept() => accepted,
+        };
+        let (stream, _) = match accepted {
+            Ok(accepted) => {
+                // Recovery: only the transition out of a systemic-error state logs and resets the
+                // backoff, so a healthy accept path pays one branch.
+                if let Some(suppressed) = error_log.on_success() {
+                    info!(
+                        suppressed,
+                        "admin API accept loop recovered after {suppressed} suppressed error(s)"
+                    );
+                    backoff.reset();
+                }
+                accepted
+            }
+            // A broken listener fd is not a blip and cannot be cured by waiting: retrying it
+            // forever would leave the process alive with a permanently dead control plane, and an
+            // embedder racing `RunningServer::wait()` would never learn (issue #826). This fatal
+            // class is deliberately **admin-only** — the shared #750 classifier stays two-way
+            // because a dying imposter serve loop is independently recoverable through the
+            // still-live admin API, whereas nothing outranks the admin plane.
+            Err(e) if is_fatal_listener_error(&e) => {
+                return Err(anyhow::anyhow!(
+                    "admin API listener is unusable, giving up: {e}"
+                ));
+            }
+            Err(e) => match classify_accept_error(&e) {
+                // Expected under load — retry immediately, no backoff, no error spam.
+                AcceptErrorClass::Transient => {
+                    debug!("transient accept error on the admin listener: {e}");
+                    continue;
+                }
+                // Systemic (fd exhaustion / unknown): log once on entry, then back off. Raced
+                // against `cancel` so a backoff sleep never delays admin-server shutdown.
+                AcceptErrorClass::Systemic => {
+                    if error_log.on_error() {
+                        error!(
+                            "accept error on the admin listener: {e}; backing off \
+                             (further errors suppressed until recovery)"
+                        );
+                    }
+                    let delay = backoff.next_delay();
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        _ = cancel.cancelled() => break,
+                    }
+                    continue;
+                }
+            },
         };
         let io = TokioIo::new(stream);
         let manager = Arc::clone(&manager);
@@ -658,5 +740,76 @@ mod wait_seam_tests {
             second.is_ok(),
             "the error is delivered once; later callers get Ok"
         );
+    }
+}
+
+// Issue #826: pins which accept errors must NOT end the admin server (the errnos the issue names)
+// and which still must. The visibility of the shared #750 machinery is already compile-gated by
+// `accept_loop` itself using it; these assertions cover the classification decisions.
+#[cfg(test)]
+mod admin_accept_error_tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn admin_accept_error_classification() {
+        for kind in [
+            ErrorKind::ConnectionAborted,
+            ErrorKind::Interrupted,
+            ErrorKind::ConnectionReset,
+        ] {
+            assert_eq!(
+                classify_accept_error(&Error::from(kind)),
+                AcceptErrorClass::Transient,
+                "{kind:?} must retry immediately, never end the admin server"
+            );
+        }
+        // EMFILE/ENFILE are the fd-exhaustion cases from the issue: back off, never terminate.
+        for raw in [24, 23] {
+            assert_eq!(
+                classify_accept_error(&Error::from_raw_os_error(raw)),
+                AcceptErrorClass::Systemic,
+                "errno {raw} must back off, not terminate"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_backoff_and_error_log_are_usable_cross_crate() {
+        let mut b = AcceptBackoff::new();
+        assert_eq!(b.next_delay(), Duration::from_millis(1));
+        assert_eq!(b.next_delay(), Duration::from_millis(2));
+        b.reset();
+        assert_eq!(b.next_delay(), Duration::from_millis(1), "reset re-arms");
+
+        let mut log = AcceptErrorLog::default();
+        assert!(log.on_error(), "first systemic error logs once");
+        assert!(!log.on_error(), "subsequent errors are suppressed");
+        assert_eq!(
+            log.on_success(),
+            Some(1),
+            "recovery reports the suppressed count"
+        );
+        assert_eq!(log.on_success(), None, "steady state is silent");
+    }
+
+    // The third class the issue asks for ("terminate only on genuinely fatal errors"): a broken
+    // listener fd must still end the loop so `RunningAdminApi::wait()` reports a dead admin plane.
+    #[cfg(unix)]
+    #[test]
+    fn broken_listener_errnos_are_fatal_but_pressure_is_not() {
+        for raw in [libc::EBADF, libc::ENOTSOCK, libc::EINVAL] {
+            assert!(
+                is_fatal_listener_error(&Error::from_raw_os_error(raw)),
+                "errno {raw} means the listener is unusable; retrying forever would hide a dead admin plane"
+            );
+        }
+        // Recoverable pressure and transient blips must never be treated as fatal.
+        for raw in [libc::EMFILE, libc::ENFILE, libc::ECONNABORTED, libc::EINTR] {
+            assert!(
+                !is_fatal_listener_error(&Error::from_raw_os_error(raw)),
+                "errno {raw} is recoverable and must be retried, not fatal"
+            );
+        }
     }
 }
