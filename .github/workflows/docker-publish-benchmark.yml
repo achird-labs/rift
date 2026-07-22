@@ -83,7 +83,7 @@ jobs:
       # This is needed because Dockerfile.rift depends on rift-http-proxy:local
       - name: Build and push base rift-http-proxy image
         id: build-base
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./crates/rift-http-proxy/Dockerfile.local-build
@@ -106,7 +106,7 @@ jobs:
 
       - name: Build and push benchmark image
         id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./benchmarks/Dockerfile.rift

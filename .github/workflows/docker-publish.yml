@@ -86,7 +86,7 @@ jobs:
 
       # Build and push amd64 image
       - name: Build and push amd64
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: ./binaries/amd64
           file: ./crates/rift-http-proxy/Dockerfile.prebuilt
@@ -104,7 +104,7 @@ jobs:
 
       # Build and push arm64 image
       - name: Build and push arm64
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: ./binaries/arm64
           file: ./crates/rift-http-proxy/Dockerfile.prebuilt
@@ -250,7 +250,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push amd64 (static)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: ./binaries/amd64-musl
           file: ./crates/rift-http-proxy/Dockerfile.static
@@ -265,7 +265,7 @@ jobs:
           provenance: mode=max
 
       - name: Build and push arm64 (static)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: ./binaries/arm64-musl
           file: ./crates/rift-http-proxy/Dockerfile.static
@@ -395,7 +395,7 @@ jobs:
 
       # Build and push amd64 image
       - name: Build and push amd64
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: ./binaries/amd64
           file: ./crates/rift-lint/Dockerfile.prebuilt
@@ -413,7 +413,7 @@ jobs:
 
       # Build and push arm64 image
       - name: Build and push arm64
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: ./binaries/arm64
           file: ./crates/rift-lint/Dockerfile.prebuilt
