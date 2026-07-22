@@ -533,6 +533,27 @@ pub struct RunningServer {
 }
 
 impl RunningServer {
+    /// Build a `RunningServer` whose admin accept loop is an arbitrary future — the seam for
+    /// testing what your code does when the admin plane dies (issue #825).
+    ///
+    /// An embedder that races [`wait`](Self::wait) and propagates the outcome to process exit
+    /// (rift-enterprise #42) cannot otherwise reach that `Err` path from outside this crate: the
+    /// real accept loop only fails by genuinely breaking the listener. Pass a future returning
+    /// `Err` (or one that panics) and assert your reaction.
+    ///
+    /// No listener is bound and there is no metrics server; `admin_addr()` reports `127.0.0.1:0`.
+    /// Gated behind the `test-util` feature — test scaffolding, not a production constructor.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn with_admin_accept_task<F>(loop_body: F) -> Self
+    where
+        F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        Self {
+            admin: crate::admin_api::RunningAdminApi::with_accept_task(loop_body),
+            metrics: None,
+            intercept: InterceptControl::default(),
+        }
+    }
     /// The bound admin API address (resolves a `:0` request to the assigned port).
     pub fn admin_addr(&self) -> SocketAddr {
         self.admin.local_addr()

@@ -13,6 +13,17 @@ record.
 
 ### Added
 
+- **`test-util` feature: fault-injectable `RunningServer` / `RunningAdminApi` constructors**
+  (issue #825). `RunningAdminApi::wait()` has exactly-once error delivery backed by a drop guard
+  that reports the accept loop dying however it dies — but the only way to *reach* that `Err` path
+  was an in-crate `#[cfg(test)]` helper, so an embedder that propagates a `RunningServer` outcome to
+  process exit could not write a regression test for it. `RunningServer::with_admin_accept_task` and
+  `RunningAdminApi::with_accept_task` build a handle whose accept loop is an arbitrary future, so a
+  downstream test can inject a failure (or a panic) and assert its reaction. Both are gated behind
+  the new `test-util` feature and bind no listener — test scaffolding, never a production
+  constructor. The in-crate test helper now delegates to the same seam, so what is tested and what
+  embedders get cannot drift.
+
 - **`rift_http_proxy::bootstrap::save_imposters_async` — a non-panicking async form of `save_imposters`**
   (issue #815). `save_imposters` builds its own tokio runtime and `block_on`s it, so an async
   embedder calling it directly from an async worker thread panics with "Cannot start a runtime from
