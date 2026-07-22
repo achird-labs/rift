@@ -83,6 +83,8 @@ pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow:
 /// Idempotent about the end state, loud about everything else: a stale pidfile (the process is
 /// already gone) is cleaned up and reported `Ok`, but a signal that is denied (the process is not
 /// ours) or fails unexpectedly is an error and the pidfile is left in place — it is not stale.
+/// A pidfile whose PID is non-positive is rejected outright (it names a process *group*, not a
+/// process) and likewise kept.
 ///
 /// The unix arm inspects `kill`'s errno to make that distinction; the Windows arm only checks
 /// whether `taskkill` succeeded (it does not map "no such process" back onto the stale-pidfile
@@ -94,6 +96,16 @@ pub fn stop_server(pidfile: &Path) -> Result<(), anyhow::Error> {
 
     let pid_str = std::fs::read_to_string(pidfile)?;
     let pid: i32 = pid_str.trim().parse()?;
+
+    // A pidfile must name a specific process. `kill(0, ..)` signals every process in the caller's
+    // own group and `kill(-pgid, ..)` broadcasts to a group, so a corrupt or crafted pidfile with a
+    // non-positive pid could make `rift stop` SIGTERM itself. Refuse it — and keep the pidfile,
+    // since we never acted on it.
+    if pid <= 0 {
+        return Err(anyhow::anyhow!(
+            "refusing to signal non-positive pid {pid} from PID file {pidfile:?}"
+        ));
+    }
 
     info!("Stopping server with PID {}", pid);
 

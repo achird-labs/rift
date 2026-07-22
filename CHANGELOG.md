@@ -49,6 +49,14 @@ record.
 
 ### Fixed
 
+- **`rift stop` refuses a pidfile with a non-positive PID** (issue #822). `stop_server` parsed the
+  pidfile's PID without a range check, so a corrupt or crafted pidfile containing `0` or a negative
+  number would reach `kill(pid, SIGTERM)` — where `kill(0, …)` signals the caller's entire process
+  group and a negative PID broadcasts to a group. `rift stop` could thus SIGTERM itself and still
+  report success. A non-positive PID is now rejected up front and the pidfile is left untouched.
+  `rift restart` goes through the same path, so it now aborts on a corrupt pidfile instead of
+  proceeding — previously it signalled its own process group and never actually restarted cleanly.
+
 - **`rift save` and `rift stop` now fail loudly instead of lying about success** (issue #816).
   `rift save` fetched `GET /imposters` and wrote the response body without checking the status, so
   when the admin API answered `401`/`500` (e.g. a wrong `--apikey`) the error document was written

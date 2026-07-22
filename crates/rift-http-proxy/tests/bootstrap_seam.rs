@@ -129,6 +129,44 @@ fn stop_server_unparseable_pid_is_an_error() {
     );
 }
 
+// AC1/AC2 (issue #822): a pidfile with a non-positive pid must be rejected before any signal —
+// `kill(0, ..)` signals the caller's whole process group and `kill(-1, ..)` broadcasts, so a
+// corrupt/crafted pidfile could otherwise make `rift stop` SIGTERM its own group. The pidfile is
+// not stale, so it is left in place.
+#[test]
+fn stop_server_zero_pid_is_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pidfile = dir.path().join("zero.pid");
+    std::fs::write(&pidfile, "0").expect("write pidfile");
+
+    let err = bootstrap::stop_server(&pidfile).expect_err("pid 0 must be rejected");
+    assert!(
+        err.to_string().contains("non-positive pid 0"),
+        "the error should name the offending pid, got: {err}"
+    );
+    assert!(
+        pidfile.exists(),
+        "a pidfile that was never acted on must not be removed"
+    );
+}
+
+#[test]
+fn stop_server_negative_pid_is_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pidfile = dir.path().join("negative.pid");
+    std::fs::write(&pidfile, "-1").expect("write pidfile");
+
+    let err = bootstrap::stop_server(&pidfile).expect_err("a negative pid must be rejected");
+    assert!(
+        err.to_string().contains("non-positive pid -1"),
+        "the error should name the offending pid, got: {err}"
+    );
+    assert!(
+        pidfile.exists(),
+        "a pidfile that was never acted on must not be removed"
+    );
+}
+
 // AC3 (issue #816): a pidfile naming a dead process is a stale pidfile — `stop_server` cleans it
 // up and returns Ok, since the desired end state (server not running) already holds.
 // NOTE: this guards the ESRCH arm's *outcome* but does not, alone, prove the arm ran — the old
