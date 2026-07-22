@@ -99,6 +99,12 @@ sxd-xpath = "0.4"
 # JSONPath RFC 9535 support
 serde_json_path = "0.7"
 
+# The bootstrap_seam integration test exercises the #825 fault-injection seam, which is
+# feature-gated; enable it for this crate's own dev builds so CI covers it.
+[dev-dependencies.rift-http-proxy]
+path = "."
+features = ["test-util"]
+
 [dev-dependencies]
 # Turn on the failing flow-store backend for backend-outage tests (issue #318)
 rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-features = false, features = ["test-backend"] }
@@ -133,6 +139,10 @@ mimalloc = ["dep:mimalloc"]
 # (e.g. CI's --all-features lanes) mimalloc wins by cfg precedence in main.rs — deliberately
 # NOT a compile_error! because CI builds --all-features.
 jemalloc = ["dep:tikv-jemallocator"]
+# Exposes the fault-injectable `RunningAdminApi`/`RunningServer` constructors so a downstream
+# embedder can drive the accept-loop failure path in its own tests (issue #825). Test-only surface:
+# never enable it in a production build.
+test-util = []
 
 [[bin]]
 name = "rift-verify"

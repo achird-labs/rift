@@ -3373,6 +3373,7 @@ dependencies = [
  "rcgen",
  "regex",
  "reqwest",
+ "rift-http-proxy",
  "rift-lint",
  "rift-mock-core",
  "rift-types",
