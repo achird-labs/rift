@@ -49,6 +49,17 @@ record.
 
 ### Fixed
 
+- **`rift save` and `rift stop` now fail loudly instead of lying about success** (issue #816).
+  `rift save` fetched `GET /imposters` and wrote the response body without checking the status, so
+  when the admin API answered `401`/`500` (e.g. a wrong `--apikey`) the error document was written
+  verbatim to the savefile and logged as `Saved imposters to <path>` — a savefile that looks valid
+  but is an error page. It now checks the status first and writes nothing on a non-2xx response.
+  `rift stop` discarded `kill`'s return value, so any parseable pidfile reported success and had its
+  pidfile removed even when no signal was delivered; it now distinguishes a stale pidfile (process
+  already gone → cleaned up, `Ok`) from a denied or failed signal (error, pidfile kept). Note: both
+  subcommands can now exit **non-zero** where they previously always exited `0` — that is the fix;
+  scripts relying on the old always-success behavior were being misled.
+
 - **`examples/task-management-api.json` no longer ships two dead stubs.** The document loaded
   cleanly and linted clean, but two of the behaviors it advertised never fired: matching is
   first-match-wins, and the bare `GET /tasks` stub was listed before the `?status=OPEN` one (so the

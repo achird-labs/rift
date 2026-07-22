@@ -165,8 +165,8 @@ imposters. These live in `rift_http_proxy::bootstrap` so an alternative binary k
 | Function | Signature | Purpose |
 |:---------|:----------|:--------|
 | `apply_rcfile_defaults` | `fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> anyhow::Result<()>` | Fill CLI fields **still at their clap defaults** from a Mountebank-compatible JSON rcfile. An explicitly-supplied flag always wins; unrecognised keys are warned and ignored. |
-| `stop_server` | `fn stop_server(pidfile: &Path) -> anyhow::Result<()>` | Signal the process named in `pidfile` (SIGTERM on unix, `taskkill /F` on Windows), then remove the file. |
-| `save_imposters_async` | `async fn save_imposters_async(host: &str, port: u16, savefile: &Path, remove_proxies: bool) -> anyhow::Result<()>` | Fetch `GET /imposters?replayable=true` from a running admin API and write it to `savefile`. The async form — call it from an embedder's own runtime. |
+| `stop_server` | `fn stop_server(pidfile: &Path) -> anyhow::Result<()>` | Signal the process named in `pidfile` (SIGTERM on unix, `taskkill /F` on Windows), then remove the file. A stale pidfile (process already gone) is cleaned up as `Ok`; a denied or failed signal is an error and the pidfile is kept. |
+| `save_imposters_async` | `async fn save_imposters_async(host: &str, port: u16, savefile: &Path, remove_proxies: bool) -> anyhow::Result<()>` | Fetch `GET /imposters?replayable=true` from a running admin API and write it to `savefile`. The async form — call it from an embedder's own runtime. A non-2xx admin response is an error; nothing is written to `savefile`. |
 | `save_imposters` | `fn save_imposters(host: &str, port: u16, savefile: &Path, remove_proxies: bool) -> anyhow::Result<()>` | Blocking wrapper over `save_imposters_async` for the sync `save` subcommand path. |
 
 Supported rcfile keys: `port`, `host`, `logLevel`/`loglevel`, `allowInjection`/`allow_injection`,

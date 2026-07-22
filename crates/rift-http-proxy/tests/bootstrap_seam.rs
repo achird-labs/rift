@@ -129,6 +129,60 @@ fn stop_server_unparseable_pid_is_an_error() {
     );
 }
 
+// AC3 (issue #816): a pidfile naming a dead process is a stale pidfile — `stop_server` cleans it
+// up and returns Ok, since the desired end state (server not running) already holds.
+// NOTE: this guards the ESRCH arm's *outcome* but does not, alone, prove the arm ran — the old
+// "ignore kill's return" code also produced Ok + removed pidfile here. It only discriminates the
+// new dispatch in tandem with `stop_server_not_permitted_keeps_pidfile` (EPERM), which would fail
+// under that old code. Keep the two together.
+#[cfg(unix)]
+#[test]
+fn stop_server_stale_pid_is_cleaned_up_with_ok() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Spawn a child, reap it, and reuse its PID — guaranteed dead. (PID reuse between reap and
+    // kill is theoretically possible but not a realistic test-time race.)
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn a short-lived process");
+    let dead_pid = child.id();
+    child.wait().expect("reap the process");
+
+    let pidfile = dir.path().join("stale.pid");
+    std::fs::write(&pidfile, dead_pid.to_string()).expect("write pidfile");
+
+    bootstrap::stop_server(&pidfile).expect("a stale pidfile must clean up with Ok");
+    assert!(
+        !pidfile.exists(),
+        "stop_server must remove a stale pidfile once the process is gone"
+    );
+}
+
+// AC5 (issue #816): signalling a process we do not own is EPERM — a real error, and the pidfile is
+// NOT ours to remove, so it stays. PID 1 (init) is never ours as an unprivileged user; skip when
+// running as root (containers), where the signal would not be denied.
+#[cfg(unix)]
+#[test]
+fn stop_server_not_permitted_keeps_pidfile() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping EPERM test: running as root, PID 1 would be signalable");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pidfile = dir.path().join("not-ours.pid");
+    std::fs::write(&pidfile, "1").expect("write pidfile");
+
+    let err = bootstrap::stop_server(&pidfile)
+        .expect_err("signalling a process we do not own must be an error");
+    assert!(
+        err.to_string().contains('1'),
+        "the error should name the pid, got: {err}"
+    );
+    assert!(
+        pidfile.exists(),
+        "a pidfile we were not permitted to act on must NOT be removed"
+    );
+}
+
 // AC6: the happy path — stop_server signals the process and clears the pidfile.
 #[cfg(unix)]
 #[test]
@@ -316,6 +370,40 @@ async fn save_imposters_async_remove_proxies_strips_proxy_stubs() {
     assert!(
         stripped_raw.contains("/kept"),
         "removeProxies=true must keep the non-proxy stub, got: {stripped_raw}"
+    );
+
+    server.shutdown().await;
+}
+
+// AC1 (issue #816): a non-2xx admin response is an error, and nothing is written to the savefile —
+// the data-path swallow this fixes is a 401/500 body written verbatim and logged as a success.
+#[tokio::test]
+async fn save_imposters_rejects_non_2xx_and_writes_nothing() {
+    let manager = Arc::new(ImposterManager::new());
+
+    // Admin API guarded by an api key — a request with no Authorization header gets 401.
+    let mut guarded = cli(&["--host", "127.0.0.1", "--port", "0"]);
+    guarded.api_key = Some("secret".to_string());
+    let server = ServerBuilder::from_cli(guarded)
+        .manager(Arc::clone(&manager))
+        .start()
+        .await
+        .expect("admin API starts");
+    let addr = server.admin_addr();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let savefile = dir.path().join("imposters.json");
+    let err =
+        bootstrap::save_imposters_async(&addr.ip().to_string(), addr.port(), &savefile, false)
+            .await
+            .expect_err("a non-2xx admin response must be an error");
+    assert!(
+        err.to_string().contains("401"),
+        "the error should carry the HTTP status, got: {err}"
+    );
+    assert!(
+        !savefile.exists(),
+        "nothing must be written to the savefile on a non-2xx response, but it exists"
     );
 
     server.shutdown().await;

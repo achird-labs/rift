@@ -79,6 +79,14 @@ pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow:
 }
 
 /// Stop a running server by PID file.
+///
+/// Idempotent about the end state, loud about everything else: a stale pidfile (the process is
+/// already gone) is cleaned up and reported `Ok`, but a signal that is denied (the process is not
+/// ours) or fails unexpectedly is an error and the pidfile is left in place — it is not stale.
+///
+/// The unix arm inspects `kill`'s errno to make that distinction; the Windows arm only checks
+/// whether `taskkill` succeeded (it does not map "no such process" back onto the stale-pidfile
+/// policy — that exit code is undocumented-ish and untested here).
 pub fn stop_server(pidfile: &Path) -> Result<(), anyhow::Error> {
     if !pidfile.exists() {
         return Err(anyhow::anyhow!("PID file not found: {pidfile:?}"));
@@ -90,19 +98,47 @@ pub fn stop_server(pidfile: &Path) -> Result<(), anyhow::Error> {
     info!("Stopping server with PID {}", pid);
 
     #[cfg(unix)]
-    unsafe {
-        libc::kill(pid, libc::SIGTERM);
+    {
+        // SAFETY: kill(2) with a plain PID and signal number touches no memory; failure is
+        // reported via errno, which we read immediately below.
+        let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+        if rc == -1 {
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::ESRCH) => {
+                    // No such process — the pidfile is stale. The desired end state already holds.
+                    warn!("process {pid} not running; removing stale PID file");
+                }
+                Some(libc::EPERM) => {
+                    return Err(anyhow::anyhow!(
+                        "not permitted to signal process {pid} (EPERM); leaving PID file in place"
+                    ));
+                }
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "failed to signal process {pid}: {err}; leaving PID file in place"
+                    ));
+                }
+            }
+        }
     }
 
     #[cfg(windows)]
     {
-        // On Windows, use taskkill
-        std::process::Command::new("taskkill")
+        // On Windows, use taskkill; a non-success exit means the process was not stopped, so the
+        // pidfile is not stale — surface the failure and keep it.
+        let output = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/F"])
-            .status()?;
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "taskkill failed to stop process {pid}: {}; leaving PID file in place",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
     }
 
-    // Remove PID file
+    // Remove PID file (success path, and the ESRCH stale-pidfile path).
     std::fs::remove_file(pidfile)?;
 
     Ok(())
@@ -127,7 +163,9 @@ pub async fn save_imposters_async(
     }
     let url = format!("http://{host}:{port}/imposters?{query}");
 
-    let response = client.get(&url).send().await?;
+    // `error_for_status` before `.text()` so a 401/500 response is a value error, not a body
+    // silently written to the user's savefile. The error carries the status and URL.
+    let response = client.get(&url).send().await?.error_for_status()?;
     let content = response.text().await?;
 
     // `tokio::fs::write` so the shared body never blocks a caller's async worker thread.
