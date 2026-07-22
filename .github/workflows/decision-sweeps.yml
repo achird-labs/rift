@@ -93,7 +93,7 @@ jobs:
           for alloc in mimalloc jemalloc system; do
             python3 scripts/bench_direct.py --aggregate-reps "_${alloc}"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: allocator-sweep-results
@@ -166,7 +166,7 @@ jobs:
           { grep -o "Runtime topology: .*" /tmp/rift-skew.log | head -1;
             curl -sf http://127.0.0.1:9090/metrics | grep "^rift_accepted_connections_total"; } \
             | tee tests/benchmark/results/skew-evidence.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: topology-sweep-results
@@ -263,7 +263,7 @@ jobs:
             printf "quamina-%s %s bytes\n" "$q" \
               "$(stat -c%s target/quamina-$q/release/rift-http-proxy)"
           done | tee tests/benchmark/results/binary-sizes.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: quamina-sweep-results
