@@ -203,3 +203,120 @@ async fn save_imposters_writes_the_replayable_config() {
 
     server.shutdown().await;
 }
+
+// AC1 (issue #815): the regression gate for the nested-runtime panic — `save_imposters_async` is
+// called **directly** from an async worker thread (no `spawn_blocking`). This is the call that
+// panics with "Cannot start a runtime from within a runtime" if the async body is not exposed.
+#[tokio::test]
+async fn save_imposters_async_works_from_async_context() {
+    let manager = Arc::new(ImposterManager::new());
+    let imposter: ImposterConfig = serde_json::from_value(serde_json::json!({
+        "protocol": "http",
+        "port": 0,
+        "name": "async-seam",
+        "stubs": [{
+            "predicates": [{"equals": {"path": "/ping"}}],
+            "responses": [{"is": {"statusCode": 200, "body": "pong"}}]
+        }]
+    }))
+    .expect("imposter config");
+    manager
+        .create_imposter(imposter)
+        .await
+        .expect("create imposter");
+
+    let server = ServerBuilder::from_cli(cli(&["--host", "127.0.0.1", "--port", "0"]))
+        .manager(Arc::clone(&manager))
+        .start()
+        .await
+        .expect("admin API starts");
+    let addr = server.admin_addr();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let savefile = dir.path().join("imposters.json");
+    bootstrap::save_imposters_async(&addr.ip().to_string(), addr.port(), &savefile, false)
+        .await
+        .expect("save_imposters_async succeeds from an async context");
+
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&savefile).expect("read savefile"))
+            .expect("savefile is JSON");
+    let names: Vec<&str> = written["imposters"]
+        .as_array()
+        .expect("imposters array")
+        .iter()
+        .filter_map(|i| i["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"async-seam"),
+        "the saved config must contain the live imposter, got: {written}"
+    );
+
+    server.shutdown().await;
+}
+
+// AC3 (issue #815): `remove_proxies=true` must reach the admin API through the async form — a
+// proxy-only stub is dropped from the saved config, a normal stub is kept. Proves the query param
+// is appended and honored, not just that the call succeeds.
+#[tokio::test]
+async fn save_imposters_async_remove_proxies_strips_proxy_stubs() {
+    let manager = Arc::new(ImposterManager::new());
+    let imposter: ImposterConfig = serde_json::from_value(serde_json::json!({
+        "protocol": "http",
+        "port": 0,
+        "name": "proxy-seam",
+        "stubs": [
+            {
+                "predicates": [{"equals": {"path": "/kept"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "kept"}}]
+            },
+            {
+                "responses": [{"proxy": {
+                    "to": "http://127.0.0.1:1", "mode": "proxyOnce"
+                }}]
+            }
+        ]
+    }))
+    .expect("imposter config");
+    manager
+        .create_imposter(imposter)
+        .await
+        .expect("create imposter");
+
+    let server = ServerBuilder::from_cli(cli(&["--host", "127.0.0.1", "--port", "0"]))
+        .manager(Arc::clone(&manager))
+        .start()
+        .await
+        .expect("admin API starts");
+    let addr = server.admin_addr();
+    let (host, port) = (addr.ip().to_string(), addr.port());
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // remove_proxies=false: the proxy stub survives.
+    let with_proxy = dir.path().join("with-proxy.json");
+    bootstrap::save_imposters_async(&host, port, &with_proxy, false)
+        .await
+        .expect("save without removeProxies");
+    let with_proxy_raw = std::fs::read_to_string(&with_proxy).expect("read with-proxy");
+    assert!(
+        with_proxy_raw.contains("\"proxy\""),
+        "without removeProxies the proxy stub must be present, got: {with_proxy_raw}"
+    );
+
+    // remove_proxies=true: the proxy-only stub is stripped, the normal stub stays.
+    let stripped = dir.path().join("stripped.json");
+    bootstrap::save_imposters_async(&host, port, &stripped, true)
+        .await
+        .expect("save with removeProxies");
+    let stripped_raw = std::fs::read_to_string(&stripped).expect("read stripped");
+    assert!(
+        !stripped_raw.contains("\"proxy\""),
+        "removeProxies=true must strip the proxy-only stub, got: {stripped_raw}"
+    );
+    assert!(
+        stripped_raw.contains("/kept"),
+        "removeProxies=true must keep the non-proxy stub, got: {stripped_raw}"
+    );
+
+    server.shutdown().await;
+}

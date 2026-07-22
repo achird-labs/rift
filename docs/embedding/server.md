@@ -166,7 +166,8 @@ imposters. These live in `rift_http_proxy::bootstrap` so an alternative binary k
 |:---------|:----------|:--------|
 | `apply_rcfile_defaults` | `fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> anyhow::Result<()>` | Fill CLI fields **still at their clap defaults** from a Mountebank-compatible JSON rcfile. An explicitly-supplied flag always wins; unrecognised keys are warned and ignored. |
 | `stop_server` | `fn stop_server(pidfile: &Path) -> anyhow::Result<()>` | Signal the process named in `pidfile` (SIGTERM on unix, `taskkill /F` on Windows), then remove the file. |
-| `save_imposters` | `fn save_imposters(host: &str, port: u16, savefile: &Path, remove_proxies: bool) -> anyhow::Result<()>` | Fetch `GET /imposters?replayable=true` from a running admin API and write it to `savefile`. |
+| `save_imposters_async` | `async fn save_imposters_async(host: &str, port: u16, savefile: &Path, remove_proxies: bool) -> anyhow::Result<()>` | Fetch `GET /imposters?replayable=true` from a running admin API and write it to `savefile`. The async form — call it from an embedder's own runtime. |
+| `save_imposters` | `fn save_imposters(host: &str, port: u16, savefile: &Path, remove_proxies: bool) -> anyhow::Result<()>` | Blocking wrapper over `save_imposters_async` for the sync `save` subcommand path. |
 
 Supported rcfile keys: `port`, `host`, `logLevel`/`loglevel`, `allowInjection`/`allow_injection`,
 `localOnly`/`local_only`, `datadir`, `configfile`.
@@ -193,8 +194,9 @@ match &cli.command {
 ```
 
 `save_imposters` builds its own tokio runtime and blocks on it (it is a sync subcommand path), so do
-not call it from inside a running async runtime — use `tokio::task::spawn_blocking` if your caller
-is already async.
+not call it from inside a running async runtime — it would panic starting a nested runtime. From
+async code call `save_imposters_async` directly instead; it awaits rather than driving its own
+runtime, so it is safe on an async worker thread.
 
 ---
 

@@ -13,6 +13,14 @@ record.
 
 ### Added
 
+- **`rift_http_proxy::bootstrap::save_imposters_async` — a non-panicking async form of `save_imposters`**
+  (issue #815). `save_imposters` builds its own tokio runtime and `block_on`s it, so an async
+  embedder calling it directly from an async worker thread panics with "Cannot start a runtime from
+  within a runtime". The async body is now public as `save_imposters_async`, which awaits instead of
+  nesting a runtime — call it from an embedder's own runtime. The blocking `save_imposters` is
+  unchanged (it now wraps the async form), so the `save` subcommand and existing sync callers are
+  unaffected.
+
 - **`RunningServer::wait(&self)` — await the embedded server without consuming it** (issue #806).
   `join(self)` and `shutdown(self)` both moved the server, so a host could await the server *or*
   await its own shutdown signal, never race them: the arm that won a `select!` against `join` could

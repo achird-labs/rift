@@ -108,13 +108,41 @@ pub fn stop_server(pidfile: &Path) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Save imposters to a file.
+/// Save imposters to a file (async form).
 ///
 /// Fetches the replayable imposter config from the admin API at `host:port` and writes it to
-/// `savefile`. Builds its own tokio runtime and blocks on it, exactly like the CLI's `save`
+/// `savefile`. This is the form to call from an embedder's own async runtime — it awaits rather
+/// than driving a nested runtime, so it is safe on an async worker thread. Sync callers (the `save`
+/// subcommand) should use [`save_imposters`], which wraps this.
+pub async fn save_imposters_async(
+    host: &str,
+    port: u16,
+    savefile: &Path,
+    remove_proxies: bool,
+) -> Result<(), anyhow::Error> {
+    let client = reqwest::Client::new();
+    let mut query = "replayable=true".to_string();
+    if remove_proxies {
+        query.push_str("&removeProxies=true");
+    }
+    let url = format!("http://{host}:{port}/imposters?{query}");
+
+    let response = client.get(&url).send().await?;
+    let content = response.text().await?;
+
+    // `tokio::fs::write` so the shared body never blocks a caller's async worker thread.
+    tokio::fs::write(savefile, &content).await?;
+    info!("Saved imposters to {:?}", savefile);
+
+    Ok(())
+}
+
+/// Save imposters to a file (blocking form).
+///
+/// Builds its own tokio runtime and drives [`save_imposters_async`], exactly like the CLI's `save`
 /// subcommand does today — so this must **not** be called from inside an already-running async
-/// runtime (it will panic trying to start a nested one). Call it from sync context, or via
-/// `tokio::task::spawn_blocking` if the caller is itself async.
+/// runtime (it will panic trying to start a nested one). Call it from sync context; from async
+/// code call [`save_imposters_async`] directly.
 pub fn save_imposters(
     host: &str,
     port: u16,
@@ -122,21 +150,5 @@ pub fn save_imposters(
     remove_proxies: bool,
 ) -> Result<(), anyhow::Error> {
     let runtime = tokio::runtime::Runtime::new()?;
-
-    runtime.block_on(async {
-        let client = reqwest::Client::new();
-        let mut query = "replayable=true".to_string();
-        if remove_proxies {
-            query.push_str("&removeProxies=true");
-        }
-        let url = format!("http://{host}:{port}/imposters?{query}");
-
-        let response = client.get(&url).send().await?;
-        let content = response.text().await?;
-
-        std::fs::write(savefile, &content)?;
-        info!("Saved imposters to {:?}", savefile);
-
-        Ok(())
-    })
+    runtime.block_on(save_imposters_async(host, port, savefile, remove_proxies))
 }
