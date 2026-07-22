@@ -293,6 +293,8 @@ impl ProxyServer {
         // transient `ECONNABORTED` or a momentary `EMFILE`.
         let mut backoff = super::network::AcceptBackoff::new();
         let mut error_log = super::network::AcceptErrorLog::default();
+        // Clears its contribution on every exit path, including a cancel break or a panic (#838).
+        let mut outage = crate::extensions::AcceptOutageGuard::new("proxy");
 
         loop {
             // Acquire a permit *before* accepting so a cap holds connections back in the listener
@@ -311,6 +313,7 @@ impl ProxyServer {
                     // Recovery: only the transition out of a systemic-error state logs and resets
                     // the backoff, so a healthy accept path pays one branch.
                     if let Some(suppressed) = error_log.on_success() {
+                        outage.exit();
                         info!(
                             suppressed,
                             "proxy accept loop recovered after {suppressed} suppressed error(s)"
@@ -328,15 +331,28 @@ impl ProxyServer {
                 }
                 Err(e) => match super::network::classify_accept_error(&e) {
                     super::network::AcceptErrorClass::Transient => {
+                        crate::extensions::record_accept_error("proxy", "transient");
                         debug!("transient accept error on the proxy listener: {e}");
                         continue;
                     }
                     super::network::AcceptErrorClass::Systemic => {
-                        if error_log.on_error() {
-                            error!(
-                                "accept error on the proxy listener: {e}; backing off \
-                                 (further errors suppressed until recovery)"
-                            );
+                        crate::extensions::record_accept_error("proxy", "systemic");
+                        match error_log.on_error() {
+                            Some(super::network::AcceptErrorEvent::Onset) => {
+                                outage.enter();
+                                error!(
+                                    "accept error on the proxy listener: {e}; backing off \
+                                     (further errors suppressed until recovery)"
+                                );
+                            }
+                            Some(super::network::AcceptErrorEvent::StillDown { suppressed }) => {
+                                error!(
+                                    suppressed,
+                                    "proxy listener still failing to accept after {suppressed} \
+                                     suppressed error(s): {e}"
+                                );
+                            }
+                            None => {}
                         }
                         // This loop has no shutdown signal to race against (see the permit
                         // acquire above), so a plain sleep is the whole story here.

@@ -712,8 +712,8 @@ async fn metrics_accept_loop(
     use hyper::{Request, Response, body::Incoming};
     use hyper_util::rt::TokioIo;
     use rift_mock_core::proxy::{
-        AcceptBackoff, AcceptErrorClass, AcceptErrorLog, HttpTuning, classify_accept_error,
-        is_fatal_listener_error,
+        AcceptBackoff, AcceptErrorClass, AcceptErrorEvent, AcceptErrorLog, HttpTuning,
+        classify_accept_error, is_fatal_listener_error,
     };
     use std::convert::Infallible;
 
@@ -731,6 +731,8 @@ async fn metrics_accept_loop(
     // answering until the process restarted.
     let mut backoff = AcceptBackoff::new();
     let mut error_log = AcceptErrorLog::default();
+    // Clears its contribution on every exit path, including a cancel break or a panic (#838).
+    let mut outage = rift_mock_core::extensions::AcceptOutageGuard::new("metrics");
 
     loop {
         // Acquire a permit *before* accepting so a cap holds connections back in the listener
@@ -760,6 +762,7 @@ async fn metrics_accept_loop(
                 // Recovery: only the transition out of a systemic-error state logs and resets the
                 // backoff, so a healthy accept path pays one branch.
                 if let Some(suppressed) = error_log.on_success() {
+                    outage.exit();
                     info!(
                         suppressed,
                         "metrics accept loop recovered after {suppressed} suppressed error(s)"
@@ -777,15 +780,28 @@ async fn metrics_accept_loop(
             }
             Err(e) => match classify_accept_error(&e) {
                 AcceptErrorClass::Transient => {
+                    rift_mock_core::extensions::record_accept_error("metrics", "transient");
                     debug!("transient accept error on the metrics listener: {e}");
                     continue;
                 }
                 AcceptErrorClass::Systemic => {
-                    if error_log.on_error() {
-                        error!(
-                            "accept error on the metrics listener: {e}; backing off \
-                             (further errors suppressed until recovery)"
-                        );
+                    rift_mock_core::extensions::record_accept_error("metrics", "systemic");
+                    match error_log.on_error() {
+                        Some(AcceptErrorEvent::Onset) => {
+                            outage.enter();
+                            error!(
+                                "accept error on the metrics listener: {e}; backing off \
+                                 (further errors suppressed until recovery)"
+                            );
+                        }
+                        Some(AcceptErrorEvent::StillDown { suppressed }) => {
+                            error!(
+                                suppressed,
+                                "metrics listener still failing to accept after {suppressed} \
+                                 suppressed error(s): {e}"
+                            );
+                        }
+                        None => {}
                     }
                     // Raced against `cancel` so a backoff sleep never delays shutdown.
                     let delay = backoff.next_delay();

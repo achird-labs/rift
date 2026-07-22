@@ -14,7 +14,7 @@ use crate::extensions::flow_state::FlowStoreProvider;
 use crate::extensions::no_match::NoMatchInterceptor;
 use crate::imposter::journal::RequestJournal;
 use crate::proxy::network::{
-    AcceptBackoff, AcceptErrorClass, AcceptErrorLog, classify_accept_error,
+    AcceptBackoff, AcceptErrorClass, AcceptErrorEvent, AcceptErrorLog, classify_accept_error,
 };
 use crate::recording::ProxyRecordingStore;
 use arc_swap::ArcSwapOption;
@@ -704,6 +704,8 @@ impl ImposterManager {
         // (issue #750).
         let mut backoff = AcceptBackoff::new();
         let mut error_log = AcceptErrorLog::default();
+        // Clears its contribution on every exit path, including a cancel break or a panic (#838).
+        let mut outage = crate::extensions::AcceptOutageGuard::new("imposter");
         loop {
             // Acquire a permit *before* accepting so a cap holds connections back in the
             // listener backlog/kernel SYN queue rather than accepting them and then failing
@@ -737,6 +739,7 @@ impl ImposterManager {
                             // Recovery: only the transition out of a systemic-error state logs
                             // and resets the backoff, so a healthy accept path pays one branch.
                             if let Some(suppressed) = error_log.on_success() {
+                                outage.exit();
                                 info!(
                                     port,
                                     suppressed,
@@ -813,16 +816,31 @@ impl ImposterManager {
                         Err(e) => match classify_accept_error(&e) {
                             // Expected under load — retry immediately, no backoff, no error spam.
                             AcceptErrorClass::Transient => {
+                                crate::extensions::record_accept_error("imposter", "transient");
                                 debug!("transient accept error on port {port}: {e}");
                             }
-                            // Systemic (fd exhaustion / unknown): log once on entry, then back off.
+                            // Systemic (fd exhaustion / unknown): log on entry and periodically
+                            // while it persists, then back off.
                             AcceptErrorClass::Systemic => {
-                                if error_log.on_error() {
-                                    error!(
-                                        port,
-                                        "accept error on port {port}: {e}; backing off \
-                                         (further errors suppressed until recovery)"
-                                    );
+                                crate::extensions::record_accept_error("imposter", "systemic");
+                                match error_log.on_error() {
+                                    Some(AcceptErrorEvent::Onset) => {
+                                        outage.enter();
+                                        error!(
+                                            port,
+                                            "accept error on port {port}: {e}; backing off \
+                                             (further errors suppressed until recovery)"
+                                        );
+                                    }
+                                    Some(AcceptErrorEvent::StillDown { suppressed }) => {
+                                        error!(
+                                            port,
+                                            suppressed,
+                                            "port {port} still failing to accept after \
+                                             {suppressed} suppressed error(s): {e}"
+                                        );
+                                    }
+                                    None => {}
                                 }
                                 // Raced against shutdown exactly like the permit acquire above:
                                 // `delete_imposter_inner` awaits this task, so an un-raced sleep

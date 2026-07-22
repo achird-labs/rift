@@ -58,6 +58,8 @@ Histogram metrics expand into the usual `_bucket{le="…"}`, `_sum`, and `_count
 | `rift_proxy_request_duration_ms` | histogram | `method`, `fault_applied` | Proxy handling time, in milliseconds. |
 | `rift_upstream_request_duration_ms` | histogram | `method`, `status` | Upstream (proxied) request time, in milliseconds. |
 | `rift_accepted_connections_total` | counter | `worker` | Connections accepted per accept-loop worker slot. Under `--runtime per-core` the slot is the worker index, making SO_REUSEPORT skew observable; in the default topology everything lands on slot `0`. |
+| `rift_accept_errors_total` | counter | `listener`, `class` | Accept errors by listener (`imposter`, `admin`, `metrics`, `proxy`) and class (`transient`, `systemic`). The accept loops classify and retry rather than terminate, so a listener can stay bound while unable to serve — this is the signal that it is degraded. Fatal (broken-fd) errors are excluded on the admin, metrics and proxy listeners — they end the loop and surface through its owner. The imposter loops have no fatal class by design (a dying imposter loop is recoverable through the still-live admin API), so there a broken fd counts as `systemic`. No port label, deliberately (unbounded cardinality); the log lines carry the port. |
+| `rift_accept_error_outage` | gauge | `listener` | `1` while **any** accept loop for that listener is in a systemic outage, `0` otherwise — the imposter plane runs many loops behind one label, so this counts depth rather than tracking whichever loop wrote last. Released when a loop ends while wedged, so it cannot stick at `1`. Present at `0` from startup, so `absent()` alerts work. The one to alert on. |
 
 Example scrape output:
 

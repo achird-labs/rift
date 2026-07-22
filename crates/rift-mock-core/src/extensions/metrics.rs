@@ -4,10 +4,12 @@
 //!
 //! Tracks fault injection activity, script execution, and proxy performance.
 use lazy_static::lazy_static;
+use parking_lot::Mutex;
 use prometheus::{
     CounterVec, Encoder, GaugeVec, HistogramVec, TextEncoder, register_counter_vec,
     register_gauge_vec, register_histogram_vec,
 };
+use std::collections::HashMap;
 
 lazy_static! {
     /// Total number of requests processed
@@ -31,6 +33,29 @@ lazy_static! {
     .unwrap();
 
     /// Total number of faults injected
+    /// Accept errors, by listener and class (issue #838). Since the accept loops classify and
+    /// retry rather than terminate, a wedged listener stays bound and answers nothing — this is
+    /// the live signal that it is degraded. `class` is `transient` or `systemic`. Fatal (broken-fd)
+    /// errors are excluded on the admin, metrics and proxy listeners because they end the loop and
+    /// surface through its owner; the imposter loops have no fatal class by design (a dying imposter
+    /// loop is recoverable through the still-live admin API), so there they count as `systemic`.
+    /// Deliberately no port label: per-port cardinality is unbounded, and the logs carry the port.
+    pub static ref ACCEPT_ERRORS_TOTAL: CounterVec = register_counter_vec!(
+        "rift_accept_errors_total",
+        "Accept errors by listener and class",
+        &["listener", "class"]
+    )
+    .expect("metric can be created");
+
+    /// Whether a listener is currently in a systemic accept-error outage (1) or not (0),
+    /// issue #838 — the gauge to alert on.
+    pub static ref ACCEPT_ERROR_OUTAGE: GaugeVec = register_gauge_vec!(
+        "rift_accept_error_outage",
+        "1 while a listener is in a systemic accept-error outage, 0 otherwise",
+        &["listener"]
+    )
+    .expect("metric can be created");
+
     pub static ref FAULTS_INJECTED_TOTAL: CounterVec = register_counter_vec!(
         "rift_faults_injected_total",
         "Total number of faults injected",
@@ -178,6 +203,94 @@ pub fn record_flow_state_op(operation: &str, success: bool) {
 /// Helper to set active flows gauge
 pub fn set_active_flows(backend: &str, count: i64) {
     ACTIVE_FLOWS.with_label_values(&[backend]).set(count as f64);
+}
+
+lazy_static! {
+    /// How many accept loops are currently inside a systemic outage, per listener (issue #838).
+    ///
+    /// The gauge cannot simply be `set(0)` by whoever recovers first: one `listener` label covers
+    /// **many** loops — the imposter plane runs one accept loop per imposter *and* one per accept
+    /// runtime under per-core fan-out (SO_REUSEPORT). Systemic errors are dominated by process-wide
+    /// fd exhaustion, so those loops wedge together and recover asynchronously; a plain `set(0)`
+    /// would clear the gauge on the first recovery while the rest are still down, under-reporting
+    /// exactly the outage the gauge exists to report. Counting depth makes it "any loop wedged".
+    static ref ACCEPT_OUTAGE_DEPTH: Mutex<HashMap<&'static str, usize>> =
+        Mutex::new(HashMap::new());
+}
+
+/// Tracks one accept loop's outage state and keeps [`ACCEPT_ERROR_OUTAGE`] consistent (issue #838).
+///
+/// Held by the loop for its lifetime. `Drop` releases the outage, so **every** way a loop can end
+/// while wedged — a shutdown/cancel `break`, a fatal `return Err`, a panic unwind — clears its
+/// contribution. Without that, deleting an imposter mid-outage would leave the gauge stuck at 1
+/// forever for a listener that no longer exists, and the registry is process-global, so it would
+/// survive across embedded server lifecycles.
+#[derive(Debug)]
+pub struct AcceptOutageGuard {
+    listener: &'static str,
+    in_outage: bool,
+}
+
+impl AcceptOutageGuard {
+    /// Start tracking `listener`. Materializes the series so alerts can reference it before the
+    /// first outage ever happens (Prometheus only creates a child on first use).
+    ///
+    /// Goes through [`Self::adjust`] with a zero delta rather than writing the gauge directly: a
+    /// new loop can start while *another* loop on the same label is already wedged (per-core
+    /// fan-out starts N loops, a new imposter is created during an outage, a second embedded
+    /// server starts), and a blind `set(0)` there would clear the gauge while the depth stayed
+    /// non-zero — and stay wrong, since the gauge is only rewritten on an outage transition.
+    #[must_use]
+    pub fn new(listener: &'static str) -> Self {
+        Self::adjust(listener, 0);
+        Self {
+            listener,
+            in_outage: false,
+        }
+    }
+
+    /// This loop entered a systemic outage. Idempotent.
+    pub fn enter(&mut self) {
+        if !self.in_outage {
+            self.in_outage = true;
+            Self::adjust(self.listener, 1);
+        }
+    }
+
+    /// This loop recovered (or is ending). Idempotent.
+    pub fn exit(&mut self) {
+        if self.in_outage {
+            self.in_outage = false;
+            Self::adjust(self.listener, -1);
+        }
+    }
+
+    fn adjust(listener: &'static str, delta: isize) {
+        let mut depth = ACCEPT_OUTAGE_DEPTH.lock();
+        let entry = depth.entry(listener).or_insert(0);
+        *entry = entry.saturating_add_signed(delta);
+        let any = *entry > 0;
+        ACCEPT_ERROR_OUTAGE
+            .with_label_values(&[listener])
+            .set(if any { 1.0 } else { 0.0 });
+    }
+}
+
+impl Drop for AcceptOutageGuard {
+    fn drop(&mut self) {
+        // Runs during unwind too; `parking_lot::Mutex` never poisons, so this cannot double-panic.
+        self.exit();
+    }
+}
+
+/// Record a classified accept error for `listener` (issue #838).
+///
+/// `class` is `"transient"` or `"systemic"`. Called from the accept loops themselves rather than
+/// from `AcceptErrorLog`, which stays dependency-free and clock-free.
+pub fn record_accept_error(listener: &'static str, class: &'static str) {
+    ACCEPT_ERRORS_TOTAL
+        .with_label_values(&[listener, class])
+        .inc();
 }
 
 /// Helper to record proxy request duration
@@ -399,6 +512,98 @@ mod tests {
 
         let metrics = collect_metrics();
         assert!(metrics.contains("rift_script_errors_total"));
+    }
+
+    // Issue #838: the accept-error signals a scrape can alert on. A wedged listener stays bound
+    // and answers nothing, so these are the live evidence that it is degraded.
+    #[test]
+    fn test_record_accept_error_by_listener_and_class() {
+        record_accept_error("test-counter", "systemic");
+        record_accept_error("test-counter", "systemic");
+        record_accept_error("test-counter", "transient");
+
+        assert_eq!(
+            ACCEPT_ERRORS_TOTAL
+                .with_label_values(&["test-counter", "systemic"])
+                .get(),
+            2.0
+        );
+        assert_eq!(
+            ACCEPT_ERRORS_TOTAL
+                .with_label_values(&["test-counter", "transient"])
+                .get(),
+            1.0
+        );
+
+        let rendered = collect_metrics();
+        assert!(rendered.contains("rift_accept_errors_total"));
+    }
+
+    // Issue #838: one `listener` label covers MANY accept loops (per-core fan-out, one loop per
+    // imposter), and a process-wide EMFILE wedges them together but they recover one at a time.
+    // The gauge must mean "any loop still wedged", not "the last loop to write".
+    #[test]
+    fn test_accept_outage_gauge_tracks_depth_not_last_writer() {
+        // Unique label so this can never collide with another test's counters.
+        let listener = "test-depth";
+        let mut a = AcceptOutageGuard::new(listener);
+        let mut b = AcceptOutageGuard::new(listener);
+        assert_eq!(
+            ACCEPT_ERROR_OUTAGE.with_label_values(&[listener]).get(),
+            0.0,
+            "the series exists at 0 before any outage, so alerts can reference it"
+        );
+
+        a.enter();
+        b.enter();
+        assert_eq!(
+            ACCEPT_ERROR_OUTAGE.with_label_values(&[listener]).get(),
+            1.0
+        );
+
+        // A loop that starts *while* another is already wedged must not clear the gauge: per-core
+        // fan-out starts its loops independently, so this ordering is the normal case, not a race.
+        let _late = AcceptOutageGuard::new(listener);
+        assert_eq!(
+            ACCEPT_ERROR_OUTAGE.with_label_values(&[listener]).get(),
+            1.0,
+            "constructing a guard must not zero a gauge another loop is holding up"
+        );
+
+        a.exit();
+        assert_eq!(
+            ACCEPT_ERROR_OUTAGE.with_label_values(&[listener]).get(),
+            1.0,
+            "one loop recovering must NOT clear the gauge while another is still wedged"
+        );
+
+        b.exit();
+        assert_eq!(
+            ACCEPT_ERROR_OUTAGE.with_label_values(&[listener]).get(),
+            0.0,
+            "the gauge clears only when the last wedged loop recovers"
+        );
+    }
+
+    // Issue #838: a loop that ends while wedged (cancel break, fatal return, panic) must not leave
+    // the gauge stuck at 1 for a listener that no longer exists — the registry is process-global.
+    #[test]
+    fn test_accept_outage_guard_clears_on_drop() {
+        let listener = "test-drop";
+        {
+            let mut g = AcceptOutageGuard::new(listener);
+            g.enter();
+            assert_eq!(
+                ACCEPT_ERROR_OUTAGE.with_label_values(&[listener]).get(),
+                1.0
+            );
+            // dropped here while still in outage, as a cancel break would
+        }
+        assert_eq!(
+            ACCEPT_ERROR_OUTAGE.with_label_values(&[listener]).get(),
+            0.0,
+            "dropping a wedged loop must release its outage"
+        );
     }
 
     #[test]

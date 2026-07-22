@@ -328,9 +328,25 @@ impl AcceptBackoff {
     }
 }
 
-/// Once-per-transition logging for the systemic accept-error path, mirroring the journal-cap warn
-/// fix (#741): one `error!` on entering the error state, silence while in it (counting suppressed
+/// What a systemic accept error should produce in the log (issue #838).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptErrorEvent {
+    /// The transition *into* the error state — emit the onset `error!`.
+    Onset,
+    /// Still failing after another [`AcceptErrorLog::REEMIT_EVERY`] suppressed errors — emit a
+    /// reminder carrying the running suppressed count.
+    StillDown { suppressed: u64 },
+}
+
+/// Rate-limited logging for the systemic accept-error path, mirroring the journal-cap warn fix
+/// (#741): one `error!` on entering the error state, near-silence while in it (counting suppressed
 /// errors), one `info!` carrying the suppressed count on recovery.
+///
+/// "Near-silence" rather than silence because a *sustained* outage would otherwise leave a single
+/// log line as its only evidence — possibly emitted weeks before anyone looked. Since the retry
+/// policy keeps the listener bound while it cannot serve, a wedged listener no longer refuses
+/// connections, so that one line may be the only local signal there is (issue #838). Every
+/// [`Self::REEMIT_EVERY`] suppressed errors the outage re-announces itself.
 #[derive(Debug, Default)]
 pub struct AcceptErrorLog {
     in_error: bool,
@@ -338,16 +354,35 @@ pub struct AcceptErrorLog {
 }
 
 impl AcceptErrorLog {
-    /// Record a systemic error. Returns `true` **only** on the transition *into* the error state
-    /// (emit the single `error!`); later errors return `false` and bump the suppressed count.
-    pub fn on_error(&mut self) -> bool {
+    /// How many suppressed errors pass between reminder log lines while an outage persists.
+    ///
+    /// Deliberately a **count**, not a duration: this type is pure and clock-free so its schedule
+    /// is unit-testable without sockets or a timer. The count maps onto time closely enough —
+    /// a sustained outage sits at [`AcceptBackoff::MAX`] (1 s), so ≈1 error/s puts a reminder
+    /// roughly every 10 minutes. Early in an outage the 1 ms→1 s ramp delivers errors faster and
+    /// the first reminder arrives sooner, which is the right bias.
+    pub const REEMIT_EVERY: u64 = 600;
+
+    /// Record a systemic error. Returns `Some(Onset)` on the transition *into* the error state,
+    /// `Some(StillDown { .. })` on every `REEMIT_EVERY`-th error while it persists, and `None`
+    /// otherwise (the error is counted, not logged).
+    ///
+    /// A reminder does **not** reset the suppressed count: it stays the running total for the
+    /// outage, so [`Self::on_success`] still reports the whole outage on recovery.
+    pub fn on_error(&mut self) -> Option<AcceptErrorEvent> {
         if self.in_error {
             self.suppressed += 1;
-            false
+            if self.suppressed.is_multiple_of(Self::REEMIT_EVERY) {
+                Some(AcceptErrorEvent::StillDown {
+                    suppressed: self.suppressed,
+                })
+            } else {
+                None
+            }
         } else {
             self.in_error = true;
             self.suppressed = 0;
-            true
+            Some(AcceptErrorEvent::Onset)
         }
     }
 
@@ -604,18 +639,18 @@ mod accept_error {
         );
     }
 
-    // The log state machine backs the "exactly one error!, exactly one info! with the
-    // suppressed count" AC without sockets: on_error transitions once, on_success reports the
-    // count once, steady state stays silent.
+    // The log state machine backs the "one error! on onset, one info! with the suppressed count
+    // on recovery" AC without sockets: on_error transitions once, steady state stays silent.
     #[test]
     fn log_emits_once_per_transition_with_suppressed_count() {
         let mut log = AcceptErrorLog::default();
-        assert!(
+        assert_eq!(
             log.on_error(),
+            Some(AcceptErrorEvent::Onset),
             "first systemic error -> emit the one error!"
         );
-        assert!(!log.on_error(), "second is suppressed");
-        assert!(!log.on_error(), "third is suppressed");
+        assert_eq!(log.on_error(), None, "second is suppressed");
+        assert_eq!(log.on_error(), None, "third is suppressed");
         assert_eq!(
             log.on_success(),
             Some(2),
@@ -625,11 +660,53 @@ mod accept_error {
         assert_eq!(log.on_success(), None);
 
         // A fresh outage re-arms: one error!, count restarts from 0.
-        assert!(log.on_error());
+        assert_eq!(log.on_error(), Some(AcceptErrorEvent::Onset));
         assert_eq!(
             log.on_success(),
             Some(0),
             "immediate recovery suppressed nothing"
         );
+    }
+
+    // Issue #838: a sustained outage must re-announce itself, or its only evidence is one log line
+    // emitted whenever it started. Reminders are count-based so this stays clock-free.
+    #[test]
+    fn sustained_outage_reemits_every_n_and_keeps_the_running_total() {
+        let mut log = AcceptErrorLog::default();
+        assert_eq!(log.on_error(), Some(AcceptErrorEvent::Onset));
+
+        // Everything strictly between onset and the Nth suppressed error is silent.
+        for i in 1..AcceptErrorLog::REEMIT_EVERY {
+            assert_eq!(log.on_error(), None, "suppressed error {i} must not log");
+        }
+        assert_eq!(
+            log.on_error(),
+            Some(AcceptErrorEvent::StillDown {
+                suppressed: AcceptErrorLog::REEMIT_EVERY
+            }),
+            "the REEMIT_EVERY-th suppressed error re-announces the outage"
+        );
+
+        // The reminder does NOT reset the count — the next one carries 2N, and recovery still
+        // reports the whole outage.
+        for _ in 1..AcceptErrorLog::REEMIT_EVERY {
+            assert_eq!(log.on_error(), None);
+        }
+        assert_eq!(
+            log.on_error(),
+            Some(AcceptErrorEvent::StillDown {
+                suppressed: AcceptErrorLog::REEMIT_EVERY * 2
+            }),
+            "reminders carry the running total, not a per-window count"
+        );
+        assert_eq!(
+            log.on_success(),
+            Some(AcceptErrorLog::REEMIT_EVERY * 2),
+            "recovery reports every error suppressed during the outage"
+        );
+
+        // And a fresh outage re-arms the reminder schedule from zero.
+        assert_eq!(log.on_error(), Some(AcceptErrorEvent::Onset));
+        assert_eq!(log.on_error(), None, "the new outage counts from 0 again");
     }
 }

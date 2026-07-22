@@ -12,7 +12,8 @@ use hyper::service::service_fn;
 use hyper::{Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use rift_mock_core::proxy::{
-    AcceptBackoff, AcceptErrorClass, AcceptErrorLog, classify_accept_error, is_fatal_listener_error,
+    AcceptBackoff, AcceptErrorClass, AcceptErrorEvent, AcceptErrorLog, classify_accept_error,
+    is_fatal_listener_error,
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -357,6 +358,8 @@ async fn accept_loop(
     // a fleet-wide correlated restart (issue #826).
     let mut backoff = AcceptBackoff::new();
     let mut error_log = AcceptErrorLog::default();
+    // Clears its contribution on every exit path, including a cancel break or a panic (#838).
+    let mut outage = rift_mock_core::extensions::AcceptOutageGuard::new("admin");
 
     loop {
         // Acquire a permit *before* accepting so a cap holds connections back in the listener
@@ -384,6 +387,7 @@ async fn accept_loop(
                 // Recovery: only the transition out of a systemic-error state logs and resets the
                 // backoff, so a healthy accept path pays one branch.
                 if let Some(suppressed) = error_log.on_success() {
+                    outage.exit();
                     info!(
                         suppressed,
                         "admin API accept loop recovered after {suppressed} suppressed error(s)"
@@ -406,17 +410,30 @@ async fn accept_loop(
             Err(e) => match classify_accept_error(&e) {
                 // Expected under load — retry immediately, no backoff, no error spam.
                 AcceptErrorClass::Transient => {
+                    rift_mock_core::extensions::record_accept_error("admin", "transient");
                     debug!("transient accept error on the admin listener: {e}");
                     continue;
                 }
                 // Systemic (fd exhaustion / unknown): log once on entry, then back off. Raced
                 // against `cancel` so a backoff sleep never delays admin-server shutdown.
                 AcceptErrorClass::Systemic => {
-                    if error_log.on_error() {
-                        error!(
-                            "accept error on the admin listener: {e}; backing off \
-                             (further errors suppressed until recovery)"
-                        );
+                    rift_mock_core::extensions::record_accept_error("admin", "systemic");
+                    match error_log.on_error() {
+                        Some(AcceptErrorEvent::Onset) => {
+                            outage.enter();
+                            error!(
+                                "accept error on the admin listener: {e}; backing off \
+                                 (further errors suppressed until recovery)"
+                            );
+                        }
+                        Some(AcceptErrorEvent::StillDown { suppressed }) => {
+                            error!(
+                                suppressed,
+                                "admin listener still failing to accept after {suppressed} \
+                                 suppressed error(s): {e}"
+                            );
+                        }
+                        None => {}
                     }
                     let delay = backoff.next_delay();
                     tokio::select! {
@@ -781,8 +798,12 @@ mod admin_accept_error_tests {
         assert_eq!(b.next_delay(), Duration::from_millis(1), "reset re-arms");
 
         let mut log = AcceptErrorLog::default();
-        assert!(log.on_error(), "first systemic error logs once");
-        assert!(!log.on_error(), "subsequent errors are suppressed");
+        assert_eq!(
+            log.on_error(),
+            Some(AcceptErrorEvent::Onset),
+            "first systemic error logs once"
+        );
+        assert_eq!(log.on_error(), None, "subsequent errors are suppressed");
         assert_eq!(
             log.on_success(),
             Some(1),

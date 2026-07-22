@@ -13,6 +13,21 @@ record.
 
 ### Added
 
+- **Accept-error metrics and a re-announcing outage log** (issue #838). Since #750/#826/#834 the
+  accept loops survive accept errors by classifying and retrying — which means a wedged listener
+  now stays *bound* while serving nothing, instead of closing its socket and refusing connections.
+  That is better to survive but harder to notice: probes hang until their own timeout rather than
+  failing fast, and the only local evidence was a single `error!` emitted whenever the outage began.
+  Two additions close that gap: `rift_accept_errors_total{listener, class}` and
+  `rift_accept_error_outage{listener}` (the gauge to alert on) expose the state through `/metrics`,
+  and a sustained outage now re-announces itself in the log roughly every 10 minutes instead of only
+  at onset. The reminder cadence is counted in suppressed errors, not wall-clock, so the accept-error
+  bookkeeping stays clock-free and unit-testable. The log re-emit and the metrics cover each other:
+  metrics are unreachable when the *metrics* listener is the wedged one, and logs rotate away. The
+  gauge counts how many loops are wedged rather than tracking whichever wrote last (one label covers
+  many loops — one per imposter, and one per accept runtime under per-core fan-out) and is released
+  when a loop ends mid-outage, so it can neither under-report nor stick at 1.
+
 - **`test-util` feature: fault-injectable `RunningServer` / `RunningAdminApi` constructors**
   (issue #825). `RunningAdminApi::wait()` has exactly-once error delivery backed by a drop guard
   that reports the accept loop dying however it dies — but the only way to *reach* that `Err` path

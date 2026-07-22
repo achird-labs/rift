@@ -35,7 +35,7 @@ pub use flow_state::{CasOutcome, FlowStore, FlowStoreProvider, NoOpFlowStore, cr
 #[allow(unused_imports)]
 pub use matcher::{CompiledMatch, CompiledRule};
 #[allow(unused_imports)]
-pub use metrics::{collect_metrics, record_request};
+pub use metrics::{AcceptOutageGuard, collect_metrics, record_accept_error, record_request};
 #[allow(unused_imports)]
 pub use no_match::{NoMatchContext, NoMatchDirective, NoMatchInterceptor};
 #[allow(unused_imports)]
