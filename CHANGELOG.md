@@ -13,6 +13,17 @@ record.
 
 ### Added
 
+- **`test-util` feature: fault-injectable `RunningServer` / `RunningAdminApi` constructors**
+  (issue #825). `RunningAdminApi::wait()` has exactly-once error delivery backed by a drop guard
+  that reports the accept loop dying however it dies — but the only way to *reach* that `Err` path
+  was an in-crate `#[cfg(test)]` helper, so an embedder that propagates a `RunningServer` outcome to
+  process exit could not write a regression test for it. `RunningServer::with_admin_accept_task` and
+  `RunningAdminApi::with_accept_task` build a handle whose accept loop is an arbitrary future, so a
+  downstream test can inject a failure (or a panic) and assert its reaction. Both are gated behind
+  the new `test-util` feature and bind no listener — test scaffolding, never a production
+  constructor. The in-crate test helper now delegates to the same seam, so what is tested and what
+  embedders get cannot drift.
+
 - **`NoMatchInterceptor` — a last-chance hook on the no-match path** (issue #819). There was no seam
   between "no stub matched" and the `defaultForward`/`defaultResponse`/empty-`200` fallthrough:
   `ImposterEventListener` observes config mutations only, and `ResponseDecorator` runs after the

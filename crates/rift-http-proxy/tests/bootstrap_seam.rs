@@ -511,3 +511,43 @@ fn stop_for_restart_stops_a_live_process() {
         "the process should have been signalled, got: {status:?}"
     );
 }
+
+// ── issue #825: the fault-injection seam is reachable from OUTSIDE the crate ─────────────────
+//
+// This suite is an integration test on purpose: it compiles as an external crate, so it only
+// builds if the constructors are genuinely public under the `test-util` feature — which is the
+// property the issue is about (rift-enterprise could not reach the accept-loop Err path at all).
+
+#[tokio::test]
+async fn running_server_admin_failure_is_observable_by_an_embedder() {
+    let server = rift_http_proxy::server::RunningServer::with_admin_accept_task(async {
+        Err(anyhow::anyhow!("admin plane died"))
+    });
+
+    let err = server
+        .wait()
+        .await
+        .expect_err("a failing admin accept loop must surface as Err to the embedder");
+    assert!(
+        err.to_string().contains("admin plane died"),
+        "the embedder must see the underlying cause, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn running_admin_api_failure_is_delivered_exactly_once() {
+    let admin = rift_http_proxy::admin_api::RunningAdminApi::with_accept_task(async {
+        Err(anyhow::anyhow!("listener died"))
+    });
+
+    admin
+        .wait()
+        .await
+        .expect_err("first waiter receives the error");
+    // Exactly-once delivery: anyhow::Error is not Clone, so later waiters get Ok rather than a
+    // duplicate. Pinning it keeps the contract from silently changing under an embedder.
+    admin
+        .wait()
+        .await
+        .expect("later waiters see Ok, not a duplicate error");
+}

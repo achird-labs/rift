@@ -155,6 +155,32 @@ metrics.shutdown().await;
 
 ---
 
+## Testing against a dead admin plane (`test-util`)
+
+`RunningServer::wait()` reports the admin accept loop dying, which an embedder typically propagates
+to process exit. Provoking that failure for real means breaking the listener, so the `test-util`
+feature exposes constructors whose "accept loop" is a future you supply (issue #825):
+
+```toml
+[dev-dependencies]
+rift-http-proxy = { version = "*", features = ["test-util"] }
+```
+
+```rust
+use rift_http_proxy::server::RunningServer;
+
+let server = RunningServer::with_admin_accept_task(async {
+    Err(anyhow::anyhow!("admin plane died"))
+});
+let err = server.wait().await.expect_err("the embedder must see the failure");
+```
+
+`RunningAdminApi::with_accept_task` is the same seam one layer down. Neither binds a listener
+(`admin_addr()` reports `127.0.0.1:0`), and both are test scaffolding — do not enable `test-util` in
+a production build.
+
+---
+
 ## Bootstrap helpers
 
 `ServerBuilder` composes the *running* server, but a binary also has bootstrap concerns around it:

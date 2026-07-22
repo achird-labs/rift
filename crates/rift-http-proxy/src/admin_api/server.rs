@@ -210,6 +210,49 @@ pub struct RunningAdminApi {
 }
 
 impl RunningAdminApi {
+    /// Build a `RunningAdminApi` whose "accept loop" is an arbitrary future — the seam for testing
+    /// the failure path (issue #825).
+    ///
+    /// The real [`bind`](AdminApiServer::bind) can only fail its accept loop by genuinely breaking
+    /// the listener, so the exactly-once error delivery of [`wait`](Self::wait) / [`join`](Self::join)
+    /// — and the [`ReleaseWaiters`] drop guard behind it — is otherwise unreachable from outside this
+    /// crate. An embedder that propagates a `RunningServer` outcome to process exit (rift-enterprise
+    /// #42) needs to prove it reacts correctly, so pass a future that returns `Err`, or panics, and
+    /// assert what your code does with it.
+    ///
+    /// No listener is bound: `local_addr()` reports `127.0.0.1:0` and the tracker is empty. Gated
+    /// behind the `test-util` feature — it is test scaffolding, not a production constructor.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn with_accept_task<F>(loop_body: F) -> Self
+    where
+        F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        let cancel = CancellationToken::new();
+        let done = CancellationToken::new();
+        let outcome: Arc<Mutex<Option<anyhow::Result<()>>>> = Arc::new(Mutex::new(None));
+        let (task_done, task_outcome) = (done.clone(), Arc::clone(&outcome));
+        let release_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let _release = ReleaseWaiters {
+                done: task_done,
+                outcome: Arc::clone(&task_outcome),
+                shutdown_requested: release_cancel,
+            };
+            let result = loop_body.await;
+            *task_outcome
+                .lock()
+                .expect("admin API outcome mutex poisoned") = Some(result);
+        });
+
+        Self {
+            local_addr: "127.0.0.1:0".parse().expect("test addr"),
+            cancel,
+            tracker: TaskTracker::new(),
+            task: Mutex::new(Some(task)),
+            done,
+            outcome,
+        }
+    }
     /// The actual bound address (a `:0` request resolves to the OS-assigned port here).
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
@@ -652,31 +695,9 @@ mod wait_seam_tests {
     where
         F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
     {
-        let cancel = CancellationToken::new();
-        let done = CancellationToken::new();
-        let outcome: Arc<Mutex<Option<anyhow::Result<()>>>> = Arc::new(Mutex::new(None));
-        let (task_done, task_outcome) = (done.clone(), Arc::clone(&outcome));
-        let release_cancel = cancel.clone();
-        let task = tokio::spawn(async move {
-            let _release = ReleaseWaiters {
-                done: task_done,
-                outcome: Arc::clone(&task_outcome),
-                shutdown_requested: release_cancel,
-            };
-            let result = loop_body.await;
-            *task_outcome
-                .lock()
-                .expect("admin API outcome mutex poisoned") = Some(result);
-        });
-
-        RunningAdminApi {
-            local_addr: "127.0.0.1:0".parse().expect("test addr"),
-            cancel,
-            tracker: TaskTracker::new(),
-            task: Mutex::new(Some(task)),
-            done,
-            outcome,
-        }
+        // Delegates to the public seam so the tested construction and the one embedders get are
+        // the same code (issue #825).
+        RunningAdminApi::with_accept_task(loop_body)
     }
 
     /// `shutdown` aborts a loop that outlives the grace window, so the task never publishes an
