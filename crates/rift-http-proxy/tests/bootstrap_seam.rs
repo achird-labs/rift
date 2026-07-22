@@ -446,3 +446,68 @@ async fn save_imposters_rejects_non_2xx_and_writes_nothing() {
 
     server.shutdown().await;
 }
+
+// ── issue #827: one pidfile binding, and restart tolerates a missing file ────────────────────
+
+// AC1: `--pidfile` is a single global binding — it parses before OR after the subcommand, and
+// `stop`/`restart` no longer carry their own. The `None` cases pin the deliberate absence of a
+// clap `default_value`: a default on the global flag would make every plain `rift` start write
+// `./rift.pid`, which it never did before.
+#[test]
+fn pidfile_is_one_global_binding_with_no_default() {
+    assert_eq!(
+        cli(&["stop", "--pidfile", "p"]).pidfile.as_deref(),
+        Some(std::path::Path::new("p")),
+        "--pidfile after the subcommand must bind the global field"
+    );
+    assert_eq!(
+        cli(&["--pidfile", "p", "restart"]).pidfile.as_deref(),
+        Some(std::path::Path::new("p")),
+        "--pidfile before the subcommand must bind the same field"
+    );
+    assert_eq!(
+        cli(&["stop"]).pidfile,
+        None,
+        "no --pidfile means None; the stop/restart default is applied at dispatch, not by clap"
+    );
+    assert_eq!(
+        cli(&[]).pidfile,
+        None,
+        "a plain start must not acquire a pidfile default"
+    );
+}
+
+// AC2: restart with no PID file is a satisfied precondition (nothing to stop, go start), while
+// bare `stop` keeps its hard error — the asymmetry is the point.
+#[test]
+fn stop_for_restart_missing_pidfile_is_ok_but_stop_still_errors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let absent = dir.path().join("absent.pid");
+
+    bootstrap::stop_for_restart(&absent).expect("restart tolerates a missing pidfile");
+    assert!(!absent.exists(), "nothing is created by the no-op path");
+
+    bootstrap::stop_server(&absent).expect_err("bare stop still errors on a missing pidfile");
+}
+
+// AC3: when a process IS named, stop_for_restart behaves exactly like stop_server.
+#[cfg(unix)]
+#[test]
+fn stop_for_restart_stops_a_live_process() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut child = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn a stand-in server process");
+    let pidfile = dir.path().join("server.pid");
+    std::fs::write(&pidfile, child.id().to_string()).expect("write pidfile");
+
+    bootstrap::stop_for_restart(&pidfile).expect("stop_for_restart succeeds");
+
+    assert!(!pidfile.exists(), "the pidfile must be removed");
+    let status = child.wait().expect("reap the stand-in process");
+    assert!(
+        !status.success(),
+        "the process should have been signalled, got: {status:?}"
+    );
+}

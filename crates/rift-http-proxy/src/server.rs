@@ -98,8 +98,11 @@ pub struct Cli {
     #[arg(long, value_name = "FILE")]
     pub log: Option<PathBuf>,
 
-    /// PID file path
-    #[arg(long, value_name = "FILE")]
+    /// PID file path. `global` so `stop`/`restart` bind the same value whether it is given
+    /// before or after the subcommand (issue #827). Deliberately has NO `default_value`: a default
+    /// here would make every plain `rift` start write `./rift.pid`. `stop`/`restart` apply
+    /// [`bootstrap::DEFAULT_PIDFILE`](crate::bootstrap::DEFAULT_PIDFILE) at their dispatch site.
+    #[arg(long, value_name = "FILE", global = true)]
     pub pidfile: Option<PathBuf>,
 
     /// CORS allowed origin
@@ -200,18 +203,10 @@ pub enum Commands {
     Start,
 
     /// Stop a running Rift server
-    Stop {
-        /// PID file to read for the process to stop
-        #[arg(long, default_value = "rift.pid")]
-        pidfile: PathBuf,
-    },
+    Stop,
 
     /// Restart the Rift server
-    Restart {
-        /// PID file to read for the process to restart
-        #[arg(long, default_value = "rift.pid")]
-        pidfile: PathBuf,
-    },
+    Restart,
 
     /// Save current imposters to a file
     Save {

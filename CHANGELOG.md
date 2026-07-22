@@ -49,6 +49,18 @@ record.
 
 ### Fixed
 
+- **`rift restart` no longer makes the process SIGTERM itself** (issue #827). `--pidfile` existed as
+  two separate clap bindings — a top-level `Option<PathBuf>` and a `pidfile` field on each of `stop`
+  and `restart` — and the PID file was written *before* subcommand dispatch. So
+  `rift --pidfile p restart` wrote its own PID to `p` and then signalled it (exit 143, no server
+  started); `rift restart --pidfile p` stopped the old server but the new one wrote no PID file; and
+  `rift --pidfile p save` overwrote a running server's PID with the short-lived save process's.
+  `--pidfile` is now a single `global` flag that binds before or after the subcommand, and the PID
+  file is written only on the serving path. `restart` also now treats a missing PID file as
+  "nothing to stop, start fresh" (new `bootstrap::stop_for_restart`), while bare `stop` keeps its
+  hard error. The `stop`/`restart` fallback is `bootstrap::DEFAULT_PIDFILE` (`rift.pid`), applied at
+  dispatch — a plain `rift` start still writes no PID file unless asked.
+
 - **`rift stop` refuses a pidfile with a non-positive PID** (issue #822). `stop_server` parsed the
   pidfile's PID without a range check, so a corrupt or crafted pidfile containing `0` or a negative
   number would reach `kill(pid, SIGTERM)` — where `kill(0, …)` signals the caller's entire process

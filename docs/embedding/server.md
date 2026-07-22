@@ -165,6 +165,8 @@ imposters. These live in `rift_http_proxy::bootstrap` so an alternative binary k
 | Function | Signature | Purpose |
 |:---------|:----------|:--------|
 | `apply_rcfile_defaults` | `fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> anyhow::Result<()>` | Fill CLI fields **still at their clap defaults** from a Mountebank-compatible JSON rcfile. An explicitly-supplied flag always wins; unrecognised keys are warned and ignored. |
+| `stop_for_restart` | `fn stop_for_restart(pidfile: &Path) -> anyhow::Result<()>` | `stop_server`, except a missing PID file is a satisfied precondition (nothing to stop) rather than an error — the `restart` semantic. |
+| `DEFAULT_PIDFILE` | `pub const DEFAULT_PIDFILE: &str` | The `rift.pid` fallback `stop`/`restart` apply when `--pidfile` is absent. Applied at the dispatch site so a plain start never writes a PID file it wasn't asked to. |
 | `stop_server` | `fn stop_server(pidfile: &Path) -> anyhow::Result<()>` | Signal the process named in `pidfile` (SIGTERM on unix, `taskkill /F` on Windows), then remove the file. A stale pidfile (process already gone) is cleaned up as `Ok`; a denied or failed signal is an error and the pidfile is kept. |
 | `save_imposters_async` | `async fn save_imposters_async(host: &str, port: u16, savefile: &Path, remove_proxies: bool) -> anyhow::Result<()>` | Fetch `GET /imposters?replayable=true` from a running admin API and write it to `savefile`. The async form — call it from an embedder's own runtime. A non-2xx admin response is an error; nothing is written to `savefile`. |
 | `save_imposters` | `fn save_imposters(host: &str, port: u16, savefile: &Path, remove_proxies: bool) -> anyhow::Result<()>` | Blocking wrapper over `save_imposters_async` for the sync `save` subcommand path. |
@@ -183,15 +185,23 @@ if let Some(rcfile) = cli.rcfile.clone() {
 }
 
 match &cli.command {
-    Some(Commands::Stop { pidfile }) => return bootstrap::stop_server(pidfile),
-    // `restart` is just `stop` followed by the normal start path.
-    Some(Commands::Restart { pidfile }) => bootstrap::stop_server(pidfile)?,
+    // `--pidfile` is a single global binding (issue #827): it parses before or after the
+    // subcommand, and the stop/restart default lives here, not on the flag.
+    Some(Commands::Stop) => return bootstrap::stop_server(&pidfile_or_default(&cli)),
+    // `restart` is `stop` followed by the normal start path — but a missing PID file means
+    // "nothing to stop", not an error, so it uses the restart-specific seam.
+    Some(Commands::Restart) => bootstrap::stop_for_restart(&pidfile_or_default(&cli))?,
     Some(Commands::Save { savefile, remove_proxies }) => {
         return bootstrap::save_imposters(&cli.host, cli.port, savefile, *remove_proxies);
     }
     _ => {}
 }
 ```
+
+The `rift` binary writes `--pidfile` only on the **serving** path (inside `run_mountebank_mode`),
+never before subcommand dispatch — otherwise `rift --pidfile p restart` would record its own PID and
+then signal itself, and a transient `save`/`healthcheck` would clobber a running server's file
+(issue #827). An alternative binary should keep that ordering.
 
 `save_imposters` builds its own tokio runtime and blocks on it (it is a sync subcommand path), so do
 not call it from inside a running async runtime — it would panic starting a nested runtime. From

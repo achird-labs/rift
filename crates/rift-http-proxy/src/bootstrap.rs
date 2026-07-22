@@ -78,6 +78,27 @@ pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow:
     Ok(())
 }
 
+/// Default PID file for the `stop`/`restart` subcommands when `--pidfile` is not given.
+///
+/// Deliberately applied at the dispatch site rather than as a clap `default_value` on the global
+/// `--pidfile`: a default on the flag itself would make every plain `rift` start write a PID file
+/// it never wrote before (issue #827).
+pub const DEFAULT_PIDFILE: &str = "rift.pid";
+
+/// Stop a running server for `restart`: a missing PID file is a satisfied precondition.
+///
+/// `restart` means "end up running". If there is no PID file there is nothing to stop and the
+/// desired end state already holds, so this reports `Ok` and lets the caller start — whereas bare
+/// [`stop_server`] keeps its hard error, since a `stop` with nothing to stop is a user error
+/// (issue #827).
+pub fn stop_for_restart(pidfile: &Path) -> Result<(), anyhow::Error> {
+    if !pidfile.exists() {
+        info!("no PID file at {pidfile:?}; nothing to stop, starting fresh");
+        return Ok(());
+    }
+    stop_server(pidfile)
+}
+
 /// Stop a running server by PID file.
 ///
 /// Idempotent about the end state, loud about everything else: a stale pidfile (the process is
