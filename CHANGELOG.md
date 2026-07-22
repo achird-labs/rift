@@ -13,6 +13,17 @@ record.
 
 ### Added
 
+- **`NoMatchInterceptor` — a last-chance hook on the no-match path** (issue #819). There was no seam
+  between "no stub matched" and the `defaultForward`/`defaultResponse`/empty-`200` fallthrough:
+  `ImposterEventListener` observes config mutations only, and `ResponseDecorator` runs after the
+  response exists and can touch just headers. An embedder whose replicated config is momentarily
+  behind therefore had no way to wait for it and retry. `ImposterManager::with_no_match_interceptor`
+  registers a hook that is consulted **only** on a genuine no-match and may answer `Proceed`
+  (fall through unchanged) or `RetryMatch` (re-run matching exactly once; a hit is served as a normal
+  match, a second miss falls through). It fires even when a default is configured — under lag the
+  right stub may be missing and forwarding would misdirect the request. Registering no interceptor
+  leaves behaviour byte-identical on both the serve loop and the `/__rift/` gateway.
+
 - **`rift_http_proxy::bootstrap::save_imposters_async` — a non-panicking async form of `save_imposters`**
   (issue #815). `save_imposters` builds its own tokio runtime and `block_on`s it, so an async
   embedder calling it directly from an async worker thread panics with "Cannot start a runtime from

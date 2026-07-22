@@ -138,6 +138,10 @@ pub struct Imposter {
     /// Admin SSE event bus (issue #461), shared from the manager so recorded requests fan out to
     /// streaming clients. `None` for a standalone imposter (no manager) — then nothing is published.
     pub(crate) event_bus: Option<Arc<super::events::AdminEventBus>>,
+    /// Last-chance no-match hook (issue #819), shared from the manager. `None` = no interceptor;
+    /// the request falls through to defaultForward/defaultResponse/empty-200 as before.
+    pub(crate) no_match_interceptor:
+        Option<Arc<dyn crate::extensions::no_match::NoMatchInterceptor>>,
     /// Recorded-request storage (issue #314); defaults to a private LocalJournal,
     /// or the embedder's shared journal injected via the manager.
     pub(crate) journal: Arc<dyn crate::imposter::journal::RequestJournal>,
@@ -227,6 +231,7 @@ impl Imposter {
             stubs_write: Mutex::new(()),
             proxy_store: Arc::new(LocalProxyStore::new(proxy_mode)),
             event_bus: None,
+            no_match_interceptor: None,
             journal: journal
                 .unwrap_or_else(|| Arc::new(crate::imposter::journal::LocalJournal::default())),
             enabled: AtomicBool::new(enabled),
