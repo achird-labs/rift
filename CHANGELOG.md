@@ -49,6 +49,24 @@ record.
 
 ### Fixed
 
+- **A transient accept error no longer ends the admin API server** (issue #826). `accept_loop`
+  propagated any `listener.accept()` failure straight out via `?`, so a single `ECONNABORTED` — or a
+  momentary `EMFILE`/`ENFILE` under fd pressure — terminated the admin server. That was survivable
+  when the only consumer was the single-node binary, but an embedder that races
+  `RunningServer::wait()` turns it into a node leaving the cluster and exiting non-zero, making
+  fleet-wide fd pressure a correlated restart storm. The admin listener now applies the same
+  classify-and-retry policy the imposter serve loop has had since #750: transient errors retry
+  immediately, systemic ones back off (1 ms doubling to a 1 s cap) and log once per outage with a
+  suppressed-error count on recovery. The shared machinery moved from `imposter::manager` to
+  `proxy::network` and is now public (`rift_mock_core::proxy::{AcceptErrorClass,
+  classify_accept_error, AcceptBackoff, AcceptErrorLog}`) so both listeners cannot drift apart.
+
+  Retrying is not unconditional: a *broken listener* (`EBADF`/`ENOTSOCK`/`EINVAL` — the descriptor
+  is not a working socket) still ends the loop, so `RunningServer::wait()` keeps reporting a genuinely
+  dead admin plane instead of the process lingering with a control plane that can never accept. That
+  fatal class is admin-only; the shared classifier stays two-way, because a dying imposter serve loop
+  is independently recoverable through the still-live admin API.
+
 - **`rift stop` refuses a pidfile with a non-positive PID** (issue #822). `stop_server` parsed the
   pidfile's PID without a range check, so a corrupt or crafted pidfile containing `0` or a negative
   number would reach `kill(pid, SIGTERM)` — where `kill(0, …)` signals the caller's entire process
