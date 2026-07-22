@@ -510,6 +510,7 @@ fn stop_for_restart_stops_a_live_process() {
         !status.success(),
         "the process should have been signalled, got: {status:?}"
     );
+}
 
 // ── issue #825: the fault-injection seam is reachable from OUTSIDE the crate ─────────────────
 //
