@@ -11,6 +11,7 @@ use super::types::{ImposterConfig, ImposterError, Stub};
 use crate::behaviors::ResponseSequencer;
 use crate::extensions::decorate::ResponseDecorator;
 use crate::extensions::flow_state::FlowStoreProvider;
+use crate::extensions::no_match::NoMatchInterceptor;
 use crate::imposter::journal::RequestJournal;
 use crate::proxy::network::{
     AcceptBackoff, AcceptErrorClass, AcceptErrorLog, classify_accept_error,
@@ -247,6 +248,8 @@ pub struct ImposterManager {
     request_journal: Option<Arc<dyn RequestJournal>>,
     /// Pluggable proxy-recording backend (issue #315); None = per-imposter LocalProxyStore.
     proxy_store: Option<Arc<dyn ProxyRecordingStore>>,
+    /// Last-chance no-match hook (issue #819); None = no interceptor, unchanged fallthrough.
+    no_match_interceptor: Option<Arc<dyn NoMatchInterceptor>>,
     /// Per-core accept runtimes (RFC-712, issue #745). When set, every imposter port binds one
     /// SO_REUSEPORT listener per runtime and each accept loop runs pinned to its runtime; the
     /// kernel spreads connections across them by 4-tuple hash. `None` (the default) keeps
@@ -287,6 +290,7 @@ impl ImposterManager {
             sequencer: None,
             request_journal: None,
             proxy_store: None,
+            no_match_interceptor: None,
             accept_runtimes: None,
             conn_drain: DEFAULT_CONN_DRAIN,
             event_bus: Arc::new(super::events::AdminEventBus::new()),
@@ -398,6 +402,16 @@ impl ImposterManager {
     #[must_use]
     pub fn with_proxy_store(mut self, store: Arc<dyn ProxyRecordingStore>) -> Self {
         self.proxy_store = Some(store);
+        self
+    }
+
+    /// Register a last-chance no-match interceptor (issue #819), consulted for every imposter
+    /// request that matches no stub, before the defaultForward/defaultResponse/empty-200
+    /// fallthrough — including when a default IS configured, since a `RetryMatch` rescue must
+    /// outrank forwarding. See [`NoMatchInterceptor`] for the full contract.
+    #[must_use]
+    pub fn with_no_match_interceptor(mut self, interceptor: Arc<dyn NoMatchInterceptor>) -> Self {
+        self.no_match_interceptor = Some(interceptor);
         self
     }
 
@@ -549,6 +563,11 @@ impl ImposterManager {
 
         // Share the admin event bus so recorded requests fan out to the SSE stream (issue #461).
         imposter.event_bus = Some(Arc::clone(&self.event_bus));
+
+        // Inject the shared no-match interceptor, if one is registered (issue #819).
+        if let Some(interceptor) = &self.no_match_interceptor {
+            imposter.no_match_interceptor = Some(Arc::clone(interceptor));
+        }
 
         // Create shutdown channel for this imposter
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -4202,6 +4221,314 @@ mod tests {
                 .expect("create succeeds once the conflict clears");
             manager.delete_imposter(19603).await.expect("delete");
             rts.shutdown();
+        }
+    }
+
+    // =========================================================================
+    // Issue #819: NoMatchInterceptor — last-chance hook on the no-match path
+    // =========================================================================
+    mod no_match_interceptor {
+        use super::*;
+        use crate::extensions::no_match::{NoMatchContext, NoMatchDirective, NoMatchInterceptor};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Counts calls and returns a fixed directive; optionally installs a matching stub the
+        /// first time it is consulted, standing in for "the replicated config caught up".
+        struct Spy {
+            calls: AtomicUsize,
+            directive: NoMatchDirective,
+            /// The stub the rescue installs when consulted.
+            rescue_stub: serde_json::Value,
+            /// Set AFTER the manager is built (the manager needs the spy at construction), so
+            /// the rescue adds its stub to the very manager serving the request.
+            rescue_with: Mutex<Option<(Arc<ImposterManager>, u16)>>,
+            seen: Mutex<Vec<(u16, String, String)>>,
+        }
+
+        impl Spy {
+            fn new(directive: NoMatchDirective) -> Arc<Self> {
+                Arc::new(Self {
+                    calls: AtomicUsize::new(0),
+                    directive,
+                    rescue_with: Mutex::new(None),
+                    rescue_stub: serde_json::Value::Null,
+                    seen: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn rescuing() -> Arc<Self> {
+                Self::rescuing_with_stub(json!({
+                    "predicates": [{"equals": {"path": "/late"}}],
+                    "responses": [{"is": {"statusCode": 200, "body": "rescued"}}]
+                }))
+            }
+
+            fn rescuing_with_stub(stub: serde_json::Value) -> Arc<Self> {
+                Arc::new(Self {
+                    calls: AtomicUsize::new(0),
+                    directive: NoMatchDirective::RetryMatch,
+                    rescue_with: Mutex::new(None),
+                    rescue_stub: stub,
+                    seen: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn arm_rescue(&self, manager: Arc<ImposterManager>, port: u16) {
+                *self.rescue_with.lock() = Some((manager, port));
+            }
+
+            fn calls(&self) -> usize {
+                self.calls.load(Ordering::SeqCst)
+            }
+        }
+
+        impl NoMatchInterceptor for Spy {
+            fn on_no_match<'a>(
+                &'a self,
+                ctx: NoMatchContext<'a>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = NoMatchDirective> + Send + 'a>>
+            {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.seen
+                    .lock()
+                    .push((ctx.port, ctx.method.to_string(), ctx.path.to_string()));
+                let rescue = self.rescue_with.lock().clone();
+                let stub_json = self.rescue_stub.clone();
+                let directive = self.directive;
+                Box::pin(async move {
+                    if let Some((manager, port)) = rescue {
+                        let stub: Stub = serde_json::from_value(stub_json).expect("late stub");
+                        manager
+                            .add_stub(port, stub, None)
+                            .await
+                            .expect("add late stub");
+                    }
+                    directive
+                })
+            }
+        }
+
+        async fn get(port: u16, path: &str) -> (u16, String, bool) {
+            let resp = reqwest::get(format!("http://127.0.0.1:{port}{path}"))
+                .await
+                .expect("request");
+            let status = resp.status().as_u16();
+            let no_match = resp.headers().contains_key("x-rift-no-match");
+            (status, resp.text().await.unwrap_or_default(), no_match)
+        }
+
+        // AC1: RetryMatch rescues a request once the stub appears — served as a normal match,
+        // no x-rift-no-match, interceptor consulted exactly once.
+        #[tokio::test]
+        async fn retry_match_rescues_after_stub_appears() {
+            let spy = Spy::rescuing();
+            let manager = Arc::new(
+                ImposterManager::new()
+                    .with_no_match_interceptor(Arc::clone(&spy) as Arc<dyn NoMatchInterceptor>),
+            );
+            // Armed after construction so the rescue mutates the manager actually serving.
+            spy.arm_rescue(Arc::clone(&manager), 19801);
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19801, "stubs": []
+                })))
+                .await
+                .expect("create");
+
+            let (status, body, no_match) = get(19801, "/late").await;
+            assert_eq!(status, 200);
+            assert_eq!(
+                body, "rescued",
+                "the rescued retry must serve the late stub"
+            );
+            assert!(
+                !no_match,
+                "a rescued request is a normal match, not a no-match"
+            );
+            assert_eq!(spy.calls(), 1, "consulted exactly once");
+            assert_eq!(
+                spy.seen.lock().first().cloned(),
+                Some((19801, "GET".to_string(), "/late".to_string())),
+                "the context must carry the bound port, method and path"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC2: a second miss falls through exactly as Proceed would — and only one retry happens.
+        #[tokio::test]
+        async fn second_miss_falls_through_and_retries_only_once() {
+            let spy = Spy::new(NoMatchDirective::RetryMatch);
+            let manager = ImposterManager::new()
+                .with_no_match_interceptor(Arc::clone(&spy) as Arc<dyn NoMatchInterceptor>);
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19802, "stubs": []
+                })))
+                .await
+                .expect("create");
+
+            let (status, _body, no_match) = get(19802, "/nope").await;
+            assert_eq!(status, 200);
+            assert!(
+                no_match,
+                "a second miss falls through to the empty-200 no-match"
+            );
+            assert_eq!(spy.calls(), 1, "at most one retry per request — no loop");
+
+            manager.delete_all().await;
+        }
+
+        // AC3: a MATCHED request never consults the interceptor (hot path pays nothing).
+        #[tokio::test]
+        async fn matched_requests_never_consult_the_interceptor() {
+            let spy = Spy::new(NoMatchDirective::RetryMatch);
+            let manager = ImposterManager::new()
+                .with_no_match_interceptor(Arc::clone(&spy) as Arc<dyn NoMatchInterceptor>);
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19803,
+                    "stubs": [{
+                        "predicates": [{"equals": {"path": "/hit"}}],
+                        "responses": [{"is": {"statusCode": 200, "body": "hit"}}]
+                    }]
+                })))
+                .await
+                .expect("create");
+
+            let (status, body, _) = get(19803, "/hit").await;
+            assert_eq!(status, 200);
+            assert_eq!(body, "hit");
+            assert_eq!(spy.calls(), 0, "a matched request must not reach the hook");
+
+            manager.delete_all().await;
+        }
+
+        // AC4: Proceed is inert — the response is the untouched baseline fallthrough.
+        #[tokio::test]
+        async fn proceed_serves_the_baseline_fallthrough() {
+            let spy = Spy::new(NoMatchDirective::Proceed);
+            let manager = ImposterManager::new()
+                .with_no_match_interceptor(Arc::clone(&spy) as Arc<dyn NoMatchInterceptor>);
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19804,
+                    "stubs": [],
+                    "defaultResponse": {"statusCode": 503, "body": "default"}
+                })))
+                .await
+                .expect("create");
+
+            let (status, body, _) = get(19804, "/nope").await;
+            assert_eq!(status, 503, "Proceed must fall through to defaultResponse");
+            assert_eq!(body, "default");
+            assert_eq!(spy.calls(), 1, "Proceed is still consulted once");
+
+            manager.delete_all().await;
+        }
+
+        // AC5: a disabled imposter never consults the interceptor — the enabled gate precedes
+        // matching, so the hook is unreachable there.
+        #[tokio::test]
+        async fn disabled_imposter_never_consults_the_interceptor() {
+            let spy = Spy::new(NoMatchDirective::RetryMatch);
+            let manager = ImposterManager::new()
+                .with_no_match_interceptor(Arc::clone(&spy) as Arc<dyn NoMatchInterceptor>);
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19805, "stubs": []
+                })))
+                .await
+                .expect("create");
+            manager
+                .set_imposter_enabled(19805, false)
+                .await
+                .expect("disable the imposter");
+
+            let _ = get(19805, "/nope").await;
+            assert_eq!(
+                spy.calls(),
+                0,
+                "the enabled gate precedes matching, so a disabled imposter never reaches the hook"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC6 (the headline design ruling, #819): the hook fires even when a default IS
+        // configured, and a rescue OUTRANKS it. Without this test, an "optimization" that only
+        // consults the interceptor when no default exists would keep every other test green while
+        // silently misdirecting lagging requests upstream.
+        #[tokio::test]
+        async fn rescue_outranks_a_configured_default_response() {
+            let spy = Spy::rescuing();
+            let manager = Arc::new(
+                ImposterManager::new()
+                    .with_no_match_interceptor(Arc::clone(&spy) as Arc<dyn NoMatchInterceptor>),
+            );
+            spy.arm_rescue(Arc::clone(&manager), 19806);
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19806,
+                    "stubs": [],
+                    "defaultResponse": {"statusCode": 503, "body": "default"}
+                })))
+                .await
+                .expect("create");
+
+            let (status, body, _) = get(19806, "/late").await;
+            assert_eq!(
+                status, 200,
+                "a rescued match must win over the configured defaultResponse"
+            );
+            assert_eq!(body, "rescued");
+            assert_eq!(spy.calls(), 1);
+
+            manager.delete_all().await;
+        }
+
+        // AC7 (#819): the retry must pass the IDENTICAL request facts as the first attempt. The
+        // rescue stub predicates on body, query and a header, so dropping any of them from the
+        // retry call (passing None/empty) fails here while a bodyless-GET-only suite would not
+        // notice.
+        #[tokio::test]
+        async fn retry_passes_the_identical_request_facts() {
+            let spy = Spy::rescuing_with_stub(json!({
+                "predicates": [{"and": [
+                    {"equals": {"path": "/echo", "method": "POST"}},
+                    {"equals": {"query": {"tenant": "acme"}}},
+                    {"equals": {"headers": {"x-trace": "abc123"}}},
+                    {"contains": {"body": "payload"}}
+                ]}],
+                "responses": [{"is": {"statusCode": 200, "body": "facts-preserved"}}]
+            }));
+            let manager = Arc::new(
+                ImposterManager::new()
+                    .with_no_match_interceptor(Arc::clone(&spy) as Arc<dyn NoMatchInterceptor>),
+            );
+            spy.arm_rescue(Arc::clone(&manager), 19807);
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19807, "stubs": []
+                })))
+                .await
+                .expect("create");
+
+            let resp = reqwest::Client::new()
+                .post("http://127.0.0.1:19807/echo?tenant=acme")
+                .header("x-trace", "abc123")
+                .body("a payload here")
+                .send()
+                .await
+                .expect("request");
+            assert_eq!(resp.status().as_u16(), 200);
+            assert_eq!(
+                resp.text().await.unwrap_or_default(),
+                "facts-preserved",
+                "the retry must see the same method/path/query/headers/body as the first attempt"
+            );
+
+            manager.delete_all().await;
         }
     }
 }

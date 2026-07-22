@@ -13,12 +13,15 @@
 //! - **Template Functions** (`template_fn`): Declarative `{{ function args | filter }}`
 //!   response templating (issue #359)
 //! - **Routing** (`routing`): Multi-upstream routing for reverse proxy mode
+//! - **No-Match Interceptor** (`no_match`): Last-chance hook for a genuine no-match, before the
+//!   defaultForward/defaultResponse/empty-200 fallthrough (issue #819)
 
 pub mod decorate;
 pub mod fault;
 pub mod flow_state;
 pub mod matcher;
 pub mod metrics;
+pub mod no_match;
 pub mod routing;
 pub mod stub_analysis;
 pub mod template;
@@ -33,6 +36,8 @@ pub use flow_state::{CasOutcome, FlowStore, FlowStoreProvider, NoOpFlowStore, cr
 pub use matcher::{CompiledMatch, CompiledRule};
 #[allow(unused_imports)]
 pub use metrics::{collect_metrics, record_request};
+#[allow(unused_imports)]
+pub use no_match::{NoMatchContext, NoMatchDirective, NoMatchInterceptor};
 #[allow(unused_imports)]
 pub use routing::Router;
 #[allow(unused_imports)]

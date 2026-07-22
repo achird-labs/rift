@@ -153,6 +153,61 @@ Inject with `.with_response_decorator(Arc<dyn ResponseDecorator>)`.
 
 ---
 
+## `NoMatchInterceptor` — rescue the no-match path
+
+Consulted when a request matched **no stub**, before the `defaultForward` / `defaultResponse` /
+empty-`200` fallthrough (issue #819). Its purpose is a safety net on the data plane: an embedder
+whose replicated config is momentarily behind can wait a bounded interval and retry the match once,
+paying nothing on requests that already matched.
+
+```rust
+use rift_mock_core::extensions::no_match::{
+    NoMatchContext, NoMatchDirective, NoMatchInterceptor,
+};
+
+struct WaitForCatchUp;
+
+impl NoMatchInterceptor for WaitForCatchUp {
+    fn on_no_match<'a>(
+        &'a self,
+        ctx: NoMatchContext<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = NoMatchDirective> + Send + 'a>> {
+        Box::pin(async move {
+            if caught_up_within(ctx.port, Duration::from_millis(500)).await {
+                NoMatchDirective::RetryMatch
+            } else {
+                NoMatchDirective::Proceed
+            }
+        })
+    }
+}
+
+let manager = ImposterManager::new()
+    .with_no_match_interceptor(Arc::new(WaitForCatchUp));
+```
+
+Contract:
+
+- **Only on a genuine no-match.** Never for matched requests, disabled imposters, matcher errors, or
+  the debug path — the hot path pays nothing when nothing missed.
+- **It fires even when a default IS configured**, deliberately. Under replication lag the right stub
+  may be momentarily missing, and forwarding upstream would misdirect the request; rescue outranks
+  forwarding. `Proceed` then falls through exactly as today.
+- **At most one retry per request.** A rescued hit is served as a normal match — indistinguishable
+  downstream — and a second miss falls through exactly as `Proceed` would. "Downstream" is precise:
+  the retry re-evaluates predicates, so a predicate `inject` script runs a **second** time and its
+  `state` mutations and `logger` output are committed twice; a rescued request can also spend two
+  `scriptEngine.timeoutMs` budgets in matching.
+- **Implementations must be bounded**: the request is parked while the future runs.
+- **Annotations** (`extensions::decorate::annotate`) are visible wherever a `ResponseDecorator` is
+  wired — the serve loop. On the `/__rift/` gateway they are inert, since that path has neither an
+  annotation scope nor a decorator.
+- **Unbound ports are out of scope.** A request to a port with no imposter never reaches an imposter
+  handler (no listener, or the gateway `404`s first), so there is nothing to hang a hook on. Cover
+  that window with your own readiness gating.
+
+Registering no interceptor leaves behaviour byte-identical, on both the serve loop and the gateway.
+
 ## Backend errors and annotations
 
 A custom backend signals unavailability by attaching `BackendUnavailable` to a failed operation's

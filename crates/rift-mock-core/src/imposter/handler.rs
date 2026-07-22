@@ -19,6 +19,7 @@ use crate::behaviors::{
 use crate::extensions::decorate::{
     ResponseDecorator, ResponsePhase, backend_error_response, with_annotation_scope,
 };
+use crate::extensions::no_match::{NoMatchContext, NoMatchDirective};
 use crate::extensions::template::{RequestData, has_template_variables, process_template};
 use crate::scripting::{
     FaultDecision, ScriptCtxExtras, ScriptRequest, ScriptStubContext, resolve_script_timeout_ms,
@@ -584,7 +585,7 @@ async fn handle_request_inner(
     // Get client address info for requestFrom, ip predicates
     let request_from = client_addr.to_string();
     let client_ip = client_addr.ip().to_string();
-    let matched = match imposter
+    let mut matched = match imposter
         .find_matching_stub_with_client_bounded(
             method_str,
             path_str,
@@ -603,6 +604,42 @@ async fn handle_request_inner(
         // serve the wrong response).
         Err(e) => return Ok(matcher_error_response(&e)),
     };
+
+    // Issue #819: on a genuine no-match, give a registered interceptor one last chance before
+    // falling through to defaultForward/defaultResponse/empty-200 — deliberately even when a
+    // default IS configured, since under replication lag the right stub may be momentarily
+    // missing and the request would otherwise be misdirected upstream (rescue outranks
+    // forwarding). A `RetryMatch` re-runs matching exactly once with the identical arguments; a
+    // rescued hit is indistinguishable from a first-try match to everything downstream. A second
+    // miss falls through exactly as `Proceed` would.
+    if matched.is_none()
+        && let Some(interceptor) = &imposter.no_match_interceptor
+    {
+        let ctx = NoMatchContext {
+            port: imposter.config.port.unwrap_or(0),
+            method: method_str,
+            path: path_str,
+        };
+        if interceptor.on_no_match(ctx).await == NoMatchDirective::RetryMatch {
+            matched = match imposter
+                .find_matching_stub_with_client_bounded(
+                    method_str,
+                    path_str,
+                    &headers_clone,
+                    query_opt,
+                    body_string.as_deref(),
+                    Some(&request_from),
+                    Some(&client_ip),
+                    script_timeout,
+                )
+                .await
+            {
+                Ok(m) => m,
+                Err(e) => return Ok(matcher_error_response(&e)),
+            };
+        }
+    }
+
     if let Some((stub_state, stub_index)) = matched {
         // Scenario FSM: apply the matched stub's newScenarioState transition (no-op unless set).
         // Resolve flow_id from the same single-value header map the matcher used (headers_clone)
