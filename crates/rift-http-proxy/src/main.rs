@@ -42,7 +42,9 @@ const ACTIVE_ALLOCATOR: &str = "jemalloc";
 const ACTIVE_ALLOCATOR: &str = "system";
 
 use clap::Parser;
-use rift_http_proxy::bootstrap::{apply_rcfile_defaults, save_imposters, stop_server};
+use rift_http_proxy::bootstrap::{
+    DEFAULT_PIDFILE, apply_rcfile_defaults, save_imposters, stop_for_restart, stop_server,
+};
 use rift_http_proxy::healthcheck;
 use rift_http_proxy::runtime;
 use rift_http_proxy::script_cli;
@@ -60,9 +62,10 @@ fn main() -> Result<(), anyhow::Error> {
         return script_cli::dispatch(action);
     }
 
-    // Same treatment for `healthcheck` (issue #664), and for a second reason beyond skipping the
-    // bootstrap: the path below writes `--pidfile`, which would clobber the running server's PID
-    // file with the probe's own — every container health check.
+    // Same treatment for `healthcheck` (issue #664): skip the server bootstrap entirely. (It used
+    // to matter for a second reason — the path below wrote `--pidfile`, clobbering the running
+    // server's PID file with the probe's own — but since #827 the PID file is written only on the
+    // serving path, so a transient subcommand can no longer touch it.)
     if let Some(Commands::Healthcheck { url, timeout }) = cli.command.clone() {
         return healthcheck::dispatch(url, &cli.host, cli.port, timeout);
     }
@@ -120,20 +123,14 @@ fn main() -> Result<(), anyhow::Error> {
         .with(file_layer)
         .init();
 
-    // Write PID file if requested
-    if let Some(ref pidfile) = cli.pidfile {
-        let pid = std::process::id();
-        std::fs::write(pidfile, pid.to_string())?;
-        info!("Wrote PID {} to {:?}", pid, pidfile);
-    }
-
     // Handle subcommands
     match &cli.command {
-        Some(Commands::Stop { pidfile }) => {
-            return stop_server(pidfile);
+        Some(Commands::Stop) => {
+            return stop_server(&pidfile_or_default(&cli));
         }
-        Some(Commands::Restart { pidfile }) => {
-            stop_server(pidfile)?;
+        Some(Commands::Restart) => {
+            // A missing PID file is a satisfied precondition for restart, not an error (#827).
+            stop_for_restart(&pidfile_or_default(&cli))?;
             // Fall through to start
         }
         Some(Commands::Save {
@@ -178,8 +175,26 @@ fn main() -> Result<(), anyhow::Error> {
     run_mountebank_mode(cli)
 }
 
+/// The PID file `stop`/`restart` act on: the single global `--pidfile` binding, falling back to
+/// [`DEFAULT_PIDFILE`] (issue #827 — the default lives here, not on the flag).
+fn pidfile_or_default(cli: &Cli) -> std::path::PathBuf {
+    cli.pidfile
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_PIDFILE))
+}
+
 /// Run in Mountebank-compatible mode
 fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
+    // Write the PID file here — the one place every serving entry converges (plain start, the
+    // `restart` fall-through, and `Replay`'s re-entry). Writing it before the subcommand dispatch
+    // meant `rift --pidfile p restart` recorded its OWN pid and then SIGTERMed itself, and a
+    // transient `save`/`healthcheck` clobbered a running server's file (issue #827).
+    if let Some(ref pidfile) = cli.pidfile {
+        let pid = std::process::id();
+        std::fs::write(pidfile, pid.to_string())?;
+        info!("Wrote PID {} to {:?}", pid, pidfile);
+    }
+
     // Topology selection (RFC-712, issue #744). Clap already applied RIFT_RUNTIME env fallback
     // into `cli.runtime`, so resolve() only sees the merged value; the platform gate then
     // downgrades or rejects per RFC D5 (macOS falls back with a warning, Windows refuses).
