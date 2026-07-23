@@ -3350,6 +3350,7 @@ name = "rift-http-proxy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "assert-json-diff",
  "base64 0.22.1",
  "bytes",

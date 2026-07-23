@@ -45,6 +45,11 @@ pub mod script_cli;
 // ===== Embeddable server composition (issue #317) =====
 // Gateway dispatch (issue #212) callable from any listener
 pub mod gateway;
+
+/// The front door: one listener routing to many imposters by host/path/header
+/// (issue #19). The gateway above addresses imposters by port; this addresses
+/// them by what the request says.
+pub mod front_door;
 // CLI surface + ServerBuilder + metrics server; the `rift` binary is a thin caller
 pub mod server;
 

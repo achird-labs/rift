@@ -7,11 +7,13 @@
 use crate::admin_api::{AdminApiServer, DEFAULT_ADMIN_PORT, RunningAdminApi};
 use crate::config_loader::{self, ConfigSource};
 use crate::extensions::metrics;
+use crate::front_door::{CompiledRoutes, RouteTable, RunningFrontDoor, bind_front_door};
 use crate::imposter::{
     ImposterConfig, ImposterManager, ScriptBaseDir, TlsDefaults, resolve_scripts,
 };
 use crate::injection_gate::GATED_SCRIPT_SURFACES;
 use crate::intercept_control::{InterceptControl, InterceptStartOptions};
+use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -124,6 +126,13 @@ pub struct Cli {
     /// Metrics server port
     #[arg(long, default_value = "9090", env = "RIFT_METRICS_PORT")]
     pub metrics_port: u16,
+
+    /// Bind the front door (issue #19 / U-11): one listener serving every imposter, routed by
+    /// host/path/header/method instead of by port. Accepts `HOST:PORT` (e.g. `0.0.0.0:8080`) or a
+    /// bare port, which binds every interface like `--metrics-port` does. Off when unset — the
+    /// single-port gateway and per-imposter ports are unaffected either way.
+    #[arg(long, value_name = "ADDR", env = "RIFT_FRONT_DOOR")]
+    pub front_door: Option<String>,
 
     // === Mountebank compatibility flags (accepted, no-op) ===
     /// Disable EJS template rendering of --configfile (Rift doesn't use EJS; accepted for compatibility)
@@ -349,6 +358,14 @@ impl ServerBuilder {
     /// needs the bound addresses (`:0` support) and a graceful shutdown.
     pub async fn start(self) -> anyhow::Result<RunningServer> {
         let cli = self.cli;
+        // Validate `--front-door` before anything else binds (issue #19 / U-11): a malformed
+        // address is then a clean, fast failure that never has to unwind an already-bound
+        // listener behind it.
+        let front_door_addr = cli
+            .front_door
+            .as_deref()
+            .map(parse_front_door_addr)
+            .transpose()?;
         let manager = match self.manager {
             Some(manager) => manager,
             None => {
@@ -379,8 +396,9 @@ impl ServerBuilder {
         };
 
         let mut intercept_block = None;
+        let mut routes_block: Option<RouteTable> = None;
         if let Some(ref configfile) = cli.configfile {
-            intercept_block = load_imposters_from_file(
+            let loaded = load_imposters_from_file(
                 &manager,
                 configfile,
                 cli.no_parse,
@@ -388,6 +406,8 @@ impl ServerBuilder {
                 &cli_intercept_flags(&cli),
             )
             .await?;
+            intercept_block = loaded.intercept;
+            routes_block = loaded.routes;
         }
         if let Some(ref datadir) = cli.datadir {
             load_imposters_from_datadir(&manager, datadir, cli.allow_injection).await?;
@@ -403,6 +423,32 @@ impl ServerBuilder {
                 error!("Metrics server error: {e:#}");
                 None
             }
+        };
+
+        // Front door (issue #19 / U-11): one listener serving every imposter, resolved by the
+        // `routes` block threaded through above exactly like the `intercept` block is (falling
+        // back to an empty table — and so the gateway-only 404 behaviour — when the config
+        // declared none). Bound only when `--front-door` was given; unset, nothing here changes.
+        // Unlike the metrics bind just above, a real bind failure here is fatal: the operator
+        // asked for this listener by name, so a silent degrade to "no front door" would be a
+        // surprise, not a convenience. It still follows this function's "don't orphan an
+        // already-bound listener on error" contract — only metrics is up at this point, so that's
+        // all there is to unwind.
+        let front_door = match front_door_addr {
+            Some(addr) => {
+                let table = routes_block.unwrap_or_default();
+                let routes = Arc::new(ArcSwap::from_pointee(CompiledRoutes::new(&table)));
+                match bind_front_door(addr, Arc::clone(&manager), routes).await {
+                    Ok(running) => Some(running),
+                    Err(e) => {
+                        if let Some(metrics) = metrics {
+                            metrics.shutdown().await;
+                        }
+                        return Err(anyhow::anyhow!("front door: {e}"));
+                    }
+                }
+            }
+            None => None,
         };
 
         let host = if cli.local_only {
@@ -483,7 +529,11 @@ impl ServerBuilder {
                 // Same contract as the admin-bind arm below: don't orphan a listener already bound
                 // by this call. #655 widens the ways this can fail (rule-capacity, and a CA/bind
                 // error declared by the config block rather than typed as a flag), and `start()` is
-                // an embedding seam callers retry — a held metrics port would fail the retry too.
+                // an embedding seam callers retry — a held metrics or front-door port would fail
+                // the retry too.
+                if let Some(front_door) = &front_door {
+                    front_door.shutdown().await;
+                }
                 if let Some(metrics) = metrics {
                     metrics.shutdown().await;
                 }
@@ -505,6 +555,9 @@ impl ServerBuilder {
                 // Don't orphan the listeners already started if the admin bind fails — start() is
                 // an embedding seam and callers may retry after an error.
                 intercept.stop().await;
+                if let Some(front_door) = &front_door {
+                    front_door.shutdown().await;
+                }
                 if let Some(metrics) = metrics {
                     metrics.shutdown().await;
                 }
@@ -515,6 +568,7 @@ impl ServerBuilder {
             admin,
             metrics,
             intercept,
+            front_door,
         })
     }
 }
@@ -525,6 +579,7 @@ pub struct RunningServer {
     admin: RunningAdminApi,
     metrics: Option<RunningMetrics>,
     intercept: InterceptControl,
+    front_door: Option<RunningFrontDoor>,
 }
 
 impl RunningServer {
@@ -547,6 +602,7 @@ impl RunningServer {
             admin: crate::admin_api::RunningAdminApi::with_accept_task(loop_body),
             metrics: None,
             intercept: InterceptControl::default(),
+            front_door: None,
         }
     }
     /// The bound admin API address (resolves a `:0` request to the assigned port).
@@ -564,6 +620,13 @@ impl RunningServer {
     /// port).
     pub fn intercept_addr(&self) -> Option<SocketAddr> {
         self.intercept.status()
+    }
+
+    /// The bound front-door address, if `--front-door` was set and bound successfully (resolves a
+    /// `:0` request to the assigned port). `None` when `--front-door` was never given — the flag is
+    /// the only way to bring this listener up.
+    pub fn front_door_addr(&self) -> Option<SocketAddr> {
+        self.front_door.as_ref().map(RunningFrontDoor::local_addr)
     }
 
     /// Run until the admin API accept loop exits — the binary's `run()` behavior. The metrics
@@ -607,6 +670,9 @@ impl RunningServer {
             metrics.shutdown().await;
         }
         self.intercept.stop().await;
+        if let Some(front_door) = &self.front_door {
+            front_door.shutdown().await;
+        }
     }
 }
 
@@ -928,6 +994,23 @@ fn partition_gated_datadir(
     (servable, gated)
 }
 
+/// Parse `--front-door`'s value as a bind address: `HOST:PORT` (e.g. `0.0.0.0:8080`), or a bare
+/// port, which binds every interface — the same convenience `--metrics-port`/`--intercept-port`
+/// offer by being port-only flags to begin with. A value that is neither is a startup error naming
+/// what was rejected, never a silent default (issue #19 / U-11).
+fn parse_front_door_addr(value: &str) -> anyhow::Result<SocketAddr> {
+    if let Ok(addr) = value.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    if let Ok(port) = value.parse::<u16>() {
+        return Ok(SocketAddr::from(([0, 0, 0, 0], port)));
+    }
+    anyhow::bail!(
+        "--front-door '{value}' is not a valid bind address; use HOST:PORT (e.g. 0.0.0.0:8080) \
+         or a bare port number"
+    )
+}
+
 /// The `--intercept-*` flags the operator supplied, by long name; empty when none were.
 fn cli_intercept_flags(cli: &Cli) -> Vec<&'static str> {
     [
@@ -997,16 +1080,25 @@ fn configfile_intercept_injection_error(
     ))
 }
 
-/// Load imposters from a JSON config file, returning the file's optional `intercept` block for the
-/// caller to start the listener from (issue #655) — the block is parsed and validated here so the
-/// whole document is refused as one, before any imposter exists.
+/// What a `--configfile` load hands back to the caller besides the imposters themselves: the
+/// optional `intercept` block (issue #655) and the optional `routes` block (issue #19 / U-11).
+/// Both are boot-time-only and already validated by `load_configs_full` before this returns.
+#[derive(Debug)]
+struct ConfigFileStartOptions {
+    intercept: Option<InterceptStartOptions>,
+    routes: Option<RouteTable>,
+}
+
+/// Load imposters from a JSON config file, returning the file's optional `intercept` and `routes`
+/// blocks for the caller to start their respective listeners from (issue #655, #19) — both are
+/// parsed and validated here so the whole document is refused as one, before any imposter exists.
 async fn load_imposters_from_file(
     manager: &Arc<ImposterManager>,
     path: &PathBuf,
     no_parse: bool,
     allow_injection: bool,
     intercept_flags: &[&str],
-) -> anyhow::Result<Option<InterceptStartOptions>> {
+) -> anyhow::Result<ConfigFileStartOptions> {
     info!("Loading imposters from configfile: {:?}", path);
 
     let loaded = config_loader::load_configs_full(&ConfigSource::File {
@@ -1042,7 +1134,10 @@ async fn load_imposters_from_file(
         }
     }
 
-    Ok(loaded.intercept)
+    Ok(ConfigFileStartOptions {
+        intercept: loaded.intercept,
+        routes: loaded.routes,
+    })
 }
 
 /// Load imposters from a data directory

@@ -64,6 +64,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 - [Date Templates]({{ site.baseurl }}/features/date-templates/) - `{{NOW}}` / `{{DAYS±N}}` / `{{MONTHS±N}}` in responses
 - [Stub-by-ID]({{ site.baseurl }}/features/stub-by-id/) - Address stubs by stable id
 - [Single-Port Gateway]({{ site.baseurl }}/features/gateway/) - Reach every imposter through the admin port
+- [Front Door]({{ site.baseurl }}/features/front-door/) - One listener routing to many imposters by host, path, header or method
 - [Hot Reload]({{ site.baseurl }}/features/hot-reload/) - Re-read config without restarting
 - [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) - Overlap detection and warnings
 - [Debug Mode]({{ site.baseurl }}/features/debug-mode/) - Request matching diagnostics
