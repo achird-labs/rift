@@ -11,6 +11,18 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Reverse-proxy `*.` host routes matched hosts they should not have.** A wildcard route's host
+  check was `host.ends_with("example.com")` after stripping `*.`, which has no label boundary: a
+  route for `*.example.com` also matched `evilexample.com` and the bare `example.com`. The first is
+  the one that matters — an attacker who controls a lookalike domain, or anything that can set the
+  `Host` header, reached the upstream that route names. A wildcard now requires a real subdomain:
+  at least one non-empty label ending at a literal `.`. Host comparison also became
+  case-insensitive, matching RFC 4343 and the intercept-rule matcher, which has always compared
+  with `eq_ignore_ascii_case` — the same `Host` could previously get two different verdicts
+  depending on which matcher saw it.
+
 ## [0.16.0] - 2026-07-22
 
 ### Added

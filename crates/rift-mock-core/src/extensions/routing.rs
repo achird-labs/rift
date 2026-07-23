@@ -85,6 +85,23 @@ fn compile_route(route: Route) -> Result<CompiledRoute, RoutingError> {
     })
 }
 
+/// Does `host` sit under the wildcard `*.{suffix}`?
+///
+/// True only for an actual subdomain: there must be at least one non-empty label
+/// ending at a literal `.` boundary. The previous `host.ends_with(suffix)` also
+/// accepted `example.com` (no label at all) and `evilexample.com` (no boundary) —
+/// the latter routing an attacker-chosen host to whatever upstream the route names.
+fn is_subdomain_of(host: &str, suffix: &str) -> bool {
+    let Some(cut) = host.len().checked_sub(suffix.len()) else {
+        return false;
+    };
+    if !host.is_char_boundary(cut) {
+        return false;
+    }
+    let (label, tail) = host.split_at(cut);
+    tail.eq_ignore_ascii_case(suffix) && label.len() > 1 && label.ends_with('.')
+}
+
 fn matches_route<B>(req: &Request<B>, route: &CompiledRoute) -> bool {
     // Check host
     if let Some(ref host_match) = route.host {
@@ -93,16 +110,18 @@ fn matches_route<B>(req: &Request<B>, route: &CompiledRoute) -> bool {
             .host()
             .or_else(|| req.headers().get("host").and_then(|h| h.to_str().ok()));
 
+        // Hostnames are case-insensitive (RFC 4343), as intercept rules already
+        // assume (`rift-http-proxy/src/intercept_rules.rs` compares with
+        // `eq_ignore_ascii_case`); comparing case-sensitively here gave the same
+        // `Host` two different verdicts depending on which matcher saw it.
         let matches = match (req_host, host_match) {
-            (Some(req_host), CompiledHost::Exact(pattern)) => req_host == pattern,
-            (Some(req_host), CompiledHost::Wildcard(pattern)) => {
-                // Simple wildcard matching (*.example.com)
-                if let Some(suffix) = pattern.strip_prefix("*.") {
-                    req_host.ends_with(suffix)
-                } else {
-                    req_host == pattern
-                }
+            (Some(req_host), CompiledHost::Exact(pattern)) => {
+                req_host.eq_ignore_ascii_case(pattern)
             }
+            (Some(req_host), CompiledHost::Wildcard(pattern)) => match pattern.strip_prefix("*.") {
+                Some(suffix) => is_subdomain_of(req_host, suffix),
+                None => req_host.eq_ignore_ascii_case(pattern),
+            },
             _ => false,
         };
 
@@ -262,6 +281,89 @@ mod tests {
             .unwrap();
 
         assert_eq!(router.match_request(&req2), None);
+    }
+
+    /// `*.example.com` must match a *subdomain* — not the bare domain, and not a
+    /// host that merely ends with the same characters. `ends_with("example.com")`
+    /// is true for `evilexample.com`, which routes an attacker-chosen host to
+    /// whatever upstream this route names.
+    #[test]
+    fn wildcard_host_respects_the_label_boundary() {
+        let routes = vec![Route {
+            name: "subdomain".to_string(),
+            match_config: RouteMatch {
+                host: Some(HostMatch::Wildcard {
+                    wildcard: "*.example.com".to_string(),
+                }),
+                ..Default::default()
+            },
+            upstream: "wildcard-service".to_string(),
+        }];
+        let router = Router::new(routes).unwrap();
+
+        let matches = |host: &str| {
+            let req = Request::builder()
+                .uri(format!("http://{host}/test"))
+                .body(())
+                .unwrap();
+            router.match_request(&req).is_some()
+        };
+
+        assert!(matches("api.example.com"), "a subdomain must match");
+        assert!(matches("a.b.example.com"), "a nested subdomain must match");
+        assert!(
+            !matches("evilexample.com"),
+            "a host that merely ends with the suffix must not match: the `.` label \
+             boundary is what makes a wildcard a wildcard"
+        );
+        assert!(
+            !matches("example.com"),
+            "`*.` requires a label; the bare domain is not a subdomain of itself"
+        );
+    }
+
+    /// Hostnames are case-insensitive (RFC 4343), and this codebase already knows
+    /// that: intercept rules compare with `eq_ignore_ascii_case`
+    /// (`rift-http-proxy/src/intercept_rules.rs`). The proxy router comparing
+    /// case-sensitively means the same `Host` reaches two different verdicts
+    /// depending on which matcher sees it.
+    #[test]
+    fn host_matching_ignores_case_like_every_other_host_matcher() {
+        let routes = vec![
+            Route {
+                name: "exact".to_string(),
+                match_config: RouteMatch {
+                    host: Some(HostMatch::Exact("api.example.com".to_string())),
+                    ..Default::default()
+                },
+                upstream: "exact-service".to_string(),
+            },
+            Route {
+                name: "wild".to_string(),
+                match_config: RouteMatch {
+                    host: Some(HostMatch::Wildcard {
+                        wildcard: "*.wild.test".to_string(),
+                    }),
+                    ..Default::default()
+                },
+                upstream: "wild-service".to_string(),
+            },
+        ];
+        let router = Router::new(routes).unwrap();
+
+        let upstream_for = |host: &str| {
+            let req = Request::builder()
+                .uri(format!("http://{host}/test"))
+                .body(())
+                .unwrap();
+            router.match_request(&req).map(str::to_owned)
+        };
+
+        assert_eq!(
+            upstream_for("API.Example.COM").as_deref(),
+            Some("exact-service")
+        );
+        assert_eq!(upstream_for("A.Wild.TEST").as_deref(), Some("wild-service"));
     }
 
     #[test]
