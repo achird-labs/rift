@@ -1012,6 +1012,21 @@ pub struct RiftFlowStateConfig {
     /// Flattened directly under `flowState` (issue #266). Absent ⇒ `"imposter_port"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_id_source: Option<String>,
+    /// Options belonging to a provider-supplied store ([`FlowStoreProvider`]).
+    ///
+    /// An embedder that plugs in its own [`FlowStore`] has, today, nowhere to put
+    /// that store's configuration: every field here describes a built-in backend,
+    /// and adding one per embedder does not scale (nor should this crate learn
+    /// their vocabulary). Unrecognised keys under `flowState` therefore collect
+    /// here instead of being dropped, and the provider parses what it owns.
+    ///
+    /// Built-in backends ignore this entirely — `"inmemory"` and `"redis"` read
+    /// only the typed fields above, so an unknown key changes nothing for them.
+    ///
+    /// [`FlowStoreProvider`]: crate::extensions::flow_state::FlowStoreProvider
+    /// [`FlowStore`]: crate::extensions::flow_state::FlowStore
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 fn default_flow_backend() -> String {
@@ -1029,6 +1044,7 @@ impl Default for RiftFlowStateConfig {
             ttl_seconds: default_flow_ttl(),
             redis: None,
             flow_id_source: None,
+            extra: serde_json::Map::new(),
         }
     }
 }
@@ -1555,6 +1571,93 @@ mod tests {
             }
             other => panic!("expected Is, got {other:?}"),
         }
+    }
+
+    // A provider's own options survive under `flowState`, verbatim, instead of
+    // being dropped on the floor as unknown keys.
+    #[test]
+    fn provider_options_collect_in_extra() {
+        let fs: RiftFlowStateConfig = serde_json::from_value(json!({
+            "backend": "inmemory",
+            "ttlSeconds": 60,
+            "readConsistency": "strong",
+            "nested": { "fsyncIntervalMs": 50 }
+        }))
+        .unwrap();
+
+        // The typed fields still bind; only what is left over collects.
+        assert_eq!(fs.backend, "inmemory");
+        assert_eq!(fs.ttl_seconds, 60);
+        assert_eq!(
+            fs.extra.get("readConsistency").and_then(|v| v.as_str()),
+            Some("strong")
+        );
+        assert_eq!(
+            fs.extra
+                .get("nested")
+                .and_then(|v| v.get("fsyncIntervalMs"))
+                .and_then(serde_json::Value::as_u64),
+            Some(50)
+        );
+        assert!(
+            !fs.extra.contains_key("backend") && !fs.extra.contains_key("ttlSeconds"),
+            "a key a typed field already claimed must not also land in extra: {:?}",
+            fs.extra
+        );
+
+        // Round-trip: provider keys come back flat, where they were written.
+        let out = serde_json::to_value(&fs).unwrap();
+        assert_eq!(
+            out.get("readConsistency").and_then(|v| v.as_str()),
+            Some("strong")
+        );
+    }
+
+    // `rename_all = "camelCase"` renames the *declared* fields; keys collected by
+    // `flatten` are data, not identifiers, and must pass through untouched.
+    #[test]
+    fn extra_keys_are_not_case_mangled() {
+        let fs: RiftFlowStateConfig = serde_json::from_value(json!({
+            "some_snake_key": 1,
+            "SCREAMING": 2,
+            "mixedCase": 3
+        }))
+        .unwrap();
+        for key in ["some_snake_key", "SCREAMING", "mixedCase"] {
+            assert!(fs.extra.contains_key(key), "{key} was renamed or dropped");
+        }
+    }
+
+    // Adding `extra` must not change the wire form of any config that exists
+    // today: an empty map contributes no keys, so a round-trip of a
+    // fully-populated built-in config is byte-identical to what it was before.
+    #[test]
+    fn an_empty_extra_adds_nothing_to_the_wire_form() {
+        let input = json!({
+            "backend": "redis",
+            "ttlSeconds": 900,
+            "redis": { "url": "redis://localhost:6379" },
+            "flowIdSource": "header:X-Flow"
+        });
+        let fs: RiftFlowStateConfig = serde_json::from_value(input.clone()).unwrap();
+        assert!(fs.extra.is_empty(), "nothing was left over: {:?}", fs.extra);
+
+        let out = serde_json::to_value(&fs).unwrap();
+        let keys: Vec<&String> = out.as_object().unwrap().keys().collect();
+        assert_eq!(keys.len(), 4, "serializing gained or lost a key: {keys:?}");
+        assert_eq!(out.get("backend"), input.get("backend"));
+        assert_eq!(out.get("ttlSeconds"), input.get("ttlSeconds"));
+        assert_eq!(out.get("flowIdSource"), input.get("flowIdSource"));
+    }
+
+    // Absent `flowState` keys entirely: `extra` defaults empty rather than
+    // failing to deserialize.
+    #[test]
+    fn extra_defaults_empty() {
+        let fs: RiftFlowStateConfig = serde_json::from_value(json!({})).unwrap();
+        assert!(fs.extra.is_empty());
+        assert_eq!(fs.backend, "inmemory");
+        assert!(RiftFlowStateConfig::default().extra.is_empty());
     }
 
     // Issue #266: `flowIdSource` is flat under `flowState` and survives a serialize round-trip.
