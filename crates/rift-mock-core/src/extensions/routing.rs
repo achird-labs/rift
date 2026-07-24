@@ -87,11 +87,15 @@ fn compile_route(route: Route) -> Result<CompiledRoute, RoutingError> {
 
 /// Does `host` sit under the wildcard `*.{suffix}`?
 ///
+/// Public because the front-door route table (`rift-http-proxy`) matches hosts by
+/// the same rule, and two copies of "what does `*.` mean" is precisely how the
+/// label-boundary bug this encodes would come back.
+///
 /// True only for an actual subdomain: there must be at least one non-empty label
 /// ending at a literal `.` boundary. The previous `host.ends_with(suffix)` also
 /// accepted `example.com` (no label at all) and `evilexample.com` (no boundary) —
 /// the latter routing an attacker-chosen host to whatever upstream the route names.
-fn is_subdomain_of(host: &str, suffix: &str) -> bool {
+pub fn is_subdomain_of(host: &str, suffix: &str) -> bool {
     let Some(cut) = host.len().checked_sub(suffix.len()) else {
         return false;
     };

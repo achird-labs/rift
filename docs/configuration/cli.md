@@ -43,6 +43,7 @@ Options:
       --runtime <MODE>             Runtime topology: work-stealing (default) or per-core[=N] (RFC-712; experimental, Linux-first — macOS falls back with a warning, Windows rejects it)
       --runtime-affinity           Pin per-core worker threads to CPU cores (with --runtime per-core; effective on Linux)
       --metrics-port <PORT>        Prometheus metrics port [default: 9090]
+      --front-door <ADDR>          Serve every imposter from one address, routed by host/path/header (see Features -> Front Door)
       --ip-whitelist <IPS>         Comma-separated allowed IPs
       --mock                       Run in mock mode
       --debug                      Enable debug mode
@@ -149,6 +150,7 @@ Environment variables override CLI defaults:
 | `RIFT_RUNTIME` | Runtime topology (env alias of `--runtime`): `work-stealing` or `per-core[=N]` (RFC-712; experimental) | `work-stealing` |
 | `RIFT_RUNTIME_AFFINITY` | Pin per-core worker threads to CPU cores (env alias of `--runtime-affinity`) | off |
 | `RIFT_METRICS_PORT` | Prometheus metrics port | `9090` |
+| `RIFT_FRONT_DOOR` | Front-door bind address (env alias of `--front-door`): `HOST:PORT` or a bare port | off |
 | `RIFT_DEFAULT_TLS_CERT` | Default TLS certificate (PEM) for HTTPS imposters | |
 | `RIFT_DEFAULT_TLS_KEY` | Default TLS private key (PEM) | |
 | `RIFT_NO_SELF_SIGNED_TLS` | Disable self-signed TLS fallback (`true`/`false`) | `false` |

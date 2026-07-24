@@ -67,6 +67,9 @@ reqwest.workspace = true
 # Utils
 bytes.workspace = true
 base64 = "0.22"
+# Hot-swappable route table for the front door listener (issue #19 / U-11); same pin as
+# rift-mock-core's own use of it for the imposter manager's port slots.
+arc-swap = "1.7"
 # Constant-time comparison for the admin API key (issue #548 — timing side channel)
 subtle = "2"
 chrono.workspace = true

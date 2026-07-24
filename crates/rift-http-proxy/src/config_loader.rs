@@ -60,6 +60,10 @@ pub struct LoadedConfig {
     /// byte-for-byte the pre-#655 behaviour. Only the `{ "imposters": [...] }` wrapper object has
     /// somewhere to put one; a bare array and a `--datadir` never yield a block.
     pub intercept: Option<InterceptStartOptions>,
+    /// `None` when the document declares no `routes` block. Same shape rule as
+    /// `intercept`: only the `{ "imposters": [...] }` wrapper has somewhere to put
+    /// one (issue #19).
+    pub routes: Option<crate::front_door::RouteTable>,
 }
 
 /// Parse the source into imposter configs without creating any imposters. A parse error is
@@ -76,9 +80,12 @@ pub fn load_configs(source: &ConfigSource) -> anyhow::Result<Vec<ImposterConfig>
 pub fn load_configs_full(source: &ConfigSource) -> anyhow::Result<LoadedConfig> {
     match source {
         ConfigSource::File { path, no_parse } => load_file(path, *no_parse),
+        // A datadir is a directory of imposter documents with no wrapper, so it has
+        // nowhere to declare either an intercept listener or a route table.
         ConfigSource::Dir(dir) => load_dir(dir).map(|imposters| LoadedConfig {
             imposters,
             intercept: None,
+            routes: None,
         }),
     }
 }
@@ -93,6 +100,7 @@ fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<LoadedConfig> {
 
     let trimmed = content.trim_start();
     let mut intercept = None;
+    let mut routes = None;
     let mut configs: Vec<ImposterConfig> = if trimmed.starts_with('{') {
         // Single imposter, or a `{ "imposters": [...] }` wrapper (Mountebank format).
         let value: serde_json::Value = serde_json::from_str(&content)?;
@@ -107,12 +115,33 @@ fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<LoadedConfig> {
                     .map(|block| serde_json::from_value(block.clone()))
                     .transpose()
                     .map_err(|e| anyhow::anyhow!("invalid `intercept` block: {e}"))?;
+                // Same wrapper-only rule, same reasoning, for the front door's route
+                // table (issue #19). Validated here rather than at first request: a
+                // table that cannot route is a startup error, not a runtime surprise.
+                routes = value
+                    .get("routes")
+                    .map(|block| {
+                        serde_json::from_value::<crate::front_door::RouteTable>(block.clone())
+                    })
+                    .transpose()
+                    .map_err(|e| anyhow::anyhow!("invalid `routes` block: {e}"))?;
+                if let Some(table) = &routes {
+                    table
+                        .validate()
+                        .map_err(|e| anyhow::anyhow!("invalid `routes` block: {e}"))?;
+                }
                 serde_json::from_value(imposters.clone())?
             }
             // A single-imposter document has no `imposters` key, so it has no wrapper to carry a
             // listener declaration — and `ImposterConfig` ignores unknown fields, so an `intercept`
             // key here would be dropped without a word: no listener, no rule, no diagnostic, and a
             // green boot (issue #655). Refuse instead; the remedy is one line of JSON.
+            None if value.get("routes").is_some() => anyhow::bail!(
+                "a `routes` block is only read from the `{{\"imposters\": [...], \"routes\": [...]}}` \
+                 wrapper form, but this document has no `imposters` key, so the block would be \
+                 ignored. Wrap the imposter in `\"imposters\": [ ... ]` (use `[]` if the file \
+                 declares none)."
+            ),
             None if value.get("intercept").is_some() => anyhow::bail!(
                 "an `intercept` block is only read from the `{{\"imposters\": [...], \"intercept\": {{...}}}}` \
                  wrapper form, but this document has no `imposters` key, so the block would be ignored. \
@@ -141,6 +170,7 @@ fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<LoadedConfig> {
     Ok(LoadedConfig {
         imposters: configs,
         intercept,
+        routes,
     })
 }
 
@@ -381,6 +411,75 @@ mod tests {
     }"#;
 
     /// AC2: the block is read from the same wrapper object that already carries `imposters`.
+    /// The wrapper form carries a `routes` table through to the caller, validated
+    /// at load time so a table that cannot route fails the boot rather than the
+    /// first request.
+    #[test]
+    fn load_configs_full_reads_and_validates_a_routes_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "cfg.json",
+            r#"{"imposters": [{"port": 4545, "protocol": "http"}],
+                "routes": {"routes": [
+                    {"id": "pay", "match": {"host": "payments.test"}, "target": {"port": 4545}}
+                ]}}"#,
+        );
+        let loaded = load_configs_full(&ConfigSource::File {
+            path: path.clone(),
+            no_parse: false,
+        })
+        .unwrap();
+        let table = loaded.routes.expect("routes block is read");
+        assert_eq!(table.routes.len(), 1);
+        assert_eq!(table.routes[0].id, "pay");
+        assert_eq!(table.routes[0].target.port, 4545);
+
+        let bad = write(
+            dir.path(),
+            "bad.json",
+            r#"{"imposters": [],
+                "routes": {"routes": [
+                    {"id": "dup", "match": {}, "target": {"port": 1}},
+                    {"id": "dup", "match": {}, "target": {"port": 2}}
+                ]}}"#,
+        );
+        let err = load_configs_full(&ConfigSource::File {
+            path: bad,
+            no_parse: false,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("routes"), "error should name the block: {err}");
+    }
+
+    /// A `routes` block on a document with no `imposters` wrapper would be
+    /// silently dropped — `ImposterConfig` ignores unknown fields — leaving no
+    /// route table, no diagnostic, and a green boot. Same trap as #655's
+    /// `intercept` block, same refusal.
+    #[test]
+    fn a_routes_block_outside_the_wrapper_is_refused_not_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "single.json",
+            r#"{"port": 4545, "protocol": "http",
+                "routes": {"routes": [
+                    {"id": "pay", "match": {}, "target": {"port": 4545}}
+                ]}}"#,
+        );
+        let err = load_configs_full(&ConfigSource::File {
+            path,
+            no_parse: false,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("`routes` block") && err.contains("imposters"),
+            "the refusal must say what was wrong and how to fix it: {err}"
+        );
+    }
+
     #[test]
     fn load_configs_full_reads_intercept_block() {
         let dir = tempfile::tempdir().unwrap();

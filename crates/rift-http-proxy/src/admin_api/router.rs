@@ -124,47 +124,17 @@ pub async fn route_request(
     Ok(response)
 }
 
-/// Dispatch a `/__rift/:port/<path>` gateway request to the imposter on `:port` (issue #212),
-/// rewriting the URI to the imposter-relative `/<path>` (+ query) so its predicates and handler
-/// behave exactly as if the request had arrived on the imposter's own port. The dispatch core
-/// is the library-public `gateway::dispatch_to_port` (issue #317).
+/// Dispatch a `/__rift/:port/<path>` gateway request to the imposter on `:port` (issue #212).
+/// Thin wrapper over the library-public `gateway::dispatch_gateway_path` (issue #317), which the
+/// front door (issue #19 / U-11) shares for its own fallback addressing so the two listeners
+/// cannot drift on what counts as a valid gateway target.
 async fn handle_gateway(
     rest: &str,
     query: Option<&str>,
     req: Request<Incoming>,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
-    let (port_str, sub_path) = match rest.split_once('/') {
-        Some((port, sub)) => (port, format!("/{sub}")),
-        None => (rest, "/".to_string()),
-    };
-    let Ok(port) = port_str.parse::<u16>() else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            &format!("invalid gateway target '{port_str}' (expected /__rift/<port>/<path>)"),
-        );
-    };
-    // Check existence before the URI rewrite so a missing imposter stays a 404 even if the
-    // rewritten URI would be rejected — the pre-#317 response precedence. dispatch_to_port
-    // re-checks as its own defensive 404 for other callers.
-    if manager.get_imposter(port).is_err() {
-        return error_response(
-            StatusCode::NOT_FOUND,
-            &format!("no imposter on port {port}"),
-        );
-    }
-
-    let target = match query {
-        Some(q) => format!("{sub_path}?{q}"),
-        None => sub_path,
-    };
-    let (mut parts, body) = req.into_parts();
-    parts.uri = match target.parse() {
-        Ok(uri) => uri,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid gateway path"),
-    };
-
-    crate::gateway::dispatch_to_port(&manager, port, Request::from_parts(parts, body)).await
+    crate::gateway::dispatch_gateway_path(rest, query, req, &manager).await
 }
 
 /// Route based on path

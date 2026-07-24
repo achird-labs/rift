@@ -436,6 +436,94 @@ async fn server_builder_start_reports_addrs_and_shuts_down_both() {
     );
 }
 
+// Issue #19 / U-11: `--front-door` binds the front-door listener from `ServerBuilder::start`,
+// seeded from the config file's `routes` block exactly like `--intercept-port`/the `intercept`
+// block seed the intercept listener. A request through the front door's own bound address (never
+// a hardcoded port — resolved via `front_door_addr()`) reaches the imposter the route names.
+#[tokio::test]
+async fn server_builder_start_binds_front_door_and_routes_to_imposter() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("imposters.json");
+    std::fs::write(
+        &path,
+        r#"{"imposters":[{"port":19490,"protocol":"http","stubs":[
+            {"predicates":[{"equals":{"path":"/ping"}}],
+             "responses":[{"is":{"statusCode":200,"body":"front-door-pong"}}]}]}],
+           "routes":{"routes":[
+             {"id":"pay","match":{"host":"payments.test"},"target":{"port":19490}}
+           ]}}"#,
+    )
+    .expect("write config");
+
+    let cli = Cli::try_parse_from([
+        "rift",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+        "--metrics-port",
+        "0",
+        "--configfile",
+        path.to_str().expect("utf8 path"),
+        "--front-door",
+        "127.0.0.1:0",
+    ])
+    .expect("cli parse");
+
+    let running = ServerBuilder::from_cli(cli)
+        .start()
+        .await
+        .expect("start binds the front door alongside admin/metrics");
+
+    let front_door_addr = running
+        .front_door_addr()
+        .expect("front door bound when --front-door is set");
+    assert_ne!(
+        front_door_addr.port(),
+        0,
+        "front_door_addr() resolves the :0 request to the real bound port"
+    );
+
+    wait_for_http(&format!("http://{}/health", running.admin_addr())).await;
+    wait_for_http(&format!("http://{front_door_addr}/ping")).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{front_door_addr}/ping"))
+        .header("Host", "payments.test")
+        .send()
+        .await
+        .expect("front door request");
+    assert_eq!(resp.status(), 200, "the routed imposter answered");
+    assert_eq!(
+        resp.text().await.expect("body"),
+        "front-door-pong",
+        "the request reached imposter 19490 via the route, not the gateway fallback"
+    );
+
+    running.shutdown().await;
+}
+
+// Without `--front-door`, nothing about startup changes: the listener stays off.
+#[tokio::test]
+async fn server_builder_start_leaves_front_door_off_without_the_flag() {
+    let cli = Cli::try_parse_from([
+        "rift",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+        "--metrics-port",
+        "0",
+    ])
+    .expect("cli parse");
+    let running = ServerBuilder::from_cli(cli).start().await.expect("start");
+    assert!(
+        running.front_door_addr().is_none(),
+        "front door must stay off unless --front-door is set"
+    );
+    running.shutdown().await;
+}
+
 // AC7 end-to-end: `--allow-injection` must survive the whole thread (ServerBuilder::start →
 // with_allow_injection → accept_loop → route_request → route_by_path → handle_config) and be
 // reported by GET /config. A hardcoded flag anywhere on that path would fail here while the
