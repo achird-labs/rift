@@ -572,21 +572,20 @@ async fn test_response_cycling_with_rift_extensions() {
 
     create_imposter(&client, admin_port, config).await;
 
-    // Verify response cycling works
-    let bodies: Vec<String> = futures::future::join_all((0..6).map(|_| {
-        let c = client.clone();
-        let port = imposter_port;
-        async move {
-            c.get(format!("{ADMIN_URL}:{port}/test"))
-                .send()
-                .await
-                .unwrap()
-                .text()
-                .await
-                .unwrap()
-        }
-    }))
-    .await;
+    // Sequential dispatch: concurrent requests reach the round-robin counter in
+    // nondeterministic order, which makes the ordering assertion below unsound.
+    let mut bodies: Vec<String> = Vec::with_capacity(6);
+    for _ in 0..6 {
+        let body = client
+            .get(format!("{ADMIN_URL}:{imposter_port}/test"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        bodies.push(body);
+    }
 
     assert_eq!(
         bodies,
