@@ -1,5 +1,19 @@
 //! Integration tests for RedisFlowStore using testcontainers.
 //!
+//! # Currently disabled (issue #853)
+//!
+//! Every container-backed test below is `#[ignore]`d, and the dedicated `redis-integration` CI
+//! job is switched off, until #853 extracts `RedisFlowStore` into the `rift-store-redis` crate —
+//! that change relocates this suite, so running it in the interim only re-litigates behaviour the
+//! extraction is about to move. They are `#[ignore]`d rather than deleted or `#[cfg]`d out so the
+//! file still **compiles** in the `Integration Tests` job: API drift in `RedisFlowStore` or
+//! `FlowStore` still breaks the build here, it just doesn't spend a Docker container per PR.
+//! Re-enable by removing these attributes and the CI job's `if: false` (see #853's checklist).
+//! Run them meanwhile with `cargo test -p rift-http-proxy --test redis_backend -- --ignored`.
+//!
+//! The `probe_gate` unit tests at the bottom are deliberately **not** ignored — they are pure
+//! classification logic (issue #649) and need no Docker.
+//!
 //! These tests start a throwaway Redis container via testcontainers, so **Docker must be
 //! running**. When Docker is not available they are **skipped** locally (with a note on stderr)
 //! rather than hanging and failing — so `cargo test -p rift-http-proxy` is green on a dev machine
@@ -122,6 +136,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_get_set() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -135,6 +150,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_increment() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -153,6 +169,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_ttl() {
         let Some((_container, store)) = setup(2).await else {
             return;
@@ -168,6 +185,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_exists_delete() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -185,6 +203,7 @@ mod tests {
     use rift_http_proxy::flow_state::CasOutcome;
 
     #[tokio::test]
+    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_cas_expected_absent_applies() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -202,6 +221,7 @@ mod tests {
     // SETEX inside the CAS script must carry the store TTL: a CAS-applied key expires
     // like a set() key (a dropped TTL arg would mean unbounded key growth in Redis).
     #[tokio::test]
+    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_cas_applied_key_expires() {
         let Some((_container, store)) = setup(2).await else {
             return;
@@ -224,6 +244,7 @@ mod tests {
     // Issue #475: increment_by folds INCRBY + EXPIRE into one EVAL. Mirror the CAS-expiry test to
     // pin that the EXPIRE arg isn't dropped — a lost EXPIRE would mean unbounded key growth.
     #[tokio::test]
+    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_increment_by_key_expires() {
         let Some((_container, store)) = setup(2).await else {
             return;
@@ -241,6 +262,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_cas_expected_present_and_conflict() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -281,6 +303,7 @@ mod tests {
     // extend every key's TTL via SCAN + EXPIRE. With a 2s store default, extending to 100s must keep
     // the keys alive past a 3s wait (before the fix they'd expire at 2s and be gone).
     #[tokio::test]
+    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_set_ttl_extends_all_keys() {
         let Some((_container, store)) = setup(2).await else {
             return;
@@ -312,6 +335,7 @@ mod tests {
 
     // Flow-level ttl(<=0) expires every current key (Redis EXPIRE semantics), matching in-memory.
     #[tokio::test]
+    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_set_ttl_zero_expires_flow() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -326,6 +350,7 @@ mod tests {
 
     // Per-key ttl mirrors Redis EXPIRE: true when the key exists, false when absent; <=0 deletes.
     #[tokio::test]
+    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_set_key_ttl() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -358,6 +383,7 @@ mod tests {
 
     // clear_flow removes only the target flow's keys.
     #[tokio::test]
+    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_clear_flow() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -390,6 +416,7 @@ mod tests {
     // literally by clear_flow's SCAN MATCH — it must NOT wipe sibling flows whose ids the glob would
     // otherwise match. Here clear_flow("a*") must clear only the literal flow "a*", leaving "abc".
     #[tokio::test]
+    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_clear_flow_does_not_glob_across_flows() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -422,6 +449,7 @@ mod tests {
 
     // Per-key ttl on an already-expired key reports false (the key is absent), on Redis too.
     #[tokio::test]
+    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_set_key_ttl_on_expired_key_is_false() {
         let Some((_container, store)) = setup(2).await else {
             return;

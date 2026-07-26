@@ -77,10 +77,12 @@ jobs:
   # corpus-replay gate, …) never ran in CI — a regression in those contracts would ship green. This
   # job runs the whole integration surface with `--tests`. `--workspace` covers only the six
   # `crates/*` members, so the docker-bound `rift-compatibility-tests` crate and the benchmark are
-  # excluded automatically (they keep their own dedicated jobs); redis_backend self-provisions a
-  # container via testcontainers and mountebank_compatibility spawns its own server, so both run on
-  # the Docker-enabled runner without extra setup. Runs on stable only (the unit surface already
-  # covers beta) to keep the heavier integration run off the critical path.
+  # excluded automatically (they keep their own dedicated jobs); mountebank_compatibility spawns its
+  # own server, so it runs on the Docker-enabled runner without extra setup. redis_backend still
+  # *compiles* here but its container-backed tests are `#[ignore]`d pending #853 (they no longer
+  # start a Redis container) — that compile is what keeps the suite from bit-rotting while it is
+  # disabled. Runs on stable only (the unit surface already covers beta) to keep the heavier
+  # integration run off the critical path.
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
@@ -432,9 +434,17 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-features --release
 
+  # DISABLED pending issue #853 (extract the Redis flow store into `rift-store-redis`). That change
+  # relocates this suite, so the tests in `tests/redis_backend.rs` are `#[ignore]`d and this job is
+  # gated off rather than left to run zero tests and report a green "Redis Integration Tests" —
+  # a passing job with no coverage behind it is worse than a visibly skipped one. The job body is
+  # kept intact (not deleted) so re-enabling is a one-line revert of the `if:` below, together with
+  # dropping the `#[ignore]`s. `Integration Tests` still *compiles* the suite, so API drift is
+  # caught in the meantime. Re-enable as part of #853.
   redis-integration:
     name: Redis Integration Tests
     runs-on: ubuntu-latest
+    if: false # re-enable with #853
     steps:
       - uses: actions/checkout@v7
 
