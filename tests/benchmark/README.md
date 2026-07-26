@@ -172,12 +172,35 @@ JSON — different stub schema, and one port per JVM with admin under `/__admin`
 ```bash
 cd tests/benchmark
 
-# Bench WireMock alone -> results/direct_wiremock.csv
+# Benches WireMock TWICE -> results/direct_wiremock.csv + results/direct_wiremock-stock.csv
 python3 scripts/bench_wiremock.py --run-all --duration 20s --warmup 10s --connections 50
 
 # Combine whatever CSVs exist from the SAME box and settings -> WIREMOCK_BENCHMARK_REPORT.md
 python3 scripts/bench_wiremock.py --report --connections 50
 ```
+
+**`--run-all` runs two series and therefore takes roughly twice the wall clock** (issue #865):
+
+| Series | Container threads | Connections | CSV |
+|---|---|---|---|
+| headline (tuned) | `max(cpu_count, highest connection count)` | all of them (incl. a sweep) | `direct_wiremock.csv` |
+| secondary (stock) | WireMock's 10-thread default | `--connections` only | `direct_wiremock-stock.csv` |
+
+WireMock is thread-per-request, so its default 10-thread pool bounds in-flight requests at 10 —
+below the 50 connections the comparison offers. Pinning the headline series above the offered
+concurrency means the number measures the engine rather than the pool, which is what makes a Rift
+win defensible instead of "you throttled WireMock". **The pin is a fairness guarantee, not a
+speedup:** on a box with about as many cores as the default pool has threads, the CPU saturates
+first and the pin is a no-op — the two WireMock columns in the report tell you whether it bound.
+
+`--container-threads N` overrides the pin, so a thread-sweep curve can be produced by hand. There is
+deliberately no standing sweep axis; the suite is already slow. The run records the pin it used
+beside the CSV, so a later standalone `--report` states the value actually measured rather than
+re-deriving one — if you bench and report in separate invocations you do not need to repeat the flag.
+
+When sweeping, pass a `--connections` value that is one of the swept points: the stock series uses
+it alone, and a point outside the swept set would produce rows no report can read (the suite fails
+at argument-parse time rather than after benching it).
 
 - **Same fixture, same gates.** The suite *imports* `IMPOSTERS`/`SCENARIOS`/`EXPECT_BODY` from
   `bench_direct` and generates WireMock mappings from them, so the two can never drift. The same 13

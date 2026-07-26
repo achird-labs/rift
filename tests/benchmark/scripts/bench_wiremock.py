@@ -61,6 +61,16 @@ MIN_JAVA_MAJOR = 11
 DEFAULT_JAR = os.path.expanduser("~/bench-wiremock/wiremock-standalone.jar")
 DEFAULT_WIREMOCK_VERSION = "3.9.1"
 
+# The stock-defaults secondary series (issue #865): same suite, WireMock launched with no
+# `--container-threads`, benched at the headline connection count only. Its own engine label keeps
+# it in its own CSV and out of the headline Rift/WireMock ratio, while still being reportable
+# beside it — the out-of-the-box story as secondary data, not the number.
+STOCK_ENGINE = "wiremock-stock"
+
+# WireMock's documented Jetty container-pool default. Reported next to the tuned value so a reader
+# can tell a thread-pool ceiling from an engine throughput ceiling.
+STOCK_CONTAINER_THREADS = 10
+
 
 # --------------------------------------------------------------------------------------------
 # Stub translator
@@ -322,8 +332,32 @@ def instance_ports():
     return [port + WIREMOCK_OFFSET for port, _, _ in IMPOSTERS]
 
 
-def wiremock_cmd(jar, port):
+def container_thread_count(conn_list, override=None):
+    """How many Jetty container threads the *tuned* series runs with (issue #865).
+
+    WireMock is thread-per-request, so in-flight concurrency is bounded by this pool — and it
+    defaults to 10, while the comparison drives 50 connections. Measuring that configuration
+    measures the pool, not the engine, and "WireMock was throttled to 10 in-flight" is the first
+    rebuttal any WireMock user raises, because unlike Mountebank's architecturally single-threaded
+    Node this is a one-flag tune.
+
+    `max(cpu_count, max(connections))` is the defensible pin: pinning to core count would still
+    throttle WireMock below the offered concurrency (same criticism, different number), while this
+    guarantees the pool is never the bottleneck. Extra threads do not manufacture parallelism — the
+    CPU budget is unchanged — they only remove the artificial queue, so a Rift win here is
+    unambiguous. When sweeping, the TOP of the sweep is what must not be throttled."""
+    if override is not None:
+        if override < 1:
+            raise SystemExit(f"bench_wiremock: --container-threads must be >= 1, got {override}")
+        return override
+    return max(os.cpu_count() or 1, max(conn_list))
+
+
+def wiremock_cmd(jar, port, container_threads=None):
     """WireMock's argv for one imposter port.
+
+    `container_threads=None` means *stock defaults* — no `--container-threads` flag at all, which
+    is exactly what the secondary `wiremock-stock` series measures. Any int pins the pool.
 
     `--no-request-journal` is a fairness requirement, not a tuning knob. WireMock records every
     incoming request by default and the journal is unbounded, so a JVM under 30s of load retains
@@ -335,8 +369,11 @@ def wiremock_cmd(jar, port):
     the API instance non-comparable with each other, since each is measured against a progressively
     fuller journal. Nothing in this suite reads `/__admin/requests`, so disabling it costs nothing.
     """
-    return ["java", "-jar", jar, "--port", str(port), "--disable-banner",
-            "--no-request-journal"]
+    cmd = ["java", "-jar", jar, "--port", str(port), "--disable-banner",
+           "--no-request-journal"]
+    if container_threads is not None:
+        cmd += ["--container-threads", str(container_threads)]
+    return cmd
 
 
 def admin_ready(port, tries=240):
@@ -401,7 +438,7 @@ def probe_wiremock_version(port, fallback):
     return fallback
 
 
-def launch_instances(jar, logdir, procs):
+def launch_instances(jar, logdir, procs, container_threads=None):
     """Spawn one JVM per imposter and wait for each to answer on its admin path.
 
     `procs` is an out-parameter the caller owns, appended to as each process is spawned. That is
@@ -416,7 +453,8 @@ def launch_instances(jar, logdir, procs):
     for (base_port, name, stubs) in IMPOSTERS:
         port = base_port + WIREMOCK_OFFSET
         log = os.path.join(logdir, f"wiremock-{name}-{port}.log")
-        procs.append((name, port, launch(wiremock_cmd(jar, port), log), log, stubs))
+        procs.append((name, port, launch(wiremock_cmd(jar, port, container_threads), log),
+                      log, stubs))
     for i, (name, port, _proc, log, _stubs) in enumerate(procs, 1):
         if not admin_ready(port):
             raise SystemExit(f"bench_wiremock: instance {name} on {port} never became ready "
@@ -434,15 +472,25 @@ def load_all_mappings(procs):
 
 
 def stop_instances(procs):
-    for _name, port, proc, _log, _stubs in procs:
-        stop(proc, [port])
+    # `bench_direct.stop` raises if a port is still bound after its drain window. Let that abort the
+    # whole teardown and every *later* instance leaks, along with the caller's `free_ports` sweep —
+    # a window this suite now opens twice per run. Collect and re-raise instead, so each JVM gets
+    # its stop attempt first.
+    failures = []
+    for name, port, proc, _log, _stubs in procs:
+        try:
+            stop(proc, [port])
+        except SystemExit as e:
+            failures.append(f"{name}:{port} ({e})")
+    if failures:
+        raise SystemExit(f"bench_wiremock: instances failed to stop: {'; '.join(failures)}")
 
 
 # --------------------------------------------------------------------------------------------
 # Bench loop
 # --------------------------------------------------------------------------------------------
 
-def bench_wiremock(duration, warmup, conn_list, csv_suffix=""):
+def bench_wiremock(duration, warmup, conn_list, csv_suffix="", engine="wiremock"):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     mode = mode_label(None)
     rows = []
@@ -452,7 +500,7 @@ def bench_wiremock(duration, warmup, conn_list, csv_suffix=""):
             # The same two gates bench_direct uses, and the reason a wrong translation cannot be
             # published as a fast number: the body marker proves the intended mapping served the
             # request, and a non-2xx distribution aborts the run.
-            verify_body("wiremock", name, method, url, body, headers)
+            verify_body(engine, name, method, url, body, headers)
             run_oha(url, method, body, headers, warmup, conns)
             m = metric(run_oha(url, method, body, headers, duration, conns))
             total = sum(m["codes"].values())
@@ -461,14 +509,44 @@ def bench_wiremock(duration, warmup, conn_list, csv_suffix=""):
             print(f"  {name:20s} c={conns:<4d} {m['rps']:>10.1f} rps  "
                   f"p50={m['p50_ms']}ms p99={m['p99_ms']}ms p999={m['p999_ms']}ms  {status}")
             if not (good and total > 0):
-                raise SystemExit(f"wiremock/{name}: unexpected status distribution {m['codes']} — aborting")
+                raise SystemExit(f"{engine}/{name}: unexpected status distribution {m['codes']} — aborting")
             rows.append((name, conns, mode, m))
-    path = write_results_csv("wiremock", csv_suffix, rows)
-    print(f"[wiremock] wrote {path}")
+    path = write_results_csv(engine, csv_suffix, rows)
+    print(f"[{engine}] wrote {path}")
     return path
 
 
-def run_all(jar, duration, warmup, conn_list, csv_suffix="", wiremock_version=DEFAULT_WIREMOCK_VERSION):
+def _run_series(jar, logdir, ports, container_threads, duration, warmup, conn_list,
+                csv_suffix, engine, wiremock_version):
+    """Launch, load, bench and tear down one WireMock configuration.
+
+    Container threads are a JVM start flag, so the tuned and stock series cannot share a launch —
+    each needs its own pass. `procs` is owned here so the `finally` still stops every JVM that was
+    spawned when a later one fails its readiness probe."""
+    label = ("stock defaults" if container_threads is None
+             else f"{container_threads} container threads")
+    print(f"[{engine}] launching {len(IMPOSTERS)} instances at offset +{WIREMOCK_OFFSET} ({label})")
+    procs = []
+    try:
+        launch_instances(jar, logdir, procs, container_threads)
+        print(f"[{engine}] loading mappings")
+        load_all_mappings(procs)
+        version = probe_wiremock_version(procs[0][1], wiremock_version)
+        print(f"[{engine}] version {version}")
+        bench_wiremock(duration, warmup, conn_list, csv_suffix, engine=engine)
+    finally:
+        stop_instances(procs)
+        free_ports(ports)
+
+
+def run_all(jar, duration, warmup, conn_list, csv_suffix="",
+            wiremock_version=DEFAULT_WIREMOCK_VERSION, container_threads=None,
+            stock_conns=50):
+    """Bench WireMock twice: the tuned headline series, then the stock-default secondary series.
+
+    The stock series runs at the headline connection count only — it exists to tell the
+    out-of-the-box story, not to be swept — and is written under its own engine label so the report
+    can show it beside the headline without it entering the Rift/WireMock ratio (issue #865)."""
     major, java_line = java_preflight()
     print(f"[wiremock] java {major} ({java_line})")
     if not os.path.exists(jar):
@@ -477,28 +555,51 @@ def run_all(jar, duration, warmup, conn_list, csv_suffix="", wiremock_version=DE
             f"  mkdir -p {os.path.dirname(jar)} && curl -Lo {jar} \\\n"
             f"    https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/"
             f"{wiremock_version}/wiremock-standalone-{wiremock_version}.jar")
+
+    threads = container_thread_count(conn_list, container_threads)
+    record_container_threads(csv_suffix, threads)
     ports = instance_ports()
     logdir = os.path.join(RESULTS_DIR, "logs")
     free_ports(ports)
-    # Owned here, not returned by launch_instances, so the `finally` below can still stop every
-    # JVM that was spawned when a later one fails its readiness probe.
-    procs = []
-    try:
-        print(f"[wiremock] launching {len(IMPOSTERS)} instances at offset +{WIREMOCK_OFFSET}")
-        launch_instances(jar, logdir, procs)
-        print("[wiremock] loading mappings")
-        load_all_mappings(procs)
-        version = probe_wiremock_version(procs[0][1], wiremock_version)
-        print(f"[wiremock] version {version}")
-        bench_wiremock(duration, warmup, conn_list, csv_suffix)
-    finally:
-        stop_instances(procs)
-        free_ports(ports)
+
+    _run_series(jar, logdir, ports, threads, duration, warmup, conn_list,
+                csv_suffix, "wiremock", wiremock_version)
+
+    # Stock defaults, headline connection count only — the out-of-the-box story as secondary data.
+    _run_series(jar, logdir, ports, None, duration, warmup, [stock_conns],
+                csv_suffix, STOCK_ENGINE, wiremock_version)
+    return threads
 
 
 # --------------------------------------------------------------------------------------------
 # Report
 # --------------------------------------------------------------------------------------------
+
+def threads_sidecar_path(csv_suffix):
+    return os.path.join(RESULTS_DIR, f"direct_wiremock{csv_suffix}.threads")
+
+
+def record_container_threads(csv_suffix, threads):
+    """Persist the pin the tuned series actually ran with, beside its CSV.
+
+    The documented flow is two commands — `--run-all`, then a separate `--report` — so the report
+    process does not know what the run chose. Recomputing it from the *report* invocation's flags
+    would silently print a different number than the one measured (e.g. run with
+    `--sweep-connections 50,200` pins 200; `--report --connections 50` would infer 50). Requirement
+    4 of issue #865 is that the report state the value **actually used**, so it is recorded rather
+    than re-derived."""
+    with open(threads_sidecar_path(csv_suffix), "w") as f:
+        f.write(f"{threads}\n")
+
+
+def recorded_container_threads(csv_suffix):
+    """The pin the tuned series ran with, or None if it was never recorded."""
+    try:
+        with open(threads_sidecar_path(csv_suffix)) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
 
 def engine_csv_path(engine, csv_suffix):
     """Where `--report` looks for an engine's CSV.
@@ -527,9 +628,17 @@ def load_engine_csv(engine, csv_suffix, conns):
     return rows or None
 
 
-def report(rift_ver, mb_ver, wiremock_ver, java_ver, duration, conns, csv_suffix=""):
+def report(rift_ver, mb_ver, wiremock_ver, java_ver, duration, conns, csv_suffix="",
+           container_threads=None):
+    """Combine the CSVs into the 3-way table.
+
+    `container_threads` is the pin the tuned series ran with, stated in the Method section so a
+    reader can tell a thread-pool ceiling from an engine throughput ceiling (issue #865). The
+    stock-defaults series is rendered as its own clearly-labelled column and is deliberately NOT
+    used for the Rift/WM speedup — that ratio must come from the un-throttled run."""
     rift = load_engine_csv("rift", csv_suffix, conns)
     wm = load_engine_csv("wiremock", csv_suffix, conns)
+    stock = load_engine_csv(STOCK_ENGINE, csv_suffix, conns)
     mb = load_engine_csv("mb", csv_suffix, conns)
     if rift is None:
         raise SystemExit(f"bench_wiremock: no comparable rift rows at connections={conns}, "
@@ -551,13 +660,35 @@ def report(rift_ver, mb_ver, wiremock_ver, java_ver, duration, conns, csv_suffix
         f.write("- **Method:** native processes (no Docker); engines run one at a time on disjoint "
                 "port ranges; the same 13 scenarios and the same oha settings for every engine; "
                 "each scenario's matched body is asserted before it is measured.\n")
-        f.write("- **WireMock setup:** one JVM per imposter port (14 instances), stock heap/GC and "
-                "the default 10-thread Jetty container pool. Response templating is **off**, so "
-                "`${request.path}` is served literally exactly as Mountebank serves it. The request "
-                "journal is **off** (`--no-request-journal`): it is on and unbounded by default, "
-                "and Rift and Mountebank are both measured with recording off — journaling is a "
-                "separate, additive scenario in the Rift suite precisely because it is a distinct "
-                "cost.\n")
+        tuned = (f"**{container_threads}** Jetty container threads" if container_threads is not None
+                 else "an **unrecorded** number of Jetty container threads "
+                      "(pass --container-threads to record it)")
+        f.write(f"- **WireMock setup:** one JVM per imposter port (14 instances), stock heap/GC, and "
+                f"{tuned} for the headline series. Response templating "
+                f"is **off**, so `${{request.path}}` is served literally exactly as Mountebank "
+                f"serves it. The request journal is **off** (`--no-request-journal`): it is on and "
+                f"unbounded by default, and Rift and Mountebank are both measured with recording "
+                f"off — journaling is a separate, additive scenario in the Rift suite precisely "
+                f"because it is a distinct cost.\n")
+        f.write(f"- **Why the pool is pinned.** WireMock is thread-per-request, so its default "
+                f"{STOCK_CONTAINER_THREADS}-thread pool bounds in-flight requests at "
+                f"{STOCK_CONTAINER_THREADS}, below the {conns} connections offered here. That "
+                f"makes the pool a possible ceiling with nothing to do with the engine, so the "
+                f"headline series pins it above the offered concurrency and the number measures "
+                f"WireMock on the same CPU budget Rift gets. **The pin is a fairness guarantee, "
+                f"not a speedup:** extra threads do not manufacture parallelism, they only remove "
+                f"an artificial queue. On a box with about as many cores as the default pool has "
+                f"threads, the CPU saturates first and the pin is a no-op — compare the two "
+                f"WireMock columns to see whether it bound on this run.\n")
+        if stock:
+            f.write(f"- **The `WireMock (stock)` column is secondary data**, measured at WireMock's "
+                    f"out-of-the-box {STOCK_CONTAINER_THREADS}-thread default at "
+                    f"{conns} connections. It is what a user gets before tuning, and it is "
+                    f"deliberately **not** the basis of the Rift/WM ratio. If it reads within "
+                    f"noise of the headline column, the {STOCK_CONTAINER_THREADS}-thread default "
+                    f"was not the binding constraint on this hardware. It also runs *after* the "
+                    f"headline series in the same session, so treat small differences between the "
+                    f"two WireMock columns as ordering noise rather than signal.\n")
         f.write("- **Read `complex_predicate` with care.** WireMock cannot express an OR across two "
                 "*different* headers in one stub, so that imposter's 50 stubs become 101 mappings "
                 "and the measured request matches the 50th candidate where Rift/Mountebank match "
@@ -570,22 +701,36 @@ def report(rift_ver, mb_ver, wiremock_ver, java_ver, duration, conns, csv_suffix
                 "longer proves a match. The per-scenario body-marker assertion is the gate that "
                 "does.\n\n")
 
+        stock_head = f" WireMock (stock, {STOCK_CONTAINER_THREADS}t) |" if stock else ""
+        stock_rule = " --:|" if stock else ""
+        # Two adjacent WireMock columns where only one carries its thread count would read as
+        # "stock vs default" — the exact confusion #865 exists to remove.
+        wm_head = f"WireMock ({container_threads}t)" if container_threads is not None else "WireMock"
         f.write("## Throughput (requests/sec, higher is better)\n\n")
-        f.write("| Scenario | Mountebank | WireMock | Rift | Rift/MB | Rift/WM |\n")
-        f.write("|---|--:|--:|--:|--:|--:|\n")
+        f.write(f"| Scenario | Mountebank |{stock_head} {wm_head} | Rift | Rift/MB | Rift/WM |\n")
+        f.write(f"|---|--:|{stock_rule}--:|--:|--:|--:|\n")
         for name in order:
             wr, rr = wm[name]["rps"], rift[name]["rps"]
             mr = mb[name]["rps"] if mb else None
             mb_cell = f"{mr:,.0f}" if mr is not None else "n/a"
             mb_sp = f"{rr / mr:.1f}x" if mr else "n/a"
+            # Deliberately the TUNED series: a speedup over a 10-thread-throttled WireMock would
+            # measure the pool, and is the first thing a WireMock user would (rightly) reject.
             wm_sp = f"{rr / wr:.1f}x" if wr else "n/a"
-            f.write(f"| {name} | {mb_cell} | {wr:,.0f} | {rr:,.0f} | **{mb_sp}** | **{wm_sp}** |\n")
+            stock_cell = ""
+            if stock:
+                sr = stock.get(name, {}).get("rps")
+                stock_cell = f" {sr:,.0f} |" if sr is not None else " n/a |"
+            f.write(f"| {name} | {mb_cell} |{stock_cell} {wr:,.0f} | {rr:,.0f} | "
+                    f"**{mb_sp}** | **{wm_sp}** |\n")
 
         f.write("\n## Latency p99 (ms, lower is better)\n\n")
-        f.write("| Scenario | Mountebank | WireMock | Rift |\n|---|--:|--:|--:|\n")
+        f.write(f"| Scenario | Mountebank |{stock_head} {wm_head} | Rift |\n")
+        f.write(f"|---|--:|{stock_rule}--:|--:|\n")
         for name in order:
             mb_cell = mb[name]["p99"] if mb else "n/a"
-            f.write(f"| {name} | {mb_cell} | {wm[name]['p99']} | {rift[name]['p99']} |\n")
+            stock_cell = f" {stock.get(name, {}).get('p99', 'n/a')} |" if stock else ""
+            f.write(f"| {name} | {mb_cell} |{stock_cell} {wm[name]['p99']} | {rift[name]['p99']} |\n")
     print(f"wrote {out}")
     return out
 
@@ -608,16 +753,31 @@ if __name__ == "__main__":
     ap.add_argument("--mb-version", default="2.9.1")
     ap.add_argument("--java-version", default=None,
                     help="override the JVM string recorded in the report (default: probed)")
+    ap.add_argument("--container-threads", type=int, default=None, metavar="N",
+                    help="pin WireMock's Jetty container pool for the headline series (default: "
+                         "max(cpu_count, highest connection count), so the pool is never the "
+                         "concurrency ceiling). Set it explicitly to produce a thread-sweep curve "
+                         "by hand — there is deliberately no standing sweep axis, the suite is "
+                         "already slow. The stock-defaults secondary series ignores this.")
     ap.add_argument("--rep", type=int, default=None,
                     help="tag this run's CSV as _repN so several reps can be aggregated")
     args = ap.parse_args()
 
     suffix = f"_rep{args.rep}" if args.rep else ""
     conn_list = parse_conn_list(args.sweep_connections) if args.sweep_connections else [args.connections]
+    # The stock series is benched at --connections only. If that point is not in the swept set, it
+    # measures ~6 minutes of a configuration no --report can render (report() reads a single
+    # connection point), so fail at parse time rather than after the run.
+    if args.run_all and args.sweep_connections and args.connections not in conn_list:
+        ap.error(f"--connections {args.connections} is not in --sweep-connections "
+                 f"{sorted(conn_list)}; the stock series would bench a point no report can read. "
+                 f"Pass --connections with one of the swept values.")
 
+    threads = None
     if args.run_all:
-        run_all(args.wiremock_jar, args.duration, args.warmup, conn_list, suffix,
-                args.wiremock_version)
+        threads = run_all(args.wiremock_jar, args.duration, args.warmup, conn_list,
+                          suffix, args.wiremock_version, args.container_threads,
+                          stock_conns=args.connections)
     if args.report:
         java_ver = args.java_version
         if java_ver is None:
@@ -625,7 +785,13 @@ if __name__ == "__main__":
                 _major, java_ver = java_preflight()
             except SystemExit:
                 java_ver = "unknown"
+        # A standalone `--report` did not run the bench. Read what the run recorded rather than
+        # re-deriving it from THIS invocation's flags, which would print a number the run never
+        # used. An explicit --container-threads still wins; absent both, the report says so.
+        if threads is None:
+            threads = (args.container_threads if args.container_threads is not None
+                       else recorded_container_threads(suffix))
         report(args.rift_version, args.mb_version, args.wiremock_version, java_ver,
-               args.duration, args.connections, suffix)
+               args.duration, args.connections, suffix, container_threads=threads)
     if not (args.run_all or args.report):
         ap.error("nothing to do: pass --run-all and/or --report")
