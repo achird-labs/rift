@@ -23,7 +23,6 @@ foldhash = "0.2"
 tokio = { workspace = true, features = ["full"] }
 # TaskTracker for bounded connection-drain on imposter teardown (issue #596)
 tokio-util = { workspace = true, features = ["rt"] }
-futures.workspace = true
 
 # HTTP
 hyper = { version = "1.5", features = ["full"] }
