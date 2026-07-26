@@ -11,6 +11,27 @@ record.
 
 ## [Unreleased]
 
+### Security
+
+- **An empty `--api-key` enabled the admin auth gate and then authenticated everyone** (issue #844).
+  `Some("")` is `Some`, so the gate switched on; a request with no `Authorization` header degrades
+  to `""`, and comparing two empty strings matched. The admin API — which can create imposters and
+  drive the TLS intercept proxy — reported as protected while being fully open, on the configuration
+  that most looks like it should fail closed.
+
+  A blank key (empty or whitespace) is now refused where it is configured: at CLI startup, before
+  anything binds, and in `rift_serve_admin`, which is the boundary every language SDK reaches the
+  admin plane through — so this is fixed once for the CLI and all SDKs rather than in four guards
+  that can each drift. Rejecting rather than silently downgrading to "no auth" is deliberate: a
+  downgrade would leave the operator believing a key is in force. As defence in depth, the key
+  comparison itself now fails closed on a blank configured key.
+
+  The realistic trigger was ordinary plumbing — an unset-but-defaulted `MB_APIKEY`, a Helm value
+  that renders empty, or an SDK passing `apiKey(getProperty("rift.apikey", ""))`. **If you were
+  relying on `--api-key ""` to mean "no authentication", omit the flag instead**; that has always
+  been the supported spelling and is unchanged. A key containing spaces is still a valid key and is
+  compared byte for byte, untrimmed.
+
 ### Fixed
 
 - **Reverse-proxy `*.` host routes matched hosts they should not have.** A wildcard route's host

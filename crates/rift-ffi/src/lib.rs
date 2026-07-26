@@ -1844,6 +1844,10 @@ async fn build_admin_plane_inner(
 ) -> anyhow::Result<(AdminPlane, String)> {
     let host = opts.host.as_deref().unwrap_or("127.0.0.1");
     let port = opts.port.unwrap_or(0);
+    // Refuse a blank `apiKey` before any side effect (issue #844): it would enable the auth gate
+    // and then authenticate every request. This is the boundary every SDK reaches the admin plane
+    // through, so rejecting here covers all of them at once.
+    rift_http_proxy::admin_api::validate_admin_api_key(opts.api_key.as_deref())?;
     let api_key = opts.api_key.clone();
     let allow_injection = opts.allow_injection.unwrap_or(false);
 

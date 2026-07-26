@@ -110,6 +110,11 @@ rift_free(result);
   `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"config":null,"allowInjection":false}`.
   `port: 0` binds an ephemeral port; `configFile` is loaded as the reload source (like `--configfile`);
   `config` is an inline `{"imposters":[...]}`. `configFile` and `config` do not compose — pass one.
+- **`apiKey`**: a blank string is rejected — `rift_serve_admin` returns `NULL` and records the
+  reason in `rift_last_error`. A blank key would enable the admin auth gate and then authenticate
+  every request, and the realistic way to send one is plumbing rather than intent
+  (`apiKey(getProperty("rift.apikey", ""))`, a config value that renders empty). Pass a real token,
+  or omit the field to leave the admin plane unauthenticated.
 - **`allowInjection`** (default `false`): whether Rift admits script/`inject` imposters
   (`inject`/`decorate`/`shellTransform`/JS-function `wait`/`_rift.script`), mirroring the
   `--allowInjection` CLI flag. Leave it `false` unless you intend to permit them.

@@ -183,6 +183,17 @@ is a startup error rather than a silent precedence guess, so pick one. (Each fla
 `Authorization` header. Data-plane traffic — direct imposter ports and the `/__rift/:port/...`
 gateway — is **not** gated by this key.
 
+A **blank** value is refused at startup rather than accepted as a key:
+
+```
+the admin API key (`--api-key` / `MB_APIKEY` / `apiKey`) is set to a blank value. …
+```
+
+`--api-key ""` (or `MB_APIKEY=` set-but-empty) would otherwise enable the auth gate and then match
+every unauthenticated request, leaving the admin API open while reporting as protected. Whitespace
+counts as blank. Omit the flag entirely to run the admin API explicitly unauthenticated; a key that
+merely *contains* spaces is still a valid key and is compared exactly as given.
+
 ```bash
 rift-http-proxy --api-key s3cr3t
 curl -H "Authorization: s3cr3t" http://localhost:2525/imposters

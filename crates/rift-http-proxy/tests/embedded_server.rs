@@ -784,3 +784,116 @@ async fn admin_wait_returns_after_shutdown() {
         .expect("admin wait returns after the accept loop exits");
     assert!(waited.is_ok(), "wait reports the accept loop's Ok result");
 }
+
+// Issue #844: `--api-key ""` used to switch the auth gate ON and then authenticate every anonymous
+// request, so the admin plane reported as protected while being fully open. It must now be a loud
+// startup failure instead.
+//
+// Driven through `ServerBuilder::start` rather than the validator directly, because the property
+// that matters is that a real startup refuses: an empty value arrives here from ordinary config
+// plumbing (a Helm value that renders empty, `MB_APIKEY=` unset-but-defaulted, an SDK passing
+// `getProperty("rift.apikey", "")`), not from someone typing `--api-key ""` on purpose.
+#[tokio::test]
+async fn server_builder_rejects_a_blank_api_key() {
+    for blank in ["", "   "] {
+        let cli = Cli::try_parse_from([
+            "rift",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--api-key",
+            blank,
+        ])
+        .expect("cli parse");
+
+        let err = match ServerBuilder::from_cli(cli).start().await {
+            Ok(_) => {
+                panic!("a blank --api-key must fail startup, not silently authenticate everyone")
+            }
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            err.contains("--api-key"),
+            "the failure must name the flag an operator would fix, got: {err}"
+        );
+    }
+}
+
+// Issue #844 AC4: the same path with a real key still starts and still enforces the key — the fix
+// must reject blank keys without weakening the working configuration.
+#[tokio::test]
+async fn server_builder_still_accepts_and_enforces_a_real_api_key() {
+    let cli = Cli::try_parse_from([
+        "rift",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "12614",
+        "--metrics-port",
+        "19491",
+        "--api-key",
+        "s3cret-token",
+    ])
+    .expect("cli parse");
+
+    tokio::spawn(ServerBuilder::from_cli(cli).run());
+    // Readiness only: `wait_for_http` needs *any* HTTP response, and with a key configured this
+    // probe gets a 401 — `/health` is behind the auth gate like everything except the `/__rift/`
+    // gateway. That 401 is itself evidence the gate is on; the assertions below are what test it.
+    wait_for_http("http://127.0.0.1:12614/health").await;
+
+    let client = reqwest::Client::new();
+    let anonymous = client
+        .get("http://127.0.0.1:12614/imposters")
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(
+        anonymous.status(),
+        401,
+        "an anonymous request must still be rejected when a real key is configured"
+    );
+
+    let authorized = client
+        .get("http://127.0.0.1:12614/imposters")
+        .header("authorization", "s3cret-token")
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(
+        authorized.status(),
+        200,
+        "the configured key must still authenticate"
+    );
+}
+
+// Issue #844: the third door onto the admin server — an embedder constructing `AdminApiServer`
+// directly, as documented in docs/embedding/server.md. Without a check here a blank key is caught
+// only by `api_key_matches` failing closed: safe, but the embedder gets a server that 401s
+// everything while the startup log says authentication is enabled. `bind()` is where all three
+// doors converge, so the diagnosis is loud wherever the key came from.
+#[tokio::test]
+async fn admin_api_server_bind_rejects_a_blank_api_key() {
+    let manager = Arc::new(ImposterManager::new());
+    let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
+
+    let err = match AdminApiServer::new(addr, manager.clone(), Some(String::new()))
+        .bind()
+        .await
+    {
+        Ok(_) => panic!("a blank api key must fail bind, not serve a deny-all admin plane"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        err.contains("api-key"),
+        "the failure must name the option to fix, got: {err}"
+    );
+
+    // AC4 at this door too: a real key still binds and still serves.
+    let running = AdminApiServer::new(addr, manager, Some("s3cret-token".to_string()))
+        .bind()
+        .await
+        .expect("a real key must bind");
+    running.shutdown().await;
+}
