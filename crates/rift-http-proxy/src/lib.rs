@@ -10,6 +10,26 @@ pub use rift_mock_core::{
     proxy, recording, response, routing, scripting, stub_analysis, template, util,
 };
 
+/// The named flow-state backends this build ships (issue #853).
+///
+/// One owner for "which backends exist in a shipped artifact", so the binary and the C-ABI cannot
+/// drift apart: both register the result of this on their `ImposterManager`. `"redis"` is present
+/// exactly when the default `redis-backend` feature is on — that feature used to enable the store
+/// inside `rift-mock-core`, and now pulls in the `rift-store-redis` crate instead, which is why
+/// the extraction is invisible to users.
+///
+/// A backend absent here is not a silent downgrade: naming it in `_rift.flowState.backend` fails
+/// imposter creation with an error listing what is available (issues #325/#377).
+#[must_use]
+pub fn default_flow_store_backends() -> extensions::flow_state::FlowStoreBackends {
+    let backends = extensions::flow_state::FlowStoreBackends::new();
+    #[cfg(feature = "redis-backend")]
+    let backends = backends.with(std::sync::Arc::new(
+        rift_store_redis::RedisFlowStoreBackendFactory,
+    ));
+    backends
+}
+
 /// Install the process-wide rustls `ring` crypto provider, idempotently (issue #343).
 ///
 /// The binary does this in `main.rs`; an embedded host (the FFI `rift_start`) must too, or an

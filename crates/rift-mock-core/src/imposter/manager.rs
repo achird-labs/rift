@@ -242,6 +242,9 @@ pub struct ImposterManager {
     response_decorator: Option<Arc<dyn ResponseDecorator>>,
     /// Embedder hook to supply a custom flow store per imposter (issue #312)
     flow_store_provider: Option<Arc<dyn FlowStoreProvider>>,
+    /// Named `_rift.flowState.backend` implementations beyond the built-in `"inmemory"`
+    /// (issue #853) — `"redis"` arrives here from the `rift-store-redis` crate.
+    flow_store_backends: crate::extensions::flow_state::FlowStoreBackends,
     /// Pluggable response-cursor backend (issue #313); None = embedded per-stub cycler.
     sequencer: Option<Arc<dyn ResponseSequencer>>,
     /// Pluggable recorded-request backend (issue #314); None = per-imposter LocalJournal.
@@ -287,6 +290,7 @@ impl ImposterManager {
             event_listener: None,
             response_decorator: None,
             flow_store_provider: None,
+            flow_store_backends: crate::extensions::flow_state::FlowStoreBackends::new(),
             sequencer: None,
             request_journal: None,
             proxy_store: None,
@@ -359,6 +363,24 @@ impl ImposterManager {
     #[must_use]
     pub fn with_flow_store_provider(mut self, provider: Arc<dyn FlowStoreProvider>) -> Self {
         self.flow_store_provider = Some(provider);
+        self
+    }
+
+    /// Register the named flow-store backends this build serves (issue #853).
+    ///
+    /// Supplies every `_rift.flowState.backend` beyond the built-in `"inmemory"` — notably
+    /// `"redis"`, which lives in the `rift-store-redis` crate so that this one carries no redis
+    /// dependency. Without it, an imposter naming an unregistered backend fails construction with
+    /// an error listing what is available (never a silent `NoOpFlowStore`, #325/#377).
+    ///
+    /// Unlike [`Self::with_flow_store_provider`], a factory does not override an imposter's
+    /// config: it is consulted only when the config names it.
+    #[must_use]
+    pub fn with_flow_store_backends(
+        mut self,
+        backends: crate::extensions::flow_state::FlowStoreBackends,
+    ) -> Self {
+        self.flow_store_backends = backends;
         self
     }
 
@@ -547,11 +569,12 @@ impl ImposterManager {
 
         info!("Imposter bound to {}:{}", bind_host, port);
         // Create imposter
-        let mut imposter = Imposter::new_with_hooks_and_journal(
+        let mut imposter = Imposter::new_with_hooks_journal_and_backends(
             config,
             self.flow_store_provider.as_ref(),
             self.sequencer.clone(),
             self.request_journal.clone(),
+            &self.flow_store_backends,
         )
         .map_err(|e| ImposterError::FlowStoreConfig(format!("{e:#}")))?;
 

@@ -47,6 +47,10 @@ serde_json.workspace = true
 # Shared workspace types + CLI-free engine (issue #203)
 rift-types = { path = "../rift-types", version = "0.1.0" }
 rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-features = false }
+# The Redis flow-state backend, opt-in as its own crate (issue #853). Optional so a build
+# without `redis-backend` pulls no redis/r2d2 at all; default-on below, so shipped artifacts
+# behave exactly as before the extraction.
+rift-store-redis = { path = "../rift-store-redis", version = "0.1.0", optional = true }
 
 # Stable stub id generation for id-addressed stub ops (issue #202)
 uuid.workspace = true
@@ -121,8 +125,6 @@ rcgen = "0.13"
 # Integration testing
 reqwest = { workspace = true, features = ["http2"] }
 tokio-test = "0.4"
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["redis"] }
 assert-json-diff = "2.0"
 serial_test = "3.0"
 tracing-test = "0.2"
@@ -130,7 +132,9 @@ port_check = "0.2"
 
 [features]
 default = ["redis-backend", "javascript", "mimalloc", "quamina-matching"]
-redis-backend = ["rift-mock-core/redis-backend"]
+# Registers `rift-store-redis`'s factory so `_rift.flowState.backend: "redis"` resolves
+# (issue #853). The feature name is unchanged from when the store lived in rift-mock-core.
+redis-backend = ["dep:rift-store-redis"]
 javascript = ["rift-mock-core/javascript"]
 # The quamina body-field candidate dimension (#767). rift-mock-core is taken with
 # `default-features = false`, so a feature that is default-on THERE reaches nothing users run

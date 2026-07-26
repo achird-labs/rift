@@ -421,7 +421,8 @@ impl ServerBuilder {
                 Arc::new(
                     ImposterManager::with_datadir(cli.datadir.clone())
                         .with_tls_defaults(tls_defaults)
-                        .with_accept_runtimes(self.accept_runtimes),
+                        .with_accept_runtimes(self.accept_runtimes)
+                        .with_flow_store_backends(crate::default_flow_store_backends()),
                 )
             }
         };

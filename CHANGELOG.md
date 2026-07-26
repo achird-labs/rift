@@ -32,6 +32,29 @@ record.
   been the supported spelling and is unchanged. A key containing spaces is still a valid key and is
   compared byte for byte, untrimmed.
 
+### Changed
+
+- **The Redis flow store moved to its own opt-in crate, `rift-store-redis`** (issue #853).
+  `rift-mock-core` now carries **no `redis`/`r2d2` dependency under any feature combination**, so
+  anyone embedding the engine — including `rift-ffi` and downstream SDKs — stops pulling a Redis
+  client and connection pool they may never use. The store reattaches through a new
+  `FlowStoreBackendFactory` seam, which adds a `_rift.flowState.backend` name and, unlike
+  `FlowStoreProvider`, has an error channel so a misconfigured backend fails imposter creation
+  instead of silently declining.
+
+  **This is behaviour-neutral for users.** The `rift` binary, the Docker images and the FFI
+  `cdylib`s all keep `redis-backend` on by default, so `_rift.flowState.backend: "redis"` works
+  exactly as before, with the same config schema and wire format. What changed is the dependency
+  graph and the error text: an unregistered backend now names the ones this build *can* serve
+  (`flowState.backend is "redis" but no such backend is registered (available: "inmemory")`), and
+  the redis case adds a `--features redis-backend` rebuild hint. `rift-mock-core` lost its
+  `redis-backend` feature entirely; the feature name survives on `rift-http-proxy` and `rift-ffi`,
+  where it now means "register the Redis backend".
+
+  Embedders assembling an `ImposterManager` by hand and wanting Redis should register it with
+  `.with_flow_store_backends(rift_http_proxy::default_flow_store_backends())` — see
+  [Embedding → SPI](docs/embedding/spi.md).
+
 ### Fixed
 
 - **Reverse-proxy `*.` host routes matched hosts they should not have.** A wildcard route's host

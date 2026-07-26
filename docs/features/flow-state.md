@@ -41,10 +41,12 @@ With `backend: "redis"` you may also set `url`, `poolSize` (default 10), and `ke
 An explicit `flowState` block that can't be honored now **fails imposter creation** with
 `400 Bad Request` rather than silently downgrading to a no-op store:
 
-- An **unknown backend** string (anything other than `inmemory` or `redis`) is rejected at
-  construction.
+- An **unregistered backend** string is rejected at construction. The error names the backend and
+  lists the ones this build can serve, e.g. `flowState.backend is "mystore" but no such backend is
+  registered (available: "inmemory", "redis")`.
 - A **`redis` backend that can't be created** — no redis config block, a connection/pool failure, or
-  a binary built without the `redis-backend` feature — fails creation too.
+  a binary built without the `redis-backend` feature — fails creation too. In the last case the
+  error also tells you to rebuild with `--features redis-backend`.
 - A **non-positive `ttlSeconds`** (`< 1`) is rejected: a zero/negative default TTL would expire every
   write the instant it lands (and errors on the first Redis `SETEX`), so it's caught up front rather
   than misbehaving later.

@@ -50,10 +50,6 @@ rift-types = { path = "../rift-types", version = "0.1.0" }
 rhai.workspace = true
 boa_engine = { version = "0.20", optional = true }
 
-# State storage
-redis = { version = "0.26", default-features = false, optional = true }
-r2d2 = { version = "0.8", optional = true }
-
 # Logging & Observability
 tracing.workspace = true
 prometheus = "0.13"
@@ -130,8 +126,11 @@ name = "response_serve_bench"
 harness = false
 
 [features]
-default = ["redis-backend", "javascript", "quamina-matching"]
-redis-backend = ["redis", "r2d2"]
+default = ["javascript", "quamina-matching"]
+# NOTE: there is deliberately no `redis-backend` feature here any more (issue #853). The Redis flow
+# store lives in the `rift-store-redis` crate and attaches through `FlowStoreBackendFactory`, so
+# this crate cannot pull `redis`/`r2d2` under any feature combination. The feature name survives on
+# `rift-http-proxy` and `rift-ffi`, where it now means "register the redis backend".
 javascript = ["boa_engine"]
 # Quamina-backed body-field candidate dimension (issue #767). Off ⇒ the dimension
 # compiles to a no-op that never prunes; Stage-2 still evaluates every body predicate.

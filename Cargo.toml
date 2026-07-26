@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/rift-types",
     "crates/rift-mock-core",
+    "crates/rift-store-redis",
     "crates/rift-ffi",
     "crates/rift-http-proxy",
     "crates/rift-lint",

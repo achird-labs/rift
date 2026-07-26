@@ -3380,6 +3380,7 @@ dependencies = [
  "rift-http-proxy",
  "rift-lint",
  "rift-mock-core",
+ "rift-store-redis",
  "rift-types",
  "rustls",
  "rustls-pemfile",
@@ -3394,8 +3395,6 @@ dependencies = [
  "sxd-document",
  "sxd-xpath",
  "tempfile",
- "testcontainers",
- "testcontainers-modules",
  "thiserror 2.0.17",
  "tikv-jemallocator",
  "tokio",
@@ -3452,10 +3451,8 @@ dependencies = [
  "parking_lot",
  "prometheus",
  "quamina",
- "r2d2",
  "rand 0.8.5",
  "rcgen",
- "redis",
  "regex",
  "regex-automata",
  "reqwest",
@@ -3485,6 +3482,21 @@ dependencies = [
  "urlencoding",
  "uuid",
  "yasna",
+]
+
+[[package]]
+name = "rift-store-redis"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "r2d2",
+ "redis",
+ "rift-mock-core",
+ "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

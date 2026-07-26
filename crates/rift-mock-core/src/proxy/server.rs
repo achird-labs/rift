@@ -9,7 +9,7 @@ use super::network::{HttpTuning, create_reusable_listener};
 use super::tls::create_tls_acceptor;
 use crate::behaviors::{CsvCache, ResponseCycler};
 use crate::config::{Config, Protocol as RiftProtocol, Upstream};
-use crate::extensions::flow_state::{FlowStore, create_flow_store};
+use crate::extensions::flow_state::{FlowStore, FlowStoreBackends, create_flow_store};
 use crate::extensions::matcher::CompiledRule;
 use crate::extensions::routing::Router;
 use crate::proxy::context::RequestHandlerContext;
@@ -54,8 +54,21 @@ pub struct ProxyServer {
 
 impl ProxyServer {
     /// Create a new ProxyServer from configuration.
+    ///
+    /// Serves only the built-in `"inmemory"` flow-state backend; use
+    /// [`Self::new_with_backends`] to make a named backend such as `"redis"` selectable
+    /// (issue #853).
     pub async fn new(config: Config) -> Result<Self, anyhow::Error> {
-        Self::new_internal(config, None).await
+        Self::new_internal(config, None, &FlowStoreBackends::new()).await
+    }
+
+    /// Create a new ProxyServer that can serve the named flow-state backends in `backends`
+    /// (issue #853) — e.g. `"redis"` from the `rift-store-redis` crate.
+    pub async fn new_with_backends(
+        config: Config,
+        backends: &FlowStoreBackends,
+    ) -> Result<Self, anyhow::Error> {
+        Self::new_internal(config, None, backends).await
     }
 
     /// Create a new ProxyServer with a shared flow store.
@@ -63,12 +76,14 @@ impl ProxyServer {
         config: Config,
         flow_store: Arc<dyn FlowStore>,
     ) -> Result<Self, anyhow::Error> {
-        Self::new_internal(config, Some(flow_store)).await
+        // A shared store is used verbatim, so no backend is ever constructed from config here.
+        Self::new_internal(config, Some(flow_store), &FlowStoreBackends::new()).await
     }
 
     async fn new_internal(
         config: Config,
         shared_flow_store: Option<Arc<dyn FlowStore>>,
+        backends: &FlowStoreBackends,
     ) -> Result<Self, anyhow::Error> {
         // Compile rules and extract upstream filters
         let mut compiled_rules = Vec::new();
@@ -112,7 +127,7 @@ impl ProxyServer {
             store
         } else if let Some(ref fs_config) = config.flow_state {
             // Create new flow store for this worker (backward compatible mode)
-            create_flow_store(fs_config)?
+            create_flow_store(fs_config, backends)?
         } else if !config.script_rules.is_empty() {
             // Scripts are configured but no flow_state - use no-op store
             tracing::info!("Using NoOpFlowStore for scripts (flow_state not configured)");

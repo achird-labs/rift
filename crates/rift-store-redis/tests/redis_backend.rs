@@ -1,31 +1,24 @@
-//! Integration tests for RedisFlowStore using testcontainers.
+//! Integration tests for [`RedisFlowStore`] using testcontainers.
 //!
-//! # Currently disabled (issue #853)
+//! These moved here from `rift-http-proxy` with the store itself (issue #853) and are **live
+//! again**: the ignore attributes and the `redis-integration` CI job's `if: false` that parked the
+//! suite during the extraction are both gone. `redis` is not optional in this crate, so the suite
+//! needs no feature gate either.
 //!
-//! Every container-backed test below is `#[ignore]`d, and the dedicated `redis-integration` CI
-//! job is switched off, until #853 extracts `RedisFlowStore` into the `rift-store-redis` crate —
-//! that change relocates this suite, so running it in the interim only re-litigates behaviour the
-//! extraction is about to move. They are `#[ignore]`d rather than deleted or `#[cfg]`d out so the
-//! file still **compiles** in the `Integration Tests` job: API drift in `RedisFlowStore` or
-//! `FlowStore` still breaks the build here, it just doesn't spend a Docker container per PR.
-//! Re-enable by removing these attributes and the CI job's `if: false` (see #853's checklist).
-//! Run them meanwhile with `cargo test -p rift-http-proxy --test redis_backend -- --ignored`.
-//!
-//! The `probe_gate` unit tests at the bottom are deliberately **not** ignored — they are pure
-//! classification logic (issue #649) and need no Docker.
+//! The `probe_gate` unit tests at the bottom need no Docker — they are pure classification logic
+//! (issue #649).
 //!
 //! These tests start a throwaway Redis container via testcontainers, so **Docker must be
 //! running**. When Docker is not available they are **skipped** locally (with a note on stderr)
-//! rather than hanging and failing — so `cargo test -p rift-http-proxy` is green on a dev machine
-//! without Docker. In CI (`CI`/`GITHUB_ACTIONS` set) a *definitively* absent Docker is a hard
-//! failure, so coverage is never silently lost; a probe that merely times out under load proceeds
-//! and lets testcontainers decide (issue #649). To run them locally, start Docker (e.g.
-//! `colima start` or Docker Desktop) and re-run.
+//! rather than hanging and failing — so `cargo test` is green on a dev machine without Docker. In
+//! CI (`CI`/`GITHUB_ACTIONS` set) a *definitively* absent Docker is a hard failure, so coverage is
+//! never silently lost; a probe that merely times out under load proceeds and lets testcontainers
+//! decide (issue #649). To run them locally, start Docker (e.g. `colima start` or Docker Desktop)
+//! and re-run.
 
-#[cfg(feature = "redis-backend")]
 mod tests {
-    use rift_http_proxy::backends::RedisFlowStore;
-    use rift_http_proxy::flow_state::FlowStore;
+    use rift_mock_core::extensions::flow_state::FlowStore;
+    use rift_store_redis::RedisFlowStore;
     use serde_json::json;
     use std::time::{Duration, Instant};
     use testcontainers::runners::AsyncRunner;
@@ -110,6 +103,15 @@ mod tests {
     /// Docker is a hard failure (so CI never silently loses Redis coverage). A probe timeout
     /// in CI is not treated as absence; see [`DockerProbe::disposition`].
     async fn setup(ttl: i64) -> Option<(testcontainers::ContainerAsync<Redis>, RedisFlowStore)> {
+        let (container, url) = setup_container().await?;
+        let store = RedisFlowStore::new(&url, 5, "test:".to_string(), ttl).unwrap();
+        Some((container, store))
+    }
+
+    /// Start a Redis container and return it with its URL, for tests that need to build the store
+    /// through a higher layer (the factory, the backend registry) rather than calling
+    /// [`RedisFlowStore::new`] directly. Same Docker disposition rules as [`setup`].
+    async fn setup_container() -> Option<(testcontainers::ContainerAsync<Redis>, String)> {
         let in_ci = std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok();
         match docker_probe().disposition(in_ci) {
             Disposition::Proceed => {}
@@ -125,18 +127,100 @@ mod tests {
         }
         let container = Redis::default().start().await.unwrap();
         let port = container.get_host_port_ipv4(6379).await.unwrap();
-        let store = RedisFlowStore::new(
-            &format!("redis://127.0.0.1:{port}"),
-            5,
-            "test:".to_string(),
-            ttl,
-        )
-        .unwrap();
-        Some((container, store))
+        Some((container, format!("redis://127.0.0.1:{port}")))
+    }
+
+    /// A `flowState` block selecting redis at `url`, as an imposter config carries it.
+    fn redis_flow_state(url: &str) -> rift_mock_core::imposter::RiftFlowStateConfig {
+        rift_mock_core::imposter::RiftFlowStateConfig {
+            backend: "redis".to_string(),
+            ttl_seconds: 300,
+            redis: Some(rift_mock_core::imposter::RiftRedisConfig {
+                url: url.to_string(),
+                pool_size: 5,
+                key_prefix: "factory:".to_string(),
+            }),
+            flow_id_source: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    // Issue #853 AC2: the factory's SUCCESS path against a real Redis. Every other factory test
+    // covers a failure branch, and the rest of this suite calls `RedisFlowStore::new` directly —
+    // so without this, the adapter the extraction introduces is never proven to produce a working
+    // store, and a field-mapping slip in `build()` (ttl for pool size, say) would pass everything.
+    #[tokio::test]
+    async fn factory_builds_a_working_store_against_a_real_redis() {
+        use rift_mock_core::extensions::flow_state::FlowStoreBackendFactory;
+
+        let Some((_container, url)) = setup_container().await else {
+            return;
+        };
+
+        let store = rift_store_redis::RedisFlowStoreBackendFactory
+            .build(&redis_flow_state(&url))
+            .expect("the factory must build a store against a reachable redis");
+
+        store.set("flow-f", "k", json!({"via": "factory"})).unwrap();
+        assert_eq!(
+            store.get("flow-f", "k").unwrap(),
+            Some(json!({"via": "factory"})),
+            "a store built through the factory must round-trip values"
+        );
+        assert!(
+            store.is_blocking(),
+            "the redis store blocks, and the request path relies on that to offload (issue #475)"
+        );
+    }
+
+    // Issue #853 AC2, the composition that "behaviour-neutral" actually means: an imposter whose
+    // config names `"redis"` resolves it through the backend registry to a real Redis store. This
+    // is the whole seam end to end — registry -> `Imposter::create_flow_store` -> factory -> store
+    // — which fakes cannot prove.
+    #[tokio::test]
+    async fn an_imposter_resolves_redis_through_the_backend_registry() {
+        use rift_mock_core::extensions::flow_state::FlowStoreBackends;
+        use rift_mock_core::imposter::Imposter;
+
+        let Some((_container, url)) = setup_container().await else {
+            return;
+        };
+
+        let backends = FlowStoreBackends::new().with(std::sync::Arc::new(
+            rift_store_redis::RedisFlowStoreBackendFactory,
+        ));
+        let config: rift_mock_core::imposter::ImposterConfig = serde_json::from_value(json!({
+            "port": 0,
+            "protocol": "http",
+            "stubs": [],
+            "_rift": { "flowState": {
+                "backend": "redis",
+                "ttlSeconds": 300,
+                "redis": { "url": url, "keyPrefix": "imposter:" }
+            }}
+        }))
+        .expect("valid imposter config");
+
+        let imposter =
+            Imposter::new_with_hooks_journal_and_backends(config, None, None, None, &backends)
+                .expect("an imposter naming a registered backend must build");
+
+        imposter
+            .flow_store
+            .set("flow-i", "k", json!("through the registry"))
+            .unwrap();
+        assert_eq!(
+            imposter.flow_store.get("flow-i", "k").unwrap(),
+            Some(json!("through the registry")),
+            "the imposter's store must be the real Redis one, reached via the registry"
+        );
+        assert!(
+            imposter.flow_store.is_blocking(),
+            "resolving through the registry must not lose the blocking-store property (#475)"
+        );
     }
 
     #[tokio::test]
-    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_get_set() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -150,7 +234,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_increment() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -169,7 +252,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_ttl() {
         let Some((_container, store)) = setup(2).await else {
             return;
@@ -185,7 +267,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_exists_delete() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -200,10 +281,9 @@ mod tests {
 
     // ===== compare_and_set (issue #311) — single-round-trip Lua CAS =====
 
-    use rift_http_proxy::flow_state::CasOutcome;
+    use rift_mock_core::extensions::flow_state::CasOutcome;
 
     #[tokio::test]
-    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_cas_expected_absent_applies() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -221,7 +301,6 @@ mod tests {
     // SETEX inside the CAS script must carry the store TTL: a CAS-applied key expires
     // like a set() key (a dropped TTL arg would mean unbounded key growth in Redis).
     #[tokio::test]
-    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_cas_applied_key_expires() {
         let Some((_container, store)) = setup(2).await else {
             return;
@@ -244,7 +323,6 @@ mod tests {
     // Issue #475: increment_by folds INCRBY + EXPIRE into one EVAL. Mirror the CAS-expiry test to
     // pin that the EXPIRE arg isn't dropped — a lost EXPIRE would mean unbounded key growth.
     #[tokio::test]
-    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_increment_by_key_expires() {
         let Some((_container, store)) = setup(2).await else {
             return;
@@ -262,7 +340,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_cas_expected_present_and_conflict() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -303,7 +380,6 @@ mod tests {
     // extend every key's TTL via SCAN + EXPIRE. With a 2s store default, extending to 100s must keep
     // the keys alive past a 3s wait (before the fix they'd expire at 2s and be gone).
     #[tokio::test]
-    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_set_ttl_extends_all_keys() {
         let Some((_container, store)) = setup(2).await else {
             return;
@@ -335,7 +411,6 @@ mod tests {
 
     // Flow-level ttl(<=0) expires every current key (Redis EXPIRE semantics), matching in-memory.
     #[tokio::test]
-    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_set_ttl_zero_expires_flow() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -350,7 +425,6 @@ mod tests {
 
     // Per-key ttl mirrors Redis EXPIRE: true when the key exists, false when absent; <=0 deletes.
     #[tokio::test]
-    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_set_key_ttl() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -383,7 +457,6 @@ mod tests {
 
     // clear_flow removes only the target flow's keys.
     #[tokio::test]
-    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_clear_flow() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -416,7 +489,6 @@ mod tests {
     // literally by clear_flow's SCAN MATCH — it must NOT wipe sibling flows whose ids the glob would
     // otherwise match. Here clear_flow("a*") must clear only the literal flow "a*", leaving "abc".
     #[tokio::test]
-    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_clear_flow_does_not_glob_across_flows() {
         let Some((_container, store)) = setup(300).await else {
             return;
@@ -449,7 +521,6 @@ mod tests {
 
     // Per-key ttl on an already-expired key reports false (the key is absent), on Redis too.
     #[tokio::test]
-    #[ignore = "disabled pending #853: the Redis flow store moves to the rift-store-redis crate; re-enable as part of that change"]
     async fn test_redis_set_key_ttl_on_expired_key_is_false() {
         let Some((_container, store)) = setup(2).await else {
             return;

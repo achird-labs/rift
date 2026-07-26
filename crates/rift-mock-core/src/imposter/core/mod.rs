@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Maximum allowed proxy response body size (10 MB)
 const MAX_PROXY_RESPONSE_BODY_SIZE: usize = 10 * 1024 * 1024;
@@ -212,6 +212,31 @@ impl Imposter {
         sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
         journal: Option<Arc<dyn crate::imposter::journal::RequestJournal>>,
     ) -> anyhow::Result<Self> {
+        Self::new_with_hooks_journal_and_backends(
+            config,
+            provider,
+            sequencer,
+            journal,
+            &crate::extensions::flow_state::FlowStoreBackends::new(),
+        )
+    }
+
+    /// Create a new imposter with all embedder hooks, including the named flow-store backend
+    /// registry (issue #853).
+    ///
+    /// `backends` supplies every `_rift.flowState.backend` beyond the built-in `"inmemory"` — most
+    /// importantly `"redis"`, which lives in the separate `rift-store-redis` crate. With an empty
+    /// registry (what [`Self::new_with_hooks_and_journal`] passes) a config naming `"redis"` fails
+    /// construction with an error listing what *is* available, rather than downgrading to
+    /// `NoOpFlowStore`. The `rift` binary and the C-ABI register the shipped backends, so their
+    /// behaviour is unchanged.
+    pub fn new_with_hooks_journal_and_backends(
+        config: ImposterConfig,
+        provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
+        sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
+        journal: Option<Arc<dyn crate::imposter::journal::RequestJournal>>,
+        backends: &crate::extensions::flow_state::FlowStoreBackends,
+    ) -> anyhow::Result<Self> {
         let stubs: Vec<Arc<StubState>> = config
             .stubs
             .iter()
@@ -222,7 +247,7 @@ impl Imposter {
 
         // Initialize flow store: a registered provider wins; otherwise the built-in
         // `_rift.flowState` selection.
-        let flow_store = Self::create_flow_store(&config, provider)?;
+        let flow_store = Self::create_flow_store(&config, provider, backends)?;
 
         let enabled = config.enabled;
         Ok(Self {
@@ -322,6 +347,7 @@ impl Imposter {
     fn create_flow_store(
         config: &ImposterConfig,
         provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
+        backends: &crate::extensions::flow_state::FlowStoreBackends,
     ) -> anyhow::Result<Arc<dyn FlowStore>> {
         if let Some(provider) = provider
             && let Some(store) = provider.provide(config)
@@ -363,17 +389,21 @@ impl Imposter {
                         flow_state_config.ttl_seconds as u64,
                     )))
                 }
-                "redis" => Self::create_redis_flow_store(flow_state_config),
                 #[cfg(feature = "test-backend")]
                 "failing" => {
                     info!("Creating deliberately failing FlowStore (test-backend feature)");
                     Ok(Arc::new(crate::extensions::flow_state::FailingFlowStore))
                 }
-                // An explicitly-set but unrecognized backend is a config error, not a reason to
-                // silently downgrade to NoOp (issue #377) — fail construction like the redis arm.
-                other => anyhow::bail!(
-                    "flowState.backend is \"{other}\" but no such backend exists (expected \"inmemory\" or \"redis\")"
-                ),
+                // Any other name is resolved through the registered backends (issue #853) — that
+                // is how `"redis"`, which now lives in the `rift-store-redis` crate, is selected
+                // without this crate depending on it. An unregistered name is a config error, not
+                // a reason to silently downgrade to NoOp (issue #377).
+                other => match backends.get(other) {
+                    Some(factory) => factory.build(flow_state_config),
+                    None => Err(crate::extensions::flow_state::unknown_backend_error(
+                        other, backends,
+                    )),
+                },
             };
         }
 
@@ -476,53 +506,6 @@ impl Imposter {
     /// magic `config.port.unwrap_or(0)` at every script call site.
     pub(crate) fn script_state_key(&self) -> u16 {
         self.config.port.unwrap_or(0)
-    }
-
-    /// Create Redis flow store if configured and available.
-    ///
-    /// An explicitly-requested `"redis"` backend that cannot be built must fail imposter
-    /// construction rather than silently downgrade to `NoOpFlowStore` (issue #325).
-    #[allow(unused_variables)]
-    fn create_redis_flow_store(
-        flow_state_config: &crate::imposter::types::RiftFlowStateConfig,
-    ) -> anyhow::Result<Arc<dyn FlowStore>> {
-        #[cfg(feature = "redis-backend")]
-        {
-            let Some(ref redis_config) = flow_state_config.redis else {
-                error!("Redis backend selected but no redis config provided");
-                anyhow::bail!(
-                    "flowState.backend is \"redis\" but no redis config block was provided"
-                );
-            };
-
-            use crate::backends::RedisFlowStore;
-            match RedisFlowStore::new(
-                &redis_config.url,
-                redis_config.pool_size,
-                redis_config.key_prefix.clone(),
-                flow_state_config.ttl_seconds,
-            ) {
-                Ok(store) => {
-                    info!(
-                        "Created Redis FlowStore for imposter (url={}, ttl={}s)",
-                        redis_config.url, flow_state_config.ttl_seconds
-                    );
-                    Ok(Arc::new(store))
-                }
-                Err(e) => {
-                    error!("Failed to create Redis FlowStore: {e:#}");
-                    anyhow::bail!("failed to build the Redis flow store: {e}");
-                }
-            }
-        }
-
-        #[cfg(not(feature = "redis-backend"))]
-        {
-            error!("Redis backend not available (compile with --features redis-backend)");
-            anyhow::bail!(
-                "flowState.backend is \"redis\" but this binary was built without the redis-backend feature (rebuild with --features redis-backend)"
-            );
-        }
     }
 
     /// Extract proxy mode from stubs
@@ -682,53 +665,105 @@ mod tests {
         );
     }
 
-    // Issue #325: an explicitly-requested redis backend that can't be built must fail imposter
-    // construction loudly, not silently downgrade to NoOp. Constructed at the ctor level (no port
-    // bind needed). `redis-backend` is a default feature, so the first case runs in `cargo test`.
-    #[cfg(feature = "redis-backend")]
+    // Issue #853 (was #325): with the Redis store extracted to `rift-store-redis`, this crate
+    // registers no `"redis"` backend at all — so an imposter naming it must fail construction with
+    // an error that names the backend and lists what IS selectable, never a silent NoOp downgrade
+    // (#377). This is the "factory absent" half of the old cfg-gated pair.
     #[test]
-    fn explicit_redis_without_config_block_fails_construction() {
-        let cfg = serde_json::from_value(json!({
-            "port": 0, "protocol": "http", "stubs": [],
-            "_rift": { "flowState": { "backend": "redis" } }
-        }))
-        .expect("valid imposter config");
-        let result = Imposter::new_with_hooks_and_journal(cfg, None, None, None);
-        assert!(
-            result.is_err(),
-            "redis backend requested with no redis config block must fail construction, not NoOp"
-        );
-    }
-
-    #[cfg(not(feature = "redis-backend"))]
-    #[test]
-    fn explicit_redis_without_feature_fails_construction() {
+    fn explicit_redis_without_a_registered_factory_fails_construction() {
         let cfg = serde_json::from_value(json!({
             "port": 0, "protocol": "http", "stubs": [],
             "_rift": { "flowState": { "backend": "redis", "redis": { "url": "redis://localhost:6379" } } }
         }))
         .expect("valid imposter config");
-        let result = Imposter::new_with_hooks_and_journal(cfg, None, None, None);
+        let err = match Imposter::new_with_hooks_and_journal(cfg, None, None, None) {
+            Ok(_) => panic!("an unregistered redis backend must fail construction, not NoOp"),
+            Err(e) => format!("{e:#}"),
+        };
         assert!(
-            result.is_err(),
-            "redis backend without the redis-backend feature must fail construction, not NoOp"
+            err.contains("redis") && err.contains("no such backend is registered"),
+            "the error must name the missing backend, got: {err}"
+        );
+        assert!(
+            err.contains("available: \"inmemory\""),
+            "the error must list what IS selectable, got: {err}"
         );
     }
 
-    // Issue #325/#358: an unreachable redis URL must fail imposter creation loudly (via
-    // `RedisFlowStore::new`'s eager PING), not silently downgrade to NoOp/in-memory.
-    #[cfg(feature = "redis-backend")]
+    // Issue #853: the "factory registered" half. A registered backend is built through its factory
+    // — proving the seam works with no redis dependency anywhere in this crate.
     #[test]
-    fn redis_unreachable_url_fails_construction() {
+    fn a_registered_backend_factory_is_consulted_for_its_name() {
+        use crate::extensions::flow_state::{
+            FlowStore, FlowStoreBackendFactory, FlowStoreBackends,
+        };
+
+        struct CountingFactory(std::sync::atomic::AtomicUsize);
+        impl FlowStoreBackendFactory for CountingFactory {
+            fn name(&self) -> &'static str {
+                "counting"
+            }
+            fn build(
+                &self,
+                _config: &crate::imposter::RiftFlowStateConfig,
+            ) -> anyhow::Result<Arc<dyn FlowStore>> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Arc::new(crate::backends::InMemoryFlowStore::new(60)))
+            }
+        }
+
+        let factory = Arc::new(CountingFactory(std::sync::atomic::AtomicUsize::new(0)));
+        let backends = FlowStoreBackends::new().with(Arc::clone(&factory) as Arc<_>);
         let cfg = serde_json::from_value(json!({
             "port": 0, "protocol": "http", "stubs": [],
-            "_rift": { "flowState": { "backend": "redis", "redis": { "url": "redis://127.0.0.1:1" } } }
+            "_rift": { "flowState": { "backend": "counting" } }
         }))
         .expect("valid imposter config");
-        let result = Imposter::new_with_hooks_and_journal(cfg, None, None, None);
+
+        Imposter::new_with_hooks_journal_and_backends(cfg, None, None, None, &backends)
+            .expect("a registered backend must build");
+        assert_eq!(
+            factory.0.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the factory must be consulted exactly once for its own backend name"
+        );
+    }
+
+    // Issue #853: a factory whose build fails must fail imposter construction — the error channel
+    // that made a named factory the right seam rather than `FlowStoreProvider` (#325).
+    #[test]
+    fn a_failing_backend_factory_fails_construction() {
+        use crate::extensions::flow_state::{
+            FlowStore, FlowStoreBackendFactory, FlowStoreBackends,
+        };
+
+        struct Broken;
+        impl FlowStoreBackendFactory for Broken {
+            fn name(&self) -> &'static str {
+                "broken"
+            }
+            fn build(
+                &self,
+                _config: &crate::imposter::RiftFlowStateConfig,
+            ) -> anyhow::Result<Arc<dyn FlowStore>> {
+                anyhow::bail!("the backend is unreachable")
+            }
+        }
+
+        let backends = FlowStoreBackends::new().with(Arc::new(Broken));
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http", "stubs": [],
+            "_rift": { "flowState": { "backend": "broken" } }
+        }))
+        .expect("valid imposter config");
+        let err =
+            match Imposter::new_with_hooks_journal_and_backends(cfg, None, None, None, &backends) {
+                Ok(_) => panic!("a failing factory must fail construction, not NoOp"),
+                Err(e) => format!("{e:#}"),
+            };
         assert!(
-            result.is_err(),
-            "an unreachable redis URL must fail imposter construction, not NoOp"
+            err.contains("the backend is unreachable"),
+            "the factory's own error must survive, got: {err}"
         );
     }
 
