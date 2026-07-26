@@ -319,9 +319,80 @@ class Ports(unittest.TestCase):
         # `--no-request-journal` is a fairness requirement: WireMock records every request by
         # default, unbounded, while rift and mb are both measured with recording off. Without it
         # the table compares WireMock-with-journaling against Rift-without.
+        # No container_threads => stock defaults, which is exactly what the secondary series wants.
         self.assertEqual(bw.wiremock_cmd("/x/wm.jar", 4745),
                          ["java", "-jar", "/x/wm.jar", "--port", "4745", "--disable-banner",
                           "--no-request-journal"])
+
+    def test_command_pins_the_container_pool_when_asked(self):
+        self.assertEqual(bw.wiremock_cmd("/x/wm.jar", 4745, 64),
+                         ["java", "-jar", "/x/wm.jar", "--port", "4745", "--disable-banner",
+                          "--no-request-journal", "--container-threads", "64"])
+
+
+class ContainerThreads(unittest.TestCase):
+    """Issue #865. WireMock is thread-per-request, so its 10-thread default caps in-flight requests
+    below the offered concurrency — benchmarking that measures the pool, not the engine."""
+
+    def test_pins_above_the_offered_concurrency(self):
+        # 200 connections must not be served by a cpu_count-sized pool.
+        self.assertEqual(bw.container_thread_count([200]), max(os.cpu_count() or 1, 200))
+
+    def test_never_drops_below_cpu_count(self):
+        # At 1 connection the pool should still not be smaller than the machine.
+        self.assertEqual(bw.container_thread_count([1]), max(os.cpu_count() or 1, 1))
+
+    def test_sweep_covers_the_TOP_of_the_sweep(self):
+        # The pin has to clear the largest point in the sweep, not the first or the last one
+        # listed — otherwise the highest-concurrency point is the only one that gets throttled,
+        # which is exactly where the ratio matters most.
+        self.assertEqual(bw.container_thread_count([1, 200, 50]), max(os.cpu_count() or 1, 200))
+
+    def test_override_wins(self):
+        self.assertEqual(bw.container_thread_count([1000], override=12), 12)
+
+    def test_override_must_be_positive(self):
+        with self.assertRaises(SystemExit):
+            bw.container_thread_count([50], override=0)
+
+    def test_stock_default_constant_matches_wiremocks_documented_default(self):
+        self.assertEqual(bw.STOCK_CONTAINER_THREADS, 10)
+
+    def test_the_pin_is_recorded_at_run_time_and_read_back(self):
+        # The documented flow is two commands (`--run-all`, then a separate `--report`), so the
+        # report process cannot know what the run chose. Re-deriving it from the report
+        # invocation's flags would state a number the run never used — e.g. run with
+        # `--sweep-connections 50,200` (pin 200), report with `--connections 50` (would infer 50).
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                self.assertIsNone(bw.recorded_container_threads(""))
+                bw.record_container_threads("", 200)
+                self.assertEqual(bw.recorded_container_threads(""), 200)
+                bw.record_container_threads("_rep2", 64)
+                self.assertEqual(bw.recorded_container_threads("_rep2"), 64)
+                self.assertEqual(bw.recorded_container_threads(""), 200,
+                                 "reps must not clobber each other's recorded pin")
+            finally:
+                bw.RESULTS_DIR = orig
+
+    def test_unreadable_sidecar_reports_unknown_rather_than_guessing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                with open(bw.threads_sidecar_path(""), "w") as f:
+                    f.write("not a number")
+                self.assertIsNone(bw.recorded_container_threads(""))
+            finally:
+                bw.RESULTS_DIR = orig
+
+    def test_stock_series_has_its_own_engine_label(self):
+        # Its own label keeps it in its own CSV and out of the headline ratio.
+        self.assertEqual(bw.STOCK_ENGINE, "wiremock-stock")
+        self.assertNotEqual(bw.STOCK_ENGINE, "wiremock")
+        self.assertTrue(bw.engine_csv_path(bw.STOCK_ENGINE, "").endswith("direct_wiremock-stock.csv"))
 
 
 class ReportCombiner(unittest.TestCase):
@@ -384,6 +455,99 @@ class ReportCombiner(unittest.TestCase):
             finally:
                 bw.RESULTS_DIR = orig
         self.assertIn("wiremock", str(ctx.exception))
+
+    def test_stock_column_appears_but_never_drives_the_speedup(self):
+        # Issue #865's core reporting contract: the stock series is visible as its own labelled
+        # column, and the Rift/WM ratio comes from the TUNED series. A speedup computed against a
+        # 10-thread-throttled WireMock would measure the pool, and is the first thing a WireMock
+        # user would rightly reject.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                self._write(tmp, "rift", self._all_scenarios(rps=60000.0))
+                self._write(tmp, "wiremock", self._all_scenarios(rps=20000.0))       # tuned
+                self._write(tmp, "wiremock-stock", self._all_scenarios(rps=5000.0))  # stock
+                out = bw.report("local", "2.9.1", "3.9.1", "openjdk 17", "20s", 50,
+                                container_threads=64)
+                text = open(out).read()
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertIn("WireMock (stock, 10t)", text)
+        self.assertIn("5,000", text)
+        self.assertIn("3.0x", text)   # 60000/20000 — the tuned ratio
+        self.assertNotIn("12.0x", text, "the ratio must NOT be computed against the stock series")
+        # Assert the pin reached the Method section without pinning the exact prose around it.
+        self.assertRegex(text, r"\*\*64\*\* Jetty container threads")
+
+    def test_both_wiremock_columns_are_labelled_with_their_thread_count(self):
+        # Two adjacent WireMock columns where only one carries its thread count would read as
+        # "stock vs default" — the exact confusion #865 exists to remove.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                self._write(tmp, "rift", self._all_scenarios(rps=60000.0))
+                self._write(tmp, "wiremock", self._all_scenarios(rps=20000.0))
+                self._write(tmp, "wiremock-stock", self._all_scenarios(rps=5000.0))
+                out = bw.report("local", "2.9.1", "3.9.1", "openjdk 17", "20s", 50,
+                                container_threads=64)
+                header = [l for l in open(out) if l.startswith("| Scenario |")][0]
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertIn("WireMock (stock, 10t)", header)
+        self.assertIn("WireMock (64t)", header)
+
+    def test_report_says_unrecorded_rather_than_inventing_a_thread_count(self):
+        # If neither the run nor the caller recorded a pin, the Method section must say so — a
+        # plausible-looking wrong number is worse than an admitted gap.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                self._write(tmp, "rift", self._all_scenarios(rps=60000.0))
+                self._write(tmp, "wiremock", self._all_scenarios(rps=20000.0))
+                out = bw.report("local", "2.9.1", "3.9.1", "openjdk 17", "20s", 50,
+                                container_threads=None)
+                text = open(out).read()
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertIn("unrecorded", text)
+        self.assertIn("--container-threads", text)
+
+    def test_report_discloses_that_the_pin_may_be_a_no_op(self):
+        # Measured on a 10-core box, pinning to 50 made no difference against the 10-thread
+        # default: the CPU saturates first. A report that asserted "measuring stock measures the
+        # pool, not the engine" while the stock column matched the headline would contradict
+        # itself, so the wording has to admit the pin may not bind.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                self._write(tmp, "rift", self._all_scenarios(rps=60000.0))
+                self._write(tmp, "wiremock", self._all_scenarios(rps=20000.0))
+                out = bw.report("local", "2.9.1", "3.9.1", "openjdk 17", "20s", 50,
+                                container_threads=64)
+                text = open(out).read()
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertIn("fairness guarantee, not a speedup", text)
+        self.assertIn("no-op", text)
+
+    def test_report_without_a_stock_csv_omits_the_column(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                self._write(tmp, "rift", self._all_scenarios(rps=60000.0))
+                self._write(tmp, "wiremock", self._all_scenarios(rps=20000.0))
+                out = bw.report("local", "2.9.1", "3.9.1", "openjdk 17", "20s", 50,
+                                container_threads=64)
+                text = open(out).read()
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertNotIn("stock", text.split("## Throughput")[1])
+        self.assertIn("3.0x", text)
 
     def test_refuses_open_loop_rows_for_the_closed_loop_table(self):
         with tempfile.TemporaryDirectory() as tmp:
