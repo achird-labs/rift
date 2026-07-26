@@ -17,6 +17,14 @@ npm install --prefix ~/bench-mb mountebank@2.9.1  # reference engine
 # python3 is used to orchestrate the runs
 ```
 
+For the WireMock suite (optional — only needed for `bench_wiremock.py`) you also need a JRE 11+
+(use an LTS, 17 or 21) and the standalone jar:
+
+```bash
+mkdir -p ~/bench-wiremock && curl -Lo ~/bench-wiremock/wiremock-standalone.jar \
+  https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/3.9.1/wiremock-standalone-3.9.1.jar
+```
+
 > `oha` initialises a TLS stack that reads the macOS keychain even for plain-HTTP
 > targets — run these outside a restricted sandbox.
 
@@ -154,6 +162,59 @@ done   # -> direct_rift_{work-stealing,per-core}_cores{2,4,8}_rep{1,2,3}.csv
 Linux only (`taskset`/`lscpu`). Note the ceiling this implies: on an M-vCPU box the generator
 needs its own cores, so the engine tops out well below M — an ≥8-*physical*-core point needs a
 bigger box or an off-box generator, and any verdict quoting these numbers should say so.
+
+### WireMock comparison (issue #861)
+
+WireMock is the most widely used JVM mock server, so the published comparison covers both reference
+engines people actually migrate from. It lives in its own suite because it cannot consume imposter
+JSON — different stub schema, and one port per JVM with admin under `/__admin` on that same port:
+
+```bash
+cd tests/benchmark
+
+# Bench WireMock alone -> results/direct_wiremock.csv
+python3 scripts/bench_wiremock.py --run-all --duration 20s --warmup 10s --connections 50
+
+# Combine whatever CSVs exist from the SAME box and settings -> WIREMOCK_BENCHMARK_REPORT.md
+python3 scripts/bench_wiremock.py --report --connections 50
+```
+
+- **Same fixture, same gates.** The suite *imports* `IMPOSTERS`/`SCENARIOS`/`EXPECT_BODY` from
+  `bench_direct` and generates WireMock mappings from them, so the two can never drift. The same 13
+  scenarios, oha settings and `verify_body` marker assertion apply, and a non-2xx distribution
+  aborts the run — a mistranslated stub falls through to the no-match default and is caught rather
+  than published as a fast number.
+- **`bench_direct.py` is untouched**, so the rift-vs-mb stability contract is unaffected by
+  construction.
+- **Engines stay on disjoint ports:** rift +0, mb +100, wiremock +200 (4745–4760), one engine at a
+  time.
+- **`--warmup 10s`, not 3s.** 3s is thin for a JIT. For a like-for-like table, quote rift/mb numbers
+  measured with the same warmup.
+- **Response templating stays off** so `${request.path}` is served literally, exactly as Mountebank
+  does — otherwise the `template` scenario would compare two different behaviours.
+- **The request journal stays off** (`--no-request-journal`). WireMock records every request by
+  default, unbounded; Rift and Mountebank are both measured with recording *off*, and journaling is
+  a separate additive scenario in the Rift suite because it is a distinct cost. Leaving it on would
+  compare WireMock-with-recording against Rift-without, and would also make the four scenarios
+  sharing the API instance non-comparable with each other.
+
+Two honest caveats the generated report repeats, because a reader will otherwise over-read the
+table:
+
+- **`complex_predicate` is not a pure predicate comparison.** WireMock has no OR across two
+  *different* headers within one stub, so those 50 stubs become 101 mappings and the measured
+  request matches the 50th candidate where Rift/MB match the 25th — roughly twice the scan. That is
+  a genuine cost of expressing this workload in WireMock, but it is not like-for-like.
+- **The all-2xx gate is weaker for WireMock.** The catch-all that reproduces Rift/MB's empty-200
+  no-match default also means every request returns 200, so the status-distribution check cannot
+  detect a fall-through here. The per-scenario body-marker assertion is the gate that does.
+- `--report` refuses to combine CSVs whose `connections`/`mode` disagree (stale-artefact guard), and
+  renders Mountebank columns as `n/a` when `direct_mb.csv` is absent.
+
+Translator logic is gate-tested in `scripts/test_bench_wiremock.py` (golden mappings per stub
+generator, priority ordering, the `or`-split, the catch-all, and a completeness test that runs
+*every* stub in the live fixture through the translator so a new generator in `bench_direct.py`
+cannot ship silently untranslated).
 
 ### Matching-dimension scenarios (Rift-only, additive)
 
