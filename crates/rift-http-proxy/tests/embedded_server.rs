@@ -87,6 +87,71 @@ async fn server_builder_with_injected_manager_serves_admin_api() {
     manager.delete_all().await;
 }
 
+// Issue #853: the manager `ServerBuilder` builds ITSELF must register the shipped flow-state
+// backends. Deliberately no `.manager(...)` here — injecting one would test the wrong object.
+//
+// Why this guard exists: `default_flow_store_backends()` is unit-tested, and the admin API is
+// tested against a manager the test builds by hand, so if a refactor dropped
+// `.with_flow_store_backends(...)` from `ServerBuilder`, everything would still compile, clippy
+// would pass, `verify-feature-propagation.sh` would pass (it checks the Cargo feature chain, not
+// the registration call) — and every `rift` binary user with `backend: "redis"` would get
+// "no such backend is registered". That is the #777 shape moved from the manifest to the code.
+//
+// The probe needs no Redis server: an UNREACHABLE url separates the two outcomes. Registered ⇒ the
+// factory runs and fails to connect ("failed to build the Redis flow store"); not registered ⇒ the
+// registry lookup misses first ("no such backend is registered"). Both are 400, so the body is what
+// discriminates.
+#[cfg(feature = "redis-backend")]
+#[tokio::test]
+async fn server_builder_registers_the_shipped_flow_store_backends() {
+    let cli = Cli::try_parse_from([
+        "rift",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "12611",
+        "--metrics-port",
+        "19483",
+    ])
+    .expect("cli parse");
+
+    tokio::spawn(ServerBuilder::from_cli(cli).run());
+    wait_for_http("http://127.0.0.1:12611/health").await;
+
+    let response = reqwest::Client::new()
+        .post("http://127.0.0.1:12611/imposters")
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "port": 19482, "protocol": "http", "stubs": [],
+                "_rift": { "flowState": {
+                    "backend": "redis",
+                    "redis": { "url": "redis://127.0.0.1:1" }
+                }}
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .expect("post imposter");
+
+    assert_eq!(
+        response.status(),
+        400,
+        "an unreachable redis must fail imposter creation, not downgrade to NoOp"
+    );
+    let body = response.text().await.expect("body");
+    assert!(
+        body.contains("failed to build the Redis flow store"),
+        "the redis backend must be REGISTERED on the manager ServerBuilder builds — got {body:?}, \
+         which means ServerBuilder no longer calls default_flow_store_backends()"
+    );
+    assert!(
+        !body.contains("no such backend is registered"),
+        "redis resolved as an unknown backend, so it was never registered: {body}"
+    );
+}
+
 // AC2: run_metrics_server on an explicit loopback SocketAddr serves /metrics (and 404s
 // elsewhere). Fixed port rather than :0 — the function never returns, so a :0 bind gives
 // the caller no way to learn the assigned port.

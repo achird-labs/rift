@@ -265,7 +265,13 @@ pub extern "C" fn rift_start() -> *mut RiftHandle {
         match Runtime::new() {
             Ok(runtime) => Box::into_raw(Box::new(RiftHandle {
                 runtime,
-                manager: Arc::new(ImposterManager::new()),
+                // Register the shipped flow-state backends (issue #853) so an embedded host gets
+                // the same `_rift.flowState.backend` vocabulary as the binary — `"redis"` included
+                // under the default `redis-backend` feature.
+                manager: Arc::new(
+                    ImposterManager::new()
+                        .with_flow_store_backends(rift_http_proxy::default_flow_store_backends()),
+                ),
                 admin: Mutex::new(None),
                 intercept: InterceptControl::default(),
             })),

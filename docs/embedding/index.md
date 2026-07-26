@@ -56,7 +56,7 @@ The engines and allocator are feature-gated. Relevant features:
 
 | Feature | Default (`rift-http-proxy`) | Default (`rift-ffi`) | Effect |
 |:--------|:----------------------------|:---------------------|:-------|
-| `redis-backend` | on | on | Redis flow-store backend |
+| `redis-backend` | on | on | Redis flow-store backend. The store itself lives in the separate `rift-store-redis` crate; this feature pulls it in and registers it under `_rift.flowState.backend: "redis"`. `rift-mock-core` has **no** redis feature and never depends on `redis`/`r2d2`, so embedders taking the engine alone do not carry them. |
 | `javascript` | on | on | JavaScript scripting engine (Boa) |
 | `mimalloc` | on | **never forwarded** | mimalloc global allocator (a `cdylib` must not impose an allocator on its host, so `rift-ffi` deliberately never enables it) |
 | `jemalloc` | off | n/a | Opt-in alternative allocator, kept for the #717 bake-off. If both `mimalloc` and `jemalloc` are enabled (as in CI's `--all-features` lanes), **mimalloc wins** — this is resolved by `cfg` precedence, not an error. mimalloc remains the shipped default. |
@@ -66,7 +66,9 @@ The engines and allocator are feature-gated. Relevant features:
 > each engine feature above must be explicitly forwarded to reach what actually ships.
 > `scripts/verify-feature-propagation.sh` enforces that in CI, so a feature cannot be default-on for
 > the library and silently absent from the binary — which is what
-> [#777](https://github.com/achird-labs/rift/issues/777) fixed.
+> [#777](https://github.com/achird-labs/rift/issues/777) fixed. `redis-backend` is checked by the
+> same script along a different chain, since it is no longer a `rift-mock-core` feature: it must
+> enable `dep:rift-store-redis` in `rift-http-proxy`, and `rift-ffi` must forward it from there.
 
 ---
 

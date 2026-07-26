@@ -78,11 +78,11 @@ jobs:
   # job runs the whole integration surface with `--tests`. `--workspace` covers only the six
   # `crates/*` members, so the docker-bound `rift-compatibility-tests` crate and the benchmark are
   # excluded automatically (they keep their own dedicated jobs); mountebank_compatibility spawns its
-  # own server, so it runs on the Docker-enabled runner without extra setup. redis_backend still
-  # *compiles* here but its container-backed tests are `#[ignore]`d pending #853 (they no longer
-  # start a Redis container) — that compile is what keeps the suite from bit-rotting while it is
-  # disabled. Runs on stable only (the unit surface already covers beta) to keep the heavier
-  # integration run off the critical path.
+  # own server, so it runs on the Docker-enabled runner without extra setup. The Redis suite moved to
+  # `rift-store-redis` with the store itself (#853) and is no longer `#[ignore]`d, so it both
+  # compiles and *runs* here as well as in the dedicated `redis-integration` job below. Runs on
+  # stable only (the unit surface already covers beta) to keep the heavier integration run off the
+  # critical path.
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
@@ -434,17 +434,14 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-features --release
 
-  # DISABLED pending issue #853 (extract the Redis flow store into `rift-store-redis`). That change
-  # relocates this suite, so the tests in `tests/redis_backend.rs` are `#[ignore]`d and this job is
-  # gated off rather than left to run zero tests and report a green "Redis Integration Tests" —
-  # a passing job with no coverage behind it is worse than a visibly skipped one. The job body is
-  # kept intact (not deleted) so re-enabling is a one-line revert of the `if:` below, together with
-  # dropping the `#[ignore]`s. `Integration Tests` still *compiles* the suite, so API drift is
-  # caught in the meantime. Re-enable as part of #853.
+  # The container-backed Redis suite. It lives in `rift-store-redis` since #853 extracted the store
+  # there; before that it sat in rift-http-proxy and this job was gated off with `if: false` while
+  # the move was pending. Both the gate and the suite's `#[ignore]`s are gone, so this job runs the
+  # real containers again. `--all-features` is kept for symmetry with the rest of CI even though
+  # `rift-store-redis` has no features of its own — redis is unconditional there.
   redis-integration:
     name: Redis Integration Tests
     runs-on: ubuntu-latest
-    if: false # re-enable with #853
     steps:
       - uses: actions/checkout@v7
 
@@ -470,7 +467,22 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run Redis integration tests
-        run: cargo test --package rift-http-proxy --test redis_backend --all-features
+        run: |
+          set -euo pipefail
+          cargo test --package rift-store-redis --test redis_backend --all-features 2>&1 \
+            | tee /tmp/redis-tests.log
+          # libtest reports success for a suite whose tests are all `#[ignore]`d, and for a filter
+          # that matches nothing — the exact shape that let this job sit green with zero coverage
+          # while #853 was pending. Assert the tests actually ran, so re-parking the suite (or a
+          # filter typo) fails loudly instead of quietly certifying nothing. The suite is 16
+          # container-backed tests plus 7 Docker-free `probe_gate` ones; the floor leaves a little
+          # slack without becoming a second copy of the test list.
+          passed=$(awk '/^test result:/ { for (i = 1; i <= NF; i++) if ($i == "passed;") s += $(i-1) } END { print s+0 }' /tmp/redis-tests.log)
+          echo "redis suite tests passed: $passed"
+          if [ "$passed" -lt 20 ]; then
+            echo "::error::the Redis suite ran only $passed tests (expected >= 20) — is it \`#[ignore]\`d again?"
+            exit 1
+          fi
 
   compatibility-test:
     name: Compatibility Tests

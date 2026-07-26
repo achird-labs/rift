@@ -187,6 +187,58 @@ async fn delete_flow_state_clears_whole_flow() {
     let _ = manager.delete_imposter(19780).await;
 }
 
+// Issue #853: a `flowState.backend` no build serves is rejected with 400 over the real admin
+// surface, and the body names both the rejected backend and the ones that ARE selectable — so an
+// operator whose binary lacks a feature can tell a typo from a missing build. This is the HTTP-level
+// proof of the #325/#377 contract: never a silent NoOpFlowStore downgrade.
+#[tokio::test]
+async fn create_imposter_rejects_an_unregistered_flow_state_backend() {
+    let manager = std::sync::Arc::new(
+        ImposterManager::new()
+            .with_flow_store_backends(rift_http_proxy::default_flow_store_backends()),
+    );
+    let admin_addr = "127.0.0.1:12604".parse().unwrap();
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
+    tokio::spawn(server.run());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let c = reqwest::Client::new();
+    let admin = "http://127.0.0.1:12604";
+    let r = c
+        .post(format!("{admin}/imposters"))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "port": 19782, "protocol": "http", "stubs": [],
+                "_rift": { "flowState": { "backend": "postgres" } }
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(
+        r.status(),
+        400,
+        "an unregistered flowState.backend must be rejected at creation"
+    );
+    let body = r.text().await.expect("body");
+    assert!(
+        body.contains("postgres"),
+        "the 400 must name the rejected backend, got: {body}"
+    );
+    assert!(
+        body.contains("inmemory"),
+        "the 400 must list the backends this build serves, got: {body}"
+    );
+    // This test build has `redis-backend` on (a default feature), so redis is registered and must
+    // appear as available — which also proves `default_flow_store_backends()` actually registered it.
+    assert!(
+        body.contains("redis"),
+        "a redis-enabled build must advertise redis as available, got: {body}"
+    );
+}
+
 // Issue #530: creating an imposter with flowState.ttlSeconds < 1 is rejected with 400.
 #[tokio::test]
 async fn create_imposter_rejects_non_positive_ttl_seconds() {

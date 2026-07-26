@@ -125,6 +125,120 @@ pub trait FlowStoreProvider: Send + Sync {
     fn provide(&self, config: &crate::imposter::ImposterConfig) -> Option<Arc<dyn FlowStore>>;
 }
 
+/// A backend selectable by name through `_rift.flowState.backend` (issue #853).
+///
+/// This is how a store lives outside `rift-mock-core` while still being chosen by config: the
+/// `"redis"` backend ships in the separate `rift-store-redis` crate and registers here, so the
+/// core engine carries no redis dependency. Distinct from [`FlowStoreProvider`] in two ways that
+/// matter:
+///
+/// - **It has an error channel.** `provide` returns `Option`, so a provider can only *decline* —
+///   a misconfigured backend would silently fall through to a built-in. A factory returns
+///   `Result`, so a bad URL or missing config block fails imposter creation loudly (issue #325).
+/// - **It is selected by the config, not imposed on it.** A provider overrides any
+///   `_rift.flowState`; a factory is only consulted when the config names it.
+pub trait FlowStoreBackendFactory: Send + Sync {
+    /// The `_rift.flowState.backend` string this factory serves, e.g. `"redis"`.
+    fn name(&self) -> &'static str;
+
+    /// Build a store for this imposter's `flowState` block. An `Err` fails imposter creation
+    /// (fail-loud, #325) — never a silent downgrade to [`NoOpFlowStore`].
+    fn build(&self, config: &crate::imposter::RiftFlowStateConfig) -> Result<Arc<dyn FlowStore>>;
+}
+
+/// The named flow-store backends a build can serve, beyond the always-present `"inmemory"`
+/// (issue #853). Register with
+/// [`ImposterManager::with_flow_store_backends`](crate::imposter::ImposterManager::with_flow_store_backends).
+///
+/// Empty by default: `rift-mock-core` alone serves only `"inmemory"`, and any other name fails
+/// construction with an error listing what *is* available. The `rift` binary and the C-ABI
+/// register `"redis"` (from `rift-store-redis`) when built with the `redis-backend` feature, so
+/// shipped artifacts behave exactly as before.
+#[derive(Clone, Default)]
+pub struct FlowStoreBackends {
+    factories: Vec<Arc<dyn FlowStoreBackendFactory>>,
+}
+
+impl FlowStoreBackends {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register `factory` under its own [`FlowStoreBackendFactory::name`].
+    ///
+    /// Lookup scans in registration order, so the **first** registration of a name wins and a
+    /// second one is unreachable rather than an override. That is a caller mistake with a
+    /// well-defined outcome, so it warns rather than panicking — a builder in a library has no
+    /// business aborting the host process over it, but it should not be silent either.
+    ///
+    /// Built-in names also take precedence over the registry: both selection sites match
+    /// `"inmemory"` (and the `test-backend` `"failing"` store) before consulting it, so registering
+    /// a factory under one of those names has no effect.
+    #[must_use]
+    pub fn with(mut self, factory: Arc<dyn FlowStoreBackendFactory>) -> Self {
+        if self.get(factory.name()).is_some() {
+            tracing::warn!(
+                backend = factory.name(),
+                "flow-state backend registered twice; the first registration wins and this one is unreachable"
+            );
+        }
+        self.factories.push(factory);
+        self
+    }
+
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&Arc<dyn FlowStoreBackendFactory>> {
+        self.factories.iter().find(|f| f.name() == name)
+    }
+
+    /// Registered backend names, for the fail-loud "available:" list.
+    #[must_use]
+    pub fn names(&self) -> Vec<&'static str> {
+        self.factories.iter().map(|f| f.name()).collect()
+    }
+}
+
+impl std::fmt::Debug for FlowStoreBackends {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlowStoreBackends")
+            .field("backends", &self.names())
+            .finish()
+    }
+}
+
+/// The fail-loud error for a `flowState.backend` this build cannot serve (issues #325/#377/#853).
+///
+/// Names the requested backend *and* everything selectable, so an operator whose binary was built
+/// without a feature learns what to rebuild with — instead of a silent `NoOpFlowStore` downgrade
+/// that only shows up later as state that never persists. The `test-backend` `"failing"` store is
+/// deliberately not advertised: it is a test fixture, not an operator choice.
+pub(crate) fn unknown_backend_error(backend: &str, backends: &FlowStoreBackends) -> anyhow::Error {
+    let mut available = vec!["inmemory"];
+    for name in backends.names() {
+        // A name can legitimately appear twice in the registry (first registration wins), but
+        // showing an operator `available: "inmemory", "redis", "redis"` would just look broken.
+        if !available.contains(&name) {
+            available.push(name);
+        }
+    }
+    let list = available
+        .iter()
+        .map(|n| format!("\"{n}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // Only reached when `backend` resolved to no factory, so an unregistered redis needs no
+    // second lookup to confirm it.
+    let hint = if backend == "redis" {
+        " — this build has no redis backend registered (rebuild with --features redis-backend)"
+    } else {
+        ""
+    };
+    anyhow!(
+        "flowState.backend is \"{backend}\" but no such backend is registered (available: {list}){hint}"
+    )
+}
+
 /// No-op flow store that does nothing
 ///
 /// This is used when flow_state is not configured but scripts are enabled.
@@ -173,71 +287,49 @@ impl FlowStore for NoOpFlowStore {
     }
 }
 
-/// Create a FlowStore based on configuration
+/// Create a server-level FlowStore from the `flowState` block of a proxy config file.
 ///
-/// # Arguments
-/// * `config` - FlowStateConfig from proxy configuration
-///
-/// # Returns
-/// * `Arc<dyn FlowStore>` - Backend-appropriate flow store
-///
-/// # Example
-/// ```ignore
-/// use rift_http_proxy::config::FlowStateConfig;
-/// use rift_http_proxy::flow_state::create_flow_store;
-///
-/// let config = FlowStateConfig::default(); // inmemory
-/// let store = create_flow_store(&config).await?;
-/// ```
-pub fn create_flow_store(config: &crate::config::FlowStateConfig) -> Result<Arc<dyn FlowStore>> {
+/// `"inmemory"` is built in; every other name is resolved through `backends` (issue #853), so a
+/// backend living outside this crate — `"redis"`, from `rift-store-redis` — is selectable without
+/// `rift-mock-core` depending on it. An unregistered name is an error listing what is available,
+/// never a silent downgrade to [`NoOpFlowStore`] (issues #325/#377).
+pub fn create_flow_store(
+    config: &crate::config::FlowStateConfig,
+    backends: &FlowStoreBackends,
+) -> Result<Arc<dyn FlowStore>> {
     match config.backend.as_str() {
         "inmemory" => {
             use crate::backends::InMemoryFlowStore;
             tracing::info!("Using InMemory FlowStore (ttl={}s)", config.ttl_seconds);
             Ok(Arc::new(InMemoryFlowStore::new(config.ttl_seconds as u64)))
         }
-        "redis" => {
-            // Validate config presence in *all* builds so the "no redis config" error is returned
-            // even without the backend feature (a test locks this in); the value is only *consumed*
-            // when the backend is compiled in, hence the unused-var allow for the minimal build.
-            // `Context` is likewise only used inside the feature block, so it's imported there (#599).
-            #[cfg_attr(not(feature = "redis-backend"), allow(unused_variables))]
-            let redis_config = config
-                .redis
-                .as_ref()
-                .ok_or_else(|| anyhow!("Redis backend selected but no redis config provided"))?;
+        other => match backends.get(other) {
+            Some(factory) => factory.build(&server_flow_state_config(config)),
+            None => Err(unknown_backend_error(other, backends)),
+        },
+    }
+}
 
-            #[cfg(feature = "redis-backend")]
-            {
-                use anyhow::Context;
-
-                use crate::backends::RedisFlowStore;
-
-                let store = RedisFlowStore::new(
-                    &redis_config.url,
-                    redis_config.pool_size,
-                    redis_config.key_prefix.clone(),
-                    config.ttl_seconds,
-                )
-                .context("Failed to create Redis backend")?;
-
-                tracing::info!(
-                    "Using redis FlowStore (url={}, ttl={}s)",
-                    redis_config.url,
-                    config.ttl_seconds
-                );
-
-                Ok(Arc::new(store))
-            }
-
-            #[cfg(not(feature = "redis-backend"))]
-            {
-                Err(anyhow!(
-                    "Redis backend not available. Compile with --features redis-backend"
-                ))
-            }
-        }
-        other => Err(anyhow!("Unknown backend type: {other}")),
+/// Adapt the server-level `flowState` block to the per-imposter shape a
+/// [`FlowStoreBackendFactory`] takes, so both config surfaces reach one factory implementation
+/// rather than each backend having to understand two config types (issue #853). `flow_id_source`
+/// and `extra` have no server-level equivalent.
+fn server_flow_state_config(
+    config: &crate::config::FlowStateConfig,
+) -> crate::imposter::RiftFlowStateConfig {
+    crate::imposter::RiftFlowStateConfig {
+        backend: config.backend.clone(),
+        ttl_seconds: config.ttl_seconds,
+        redis: config
+            .redis
+            .as_ref()
+            .map(|r| crate::imposter::RiftRedisConfig {
+                url: r.url.clone(),
+                pool_size: r.pool_size,
+                key_prefix: r.key_prefix.clone(),
+            }),
+        flow_id_source: None,
+        extra: serde_json::Map::new(),
     }
 }
 
@@ -361,7 +453,7 @@ mod tests {
             ttl_seconds: 300,
             redis: None,
         };
-        let store = create_flow_store(&config);
+        let store = create_flow_store(&config, &FlowStoreBackends::new());
         assert!(store.is_ok());
     }
 
@@ -373,36 +465,231 @@ mod tests {
             ttl_seconds: 7200,
             redis: None,
         };
-        let store = create_flow_store(&config);
+        let store = create_flow_store(&config, &FlowStoreBackends::new());
         assert!(store.is_ok());
     }
 
-    #[test]
-    fn test_create_flow_store_unknown_backend() {
-        use crate::config::FlowStateConfig;
-        let config = FlowStateConfig {
-            backend: "unknown".to_string(),
-            ttl_seconds: 300,
-            redis: None,
-        };
-        let result = create_flow_store(&config);
-        assert!(result.is_err());
-        let err_msg = result.err().unwrap().to_string();
-        assert!(err_msg.contains("Unknown backend type"));
+    /// `Arc<dyn FlowStore>` is not `Debug`, so `expect_err` is unavailable — unwrap the error
+    /// message explicitly instead.
+    fn build_error(result: Result<Arc<dyn FlowStore>>, what: &str) -> String {
+        match result {
+            Ok(_) => panic!("{what}"),
+            Err(e) => e.to_string(),
+        }
     }
 
+    /// A fake out-of-crate backend: proves the registry seam works with NO redis dependency in
+    /// `rift-mock-core`, which is the whole point of issue #853.
+    struct FakeBackend;
+
+    impl FlowStoreBackendFactory for FakeBackend {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn build(
+            &self,
+            _config: &crate::imposter::RiftFlowStateConfig,
+        ) -> Result<Arc<dyn FlowStore>> {
+            Ok(Arc::new(NoOpFlowStore))
+        }
+    }
+
+    /// A backend whose construction fails — the error channel `FlowStoreProvider` lacks (#853).
+    struct BrokenBackend;
+
+    impl FlowStoreBackendFactory for BrokenBackend {
+        fn name(&self) -> &'static str {
+            "broken"
+        }
+        fn build(
+            &self,
+            _config: &crate::imposter::RiftFlowStateConfig,
+        ) -> Result<Arc<dyn FlowStore>> {
+            Err(anyhow!("cannot reach the thing"))
+        }
+    }
+
+    // Issue #853 AC3: an explicitly-named backend that nothing registered must fail with an error
+    // naming it AND listing what IS selectable — never a silent NoOp downgrade (#325/#377). This
+    // covers "redis" specifically, since after the extraction core registers nothing itself.
     #[test]
-    fn test_create_flow_store_redis_without_config() {
+    fn create_flow_store_unregistered_backend_names_the_available_ones() {
+        use crate::config::FlowStateConfig;
+        for backend in ["redis", "unknown"] {
+            let config = FlowStateConfig {
+                backend: backend.to_string(),
+                ttl_seconds: 300,
+                redis: None,
+            };
+            let err = build_error(
+                create_flow_store(&config, &FlowStoreBackends::new()),
+                "an unregistered backend must fail, not downgrade to NoOp",
+            );
+            assert!(
+                err.contains(backend) && err.contains("no such backend is registered"),
+                "the error must name the requested backend, got: {err}"
+            );
+            assert!(
+                err.contains("available: \"inmemory\""),
+                "the error must list what IS selectable, got: {err}"
+            );
+        }
+    }
+
+    // Issue #853: the redis case earns a rebuild hint, because a missing feature (not a typo) is
+    // overwhelmingly the reason it is absent.
+    #[test]
+    fn create_flow_store_unregistered_redis_hints_at_the_feature() {
         use crate::config::FlowStateConfig;
         let config = FlowStateConfig {
             backend: "redis".to_string(),
             ttl_seconds: 300,
             redis: None,
         };
-        let result = create_flow_store(&config);
-        assert!(result.is_err());
-        let err_msg = result.err().unwrap().to_string();
-        assert!(err_msg.contains("redis config"));
+        let err = build_error(
+            create_flow_store(&config, &FlowStoreBackends::new()),
+            "redis is not registered in core",
+        );
+        assert!(
+            err.contains("--features redis-backend"),
+            "an absent redis backend must say how to get one, got: {err}"
+        );
+    }
+
+    // Issue #853: a registered factory is consulted for its own name, and its registered name
+    // shows up in the fail-loud list for other names.
+    #[test]
+    fn create_flow_store_consults_a_registered_backend() {
+        use crate::config::FlowStateConfig;
+        let backends = FlowStoreBackends::new().with(Arc::new(FakeBackend));
+        let config = FlowStateConfig {
+            backend: "fake".to_string(),
+            ttl_seconds: 300,
+            redis: None,
+        };
+        assert!(
+            create_flow_store(&config, &backends).is_ok(),
+            "a registered backend must be built through its factory"
+        );
+
+        let missing = FlowStateConfig {
+            backend: "nope".to_string(),
+            ttl_seconds: 300,
+            redis: None,
+        };
+        let err = build_error(create_flow_store(&missing, &backends), "unregistered");
+        assert!(
+            err.contains("\"inmemory\", \"fake\""),
+            "the available list must include registered backends, got: {err}"
+        );
+    }
+
+    // Issue #853: a factory's build error propagates — this is the error channel that made a
+    // factory the right seam instead of `FlowStoreProvider` (whose `provide` returns Option).
+    #[test]
+    fn create_flow_store_propagates_a_factory_build_failure() {
+        use crate::config::FlowStateConfig;
+        let backends = FlowStoreBackends::new().with(Arc::new(BrokenBackend));
+        let config = FlowStateConfig {
+            backend: "broken".to_string(),
+            ttl_seconds: 300,
+            redis: None,
+        };
+        let err = build_error(
+            create_flow_store(&config, &backends),
+            "a failing factory must fail the build",
+        );
+        assert!(
+            err.contains("cannot reach the thing"),
+            "the factory's own error must survive, got: {err}"
+        );
+    }
+
+    // Issue #853: registration order is the contract — the FIRST factory for a name wins, so a
+    // duplicate cannot silently displace a backend that is already installed.
+    #[test]
+    fn the_first_registration_of_a_name_wins() {
+        struct Named(&'static str, &'static str);
+        impl FlowStoreBackendFactory for Named {
+            fn name(&self) -> &'static str {
+                self.0
+            }
+            fn build(
+                &self,
+                _config: &crate::imposter::RiftFlowStateConfig,
+            ) -> Result<Arc<dyn FlowStore>> {
+                Err(anyhow!("built by {}", self.1))
+            }
+        }
+
+        let backends = FlowStoreBackends::new()
+            .with(Arc::new(Named("dup", "first")))
+            .with(Arc::new(Named("dup", "second")));
+        assert_eq!(backends.names(), vec!["dup", "dup"]);
+
+        let config = crate::config::FlowStateConfig {
+            backend: "dup".to_string(),
+            ttl_seconds: 300,
+            redis: None,
+        };
+        let err = build_error(create_flow_store(&config, &backends), "always errors");
+        assert!(
+            err.contains("built by first"),
+            "the first registration must be the one consulted, got: {err}"
+        );
+    }
+
+    // Issue #853: built-ins are matched before the registry is consulted, so a factory claiming a
+    // built-in name is inert. Pinned so a future reorder of the match cannot silently start letting
+    // an embedder replace `"inmemory"`.
+    #[test]
+    fn a_factory_cannot_shadow_the_builtin_inmemory_backend() {
+        struct Hijack;
+        impl FlowStoreBackendFactory for Hijack {
+            fn name(&self) -> &'static str {
+                "inmemory"
+            }
+            fn build(
+                &self,
+                _config: &crate::imposter::RiftFlowStateConfig,
+            ) -> Result<Arc<dyn FlowStore>> {
+                Err(anyhow!("the hijacking factory must never be consulted"))
+            }
+        }
+
+        let backends = FlowStoreBackends::new().with(Arc::new(Hijack));
+        let config = crate::config::FlowStateConfig {
+            backend: "inmemory".to_string(),
+            ttl_seconds: 300,
+            redis: None,
+        };
+        assert!(
+            create_flow_store(&config, &backends).is_ok(),
+            "the built-in inmemory backend must win over a registered factory of the same name"
+        );
+    }
+
+    // Issue #853: the server-level `redis` block must reach the factory — otherwise a config-file
+    // deployment would hand the backend an empty config and fail for the wrong reason.
+    #[test]
+    fn server_level_redis_block_reaches_the_factory() {
+        use crate::config::{FlowStateConfig, RedisConfig};
+        let config = FlowStateConfig {
+            backend: "redis".to_string(),
+            ttl_seconds: 900,
+            redis: Some(RedisConfig {
+                url: "redis://example:6379".to_string(),
+                pool_size: 7,
+                key_prefix: "pfx:".to_string(),
+            }),
+        };
+        let adapted = server_flow_state_config(&config);
+        assert_eq!(adapted.backend, "redis");
+        assert_eq!(adapted.ttl_seconds, 900);
+        let redis = adapted.redis.expect("the redis block must carry over");
+        assert_eq!(redis.url, "redis://example:6379");
+        assert_eq!(redis.pool_size, 7);
+        assert_eq!(redis.key_prefix, "pfx:");
     }
 
     // ============================================

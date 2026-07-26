@@ -2460,3 +2460,50 @@ fn ffi_serve_admin_still_enforces_a_real_api_key() {
         rift_stop(h);
     }
 }
+
+// Issue #853: the manager `rift_start` builds must register the shipped flow-state backends, so an
+// embedded host gets the same `_rift.flowState.backend` vocabulary as the binary.
+//
+// This is the C-ABI half of the same regression guard as
+// `embedded_server::server_builder_registers_the_shipped_flow_store_backends`. Without it, dropping
+// `.with_flow_store_backends(...)` from `rift_start` would compile, lint and test clean while every
+// embedded SDK lost `backend: "redis"`.
+//
+// No Redis server needed: an UNREACHABLE url discriminates the two outcomes. Registered => the
+// factory runs and fails to connect ("failed to build the Redis flow store"); not registered => the
+// registry lookup misses first ("no such backend is registered"). Both fail creation (sentinel 0),
+// so `rift_last_error` is what tells them apart.
+#[cfg(feature = "redis-backend")]
+#[test]
+fn ffi_start_registers_the_shipped_flow_store_backends() {
+    unsafe {
+        let h = rift_start();
+        assert!(!h.is_null(), "rift_start returned null");
+
+        let config = cstr(
+            r#"{"port": 19484, "protocol": "http", "stubs": [],
+                "_rift": {"flowState": {"backend": "redis",
+                                        "redis": {"url": "redis://127.0.0.1:1"}}}}"#,
+        );
+        assert_eq!(
+            rift_create_imposter(h, config.as_ptr()),
+            0,
+            "an unreachable redis must fail imposter creation, not downgrade to NoOp"
+        );
+
+        let err = rift_last_error();
+        assert!(!err.is_null(), "a failed creation must record last_error");
+        let err = take_json(err);
+        assert!(
+            err.contains("failed to build the Redis flow store"),
+            "the redis backend must be REGISTERED on the manager rift_start builds — got {err:?}, \
+             which means rift_start no longer calls default_flow_store_backends()"
+        );
+        assert!(
+            !err.contains("no such backend is registered"),
+            "redis resolved as an unknown backend, so it was never registered: {err}"
+        );
+
+        rift_stop(h);
+    }
+}

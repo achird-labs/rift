@@ -1,6 +1,16 @@
-use crate::extensions::flow_state::{CasOutcome, FlowStore};
+//! The Redis [`FlowStore`] backend, as an opt-in crate (issue #853).
+//!
+//! This lived in `rift-mock-core::backends::redis` until #853 moved it out, so the core engine
+//! carries no `redis`/`r2d2` dependency under any feature combination. It reattaches through the
+//! [`FlowStoreBackendFactory`] seam, which means `_rift.flowState.backend: "redis"` still selects
+//! it exactly as before — the `rift` binary and the C-ABI register
+//! [`RedisFlowStoreBackendFactory`] when built with their default `redis-backend` feature.
+//!
+//! Nothing about the wire format, config schema or store behaviour changed in the move.
+
 use anyhow::{Context, Result};
 use redis::{Commands, Connection};
+use rift_mock_core::extensions::flow_state::{CasOutcome, FlowStore};
 use serde_json::Value;
 use std::sync::Mutex;
 
@@ -149,8 +159,8 @@ fn escape_glob(s: &str) -> String {
 /// #318): annotate the failed op, then attach `BackendUnavailable`. Serde failures are
 /// NOT wrapped — malformed stored data is corruption, not backend unavailability.
 fn backend_err(op: &'static str, err: impl std::fmt::Display) -> anyhow::Error {
-    crate::extensions::decorate::annotate(op, err.to_string());
-    anyhow::Error::new(crate::extensions::decorate::BackendUnavailable {
+    rift_mock_core::extensions::decorate::annotate(op, err.to_string());
+    anyhow::Error::new(rift_mock_core::extensions::decorate::BackendUnavailable {
         feature: "flowState",
         detail: format!("{op}: {err}"),
     })
@@ -434,18 +444,107 @@ fn scan_batch(
         .map_err(|e| backend_err(op, e))
 }
 
-/// Health check for Redis connection
-#[allow(dead_code, private_interfaces)]
-pub(crate) fn health_check(pool: &r2d2::Pool<RedisConnectionManager>) -> Result<bool> {
-    let conn = pool.get().context("Failed to get connection from pool")?;
+/// Registers [`RedisFlowStore`] under the `_rift.flowState.backend` name `"redis"` (issue #853).
+///
+/// Construction is eager and fail-loud: a missing `redis` config block, an unparseable URL or an
+/// unreachable server all fail imposter creation (surfacing as a 400) rather than silently
+/// downgrading to a no-op store (issues #325/#377).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RedisFlowStoreBackendFactory;
 
-    let mut guard = lock_recover(&conn);
-    match redis::cmd("PING").query::<String>(&mut *guard) {
-        Ok(_) => Ok(true),
-        Err(e) => {
-            tracing::warn!("Redis health check failed: {}", e);
-            Ok(false)
+impl rift_mock_core::extensions::flow_state::FlowStoreBackendFactory
+    for RedisFlowStoreBackendFactory
+{
+    fn name(&self) -> &'static str {
+        "redis"
+    }
+
+    fn build(
+        &self,
+        config: &rift_mock_core::imposter::RiftFlowStateConfig,
+    ) -> Result<std::sync::Arc<dyn FlowStore>> {
+        let Some(ref redis_config) = config.redis else {
+            tracing::error!("Redis backend selected but no redis config provided");
+            anyhow::bail!("flowState.backend is \"redis\" but no redis config block was provided");
+        };
+
+        match RedisFlowStore::new(
+            &redis_config.url,
+            redis_config.pool_size,
+            redis_config.key_prefix.clone(),
+            config.ttl_seconds,
+        ) {
+            Ok(store) => {
+                // No "for imposter" here: since #853 this one factory also serves the server-level
+                // config-file path, where that wording would be wrong.
+                tracing::info!(
+                    "Created Redis FlowStore (url={}, ttl={}s)",
+                    redis_config.url,
+                    config.ttl_seconds
+                );
+                Ok(std::sync::Arc::new(store))
+            }
+            Err(e) => {
+                tracing::error!("Failed to create Redis FlowStore: {e:#}");
+                anyhow::bail!("failed to build the Redis flow store: {e}");
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod factory_tests {
+    use super::*;
+    use rift_mock_core::extensions::flow_state::FlowStoreBackendFactory;
+    use rift_mock_core::imposter::{RiftFlowStateConfig, RiftRedisConfig};
+
+    fn config(redis: Option<RiftRedisConfig>) -> RiftFlowStateConfig {
+        RiftFlowStateConfig {
+            backend: "redis".to_string(),
+            ttl_seconds: 300,
+            redis,
+            flow_id_source: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    #[test]
+    fn factory_serves_the_redis_backend_name() {
+        assert_eq!(RedisFlowStoreBackendFactory.name(), "redis");
+    }
+
+    // Issue #325: the no-config-block case must fail construction, not decline silently. This is
+    // the error that used to live in `Imposter::create_redis_flow_store`; the wording is preserved
+    // because it is operator-facing.
+    #[test]
+    fn factory_without_a_redis_block_fails_loudly() {
+        let err = match RedisFlowStoreBackendFactory.build(&config(None)) {
+            Ok(_) => panic!("a redis backend with no redis block must fail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("no redis config block was provided"),
+            "got: {err}"
+        );
+    }
+
+    // Issue #325/#358: an unreachable URL must fail at construction (the eager PING), never
+    // succeed and fail later on first use.
+    #[test]
+    fn factory_with_an_unreachable_url_fails_construction() {
+        let cfg = config(Some(RiftRedisConfig {
+            url: "redis://127.0.0.1:1".to_string(),
+            pool_size: 1,
+            key_prefix: "rift:".to_string(),
+        }));
+        let err = match RedisFlowStoreBackendFactory.build(&cfg) {
+            Ok(_) => panic!("an unreachable redis URL must fail construction"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("failed to build the Redis flow store"),
+            "got: {err}"
+        );
     }
 }
 
@@ -478,7 +577,7 @@ mod tests {
     fn backend_err_is_downcastable_to_backend_unavailable() {
         let err = backend_err("flowStore.get", "connection refused");
         let unavailable = err
-            .downcast_ref::<crate::extensions::decorate::BackendUnavailable>()
+            .downcast_ref::<rift_mock_core::extensions::decorate::BackendUnavailable>()
             .expect("typed error");
         assert_eq!(unavailable.feature, "flowState");
         assert!(unavailable.detail.contains("flowStore.get"));

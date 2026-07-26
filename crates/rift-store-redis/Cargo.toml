@@ -1,0 +1,33 @@
+[package]
+name = "rift-store-redis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+description = "Redis-backed flow-state store for Rift, registered through the FlowStoreBackendFactory seam."
+readme = "../../README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The `FlowStore`/`FlowStoreBackendFactory` seams and the `RiftFlowStateConfig` this factory reads.
+# Taken without default features for the same reason rift-http-proxy does: a backend crate has no
+# business pulling the engine's scripting or matching feature set into the tree.
+rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-features = false }
+
+redis = { version = "0.26", default-features = false }
+r2d2 = "0.8"
+
+anyhow.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["redis"] }
