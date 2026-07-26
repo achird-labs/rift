@@ -62,7 +62,9 @@ lazy_static = "1.4"
 clap = { workspace = true, features = ["env"] }
 
 # HTTP client (for save command)
-reqwest.workspace = true
+# `stream` (U-12): the https imposter source enforces its size cap while reading, not from a
+# Content-Length header the source itself supplies. No new crate — reqwest is already here.
+reqwest = { workspace = true, features = ["stream"] }
 
 # Utils
 bytes.workspace = true

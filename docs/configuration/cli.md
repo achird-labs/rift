@@ -24,6 +24,98 @@ rift-http-proxy --configfile imposters.json
 rift-http-proxy --port 3525
 ```
 
+
+---
+
+## Imposter Sources
+
+`--imposters` loads imposters from one or more URIs instead of a single local path. Sources are
+merged in the order given, and `POST /admin/reload` re-fetches all of them.
+
+```bash
+# A local file (these three are identical)
+rift-http-proxy --configfile mocks.json
+rift-http-proxy --imposters file:mocks.json
+rift-http-proxy --imposters mocks.json
+
+# A document served over HTTP
+rift-http-proxy --imposters https://config.example.com/imposters.json
+
+# Several sources merged into one running set
+rift-http-proxy --imposters file:base.json,https://config.example.com/team-overrides.json
+```
+
+`--configfile <p>` is sugar for `--imposters file:<p>` and behaves identically; passing both is an
+error. `RIFT_IMPOSTERS` is the environment-variable spelling.
+
+### Built-in schemes
+
+| Scheme | Form | Version token |
+|---|---|---|
+| `file:` | `file:<path>`, or a bare path | none — always re-read |
+| `http:` / `https:` | a full URL | the response `ETag` |
+
+### Merging
+
+Every source contributes its imposters to one set. A port declared by **two** sources is a
+startup error naming both — the alternative, letting the last source win, silently drops an
+imposter the operator asked for. The optional `intercept` and `routes` blocks follow the same
+rule: at most one source may declare each.
+
+### Reload and `ETag`
+
+`POST /admin/reload` re-fetches every source. An `https:` source sends `If-None-Match` with the
+`ETag` it last saw; a `304 Not Modified` is served from cache without re-parsing, and when *every*
+source reports no change the reload returns without touching the running imposters at all:
+
+```json
+{"message": "No source changed; imposters left as they are",
+ "created": 0, "replaced": 0, "stubPatched": 0, "deleted": 0}
+```
+
+When something did change, the existing incremental apply runs: unchanged imposters keep their
+recorded requests, scenario state and response cyclers; only changed ports are patched or replaced.
+
+### What a remote document may not do
+
+A document fetched over the network is not written by someone who already has access to the
+machine running Rift, so two things a local `--configfile` may do are refused for `https:`
+sources:
+
+- **`<% include 'path' %>` and `<%- stringify('path') %>`** — both read a local file. Refused with
+  an error naming the tag.
+- **`_rift.script` `file:` references** — refused, as they are for admin-API-created imposters
+  without `--scripts-dir`.
+
+`<%= process.env.VAR %>` **is** substituted for remote documents: environment is deployment
+configuration the operator supplied to their own process. Note the consequence — a remote source
+you do not control can read your process environment into an imposter response body. Point
+`--imposters` only at hosts you trust as much as the config file they replace.
+
+### Limits
+
+| Limit | Value |
+|---|---|
+| Response body | 10 MB (enforced while reading, not from `Content-Length`) |
+| Request timeout | 30 s |
+| Redirects | followed only while the target stays `http`/`https`; at most 10 hops |
+
+### Adding a scheme
+
+Embedders register their own schemes on the builder:
+
+```rust
+ServerBuilder::from_cli(cli)
+    .imposter_source(Arc::new(MyGitSource::new()))
+    .run()
+    .await
+```
+
+A source declares the schemes it claims via `ImposterSource::schemes`. Claiming a scheme that is
+already registered — including a built-in — is a startup error rather than a silent override.
+Providers return bytes; parsing goes through the same loader the built-ins use, so no scheme can
+grow its own dialect of the config format.
+
 ---
 
 ## CLI Options
@@ -34,7 +126,8 @@ rift-http-proxy [OPTIONS]
 Options:
       --port <PORT>                Admin API port [default: 2525]
       --host <HOST>                Bind hostname [default: 0.0.0.0]
-      --configfile <FILE>          Load imposters from a JSON/YAML file on startup
+      --configfile <FILE>          Load imposters from a JSON/YAML file on startup (sugar for --imposters file:<FILE>)
+      --imposters <URI[,URI...]>   Load imposters from one or more source URIs: file:<path>, a bare path, or https://… (see Imposter Sources below)
       --datadir <DIR>              Directory for persistent imposter storage
       --scripts-dir <DIR>          Root directory for admin-API `file:`/`ref:` script resolution; references that escape it are rejected (unset ⇒ file-backed scripts via the admin API are refused)
       --allow-injection            Enable JavaScript injection in responses (alias: --allowInjection)
@@ -61,7 +154,7 @@ Options:
       --intercept-ca-key <FILE>    PEM CA private key for interception (required with --intercept-ca-cert)
       --intercept-ca-cert-pem <PEM>  Inline PEM CA certificate for interception (with --intercept-ca-key-pem); mutually exclusive with file paths
       --intercept-ca-key-pem <PEM>   Inline PEM CA private key for interception (required with --intercept-ca-cert-pem)
-      --no-parse                   Disable EJS preprocessing of --configfile (alias: --noParse)
+      --no-parse                   Disable EJS preprocessing of --configfile/file: sources (alias: --noParse)
       --formatter <NAME>           Custom config formatter module (no-op; Rift auto-detects JSON/YAML)
       --protofile <FILE>           Custom protocol definitions file (no-op; custom protocols unsupported)
   -h, --help                       Print help

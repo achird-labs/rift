@@ -6,6 +6,7 @@ use crate::config_loader::ConfigSource;
 use crate::extensions::decorate::{ResponsePhase, with_annotation_scope};
 use crate::imposter::ImposterManager;
 use crate::intercept_control::InterceptControl;
+use crate::sources::{ReloadSource, SourceSet};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::service::service_fn;
@@ -34,7 +35,7 @@ pub struct AdminApiServer {
     addr: SocketAddr,
     manager: Arc<ImposterManager>,
     api_key: Option<Arc<String>>,
-    config_source: Option<Arc<ConfigSource>>,
+    config_source: Option<ReloadSource>,
     allow_injection: bool,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
@@ -58,7 +59,15 @@ impl AdminApiServer {
     /// (issue #197). Without it, reload is a no-op.
     #[must_use]
     pub fn with_config_source(mut self, source: ConfigSource) -> Self {
-        self.config_source = Some(Arc::new(source));
+        self.config_source = Some(ReloadSource::Legacy(Arc::new(source)));
+        self
+    }
+
+    /// Set the `--imposters` source set so `POST /admin/reload` re-fetches every source (U-12).
+    /// Replaces any previously-set config source: a server reloads from one place.
+    #[must_use]
+    pub fn with_imposter_sources(mut self, sources: Arc<SourceSet>) -> Self {
+        self.config_source = Some(ReloadSource::Sources(sources));
         self
     }
 
@@ -337,7 +346,7 @@ async fn accept_loop(
     listener: TcpListener,
     manager: Arc<ImposterManager>,
     api_key: Option<Arc<String>>,
-    config_source: Option<Arc<ConfigSource>>,
+    config_source: Option<ReloadSource>,
     allow_injection: bool,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,

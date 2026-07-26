@@ -5,7 +5,7 @@
 //! binary.
 
 use crate::admin_api::{AdminApiServer, DEFAULT_ADMIN_PORT, RunningAdminApi};
-use crate::config_loader::{self, ConfigSource};
+use crate::config_loader::ConfigSource;
 use crate::extensions::metrics;
 use crate::front_door::{CompiledRoutes, RouteTable, RunningFrontDoor, bind_front_door};
 use crate::imposter::{
@@ -13,6 +13,9 @@ use crate::imposter::{
 };
 use crate::injection_gate::GATED_SCRIPT_SURFACES;
 use crate::intercept_control::{InterceptControl, InterceptStartOptions};
+use crate::sources::{
+    self, FileSource, HttpSource, ImposterSource, SourceRef, SourceRegistry, SourceSet,
+};
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
@@ -61,6 +64,14 @@ pub struct Cli {
     /// Directory for persistent imposter storage
     #[arg(long, value_name = "DIR", env = "MB_DATADIR")]
     pub datadir: Option<PathBuf>,
+
+    /// Load imposters from one or more source URIs (U-12), comma-separated. `file:<path>` and a
+    /// bare path read the local filesystem; `https://…` fetches the document over HTTP, honouring
+    /// `ETag`. Multiple sources are merged, and a port declared by two of them is a startup error
+    /// naming both. `POST /admin/reload` re-fetches every source. `--configfile <p>` is sugar for
+    /// `--imposters file:<p>`.
+    #[arg(long, value_name = "URI[,URI...]", env = "RIFT_IMPOSTERS")]
+    pub imposters: Option<String>,
 
     /// Root directory `_rift.script` `file:` references resolve under for admin-API-created
     /// imposters (issue #356). A resolved path that escapes this root is rejected. Without it,
@@ -316,6 +327,7 @@ pub struct ServerBuilder {
     cli: Cli,
     manager: Option<Arc<ImposterManager>>,
     accept_runtimes: Vec<tokio::runtime::Handle>,
+    imposter_sources: Vec<Arc<dyn ImposterSource>>,
 }
 
 impl ServerBuilder {
@@ -326,7 +338,20 @@ impl ServerBuilder {
             cli,
             manager: None,
             accept_runtimes: Vec::new(),
+            imposter_sources: Vec::new(),
         }
+    }
+
+    /// Register an additional [`ImposterSource`] scheme (U-12).
+    ///
+    /// Repeatable. The `file:` and `https:` built-ins are always registered; claiming a scheme
+    /// that is already taken is a startup error rather than a silent override, so an embedder
+    /// that shadows a built-in finds out immediately. This is the seam the enterprise
+    /// `git:`/`s3:`/`registry:` providers attach through.
+    #[must_use]
+    pub fn imposter_source(mut self, source: Arc<dyn ImposterSource>) -> Self {
+        self.imposter_sources.push(source);
+        self
     }
 
     /// Fan imposter accept loops out across per-core worker runtimes (RFC-712, issue #745).
@@ -358,6 +383,7 @@ impl ServerBuilder {
     /// needs the bound addresses (`:0` support) and a graceful shutdown.
     pub async fn start(self) -> anyhow::Result<RunningServer> {
         let cli = self.cli;
+        let extra_sources = self.imposter_sources;
         // Validate `--front-door` before anything else binds (issue #19 / U-11): a malformed
         // address is then a clean, fast failure that never has to unwind an already-bound
         // listener behind it.
@@ -397,11 +423,13 @@ impl ServerBuilder {
 
         let mut intercept_block = None;
         let mut routes_block: Option<RouteTable> = None;
-        if let Some(ref configfile) = cli.configfile {
-            let loaded = load_imposters_from_file(
+        // `--configfile` and `--imposters` converge here: the flag is sugar for a single `file:`
+        // ref, so both spellings run the same fetch, gating and block handling (U-12).
+        let source_set = resolve_source_set(&cli, extra_sources)?;
+        if let Some(set) = &source_set {
+            let loaded = load_imposters_from_sources(
                 &manager,
-                configfile,
-                cli.no_parse,
+                set,
                 cli.allow_injection,
                 &cli_intercept_flags(&cli),
             )
@@ -485,11 +513,11 @@ impl ServerBuilder {
         if let Some(scripts_dir) = cli.scripts_dir {
             server = server.with_scripts_dir(scripts_dir);
         }
-        if let Some(configfile) = cli.configfile {
-            server = server.with_config_source(ConfigSource::File {
-                path: configfile,
-                no_parse: cli.no_parse,
-            });
+        // Reload re-runs whatever boot ran. A source set (`--imposters`, or `--configfile`
+        // desugared into one) re-fetches every source; a bare `--datadir` keeps the original
+        // synchronous directory re-read.
+        if let Some(set) = source_set {
+            server = server.with_imposter_sources(set);
         } else if let Some(datadir) = cli.datadir {
             server = server.with_config_source(ConfigSource::Dir(datadir));
         }
@@ -1089,45 +1117,77 @@ struct ConfigFileStartOptions {
     routes: Option<RouteTable>,
 }
 
-/// Load imposters from a JSON config file, returning the file's optional `intercept` and `routes`
-/// blocks for the caller to start their respective listeners from (issue #655, #19) — both are
-/// parsed and validated here so the whole document is refused as one, before any imposter exists.
-async fn load_imposters_from_file(
+/// Resolve `--imposters` / `--configfile` into the source set the server both boots from and
+/// reloads from (U-12). `Ok(None)` when neither flag was given.
+///
+/// The built-ins are registered before the embedder's own sources, so an embedder that claims
+/// `file:` or `https:` gets a startup error instead of silently shadowing a built-in.
+fn resolve_source_set(
+    cli: &Cli,
+    extra: Vec<Arc<dyn ImposterSource>>,
+) -> anyhow::Result<Option<Arc<SourceSet>>> {
+    let refs = match (&cli.imposters, &cli.configfile) {
+        (Some(_), Some(_)) => anyhow::bail!(
+            "--imposters and --configfile are two spellings of the same thing (`--configfile p` \
+             is `--imposters file:p`); pass only one"
+        ),
+        (Some(list), None) => sources::parse_uri_list(list),
+        // The sugar. Spelled `file:` explicitly so a path containing `://` cannot be re-read as
+        // some other scheme on the way back through `SourceRef::scheme`.
+        (None, Some(path)) => vec![SourceRef::new(format!("file:{}", path.display()))],
+        (None, None) => return Ok(None),
+    };
+    if refs.is_empty() {
+        return Ok(None);
+    }
+
+    let mut registry = SourceRegistry::new();
+    registry.register(Arc::new(FileSource::new(cli.no_parse)))?;
+    registry.register(Arc::new(HttpSource::new()?))?;
+    for source in extra {
+        registry.register(source)?;
+    }
+    Ok(Some(Arc::new(SourceSet::new(refs, registry))))
+}
+
+/// Boot-time load from every `--imposters` source, with the same refusals `--configfile` has
+/// always applied — injection gating and the intercept-source conflict — evaluated across the
+/// merged set before a single imposter exists, so a rejected document cannot half-load.
+async fn load_imposters_from_sources(
     manager: &Arc<ImposterManager>,
-    path: &PathBuf,
-    no_parse: bool,
+    set: &SourceSet,
     allow_injection: bool,
     intercept_flags: &[&str],
 ) -> anyhow::Result<ConfigFileStartOptions> {
-    info!("Loading imposters from configfile: {:?}", path);
+    for source_ref in &set.refs {
+        info!("Loading imposters from source: {}", source_ref.uri);
+    }
+    let merged = set.fetch_all().await?;
 
-    let loaded = config_loader::load_configs_full(&ConfigSource::File {
-        path: path.clone(),
-        no_parse,
-    })?;
-
-    // Refuse before creating anything: a gated configfile must not half-load (issue #612). The
-    // intercept block is validated in the same breath, so a file that cannot bring up its listener
-    // never half-applies its imposters either.
-    if let Some(message) = configfile_injection_error(path, &loaded.imposters, allow_injection) {
+    // A label for the refusal messages, which were written for a single `--configfile` path.
+    let label = PathBuf::from(
+        set.refs
+            .iter()
+            .map(|r| r.uri.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    if let Some(message) = configfile_injection_error(&label, &merged.imposters, allow_injection) {
         anyhow::bail!(message);
     }
-    if let Some(block) = &loaded.intercept {
-        if let Some(message) = intercept_source_conflict_error(path, intercept_flags) {
+    if let Some(block) = &merged.intercept {
+        if let Some(message) = intercept_source_conflict_error(&label, intercept_flags) {
             anyhow::bail!(message);
         }
         if let Some(message) =
-            configfile_intercept_injection_error(path, &block.rules, allow_injection)
+            configfile_intercept_injection_error(&label, &block.rules, allow_injection)
         {
             anyhow::bail!(message);
         }
     }
 
-    for config in loaded.imposters {
-        info!(
-            "Creating imposter on port {:?} from configfile",
-            config.port
-        );
+    for config in merged.imposters {
+        info!("Creating imposter on port {:?} from source", config.port);
         match manager.create_imposter(config).await {
             Ok(port) => info!("Created imposter on port {}", port),
             Err(e) => error!("Failed to create imposter: {}", e),
@@ -1135,8 +1195,8 @@ async fn load_imposters_from_file(
     }
 
     Ok(ConfigFileStartOptions {
-        intercept: loaded.intercept,
-        routes: loaded.routes,
+        intercept: merged.intercept,
+        routes: merged.routes,
     })
 }
 
@@ -1737,12 +1797,24 @@ mod tests {
     // drive the real loaders, so dropping the gate call (or bailing after the create loop) fails
     // here even though every helper test would still pass.
 
+    /// What `--configfile <p>` desugars to, so these tests exercise the path the flag now takes.
+    fn single_file_source(path: &Path) -> SourceSet {
+        let mut registry = SourceRegistry::new();
+        registry
+            .register(Arc::new(FileSource::new(false)))
+            .expect("file source registers");
+        SourceSet::new(
+            vec![SourceRef::new(format!("file:{}", path.display()))],
+            registry,
+        )
+    }
+
     fn write_json(path: &Path, value: serde_json::Value) {
         std::fs::write(path, serde_json::to_string(&value).expect("json")).expect("write");
     }
 
     #[tokio::test]
-    async fn load_imposters_from_file_aborts_before_creating_any_imposter() {
+    async fn a_gated_file_source_aborts_before_creating_any_imposter() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
         // A clean imposter listed *before* the offender: if the gate ran per-imposter inside the
@@ -1758,7 +1830,8 @@ mod tests {
         );
 
         let manager = Arc::new(ImposterManager::new());
-        let err = load_imposters_from_file(&manager, &path, false, false, &[])
+        let set = single_file_source(&path);
+        let err = load_imposters_from_sources(&manager, &set, false, &[])
             .await
             .expect_err("a gated configfile must abort startup");
         assert!(err.to_string().contains("--allowInjection"), "got: {err}");
@@ -1778,13 +1851,14 @@ mod tests {
     // The literal repro from the issue's Evidence section: the shipped example is refused by the
     // admin API without --allowInjection, and must now be refused through --configfile too.
     #[tokio::test]
-    async fn load_imposters_from_file_refuses_the_shipped_latency_example() {
+    async fn a_file_source_refuses_the_shipped_latency_example() {
         let example =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/latency-testing.json");
         assert!(example.exists(), "fixture missing: {}", example.display());
 
         let manager = Arc::new(ImposterManager::new());
-        let err = load_imposters_from_file(&manager, &example, false, false, &[])
+        let set = single_file_source(&example);
+        let err = load_imposters_from_sources(&manager, &set, false, &[])
             .await
             .expect_err("examples/latency-testing.json uses a JS-function wait; it must be gated");
         assert!(err.to_string().contains("--allowInjection"), "got: {err}");
