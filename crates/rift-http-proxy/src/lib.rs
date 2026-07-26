@@ -39,6 +39,11 @@ pub mod intercept_control;
 // Imposter config loading (--configfile / --datadir), shared with hot-reload (issue #197)
 pub mod config_loader;
 
+/// Imposter sources (U-12): `--imposters <uri,...>` and the `ImposterSource` SPI embedders
+/// register their own schemes through. `file:`/`https:` are built in; parsing is shared with
+/// [`config_loader`] so no scheme can grow its own dialect.
+pub mod sources;
+
 // `rift script check` / `rift script run` (issue #360): scripting DX outside a running server
 pub mod script_cli;
 

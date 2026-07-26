@@ -139,7 +139,7 @@ fn reload_is_gated(configs: &[crate::imposter::ImposterConfig], allow_injection:
 /// requests, scenario state, response cyclers); only changed ports are patched or replaced.
 pub async fn handle_reload(
     manager: Arc<ImposterManager>,
-    config_source: Option<Arc<crate::config_loader::ConfigSource>>,
+    config_source: Option<crate::sources::ReloadSource>,
     allow_injection: bool,
 ) -> Response<Full<Bytes>> {
     let Some(source) = config_source else {
@@ -149,30 +149,76 @@ pub async fn handle_reload(
         );
     };
 
-    // Parse before touching state — a bad config leaves the running imposters intact.
+    // Parse/fetch before touching state — a bad config leaves the running imposters intact.
     //
     // On the blocking pool (issue #550): `load_configs` is synchronous — many small `std::fs`
     // reads plus EJS/regex/serde work — and unlike startup, reload is network-triggered and
     // repeatable, so a large datadir or a stalled mount would pin a runtime worker for the whole
     // read. Awaited here, so the parse still completes before anything mutates.
-    let loaded =
-        match tokio::task::spawn_blocking(move || crate::config_loader::load_configs_full(&source))
+    let (loaded, all_unchanged) = match source {
+        crate::sources::ReloadSource::Legacy(source) => {
+            match tokio::task::spawn_blocking(move || {
+                crate::config_loader::load_configs_full(&source)
+            })
             .await
-        {
-            Ok(Ok(loaded)) => loaded,
-            Ok(Err(e)) => {
+            {
+                Ok(Ok(loaded)) => (loaded, false),
+                Ok(Err(e)) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Reload failed (imposters unchanged): {e}"),
+                    );
+                }
+                Err(e) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Reload task failed: {e}"),
+                    );
+                }
+            }
+        }
+        // U-12: each source's own fetch is already async and does its own I/O budgeting
+        // (`FileSource` hops to the blocking pool; `HttpSource` is non-blocking), so this arm
+        // must not be wrapped in `spawn_blocking`.
+        crate::sources::ReloadSource::Sources(set) => match set.fetch_all().await {
+            Ok(merged) => {
+                let unchanged = merged.all_unchanged;
+                (
+                    crate::config_loader::LoadedConfig {
+                        imposters: merged.imposters,
+                        // Boot-only blocks; reload deliberately does not re-apply them, and the
+                        // warning below is driven off `intercept` being present in the document.
+                        intercept: merged.intercept,
+                        routes: merged.routes,
+                    },
+                    unchanged,
+                )
+            }
+            Err(e) => {
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &format!("Reload failed (imposters unchanged): {e}"),
                 );
             }
-            Err(e) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Reload task failed: {e}"),
-                );
-            }
-        };
+        },
+    };
+
+    // Every source proved its content unmoved (an HTTP 304, a matching sha), so there is nothing
+    // to apply. Returning early is not just an optimisation: `apply_config` on an identical
+    // document is still a diff pass over every imposter, and a poller doing that on a fixed
+    // interval is exactly the churn `ETag` support exists to avoid.
+    if all_unchanged {
+        return json_response(
+            StatusCode::OK,
+            &serde_json::json!({
+                "message": "No source changed; imposters left as they are",
+                "created": 0,
+                "replaced": 0,
+                "stubPatched": 0,
+                "deleted": 0,
+            }),
+        );
+    }
 
     // The `intercept` block is applied at boot only (issue #655): re-seeding would duplicate or
     // clobber rules added at runtime, and rebinding the listener is a lifecycle change reload does
@@ -349,10 +395,12 @@ mod tests {
             ]}"#,
         )
         .expect("write config");
-        let source = Arc::new(crate::config_loader::ConfigSource::File {
-            path,
-            no_parse: false,
-        });
+        let source = crate::sources::ReloadSource::Legacy(Arc::new(
+            crate::config_loader::ConfigSource::File {
+                path,
+                no_parse: false,
+            },
+        ));
 
         let manager = Arc::new(ImposterManager::new());
         let resp = handle_reload(manager.clone(), Some(source), false).await;
@@ -398,10 +446,12 @@ mod tests {
         )
         .expect("write config");
 
-        let source = Arc::new(crate::config_loader::ConfigSource::File {
-            path: config_path,
-            no_parse: false,
-        });
+        let source = crate::sources::ReloadSource::Legacy(Arc::new(
+            crate::config_loader::ConfigSource::File {
+                path: config_path,
+                no_parse: false,
+            },
+        ));
 
         let manager = Arc::new(ImposterManager::new());
 
@@ -465,10 +515,12 @@ mod tests {
             ]}]}"#,
         )
         .expect("write clean config");
-        let source = Arc::new(crate::config_loader::ConfigSource::File {
-            path: path.clone(),
-            no_parse: false,
-        });
+        let source = crate::sources::ReloadSource::Legacy(Arc::new(
+            crate::config_loader::ConfigSource::File {
+                path: path.clone(),
+                no_parse: false,
+            },
+        ));
 
         let manager = Arc::new(ImposterManager::new());
         let resp = handle_reload(manager.clone(), Some(source.clone()), false).await;
@@ -527,10 +579,12 @@ mod tests {
             ]}]}"#,
         )
         .expect("write scripted config");
-        let source = Arc::new(crate::config_loader::ConfigSource::File {
-            path,
-            no_parse: false,
-        });
+        let source = crate::sources::ReloadSource::Legacy(Arc::new(
+            crate::config_loader::ConfigSource::File {
+                path,
+                no_parse: false,
+            },
+        ));
 
         let manager = Arc::new(ImposterManager::new());
         let resp = handle_reload(manager.clone(), Some(source), true).await;

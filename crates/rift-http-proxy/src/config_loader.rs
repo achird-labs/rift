@@ -42,6 +42,23 @@ static EJS_STMT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)<%[^=].*?%>").expect("EJS statement pattern is a valid constant regex")
 });
 
+/// Whether EJS tags that read the local filesystem are honoured.
+///
+/// `--configfile` documents are authored by someone who already has filesystem access, so
+/// `<% include %>` / `<%- stringify %>` are resolved verbatim — the same rationale that makes
+/// [`ScriptBaseDir::ConfigRelative`] unrestricted. A document fetched over the network (U-12's
+/// `https:` source) has no such author, so those two tags are refused rather than resolved:
+/// honouring them would let whoever serves the document read arbitrary local files. `<%=
+/// process.env.X %>` still substitutes in both — env is deployment config the operator chose to
+/// expose to their own process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EjsFileAccess {
+    /// Local document: `include` and `stringify` resolve against the document's directory.
+    Allowed,
+    /// Remote document: `include` and `stringify` are a load error naming the tag.
+    Denied,
+}
+
 /// Where the running imposters were loaded from, retained so reload can re-read the same source.
 #[derive(Debug, Clone)]
 pub enum ConfigSource {
@@ -95,15 +112,46 @@ fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<LoadedConfig> {
     let content = if no_parse {
         raw
     } else {
-        preprocess_ejs(&raw, path)?
+        preprocess_ejs(&raw, path, EjsFileAccess::Allowed)?
     };
 
+    // `_rift.script` `file:`/`ref:` sources (issue #356) resolve relative to the config file's
+    // own directory, so a parse error and a resolve error are both surfaced up front, and
+    // hot-reload (which re-runs this loader) automatically picks up edits to referenced scripts.
+    let base = ScriptBaseDir::ConfigRelative(
+        path.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+    );
+    parse_document(&content, &base)
+}
+
+/// Parse a document fetched from a source that is not the local filesystem (U-12's `https:`
+/// built-in, and any third-party [`crate::sources::ImposterSource`]).
+///
+/// Format sniffing, the wrapper/single/array shapes, and the `intercept`/`routes` block rules are
+/// the *same* code the `--configfile` path runs, so a document behaves identically whichever
+/// source delivered it. The two deliberate differences are both fail-closed, and both exist
+/// because a remote document's author is not someone who already has local access:
+/// - EJS `include`/`stringify` are refused ([`EjsFileAccess::Denied`]);
+/// - `_rift.script` `file:` references are refused ([`ScriptBaseDir::Unconfigured`]).
+///
+/// `uri` is used only to name the source in error messages.
+pub fn parse_remote_document(content: &str, uri: &str) -> anyhow::Result<LoadedConfig> {
+    let processed = preprocess_ejs(content, Path::new(uri), EjsFileAccess::Denied)?;
+    parse_document(&processed, &ScriptBaseDir::Unconfigured)
+}
+
+/// The shared parse path: format sniffing, the Mountebank document shapes, and script resolution
+/// against whatever base the caller's source implies. Everything above this function differs per
+/// source (bytes off a disk, bytes off a socket); everything below it must not.
+fn parse_document(content: &str, base: &ScriptBaseDir) -> anyhow::Result<LoadedConfig> {
     let trimmed = content.trim_start();
     let mut intercept = None;
     let mut routes = None;
     let mut configs: Vec<ImposterConfig> = if trimmed.starts_with('{') {
         // Single imposter, or a `{ "imposters": [...] }` wrapper (Mountebank format).
-        let value: serde_json::Value = serde_json::from_str(&content)?;
+        let value: serde_json::Value = serde_json::from_str(content)?;
         match value.get("imposters") {
             Some(imposters) => {
                 // Only the wrapper carries siblings, so this is the one shape with somewhere to
@@ -150,22 +198,13 @@ fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<LoadedConfig> {
             None => vec![serde_json::from_value(value)?],
         }
     } else if trimmed.starts_with('[') {
-        serde_json::from_str(&content)?
+        serde_json::from_str(content)?
     } else {
-        serde_yaml::from_str(&content)?
+        serde_yaml::from_str(content)?
     };
 
-    // Resolve `_rift.script` `file:`/`ref:` sources (issue #356) relative to the config file's
-    // own directory, before the configs are handed to the caller — so a parse error and a
-    // resolve error are both surfaced up front, and hot-reload (which re-runs this loader)
-    // automatically picks up edits to referenced script files.
-    let base = ScriptBaseDir::ConfigRelative(
-        path.parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf(),
-    );
     for config in &mut configs {
-        resolve_scripts(config, &base)?;
+        resolve_scripts(config, base)?;
     }
     Ok(LoadedConfig {
         imposters: configs,
@@ -204,9 +243,34 @@ fn load_dir(dir: &Path) -> anyhow::Result<Vec<ImposterConfig>> {
 ///
 /// Any other `<%= expr %>` token is replaced with an empty string and logged as a warning.
 /// `<% expr %>` (without `=`) statements (e.g., `<% for (...) %>`) are removed and logged.
-fn preprocess_ejs(content: &str, config_path: &Path) -> anyhow::Result<String> {
+fn preprocess_ejs(
+    content: &str,
+    config_path: &Path,
+    file_access: EjsFileAccess,
+) -> anyhow::Result<String> {
     if !content.contains("<%") {
         return Ok(content.to_string());
+    }
+
+    // Fail closed before any resolution: a remote document that names a local file is refused
+    // outright, naming the tag, rather than having it quietly stripped by the `<% ... %>`
+    // catch-all further down (which would produce a silently different config, not an error).
+    if file_access == EjsFileAccess::Denied {
+        for (re, tag) in [
+            (&*EJS_INCLUDE_RE, "<% include ... %>"),
+            (&*EJS_STRINGIFY_RE, "<%- stringify(...) %>"),
+        ] {
+            if let Some(cap) = re.captures(content) {
+                anyhow::bail!(
+                    "`{tag}` reads a local file and is not honoured in a document fetched from \
+                     {} — it names '{}'. Only local `--configfile` documents may include local \
+                     files; use `--configfile` if the template must, or inline the content at \
+                     the source.",
+                    config_path.display(),
+                    &cap[1],
+                );
+            }
+        }
     }
 
     let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
@@ -667,7 +731,10 @@ mod tests {
     fn test_ejs_no_tokens_passthrough() {
         let content = r#"{"imposters": []}"#;
         let path = PathBuf::from("config.json");
-        assert_eq!(preprocess_ejs(content, &path).unwrap(), content);
+        assert_eq!(
+            preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap(),
+            content
+        );
     }
 
     #[test]
@@ -675,7 +742,7 @@ mod tests {
         unsafe { std::env::set_var("RIFT_TEST_HOST", "myhost") };
         let content = r#"{"body": "<%= process.env.RIFT_TEST_HOST %>"}"#;
         let path = PathBuf::from("config.json");
-        let result = preprocess_ejs(content, &path).unwrap();
+        let result = preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap();
         assert_eq!(result, r#"{"body": "myhost"}"#);
         unsafe { std::env::remove_var("RIFT_TEST_HOST") };
     }
@@ -685,7 +752,7 @@ mod tests {
         unsafe { std::env::remove_var("RIFT_TEST_UNSET_VAR") };
         let content = r#"{"port": "<%= process.env.RIFT_TEST_UNSET_VAR || '4545' %>"}"#;
         let path = PathBuf::from("config.json");
-        let result = preprocess_ejs(content, &path).unwrap();
+        let result = preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap();
         assert_eq!(result, r#"{"port": "4545"}"#);
     }
 
@@ -694,7 +761,7 @@ mod tests {
         unsafe { std::env::set_var("RIFT_TEST_PORT", "8080") };
         let content = r#"{"port": "<%= process.env.RIFT_TEST_PORT || '4545' %>"}"#;
         let path = PathBuf::from("config.json");
-        let result = preprocess_ejs(content, &path).unwrap();
+        let result = preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap();
         assert_eq!(result, r#"{"port": "8080"}"#);
         unsafe { std::env::remove_var("RIFT_TEST_PORT") };
     }
@@ -705,7 +772,7 @@ mod tests {
         std::fs::write(dir.path().join("partial.json"), r#"{"key": "value"}"#).unwrap();
         let content = r#"<% include 'partial.json' %>"#.to_string();
         let config_path = dir.path().join("config.ejs");
-        let result = preprocess_ejs(&content, &config_path).unwrap();
+        let result = preprocess_ejs(&content, &config_path, EjsFileAccess::Allowed).unwrap();
         assert_eq!(result, r#"{"key": "value"}"#);
     }
 
@@ -715,7 +782,7 @@ mod tests {
         std::fs::write(dir.path().join("partial.json"), r#"[1,2,3]"#).unwrap();
         let content = r#"<% include partial.json %>"#;
         let config_path = dir.path().join("config.ejs");
-        let result = preprocess_ejs(content, &config_path).unwrap();
+        let result = preprocess_ejs(content, &config_path, EjsFileAccess::Allowed).unwrap();
         assert_eq!(result, "[1,2,3]");
     }
 
@@ -723,7 +790,7 @@ mod tests {
     fn test_ejs_missing_include_is_fatal_error() {
         let content = r#"<% include 'nonexistent.json' %>"#;
         let path = PathBuf::from("config.json");
-        let result = preprocess_ejs(content, &path);
+        let result = preprocess_ejs(content, &path, EjsFileAccess::Allowed);
         assert!(result.is_err(), "missing include file should return Err");
         assert!(
             result.unwrap_err().to_string().contains("nonexistent.json"),
@@ -743,7 +810,7 @@ mod tests {
         .unwrap();
         let content = r#"{"port": 9000, "protocol": "http", "stubs": [{"responses": [{"inject": "<%- stringify('inject.js') %>"}]}]}"#;
         let config_path = dir.path().join("config.ejs");
-        let processed = preprocess_ejs(content, &config_path).unwrap();
+        let processed = preprocess_ejs(content, &config_path, EjsFileAccess::Allowed).unwrap();
 
         // The substituted content must keep the surrounding JSON valid.
         let processed_value: serde_json::Value =
@@ -774,7 +841,7 @@ mod tests {
     fn ejs_stringify_missing_file_is_fatal_error() {
         let content = r#"{"inject": "<%- stringify('nope-355.js') %>"}"#;
         let path = PathBuf::from("config.json");
-        let result = preprocess_ejs(content, &path);
+        let result = preprocess_ejs(content, &path, EjsFileAccess::Allowed);
         assert!(result.is_err(), "missing stringify file should return Err");
         assert!(
             result.unwrap_err().to_string().contains("nope-355.js"),
@@ -792,7 +859,7 @@ mod tests {
         let content = r#"{"a": "<%- stringify('inject.js') %>"}<% if (x) { %><% } %>"#;
         let config_path = dir.path().join("config.ejs");
         assert_eq!(
-            preprocess_ejs(content, &config_path).unwrap(),
+            preprocess_ejs(content, &config_path, EjsFileAccess::Allowed).unwrap(),
             r#"{"a": "hi"}"#
         );
     }
@@ -801,14 +868,20 @@ mod tests {
     fn ejs_statement_blocks_are_stripped() {
         let content = r#"{"a": 1<% for (var i=0;i<3;i++) { %><% } %>}"#;
         let path = PathBuf::from("config.json");
-        assert_eq!(preprocess_ejs(content, &path).unwrap(), r#"{"a": 1}"#);
+        assert_eq!(
+            preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap(),
+            r#"{"a": 1}"#
+        );
     }
 
     #[test]
     fn ejs_statement_strip_spans_newlines() {
         let content = "{\"a\": 1<% if (x) {\n  y();\n} %>}";
         let path = PathBuf::from("config.json");
-        assert_eq!(preprocess_ejs(content, &path).unwrap(), r#"{"a": 1}"#);
+        assert_eq!(
+            preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap(),
+            r#"{"a": 1}"#
+        );
     }
 
     #[test]

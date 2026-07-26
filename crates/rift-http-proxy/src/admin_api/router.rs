@@ -4,9 +4,9 @@
 
 use crate::admin_api::handlers::{imposters, intercept, scenarios, stubs, system};
 use crate::admin_api::types::{error_response, get_base_url, not_found};
-use crate::config_loader::ConfigSource;
 use crate::imposter::ImposterManager;
 use crate::intercept_control::InterceptControl;
+use crate::sources::ReloadSource;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -75,7 +75,7 @@ impl ImposterRoute {
 pub async fn route_request(
     req: Request<Incoming>,
     manager: Arc<ImposterManager>,
-    config_source: Option<Arc<ConfigSource>>,
+    config_source: Option<ReloadSource>,
     allow_injection: bool,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
@@ -146,7 +146,7 @@ async fn route_by_path(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
-    config_source: Option<Arc<ConfigSource>>,
+    config_source: Option<ReloadSource>,
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
