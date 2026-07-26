@@ -384,6 +384,11 @@ impl ServerBuilder {
     pub async fn start(self) -> anyhow::Result<RunningServer> {
         let cli = self.cli;
         let extra_sources = self.imposter_sources;
+        // Refuse a blank `--api-key` before anything binds (issue #844). Same reasoning as the
+        // front-door check below, with a security edge: a blank key enables the auth gate and then
+        // authenticates every request, so the admin plane must never reach the accept loop in that
+        // state.
+        crate::admin_api::validate_admin_api_key(cli.api_key.as_deref())?;
         // Validate `--front-door` before anything else binds (issue #19 / U-11): a malformed
         // address is then a clean, fast failure that never has to unwind an already-bound
         // listener behind it.

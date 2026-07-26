@@ -102,6 +102,13 @@ impl AdminApiServer {
     /// Bind the listener (`:0` is fine) and start serving on the current runtime, returning a
     /// handle that reports the bound address and can be shut down gracefully (issue #342).
     pub async fn bind(self) -> anyhow::Result<RunningAdminApi> {
+        // The third door onto this server, after the CLI and the C-ABI: an embedder building an
+        // `AdminApiServer` directly (documented in docs/embedding/server.md). Without this check a
+        // blank key here is caught only by `api_key_matches` failing closed, which is safe but
+        // silent — the embedder would get a server that 401s everything while the log below claims
+        // authentication is enabled. Checking at the one point all three doors converge on makes
+        // the diagnosis loud wherever the key came from (issue #844).
+        validate_admin_api_key(self.api_key.as_deref().map(String::as_str))?;
         let listener = TcpListener::bind(self.addr).await?;
         let local_addr = listener.local_addr()?;
         info!(
@@ -588,7 +595,42 @@ async fn accept_loop(
 /// (issue #548). `ConstantTimeEq` compares every byte regardless of where the
 /// mismatch is; the length check it performs first is not secret.
 fn api_key_matches(provided: &str, expected: &str) -> bool {
+    // Fail closed on a blank configured key (issue #844). A request with no `authorization` header
+    // reaches here as `""`, so comparing it against a blank key returns true and authenticates
+    // everyone — on the configuration that most looks like it should fail closed. A classifier that
+    // cannot tell callers apart must treat them as unauthenticated.
+    //
+    // This early return branches only on the SERVER's configured key, never on the caller-supplied
+    // one, so it leaks nothing about the secret and leaves the constant-time property from #548
+    // intact for the comparison that matters.
+    if expected.trim().is_empty() {
+        return false;
+    }
     provided.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
+/// Reject a blank admin API key where it is configured (issue #844).
+///
+/// A blank key is a misconfiguration, not a key: `Some("")` switches the auth gate on, and a
+/// request with no `Authorization` header also degrades to `""`, so the gate then matches everyone.
+/// Rejecting rather than normalising to "no auth" is deliberate — a silent downgrade leaves the
+/// operator believing a key is in force. Whitespace-only counts as blank; a key that merely
+/// *contains* spaces is valid and is never trimmed for comparison.
+///
+/// See the CHANGELOG entry and `docs/configuration/cli.md` for the operator-facing account of how
+/// a blank value gets configured in the first place.
+pub fn validate_admin_api_key(api_key: Option<&str>) -> anyhow::Result<()> {
+    if let Some(key) = api_key
+        && key.trim().is_empty()
+    {
+        anyhow::bail!(
+            "the admin API key (`--api-key` / `MB_APIKEY` / `apiKey`) is set to a blank value. \
+             That would enable the auth gate and then accept every unauthenticated request, \
+             leaving the admin API open while reporting as protected. Set a real token, or omit \
+             it entirely to run the admin API explicitly unauthenticated."
+        );
+    }
+    Ok(())
 }
 
 /// Box a `Full<Bytes>` response into the streaming-unified `AdminBody` (issue #461), so the normal
@@ -679,9 +721,73 @@ mod tests {
     #[test]
     fn api_key_matches_rejects_empty_against_nonempty() {
         assert!(!api_key_matches("", "s3cret-token"));
-        // Two empty strings are trivially equal — no key configured is handled
-        // by the `Some(key)` guard at the call site, not here.
-        assert!(api_key_matches("", ""));
+    }
+
+    // Issue #844: this used to assert the OPPOSITE — that two empty strings match — on the
+    // reasoning that "no key configured is handled by the `Some(key)` guard at the call site".
+    // `Some("")` is `Some`, so that guard does not fire: the gate switched ON and then
+    // authenticated every anonymous request, because a missing `authorization` header also
+    // degrades to `""`. A security classifier that cannot identify a caller must fail closed, so a
+    // blank configured key now matches nothing. `validate_admin_api_key` rejects that config long
+    // before a request arrives; this is the backstop for an entry point that forgets to call it.
+    #[test]
+    fn api_key_matches_fails_closed_on_a_blank_expected_key() {
+        assert!(
+            !api_key_matches("", ""),
+            "a blank configured key must not authenticate an anonymous request"
+        );
+        assert!(!api_key_matches("anything", ""));
+        assert!(!api_key_matches("", "   "));
+        assert!(
+            !api_key_matches("   ", "   "),
+            "a whitespace-only key is blank too, and must not authenticate its own echo"
+        );
+    }
+
+    // Issue #844 AC1/AC2: the shared validator both config boundaries use. A blank key is a
+    // misconfiguration to reject loudly, never a key and never a silent downgrade to "no auth" —
+    // downgrading would leave the operator believing a key is in force.
+    #[test]
+    fn blank_api_key_is_rejected() {
+        // `\u{00a0}` (non-breaking space) is included deliberately: `str::trim` uses
+        // `char::is_whitespace`, so it counts as blank — and a non-breaking space is exactly the
+        // kind of thing that survives a copy-paste out of a rendered config or a wiki page.
+        for blank in ["", " ", "   ", "\t", "\n", " \t\n ", "\u{00a0}"] {
+            let err = validate_admin_api_key(Some(blank))
+                .expect_err("a blank api key must be rejected")
+                .to_string();
+            assert!(
+                err.contains("--api-key"),
+                "the error must name the flag an operator would fix, got: {err}"
+            );
+        }
+    }
+
+    // Issue #844 AC4: the fix must not change either working configuration — a real key, or no key
+    // at all (explicitly unauthenticated).
+    #[test]
+    fn a_real_or_absent_api_key_is_accepted() {
+        assert!(validate_admin_api_key(Some("s3cret-token")).is_ok());
+        assert!(
+            validate_admin_api_key(Some(" padded ")).is_ok(),
+            "a key with surrounding spaces is unusual but not blank; it stays a valid key"
+        );
+        assert!(
+            validate_admin_api_key(None).is_ok(),
+            "no key at all remains a supported, explicitly unauthenticated configuration"
+        );
+    }
+
+    // Issue #844: a key that is not blank keeps matching exactly as before, including the
+    // surrounding-whitespace case — the validator allows it, so the comparison must too, byte for
+    // byte and without trimming.
+    #[test]
+    fn a_padded_key_still_matches_byte_for_byte() {
+        assert!(api_key_matches(" padded ", " padded "));
+        assert!(
+            !api_key_matches("padded", " padded "),
+            "the comparison must not trim; a trimmed guess is a different key"
+        );
     }
 }
 

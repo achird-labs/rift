@@ -2386,3 +2386,77 @@ fn ffi_serve_admin_failure_after_intercept_start_leaves_no_listener() {
         drop(occupied);
     }
 }
+
+// Issue #844: a blank `apiKey` used to switch the auth gate ON and then authenticate every
+// anonymous request. This is the boundary that matters most for the SDKs: they all reach the admin
+// plane through `rift_serve_admin`, and the realistic trigger is plumbing rather than intent —
+// `apiKey(getProperty("rift.apikey", ""))`, or a Helm value that renders empty. Rejecting here
+// fixes it once for all four SDKs instead of four guards that can each drift.
+#[test]
+fn ffi_serve_admin_rejects_a_blank_api_key() {
+    unsafe {
+        for blank in ["", "   "] {
+            let h = rift_start();
+            let opts = cstr(&format!(
+                r#"{{"host":"127.0.0.1","port":0,"apiKey":{}}}"#,
+                serde_json::json!(blank)
+            ));
+            assert!(
+                rift_serve_admin(h, opts.as_ptr()).is_null(),
+                "a blank apiKey must be refused, not accepted as a key that matches everyone"
+            );
+
+            let err = rift_last_error();
+            assert!(!err.is_null(), "a refused blank apiKey records last_error");
+            let msg = take_json(err);
+            assert!(
+                msg.contains("api-key") || msg.contains("apiKey"),
+                "the rejection must name the option an embedder would fix, got: {msg}"
+            );
+
+            rift_stop(h);
+        }
+    }
+}
+
+// Issue #844 AC4: a real key over the same path still works and is still enforced — the fix must
+// not weaken the configuration that was already correct.
+#[test]
+fn ffi_serve_admin_still_enforces_a_real_api_key() {
+    unsafe {
+        let h = rift_start();
+        let started = serve_admin(
+            h,
+            r#"{"host":"127.0.0.1","port":0,"apiKey":"s3cret-token"}"#,
+        );
+        let admin_url = started["adminUrl"].as_str().expect("adminUrl").to_string();
+
+        let anonymous = rt().block_on(async {
+            reqwest::Client::new()
+                .get(format!("{admin_url}/imposters"))
+                .send()
+                .await
+                .expect("request")
+                .status()
+                .as_u16()
+        });
+        assert_eq!(anonymous, 401, "anonymous must still be rejected");
+
+        let authorized = rt().block_on(async {
+            reqwest::Client::new()
+                .get(format!("{admin_url}/imposters"))
+                .header("authorization", "s3cret-token")
+                .send()
+                .await
+                .expect("request")
+                .status()
+                .as_u16()
+        });
+        assert_eq!(
+            authorized, 200,
+            "the configured key must still authenticate"
+        );
+
+        rift_stop(h);
+    }
+}

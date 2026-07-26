@@ -25,6 +25,9 @@ When Rift is started with `--api-key <TOKEN>` (or `MB_APIKEY`), every admin API 
 token in the `Authorization` header. Requests without a matching token receive `401 Unauthorized`.
 Data-plane traffic — direct imposter ports and the `/__rift/:port/...` gateway — is not gated.
 
+A blank token is a startup error, not a key: it would enable this gate and then authenticate every
+request. Omit the option to run the admin API explicitly unauthenticated.
+
 ```bash
 curl -H "Authorization: <TOKEN>" http://localhost:2525/imposters
 ```
