@@ -12,7 +12,7 @@ use crate::imposter::{
     ImposterConfig, ImposterManager, ScriptBaseDir, TlsDefaults, resolve_scripts,
 };
 use crate::injection_gate::GATED_SCRIPT_SURFACES;
-use crate::intercept_control::{InterceptControl, InterceptStartOptions};
+use crate::intercept_control::{InterceptAuth, InterceptControl, InterceptStartOptions};
 use crate::sources::{
     self, FileSource, HttpSource, ImposterSource, SourceRef, SourceRegistry, SourceSet,
 };
@@ -199,6 +199,12 @@ pub struct Cli {
     /// unset. Configure rules and export the CA via the admin API's `/intercept/*` routes.
     #[arg(long, value_name = "PORT", env = "RIFT_INTERCEPT_PORT")]
     pub intercept_port: Option<u16>,
+
+    /// Require `Proxy-Authorization: Basic <user:pass>` on every `CONNECT` to the intercept
+    /// listener (issue #878). Off when unset — the proxy is then open, which is what it has always
+    /// been. The value is `user:pass`; a value with no `:` is a startup error.
+    #[arg(long, value_name = "USER:PASS", env = "RIFT_INTERCEPT_AUTH")]
+    pub intercept_auth: Option<String>,
 
     /// PEM CA certificate for interception. Used with `--intercept-ca-key`; a CA is generated
     /// in-memory when both are omitted.
@@ -439,6 +445,40 @@ impl ServerBuilder {
             cli.api_key.as_deref(),
             cli.require_admin_auth.into(),
         )?;
+        // The intercept listener gets the same judgement (issue #878) — it is a TLS-MITM proxy, so
+        // an exposed keyless one is worse than an exposed keyless admin plane, not better.
+        //
+        // Only the `--intercept-port` spelling is checked here. The config file's `intercept` block
+        // is not loaded yet, and it is checked at its own start site below; the two can never both
+        // be present, because supplying both is already refused when the file is loaded.
+        let cli_intercept_auth = parse_intercept_auth(cli.intercept_auth.as_deref())?;
+        if cli_intercept_auth.is_some() && cli.intercept_port.is_none() {
+            // A credential with no listener to guard is a misconfiguration that reads as a
+            // protection: the operator sets it, no listener starts at boot, and a later
+            // `POST /intercept` brings up an *open* proxy. Refusing is the same fail-loud rule as a
+            // blank secret — a gate the operator believes is in force must actually be in force.
+            anyhow::bail!(
+                "--intercept-auth was given without --intercept-port, so no listener uses it. \
+                 Add --intercept-port to start an authenticated listener now, or drop the flag and \
+                 supply `auth` in the `POST /intercept` body when you start one at runtime."
+            );
+        }
+        // The exposure judgement itself lives in `InterceptControl::start`, the one point all four
+        // doors converge on, so a listener started at runtime over `POST /intercept` is judged too.
+        // This early call exists only for the *refusal ordering*: under `Refuse` the error must not
+        // have to unwind the metrics listener that binds further down. Skipped under `Warn`, where
+        // `start` does the warning — running both would log it twice.
+        if cli.require_admin_auth
+            && let Some(intercept_port) = cli.intercept_port
+        {
+            let intercept_addr: SocketAddr =
+                format!("{host}:{intercept_port}").parse::<SocketAddr>()?;
+            crate::admin_api::check_intercept_exposure(
+                intercept_addr,
+                cli_intercept_auth.is_some(),
+                crate::admin_api::AdminExposurePolicy::Refuse,
+            )?;
+        }
         // Validate `--front-door` before anything else binds (issue #19 / U-11): a malformed
         // address is then a clean, fast failure that never has to unwind an already-bound
         // listener behind it.
@@ -608,7 +648,11 @@ impl ServerBuilder {
         // of the same listener; supplying both was already refused when the file was loaded, so at
         // most one of these arms can run. The block declares its own bind host, so unlike the flag
         // it does not inherit the admin `host`.
-        let intercept = InterceptControl::default();
+        // The policy is set on the control, not passed per start, so every door through it — the
+        // flag, the config block, and a runtime `POST /intercept` — is judged the same. Set before
+        // the clone handed to the admin server, or the runtime door would inherit the default.
+        let intercept =
+            InterceptControl::default().with_exposure_policy(cli.require_admin_auth.into());
         let start_options = intercept_block.or_else(|| {
             cli.intercept_port
                 .map(|intercept_port| InterceptStartOptions {
@@ -624,6 +668,7 @@ impl ServerBuilder {
                         .map(|p| p.to_string_lossy().into_owned()),
                     ca_cert_pem: cli.intercept_ca_cert_pem.clone(),
                     ca_key_pem: cli.intercept_ca_key_pem.clone(),
+                    auth: cli_intercept_auth,
                     // Cloned (not moved) because `cli` is borrowed for the rest of startup.
                     ..Default::default()
                 })
@@ -1128,9 +1173,36 @@ fn parse_front_door_addr(value: &str) -> anyhow::Result<SocketAddr> {
 }
 
 /// The `--intercept-*` flags the operator supplied, by long name; empty when none were.
+/// Parse `--intercept-auth <user:pass>` into a credential (issue #878).
+///
+/// A value with no `:` is a startup error rather than a silently-disabled gate: an operator who
+/// mistyped it must not end up running an open MITM proxy while believing it is closed. The blank
+/// halves are rejected by [`InterceptAuth::validate`] at start, so the two checks together cover
+/// `""`, `"user:"` and `":pass"`.
+fn parse_intercept_auth(raw: Option<&str>) -> anyhow::Result<Option<InterceptAuth>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let Some((username, password)) = raw.split_once(':') else {
+        anyhow::bail!(
+            "--intercept-auth must be `user:pass` (got a value with no `:`). It is the credential \
+             the intercept proxy requires in `Proxy-Authorization`; omit the flag entirely to run \
+             the listener explicitly unauthenticated."
+        );
+    };
+    let auth = InterceptAuth {
+        username: username.to_string(),
+        password: password.to_string(),
+    };
+    auth.validate()
+        .map_err(|e| anyhow::anyhow!("--intercept-auth: {e}"))?;
+    Ok(Some(auth))
+}
+
 fn cli_intercept_flags(cli: &Cli) -> Vec<&'static str> {
     [
         ("--intercept-port", cli.intercept_port.is_some()),
+        ("--intercept-auth", cli.intercept_auth.is_some()),
         ("--intercept-ca-cert", cli.intercept_ca_cert.is_some()),
         ("--intercept-ca-key", cli.intercept_ca_key.is_some()),
         (
@@ -2098,6 +2170,9 @@ mod tests {
     fn intercept_conflict_names_every_supplied_flag() {
         for (args, expected) in [
             (vec!["rift", "--intercept-port", "8080"], "--intercept-port"),
+            // Issue #878: without its entry in `cli_intercept_flags` the credential would be
+            // silently ignored beside a config block rather than reported as the conflict it is.
+            (vec!["rift", "--intercept-auth", "u:p"], "--intercept-auth"),
             (
                 vec![
                     "rift",

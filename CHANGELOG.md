@@ -28,6 +28,39 @@ record.
 
 ### Added
 
+- **Serve options are now feature-detectable — `serveOptions` on `rift_build_info` and `GET /config`**
+  (issue #877). `ServeOptions` fields have no symbol for an SDK to probe, so the "additive symbols are
+  discovered by presence" convention `rift_abi_version` documents could not reach them: an SDK sending
+  a new option to an older engine got a normal success and an option that silently did nothing. For
+  `requireAdminAuth` (#863) that silence was *fail-open*.
+
+  Both surfaces now publish the accepted keys, from one shared constant. **Absence of the key is the
+  signal**: an engine older than 0.17.0 reports no `serveOptions` at all, so an SDK reading it knows to
+  treat every option as unsupported. That is what makes this work against already-released engines —
+  detection by provoking an error cannot, because the engine doing the ignoring is the old one.
+  `serveOptions` is deliberately separate from `features`, which lists compiled cargo features.
+
+- **`--intercept-auth` — require `Proxy-Authorization` on the TLS intercept proxy** (issue #878).
+  The intercept listener took its bind host from the admin host (default `0.0.0.0`) and had no
+  authentication of any kind, so `--require-admin-auth --api-key … --intercept-port 8888` gave an
+  authenticated admin plane beside an open MITM proxy. `--intercept-auth user:pass`
+  (`RIFT_INTERCEPT_AUTH`, the config block's `auth`, `POST /intercept`'s `auth`, and
+  `rift_start_intercept`'s `auth`) requires `Proxy-Authorization: Basic …` on every `CONNECT`;
+  anything else is `407` **before** the TLS handshake, so an unauthenticated caller never causes a
+  leaf certificate to be minted.
+
+  It is a separate credential from `--api-key` deliberately: `Proxy-Authorization` is hop-by-hop and
+  consumed by the proxy, while `Authorization` is end-to-end and would be forwarded to every
+  intercepted origin.
+
+  `--require-admin-auth` now also covers this listener, at every door on the standalone binary — the
+  flag, the config block, and a listener started at runtime over `POST /intercept`, which answers
+  `403` rather than binding an exposed keyless one. (Checking only at boot would have left the
+  runtime door open, which is the same hole one layer along.) Embedders using the C-ABI get the
+  warning but not the refusal, since the policy travels on the process's `InterceptControl`.
+  `--intercept-auth` without `--intercept-port` is now a startup error too — a credential guarding
+  nothing reads as protection while providing none.
+
 - **`--require-admin-auth` — opt in to refusing a keyless off-host admin plane** (issue #863).
   `--host` defaults to `0.0.0.0`, so a bare keyless `rift` already serves the full admin API — which
   can create imposters and drive the TLS intercept proxy — on every interface with no
@@ -83,6 +116,19 @@ record.
 
 ### Security
 
+- **The TLS intercept proxy was reachable off-host with no authentication** (issue #878). Every
+  release that shipped `--intercept-port` bound the listener to the admin host — `0.0.0.0` by
+  default — with no credential and no way to add one. Anyone who could reach the port could route
+  traffic through it and receive certificates forged by Rift's CA, which are trusted wherever that
+  CA has been installed; installing it in the system or JVM truststore is the documented way to use
+  the feature, so the trusted case is the normal one.
+
+  **If you run `--intercept-port` on anything but loopback**, set `--intercept-auth user:pass` (see
+  *Added*), or restrict the bind with `--local-only` / `--host 127.0.0.1`. The default is unchanged
+  and still open — turning auth on by default would break every existing intercept user — so this
+  needs an explicit action from you. Setting `--require-admin-auth` makes the exposed case a startup
+  failure instead.
+
 - **An empty `--api-key` enabled the admin auth gate and then authenticated everyone** (issue #844).
   `Some("")` is `Some`, so the gate switched on; a request with no `Authorization` header degrades
   to `""`, and comparing two empty strings matched. The admin API — which can create imposters and
@@ -103,6 +149,16 @@ record.
   compared byte for byte, untrimmed.
 
 ### Changed
+
+- **An unknown key in the C-ABI serve-options JSON is now a hard error** (issue #877). `ServeOptions`
+  gained `deny_unknown_fields`, so `rift_serve_admin` answers `NULL` with the offending key named in
+  `rift_last_error` instead of silently dropping it and returning success. **If you pass extra keys
+  today** — a forward-compatibility habit, or a serializer emitting nulls for unknown members — that
+  call now fails; send only the keys `rift_build_info().serveOptions` advertises.
+
+  This catches typos going forward; it is **not** the feature-detection mechanism, and cannot be. An
+  engine released before this change still silently ignores unknown keys, so an SDK must read the
+  capability list rather than infer support from the absence of an error.
 
 - **`--ip-whitelist` now says out loud that it does nothing** (issue #879). The flag was declared and
   read nowhere — it has **never** applied IP filtering in any release — while four places said it

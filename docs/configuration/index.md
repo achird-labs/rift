@@ -45,9 +45,14 @@ docker run -v $(pwd)/imposters.json:/imposters.json \
 | Key | Purpose |
 |---|---|
 | `imposters` | The imposters to create — the Mountebank format above. |
-| `intercept` | *Optional, Rift extension.* Declares the [HTTPS intercept listener](../features/intercept-proxy.md#declare-it-in-the-config-file) and its rules, so a container needs no post-boot admin call to install them. |
+| `intercept` | *Optional, Rift extension.* Declares the [HTTPS intercept listener](../features/intercept-proxy.md#declare-it-in-the-config-file) and its rules, so a container needs no post-boot admin call to install them. Its keys are `host`, `port`, the CA pair (`caCertPath`/`caKeyPath` **or** `caCertPem`/`caKeyPem`), `returnCaKey`, `rules`, and `auth`. |
 
 A file may also be a single imposter object (`{"port": 4545, ...}`) or a bare array of them; those
+`intercept.auth` (issue #878) is `{"username": "…", "password": "…"}` and requires
+`Proxy-Authorization: Basic …` on every `CONNECT` to the listener. Omit it and the proxy is open —
+see [Authenticating the proxy](../features/intercept-proxy.md#authenticating-the-proxy) for why that
+matters on a shared host. A blank username or password is a startup error, not a disabled gate.
+
 shapes have nowhere to put an `intercept` block, so declaring one there is a startup error naming
 the fix rather than a block that silently does nothing.
 

@@ -669,12 +669,17 @@ Get current configuration.
 **Response:**
 ```json
 {
+  "version": "0.17.0",
   "options": {
     "port": 2525,
     "allowInjection": true,
     "localOnly": false,
     "ipWhitelist": ["*"]
-  }
+  },
+  "serveOptions": [
+    "host", "port", "apiKey", "metricsPort",
+    "configFile", "config", "allowInjection", "requireAdminAuth"
+  ]
 }
 ```
 
@@ -689,6 +694,19 @@ Field notes (issue #879 — these were previously hardcoded literals):
 - **`ipWhitelist`** is always `["*"]`. `--ip-whitelist` is accepted for Mountebank compatibility and
   **never enforced**, so every address may connect; see the
   [CLI reference]({{ site.baseurl }}/configuration/cli/#--ip-whitelist-does-not-filter-anything).
+
+`serveOptions` (since 0.17.0, issue #877) lists the keys the embedded serve-options document
+accepts, so a consumer can feature-detect an option before sending it. **Absence of the key means an
+engine too old to report capabilities** — treat every option as unsupported rather than assuming a
+rejection you will never receive. It is the same list `rift_build_info().serveOptions` publishes over
+the C-ABI, and is a sibling of `options` rather than a member of it: `options` is the
+Mountebank-compatible shape and is unchanged.
+
+**Reading this from the standalone binary:** there is no serve-options document in process mode —
+that door only exists for an embedded host going through `rift_serve_admin`. The list is still a
+faithful capability signal for the running release, but a process-mode consumer sets the equivalent
+lever on the command line instead: `requireAdminAuth` → `--require-admin-auth`, `allowInjection` →
+`--allow-injection`, `configFile` → `--configfile`, `apiKey` → `--api-key`, and so on.
 
 ---
 

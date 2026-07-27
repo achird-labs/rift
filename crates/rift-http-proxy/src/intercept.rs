@@ -16,10 +16,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::intercept_control::InterceptAuth;
 use crate::intercept_rules::{InterceptAction, InterceptRules, ServeStub};
 use base64::Engine;
 use rift_mock_core::proxy::intercept_ca::SniCertResolver;
 use rustls::ServerConfig;
+use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -64,10 +66,14 @@ impl InterceptListener {
     ///
     /// `rules` is matched against every intercepted request (issue #398); an empty store falls
     /// back to the fixed slice-3 200 response.
+    ///
+    /// `auth`, when set, requires `Proxy-Authorization: Basic …` on every `CONNECT` (issue #878);
+    /// `None` leaves the proxy open, which is the behaviour it has always had.
     pub async fn bind(
         addr: SocketAddr,
         resolver: Arc<SniCertResolver>,
         rules: InterceptRules,
+        auth: Option<InterceptAuth>,
     ) -> anyhow::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
@@ -80,6 +86,7 @@ impl InterceptListener {
         // multi-instance use keeps pools independent; building here also surfaces a failure as a
         // start error instead of a lazy-init panic.
         let forward_client = build_forward_client()?;
+        let auth = auth.map(Arc::new);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
         let handle = tokio::spawn(async move {
@@ -91,8 +98,9 @@ impl InterceptListener {
                             let tls = tls.clone();
                             let rules = rules.clone();
                             let forward_client = forward_client.clone();
+                            let auth = auth.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(stream, tls, rules, forward_client).await {
+                                if let Err(e) = handle_connection(stream, tls, rules, forward_client, auth).await {
                                     tracing::debug!(%peer, error = %e, "intercept connection ended");
                                 }
                             });
@@ -166,6 +174,7 @@ async fn handle_connection(
     tls: TlsAcceptor,
     rules: InterceptRules,
     forward_client: reqwest::Client,
+    auth: Option<Arc<InterceptAuth>>,
 ) -> anyhow::Result<()> {
     let head = timeout(IO_TIMEOUT, read_connect_head(&mut stream))
         .await
@@ -176,6 +185,24 @@ async fn handle_connection(
             .await?;
         return Ok(());
     };
+
+    // Issue #878, and the ordering is load-bearing: this sits BEFORE the `200` below, because TLS
+    // only starts after it. Checking here means an unauthenticated caller never reaches the
+    // handshake, so Rift never mints a leaf certificate for an SNI of their choosing. Moving this
+    // after the `200` would still refuse the request while doing exactly the work worth refusing.
+    if let Some(ref auth) = auth
+        && !proxy_credential_matches(&head, auth)
+    {
+        stream
+            .write_all(
+                b"HTTP/1.1 407 Proxy Authentication Required\r\n\
+                  Proxy-Authenticate: Basic realm=\"rift-intercept\"\r\n\
+                  connection: close\r\n\r\n",
+            )
+            .await?;
+        tracing::debug!(%target, "intercept CONNECT refused: missing or invalid Proxy-Authorization");
+        return Ok(());
+    }
 
     stream
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -481,6 +508,38 @@ where
     Ok(body)
 }
 
+/// Does the `CONNECT` head carry a `Proxy-Authorization: Basic …` matching `expected` (issue #878)?
+///
+/// Reuses [`parse_request_head`] rather than parsing the header block a second time — it already
+/// lowercases names, so the lookup is case-insensitive as HTTP requires.
+///
+/// Fails **closed** at every step it cannot complete: a missing header, a non-Basic scheme,
+/// undecodable base64, non-UTF-8 bytes or a value with no `:` all return `false`. A classifier that
+/// cannot read the credential must treat it as absent, never as valid.
+fn proxy_credential_matches(head: &[u8], expected: &InterceptAuth) -> bool {
+    let (_, _, _, headers) = parse_request_head(head);
+    let Some(value) = headers.get("proxy-authorization") else {
+        return false;
+    };
+    let Some(encoded) = value
+        .split_once(char::is_whitespace)
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("basic"))
+        .map(|(_, rest)| rest.trim())
+    else {
+        return false;
+    };
+    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+        return false;
+    };
+
+    // Compare the whole `user:pass` in one pass, so timing cannot reveal whether the username alone
+    // was right — which comparing the halves separately would leak. `ct_eq` short-circuits on a
+    // length mismatch, so the credential's *length* is still observable; that is inherent to
+    // comparing variable-length secrets and is the same bound `api_key_matches` accepts.
+    let expected_pair = format!("{}:{}", expected.username, expected.password);
+    expected_pair.as_bytes().ct_eq(&decoded).into()
+}
+
 fn parse_connect(head: &[u8]) -> Option<ConnectTarget> {
     let text = std::str::from_utf8(head).ok()?;
     let line = text.lines().next().unwrap_or("");
@@ -674,6 +733,140 @@ mod tests {
         }
     }
 
+    // Issue #878: `proxy_credential_matches` is a security classifier, so its fail-closed branches
+    // are the point of it. The integration tests cover missing / wrong / non-Basic over a real
+    // socket; these cover the decode paths that are awkward to provoke there and would otherwise
+    // rest entirely on the doc comment's word.
+    mod proxy_auth {
+        use super::*;
+
+        fn auth() -> InterceptAuth {
+            InterceptAuth {
+                username: "ci".to_string(),
+                password: "s3cr3t".to_string(),
+            }
+        }
+
+        fn head(extra: &str) -> Vec<u8> {
+            format!("CONNECT cdn.example.com:443 HTTP/1.1\r\nHost: cdn.example.com\r\n{extra}\r\n")
+                .into_bytes()
+        }
+
+        fn encoded(raw: &str) -> String {
+            base64::engine::general_purpose::STANDARD.encode(raw)
+        }
+
+        #[test]
+        fn accepts_only_the_exact_credential() {
+            let ok = head(&format!(
+                "Proxy-Authorization: Basic {}\r\n",
+                encoded("ci:s3cr3t")
+            ));
+            assert!(proxy_credential_matches(&ok, &auth()));
+        }
+
+        #[test]
+        fn fails_closed_on_every_unreadable_credential() {
+            let cases = vec![
+                ("no header at all", head("")),
+                (
+                    "wrong password",
+                    head(&format!(
+                        "Proxy-Authorization: Basic {}\r\n",
+                        encoded("ci:wrong")
+                    )),
+                ),
+                (
+                    "right password, wrong user",
+                    head(&format!(
+                        "Proxy-Authorization: Basic {}\r\n",
+                        encoded("nope:s3cr3t")
+                    )),
+                ),
+                (
+                    "non-Basic scheme",
+                    head("Proxy-Authorization: Bearer abc\r\n"),
+                ),
+                (
+                    "scheme with no value",
+                    head("Proxy-Authorization: Basic\r\n"),
+                ),
+                (
+                    "undecodable base64",
+                    head("Proxy-Authorization: Basic !!!not-base64!!!\r\n"),
+                ),
+                (
+                    "decodes, but carries no colon",
+                    head(&format!(
+                        "Proxy-Authorization: Basic {}\r\n",
+                        encoded("cis3cr3t")
+                    )),
+                ),
+                (
+                    "empty credential",
+                    head(&format!("Proxy-Authorization: Basic {}\r\n", encoded(""))),
+                ),
+                (
+                    // The `Authorization` header is NOT a substitute: it is end-to-end and meant for
+                    // the origin, so accepting it here would be the credential-leak this design
+                    // deliberately avoids.
+                    "admin-style Authorization header instead",
+                    head(&format!(
+                        "Authorization: Basic {}\r\n",
+                        encoded("ci:s3cr3t")
+                    )),
+                ),
+            ];
+            for (why, h) in cases {
+                assert!(
+                    !proxy_credential_matches(&h, &auth()),
+                    "must fail closed: {why}"
+                );
+            }
+        }
+
+        // Headers land in a `HashMap`, so a duplicate overwrites: last wins. Pinned as intentional
+        // — Rift is the terminal parser here, so this cannot be smuggled past a downstream hop, but
+        // the behaviour should change deliberately rather than by accident.
+        #[test]
+        fn a_duplicate_header_takes_the_last_value() {
+            let good = encoded("ci:s3cr3t");
+            let bad = encoded("ci:wrong");
+            let last_is_good = head(&format!(
+                "Proxy-Authorization: Basic {bad}\r\nProxy-Authorization: Basic {good}\r\n"
+            ));
+            let last_is_bad = head(&format!(
+                "Proxy-Authorization: Basic {good}\r\nProxy-Authorization: Basic {bad}\r\n"
+            ));
+            assert!(proxy_credential_matches(&last_is_good, &auth()));
+            assert!(!proxy_credential_matches(&last_is_bad, &auth()));
+        }
+
+        #[test]
+        fn header_name_is_case_insensitive() {
+            let h = head(&format!(
+                "PROXY-AUTHORIZATION: Basic {}\r\n",
+                encoded("ci:s3cr3t")
+            ));
+            assert!(proxy_credential_matches(&h, &auth()));
+        }
+
+        #[test]
+        fn a_blank_half_is_rejected_by_validate() {
+            for (u, p) in [("", "p"), ("u", ""), ("  ", "p"), ("u", "  ")] {
+                let a = InterceptAuth {
+                    username: u.to_string(),
+                    password: p.to_string(),
+                };
+                assert!(
+                    a.validate().is_err(),
+                    "a blank half enables the gate and then admits everyone: {u:?}/{p:?}"
+                );
+            }
+            assert!(auth().validate().is_ok());
+        }
+    }
+
     #[test]
     fn parse_connect_accepts_authority() {
         let t = parse_connect(b"CONNECT cdn.example.com:443 HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
@@ -709,9 +902,10 @@ mod tests {
         let ca = CertificateAuthority::generate().expect("ca");
         let ca_pem = ca.ca_cert_pem().to_string();
         let resolver = Arc::new(SniCertResolver::new(Arc::new(ca)));
-        let listener = InterceptListener::bind("127.0.0.1:0".parse().unwrap(), resolver, rules)
-            .await
-            .expect("bind");
+        let listener =
+            InterceptListener::bind("127.0.0.1:0".parse().unwrap(), resolver, rules, None)
+                .await
+                .expect("bind");
         (listener, ca_pem)
     }
 

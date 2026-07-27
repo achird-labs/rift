@@ -35,7 +35,7 @@
 use anyhow::Context;
 use parking_lot::Mutex;
 use rift_http_proxy::admin_api::{
-    AdminApiServer, RunningAdminApi, filter_proxy_responses, filter_proxy_stubs,
+    AdminApiServer, RunningAdminApi, SERVE_OPTION_KEYS, filter_proxy_responses, filter_proxy_stubs,
 };
 use rift_http_proxy::config_loader::{self, ConfigSource};
 use rift_http_proxy::injection_gate;
@@ -228,8 +228,17 @@ unsafe fn resolve_flow_arg(
 /// `rift_serve_admin` options (all fields optional). Typed so a wrong-JSON-type field is a serde
 /// error surfaced via `last_error` — not silently coerced to a default (a non-string `apiKey`
 /// silently disabling auth, or an out-of-range `port` truncating, would be a real footgun).
+/// `deny_unknown_fields` (issue #877): an unknown key is a hard error naming the key, rather than a
+/// silent drop that returns success while the option does nothing. This catches typos going
+/// forward; it is NOT the feature-detection mechanism — see [`SERVE_OPTION_KEYS`], since an engine
+/// released before this attribute existed cannot report anything about a key it never knew.
+///
+/// **Do not add `#[serde(alias = "…")]` to a field here.** serde-derive omits aliases from the
+/// `expected one of …` list that `serve_option_keys_match_the_struct_exactly` derives the field set
+/// from, so an alias would be silently accepted but never advertised — undiscoverable by exactly the
+/// SDKs `SERVE_OPTION_KEYS` exists to serve, and invisible to the drift guard.
 #[derive(serde::Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ServeOptions {
     host: Option<String>,
     port: Option<u16>,
@@ -1473,6 +1482,12 @@ pub unsafe extern "C" fn rift_start_intercept(
                     InterceptStartError::InvalidAddr(s) => {
                         format!("rift_start_intercept: invalid host/port: {s}")
                     }
+                    InterceptStartError::InvalidAuth(s) => {
+                        format!("rift_start_intercept: invalid auth: {s}")
+                    }
+                    InterceptStartError::Exposed(s) => {
+                        format!("rift_start_intercept: refused: {s}")
+                    }
                     // `{err:#}` so the chained cause (missing file, bad PEM, mismatched pair)
                     // reaches the caller — `rift_last_error` is their only diagnostic channel.
                     // (`InterceptControl::start` already `warn!`s the CA/bind failure server-side.)
@@ -2053,8 +2068,14 @@ pub extern "C" fn rift_abi_version() -> u32 {
 }
 
 /// Build identity as a STATIC JSON string — never freed; probe this symbol to detect a v2 library
-/// (issue #343). `{"version":"..","commit":"<sha>|null","builtAt":"<iso8601>|null","features":[..]}`.
+/// (issue #343).
+/// `{"version":"..","commit":"<sha>|null","builtAt":"<iso8601>|null","features":[..],"serveOptions":[..]}`.
 /// `commit`/`builtAt` are `null` unless stamped at build time (issue #344).
+///
+/// `serveOptions` lists the keys `rift_serve_admin`'s options document accepts (issue #877) — read
+/// it to feature-detect an option before sending it. It is **absent** on engines older than 0.17.0,
+/// and that absence is the signal: treat every serve option as unsupported. `features` is a
+/// different question (compiled cargo features), so do not conflate the two arrays.
 #[unsafe(no_mangle)]
 pub extern "C" fn rift_build_info() -> *const c_char {
     static INFO: OnceLock<CString> = OnceLock::new();
@@ -2071,6 +2092,10 @@ pub extern "C" fn rift_build_info() -> *const c_char {
             "commit": option_env!("RIFT_COMMIT"),
             "builtAt": option_env!("RIFT_BUILT_AT"),
             "features": features,
+            // Serve-option capability list (issue #877), deliberately a sibling of `features`:
+            // that array means compiled cfg features, and an SDK checking for `redis-backend`
+            // asks a different question from one checking whether `requireAdminAuth` is accepted.
+            "serveOptions": SERVE_OPTION_KEYS,
         });
         // Terminal last-resort: `json!` output cannot contain an interior NUL, so this fallback is
         // unreachable; and build info carries no status for the `{}` fallback to misreport
@@ -2341,5 +2366,122 @@ mod serve_options_tests {
             serde_json::from_str::<ServeOptions>(r#"{"allowInjection": "yes"}"#).is_err(),
             "a non-bool allowInjection must be a parse error, not silently coerced"
         );
+    }
+}
+
+#[cfg(test)]
+mod serve_option_capability_tests {
+    use super::*;
+
+    /// The field names serde itself will accept, taken from the `deny_unknown_fields` error rather
+    /// than from a hand-written list — so this is the authoritative set, not a second copy of it.
+    fn fields_serde_actually_accepts() -> Vec<String> {
+        // `.err().expect(..)` rather than `.expect_err(..)`: the latter needs `ServeOptions: Debug`,
+        // and this struct holds `api_key` — deriving Debug on it would put a credential one `{:?}`
+        // away from a log line.
+        let err = serde_json::from_str::<ServeOptions>(r#"{"__definitely_not_a_field__": 1}"#)
+            .err()
+            .expect("deny_unknown_fields must reject an unknown key");
+        let msg = err.to_string();
+        let Some((_, list)) = msg.split_once("expected one of ") else {
+            panic!(
+                "serde's unknown-field message no longer contains `expected one of` — this drift \
+                 guard derives the field set from it and must be updated. Got: {msg}"
+            );
+        };
+        let fields: Vec<String> = list
+            .split(',')
+            .filter_map(|part| part.trim().trim_end_matches('.').split('`').nth(1))
+            .map(str::to_owned)
+            .collect();
+        // Without this the guard degrades silently: a format change that keeps `expected one of`
+        // but drops the backticks yields an empty list, and the caller's assertion then fails as a
+        // confusing "declared vs nothing" diff instead of naming the real cause.
+        assert!(
+            !fields.is_empty(),
+            "parsed no field names out of serde's message — the format changed and this drift \
+             guard must be updated. Got: {msg}"
+        );
+        fields
+    }
+
+    // AC4: the capability list and the struct cannot drift apart. Both directions matter — a name
+    // in the list that is not a field would advertise an option that silently does nothing, and a
+    // field missing from the list would be undiscoverable by the SDKs this exists to serve.
+    // Deriving the truth from serde means adding a field without listing it fails here, which a
+    // hand-maintained length assertion would not reliably catch.
+    #[test]
+    fn serve_option_keys_match_the_struct_exactly() {
+        let mut actual = fields_serde_actually_accepts();
+        let mut declared: Vec<String> = SERVE_OPTION_KEYS.iter().map(|k| (*k).to_owned()).collect();
+        actual.sort();
+        declared.sort();
+        assert_eq!(
+            declared, actual,
+            "SERVE_OPTION_KEYS must name exactly the fields ServeOptions accepts"
+        );
+    }
+
+    // AC2: the list is published where an SDK can read it, and is kept out of `features`.
+    // `features` means compiled cfg features; conflating the two namespaces would make an SDK
+    // checking for `redis-backend` and one checking for `requireAdminAuth` read the same array.
+    #[test]
+    fn build_info_publishes_the_capability_list_separately_from_features() {
+        let raw = unsafe { CStr::from_ptr(rift_build_info()) }
+            .to_str()
+            .expect("build info is utf8");
+        let info: serde_json::Value = serde_json::from_str(raw).expect("build info is JSON");
+
+        let published: Vec<&str> = info["serveOptions"]
+            .as_array()
+            .expect("build info exposes a serveOptions array")
+            .iter()
+            .map(|v| v.as_str().expect("serveOptions entries are strings"))
+            .collect();
+        assert_eq!(published, SERVE_OPTION_KEYS);
+
+        let features = info["features"].as_array().expect("features array");
+        for key in SERVE_OPTION_KEYS {
+            assert!(
+                !features.iter().any(|f| f.as_str() == Some(key)),
+                "`{key}` leaked into `features`; option names and cfg features are separate namespaces"
+            );
+        }
+    }
+
+    // AC3: an unknown key is now a hard error that names the offending key. Naming it is the point —
+    // a bare "invalid options" would leave an operator guessing which of eight keys they mistyped.
+    #[test]
+    fn an_unknown_option_is_rejected_and_names_the_key() {
+        let err = serde_json::from_str::<ServeOptions>(r#"{"requireAdminAuthh": true}"#)
+            .err()
+            .expect("an unknown key must be rejected");
+        assert!(
+            err.to_string().contains("requireAdminAuthh"),
+            "the error must name the offending key, got: {err}"
+        );
+    }
+
+    // AC5: the compatibility direction. Every documented key, type-valid, must still parse — a
+    // false positive here would break every SDK at once, which is the risk `deny_unknown_fields`
+    // carries and the reason this guard sits next to it.
+    #[test]
+    fn a_document_using_every_option_still_parses() {
+        let full = serde_json::json!({
+            "host": "127.0.0.1",
+            "port": 0,
+            "apiKey": "s3cr3t",
+            "metricsPort": 0,
+            "configFile": "/tmp/nope.json",
+            "config": {"imposters": []},
+            "allowInjection": true,
+            "requireAdminAuth": false,
+        });
+        assert_eq!(
+            full.as_object().expect("object").len(),
+            SERVE_OPTION_KEYS.len(),
+            "this fixture must exercise every advertised key"
+        );
+        serde_json::from_value::<ServeOptions>(full).expect("a full valid options document parses");
     }
 }
