@@ -184,7 +184,7 @@ Creates and starts a new Rift server instance.
 | `loglevel`       | `string`   | `'info'`      | Log level: debug, info, warn, error |
 | `logfile`        | `string`   | -             | Path to log file                    |
 | `datadir`        | `string`   | -             | Directory for imposter persistence (Mountebank `--datadir` parity) |
-| `ipWhitelist`    | `string[]` | -             | Allowed IP addresses                |
+| `ipWhitelist`    | `string[]` | -             | Accepted, **not enforced** (see CLI reference) |
 | `allowInjection` | `boolean`  | `false`       | Enable script injection             |
 
 `impostersRepository` and `redis` (custom Mountebank repository config) are accepted by the type

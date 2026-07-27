@@ -79,6 +79,7 @@ pub async fn route_request(
     allow_injection: bool,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
+    config_snapshot: system::ConfigSnapshot,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -119,6 +120,7 @@ pub async fn route_request(
         config_source,
         allow_injection,
         scripts_dir,
+        config_snapshot,
     )
     .await;
     Ok(response)
@@ -149,6 +151,7 @@ async fn route_by_path(
     config_source: Option<ReloadSource>,
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
+    config_snapshot: system::ConfigSnapshot,
 ) -> Response<Full<Bytes>> {
     // Single-port gateway (issue #212): `/__rift/:port/<path>` dispatches to that imposter,
     // so a containerized Rift only needs the one admin port published.
@@ -160,7 +163,9 @@ async fn route_by_path(
     match (method, path) {
         (&Method::GET, "/") => return system::handle_root(base_url),
         (&Method::GET, "/health") => return system::handle_health(),
-        (&Method::GET, "/config") => return system::handle_config(allow_injection),
+        (&Method::GET, "/config") => {
+            return system::handle_config(allow_injection, config_snapshot);
+        }
         (&Method::GET, "/logs") => return system::handle_logs(query),
         (&Method::POST, "/admin/reload") => {
             return system::handle_reload(manager, config_source, allow_injection).await;

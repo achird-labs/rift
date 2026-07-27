@@ -355,7 +355,7 @@ This matches Mountebank's behavior for automatic port assignment.
 | `--log` | ✅ Yes | ✅ Yes | ✅ **Complete** | Log file path |
 | `--pidfile` | ✅ Yes | ✅ Yes | ✅ **Complete** | PID file location |
 | `--debug` | ✅ Yes | ✅ Yes | ✅ **Complete** | Enable debug mode |
-| `--ipWhitelist` | ✅ Yes | ✅ Yes | ✅ **Complete** | IP whitelist (comma-separated) |
+| `--ipWhitelist` | ✅ Yes | ⚠️ Accepted | ⚠️ **Accepted, not enforced** | Parsed but never applied (issue #879); use a network policy/firewall, `--local-only`, or `--api-key` |
 | `--mock` | ✅ Yes | ✅ Yes | ✅ **Complete** | Mock mode flag |
 | `--origin` | ✅ Yes | ✅ Yes | ✅ **Complete** | CORS allowed origin |
 
@@ -582,7 +582,7 @@ rules:
    - **Workaround**: Use `decorate` behavior with JavaScript
 
 3. **IP Whitelisting** ⚠️
-   - **Gap**: No `--ipWhitelist` CLI option
+   - **Gap**: `--ipWhitelist` is accepted and parsed but **never enforced** (issue #879) — it applies no filtering and warns at startup
    - **Impact**: **LOW** - Handled by Kubernetes network policies
    - **Recommendation**: Document Kubernetes-native approach
 

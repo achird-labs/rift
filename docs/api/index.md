@@ -673,7 +673,8 @@ Get current configuration.
   "options": {
     "port": 2525,
     "allowInjection": true,
-    "localOnly": false
+    "localOnly": false,
+    "ipWhitelist": ["*"]
   },
   "serveOptions": [
     "host", "port", "apiKey", "metricsPort",
@@ -681,6 +682,18 @@ Get current configuration.
   ]
 }
 ```
+
+Field notes (issue #879 — these were previously hardcoded literals):
+
+- **`port`** is the port the admin plane actually bound, so a `--port 0` (ephemeral) server reports
+  the real one rather than the `2525` default.
+- **`localOnly`** reports whether **`--local-only` was supplied**, not whether the admin listener
+  happened to bind loopback. The distinction matters: `--host 127.0.0.1` narrows only the admin
+  plane, while `/metrics` and every imposter port stay on `0.0.0.0` — so reporting `true` there
+  would tell you nothing is reachable off-host while two listener families still are.
+- **`ipWhitelist`** is always `["*"]`. `--ip-whitelist` is accepted for Mountebank compatibility and
+  **never enforced**, so every address may connect; see the
+  [CLI reference]({{ site.baseurl }}/configuration/cli/#--ip-whitelist-does-not-filter-anything).
 
 `serveOptions` (since 0.17.0, issue #877) lists the keys the embedded serve-options document
 accepts, so a consumer can feature-detect an option before sending it. **Absence of the key means an
