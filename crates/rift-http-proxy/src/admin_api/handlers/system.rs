@@ -54,20 +54,48 @@ pub async fn handle_metrics(manager: Arc<ImposterManager>) -> Response<Full<Byte
         .unwrap()
 }
 
+/// The `GET /config` values that used to be hardcoded literals (issue #879).
+///
+/// A struct rather than two more positional parameters: the router would otherwise thread three
+/// adjacent unlabelled scalars into one call, where a transposition compiles silently and makes
+/// `/config` report one setting as another.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfigSnapshot {
+    /// The port the admin plane actually bound. Was hardcoded to `DEFAULT_ADMIN_PORT`, so
+    /// `--port 3000` (or the `:0` every embedder test uses) reported `2525`.
+    pub admin_port: u16,
+    /// Whether `--local-only` was set — **the flag**, not "did the admin plane happen to bind
+    /// loopback".
+    ///
+    /// Deriving it from the bound address reads as more truthful and is worse. `--host 127.0.0.1`
+    /// without `--local-only` binds the admin plane to loopback while `/metrics` and every imposter
+    /// port stay on `0.0.0.0` (pinned by `without_local_only_metrics_still_binds_every_interface`),
+    /// so a bind-derived `true` would tell an operator nothing is reachable off-host while two
+    /// listener families are. The old hardcoded `false` understated; that would *overstate*, which
+    /// is the direction that gets someone hurt. The flag is also what Mountebank's `/config`
+    /// echoes, so this keeps the compat endpoint compatible.
+    pub local_only: bool,
+}
+
 /// GET /config - Mountebank-compatible config endpoint
 ///
 /// `allow_injection` is threaded in explicitly (issue #342) rather than read from
 /// `MB_ALLOW_INJECTION`, so an embedded host can set it without mutating process env.
-pub fn handle_config(allow_injection: bool) -> Response<Full<Bytes>> {
+///
+/// `snapshot` carries the values that used to be hardcoded literals (issue #879).
+pub fn handle_config(allow_injection: bool, snapshot: ConfigSnapshot) -> Response<Full<Bytes>> {
     let config = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         // Build identity (issue #344), stamped by build.rs — the same value rift_build_info
         // reports over FFI, so one version-coherence preflight works for process and FFI modes.
         "commit": option_env!("RIFT_COMMIT"),
         "options": {
-            "port": crate::admin_api::DEFAULT_ADMIN_PORT,
+            "port": snapshot.admin_port,
             "allowInjection": allow_injection,
-            "localOnly": false,
+            "localOnly": snapshot.local_only,
+            // Accurate rather than aspirational (issue #879): `--ip-whitelist` is accepted and
+            // never enforced, so every address may connect. Reporting the supplied list here would
+            // re-create the false assurance the flag itself was removed from advertising.
             "ipWhitelist": ["*"]
         },
         "process": {
@@ -317,7 +345,13 @@ mod tests {
 
     #[test]
     fn test_handle_config() {
-        let resp = handle_config(false);
+        let resp = handle_config(
+            false,
+            ConfigSnapshot {
+                admin_port: 2525,
+                local_only: false,
+            },
+        );
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -326,7 +360,13 @@ mod tests {
     #[test]
     fn handle_config_reports_commit() {
         use http_body_util::BodyExt;
-        let resp = handle_config(false);
+        let resp = handle_config(
+            false,
+            ConfigSnapshot {
+                admin_port: 2525,
+                local_only: false,
+            },
+        );
         let bytes = tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(resp.into_body().collect())
@@ -359,7 +399,13 @@ mod tests {
     fn handle_config_reports_explicit_injection_flag() {
         use http_body_util::BodyExt;
         let read_flag = |allow: bool| {
-            let resp = handle_config(allow);
+            let resp = handle_config(
+                allow,
+                ConfigSnapshot {
+                    admin_port: 2525,
+                    local_only: false,
+                },
+            );
             let bytes = tokio::runtime::Runtime::new()
                 .unwrap()
                 .block_on(resp.into_body().collect())

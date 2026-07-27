@@ -48,6 +48,9 @@ pub struct AdminApiServer {
     allow_injection: bool,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
+    /// `--local-only` as supplied, reported verbatim by `GET /config` (issue #879). The flag, not
+    /// "did we bind loopback" — see `ConfigSnapshot::local_only`.
+    local_only: bool,
     authorizer: Option<Arc<dyn AdminAuthorizer>>,
     /// Exposure policy for [`bind`](Self::bind) (issue #863), or `None` when an outer door already
     /// ran the check — see [`with_exposure_checked`](Self::with_exposure_checked).
@@ -66,8 +69,19 @@ impl AdminApiServer {
             intercept: None,
             scripts_dir: None,
             authorizer: None,
+            local_only: false,
             exposure: Some(AdminExposurePolicy::default()),
         }
+    }
+
+    /// Record `--local-only` for `GET /config` to report (issue #879). Threaded explicitly, like
+    /// [`with_allow_injection`](Self::with_allow_injection), so an embedder states it rather than
+    /// having it inferred from the bind address — which would overstate the restriction, since the
+    /// metrics and imposter listeners are governed separately.
+    #[must_use]
+    pub fn with_local_only(mut self, local_only: bool) -> Self {
+        self.local_only = local_only;
+        self
     }
 
     /// Refuse to bind when this server would be reachable off-host with no API key, instead of
@@ -216,6 +230,10 @@ impl AdminApiServer {
                 self.intercept,
                 self.scripts_dir,
                 self.authorizer,
+                crate::admin_api::handlers::system::ConfigSnapshot {
+                    admin_port: local_addr.port(),
+                    local_only: self.local_only,
+                },
                 loop_cancel,
                 loop_tracker,
             )
@@ -426,6 +444,8 @@ async fn accept_loop(
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
     authorizer: Option<Arc<dyn AdminAuthorizer>>,
+    // The `GET /config` values that used to be hardcoded literals (issue #879).
+    config_snapshot: crate::admin_api::handlers::system::ConfigSnapshot,
     cancel: CancellationToken,
     tracker: TaskTracker,
 ) -> anyhow::Result<()> {
@@ -644,6 +664,7 @@ async fn accept_loop(
                                 allow_injection,
                                 intercept,
                                 scripts_dir,
+                                config_snapshot,
                             ),
                         )
                         .await

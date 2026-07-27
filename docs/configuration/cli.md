@@ -138,7 +138,7 @@ Options:
       --runtime-affinity           Pin per-core worker threads to CPU cores (with --runtime per-core; effective on Linux)
       --metrics-port <PORT>        Prometheus metrics port [default: 9090]
       --front-door <ADDR>          Serve every imposter from one address, routed by host/path/header (see Features -> Front Door)
-      --ip-whitelist <IPS>         Comma-separated allowed IPs
+      --ip-whitelist <IPS>         Comma-separated allowed IPs (accepted for Mountebank compatibility; NOT enforced)
       --mock                       Run in mock mode
       --debug                      Enable debug mode
       --nologfile                  Disable log file (stdout only)
@@ -163,8 +163,31 @@ Options:
 ```
 
 `--no-parse` disables EJS preprocessing of `--configfile` (`<% include %>` / `<%= process.env.X %>`
-expansion), which is otherwise applied on load. `--formatter` and `--protofile` are accepted for
-Mountebank command-line compatibility but have no effect in Rift.
+expansion), which is otherwise applied on load. `--formatter`, `--protofile` and `--ip-whitelist`
+are accepted for Mountebank command-line compatibility but have no effect in Rift.
+
+### `--ip-whitelist` does not filter anything
+
+`--ip-whitelist` has **never** applied IP filtering in any release of Rift. It parses, and is
+otherwise ignored; passing it now logs a warning saying so. Earlier versions of this page advertised
+it as a way to "restrict access", including a CIDR example — that syntax was never implemented
+either. If you were relying on it, you had no filtering.
+
+This is deliberate rather than a gap waiting to be filled. Network-level access control belongs to
+the network, which sees the real peer: behind a proxy, load balancer or container NAT this process
+sees the hop, not the client, so an ACL enforced here would silently admit everyone unless it
+trusted `X-Forwarded-For` — and trusting a client-settable header for an ACL is a vulnerability, not
+a feature. Use a NetworkPolicy, security group or firewall.
+
+What does work inside Rift:
+
+| Goal | Use |
+|:-----|:----|
+| Refuse connections from other hosts | `--local-only` (binds loopback; covers `/metrics` too since 0.17.0) |
+| Require a credential on the admin API | `--api-key <token>` |
+| Fail startup if the admin plane is exposed and keyless | `--require-admin-auth` |
+
+`GET /config` reports `"ipWhitelist": ["*"]`, which is accurate: every address may connect.
 
 `--intercept-port` eagerly starts the [intercept/TLS-MITM proxy]({{ site.baseurl }}/features/intercept-proxy/)
 at boot. It is no longer the only way to enable it: a server started without the flag still exposes
@@ -262,7 +285,7 @@ rift-http-proxy --loglevel debug
 
 # Restrict access
 rift-http-proxy --local-only
-rift-http-proxy --ip-whitelist "192.168.1.0/24,10.0.0.0/8"
+rift-http-proxy --api-key s3cr3t --require-admin-auth
 
 # With persistent data directory
 rift-http-proxy --datadir ./mb-data

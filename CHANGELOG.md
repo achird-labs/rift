@@ -104,6 +104,34 @@ record.
 
 ### Changed
 
+- **`--ip-whitelist` now says out loud that it does nothing** (issue #879). The flag was declared and
+  read nowhere — it has **never** applied IP filtering in any release — while four places said it
+  worked: the CLI reference table, a "Restrict access" example promising CIDR syntax that was never
+  implemented, the Node getting-started page, and the Mountebank compatibility matrix, which marked
+  it ✅ Complete. **If you believed you had IP filtering from this flag, you did not**; add it at the
+  network layer.
+
+  It stays accepted (removing it would break Mountebank drop-in compatibility for anyone passing it)
+  and now logs a warning naming what to use instead, joining `--formatter` and `--protofile` in the
+  accepted-but-inert group. Implementing it was considered and rejected: `COMPATIBILITY_COVERAGE.md`
+  already recorded "use Kubernetes NetworkPolicy instead", and behind a proxy or container NAT this
+  process sees the hop rather than the client — so an ACL here would admit everyone unless it trusted
+  `X-Forwarded-For`, which is a vulnerability rather than a feature. A silently-inert security flag
+  is worse than an absent one; the docs are corrected to match.
+
+- **`GET /config` stops reporting hardcoded literals for `port` and `localOnly`** (issue #879). It
+  answered questions about the running configuration with fixed values: `port` was always `2525`
+  even under `--port 3000` (or the ephemeral `:0` embedders use), and `localOnly` was always `false`.
+  `port` is now the port actually bound, and `localOnly` reports whether `--local-only` was supplied.
+
+  `localOnly` deliberately reflects **the flag, not the admin plane's bind address**. Deriving it
+  from the bound address reads as more truthful and is worse: `--host 127.0.0.1` narrows only the
+  admin plane while `/metrics` and every imposter port stay on `0.0.0.0`, so a bind-derived `true`
+  would tell an operator nothing is reachable off-host while two listener families are. The old
+  literal understated; that would overstate, which is the direction that gets someone hurt. It also
+  keeps the field meaning what Mountebank's `/config` means. `ipWhitelist` still reports `["*"]`,
+  which is accurate: nothing is filtered.
+
 - **`--local-only` now restricts the metrics listener too** (issue #880). The metrics server
   hardcoded `0.0.0.0`, so a flag documented as "only accept connections from localhost" narrowed the
   admin plane while leaving `/metrics` reachable on every interface. It now binds `127.0.0.1` under

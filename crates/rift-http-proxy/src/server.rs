@@ -129,10 +129,6 @@ pub struct Cli {
     #[arg(long)]
     pub origin: Option<String>,
 
-    /// IP addresses allowed to connect (comma-separated)
-    #[arg(long, value_delimiter = ',')]
-    pub ip_whitelist: Option<Vec<String>>,
-
     /// Run in mock mode (all imposters are mocks)
     #[arg(long)]
     pub mock: bool,
@@ -164,6 +160,19 @@ pub struct Cli {
     /// Custom protocol definitions file (custom protocols not yet supported; accepted for compatibility)
     #[arg(long, value_name = "FILE")]
     pub protofile: Option<PathBuf>,
+
+    /// IP addresses allowed to connect (comma-separated). ACCEPTED AND NEVER ENFORCED
+    /// (issue #879) — it lives here, with `--formatter` and `--protofile`, because it has never
+    /// filtered anything in any release.
+    ///
+    /// Network-level access control belongs to the platform (NetworkPolicy, security group,
+    /// firewall), which sees the real peer: behind a proxy or container NAT this process sees the
+    /// hop, not the client, so an ACL enforced here would silently admit everyone unless it trusted
+    /// `X-Forwarded-For` — and trusting a client-settable header for an ACL is a vulnerability, not
+    /// a feature. Use `--local-only` to bind loopback, `--api-key` to authenticate the admin plane,
+    /// or `--require-admin-auth` (issue #863) to make an exposed keyless plane a startup failure.
+    #[arg(long, value_delimiter = ',')]
+    pub ip_whitelist: Option<Vec<String>>,
 
     /// Require this token in the Authorization header for all admin API requests
     #[arg(long, value_name = "TOKEN", env = "MB_APIKEY")]
@@ -556,6 +565,16 @@ impl ServerBuilder {
         if cli.protofile.is_some() {
             warn!("--protofile is not supported; custom protocols are not yet implemented");
         }
+        // Issue #879: said out loud because the alternative is silence on a flag that reads as a
+        // security control. An operator who believed they had IP filtering has none, and nothing
+        // told them — the docs even recommended it.
+        if cli.ip_whitelist.is_some() {
+            warn!(
+                "--ip-whitelist is accepted for Mountebank compatibility but is NOT enforced; no \
+                 IP filtering is applied. Use a network policy/firewall, or --local-only, \
+                 --api-key and --require-admin-auth to restrict access."
+            );
+        }
 
         // Retain the config source so POST /admin/reload can re-read it (issue #197).
         // Injection gating is threaded explicitly (issue #342) rather than read from env.
@@ -563,6 +582,7 @@ impl ServerBuilder {
         // bind. Without this the same startup would log the warning twice.
         let mut server = AdminApiServer::new(admin_addr, manager, cli.api_key)
             .with_allow_injection(cli.allow_injection)
+            .with_local_only(cli.local_only)
             .with_exposure_checked();
         if let Some(authorizer) = admin_authorizer {
             server = server.with_admin_authorizer(authorizer);
@@ -2008,6 +2028,68 @@ mod tests {
             "predicates": [{"inject": "function (req) { return true; }"}],
             "action": {"serve": {"statusCode": 200}}
         }))
+    }
+
+    // AC2 (issue #879) — the warning IS the behavioural change, so it is the one thing that must be
+    // pinned. Without it, a refactor that drops the `warn!` returns the flag to being silently inert
+    // and every other test stays green.
+    //
+    // This lives in the crate's own unit tests, not the integration suite, because `tracing_test`
+    // scopes its capture filter to the crate the macro expands in — from `tests/` the library's
+    // events are filtered out and `logs_contain` silently sees nothing. That is why every existing
+    // `traced_test` in this repo (`intercept.rs`, `intercept_control.rs`) is an in-crate test.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn ip_whitelist_warns_that_it_is_not_enforced() {
+        let server = ServerBuilder::from_cli(Cli::parse_from([
+            "rift",
+            "--local-only",
+            "--port",
+            "0",
+            "--metrics-port",
+            "0",
+            "--ip-whitelist",
+            "10.0.0.1",
+        ]))
+        .start()
+        .await
+        .expect("start");
+
+        assert!(
+            logs_contain("--ip-whitelist is accepted"),
+            "passing the flag must say out loud that nothing is filtered"
+        );
+        assert!(
+            logs_contain("NOT enforced"),
+            "the warning must be unambiguous about the flag doing nothing"
+        );
+
+        server.shutdown().await;
+    }
+
+    // The negative half: a server never given the flag must not emit the warning, or it becomes
+    // noise operators learn to ignore — which is how the next real warning gets missed.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn omitting_ip_whitelist_warns_about_nothing() {
+        let server = ServerBuilder::from_cli(Cli::parse_from([
+            "rift",
+            "--local-only",
+            "--port",
+            "0",
+            "--metrics-port",
+            "0",
+        ]))
+        .start()
+        .await
+        .expect("start");
+
+        assert!(
+            !logs_contain("--ip-whitelist"),
+            "the warning must fire only when the flag was actually supplied"
+        );
+
+        server.shutdown().await;
     }
 
     /// AC3: the block and `--intercept-port` are two spellings of one listener. Supplying both is a

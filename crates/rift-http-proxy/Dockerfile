@@ -210,7 +210,7 @@ ENV RIFT_METRICS_PORT=9090
 #   --log <FILE>            Log file path
 #   --pidfile <FILE>        PID file path
 #   --origin <ORIGIN>       CORS allowed origin
-#   --ip-whitelist <IPS>    Allowed IP addresses (comma-separated)
+#   --ip-whitelist <IPS>    Accepted for Mountebank compatibility; NOT enforced (issue #879)
 
 ENTRYPOINT ["/usr/local/bin/rift"]
 CMD []
