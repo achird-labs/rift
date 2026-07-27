@@ -84,6 +84,13 @@ impl Origin {
     }
 }
 
+/// Serve exactly one request, then let the caller drop the socket.
+///
+/// Every response carries `Connection: close` (issue #872). The server genuinely does close after
+/// one request, so saying so is the correct behaviour rather than a workaround: HTTP/1.1 defaults
+/// to keep-alive, so without it `reqwest` pools the socket, reuses it for the next fetch, and
+/// races the close — which surfaced as an intermittent transport error under full-suite load, not
+/// as the parse error the 304 test is designed to catch.
 fn serve_one(
     mut stream: TcpStream,
     hits: &AtomicUsize,
@@ -109,13 +116,14 @@ fn serve_one(
             if if_none_match.as_deref() == Some(etag.as_str()) {
                 write!(
                     stream,
-                    "HTTP/1.1 304 Not Modified\r\nETag: {etag}\r\nContent-Length: 0\r\n\r\n"
+                    "HTTP/1.1 304 Not Modified\r\nETag: {etag}\r\nContent-Length: 0\r\n\
+                     Connection: close\r\n\r\n"
                 )?;
             } else {
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nETag: {etag}\r\nContent-Type: application/json\r\n\
-                     Content-Length: {}\r\n\r\n{body}",
+                     Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
                     body.len()
                 )?;
             }
@@ -123,13 +131,15 @@ fn serve_one(
         Reply::Redirect { location } => {
             write!(
                 stream,
-                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n"
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\
+                 Connection: close\r\n\r\n"
             )?;
         }
         Reply::Oversized { size } => {
             write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {size}\r\n\r\n"
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\
+                 Content-Length: {size}\r\n\r\n"
             )?;
             // Written in chunks so the reader can bail part-way; a broken pipe here is the
             // expected outcome, not a failure.
@@ -145,7 +155,10 @@ fn serve_one(
         }
         Reply::Slow { delay } => {
             std::thread::sleep(delay);
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n[]")?;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n[]"
+            )?;
         }
     }
     stream.flush()
@@ -175,6 +188,59 @@ fn cli(args: &[&str]) -> Cli {
     let mut argv = vec!["rift"];
     argv.extend_from_slice(args);
     Cli::try_parse_from(argv).expect("cli parse")
+}
+
+// ===== Issue #872: the origin must announce that it closes after one request =====
+
+/// Read one raw HTTP response from the origin, sending `request_headers` verbatim.
+fn raw_request(port: u16, extra_headers: &str) -> String {
+    use std::io::{Read, Write};
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).expect("connect to origin");
+    write!(
+        sock,
+        "GET /imposters.json HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra_headers}\r\n"
+    )
+    .expect("write request");
+    let mut out = String::new();
+    let _ = sock.read_to_string(&mut out);
+    out
+}
+
+/// `serve_one` handles exactly one request and drops the socket. HTTP/1.1 defaults to keep-alive,
+/// so without an explicit `Connection: close` a pooling client (reqwest) reuses the dead socket on
+/// the next fetch and racily fails with a transport error.
+///
+/// Asserted on the header rather than by making two fetches and hoping: the race is timing- and
+/// load-dependent, so a two-fetch test passes almost every time even when the header is missing —
+/// which is exactly how this shipped.
+#[test]
+fn origin_announces_connection_close_on_a_200() {
+    let origin = Origin::start(Reply::Etagged {
+        body: imposter_doc(14930, "x"),
+        etag: "\"v1\"".to_string(),
+    });
+    let resp = raw_request(origin.port, "");
+    assert!(resp.starts_with("HTTP/1.1 200"), "got: {resp:.80}");
+    assert!(
+        resp.to_ascii_lowercase().contains("connection: close"),
+        "a 200 must announce the close; headers were: {resp:.200}"
+    );
+}
+
+#[test]
+fn origin_announces_connection_close_on_a_304() {
+    // The 304 path is the one the flake actually hit: it is the second fetch in
+    // `http_source_304_serves_cache_without_reparsing`, i.e. the one served over a pooled socket.
+    let origin = Origin::start(Reply::Etagged {
+        body: imposter_doc(14931, "x"),
+        etag: "\"v1\"".to_string(),
+    });
+    let resp = raw_request(origin.port, "If-None-Match: \"v1\"\r\n");
+    assert!(resp.starts_with("HTTP/1.1 304"), "got: {resp:.80}");
+    assert!(
+        resp.to_ascii_lowercase().contains("connection: close"),
+        "a 304 must announce the close; headers were: {resp:.200}"
+    );
 }
 
 // ===== AC3: a port claimed by two sources names both =====
