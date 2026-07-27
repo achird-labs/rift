@@ -110,6 +110,8 @@ rift_free(result);
   `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"config":null,"allowInjection":false,"requireAdminAuth":false}`.
   `port: 0` binds an ephemeral port; `configFile` is loaded as the reload source (like `--configfile`);
   `config` is an inline `{"imposters":[...]}`. `configFile` and `config` do not compose — pass one.
+  Since 0.17.0 an **unknown key is a hard error** naming the key (`NULL` + `rift_last_error`), not a
+  silent drop — so a typo fails loudly instead of leaving the option quietly inert.
 - **`apiKey`**: a blank string is rejected — `rift_serve_admin` returns `NULL` and records the
   reason in `rift_last_error`. A blank key would enable the admin auth gate and then authenticate
   every request, and the realistic way to send one is plumbing rather than intent
@@ -121,14 +123,9 @@ rift_free(result);
   *authentication*, not on the address — a real `apiKey` satisfies it on any bind. Under a refusal
   `rift_serve_admin` returns `NULL` with the reason in `rift_last_error`, and nothing has been bound.
 
-  **This field is not self-gating — check the engine version before relying on it.** `ServeOptions`
-  does not use `deny_unknown_fields`, so an engine older than 0.17.0 **silently ignores**
-  `requireAdminAuth` and serves the keyless off-host admin plane anyway, returning a normal
-  `{"adminPort":…}`. There is no error to detect. An SDK that offers this option must gate it on the
-  engine version from `rift_build_info` rather than assuming a rejection it will never receive.
-  (Note this is not something a newer engine can fix retroactively: the old engine is the one doing
-  the ignoring.) Omitting the field is the previous behaviour exactly, so an SDK built against an
-  older engine is otherwise unaffected.
+  **Feature-detect it** — see *Detecting which options an engine accepts* below. Against an engine
+  released before 0.17.0 this field is silently ignored and the keyless off-host admin plane is
+  served anyway, with a normal `{"adminPort":…}` and nothing to catch.
 
   The default `Warn` posture writes through the `tracing` facade. `rift-ffi` installs **no**
   subscriber — correct for a library, but it means an embedding host that has not installed one of
@@ -156,6 +153,31 @@ rift_free(result);
   fails the serve outright (`NULL` + `rift_last_error`) rather than loading, so nothing is applied.
 - **Returns** (caller frees): `{"adminPort":...,"adminUrl":"...","metricsPort":...}`, or `NULL` on
   error (bad JSON, bind failure, or already serving — one admin plane per handle).
+
+### Detecting which options an engine accepts
+
+`rift_build_info()` publishes the accepted option keys as `serveOptions` (issue #877), so an SDK can
+check before sending one:
+
+```jsonc
+{"version":"0.17.0","commit":"…","builtAt":"…","features":["javascript"],
+ "serveOptions":["host","port","apiKey","metricsPort","configFile","config",
+                 "allowInjection","requireAdminAuth"]}
+```
+
+**Absence of the key is the signal.** An engine older than 0.17.0 reports no `serveOptions` at all —
+treat that as "no serve option can be relied upon" and fall back to the behaviour you would have had
+without the option. This is the only check that works against already-released engines, and it is why
+you must not feature-detect by sending the option and watching for an error:
+
+- an engine **older** than 0.17.0 accepts the JSON, ignores the key, and returns success — there is
+  no error to catch, and for `requireAdminAuth` specifically the silent outcome is *fail-open*;
+- an engine **0.17.0 or newer** does reject an unknown key, but relying on that means probing by
+  deliberately provoking a failure, and it still tells you nothing about the older engines.
+
+`serveOptions` is deliberately separate from `features`, which lists compiled cargo features
+(`redis-backend`, `javascript`) — different question, different array. The same list is published
+over HTTP at `GET /config` for consumers that do not link the C-ABI.
 
 ## Intercept proxy over FFI
 
