@@ -18,7 +18,7 @@ pub mod types;
 pub use handlers::imposters::{filter_proxy_responses, filter_proxy_stubs};
 pub use server::{
     AdminApiServer, AdminExposurePolicy, RunningAdminApi, check_admin_exposure,
-    validate_admin_api_key,
+    check_intercept_exposure, validate_admin_api_key,
 };
 
 /// Default port for the Mountebank-compatible admin API.

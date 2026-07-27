@@ -803,14 +803,6 @@ pub fn check_admin_exposure(
     api_key: Option<&str>,
     policy: AdminExposurePolicy,
 ) -> anyhow::Result<()> {
-    // `to_canonical` first: `Ipv6Addr::is_loopback` matches only the literal `::1`, so an
-    // IPv4-mapped `::ffff:127.0.0.1` — which some address-normalising front ends hand over — would
-    // otherwise be judged off-host and refused under `Refuse` despite being loopback-only. The
-    // mapping is safe in the other direction too: `::ffff:10.0.0.5` canonicalises to `10.0.0.5`,
-    // which is still not loopback, so nothing genuinely reachable becomes exempt.
-    if api_key.is_some() || addr.ip().to_canonical().is_loopback() {
-        return Ok(());
-    }
     let message = format!(
         "the admin API is bound to {addr}, which is reachable from outside this host, with no API \
          key — anyone who can reach that address can create imposters and drive the TLS intercept \
@@ -818,12 +810,61 @@ pub fn check_admin_exposure(
          `--host 127.0.0.1`. Set `--require-admin-auth` (`RIFT_REQUIRE_ADMIN_AUTH`) to make this a \
          startup failure instead of a warning."
     );
+    judge_exposure(addr, api_key.is_some(), policy, &message)
+}
+
+/// Warn or refuse when the **intercept** listener would bind a non-loopback address with no proxy
+/// credential (issue #878).
+///
+/// Same rule and same policy as [`check_admin_exposure`], one listener over. It is a sibling rather
+/// than a widened signature because `check_admin_exposure` is public API that `rift-ffi` already
+/// calls, and because the two need different remedies in their messages.
+///
+/// This listener deserves the check at least as much as the admin plane: it is a TLS-MITM proxy, so
+/// an unauthenticated caller who can reach it is served forged certificates from Rift's CA — which
+/// is trusted wherever that CA was installed, and installing it is the entire point of the feature.
+///
+/// Callers must invoke this before binding anything, for the reason given on [`check_admin_exposure`].
+pub fn check_intercept_exposure(
+    addr: SocketAddr,
+    has_credential: bool,
+    policy: AdminExposurePolicy,
+) -> anyhow::Result<()> {
+    let message = format!(
+        "the TLS intercept proxy is bound to {addr}, which is reachable from outside this host, \
+         with no proxy credential — anyone who can reach that address can route traffic through it \
+         and be served certificates forged by Rift's CA. Set `--intercept-auth <user:pass>` \
+         (`RIFT_INTERCEPT_AUTH`), or restrict the bind with `--local-only` or `--host 127.0.0.1`. \
+         Set `--require-admin-auth` (`RIFT_REQUIRE_ADMIN_AUTH`) to make this a startup failure \
+         instead of a warning."
+    );
+    judge_exposure(addr, has_credential, policy, &message)
+}
+
+/// The one exposure rule both public checks apply: a bind reachable off-host with no credential is
+/// warned about, or refused under [`AdminExposurePolicy::Refuse`]. Shared so the two listeners can
+/// never drift on what "exposed" means.
+///
+/// `to_canonical` first: `Ipv6Addr::is_loopback` matches only the literal `::1`, so an IPv4-mapped
+/// `::ffff:127.0.0.1` — which some address-normalising front ends hand over — would otherwise be
+/// judged off-host and refused despite being loopback-only. The mapping is safe in the other
+/// direction too: `::ffff:10.0.0.5` canonicalises to `10.0.0.5`, still not loopback, so nothing
+/// genuinely reachable becomes exempt.
+fn judge_exposure(
+    addr: SocketAddr,
+    has_credential: bool,
+    policy: AdminExposurePolicy,
+    message: &str,
+) -> anyhow::Result<()> {
+    if has_credential || addr.ip().to_canonical().is_loopback() {
+        return Ok(());
+    }
     match policy {
         AdminExposurePolicy::Warn => {
             warn!("{message}");
             Ok(())
         }
-        AdminExposurePolicy::Refuse => anyhow::bail!(message),
+        AdminExposurePolicy::Refuse => anyhow::bail!(message.to_string()),
     }
 }
 

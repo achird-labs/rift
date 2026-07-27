@@ -55,9 +55,45 @@ use rift_http_proxy::intercept_rules::InterceptRules;
 let ca = Arc::new(CertificateAuthority::generate()?);      // or CertificateAuthority::load_pem(cert, key)
 let rules = InterceptRules::new();
 let resolver = Arc::new(SniCertResolver::new(ca.clone())); // mints one leaf per SNI host
-let listener = InterceptListener::bind("127.0.0.1:0".parse()?, resolver, rules.clone()).await?;
+// `None` = no proxy credential (open). Pass `Some(InterceptAuth { .. })` to require
+// `Proxy-Authorization: Basic …` on every CONNECT (issue #878).
+let listener =
+    InterceptListener::bind("127.0.0.1:0".parse()?, resolver, rules.clone(), None).await?;
 // Point the SUT at `listener.local_addr()` as its HTTPS proxy, trusting `ca`.
 ```
+
+### Authenticating the proxy
+
+**The listener is open unless you give it a credential.** That is deliberate — it is off until you
+start it, and most uses are a loopback test rig — but be clear about what it is: a TLS-MITM proxy
+that serves certificates forged by a CA you have asked your clients to trust. On loopback that is
+fine. Anywhere reachable by others it is not, because reaching the port is the only thing standing
+between someone and a trusted forged certificate for any host they name.
+
+Set a credential with `--intercept-auth user:pass` (`RIFT_INTERCEPT_AUTH`), the `auth` key on the
+config-file block, `POST /intercept`'s body, or `rift_start_intercept`'s options:
+
+```json
+{ "port": 8888, "auth": { "username": "ci", "password": "s3cr3t" } }
+```
+
+Every `CONNECT` must then carry `Proxy-Authorization: Basic <base64(user:pass)>`; anything else is
+answered `407 Proxy Authentication Required` with a `Proxy-Authenticate` challenge — **before** the
+TLS handshake, so an unauthenticated caller never causes a certificate to be minted. Standard
+clients handle this: `HTTPS_PROXY=http://ci:s3cr3t@host:8888`, `curl -x`, a JVM `Authenticator`.
+
+This is a *separate* credential from the admin `--api-key`, on purpose. `Proxy-Authorization` is
+hop-by-hop and is consumed by the proxy; `Authorization` is end-to-end and would be forwarded to
+every intercepted origin, handing your admin key to the very servers you are intercepting.
+
+`--require-admin-auth` covers this listener too, at **every** door on the standalone binary — the
+flag, the config block, and a listener started at runtime over `POST /intercept` (which answers
+`403` rather than starting an exposed keyless one). A non-loopback bind with no credential warns by
+default and refuses under the flag.
+
+Embedders driving `rift_start_intercept` over the C-ABI get the **warning** but not the refusal: the
+policy travels on the process's `InterceptControl`, which the standalone binary sets from the flag
+and an embedded host currently does not. Set `auth` explicitly if you bind off-host.
 
 To expose the `/intercept` routes over the admin API, build the admin server
 `with_intercept(control)` where `control: InterceptControl` is the shared lifecycle slot (see
