@@ -70,6 +70,11 @@ pub fn handle_config(allow_injection: bool) -> Response<Full<Bytes>> {
             "localOnly": false,
             "ipWhitelist": ["*"]
         },
+        // Serve-option capability list (issue #877), a sibling of the Mountebank-shaped `options`
+        // above rather than a member of it — existing clients parse that object, and this is ours.
+        // An HTTP-only consumer feature-detects on this exactly as an FFI consumer does on
+        // `rift_build_info().serveOptions`; absence means an engine too old to report capabilities.
+        "serveOptions": crate::admin_api::SERVE_OPTION_KEYS,
         "process": {
             "nodeVersion": "N/A (Rust)",
             "architecture": std::env::consts::ARCH,

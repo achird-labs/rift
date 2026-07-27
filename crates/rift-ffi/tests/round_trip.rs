@@ -2569,3 +2569,100 @@ fn ffi_omitting_require_admin_auth_is_accepted_and_defaults_off() {
         rift_stop(h);
     }
 }
+
+// ── issue #877: serve-option capability list + unknown-key rejection, across the C-ABI ────────
+
+// AC3 at the real boundary: an SDK that misspells an option now gets NULL and a last_error naming
+// the key, instead of a success response and an option that silently did nothing.
+#[test]
+fn ffi_unknown_serve_option_is_rejected_naming_the_key() {
+    unsafe {
+        let h = rift_start();
+        let opts = cstr(r#"{"host": "127.0.0.1", "port": 0, "requireAdminAuthh": true}"#);
+        assert!(
+            rift_serve_admin(h, opts.as_ptr()).is_null(),
+            "an unknown serve option must be rejected, not silently dropped"
+        );
+
+        let err = rift_last_error();
+        assert!(!err.is_null(), "the rejection must record last_error");
+        let msg = take_json(err);
+        assert!(
+            msg.contains("requireAdminAuthh"),
+            "last_error must name the offending key, got: {msg}"
+        );
+
+        rift_stop(h);
+    }
+}
+
+// AC2/AC6: the capability list an SDK reads before sending an option. `rift_build_info` is a static
+// string needing no handle, so an SDK can probe it before deciding anything — which is the whole
+// point: absence of `serveOptions` means an engine too old to report capabilities.
+#[test]
+fn ffi_build_info_advertises_serve_options() {
+    unsafe {
+        let raw = CStr::from_ptr(rift_build_info())
+            .to_str()
+            .expect("build info utf8");
+        let info: serde_json::Value = serde_json::from_str(raw).expect("build info is JSON");
+        let opts = info["serveOptions"]
+            .as_array()
+            .expect("build info advertises serveOptions");
+        let names: Vec<&str> = opts.iter().filter_map(|v| v.as_str()).collect();
+        for expected in [
+            "host",
+            "port",
+            "apiKey",
+            "allowInjection",
+            "requireAdminAuth",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "serveOptions must advertise `{expected}`, got: {names:?}"
+            );
+        }
+    }
+}
+
+// AC5 across the ABI: the compatibility direction — a document using every advertised option still
+// serves. This is the regression `deny_unknown_fields` could break for all four SDKs at once.
+#[test]
+fn ffi_a_document_using_every_advertised_option_still_serves() {
+    unsafe {
+        let h = rift_start();
+        let info: serde_json::Value = {
+            let raw = CStr::from_ptr(rift_build_info()).to_str().expect("utf8");
+            serde_json::from_str(raw).expect("json")
+        };
+        let advertised: Vec<String> = info["serveOptions"]
+            .as_array()
+            .expect("serveOptions")
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+
+        // Built from the advertised list, so this fails if the engine advertises a key it will not
+        // actually accept — the failure mode the capability list exists to prevent.
+        let mut doc = serde_json::Map::new();
+        for key in &advertised {
+            let value = match key.as_str() {
+                "host" => serde_json::json!("127.0.0.1"),
+                "port" | "metricsPort" => serde_json::json!(0),
+                "apiKey" => serde_json::json!("s3cr3t"),
+                "configFile" => continue, // mutually exclusive with `config`; covered elsewhere
+                "config" => serde_json::json!({"imposters": []}),
+                "allowInjection" => serde_json::json!(true),
+                "requireAdminAuth" => serde_json::json!(false),
+                other => {
+                    panic!("unhandled advertised serve option `{other}` — extend this fixture")
+                }
+            };
+            doc.insert(key.clone(), value);
+        }
+
+        let info = serve_admin(h, &serde_json::Value::Object(doc).to_string());
+        assert!(info["adminPort"].as_u64().expect("adminPort") > 0);
+        rift_stop(h);
+    }
+}

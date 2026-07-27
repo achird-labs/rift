@@ -28,6 +28,18 @@ record.
 
 ### Added
 
+- **Serve options are now feature-detectable — `serveOptions` on `rift_build_info` and `GET /config`**
+  (issue #877). `ServeOptions` fields have no symbol for an SDK to probe, so the "additive symbols are
+  discovered by presence" convention `rift_abi_version` documents could not reach them: an SDK sending
+  a new option to an older engine got a normal success and an option that silently did nothing. For
+  `requireAdminAuth` (#863) that silence was *fail-open*.
+
+  Both surfaces now publish the accepted keys, from one shared constant. **Absence of the key is the
+  signal**: an engine older than 0.17.0 reports no `serveOptions` at all, so an SDK reading it knows to
+  treat every option as unsupported. That is what makes this work against already-released engines —
+  detection by provoking an error cannot, because the engine doing the ignoring is the old one.
+  `serveOptions` is deliberately separate from `features`, which lists compiled cargo features.
+
 - **`--require-admin-auth` — opt in to refusing a keyless off-host admin plane** (issue #863).
   `--host` defaults to `0.0.0.0`, so a bare keyless `rift` already serves the full admin API — which
   can create imposters and drive the TLS intercept proxy — on every interface with no
@@ -103,6 +115,16 @@ record.
   compared byte for byte, untrimmed.
 
 ### Changed
+
+- **An unknown key in the C-ABI serve-options JSON is now a hard error** (issue #877). `ServeOptions`
+  gained `deny_unknown_fields`, so `rift_serve_admin` answers `NULL` with the offending key named in
+  `rift_last_error` instead of silently dropping it and returning success. **If you pass extra keys
+  today** — a forward-compatibility habit, or a serializer emitting nulls for unknown members — that
+  call now fails; send only the keys `rift_build_info().serveOptions` advertises.
+
+  This catches typos going forward; it is **not** the feature-detection mechanism, and cannot be. An
+  engine released before this change still silently ignores unknown keys, so an SDK must read the
+  capability list rather than infer support from the absence of an error.
 
 - **`--local-only` now restricts the metrics listener too** (issue #880). The metrics server
   hardcoded `0.0.0.0`, so a flag documented as "only accept connections from localhost" narrowed the
