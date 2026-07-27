@@ -8,6 +8,7 @@
 //!
 //! The API listens on a configurable port (default: 2525).
 
+pub(crate) mod authz;
 mod handlers;
 mod request_filter;
 mod router;

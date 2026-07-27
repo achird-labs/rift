@@ -15,7 +15,10 @@
 //! - **Routing** (`routing`): Multi-upstream routing for reverse proxy mode
 //! - **No-Match Interceptor** (`no_match`): Last-chance hook for a genuine no-match, before the
 //!   defaultForward/defaultResponse/empty-200 fallthrough (issue #819)
+//! - **Admin Authorization** (`authz`): Pluggable per-request admin-API authorization with parsed
+//!   route context, consulted after authentication (issue #854)
 
+pub mod authz;
 pub mod decorate;
 pub mod fault;
 pub mod flow_state;
