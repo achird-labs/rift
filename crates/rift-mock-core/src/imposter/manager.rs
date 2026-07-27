@@ -3966,15 +3966,14 @@ mod tests {
             manager.create_imposter(cfg).await.expect("create upstream")
         }
 
-        /// A port with nothing listening: bind an ephemeral port to learn a free number, then drop
-        /// the listener so a connection there is refused — deterministic, unlike a guessed literal.
-        fn closed_port() -> u16 {
-            std::net::TcpListener::bind("127.0.0.1:0")
-                .expect("bind ephemeral")
-                .local_addr()
-                .expect("local_addr")
-                .port()
-        }
+        /// A port with nothing listening, chosen so the suite cannot race it (issue #859). Port 1
+        /// is below the privileged threshold, so no test can bind it, and outside the ephemeral
+        /// range `bind(:0)` allocates from, so the allocator can never hand it out — `connect`
+        /// here is always refused. Binding an ephemeral port and dropping the listener, as this
+        /// did before, returns the number to the allocator immediately; under full-suite
+        /// parallelism another test took it before the proxy dialled, the upstream *succeeded*,
+        /// and no claim was released.
+        const CLOSED_PORT: u16 = 1;
 
         // AC7: a shared proxy store is injected into imposters, keyed by port, exercised on the
         // proxy hot path, and cleared on imposter deletion.
@@ -4039,7 +4038,7 @@ mod tests {
             let manager = ImposterManager::new()
                 .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
             // Forward to a closed port so the upstream leg always fails.
-            let dead = closed_port();
+            let dead = CLOSED_PORT;
             let proxy_port = proxy_imposter(&manager, &format!("http://127.0.0.1:{dead}")).await;
 
             for _ in 0..2 {

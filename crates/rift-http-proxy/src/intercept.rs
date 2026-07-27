@@ -550,6 +550,14 @@ mod tests {
     use crate::intercept_rules::{ForwardTarget, InterceptRule};
     use rift_mock_core::proxy::intercept_ca::CertificateAuthority;
 
+    /// A port with nothing listening, for the tests that need a forward target that always fails.
+    /// Port 1 is below the privileged threshold, so no test can bind it, and outside the ephemeral
+    /// range `bind(:0)` allocates from, so the allocator can never hand it out — `connect` here is
+    /// always refused. These tests used to bind an ephemeral port and drop the listener, which
+    /// returns the number to the allocator immediately; under full-suite parallelism another test
+    /// takes it and the "dead" upstream answers (issue #859).
+    const CLOSED_PORT: u16 = 1;
+
     // Issue #522: a panicked accept loop must not be swallowed by `shutdown`/`stop` — its
     // `JoinError` is logged rather than discarded.
     #[tokio::test]
@@ -1023,10 +1031,10 @@ mod tests {
             }
         });
 
-        // Bind then drop, to get a port that is very likely closed for the test's lifetime.
-        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let dead_port = closed.local_addr().unwrap().port();
-        drop(closed);
+        // A port nothing can be listening on — see the note on CLOSED_PORT below (issue #859).
+        // Bind-then-drop returns the number to the ephemeral allocator, so another test in this
+        // binary can take it and turn "dead upstream" into a live one.
+        let dead_port = CLOSED_PORT;
 
         let rules = InterceptRules::new();
         rules
@@ -1086,18 +1094,12 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_forward_port_returns_502() {
-        // Bind then immediately drop a listener to get a port that is very likely closed for
-        // the lifetime of the test.
-        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let closed_port = closed.local_addr().unwrap().port();
-        drop(closed);
-
         let rules = InterceptRules::new();
         rules
             .add(InterceptRule {
                 host: None,
                 predicates: vec![],
-                action: InterceptAction::Forward(ForwardTarget { port: closed_port }),
+                action: InterceptAction::Forward(ForwardTarget { port: CLOSED_PORT }),
             })
             .unwrap();
         let (listener, ca_pem) = start_listener(rules).await;
