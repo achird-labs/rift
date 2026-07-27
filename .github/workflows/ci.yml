@@ -175,6 +175,20 @@ jobs:
           ./scripts/verify-feature-propagation.sh --self-test
           ./scripts/verify-feature-propagation.sh
 
+  benchmark-scripts:
+    name: Benchmark Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Issue #866. The benchmark suites had unit tests but no CI ran them, so the gate protecting
+      # every published number — stub translation, rep aggregation, the report combiner — could go
+      # red for months without anyone noticing. The live path (14 JVMs + oha) is not CI-runnable;
+      # this is the pure logic underneath it, and it takes seconds.
+      - name: Run benchmark suite unit tests
+        working-directory: tests/benchmark/scripts
+        run: python3 -m unittest discover -p 'test_*.py'
+
   image-hardening:
     name: Image Hardening
     runs-on: ubuntu-latest

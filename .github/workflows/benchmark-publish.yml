@@ -8,8 +8,11 @@
 #   1. Every published cell is a MEDIAN with its spread stated. A benchmark host is not a constant
 #      — issue #746 published a number from a single rep that landed on a degraded runner and had
 #      to be retracted. `--rep` plus the aggregation step below makes that structurally impossible.
-#   2. Mountebank is pinned and installed here, not taken from whoever ran it. The comparison is
-#      only meaningful if both engines are the same versions every time.
+#   2. Mountebank and WireMock are pinned and installed here, not taken from whoever ran them. The
+#      comparison is only meaningful if every engine is the same version every time.
+#   3. All three engines are measured in ONE dispatch at ONE warmup. A published ratio between a
+#      3s-warmed Rift and a 10s-warmed JVM is not a comparison, and nothing in the table would say
+#      so — hence a single `warmup` input rather than a per-leg constant.
 name: Benchmark (publish)
 
 on:
@@ -27,9 +30,18 @@ on:
       connections:
         description: "Keep-alive connections for the comparison table"
         default: "50"
+      warmup:
+        description: >-
+          Warmup per scenario point, applied to ALL THREE engines. 3s is thin for a JVM's JIT, so a
+          3s rift/mb table cannot have a WireMock column bolted onto it — the whole table is
+          re-measured at one warmup per dispatch.
+        default: "10s"
       mb_version:
         description: "Mountebank version (pinned so the comparison is reproducible)"
         default: "2.9.1"
+      wiremock_version:
+        description: "WireMock version (pinned, same reason as Mountebank)"
+        default: "3.9.1"
 
 permissions:
   contents: read
@@ -38,6 +50,16 @@ jobs:
   publish:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 360
+    # Dispatch inputs reach the shell as environment variables, never interpolated into the script
+    # body — `${{ }}` is substituted before bash parses the line, so a crafted input would run as
+    # code. `BENCH_`-prefixed because Mountebank and Rift both read `MB_*` from the environment.
+    env:
+      BENCH_REPS: ${{ inputs.reps }}
+      BENCH_DURATION: ${{ inputs.duration }}
+      BENCH_CONNECTIONS: ${{ inputs.connections }}
+      BENCH_WARMUP: ${{ inputs.warmup }}
+      BENCH_MB_VERSION: ${{ inputs.mb_version }}
+      BENCH_WIREMOCK_VERSION: ${{ inputs.wiremock_version }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -45,16 +67,27 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
 
-      - name: Install oha and Mountebank ${{ inputs.mb_version }}
+      - name: Install oha, Mountebank ${{ inputs.mb_version }}, WireMock ${{ inputs.wiremock_version }}
         run: |
           set -euo pipefail
           curl -sfL -o /usr/local/bin/oha \
             https://github.com/hatoo/oha/releases/download/v1.12.0/oha-linux-amd64 \
             && chmod +x /usr/local/bin/oha && oha --version \
             || cargo install oha --locked
-          npm install --prefix "$HOME/bench-mb" "mountebank@${{ inputs.mb_version }}"
+          npm install --prefix "$HOME/bench-mb" "mountebank@$BENCH_MB_VERSION"
           "$HOME/bench-mb/node_modules/mountebank/bin/mb" --version
+          mkdir -p "$HOME/bench-wiremock"
+          curl -sfL -o "$HOME/bench-wiremock/wiremock-standalone.jar" \
+            "https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/$BENCH_WIREMOCK_VERSION/wiremock-standalone-$BENCH_WIREMOCK_VERSION.jar"
+          # Integrity, not a version flag: a truncated jar still downloads cleanly and only fails
+          # 40 minutes later inside the first rep.
+          unzip -qt "$HOME/bench-wiremock/wiremock-standalone.jar"
+          java -version
 
       - name: Record environment
         run: |
@@ -72,17 +105,18 @@ jobs:
         working-directory: tests/benchmark
         run: |
           set -euo pipefail
-          for rep in $(seq 1 ${{ inputs.reps }}); do
+          for rep in $(seq 1 "$BENCH_REPS"); do
             echo "===== comparison rep=$rep ====="
             python3 -u scripts/bench_direct.py --run-all --engines rift,mb --rep "$rep" \
-              --connections "${{ inputs.connections }}" --duration "${{ inputs.duration }}" \
-              --warmup 3s --rift-bin ../../target/release/rift-http-proxy \
+              --connections "$BENCH_CONNECTIONS" --duration "$BENCH_DURATION" \
+              --warmup "$BENCH_WARMUP" \
+              --rift-bin ../../target/release/rift-http-proxy \
               --mb-bin "$HOME/bench-mb/node_modules/mountebank/bin/mb"
           done
           python3 -u scripts/bench_direct.py --aggregate-comparison "" \
-            --connections "${{ inputs.connections }}" \
+            --connections "$BENCH_CONNECTIONS" \
             --rift-version "$(../../target/release/rift-http-proxy --version)" \
-            --mb-version "${{ inputs.mb_version }}"
+            --mb-version "$BENCH_MB_VERSION"
           # Both phases write direct_rift_repN.csv — same engine, same empty variant suffix — so
           # the sweep below would silently overwrite the comparison's inputs and the published
           # table would be built from whatever survived. Park the comparison artefacts first.
@@ -92,16 +126,66 @@ jobs:
           mv results/direct_rift.csv results/direct_mb.csv results/comparison/ 2>/dev/null || true
           ls results/comparison
 
+      # The third engine. It runs here — after the comparison, before the sweep — because the 3-way
+      # median table needs rift and mb at the SAME point, and the sweep below re-writes
+      # direct_rift_rep*.csv at other connection counts.
+      #
+      # WireMock is benched by its own suite (bench_wiremock.py): it cannot consume the imposter
+      # JSON, so its mappings are generated from the same fixture instead. Two series come out of
+      # each rep — `wiremock` with the Jetty pool pinned (issue #865) and `wiremock-stock` at
+      # out-of-the-box defaults — so the report can distinguish a thread-pool ceiling from an
+      # engine ceiling.
+      - name: WireMock ${{ inputs.wiremock_version }} + 3-way comparison (repeated)
+        working-directory: tests/benchmark
+        run: |
+          set -euo pipefail
+          for rep in $(seq 1 "$BENCH_REPS"); do
+            echo "===== wiremock rep=$rep ====="
+            python3 -u scripts/bench_wiremock.py --run-all --rep "$rep" \
+              --connections "$BENCH_CONNECTIONS" --duration "$BENCH_DURATION" \
+              --warmup "$BENCH_WARMUP" \
+              --wiremock-jar "$HOME/bench-wiremock/wiremock-standalone.jar" \
+              --wiremock-version "$BENCH_WIREMOCK_VERSION"
+          done
+          # Bring the parked comparison reps back so all four series aggregate together and the
+          # table is one dispatch's data end to end. Unequal rep counts are refused by the
+          # aggregation, so a partial copy cannot quietly become a thinner column.
+          cp results/comparison/direct_rift_rep*.csv results/comparison/direct_mb_rep*.csv results/
+          # No --warmup here on purpose: the report states what the reps recorded, so a mismatch
+          # between what CI asked for and what ran shows up instead of being papered over.
+          python3 -u scripts/bench_wiremock.py --aggregate-reps --report \
+            --connections "$BENCH_CONNECTIONS" --duration "$BENCH_DURATION" \
+            --rift-version "$(../../target/release/rift-http-proxy --version)" \
+            --mb-version "$BENCH_MB_VERSION" \
+            --wiremock-version "$BENCH_WIREMOCK_VERSION"
+          # Park before the sweep: it writes direct_rift_rep*.csv and its own direct_rift_median.csv,
+          # which would otherwise overwrite the inputs and the output of the table just built.
+          # Named individually rather than by one broad glob: `direct_wiremock*.csv` and
+          # `*_median.csv` overlap on direct_wiremock_median.csv, and `mv` given the same source
+          # twice fails on the second — an hour of benching thrown away at the last command.
+          mkdir -p results/wiremock
+          mv results/direct_wiremock*.csv results/wiremock/
+          mv results/direct_wiremock*.threads results/direct_wiremock*.warmup results/wiremock/
+          mv results/WIREMOCK_BENCHMARK_REPORT*.md results/wiremock/
+          # Renamed, not just moved: the sweep writes its own direct_rift_median.csv at other
+          # connection counts, and two files with the same basename in one artefact is how the
+          # wrong one gets published.
+          mv results/direct_rift_median.csv results/wiremock/direct_rift_comparison_median.csv
+          mv results/direct_mb_median.csv results/wiremock/direct_mb_comparison_median.csv
+          rm -f results/direct_rift_rep*.csv results/direct_mb_rep*.csv
+          ls results/wiremock
+
       # Rift-only sweep: connection scaling plus the matching-dimension scenarios that the
       # comparison set deliberately excludes (it is a stability contract).
       - name: Rift concurrency sweep + matching dimensions (repeated)
         working-directory: tests/benchmark
         run: |
           set -euo pipefail
-          for rep in $(seq 1 ${{ inputs.reps }}); do
+          for rep in $(seq 1 "$BENCH_REPS"); do
             echo "===== sweep rep=$rep ====="
             python3 -u scripts/bench_direct.py --run-all --rep "$rep" \
-              --sweep-connections 1,50,256,512 --duration "${{ inputs.duration }}" --warmup 3s \
+              --sweep-connections 1,50,256,512 --duration "$BENCH_DURATION" \
+              --warmup "$BENCH_WARMUP" \
               --rift-bin ../../target/release/rift-http-proxy
           done
           python3 -u scripts/bench_direct.py --aggregate-reps ""
@@ -110,7 +194,10 @@ jobs:
         if: failure()
         run: |
           free -m; df -h / | tail -1
-          tail -40 tests/benchmark/results/*.log 2>/dev/null || echo "(no logs)"
+          # results/logs/ as well as results/: the WireMock leg spawns 14 JVMs and writes each one's
+          # log there, and it is the leg most likely to die on a readiness probe or an OOM.
+          tail -40 tests/benchmark/results/*.log tests/benchmark/results/logs/*.log 2>/dev/null \
+            || echo "(no logs)"
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -120,6 +207,8 @@ jobs:
             tests/benchmark/results/*.csv
             tests/benchmark/results/*.md
             tests/benchmark/results/comparison/*
+            tests/benchmark/results/wiremock/*
             tests/benchmark/results/environment.txt
             tests/benchmark/results/*.log
+            tests/benchmark/results/logs/*.log
           retention-days: 90

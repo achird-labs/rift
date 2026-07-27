@@ -237,7 +237,61 @@ table:
 Translator logic is gate-tested in `scripts/test_bench_wiremock.py` (golden mappings per stub
 generator, priority ordering, the `or`-split, the catch-all, and a completeness test that runs
 *every* stub in the live fixture through the translator so a new generator in `bench_direct.py`
-cannot ship silently untranslated).
+cannot ship silently untranslated). CI runs it — the `Benchmark Scripts` job in `ci.yml` executes
+both suites' unit tests on every PR.
+
+#### Publishing the 3-way table (issue #866)
+
+Do not publish a number from one rep, and **do not bolt a WireMock column onto an existing
+rift-vs-mb table**. Both are handled by the `Benchmark (publish)` workflow
+(`.github/workflows/benchmark-publish.yml`, `workflow_dispatch` only):
+
+```
+gh workflow run benchmark-publish.yml \
+  -f runner=ubuntu-16core -f reps=3 -f duration=20s -f connections=50 -f warmup=10s
+```
+
+It measures **all three engines in one dispatch at one `warmup`**, three reps each, then publishes
+medians. That single-warmup rule is the point of the input existing: a 3s-warmed Rift against a
+10s-warmed JVM is not a comparison, and the rendered table would say nothing about it. The legs run
+in a fixed order — comparison, then WireMock, then the Rift-only sweep — because the sweep re-writes
+`direct_rift_rep*.csv` at other connection counts; the WireMock leg parks its artefacts under
+`results/wiremock/` before that happens. `wiremock_version` and `mb_version` are pinned inputs so a
+re-run is reproducible.
+
+The same aggregation runs locally:
+
+```bash
+for rep in 1 2 3; do
+  python3 scripts/bench_wiremock.py --run-all --rep $rep --connections 50 --warmup 10s
+done
+# -> direct_<engine>_median.csv for every engine with rep files, then the median table
+python3 scripts/bench_wiremock.py --aggregate-reps --report --connections 50
+```
+
+`--aggregate-reps` collapses `_repN` CSVs for `wiremock`, `wiremock-stock`, and `rift`/`mb` when
+those are present, carrying `reps` and peak-to-peak `rps_spread_pct` into the median CSV. The report
+then renders a **Repetition spread** table with each column's `n` in its own header — a single rep
+shows `n/a`, never `0.0%`, because peak-to-peak over one sample is zero and the thinnest column
+would otherwise read as the steadiest engine.
+
+Four things are hard errors rather than a quieter number:
+
+| Refused | Why |
+|---|---|
+| a scenario point missing from any rep | the median would rest on fewer samples than the table claims (#773) |
+| engines with **different** rep counts | unequal replication favours whichever engine got more samples — the rule `bench_direct` already applies to rift-vs-mb |
+| reps with different `--container-threads` | their median describes a configuration nothing measured |
+| reps with different `--warmup` | same, and this is the setting the 3-way claim rests on |
+| no tuned `wiremock` reps | the headline ratio comes from that series; stock alone cannot stand in |
+
+Both the pin and the warmup are carried onto the `_median` suffix, so the median report states the
+values actually used. `--report` prints the **recorded** warmup, not the flag default — passing
+`--warmup` to a standalone `--report` overrides it, so omit it unless you mean to.
+
+> The Rift-only sweep now runs at the same `warmup` input as everything else (previously a hardcoded
+> `3s`). Sweep figures published from this workflow before that change are not comparable with ones
+> produced after it.
 
 ### Matching-dimension scenarios (Rift-only, additive)
 
