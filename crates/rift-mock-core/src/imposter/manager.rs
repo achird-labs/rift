@@ -6,7 +6,9 @@
 use super::core::Imposter;
 use super::fault_io::{FaultCell, FaultIo, TcpFaultKind};
 use super::handler::handle_imposter_request_decorated;
-use super::reconcile::{ApplyReport, ImposterEvent, ImposterEventListener, StubReconcile};
+use super::reconcile::{
+    ApplyReport, EventContext, ImposterEvent, ImposterEventListener, StubReconcile,
+};
 use super::types::{ImposterConfig, ImposterError, Stub};
 use crate::behaviors::ResponseSequencer;
 use crate::extensions::decorate::ResponseDecorator;
@@ -439,7 +441,12 @@ impl ImposterManager {
 
     fn emit(&self, event: ImposterEvent) {
         if let Some(listener) = &self.event_listener {
-            listener.on_event(&event);
+            // Built only when someone is listening — outside a request scope this is a cheap miss,
+            // but there is no reason to pay even that when no listener is installed (issue #855).
+            let ctx = EventContext {
+                principal: crate::extensions::authz::current_principal(),
+            };
+            listener.on_event(&event, &ctx);
         }
         // Additionally fan the event out to the admin SSE bus (issue #461) — separate from the
         // single-slot embedder listener above, which callers may already hold.
@@ -2077,7 +2084,7 @@ mod tests {
     // =========================================================================
 
     use super::super::core::StubState;
-    use super::super::reconcile::{ImposterEvent, ImposterEventListener};
+    use super::super::reconcile::{EventContext, ImposterEvent, ImposterEventListener};
     use super::super::types::RecordedRequest;
     use serde_json::json;
 
@@ -2456,7 +2463,7 @@ mod tests {
     struct RecordingListener(Mutex<Vec<ImposterEvent>>);
 
     impl ImposterEventListener for RecordingListener {
-        fn on_event(&self, event: &ImposterEvent) {
+        fn on_event(&self, event: &ImposterEvent, _ctx: &EventContext) {
             self.0.lock().push(event.clone());
         }
     }

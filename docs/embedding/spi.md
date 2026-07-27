@@ -172,13 +172,53 @@ pub enum ImposterEvent {
     AllDeleted,        // every imposter removed
 }
 
+pub struct EventContext {
+    pub principal: Option<String>,   // who caused the change
+}
+
 pub trait ImposterEventListener: Send + Sync {
-    fn on_event(&self, event: &ImposterEvent);
+    fn on_event(&self, event: &ImposterEvent, ctx: &EventContext);
 }
 ```
 
 `on_event` is called **synchronously on the mutating path** — keep implementations fast and
 non-blocking. Inject with `.with_event_listener(Arc<dyn ImposterEventListener>)`.
+
+### Attribution — who changed it
+
+An event says *what* changed; `ctx.principal` says *who* (issue #855). It is populated from
+`AuthzDecision::Allow { principal }` when an [`AdminAuthorizer`](#adminauthorizer--authorize-admin-requests)
+is installed, which is what makes these events usable as an audit trail instead of something you
+have to correlate against request logs out of band.
+
+`principal` is `None` whenever there is genuinely nobody to name, and it is never guessed:
+
+| Situation | `ctx.principal` |
+|:---|:---|
+| No authorizer installed | `None` — the seam stays inert by default |
+| Authorizer returned `AuthzDecision::allow()` | `None` — allowed, but nobody identified |
+| Authorizer returned `Allow { principal: Some(p) }` | `Some(p)` |
+| `POST /admin/reload` (re-reads `--configfile`) | `Some(p)` — it is an admin request like any other |
+| The **startup** config read, or your own direct `ImposterManager` call | `None` — no request behind the change |
+
+Note the third and fourth rows together: what decides attribution is whether a request caused the
+change, not where the config came from. The same `--configfile` yields `None` when read at boot and
+`Some(p)` when re-read through `POST /admin/reload`.
+
+Attribution rides on the **listener signature**, not on `ImposterEvent`. The enum is unchanged, so
+an existing `match` over it keeps compiling untouched. `EventContext` is `#[non_exhaustive]` so a
+later attribution field is not another break — construct one in your own tests from
+`EventContext::default()` and assign fields.
+
+Three bounds worth knowing:
+
+- `AllDeleted` carries no port, so a fleet-wide delete records the actor but no per-resource
+  target. That is the shape, not a defect.
+- The principal travels as a `tokio` task-local scoped to the admin request. A mutation you drive
+  from a `tokio::spawn`ed task of your own does not inherit that scope and will report `None`.
+- **Only this listener is attributed.** The admin SSE bus (`GET /events`) publishes the same
+  lifecycle changes with no principal, so an audit collector pointed at `/events` gets *what* but
+  not *who*. If you need attribution, consume it here.
 
 ## `ResponseDecorator` — cross-cutting response headers
 

@@ -58,6 +58,29 @@ record.
   verbatim as the authorizer's `scope`; it is caller-asserted and must be cross-checked against the
   credential rather than trusted as identity. See `docs/embedding/spi.md`.
 
+- **`EventContext` on `ImposterEventListener` — change events now say *who*, not just *what***
+  (issue #855). Audit logging was a listed motivation for the change-event seam (#316), but an
+  event named the change and not the actor, so anyone building an audit trail had to correlate
+  events against request logs out of band — guesswork under concurrency. `on_event` now receives an
+  `EventContext` carrying `principal`, populated from `AuthzDecision::Allow { principal }` when an
+  `AdminAuthorizer` (#854) is installed.
+
+  **Breaking for embedders who implement `ImposterEventListener`:** the trait method gains a second
+  parameter, so existing implementations need `fn on_event(&self, event: &ImposterEvent, ctx:
+  &EventContext)`. Add `_ctx` and ignore it to restore the previous behaviour exactly. The
+  `ImposterEvent` **enum is deliberately untouched** — attribution rides on the listener signature
+  precisely so that every downstream `match` over the enum keeps compiling. `EventContext` itself is
+  `#[non_exhaustive]` so that adding a second attribution field later is not a third break; build
+  one in your own tests with `EventContext::default()` and assign the fields you need.
+
+  `principal` is `None` whenever nobody can honestly be named — no authorizer installed, an
+  authorizer that allowed without identifying anyone, or a change with no request behind it (the
+  startup config read, or an embedder driving `ImposterManager` directly). It is never guessed.
+  Two stated bounds: `AllDeleted` carries no port, so a fleet-wide delete records the actor but no
+  per-resource target; and the principal is scoped to the admin request task, so a mutation driven
+  from your own `tokio::spawn`ed task reports `None`. The admin SSE bus (`/events`) is **not**
+  attributed — only the in-process listener is. See `docs/embedding/spi.md`.
+
 ### Security
 
 - **An empty `--api-key` enabled the admin auth gate and then authenticated everyone** (issue #844).

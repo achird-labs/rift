@@ -19,6 +19,7 @@
 //! `Deny` on an authenticated request is a `403`. `401` stays reserved for a missing or malformed
 //! credential.
 
+use std::future::Future;
 use std::sync::Arc;
 
 /// What the caller is trying to do, as the admin router understood it.
@@ -168,6 +169,37 @@ impl AdminAuthorizer for AllowAll {
 
 /// Convenience alias for the registration type.
 pub type SharedAdminAuthorizer = Arc<dyn AdminAuthorizer>;
+
+tokio::task_local! {
+    /// Attribution for the admin request the current task is serving (issue #855).
+    static PRINCIPAL: Option<String>;
+}
+
+/// Run `fut` with `principal` as the ambient attribution for change events (issue #855).
+///
+/// The principal is decided at the admin listener, but it has to reach `ImposterManager::emit`,
+/// which sits several layers down in `rift-mock-core` behind manager methods that take no
+/// principal. Threading a parameter through every one of those — `create_imposter`,
+/// `delete_imposter`, `apply_config`, `add_stub`, … — would be a large breaking API change for one
+/// optional feature, so this follows the seam the codebase already uses for exactly this shape:
+/// `with_annotation_scope` in [`crate::extensions::decorate`]. Task-locals follow the task across
+/// `.await`s, so a synchronous `emit` anywhere inside the request lands in this scope.
+///
+/// **Boundary:** `tokio::spawn` starts a task that does *not* inherit this scope. Every current
+/// emit site is a direct call inside the mutating manager method, so all of them are covered; an
+/// emit moved into a spawned task would silently attribute `None`.
+pub async fn with_principal_scope<F: Future>(principal: Option<String>, fut: F) -> F::Output {
+    PRINCIPAL.scope(principal, fut).await
+}
+
+/// The principal attributed to the current request, or `None` outside any request scope.
+#[must_use]
+pub fn current_principal() -> Option<String> {
+    // Domain-optional read, not a swallowed error: `try_with` fails precisely when no scope is
+    // open, which is the legitimate "no request behind this change" case (config-file load, an
+    // embedder calling the manager directly). There is nothing to report and nothing to fail.
+    PRINCIPAL.try_with(Clone::clone).ok().flatten()
+}
 
 #[cfg(test)]
 mod tests {

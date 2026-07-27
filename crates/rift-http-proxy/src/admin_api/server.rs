@@ -13,7 +13,9 @@ use hyper::body::Bytes;
 use hyper::service::service_fn;
 use hyper::{Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use rift_mock_core::extensions::authz::{AdminAuthorizer, AuthzDecision, AuthzRequest};
+use rift_mock_core::extensions::authz::{
+    AdminAuthorizer, AuthzDecision, AuthzRequest, with_principal_scope,
+};
 use rift_mock_core::proxy::{
     AcceptBackoff, AcceptErrorClass, AcceptErrorEvent, AcceptErrorLog, classify_accept_error,
     is_fatal_listener_error,
@@ -582,6 +584,10 @@ async fn accept_loop(
                         // Gateway traffic is exempt for the same reason it skips the api key —
                         // `classify` returns None for `/__rift/`, so app-under-test requests are
                         // never asked to carry an admin identity.
+                        // Attribution for change events (issue #855). Stays `None` unless an
+                        // authorizer both runs and names someone, so an embedder who installs no
+                        // authorizer sees exactly the previous behaviour and data.
+                        let mut principal: Option<String> = None;
                         if let Some(ref authorizer) = authorizer
                             && let Some(target) = authz::classify(req.method(), req.uri().path())
                         {
@@ -605,7 +611,9 @@ async fn accept_loop(
                                 params: &params,
                             });
                             match decision {
-                                AuthzDecision::Allow { principal: _ } => {}
+                                AuthzDecision::Allow { principal: allowed } => {
+                                    principal = allowed;
+                                }
                                 AuthzDecision::Deny { reason } => {
                                     return Ok::<_, hyper::Error>(box_full(forbidden_response(
                                         reason,
@@ -625,13 +633,18 @@ async fn accept_loop(
                                 stream_cancel,
                             ));
                         }
-                        route_request(
-                            req,
-                            manager,
-                            config_source,
-                            allow_injection,
-                            intercept,
-                            scripts_dir,
+                        // Only the router mutates, so the attribution scope wraps just this call —
+                        // the SSE stream above is read-only and returns before it (issue #855).
+                        with_principal_scope(
+                            principal,
+                            route_request(
+                                req,
+                                manager,
+                                config_source,
+                                allow_injection,
+                                intercept,
+                                scripts_dir,
+                            ),
                         )
                         .await
                         .map(box_full)
