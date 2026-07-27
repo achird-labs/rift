@@ -293,10 +293,31 @@ impl FlowStore for NoOpFlowStore {
 /// backend living outside this crate — `"redis"`, from `rift-store-redis` — is selectable without
 /// `rift-mock-core` depending on it. An unregistered name is an error listing what is available,
 /// never a silent downgrade to [`NoOpFlowStore`] (issues #325/#377).
+/// Reject a non-positive flow-state TTL at construction (issue #530, extended to the server-level
+/// path by #860).
+///
+/// A non-positive TTL fails late and differently per backend — in-memory expires every write
+/// immediately, Redis errors on the first `SETEX` — so a static config error would otherwise
+/// surface as a runtime mystery. Shared by both the per-imposter and server-level factories so the
+/// two paths cannot drift on the rule or the wording.
+pub(crate) fn validate_ttl_seconds(ttl_seconds: i64) -> Result<()> {
+    if ttl_seconds < 1 {
+        anyhow::bail!(
+            "flowState.ttlSeconds must be >= 1 (got {ttl_seconds}); a non-positive TTL would \
+             expire every write immediately"
+        );
+    }
+    Ok(())
+}
+
 pub fn create_flow_store(
     config: &crate::config::FlowStateConfig,
     backends: &FlowStoreBackends,
 ) -> Result<Arc<dyn FlowStore>> {
+    // Before the backend match, not after: the per-imposter path validates the TTL ahead of its
+    // own dispatch, so `{backend: "nope", ttlSeconds: 0}` must report the TTL error on both paths
+    // rather than whichever error the dispatch happens to reach first.
+    validate_ttl_seconds(config.ttl_seconds)?;
     match config.backend.as_str() {
         "inmemory" => {
             use crate::backends::InMemoryFlowStore;
@@ -467,6 +488,73 @@ mod tests {
         };
         let store = create_flow_store(&config, &FlowStoreBackends::new());
         assert!(store.is_ok());
+    }
+
+    /// Issue #860: the server-level path had no TTL guard, so `ttlSeconds: 0` was accepted and
+    /// then misbehaved late and backend-dependently — the exact failure #530 removed from the
+    /// per-imposter path.
+    #[test]
+    fn server_level_rejects_a_non_positive_ttl() {
+        use crate::config::FlowStateConfig;
+        for ttl in [0, -1, -3600] {
+            let config = FlowStateConfig {
+                backend: "inmemory".to_string(),
+                ttl_seconds: ttl,
+                redis: None,
+            };
+            let err = build_error(
+                create_flow_store(&config, &FlowStoreBackends::new()),
+                &format!("ttlSeconds {ttl} must be rejected, not accepted and expired instantly"),
+            );
+            assert!(
+                err.contains("flowState.ttlSeconds must be >= 1"),
+                "ttl={ttl} gave: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn ttl_one_is_the_boundary_and_is_accepted() {
+        use crate::config::FlowStateConfig;
+        let config = FlowStateConfig {
+            backend: "inmemory".to_string(),
+            ttl_seconds: 1,
+            redis: None,
+        };
+        assert!(create_flow_store(&config, &FlowStoreBackends::new()).is_ok());
+    }
+
+    /// The guard runs *before* the backend match, matching the per-imposter path's ordering. If it
+    /// ran after, `{backend: "nope", ttlSeconds: 0}` would report an unknown-backend error on one
+    /// path and a TTL error on the other for the same config.
+    #[test]
+    fn a_bad_ttl_is_reported_before_an_unknown_backend() {
+        use crate::config::FlowStateConfig;
+        let config = FlowStateConfig {
+            backend: "definitely-not-a-backend".to_string(),
+            ttl_seconds: 0,
+            redis: None,
+        };
+        let err = build_error(
+            create_flow_store(&config, &FlowStoreBackends::new()),
+            "a config wrong in two ways must still fail",
+        );
+        assert!(
+            err.contains("flowState.ttlSeconds must be >= 1"),
+            "TTL must be reported first, got: {err}"
+        );
+    }
+
+    /// Both entry points share one guard, so they cannot drift on the rule or the wording.
+    #[test]
+    fn both_paths_report_the_same_ttl_error() {
+        assert!(
+            validate_ttl_seconds(0)
+                .unwrap_err()
+                .to_string()
+                .contains("flowState.ttlSeconds must be >= 1")
+        );
+        assert!(validate_ttl_seconds(1).is_ok());
     }
 
     /// `Arc<dyn FlowStore>` is not `Debug`, so `expect_err` is unavailable — unwrap the error

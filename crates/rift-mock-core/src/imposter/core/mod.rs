@@ -373,12 +373,7 @@ impl Imposter {
             // and inconsistently (in-memory → instant expiry of every write; Redis → SETEX error on
             // the first write), so reject it at construction. This surfaces as a 400 via
             // ImposterError::FlowStoreConfig, matching the unrecognized-backend rule (#377).
-            if flow_state_config.ttl_seconds < 1 {
-                anyhow::bail!(
-                    "flowState.ttlSeconds must be >= 1 (got {}); a non-positive TTL would expire every write immediately",
-                    flow_state_config.ttl_seconds
-                );
-            }
+            crate::extensions::flow_state::validate_ttl_seconds(flow_state_config.ttl_seconds)?;
             return match flow_state_config.backend.as_str() {
                 "inmemory" => {
                     info!(

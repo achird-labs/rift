@@ -11,6 +11,21 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Server-level `flowState.ttlSeconds` below 1 is now rejected** (issue #860). The per-imposter
+  path has refused a non-positive TTL at construction since #530, but the server-level
+  `flowState` block had no such check: `ttlSeconds: 0` was accepted and then misbehaved late and
+  backend-dependently — the in-memory store expired every write instantly, Redis failed on the
+  first `SETEX`. A static config error surfaced as a runtime mystery, which is the exact failure
+  #530 set out to remove.
+
+  Both paths now share one guard, so they cannot drift on the rule or the message. The error
+  surface stays deliberately different: the per-imposter path answers `400`, while the
+  server-level path fails startup, which is correct for an embedder configuring the server rather
+  than a client creating an imposter. **If you were setting `ttlSeconds: 0` at server level**, it
+  was never doing what it looked like — set a real TTL, or omit the key for the default.
+
 ### Added
 
 - **`AdminAuthorizer` — pluggable per-request admin-API authorization** (issue #854). The

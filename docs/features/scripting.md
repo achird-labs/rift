@@ -585,4 +585,7 @@ only) and raw throughput (Rhai, compiled and cached).
 3. **Keep scripts simple** - Complex logic is harder to debug and maintain
 4. **Choose `flowIdSource` wisely** - it determines what `ctx.state` isolates by (request header,
    imposter port); pick a source that keys state per request/user/session to avoid collisions
-5. **Set appropriate TTLs** - Prevent unbounded state growth with `ttlSeconds` config
+5. **Set appropriate TTLs** - Prevent unbounded state growth with `ttlSeconds` config. It must be
+   **>= 1**; a non-positive value is rejected at construction rather than accepted, because it would
+   expire every write immediately (in-memory) or fail on the first write (Redis). This applies to
+   both the per-imposter `_rift.flowState` block and the server-level `flowState` config
