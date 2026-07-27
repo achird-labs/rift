@@ -89,6 +89,12 @@ pub struct Cli {
     #[arg(long, env = "MB_LOCAL_ONLY")]
     pub local_only: bool,
 
+    /// Refuse to start when the admin API would bind a non-loopback address with no `--api-key`
+    /// (issue #863). Off by default: `--host` defaults to `0.0.0.0` and containers need it, so the
+    /// default is a startup warning instead.
+    #[arg(long, env = "RIFT_REQUIRE_ADMIN_AUTH")]
+    pub require_admin_auth: bool,
+
     /// Log level (debug, info, warn, error)
     #[arg(long, default_value = "info", env = "MB_LOGLEVEL")]
     pub loglevel: String,
@@ -408,6 +414,22 @@ impl ServerBuilder {
         // authenticates every request, so the admin plane must never reach the accept loop in that
         // state.
         crate::admin_api::validate_admin_api_key(cli.api_key.as_deref())?;
+        // Resolve the admin bind address here rather than at the `AdminApiServer::new` call below,
+        // because both things that read it must happen before anything binds (issue #863):
+        //   * the exposure check — under `--require-admin-auth` its error must not have to unwind
+        //     the metrics listener, which binds further down;
+        //   * the `SocketAddr` parse itself — a malformed `--host` used to fail *after* the metrics
+        //     server was already up.
+        // Owned rather than borrowed: `admin_bind_host` takes the whole `Cli`, and holding that
+        // borrow across the rest of `start()` would block moving `cli.scripts_dir` / `cli.datadir`
+        // out below.
+        let host = admin_bind_host(&cli).to_string();
+        let admin_addr: SocketAddr = format!("{}:{}", host, cli.port).parse::<SocketAddr>()?;
+        crate::admin_api::check_admin_exposure(
+            admin_addr,
+            cli.api_key.as_deref(),
+            cli.require_admin_auth.into(),
+        )?;
         // Validate `--front-door` before anything else binds (issue #19 / U-11): a malformed
         // address is then a clean, fast failure that never has to unwind an already-bound
         // listener behind it.
@@ -469,7 +491,18 @@ impl ServerBuilder {
         // Bind the metrics server now so a `:0` request can report its port. A bind failure
         // stays non-fatal and only logs — matching the binary, which spawned the metrics
         // server and kept the admin plane up regardless.
-        let metrics_addr = SocketAddr::from(([0, 0, 0, 0], cli.metrics_port));
+        //
+        // `--local-only` reaches this listener too (issue #880). It used to hardcode `0.0.0.0`, so
+        // a flag documented as "only accept connections from localhost" restricted the admin plane
+        // while leaving `/metrics` on every interface — the same class of surprise as #863, one
+        // listener over. `--host` deliberately still does NOT move metrics: that would relocate it
+        // for anyone who binds the admin plane to a specific interface, which is a separate call.
+        let metrics_ip = if cli.local_only {
+            [127, 0, 0, 1]
+        } else {
+            [0, 0, 0, 0]
+        };
+        let metrics_addr = SocketAddr::from((metrics_ip, cli.metrics_port));
         let metrics = match bind_metrics_server(metrics_addr).await {
             Ok(running) => Some(running),
             Err(e) => {
@@ -504,16 +537,9 @@ impl ServerBuilder {
             None => None,
         };
 
-        let host = if cli.local_only {
-            "127.0.0.1"
-        } else {
-            &cli.host
-        };
-        let addr: SocketAddr = format!("{}:{}", host, cli.port).parse()?;
-
         info!(
             "Rift Admin API (Mountebank-compatible) starting on http://{}",
-            addr
+            admin_addr
         );
         info!(
             "Metrics available at http://{}:{}/metrics",
@@ -533,8 +559,11 @@ impl ServerBuilder {
 
         // Retain the config source so POST /admin/reload can re-read it (issue #197).
         // Injection gating is threaded explicitly (issue #342) rather than read from env.
-        let mut server = AdminApiServer::new(addr, manager, cli.api_key)
-            .with_allow_injection(cli.allow_injection);
+        // `with_exposure_checked`: the issue #863 check already ran above, before the metrics
+        // bind. Without this the same startup would log the warning twice.
+        let mut server = AdminApiServer::new(admin_addr, manager, cli.api_key)
+            .with_allow_injection(cli.allow_injection)
+            .with_exposure_checked();
         if let Some(authorizer) = admin_authorizer {
             server = server.with_admin_authorizer(authorizer);
         }
@@ -563,7 +592,7 @@ impl ServerBuilder {
         let start_options = intercept_block.or_else(|| {
             cli.intercept_port
                 .map(|intercept_port| InterceptStartOptions {
-                    host: Some(host.to_string()),
+                    host: Some(host.clone()),
                     port: Some(intercept_port),
                     ca_cert_path: cli
                         .intercept_ca_cert
@@ -737,6 +766,17 @@ impl RunningServer {
 /// [`bind_metrics_server`] + [`RunningMetrics::join`] so the binary path is unchanged.
 pub async fn run_metrics_server(addr: SocketAddr) -> anyhow::Result<()> {
     bind_metrics_server(addr).await?.join().await
+}
+
+/// The host the admin API binds: `--local-only` pins loopback, otherwise `--host` (default
+/// `0.0.0.0`). One definition so the issue #863 exposure check and the actual bind can never
+/// disagree about which address is being judged.
+fn admin_bind_host(cli: &Cli) -> &str {
+    if cli.local_only {
+        "127.0.0.1"
+    } else {
+        &cli.host
+    }
 }
 
 /// Bind the metrics listener (`:0` is fine) and start serving, returning a handle that reports

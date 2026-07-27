@@ -28,6 +28,23 @@ record.
 
 ### Added
 
+- **`--require-admin-auth` — opt in to refusing a keyless off-host admin plane** (issue #863).
+  `--host` defaults to `0.0.0.0`, so a bare keyless `rift` already serves the full admin API — which
+  can create imposters and drive the TLS intercept proxy — on every interface with no
+  authentication. Rift now says so at startup (see *Changed*), and `--require-admin-auth`
+  (`RIFT_REQUIRE_ADMIN_AUTH`, rcfile `requireAdminAuth`) turns that warning into a startup failure
+  for fleets that want fail-closed.
+
+  The flag gates on *authentication*, not on the address: a real `--api-key` satisfies it on any
+  bind, and loopback (`127.0.0.0/8`, `::1`) satisfies it with no key. `0.0.0.0` and `::` are
+  unspecified addresses — not loopback — so they are flagged, as is any specific off-host interface.
+  The check runs before anything binds, so a refusal never orphans a listener.
+
+  The same rule applies at all three doors onto the admin plane, so an embedded host inherits it
+  rather than reimplementing it: the C-ABI takes `"requireAdminAuth": true` in `rift_serve_admin`'s
+  options (an optional field — omitting it is the previous behaviour exactly, so existing SDKs are
+  unaffected), and `AdminApiServer::with_require_admin_auth(true)` is the in-process spelling.
+
 - **`AdminAuthorizer` — pluggable per-request admin-API authorization** (issue #854). The
   `--api-key` gate grants *access*, not an identity, so an embedder with its own identity system
   had to reverse-proxy the admin API and re-parse routes to decide anything.
@@ -63,6 +80,26 @@ record.
   compared byte for byte, untrimmed.
 
 ### Changed
+
+- **`--local-only` now restricts the metrics listener too** (issue #880). The metrics server
+  hardcoded `0.0.0.0`, so a flag documented as "only accept connections from localhost" narrowed the
+  admin plane while leaving `/metrics` reachable on every interface. It now binds `127.0.0.1` under
+  `--local-only`. **If you scrape `/metrics` from another host while passing `--local-only`**, that
+  scrape now fails — drop the flag, or bind the admin plane with `--host 127.0.0.1` instead, which
+  leaves metrics where it was. `--host` on its own still does not move the metrics listener.
+
+- **Startup now states the admin API's authentication posture either way** (issue #863). The
+  `Admin API authentication enabled (--apikey)` line only ever fired when a key *was* set, so the
+  riskier configuration was the silent one. An unauthenticated admin plane now logs that it is
+  unauthenticated, and one bound to a non-loopback address with no key additionally logs a warning
+  naming the address and every remedy (`--api-key`, `--local-only`, `--host 127.0.0.1`, and
+  `--require-admin-auth` to make it fatal).
+
+  This is a **warning, not a refusal**: `--host 0.0.0.0` is the documented default and containers
+  require it — binding loopback inside Docker makes the published port unreachable — so refusing
+  would break the no-argument invocation, every keyless quickstart and every CI sandbox. Nothing
+  that started before starts differently now; opt in with `--require-admin-auth` if you want the
+  hard failure. Log-scraping CI that asserts on exact startup output may need updating.
 
 - **The Redis flow store moved to its own opt-in crate, `rift-store-redis`** (issue #853).
   `rift-mock-core` now carries **no `redis`/`r2d2` dependency under any feature combination**, so

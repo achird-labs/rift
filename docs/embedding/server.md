@@ -127,7 +127,15 @@ println!("admin bound to {}", running.local_addr());
 | `AdminApiServer::new` | `fn new(addr: SocketAddr, manager: Arc<ImposterManager>, api_key: Option<String>) -> Self` | Construct the admin server; `api_key` (when `Some`) gates the admin API via the `Authorization` header. |
 | `with_config_source` | `fn with_config_source(self, source: ConfigSource) -> Self` | Retain the load source so `POST /admin/reload` can re-read it. |
 | `with_allow_injection` | `fn with_allow_injection(self, allow: bool) -> Self` | Enable JavaScript `inject` responses. |
+| `with_require_admin_auth` | `fn with_require_admin_auth(self, require: bool) -> Self` | Make `bind` **fail** when this server would be reachable off-host with no `api_key`, instead of warning (issue #863). The embedder spelling of `--require-admin-auth`. |
 | `bind` | `async fn bind(self) -> anyhow::Result<RunningAdminApi>` | Bind and start serving; returns once bound. |
+
+`bind` reports the authentication posture either way. When `addr` is **not** loopback and `api_key`
+is `None`, it logs a warning naming the address and the remedies — the admin API can create
+imposters and drive the TLS intercept proxy, so an unauthenticated off-host bind is worth stating
+out loud. `with_require_admin_auth(true)` turns that warning into a startup error; the check runs
+before the listener binds, so a refusal never leaves a socket behind. It gates on *authentication*,
+not on the address: a real `api_key` satisfies it on any bind, and loopback satisfies it with none.
 
 `RunningAdminApi`: `local_addr(&self) -> SocketAddr`, `shutdown(&self)`, `join(self) -> anyhow::Result<()>`,
 `wait(&self) -> anyhow::Result<()>` (the non-consuming form of `join`, as above).
@@ -198,7 +206,7 @@ imposters. These live in `rift_http_proxy::bootstrap` so an alternative binary k
 | `save_imposters` | `fn save_imposters(host: &str, port: u16, savefile: &Path, remove_proxies: bool) -> anyhow::Result<()>` | Blocking wrapper over `save_imposters_async` for the sync `save` subcommand path. |
 
 Supported rcfile keys: `port`, `host`, `logLevel`/`loglevel`, `allowInjection`/`allow_injection`,
-`localOnly`/`local_only`, `datadir`, `configfile`.
+`localOnly`/`local_only`, `requireAdminAuth`/`require_admin_auth`, `datadir`, `configfile`.
 
 ```rust
 use rift_http_proxy::bootstrap;

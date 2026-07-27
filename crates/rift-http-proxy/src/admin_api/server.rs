@@ -27,7 +27,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Bounded grace given to in-flight connections on `shutdown()` before the wait is abandoned.
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
@@ -47,6 +47,9 @@ pub struct AdminApiServer {
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
     authorizer: Option<Arc<dyn AdminAuthorizer>>,
+    /// Exposure policy for [`bind`](Self::bind) (issue #863), or `None` when an outer door already
+    /// ran the check — see [`with_exposure_checked`](Self::with_exposure_checked).
+    exposure: Option<AdminExposurePolicy>,
 }
 
 impl AdminApiServer {
@@ -61,7 +64,34 @@ impl AdminApiServer {
             intercept: None,
             scripts_dir: None,
             authorizer: None,
+            exposure: Some(AdminExposurePolicy::default()),
         }
+    }
+
+    /// Refuse to bind when this server would be reachable off-host with no API key, instead of
+    /// warning (issue #863). The embedder-facing spelling of `--require-admin-auth`; `false` (the
+    /// default) keeps the warning.
+    #[must_use]
+    pub fn with_require_admin_auth(mut self, require: bool) -> Self {
+        self.exposure = Some(require.into());
+        self
+    }
+
+    /// Suppress this server's own exposure check because an outer door already ran it (issue #863).
+    ///
+    /// The CLI and the C-ABI both have to run [`check_admin_exposure`] *before* they bind anything
+    /// else — under `Refuse` the error must not have to unwind an already-bound metrics listener —
+    /// so without this the same startup would emit the warning twice. Not for embedders building an
+    /// `AdminApiServer` directly: for them `bind()` is the only door, and it must do the checking.
+    ///
+    /// Hidden from the rendered docs deliberately — it is a "skip the check" switch, public only
+    /// because `rift-ffi` is a separate crate and needs to reach it. Order-sensitive: calling it
+    /// after [`with_require_admin_auth`](Self::with_require_admin_auth) discards that strictness.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_exposure_checked(mut self) -> Self {
+        self.exposure = None;
+        self
     }
 
     /// Install a per-request authorization hook (issue #854).
@@ -129,6 +159,17 @@ impl AdminApiServer {
         // authentication is enabled. Checking at the one point all three doors converge on makes
         // the diagnosis loud wherever the key came from (issue #844).
         validate_admin_api_key(self.api_key.as_deref().map(String::as_str))?;
+        // Issue #863: same convergence point, one step further — an off-host bind with no key at
+        // all. Runs before `TcpListener::bind` so a `Refuse` policy never has to unwind a live
+        // listener. Skipped when an outer door (CLI, C-ABI) already checked, so a single startup
+        // warns once.
+        if let Some(policy) = self.exposure {
+            check_admin_exposure(
+                self.addr,
+                self.api_key.as_deref().map(String::as_str),
+                policy,
+            )?;
+        }
         let listener = TcpListener::bind(self.addr).await?;
         let local_addr = listener.local_addr()?;
         info!(
@@ -136,8 +177,12 @@ impl AdminApiServer {
             local_addr
         );
 
+        // Stated either way (issue #863): logging only the authenticated case made the riskier
+        // posture the silent one, so the startup output never said the admin plane was open.
         if self.api_key.is_some() {
             info!("Admin API authentication enabled (--apikey)");
+        } else {
+            info!("Admin API authentication disabled — no --api-key is set");
         }
 
         let cancel = CancellationToken::new();
@@ -696,6 +741,79 @@ pub fn validate_admin_api_key(api_key: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What to do when the admin plane would be reachable off-host with no API key (issue #863).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AdminExposurePolicy {
+    /// Log a warning and continue. The default, and deliberately so: `--host` defaults to
+    /// `0.0.0.0` and containers need it (binding loopback inside Docker makes the published port
+    /// unreachable), so refusing here would break the no-argument invocation, every quickstart and
+    /// every CI sandbox. A refusal everyone opts out of immediately is worse than a warning read
+    /// once — the opt-out ends up permanent in the base image.
+    #[default]
+    Warn,
+    /// Refuse to start (`--require-admin-auth` / `RIFT_REQUIRE_ADMIN_AUTH`). Opting *in* to
+    /// strictness rather than out of a refusal keeps the default compatible and needs no escape
+    /// hatch of its own.
+    Refuse,
+}
+
+impl From<bool> for AdminExposurePolicy {
+    /// `true` is the `--require-admin-auth` / `requireAdminAuth` spelling of [`Refuse`]. One
+    /// mapping, so the CLI, the C-ABI and the embedder builder cannot drift on what the flag means.
+    ///
+    /// [`Refuse`]: AdminExposurePolicy::Refuse
+    fn from(require_admin_auth: bool) -> Self {
+        if require_admin_auth {
+            Self::Refuse
+        } else {
+            Self::Warn
+        }
+    }
+}
+
+/// Warn or refuse when the admin plane would bind a non-loopback address with no API key
+/// (issue #863).
+///
+/// `addr` is the *resolved* bind address, so `0.0.0.0`, `::` and any specific interface are all
+/// covered by one `is_loopback()` test — an unspecified address is not loopback, which is exactly
+/// the case this catches. Rift parses `--host` as a literal `SocketAddr` and never resolves DNS, so
+/// there is no name left to resolve by the time the address gets here.
+///
+/// Callers must invoke this before binding anything: under [`AdminExposurePolicy::Refuse`] the
+/// error must not have to unwind a listener that is already up.
+///
+/// `api_key` being `Some(_)` is taken to mean a usable key, which holds because
+/// [`validate_admin_api_key`] rejects a blank one upstream (issue #844) — reversing that order
+/// would let `Some("")` satisfy the very gate it defeats.
+pub fn check_admin_exposure(
+    addr: SocketAddr,
+    api_key: Option<&str>,
+    policy: AdminExposurePolicy,
+) -> anyhow::Result<()> {
+    // `to_canonical` first: `Ipv6Addr::is_loopback` matches only the literal `::1`, so an
+    // IPv4-mapped `::ffff:127.0.0.1` — which some address-normalising front ends hand over — would
+    // otherwise be judged off-host and refused under `Refuse` despite being loopback-only. The
+    // mapping is safe in the other direction too: `::ffff:10.0.0.5` canonicalises to `10.0.0.5`,
+    // which is still not loopback, so nothing genuinely reachable becomes exempt.
+    if api_key.is_some() || addr.ip().to_canonical().is_loopback() {
+        return Ok(());
+    }
+    let message = format!(
+        "the admin API is bound to {addr}, which is reachable from outside this host, with no API \
+         key — anyone who can reach that address can create imposters and drive the TLS intercept \
+         proxy. Set `--api-key <token>` (`MB_APIKEY`), or restrict the bind with `--local-only` or \
+         `--host 127.0.0.1`. Set `--require-admin-auth` (`RIFT_REQUIRE_ADMIN_AUTH`) to make this a \
+         startup failure instead of a warning."
+    );
+    match policy {
+        AdminExposurePolicy::Warn => {
+            warn!("{message}");
+            Ok(())
+        }
+        AdminExposurePolicy::Refuse => anyhow::bail!(message),
+    }
+}
+
 /// Box a `Full<Bytes>` response into the streaming-unified `AdminBody` (issue #461), so the normal
 /// router path and the SSE stream path share one response type. `Full`'s error is `Infallible`, so
 /// the `map_err` closure is unreachable.
@@ -868,6 +986,163 @@ mod tests {
             !api_key_matches("padded", " padded "),
             "the comparison must not trim; a trimmed guess is a different key"
         );
+    }
+
+    // ── issue #863: the keyless off-host admin plane ─────────────────────────────────────────
+    //
+    // The classifier is one `is_loopback()` test because the bind address reaching it is already
+    // resolved and parsed as a literal `SocketAddr` — Rift never resolves DNS for `--host`, so
+    // there is no name to look up here and no case where the "address" is still a hostname.
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().expect("test address parses")
+    }
+
+    /// Every address the check must treat as off-host. `0.0.0.0` and `::` are *unspecified*, not
+    /// loopback: binding them reaches every interface, which is exactly the case being caught.
+    const OFF_HOST: [&str; 4] = [
+        "0.0.0.0:2525",
+        "[::]:2525",
+        "10.0.0.5:2525",
+        // Canonicalising must not exempt a genuinely reachable address: this maps to `10.0.0.5`,
+        // which is still not loopback.
+        "[::ffff:10.0.0.5]:2525",
+    ];
+    /// Loopback in both families. `::1` is the one an IPv4-only `is_loopback` would misclassify;
+    /// `::ffff:127.0.0.1` is the one `Ipv6Addr::is_loopback` alone misclassifies, since it matches
+    /// only the literal `::1` — hence the `to_canonical()` in the classifier.
+    const LOOPBACK: [&str; 3] = ["127.0.0.1:2525", "[::1]:2525", "[::ffff:127.0.0.1]:2525"];
+
+    // AC1: `Refuse` errors on exactly the off-host × no-key cells and nowhere else.
+    #[test]
+    fn refuse_rejects_exactly_the_keyless_off_host_binds() {
+        for a in OFF_HOST {
+            assert!(
+                check_admin_exposure(addr(a), None, AdminExposurePolicy::Refuse).is_err(),
+                "{a} with no key must be refused under --require-admin-auth"
+            );
+        }
+        for a in LOOPBACK {
+            assert!(
+                check_admin_exposure(addr(a), None, AdminExposurePolicy::Refuse).is_ok(),
+                "{a} is loopback: unreachable off-host, so no key is needed"
+            );
+        }
+    }
+
+    // AC2: IPv6 loopback is loopback. Called out separately from the loop above because getting
+    // this wrong is silent — `::1` would be refused as if it were world-reachable.
+    #[test]
+    fn ipv6_loopback_is_not_treated_as_exposed() {
+        assert!(
+            check_admin_exposure(addr("[::1]:2525"), None, AdminExposurePolicy::Refuse).is_ok()
+        );
+    }
+
+    // AC3: the flag gates on authentication, not on the address. A real key makes any bind
+    // acceptable — otherwise `--require-admin-auth` would just be a second `--local-only`.
+    #[test]
+    fn a_real_key_satisfies_the_check_on_any_address() {
+        for a in OFF_HOST.iter().chain(LOOPBACK.iter()) {
+            assert!(
+                check_admin_exposure(addr(a), Some("s3cr3t"), AdminExposurePolicy::Refuse).is_ok(),
+                "{a} with a real key is authenticated, so it must be accepted"
+            );
+        }
+    }
+
+    // The default posture is advisory: the same cell that errors under `Refuse` must return `Ok`
+    // under `Warn`. This is the compatibility guarantee for every existing keyless deployment.
+    #[test]
+    fn warn_never_refuses() {
+        for a in OFF_HOST {
+            assert!(
+                check_admin_exposure(addr(a), None, AdminExposurePolicy::Warn).is_ok(),
+                "{a} must only warn by default; refusing is opt-in"
+            );
+        }
+        assert_eq!(
+            AdminExposurePolicy::default(),
+            AdminExposurePolicy::Warn,
+            "the default policy must be Warn, so an embedder that sets nothing is unaffected"
+        );
+    }
+
+    // AC4: an operator must be able to act on the message without reading source, so it names the
+    // address and every remedy — including `--require-admin-auth` itself, for anyone who arrives
+    // via the warning and wants it to be fatal next time.
+    #[test]
+    fn the_refusal_names_the_address_and_every_remedy() {
+        let err = check_admin_exposure(addr("0.0.0.0:2525"), None, AdminExposurePolicy::Refuse)
+            .expect_err("a keyless 0.0.0.0 bind must be refused under Refuse")
+            .to_string();
+        for expected in [
+            "0.0.0.0:2525",
+            "--api-key",
+            "--local-only",
+            "--host 127.0.0.1",
+            "--require-admin-auth",
+        ] {
+            assert!(
+                err.contains(expected),
+                "the refusal must mention `{expected}`, got: {err}"
+            );
+        }
+    }
+
+    // Interaction with #844: a blank key is rejected by `validate_admin_api_key` upstream, so it
+    // can never reach this check. Were the order ever reversed, `Some("")` would read as "a key is
+    // set" here and silently satisfy the very gate it defeats — pin the ordering assumption.
+    #[test]
+    fn a_blank_key_is_already_rejected_before_this_check_runs() {
+        assert!(
+            validate_admin_api_key(Some("")).is_err(),
+            "the blank-key validator must run first; this check trusts that Some(_) is a real key"
+        );
+    }
+
+    // AC12 — the third door. The CLI and the C-ABI both run the check themselves and then call
+    // `with_exposure_checked()`, so `bind()`'s own check is reached ONLY by an embedder building an
+    // `AdminApiServer` directly. Without these two tests `with_require_admin_auth` and the check
+    // inside `bind()` are public API that no test exercises: both could be deleted and everything
+    // would still pass.
+
+    #[tokio::test]
+    async fn with_require_admin_auth_refuses_at_the_embedder_door_before_binding() {
+        // `expect_err` is unavailable here — `RunningAdminApi` is not `Debug` — and matching also
+        // lets the success arm shut the listener down rather than leaking it into the test run.
+        let err =
+            match AdminApiServer::new(addr("0.0.0.0:0"), Arc::new(ImposterManager::new()), None)
+                .with_require_admin_auth(true)
+                .bind()
+                .await
+            {
+                Ok(running) => {
+                    running.shutdown().await;
+                    panic!(
+                        "an embedder opting into strict mode must not get a keyless off-host bind"
+                    );
+                }
+                Err(err) => err,
+            };
+        // Port 0 would bind successfully if the check never ran, so an exposure message here — as
+        // opposed to an I/O error — is what proves `bind()` refused rather than failed to listen.
+        assert!(
+            err.to_string().contains("--api-key"),
+            "the embedder must get the exposure refusal, not an I/O error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_embedder_door_defaults_to_warning_and_still_binds() {
+        let running =
+            AdminApiServer::new(addr("0.0.0.0:0"), Arc::new(ImposterManager::new()), None)
+                .bind()
+                .await
+                .expect(
+                    "the default policy warns; it must never refuse an embedder's keyless bind",
+                );
+        running.shutdown().await;
     }
 }
 

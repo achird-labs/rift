@@ -56,6 +56,24 @@ pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow:
                     cli.local_only = val.as_bool().unwrap_or(false);
                 }
             }
+            "requireAdminAuth" | "require_admin_auth" => {
+                if !cli.require_admin_auth {
+                    // Deliberately stricter than the sibling booleans above: this one is a security
+                    // gate, and `false` is its *permissive* state. `"requireAdminAuth": "true"` (a
+                    // plausible hand-edit) would coerce to `false` under `unwrap_or`, so a fleet
+                    // that believed it had opted every host into fail-closed startup would keep
+                    // booting keyless and off-host with nothing said — the exact posture this key
+                    // exists to make impossible. `allowInjection` can default to `false` safely
+                    // because there `false` is the deny state; here it is not.
+                    let Some(b) = val.as_bool() else {
+                        anyhow::bail!(
+                            "--rcfile: '{key}' must be a JSON boolean, got {val}. Refusing rather \
+                             than silently leaving --require-admin-auth off."
+                        );
+                    };
+                    cli.require_admin_auth = b;
+                }
+            }
             "datadir" => {
                 if cli.datadir.is_none()
                     && let Some(d) = val.as_str()

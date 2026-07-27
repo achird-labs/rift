@@ -2507,3 +2507,65 @@ fn ffi_start_registers_the_shipped_flow_store_backends() {
         rift_stop(h);
     }
 }
+
+// ── issue #863: the keyless off-host admin plane, at the C-ABI door ──────────────────────────
+//
+// This is the boundary every SDK reaches the admin plane through, so the policy has to live here
+// rather than in each SDK. Unlike the CLI, `host` defaults to `127.0.0.1` here — an embedder has
+// to ask for an off-host bind, and only then does the check have anything to say.
+
+// AC11: `requireAdminAuth: true` + a non-loopback host + no key fails, with the reason in
+// last_error rather than a bare NULL the SDK would have to guess at.
+#[test]
+fn ffi_require_admin_auth_refuses_a_keyless_off_host_bind() {
+    unsafe {
+        let h = rift_start();
+        let opts = cstr(r#"{"host": "0.0.0.0", "port": 0, "requireAdminAuth": true}"#);
+        assert!(
+            rift_serve_admin(h, opts.as_ptr()).is_null(),
+            "requireAdminAuth must refuse a keyless off-host admin bind"
+        );
+
+        let err = rift_last_error();
+        assert!(!err.is_null(), "the refusal must record last_error");
+        let msg = take_json(err);
+        assert!(
+            msg.contains("--api-key"),
+            "the refusal must name the remedy, got: {msg}"
+        );
+
+        rift_stop(h);
+    }
+}
+
+// AC11: a real key satisfies the gate on any address — it gates on authentication, not on the
+// address. Without this an SDK setting requireAdminAuth could never bind off-host at all.
+#[test]
+fn ffi_require_admin_auth_accepts_an_off_host_bind_with_a_key() {
+    unsafe {
+        let h = rift_start();
+        let info = serve_admin(
+            h,
+            r#"{"host": "0.0.0.0", "port": 0, "apiKey": "s3cr3t", "requireAdminAuth": true}"#,
+        );
+        assert!(info["adminPort"].as_u64().expect("adminPort") > 0);
+        rift_stop(h);
+    }
+}
+
+// AC11: the version-gate regression guard. `requireAdminAuth` is an *optional* addition to
+// ServeOptions — every existing SDK omits it and must keep working unchanged. A regression here
+// (a required field, or a default of `true`) breaks all four SDKs at once, silently for the ones
+// that never bind off-host and loudly for the ones that do.
+#[test]
+fn ffi_omitting_require_admin_auth_is_accepted_and_defaults_off() {
+    unsafe {
+        let h = rift_start();
+        let info = serve_admin(h, r#"{"host": "0.0.0.0", "port": 0}"#);
+        assert!(
+            info["adminPort"].as_u64().expect("adminPort") > 0,
+            "omitting requireAdminAuth must keep the previous keyless behaviour"
+        );
+        rift_stop(h);
+    }
+}

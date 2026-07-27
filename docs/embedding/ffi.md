@@ -107,7 +107,7 @@ rift_free(result);
 ```
 
 - **Options JSON** (pass `NULL` or `{}` for all defaults; every field optional):
-  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"config":null,"allowInjection":false}`.
+  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"config":null,"allowInjection":false,"requireAdminAuth":false}`.
   `port: 0` binds an ephemeral port; `configFile` is loaded as the reload source (like `--configfile`);
   `config` is an inline `{"imposters":[...]}`. `configFile` and `config` do not compose — pass one.
 - **`apiKey`**: a blank string is rejected — `rift_serve_admin` returns `NULL` and records the
@@ -115,6 +115,24 @@ rift_free(result);
   every request, and the realistic way to send one is plumbing rather than intent
   (`apiKey(getProperty("rift.apikey", ""))`, a config value that renders empty). Pass a real token,
   or omit the field to leave the admin plane unauthenticated.
+- **`requireAdminAuth`** (default `false`, issue #863): refuse to serve when the admin plane would
+  bind a non-loopback address with no `apiKey`, instead of logging a warning. `host` defaults to
+  `127.0.0.1` for this door, so the check is silent unless you ask for an off-host bind. It gates on
+  *authentication*, not on the address — a real `apiKey` satisfies it on any bind. Under a refusal
+  `rift_serve_admin` returns `NULL` with the reason in `rift_last_error`, and nothing has been bound.
+
+  **This field is not self-gating — check the engine version before relying on it.** `ServeOptions`
+  does not use `deny_unknown_fields`, so an engine older than 0.18.0 **silently ignores**
+  `requireAdminAuth` and serves the keyless off-host admin plane anyway, returning a normal
+  `{"adminPort":…}`. There is no error to detect. An SDK that offers this option must gate it on the
+  engine version from `rift_build_info` rather than assuming a rejection it will never receive.
+  (Note this is not something a newer engine can fix retroactively: the old engine is the one doing
+  the ignoring.) Omitting the field is the previous behaviour exactly, so an SDK built against an
+  older engine is otherwise unaffected.
+
+  The default `Warn` posture writes through the `tracing` facade. `rift-ffi` installs **no**
+  subscriber — correct for a library, but it means an embedding host that has not installed one of
+  its own sees nothing at all. Install a `tracing` subscriber if you want the warning to be visible.
 - **`allowInjection`** (default `false`): whether Rift admits script/`inject` imposters
   (`inject`/`decorate`/`shellTransform`/JS-function `wait`/`_rift.script`), mirroring the
   `--allowInjection` CLI flag. Leave it `false` unless you intend to permit them.

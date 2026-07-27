@@ -245,6 +245,10 @@ struct ServeOptions {
     /// `rift_create_imposter` — is ungated by design: that host can already execute code in this
     /// process, so gating its own JSON would restrict nobody.
     allow_injection: Option<bool>,
+    /// Refuse to bind when the admin plane would be reachable off-host with no `apiKey`
+    /// (issue #863), instead of warning. Optional and defaulting to `false`, so every existing SDK
+    /// that omits it keeps the previous behaviour unchanged.
+    require_admin_auth: Option<bool>,
 }
 
 /// Parse `{"imposters":[...]}` or a bare `[...]` into imposter configs (the reload input shape).
@@ -1870,6 +1874,16 @@ async fn build_admin_plane_inner(
         None => None,
     };
 
+    // Issue #863: judge the resolved admin address before any side effect, for the same reason the
+    // blank-key check above is here — this is the one boundary every SDK reaches the admin plane
+    // through, so the policy belongs here rather than copied into each of them. `host` defaults to
+    // loopback for this door, so an embedder has to ask for an off-host bind to reach the warning.
+    rift_http_proxy::admin_api::check_admin_exposure(
+        addr,
+        opts.api_key.as_deref(),
+        opts.require_admin_auth.unwrap_or(false).into(),
+    )?;
+
     // configFile: apply the loaded set via apply_config, mirroring the inline `config` path and
     // POST /admin/reload. apply_config validates the whole set up front (Err => nothing mutated)
     // and reports per-port failures in its report rather than a half-applied create loop that
@@ -1933,9 +1947,12 @@ async fn build_admin_plane_inner(
     // serves the full `/intercept*` surface against the same listener the C-ABI drives: a
     // `rift_start_intercept` is then visible to `GET /intercept`, and `POST /intercept` feeds
     // `rift_intercept_add_rules` — a double-start across surfaces 409s/-1s consistently.
+    // `with_exposure_checked`: the issue #863 check already ran above, before any side effect.
+    // Without this the same call would log the warning twice.
     let mut server = AdminApiServer::new(addr, Arc::clone(&handle.manager), api_key)
         .with_allow_injection(allow_injection)
-        .with_intercept(handle.intercept.clone());
+        .with_intercept(handle.intercept.clone())
+        .with_exposure_checked();
     if let Some(source) = config_source {
         server = server.with_config_source(source);
     }
@@ -2144,6 +2161,7 @@ mod build_admin_plane_chain_tests {
             config_file: Some("/nonexistent/rift-688/does-not-exist.json".to_string()),
             config: None,
             allow_injection: None,
+            require_admin_auth: None,
         };
         let Err(err) = handle.runtime.block_on(build_admin_plane(&handle, &opts)) else {
             panic!("a missing configFile must fail the admin build");

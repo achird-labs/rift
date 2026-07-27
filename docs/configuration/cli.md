@@ -131,7 +131,8 @@ Options:
       --datadir <DIR>              Directory for persistent imposter storage
       --scripts-dir <DIR>          Root directory for admin-API `file:`/`ref:` script resolution; references that escape it are rejected (unset ⇒ file-backed scripts via the admin API are refused)
       --allow-injection            Enable JavaScript injection in responses (alias: --allowInjection)
-      --local-only                 Only accept connections from localhost
+      --local-only                 Only accept connections from localhost (binds both the admin API and /metrics to loopback)
+      --require-admin-auth         Refuse to start when the admin API would bind a non-loopback address with no --api-key (default: warn)
       --loglevel <LEVEL>           Log level: debug, info, warn, error [default: info]
       --runtime <MODE>             Runtime topology: work-stealing (default) or per-core[=N] (RFC-712; experimental, Linux-first — macOS falls back with a warning, Windows rejects it)
       --runtime-affinity           Pin per-core worker threads to CPU cores (with --runtime per-core; effective on Linux)
@@ -145,7 +146,7 @@ Options:
       --pidfile <FILE>             PID file path
       --origin <ORIGIN>            CORS allowed origin
       --api-key <TOKEN>            Require this token in the Authorization header for all admin API requests
-      --rcfile <FILE>              RC file of default flag values (a subset: port/host/loglevel/allowInjection/localOnly/datadir/configfile)
+      --rcfile <FILE>              RC file of default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/datadir/configfile)
       --default-tls-cert <FILE>    Default TLS certificate (PEM) for HTTPS imposters without their own
       --default-tls-key <FILE>     Default TLS private key (PEM), paired with --default-tls-cert
       --no-self-signed-tls         Disable the self-signed fallback; an HTTPS imposter with no cert is an error
@@ -199,6 +200,40 @@ rift-http-proxy --api-key s3cr3t
 curl -H "Authorization: s3cr3t" http://localhost:2525/imposters
 ```
 
+### Unauthenticated admin plane on a public interface
+
+`--host` defaults to `0.0.0.0`, so a bare `rift-http-proxy` with no `--api-key` already serves the
+full admin API — which can create imposters and drive the TLS intercept proxy — on every interface
+with no authentication. Since 0.18.0 that posture is stated at startup instead of being silent:
+
+```
+WARN the admin API is bound to 0.0.0.0:2525, which is reachable from outside this host, with no
+     API key — anyone who can reach that address can create imposters and drive the TLS intercept
+     proxy. Set `--api-key <token>` (`MB_APIKEY`), or restrict the bind with `--local-only` or
+     `--host 127.0.0.1`. Set `--require-admin-auth` (`RIFT_REQUIRE_ADMIN_AUTH`) to make this a
+     startup failure instead of a warning.
+```
+
+The default is a **warning, not a refusal**: containers require `0.0.0.0` (binding loopback inside
+Docker makes the published port unreachable), so refusing would break the no-argument invocation
+and every keyless quickstart. Fleets that want fail-closed opt in:
+
+```bash
+# Refuse to start unless the admin plane is authenticated or loopback-only
+rift-http-proxy --require-admin-auth              # errors: 0.0.0.0 with no key
+rift-http-proxy --require-admin-auth --api-key s3cr3t   # ok — authenticated
+rift-http-proxy --require-admin-auth --local-only       # ok — not reachable off-host
+```
+
+`--require-admin-auth` gates on *authentication*, not on the address: a real `--api-key` satisfies
+it on any bind. Loopback (`127.0.0.0/8`, `::1`) satisfies it with no key. `0.0.0.0` and `::` are
+unspecified addresses, not loopback, so they are flagged — as is any specific off-host interface
+such as `10.0.0.5`.
+
+The same rule applies at every door onto the admin plane, so an embedded host gets it too: the
+C-ABI `rift_serve_admin` accepts `"requireAdminAuth": true` in its options, and an embedder building
+an `AdminApiServer` directly gets it from `.with_require_admin_auth(true)`.
+
 ### Default TLS for HTTPS imposters
 
 An imposter declared with `protocol: https` terminates TLS. If it carries no `cert`/`key`, Rift
@@ -247,6 +282,7 @@ Environment variables override CLI defaults:
 | `MB_DATADIR` | Persistent storage directory | |
 | `MB_ALLOW_INJECTION` | Enable injection (`true`/`false`) | `false` |
 | `MB_LOCAL_ONLY` | Localhost only | `false` |
+| `RIFT_REQUIRE_ADMIN_AUTH` | Refuse to start on a keyless non-loopback admin bind (env alias of `--require-admin-auth`) | `false` |
 | `MB_LOGLEVEL` | Log level | `info` |
 | `MB_APIKEY` | Admin API authorization token (see `--api-key`) | |
 | `RIFT_SCRIPTS_DIR` | Root directory for admin-API `file:`/`ref:` script resolution (env alias of `--scripts-dir`); references escaping it are rejected | |

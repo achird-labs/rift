@@ -30,7 +30,7 @@ fn rcfile_fills_fields_left_at_defaults() {
     let rcfile = write_rcfile(
         &dir,
         r#"{"port": 4321, "host": "127.0.0.1", "logLevel": "debug",
-            "allowInjection": true, "localOnly": true,
+            "allowInjection": true, "localOnly": true, "requireAdminAuth": true,
             "datadir": "/tmp/rc-datadir", "configfile": "/tmp/rc-config.json"}"#,
     );
 
@@ -42,6 +42,10 @@ fn rcfile_fills_fields_left_at_defaults() {
     assert_eq!(parsed.loglevel, "debug");
     assert!(parsed.allow_injection);
     assert!(parsed.local_only);
+    // Issue #863: the strict admin-auth gate is settable from a config file too. A fleet sets it
+    // once in a shipped rcfile rather than editing every invocation — the same reach `localOnly`
+    // above already has.
+    assert!(parsed.require_admin_auth);
     assert_eq!(
         parsed.datadir.as_deref(),
         Some(std::path::Path::new("/tmp/rc-datadir"))
@@ -82,6 +86,45 @@ fn rcfile_unknown_key_is_ignored_without_dropping_the_rest() {
     let mut parsed = cli(&[]);
     bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile).expect("unknown keys are not fatal");
     assert_eq!(parsed.port, 4321);
+}
+
+// Issue #863: `requireAdminAuth` is deliberately stricter than its sibling booleans. `false` is its
+// *permissive* state, so coercing a mistyped value to `false` would silently leave a fleet that
+// believed it had opted into fail-closed startup running keyless and off-host with nothing said.
+// A wrong-typed value is therefore a hard rcfile error, not a default.
+#[test]
+fn rcfile_non_boolean_require_admin_auth_is_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for bad in ["\"true\"", "1", "null", "[]"] {
+        let rcfile = write_rcfile(&dir, &format!(r#"{{"requireAdminAuth": {bad}}}"#));
+        let mut parsed = cli(&[]);
+        let err = bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile)
+            .expect_err("a non-boolean requireAdminAuth must be rejected, never coerced to false");
+        assert!(
+            err.to_string().contains("requireAdminAuth"),
+            "the error must name the offending key, got: {err}"
+        );
+        assert!(
+            !parsed.require_admin_auth,
+            "a rejected rcfile must not leave the flag half-applied"
+        );
+    }
+}
+
+// The sibling booleans keep their tolerant behaviour — the stricter rule above is scoped to the one
+// key where the coerced default is the permissive state, not applied across the board.
+#[test]
+fn rcfile_non_boolean_local_only_is_still_tolerated() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rcfile = write_rcfile(&dir, r#"{"localOnly": "yes", "port": 4321}"#);
+    let mut parsed = cli(&[]);
+    bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile)
+        .expect("a mistyped localOnly stays non-fatal");
+    assert!(!parsed.local_only);
+    assert_eq!(
+        parsed.port, 4321,
+        "the recognised keys beside it still apply"
+    );
 }
 
 // AC4: a structurally wrong rcfile is an error, not a silent no-op.
