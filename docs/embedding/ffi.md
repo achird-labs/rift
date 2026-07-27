@@ -122,7 +122,7 @@ rift_free(result);
   `rift_serve_admin` returns `NULL` with the reason in `rift_last_error`, and nothing has been bound.
 
   **This field is not self-gating — check the engine version before relying on it.** `ServeOptions`
-  does not use `deny_unknown_fields`, so an engine older than 0.18.0 **silently ignores**
+  does not use `deny_unknown_fields`, so an engine older than 0.17.0 **silently ignores**
   `requireAdminAuth` and serves the keyless off-host admin plane anyway, returning a normal
   `{"adminPort":…}`. There is no error to detect. An SDK that offers this option must gate it on the
   engine version from `rift_build_info` rather than assuming a rejection it will never receive.
