@@ -49,6 +49,31 @@ stays flat while Mountebank's per-request cost grows with stub count and predica
 methodology and all 13 scenarios: [`tests/benchmark`](tests/benchmark/). Your numbers will vary
 with hardware and config.</sub>
 
+#### vs WireMock
+
+WireMock is the most widely used JVM mock server. Same suite, same host, same load — **Rift is
+4.0x–14.0x its throughput**, and the gap widens as matching work grows:
+
+| Workload | WireMock → Rift | p99 |
+|:---------|:----------------|:----|
+| Simple static stub | 83,048 → 334,025 RPS (**4.0x**) | 7.0 ms → 2.4 ms |
+| Deep path match (410 stubs) | 24,264 → 326,779 RPS (**13.5x**) | 31.6 ms → 2.5 ms |
+| Regex path (100 patterns) | 48,982 → 311,815 RPS (**6.4x**) | — |
+| JSON body equals | 63,814 → 314,939 RPS (**4.9x**) | — |
+| Query match (last of 100) | 20,529 → 190,867 RPS (**9.3x**) | — |
+
+Rift stays roughly flat from a trivial stub to a 410-stub deep match (334k → 327k); WireMock falls
+from 83k to 24k. That shape matters more than the headline multiple.
+
+<sub>Intel Xeon Platinum 8573C, 16 vCPU (GitHub `ubuntu-16core`), 2026-07-27. WireMock 3.9.1 on
+Temurin 21 vs Rift from `master`. `oha` at **256 keep-alive connections**, 20s/scenario after a 10s
+warmup — identical for both engines, each run alone. Median of 3 reps; spread ≤5.6% (Rift ≤1.2%).
+WireMock's Jetty pool is pinned to 256 so its 10-thread default is not the ceiling — a fairness
+guarantee, not a speedup: the stock-default column lands within noise of it on this hardware. Its
+request journal is off, matching how Rift and Mountebank are measured. Ratios move with the
+connection count, so quote it. Full methodology, all 13 scenarios and two caveats we do not bury:
+[docs/performance](docs/performance/index.md#rift-vs-wiremock).</sub>
+
 ### Full Feature Support
 
 - **Imposters** - HTTP/HTTPS mock servers
