@@ -434,8 +434,14 @@ uint32_t rift_abi_version(void);
 
 /**
  * Build identity as a STATIC JSON string — never freed; probe this symbol to detect a v2 library
- * (issue #343). `{"version":"..","commit":"<sha>|null","builtAt":"<iso8601>|null","features":[..]}`.
+ * (issue #343).
+ * `{"version":"..","commit":"<sha>|null","builtAt":"<iso8601>|null","features":[..],"serveOptions":[..]}`.
  * `commit`/`builtAt` are `null` unless stamped at build time (issue #344).
+ *
+ * `serveOptions` lists the keys `rift_serve_admin`'s options document accepts (issue #877) — read
+ * it to feature-detect an option before sending it. It is **absent** on engines older than 0.17.0,
+ * and that absence is the signal: treat every serve option as unsupported. `features` is a
+ * different question (compiled cargo features), so do not conflate the two arrays.
  */
 const char *rift_build_info(void);
 
