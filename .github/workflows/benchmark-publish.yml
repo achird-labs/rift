@@ -42,6 +42,12 @@ on:
       wiremock_version:
         description: "WireMock version (pinned, same reason as Mountebank)"
         default: "3.9.1"
+      run_sweep:
+        description: >-
+          Run the Rift-only connection sweep. It is ~75% of the wall clock and contributes nothing
+          to the 3-way comparison table, so turn it off when you only want the engine comparison.
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -178,6 +184,7 @@ jobs:
       # Rift-only sweep: connection scaling plus the matching-dimension scenarios that the
       # comparison set deliberately excludes (it is a stability contract).
       - name: Rift concurrency sweep + matching dimensions (repeated)
+        if: inputs.run_sweep
         working-directory: tests/benchmark
         run: |
           set -euo pipefail

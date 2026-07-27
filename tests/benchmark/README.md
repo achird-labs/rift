@@ -252,7 +252,12 @@ gh workflow run benchmark-publish.yml \
 ```
 
 It measures **all three engines in one dispatch at one `warmup`**, three reps each, then publishes
-medians. That single-warmup rule is the point of the input existing: a 3s-warmed Rift against a
+medians.
+
+Pass `-f run_sweep=false` when you only want the engine-comparison table. The Rift-only sweep is
+roughly three quarters of the wall clock and feeds none of the 3-way numbers, so skipping it turns
+a ~3–4 hour dispatch into well under an hour. Leave it on when you are refreshing the published
+connection-scaling curve. That single-warmup rule is the point of the input existing: a 3s-warmed Rift against a
 10s-warmed JVM is not a comparison, and the rendered table would say nothing about it. The legs run
 in a fixed order — comparison, then WireMock, then the Rift-only sweep — because the sweep re-writes
 `direct_rift_rep*.csv` at other connection counts; the WireMock leg parks its artefacts under

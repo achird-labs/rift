@@ -836,6 +836,19 @@ class PublishWorkflow(unittest.TestCase):
         self.assertIn("tests/benchmark/results/logs/*.log", self.text)
         self.assertIn("results/logs/*.log", self.text.split("Diagnostics on failure")[1])
 
+    def test_the_sweep_can_be_skipped_without_touching_the_comparison_legs(self):
+        # The sweep is ~75% of the wall clock and contributes nothing to the 3-way table, so a
+        # WireMock-only dispatch must be able to turn it off — and ONLY it. Gating a comparison
+        # leg by mistake would publish a table missing an engine.
+        self.assertIn("run_sweep:", self.text)
+        gated = [l for l in self.text.splitlines() if "if: inputs.run_sweep" in l]
+        self.assertEqual(len(gated), 1, "exactly one leg may be gated by run_sweep")
+        sweep_at = self.text.index("Rift concurrency sweep")
+        gate_at = self.text.index("if: inputs.run_sweep")
+        self.assertLess(
+            abs(self.text[:gate_at].count("\n") - self.text[:sweep_at].count("\n")), 3,
+            "the run_sweep gate must sit on the sweep step, not on a comparison leg")
+
     def test_the_parked_comparison_medians_do_not_collide_with_the_sweeps(self):
         # results/direct_rift_median.csv means two different things (c=50 comparison vs the sweep's
         # 1/50/256/512) and only one is the basis of the published ratio.
