@@ -33,6 +33,7 @@ Prerequisites: a JRE (WireMock 3 needs 11+; use an LTS, 17 or 21) and the WireMo
       https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/3.9.1/wiremock-standalone-3.9.1.jar
 """
 import argparse
+import glob
 import json
 import os
 import re
@@ -44,8 +45,8 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(__file__))
 from bench_direct import (  # noqa: E402
-    IMPOSTERS, RESULTS_DIR, SCENARIOS,
-    free_ports, launch, load_rift_csv, metric, mode_label,
+    CSV_HEADER, IMPOSTERS, REP_FILE_RX, RESULTS_DIR, SCENARIOS,
+    aggregate_reps, csv_row, free_ports, launch, load_rift_csv, metric, mode_label,
     parse_conn_list, run_oha, stop, verify_body, write_results_csv,
 )
 
@@ -60,6 +61,11 @@ CATCH_ALL_PRIORITY = 999_999
 MIN_JAVA_MAJOR = 11
 DEFAULT_JAR = os.path.expanduser("~/bench-wiremock/wiremock-standalone.jar")
 DEFAULT_WIREMOCK_VERSION = "3.9.1"
+
+# 3s is thin for a JIT. The value matters beyond this suite: the published 3-way table is only
+# like-for-like if rift and mb were measured at the same warmup, which is why it is a single input
+# in benchmark-publish.yml rather than a per-leg constant (issue #866).
+DEFAULT_WARMUP = "10s"
 
 # The stock-defaults secondary series (issue #865): same suite, WireMock launched with no
 # `--container-threads`, benched at the headline connection count only. Its own engine label keeps
@@ -558,6 +564,7 @@ def run_all(jar, duration, warmup, conn_list, csv_suffix="",
 
     threads = container_thread_count(conn_list, container_threads)
     record_container_threads(csv_suffix, threads)
+    record_warmup(csv_suffix, warmup)
     ports = instance_ports()
     logdir = os.path.join(RESULTS_DIR, "logs")
     free_ports(ports)
@@ -575,8 +582,38 @@ def run_all(jar, duration, warmup, conn_list, csv_suffix="",
 # Report
 # --------------------------------------------------------------------------------------------
 
+def sidecar_path(name, csv_suffix):
+    """Where a run records one setting it was invoked with, beside its CSV."""
+    return os.path.join(RESULTS_DIR, f"direct_wiremock{csv_suffix}.{name}")
+
+
+def recorded_setting(name, csv_suffix):
+    """A setting the run recorded, or None if it never did."""
+    try:
+        with open(sidecar_path(name, csv_suffix)) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
 def threads_sidecar_path(csv_suffix):
-    return os.path.join(RESULTS_DIR, f"direct_wiremock{csv_suffix}.threads")
+    return sidecar_path("threads", csv_suffix)
+
+
+def record_warmup(csv_suffix, warmup):
+    """Persist the warmup the series ran with, for the same reason the pin is persisted.
+
+    The warmup is the one setting the 3-way comparison exists to hold equal across engines
+    (issue #866), and `--report` is a separate invocation that would otherwise have to be told
+    again — or, worse, leave it out of the published Method section entirely, so a reader cannot
+    check the like-for-like claim and two dispatches at different warmups produce indistinguishable
+    documents."""
+    with open(sidecar_path("warmup", csv_suffix), "w") as f:
+        f.write(f"{warmup}\n")
+
+
+def recorded_warmup(csv_suffix):
+    return recorded_setting("warmup", csv_suffix)
 
 
 def record_container_threads(csv_suffix, threads):
@@ -601,6 +638,151 @@ def recorded_container_threads(csv_suffix):
         return None
 
 
+# What a reader needs to see in the Method section to check the like-for-like claim, and what
+# `--report --csv-suffix _median` would otherwise lose because the reps recorded it under `_repN`.
+# Mapped to the flag that sets each one, so a disagreement error names something runnable.
+PROPAGATED_SETTINGS = {"threads": "--container-threads", "warmup": "--warmup"}
+
+
+def propagate_run_settings(base_suffix=""):
+    """Carry the reps' recorded settings onto the `_median` suffix, so `--report --csv-suffix
+    _median` states the values actually measured instead of "unrecorded".
+
+    Disagreement between reps is a hard error, not a majority vote: reps that ran with different
+    Jetty pools — or different warmups — are different configurations, and a median across them
+    describes no configuration that was ever measured."""
+    # Both series share one sidecar per rep (it is keyed by csv-suffix, not by engine), so either
+    # engine's rep numbers enumerate them. Reading both means a partial re-run that left only the
+    # stock series still recovers the settings instead of publishing "unrecorded".
+    reps = sorted({n for engine in ("wiremock", STOCK_ENGINE)
+                   for n, _p in find_engine_reps(engine, base_suffix)})
+    resolved = {}
+    for name, flag in PROPAGATED_SETTINGS.items():
+        seen = {f"{base_suffix}_rep{n}": recorded_setting(name, f"{base_suffix}_rep{n}")
+                for n in reps}
+        known = {v for v in seen.values() if v is not None}
+        if not known:
+            continue
+        if len(known) > 1:
+            detail = ", ".join(f"{s}={v}" for s, v in sorted(seen.items()) if v is not None)
+            raise SystemExit(
+                f"bench_wiremock: reps disagree on {flag} ({detail}). A median across reps that "
+                f"ran with different {flag} values describes no configuration that was measured. "
+                f"Re-run them with one {flag}, or aggregate them separately.")
+        value = known.pop()
+        with open(sidecar_path(name, f"{base_suffix}_median"), "w") as f:
+            f.write(f"{value}\n")
+        resolved[name] = value
+    return resolved
+
+
+# Every engine whose `_repN.csv` files this suite knows how to collapse. `wiremock` and
+# `wiremock-stock` are the ones issue #866 requires; `rift` and `mb` are included because the 3-way
+# median table needs their medians too, and `bench_direct`'s own aggregation emits a median CSV for
+# `rift` alone (its comparison path writes a report, not per-engine CSVs). Aggregating them here
+# keeps `bench_direct.py` untouched.
+AGGREGATABLE_ENGINES = ("rift", "mb", "wiremock", STOCK_ENGINE)
+
+
+def find_engine_reps(engine, base_suffix=""):
+    """Every `direct_<engine><base_suffix>_repN.csv` as `(rep_number, path)`, in rep order.
+
+    `bench_direct.find_rep_files` does this but hardcodes a `direct_rift` prefix, so it cannot see
+    the WireMock series at all. Matching on the `_rep<digits>.csv` tail (the shared `REP_FILE_RX`)
+    keeps a stale unsuffixed file, or a different variant sharing a prefix, out of the aggregate.
+
+    The rep number is returned alongside the path so callers never have to re-run the regex and
+    dereference a match that could be `None`."""
+    pattern = os.path.join(RESULTS_DIR, f"direct_{engine}{base_suffix}_rep*.csv")
+    matched = []
+    for p in glob.glob(pattern):
+        m = REP_FILE_RX.search(p)
+        if m:
+            matched.append((int(m.group(1)), p))
+    return sorted(matched)
+
+
+def find_engine_rep_files(engine, base_suffix=""):
+    """Just the paths from `find_engine_reps`, in rep order."""
+    return [p for _n, p in find_engine_reps(engine, base_suffix)]
+
+
+def aggregate_engine(engine, base_suffix=""):
+    """Collapse one engine's reps into `direct_<engine><base_suffix>_median.csv`.
+
+    Returns `(path, n_reps)`, or `None` when the engine has no rep files (a run may legitimately
+    not include Mountebank, or not produce a stock series).
+
+    The median maths is `bench_direct.aggregate_reps`, imported rather than reimplemented — two
+    suites with independently written definitions of "median" is a drift waiting to happen."""
+    paths = find_engine_rep_files(engine, base_suffix)
+    if not paths:
+        return None
+    reps = []
+    for p in paths:
+        with open(p) as f:
+            reps.append(load_rift_csv(f))
+    agg = aggregate_reps(reps)
+
+    # Same hard error as bench_direct (#773): a point missing from one rep produces a
+    # complete-looking report whose cells rest on fewer samples than it claims, with exit 0 and
+    # nothing said. Refuse rather than publish that.
+    incomplete = {k: c["reps"] for k, c in agg.items() if c["reps"] != len(paths)}
+    if incomplete:
+        detail = ", ".join(f"{s}@c={c}/{m}: {n} of {len(paths)}"
+                           for (s, c, m), n in sorted(incomplete.items())[:8])
+        raise SystemExit(
+            f"bench_wiremock: incomplete repetitions for '{engine}{base_suffix}' across "
+            f"{len(paths)} rep files: {detail}{' …' if len(incomplete) > 8 else ''}\n"
+            f"Every point must appear in every rep, or the median silently rests on fewer samples "
+            f"than the report claims. Re-run the missing reps, or aggregate a consistent subset.")
+
+    out = os.path.join(RESULTS_DIR, f"direct_{engine}{base_suffix}_median.csv")
+    with open(out, "w") as f:
+        f.write(CSV_HEADER + ",reps,rps_spread_pct\n")
+        for (scen, conns, mode), c in sorted(agg.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+            spread = f"{c['rps_spread_pct']:.1f}" if c["rps_spread_pct"] != "" else ""
+            f.write(f"{csv_row(scen, conns, mode, c)},{c['reps']},{spread}\n")
+    print(f"  {engine}: {len(paths)} reps -> {os.path.basename(out)}")
+    return out, len(paths)
+
+
+def aggregate_all_reps(base_suffix=""):
+    """Collapse every engine that has rep files into `_median` CSVs.
+
+    Two hard errors guard the published table. The tuned `wiremock` series must be present — it is
+    the one the headline ratio is computed from, and aggregating only `wiremock-stock` would print
+    a success line for a run that cannot produce the number. And every engine must have the *same*
+    rep count, mirroring `bench_direct.aggregate_comparison_reps`."""
+    done = {}
+    for engine in AGGREGATABLE_ENGINES:
+        result = aggregate_engine(engine, base_suffix)
+        if result is not None:
+            done[engine] = result[1]
+    if "wiremock" not in done:
+        raise SystemExit(
+            f"bench_wiremock: no tuned WireMock rep files matched "
+            f"direct_wiremock{base_suffix}_rep*.csv in {RESULTS_DIR} — the headline ratio is "
+            f"computed from that series, so there is nothing to publish "
+            f"(run `--run-all --rep N` first).")
+
+    # Unequal replication favours whichever engine got more samples, and the spread table makes it
+    # worse rather than better: peak-to-peak over a single rep is 0.0%, so the *least*-replicated
+    # engine renders as the most stable one. bench_direct refuses the same case for rift-vs-mb.
+    if len(set(done.values())) > 1:
+        detail = ", ".join(f"{e}={n}" for e, n in sorted(done.items()))
+        raise SystemExit(
+            f"bench_wiremock: rep-count mismatch across engines ({detail}). A table built from "
+            f"unequal replication favours whichever engine got more samples, and a one-rep column "
+            f"reports 0.0% spread — the least-replicated engine would read as the most stable. "
+            f"Re-run the short engines, or move the stale reps out of {RESULTS_DIR}.")
+
+    propagate_run_settings(base_suffix)
+    counts = ", ".join(f"{e}={n}" for e, n in sorted(done.items()))
+    print(f"[aggregate] {counts}; render with --report --csv-suffix {base_suffix}_median")
+    return done
+
+
 def engine_csv_path(engine, csv_suffix):
     """Where `--report` looks for an engine's CSV.
 
@@ -622,20 +804,28 @@ def load_engine_csv(engine, csv_suffix, conns):
     if not os.path.exists(path):
         return None
     with open(path) as f:
-        rows = {r["scenario"]: {"rps": float(r["rps"]), "p50": r["p50_ms"], "p99": r["p99_ms"]}
+        rows = {r["scenario"]: {"rps": float(r["rps"]), "p50": r["p50_ms"], "p99": r["p99_ms"],
+                                # Present only in a `_median.csv` produced by --aggregate-reps.
+                                # A median with no visible spread cannot distinguish a clean run
+                                # from one where a rep disagreed, so carry it through.
+                                "reps": r.get("reps", ""), "spread": r.get("rps_spread_pct", "")}
                 for r in load_rift_csv(f)
                 if r["mode"] == "closed" and int(r["connections"]) == conns}
     return rows or None
 
 
 def report(rift_ver, mb_ver, wiremock_ver, java_ver, duration, conns, csv_suffix="",
-           container_threads=None):
+           container_threads=None, warmup=None):
     """Combine the CSVs into the 3-way table.
 
     `container_threads` is the pin the tuned series ran with, stated in the Method section so a
     reader can tell a thread-pool ceiling from an engine throughput ceiling (issue #865). The
     stock-defaults series is rendered as its own clearly-labelled column and is deliberately NOT
-    used for the Rift/WM speedup — that ratio must come from the un-throttled run."""
+    used for the Rift/WM speedup — that ratio must come from the un-throttled run.
+
+    `warmup` is stated for the same reason: it is the setting the 3-way comparison holds equal
+    across engines, so a table that omits it cannot be checked against its own like-for-like
+    claim (issue #866)."""
     rift = load_engine_csv("rift", csv_suffix, conns)
     wm = load_engine_csv("wiremock", csv_suffix, conns)
     stock = load_engine_csv(STOCK_ENGINE, csv_suffix, conns)
@@ -655,8 +845,9 @@ def report(rift_ver, mb_ver, wiremock_ver, java_ver, duration, conns, csv_suffix
         f.write(f"- **Rift:** {rift_ver}\n")
         f.write(f"- **WireMock:** {wiremock_ver} (JVM: {java_ver})\n")
         f.write(f"- **Mountebank:** {mb_ver if mb else 'not measured on this box'}\n")
+        warm = f"{warmup} warmup" if warmup else "an **unrecorded** warmup"
         f.write(f"- **Load generator:** oha, {conns} keep-alive connections, {duration} per scenario "
-                f"(after warmup)\n")
+                f"after {warm} — the same for every engine in this table\n")
         f.write("- **Method:** native processes (no Docker); engines run one at a time on disjoint "
                 "port ranges; the same 13 scenarios and the same oha settings for every engine; "
                 "each scenario's matched body is asserted before it is measured.\n")
@@ -724,6 +915,44 @@ def report(rift_ver, mb_ver, wiremock_ver, java_ver, duration, conns, csv_suffix
             f.write(f"| {name} | {mb_cell} |{stock_cell} {wr:,.0f} | {rr:,.0f} | "
                     f"**{mb_sp}** | **{wm_sp}** |\n")
 
+        # Medians only: a median with no visible spread cannot distinguish a clean run from one
+        # where a rep disagreed, which is how a degraded sample becomes a published number. Emitted
+        # only when --aggregate-reps produced the inputs, so a single-rep report stays unchanged.
+        spread_series = [(label, rows) for label, rows in
+                         (("Mountebank", mb), (f"WireMock (stock, {STOCK_CONTAINER_THREADS}t)", stock),
+                          ("WireMock", wm), ("Rift", rift))
+                         if rows and any(r.get("spread") not in (None, "") for r in rows.values())]
+        if spread_series:
+            # The rep count goes in each column header, not in one prose sentence listing every
+            # distinct value: "a median of 1, 3 repetitions" does not say WHICH engine got one, and
+            # a one-rep column reports 0.0% spread — peak-to-peak over a single sample — so the
+            # least-replicated engine would otherwise read as the most stable one in the table.
+            headers = []
+            for label, rows in spread_series:
+                ns = {r["reps"] for r in rows.values() if r.get("reps") not in (None, "")}
+                if not ns:
+                    headers.append(label)
+                    continue
+                n = f"n={'/'.join(sorted(ns))}"
+                # Fold into the label's existing parenthesis rather than adding a second one:
+                # "WireMock (stock, 10t) (n=3)" reads as two separate annotations.
+                headers.append(f"{label[:-1]}, {n})" if label.endswith(")") else f"{label} ({n})")
+            f.write("\n## Repetition spread (peak-to-peak RPS as % of the mean)\n\n")
+            f.write("Every throughput cell above is a **median** over that column's `n` "
+                    "repetitions. A large spread means the reps disagree — treat that row as "
+                    "provisional and look at the individual reps before quoting it. A single rep "
+                    "has no spread to report and shows `n/a`, not 0%.\n\n")
+            f.write("| Scenario | " + " | ".join(headers) + " |\n")
+            f.write("|---|" + "--:|" * len(spread_series) + "\n")
+            for name in order:
+                cells = []
+                for _label, rows in spread_series:
+                    row = rows.get(name, {})
+                    s, n = row.get("spread", ""), row.get("reps", "")
+                    single = str(n) == "1"
+                    cells.append("n/a" if s in (None, "") or single else f"{float(s):.1f}%")
+                f.write(f"| {name} | " + " | ".join(cells) + " |\n")
+
         f.write("\n## Latency p99 (ms, lower is better)\n\n")
         f.write(f"| Scenario | Mountebank |{stock_head} {wm_head} | Rift |\n")
         f.write(f"|---|--:|{stock_rule}--:|--:|\n")
@@ -735,6 +964,21 @@ def report(rift_ver, mb_ver, wiremock_ver, java_ver, duration, conns, csv_suffix
     return out
 
 
+def resolve_suffix(csv_suffix, rep):
+    """The CSV suffix a run reads and writes under: an explicit `--csv-suffix`, else the `--rep`
+    tag, else none."""
+    if csv_suffix is not None:
+        return csv_suffix
+    return f"_rep{rep}" if rep else ""
+
+
+def median_suffix(base_suffix):
+    """Where `--aggregate-reps` writes, and therefore what a `--report` in the same invocation must
+    read. Kept as a function so the `--aggregate-reps --report` chaining the CI workflow relies on
+    is unit-testable without driving argparse."""
+    return f"{base_suffix}_median"
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="WireMock benchmark suite (issue #861)")
     ap.add_argument("--run-all", action="store_true", help="bench WireMock alone")
@@ -742,9 +986,12 @@ if __name__ == "__main__":
                     help="combine direct_rift.csv / direct_mb.csv / direct_wiremock.csv from the "
                          "SAME box and settings into WIREMOCK_BENCHMARK_REPORT.md")
     ap.add_argument("--duration", default="20s")
-    ap.add_argument("--warmup", default="10s",
-                    help="3s is thin for a JIT; 10s is the recommended default for WireMock runs. "
-                         "Quote rift/mb numbers measured with the same warmup for comparability.")
+    ap.add_argument("--warmup", default=None,
+                    help=f"default {DEFAULT_WARMUP}. 3s is thin for a JIT; {DEFAULT_WARMUP} is the "
+                         f"recommended default for WireMock runs. Quote rift/mb numbers measured "
+                         f"with the same warmup for comparability. On a standalone --report, this "
+                         f"overrides the warmup the run recorded — omit it to state what was "
+                         f"actually measured.")
     ap.add_argument("--connections", type=int, default=50)
     ap.add_argument("--sweep-connections", help="comma-separated connection counts")
     ap.add_argument("--wiremock-jar", default=DEFAULT_JAR)
@@ -761,9 +1008,23 @@ if __name__ == "__main__":
                          "already slow. The stock-defaults secondary series ignores this.")
     ap.add_argument("--rep", type=int, default=None,
                     help="tag this run's CSV as _repN so several reps can be aggregated")
+    ap.add_argument("--aggregate-reps", action="store_true",
+                    help="collapse direct_<engine>_repN.csv files into direct_<engine>_median.csv "
+                         "for every engine that has them (wiremock, wiremock-stock, and rift/mb "
+                         "when present). A point missing from any rep is a hard error, never a "
+                         "quietly thinner median. Render with --report --csv-suffix _median.")
+    ap.add_argument("--csv-suffix", default=None,
+                    help="the BASE suffix to read/write CSVs under, instead of the --rep tag. "
+                         "--aggregate-reps appends _median itself, so pass the suffix the reps were "
+                         "written with (usually none) — not _median.")
     args = ap.parse_args()
 
-    suffix = f"_rep{args.rep}" if args.rep else ""
+    # Both set the same thing, so honouring one and dropping the other silently would run under a
+    # suffix the caller did not think they asked for.
+    if args.csv_suffix is not None and args.rep:
+        ap.error("--csv-suffix and --rep both set the CSV suffix; pass one or the other")
+
+    suffix = resolve_suffix(args.csv_suffix, args.rep)
     conn_list = parse_conn_list(args.sweep_connections) if args.sweep_connections else [args.connections]
     # The stock series is benched at --connections only. If that point is not in the swept set, it
     # measures ~6 minutes of a configuration no --report can render (report() reads a single
@@ -773,11 +1034,18 @@ if __name__ == "__main__":
                  f"{sorted(conn_list)}; the stock series would bench a point no report can read. "
                  f"Pass --connections with one of the swept values.")
 
-    threads = None
+    threads, warmup = None, None
     if args.run_all:
-        threads = run_all(args.wiremock_jar, args.duration, args.warmup, conn_list,
+        warmup = args.warmup or DEFAULT_WARMUP
+        threads = run_all(args.wiremock_jar, args.duration, warmup, conn_list,
                           suffix, args.wiremock_version, args.container_threads,
                           stock_conns=args.connections)
+    if args.aggregate_reps:
+        # Aggregation reads `_repN` files, so it must not inherit a `_repN` suffix
+        # of its own; it writes the `_median` suffix the report then reads.
+        aggregate_all_reps(args.csv_suffix or "")
+        suffix = median_suffix(args.csv_suffix or "")
+
     if args.report:
         java_ver = args.java_version
         if java_ver is None:
@@ -791,7 +1059,13 @@ if __name__ == "__main__":
         if threads is None:
             threads = (args.container_threads if args.container_threads is not None
                        else recorded_container_threads(suffix))
+        # Same rule for the warmup, and it matters more: it is the setting the 3-way table claims
+        # to hold equal. `--warmup` defaults to None rather than DEFAULT_WARMUP precisely so a
+        # standalone --report can tell "the caller asked for this" from "nobody said", and print
+        # what the run recorded instead of the default it may never have used.
+        if warmup is None:
+            warmup = args.warmup if args.warmup is not None else recorded_warmup(suffix)
         report(args.rift_version, args.mb_version, args.wiremock_version, java_ver,
-               args.duration, args.connections, suffix, container_threads=threads)
-    if not (args.run_all or args.report):
-        ap.error("nothing to do: pass --run-all and/or --report")
+               args.duration, args.connections, suffix, container_threads=threads, warmup=warmup)
+    if not (args.run_all or args.report or args.aggregate_reps):
+        ap.error("nothing to do: pass --run-all, --aggregate-reps and/or --report")

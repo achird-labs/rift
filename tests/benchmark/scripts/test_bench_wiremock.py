@@ -10,6 +10,8 @@ imported fixture through it.
 Run: python3 -m unittest test_bench_wiremock   (from tests/benchmark/scripts)
 """
 import copy
+import csv
+import glob
 import json
 import os
 import re
@@ -393,6 +395,461 @@ class ContainerThreads(unittest.TestCase):
         self.assertEqual(bw.STOCK_ENGINE, "wiremock-stock")
         self.assertNotEqual(bw.STOCK_ENGINE, "wiremock")
         self.assertTrue(bw.engine_csv_path(bw.STOCK_ENGINE, "").endswith("direct_wiremock-stock.csv"))
+
+
+class AggregateReps(unittest.TestCase):
+    """Issue #866. A published number must not rest on one sample of each engine, and a median must
+    not silently rest on fewer reps than it claims."""
+
+    HEADER = bd.CSV_HEADER
+
+    def _write_rep(self, tmp, engine, rep, rps, scenarios=None, conns=50):
+        path = os.path.join(tmp, f"direct_{engine}_rep{rep}.csv")
+        with open(path, "w") as f:
+            f.write(self.HEADER + "\n")
+            for s in (scenarios if scenarios is not None else [x[0] for x in bd.SCENARIOS]):
+                f.write(f"{s},{conns},closed,{rps},1.0,2.0,3.0,4.0,1.5,,\n")
+        return path
+
+    def test_finds_rep_files_for_any_engine_not_just_rift(self):
+        # bench_direct.find_rep_files hardcodes a `direct_rift` prefix, so it cannot see these.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                self._write_rep(tmp, "wiremock", 1, 100.0)
+                self._write_rep(tmp, "wiremock", 2, 200.0)
+                self._write_rep(tmp, "wiremock-stock", 1, 50.0)
+                self.assertEqual(len(bw.find_engine_rep_files("wiremock")), 2)
+                self.assertEqual(len(bw.find_engine_rep_files("wiremock-stock")), 1)
+                self.assertEqual(bw.find_engine_rep_files("mb"), [])
+            finally:
+                bw.RESULTS_DIR = orig
+
+    def test_rep_files_are_ordered_numerically_not_lexically(self):
+        # rep10 must sort after rep2. The median itself is order-independent, but the rep numbers
+        # this ordering yields are what `propagate_run_settings` reads the per-rep sidecars by.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                for rep in (1, 2, 10):
+                    self._write_rep(tmp, "wiremock", rep, 100.0)
+                got = [os.path.basename(p) for p in bw.find_engine_rep_files("wiremock")]
+                self.assertEqual(got, ["direct_wiremock_rep1.csv", "direct_wiremock_rep2.csv",
+                                       "direct_wiremock_rep10.csv"])
+            finally:
+                bw.RESULTS_DIR = orig
+
+    def test_median_and_spread_are_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                for rep, rps in ((1, 100.0), (2, 200.0), (3, 300.0)):
+                    self._write_rep(tmp, "wiremock", rep, rps)
+                path, n = bw.aggregate_engine("wiremock")
+                self.assertEqual(n, 3)
+                with open(path) as f:
+                    rows = list(csv.DictReader(f))
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertEqual(float(rows[0]["rps"]), 200.0, "median of 100/200/300")
+        self.assertEqual(rows[0]["reps"], "3")
+        # peak-to-peak (300-100) over mean (200) = 100%
+        self.assertAlmostEqual(float(rows[0]["rps_spread_pct"]), 100.0, places=1)
+
+    def test_a_point_missing_from_one_rep_is_a_hard_error(self):
+        # The #773 rule: a complete-looking report whose cells rest on 2 of 3 reps, exit 0, nothing
+        # said, is exactly the silence this must not reproduce.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                self._write_rep(tmp, "wiremock", 1, 100.0)
+                self._write_rep(tmp, "wiremock", 2, 200.0,
+                                scenarios=[s[0] for s in bd.SCENARIOS][:-1])  # one point short
+                with self.assertRaises(SystemExit) as ctx:
+                    bw.aggregate_engine("wiremock")
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertIn("incomplete repetitions", str(ctx.exception))
+
+    def test_absent_engine_yields_none_not_an_error(self):
+        # A run may legitimately not include Mountebank.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                self.assertIsNone(bw.aggregate_engine("mb"))
+            finally:
+                bw.RESULTS_DIR = orig
+
+    def test_aggregate_all_covers_both_wiremock_engines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                for eng in ("wiremock", "wiremock-stock", "rift"):
+                    for rep in (1, 2):
+                        self._write_rep(tmp, eng, rep, 100.0 * rep)
+                done = bw.aggregate_all_reps()
+                produced = sorted(os.path.basename(p) for p in
+                                  glob.glob(os.path.join(tmp, "*_median.csv")))
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertEqual(done, {"wiremock": 2, "wiremock-stock": 2, "rift": 2})
+        self.assertEqual(produced, ["direct_rift_median.csv", "direct_wiremock-stock_median.csv",
+                                    "direct_wiremock_median.csv"])
+
+    def test_aggregate_all_with_no_wiremock_reps_is_an_error(self):
+        # Producing nothing and exiting 0 would read as success.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                self._write_rep(tmp, "rift", 1, 100.0)
+                with self.assertRaises(SystemExit) as ctx:
+                    bw.aggregate_all_reps()
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertIn("no tuned WireMock rep files", str(ctx.exception))
+
+    def test_median_csv_is_readable_by_the_report_loader(self):
+        # The whole point: --aggregate-reps then --report --csv-suffix _median.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                for rep, rps in ((1, 100.0), (2, 300.0)):
+                    self._write_rep(tmp, "wiremock", rep, rps)
+                bw.aggregate_engine("wiremock")
+                rows = bw.load_engine_csv("wiremock", "_median", 50)
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertIsNotNone(rows)
+        self.assertEqual(rows["simple_health"]["rps"], 200.0)
+        self.assertEqual(rows["simple_health"]["reps"], "2")
+
+    def test_the_reps_thread_pin_reaches_the_median_suffix(self):
+        # Without this the median report says "unrecorded" for a pin every rep actually ran with,
+        # and #865's requirement (state the value used) is lost the moment reps are aggregated.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                for rep in (1, 2):
+                    self._write_rep(tmp, "wiremock", rep, 100.0 * rep)
+                    bw.record_container_threads(f"_rep{rep}", 16)
+                bw.aggregate_all_reps()
+                got = bw.recorded_container_threads("_median")
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertEqual(got, 16)
+
+    def test_reps_that_disagree_on_the_pin_are_a_hard_error(self):
+        # Different Jetty pool sizes are different configurations; their median describes none.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                for rep, threads in ((1, 16), (2, 10)):
+                    self._write_rep(tmp, "wiremock", rep, 100.0)
+                    bw.record_container_threads(f"_rep{rep}", threads)
+                with self.assertRaises(SystemExit) as ctx:
+                    bw.aggregate_all_reps()
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertIn("disagree on --container-threads", str(ctx.exception))
+
+    def test_engines_with_unequal_rep_counts_are_a_hard_error(self):
+        # bench_direct refuses this for rift-vs-mb; the 3-way table is the more-quoted artefact and
+        # had no equivalent guard. Worse than unfair weighting: the one-rep column reports 0.0%
+        # spread, so the thinnest data renders as the steadiest engine.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                self._write_rep(tmp, "rift", 1, 9000.0)
+                for rep in (1, 2, 3):
+                    self._write_rep(tmp, "wiremock", rep, 3000.0)
+                with self.assertRaises(SystemExit) as ctx:
+                    bw.aggregate_all_reps()
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertIn("rep-count mismatch", str(ctx.exception))
+        self.assertIn("rift=1", str(ctx.exception))
+
+    def test_stock_reps_alone_cannot_stand_in_for_the_tuned_series(self):
+        # The headline ratio comes from the tuned series; aggregating only the stock one and
+        # printing a success line would misrepresent what the run can publish.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                for rep in (1, 2):
+                    self._write_rep(tmp, "wiremock-stock", rep, 900.0)
+                with self.assertRaises(SystemExit) as ctx:
+                    bw.aggregate_all_reps()
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertIn("no tuned WireMock rep files", str(ctx.exception))
+
+    def test_the_reps_warmup_reaches_the_median_suffix(self):
+        # The warmup is the setting the 3-way table claims to hold equal, so losing it at
+        # aggregation is what makes the published claim uncheckable.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                for rep in (1, 2):
+                    self._write_rep(tmp, "wiremock", rep, 100.0 * rep)
+                    bw.record_warmup(f"_rep{rep}", "10s")
+                bw.aggregate_all_reps()
+                got = bw.recorded_warmup("_median")
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertEqual(got, "10s")
+
+    def test_reps_that_disagree_on_the_warmup_are_a_hard_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                for rep, warm in ((1, "10s"), (2, "3s")):
+                    self._write_rep(tmp, "wiremock", rep, 100.0)
+                    bw.record_warmup(f"_rep{rep}", warm)
+                with self.assertRaises(SystemExit) as ctx:
+                    bw.aggregate_all_reps()
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertIn("disagree on --warmup", str(ctx.exception))
+
+    def test_the_pin_is_recovered_when_only_the_stock_series_survived(self):
+        # Both series share one sidecar per rep. Enumerating rep numbers from the tuned series
+        # alone loses the pin whenever a partial re-run left only the stock CSVs behind.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                for rep in (1, 2):
+                    self._write_rep(tmp, "wiremock", rep, 100.0)
+                    self._write_rep(tmp, "wiremock-stock", rep, 50.0)
+                    bw.record_container_threads(f"_rep{rep}", 16)
+                os.remove(os.path.join(tmp, "direct_wiremock_rep1.csv"))
+                os.remove(os.path.join(tmp, "direct_wiremock_rep2.csv"))
+                self.assertEqual(bw.propagate_run_settings(""), {"threads": "16"})
+                got = bw.recorded_container_threads("_median")
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertEqual(got, 16)
+
+    def test_unrecorded_pin_stays_unrecorded_rather_than_invented(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                for rep in (1, 2):
+                    self._write_rep(tmp, "wiremock", rep, 100.0)
+                bw.aggregate_all_reps()
+                got = bw.recorded_container_threads("_median")
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertIsNone(got)
+
+
+class ReportSpread(unittest.TestCase):
+    """AC3. The spread table is the part of #866 a reader actually sees: it is what stops a median
+    over a degraded rep from reading like a clean number."""
+
+    def _median_csv(self, tmp, engine, rps, reps, spread):
+        path = os.path.join(tmp, f"direct_{engine}_median.csv")
+        with open(path, "w") as f:
+            f.write(bd.CSV_HEADER + ",reps,rps_spread_pct\n")
+            for s, *_ in bd.SCENARIOS:
+                f.write(f"{s},50,closed,{rps},1.0,2.0,3.0,4.0,1.5,,,{reps},{spread}\n")
+
+    def _render(self, tmp, series, **kw):
+        for engine, rps, reps, spread in series:
+            self._median_csv(tmp, engine, rps, reps, spread)
+        out = bw.report("local", "2.9.1", "3.9.1", "openjdk 21", "20s", 50,
+                        csv_suffix="_median", **kw)
+        return open(out).read()
+
+    def _in_tmp(self, series, **kw):
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                return self._render(tmp, series, **kw)
+            finally:
+                bw.RESULTS_DIR = orig
+
+    def test_the_spread_table_is_rendered_for_medians(self):
+        text = self._in_tmp([("rift", 60000.0, 3, "4.2"), ("wiremock", 20000.0, 3, "11.5")])
+        self.assertIn("## Repetition spread", text)
+        self.assertIn("4.2%", text)
+        self.assertIn("11.5%", text)
+
+    def test_a_single_rep_reports_n_a_not_zero_percent(self):
+        # Peak-to-peak over one sample is 0.0%, so a one-rep column would render as the STEADIEST
+        # engine in a table whose entire purpose is to expose thin replication.
+        text = self._in_tmp([("rift", 60000.0, 1, "0.0"), ("wiremock", 20000.0, 3, "11.5")])
+        spread = text.split("## Repetition spread")[1]
+        row = [l for l in spread.splitlines() if l.startswith("| simple_health |")][0]
+        self.assertIn("n/a", row)
+        self.assertNotIn("0.0%", row)
+
+    def test_each_column_states_its_own_rep_count(self):
+        # "a median of 1, 3 repetitions" does not say WHICH engine got one.
+        text = self._in_tmp([("rift", 60000.0, 1, "0.0"), ("wiremock", 20000.0, 3, "11.5")])
+        header = [l for l in text.split("## Repetition spread")[1].splitlines()
+                  if l.startswith("| Scenario |")][0]
+        self.assertIn("Rift (n=1)", header)
+        self.assertIn("WireMock (n=3)", header)
+
+    def test_a_single_rep_report_has_no_spread_table_at_all(self):
+        # A plain (non-aggregated) run must render exactly as it did before #866.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                for engine, rps in (("rift", 60000.0), ("wiremock", 20000.0)):
+                    path = os.path.join(tmp, f"direct_{engine}.csv")
+                    with open(path, "w") as f:
+                        f.write(bd.CSV_HEADER + "\n")
+                        for s, *_ in bd.SCENARIOS:
+                            f.write(f"{s},50,closed,{rps},1.0,2.0,3.0,4.0,1.5,,\n")
+                out = bw.report("local", "2.9.1", "3.9.1", "openjdk 21", "20s", 50)
+                text = open(out).read()
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertNotIn("## Repetition spread", text)
+
+    def test_the_warmup_reaches_the_method_section(self):
+        # #866's premise: a 3s-warmed Rift against a 10s-warmed JVM is not a comparison. A reader
+        # who cannot see the warmup cannot check that claim.
+        text = self._in_tmp([("rift", 60000.0, 3, "4.2"), ("wiremock", 20000.0, 3, "11.5")],
+                            warmup="10s")
+        self.assertIn("10s warmup", text)
+
+    def test_an_unrecorded_warmup_is_admitted_rather_than_defaulted(self):
+        text = self._in_tmp([("rift", 60000.0, 3, "4.2"), ("wiremock", 20000.0, 3, "11.5")])
+        self.assertIn("**unrecorded** warmup", text)
+        self.assertNotIn("10s warmup", text)
+
+
+class ReportSuffixChaining(unittest.TestCase):
+    """`--aggregate-reps --report` in one invocation is exactly what benchmark-publish.yml runs.
+    The suffix hand-off between the two lives in `__main__`, so it is extracted to be testable —
+    without this the report would silently render the un-aggregated single-rep CSVs."""
+
+    def test_rep_tag_is_the_default_suffix(self):
+        self.assertEqual(bw.resolve_suffix(None, 3), "_rep3")
+
+    def test_explicit_suffix_wins_over_no_rep(self):
+        self.assertEqual(bw.resolve_suffix("_variant", None), "_variant")
+
+    def test_no_rep_and_no_suffix_is_unsuffixed(self):
+        self.assertEqual(bw.resolve_suffix(None, None), "")
+
+    def test_aggregation_writes_where_the_report_then_reads(self):
+        # The contract that makes `--aggregate-reps --report` work as one command.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bw.RESULTS_DIR
+            bw.RESULTS_DIR = tmp
+            try:
+                for rep in (1, 2):
+                    for engine in ("rift", "wiremock"):
+                        path = os.path.join(tmp, f"direct_{engine}_rep{rep}.csv")
+                        with open(path, "w") as f:
+                            f.write(bd.CSV_HEADER + "\n")
+                            for s, *_ in bd.SCENARIOS:
+                                f.write(f"{s},50,closed,{100.0 * rep},1.0,2.0,3.0,4.0,1.5,,\n")
+                bw.aggregate_all_reps("")
+                suffix = bw.median_suffix("")
+                self.assertIsNotNone(bw.load_engine_csv("wiremock", suffix, 50),
+                                     "the report must find what the aggregation just wrote")
+            finally:
+                bw.RESULTS_DIR = orig
+        self.assertEqual(suffix, "_median")
+
+
+class PublishWorkflow(unittest.TestCase):
+    """Issue #866. The publication workflow is where a like-for-like comparison is won or lost, and
+    the failure mode is silent: a table whose engines were warmed differently still renders."""
+
+    WORKFLOW = os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                            ".github", "workflows", "benchmark-publish.yml")
+
+    @classmethod
+    def setUpClass(cls):
+        with open(cls.WORKFLOW) as f:
+            cls.text = f.read()
+
+    def test_all_three_engines_are_warmed_by_one_and_the_same_expression(self):
+        # The whole point of issue #866. Capturing to end-of-line, not to the first space: a regex
+        # that stops at whitespace matches the shared `"${{` prefix of ANY expression, so one leg
+        # silently warmed from a different variable would still look identical.
+        runs = []
+        for line in self.text.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            m = re.search(r"--warmup\s+(.+)$", line)
+            if m:
+                runs.append(m.group(1).strip().rstrip("\\").strip())
+        self.assertEqual(len(runs), 3, f"expected 3 benched legs, saw {runs}")
+        self.assertEqual(len(set(runs)), 1,
+                         f"the legs are warmed differently, so the ratio is not like-for-like: {runs}")
+
+    def test_no_leg_hardcodes_a_warmup_duration(self):
+        self.assertNotRegex(self.text, r"--warmup\s+\d+[smh]\b")
+
+    def test_the_warmup_the_legs_use_is_bound_to_the_dispatch_input(self):
+        # Guards the other half: three legs could agree on a variable that is wired to `duration`,
+        # or to nothing at all (unset + `set -u` would at least fail loudly, but a typo'd binding
+        # to another input would not).
+        warmup_var = re.search(r"--warmup\s+\"\$(\w+)\"", self.text)
+        self.assertIsNotNone(warmup_var, "the legs should take the warmup from an env var")
+        self.assertRegex(
+            self.text,
+            rf"{warmup_var.group(1)}:\s*\$\{{\{{\s*inputs\.warmup\s*\}}\}}",
+            "the legs' warmup variable must be bound to the `warmup` dispatch input")
+
+    def test_dispatch_inputs_are_not_interpolated_into_shell_bodies(self):
+        # `${{ }}` is substituted before bash parses the line, so an input reaching a run: body is
+        # script injection. Step `name:` fields are not shell and are excluded.
+        offenders = [l.strip() for l in self.text.splitlines()
+                     if "${{ inputs." in l and not l.lstrip().startswith(("- name:", "#"))
+                     and ":" not in l.split("${{")[0].rstrip()[-1:]]
+        self.assertEqual(offenders, [], f"inputs reach the shell directly: {offenders}")
+
+    def test_wiremock_version_is_pinned_by_input_not_by_the_jar_that_happened_to_be_there(self):
+        self.assertIn("wiremock_version:", self.text)
+        self.assertIn("--wiremock-version", self.text)
+        self.assertNotIn("/wiremock-standalone/3.9.1/", self.text,
+                         "the download URL must interpolate the input, not a frozen version")
+
+    def test_wiremock_jvm_logs_are_collected(self):
+        # 14 JVMs write to results/logs/; the flat results/*.log globs do not reach them, and this
+        # is the leg most likely to die on a readiness probe or an OOM.
+        self.assertIn("tests/benchmark/results/logs/*.log", self.text)
+        self.assertIn("results/logs/*.log", self.text.split("Diagnostics on failure")[1])
+
+    def test_the_parked_comparison_medians_do_not_collide_with_the_sweeps(self):
+        # results/direct_rift_median.csv means two different things (c=50 comparison vs the sweep's
+        # 1/50/256/512) and only one is the basis of the published ratio.
+        self.assertIn("direct_rift_comparison_median.csv", self.text)
+        self.assertIn("direct_mb_comparison_median.csv", self.text)
+
+    def test_the_wiremock_leg_parks_its_medians_before_the_sweep_overwrites_them(self):
+        # The sweep re-runs bench_direct --aggregate-reps, which writes direct_rift_median.csv.
+        # Without the park, the published 3-way table is silently rebuilt from sweep data.
+        wm = self.text.index("bench_wiremock.py --run-all")
+        sweep = self.text.index("--sweep-connections")
+        self.assertLess(wm, sweep, "the WireMock leg must run before the Rift-only sweep")
+        park = self.text.index("results/wiremock/")
+        self.assertLess(park, sweep, "medians must be parked before the sweep runs")
 
 
 class ReportCombiner(unittest.TestCase):
