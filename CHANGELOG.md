@@ -11,6 +11,21 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **`AdminAuthorizer` — pluggable per-request admin-API authorization** (issue #854). The
+  `--api-key` gate grants *access*, not an identity, so an embedder with its own identity system
+  had to reverse-proxy the admin API and re-parse routes to decide anything.
+  `ServerBuilder::admin_authorizer` installs a hook that is consulted **after** authentication and
+  **after** the route is parsed, receiving a stable action string, the port, the space and the
+  already-extracted path params. Install nothing and nothing changes.
+
+  Authentication still runs first and unconditionally, so an unauthenticated request answers `401`
+  whatever the path — unknown paths never become a route-existence oracle. A `Deny` on an
+  authenticated request is a `403`. Requests may carry an `x-rift-scope` header, passed through
+  verbatim as the authorizer's `scope`; it is caller-asserted and must be cross-checked against the
+  credential rather than trusted as identity. See `docs/embedding/spi.md`.
+
 ### Security
 
 - **An empty `--api-key` enabled the admin auth gate and then authenticated everyone** (issue #844).

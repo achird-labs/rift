@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tracing::debug;
 
 /// Parsed route for imposter-specific endpoints
-enum ImposterRoute {
+pub(crate) enum ImposterRoute {
     /// GET/DELETE /imposters/:port
     Root,
     /// POST/PUT/GET /imposters/:port/stubs
@@ -49,7 +49,7 @@ enum ImposterRoute {
 
 impl ImposterRoute {
     /// Parse route from path segments after `/imposters/:port`
-    fn parse(segments: &[&str]) -> Option<Self> {
+    pub(crate) fn parse(segments: &[&str]) -> Option<Self> {
         match segments {
             [] => Some(ImposterRoute::Root),
             ["stubs"] => Some(ImposterRoute::Stubs),

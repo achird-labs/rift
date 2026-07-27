@@ -1,5 +1,6 @@
 //! Admin API server.
 
+use crate::admin_api::authz;
 use crate::admin_api::handlers::events::{self, AdminBody};
 use crate::admin_api::router::route_request;
 use crate::config_loader::ConfigSource;
@@ -12,6 +13,7 @@ use hyper::body::Bytes;
 use hyper::service::service_fn;
 use hyper::{Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use rift_mock_core::extensions::authz::{AdminAuthorizer, AuthzDecision, AuthzRequest};
 use rift_mock_core::proxy::{
     AcceptBackoff, AcceptErrorClass, AcceptErrorEvent, AcceptErrorLog, classify_accept_error,
     is_fatal_listener_error,
@@ -30,6 +32,11 @@ use tracing::{debug, error, info};
 /// Bounded grace given to in-flight connections on `shutdown()` before the wait is abandoned.
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
+/// Header carrying the embedder-defined scope selector handed to an [`AdminAuthorizer`]
+/// (issue #854). Upstream never parses or interprets the value — it exists because an authorizer
+/// often cannot derive the target from the port alone (`POST /imposters` has no port yet).
+const SCOPE_HEADER: &str = "x-rift-scope";
+
 /// Admin API server for Rift
 pub struct AdminApiServer {
     addr: SocketAddr,
@@ -39,6 +46,7 @@ pub struct AdminApiServer {
     allow_injection: bool,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
+    authorizer: Option<Arc<dyn AdminAuthorizer>>,
 }
 
 impl AdminApiServer {
@@ -52,7 +60,19 @@ impl AdminApiServer {
             allow_injection: false,
             intercept: None,
             scripts_dir: None,
+            authorizer: None,
         }
+    }
+
+    /// Install a per-request authorization hook (issue #854).
+    ///
+    /// Consulted after authentication and after the route is parsed, so it receives the action,
+    /// port and path params rather than a raw path. Without one the api-key comparison decides
+    /// alone, exactly as before.
+    #[must_use]
+    pub fn with_admin_authorizer(mut self, authorizer: Arc<dyn AdminAuthorizer>) -> Self {
+        self.authorizer = Some(authorizer);
+        self
     }
 
     /// Set the config source (`--configfile`/`--datadir`) so `POST /admin/reload` can re-read it
@@ -148,6 +168,7 @@ impl AdminApiServer {
                 self.allow_injection,
                 self.intercept,
                 self.scripts_dir,
+                self.authorizer,
                 loop_cancel,
                 loop_tracker,
             )
@@ -357,6 +378,7 @@ async fn accept_loop(
     allow_injection: bool,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
+    authorizer: Option<Arc<dyn AdminAuthorizer>>,
     cancel: CancellationToken,
     tracker: TaskTracker,
 ) -> anyhow::Result<()> {
@@ -467,6 +489,7 @@ async fn accept_loop(
         let api_key = api_key.clone();
         let config_source = config_source.clone();
         let intercept = intercept.clone();
+        let authorizer = authorizer.clone();
         let scripts_dir = scripts_dir.clone();
         let conn_cancel = cancel.clone();
 
@@ -479,6 +502,7 @@ async fn accept_loop(
                 let api_key = api_key.clone();
                 let config_source = config_source.clone();
                 let intercept = intercept.clone();
+                let authorizer = authorizer.clone();
                 let scripts_dir = scripts_dir.clone();
                 let stream_cancel = stream_cancel.clone();
                 async move {
@@ -503,6 +527,45 @@ async fn accept_loop(
                                 .unwrap_or("");
                             if !api_key_matches(auth, key.as_str()) {
                                 return Ok::<_, hyper::Error>(box_full(unauthorized_response()));
+                            }
+                        }
+                        // Authorization (issue #854), strictly after authentication. Ordering is
+                        // load-bearing: moving the api-key gate below this would let an
+                        // unauthenticated request to an unknown path answer 404 instead of 401,
+                        // turning unknown-path responses into a route-existence oracle.
+                        //
+                        // Gateway traffic is exempt for the same reason it skips the api key —
+                        // `classify` returns None for `/__rift/`, so app-under-test requests are
+                        // never asked to carry an admin identity.
+                        if let Some(ref authorizer) = authorizer
+                            && let Some(target) = authz::classify(req.method(), req.uri().path())
+                        {
+                            let params: Vec<(&str, &str)> = target
+                                .params
+                                .iter()
+                                .map(|(name, value)| (*name, value.as_str()))
+                                .collect();
+                            let decision = authorizer.authorize(AuthzRequest {
+                                credential: req
+                                    .headers()
+                                    .get("authorization")
+                                    .and_then(|v| v.to_str().ok()),
+                                action: target.action,
+                                port: target.port,
+                                space: target.space.as_deref(),
+                                scope: req
+                                    .headers()
+                                    .get(SCOPE_HEADER)
+                                    .and_then(|v| v.to_str().ok()),
+                                params: &params,
+                            });
+                            match decision {
+                                AuthzDecision::Allow { principal: _ } => {}
+                                AuthzDecision::Deny { reason } => {
+                                    return Ok::<_, hyper::Error>(box_full(forbidden_response(
+                                        reason,
+                                    )));
+                                }
                             }
                         }
                         // Admin SSE stream (issue #461): `/events` + the
@@ -647,6 +710,23 @@ fn unauthorized_response() -> Response<Full<Bytes>> {
         .header("Content-Type", "application/json")
         .body(Full::new(Bytes::from(body)))
         .expect("infallible")
+}
+
+/// An installed [`AdminAuthorizer`] denied an *authenticated* request (issue #854).
+///
+/// 403, not 401: the credential was accepted, so telling the caller to re-authenticate would send
+/// them round a loop that cannot succeed. 401 stays reserved for a missing or malformed
+/// credential.
+///
+/// `reason` comes from the authorizer and is echoed to the caller, which is why it is a
+/// `&'static str` — an embedder has to write it as a literal rather than formatting a principal,
+/// a policy id or an internal error into it by accident.
+fn forbidden_response(reason: &'static str) -> Response<Full<Bytes>> {
+    // The shared builder, not a hand-rolled envelope: it emits `code = "403"` and
+    // `type = "insufficient access"` per the #797 format that all four SDKs and rift-conformance
+    // parse. `unauthorized_response` above predates that format and is grandfathered; copying its
+    // shape onto a brand-new surface would spread the wart rather than contain it.
+    crate::admin_api::types::error_response(StatusCode::FORBIDDEN, reason)
 }
 
 #[cfg(test)]

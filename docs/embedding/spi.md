@@ -256,6 +256,88 @@ Contract:
 
 Registering no interceptor leaves behaviour byte-identical, on both the serve loop and the gateway.
 
+## `AdminAuthorizer` — per-request admin authorization
+
+The built-in `--api-key` gate yields *access*, not an identity: every caller that presents the key
+is equivalent. `AdminAuthorizer` lets an embedder decide per request, with the route already parsed.
+
+```rust
+use rift_mock_core::extensions::authz::{
+    AdminAuthorizer, AuthzDecision, AuthzRequest, actions,
+};
+
+struct TenantAuthorizer;
+
+impl AdminAuthorizer for TenantAuthorizer {
+    fn authorize(&self, req: AuthzRequest<'_>) -> AuthzDecision {
+        let principal = match req.credential.and_then(lookup_principal) {
+            Some(p) => p,
+            None => return AuthzDecision::Deny { reason: "unknown principal" },
+        };
+        match req.action {
+            actions::IMPOSTER_DELETE if !principal.may_delete => {
+                AuthzDecision::Deny { reason: "delete not permitted" }
+            }
+            _ => AuthzDecision::Allow { principal: Some(principal.name) },
+        }
+    }
+}
+
+let server = ServerBuilder::from_cli(cli)
+    .admin_authorizer(Arc::new(TenantAuthorizer))
+    .start()
+    .await?;
+```
+
+**Install nothing, change nothing.** With no authorizer registered the api-key comparison decides
+alone, exactly as before.
+
+### Ordering is part of the contract
+
+Authentication runs **first and unconditionally**; only then is the route parsed and the hook
+consulted. That order is load-bearing — if authentication ran after route parsing, an
+unauthenticated request to an unknown path would answer `404` instead of `401` and unknown-path
+responses would become a route-existence oracle for anonymous callers.
+
+- Missing or invalid credential → `401`, and the hook is **not** consulted.
+- `Deny` on an authenticated request → `403` with the standard error envelope.
+- A path matching no route → the ordinary `404`; the hook is not consulted, because nothing runs.
+
+### Actions
+
+`action` is a stable string rather than an enum, so an embedder can extend its own vocabulary
+without waiting for an upstream release. The values upstream emits are constants in
+`extensions::authz::actions`:
+
+| Action | Routes |
+|:--|:--|
+| `system.read` | `GET /`, `/health`, `/config`, `/logs`, `/metrics` |
+| `system.write` | `POST /admin/reload` |
+| `imposter.read` | any `GET` under `/imposters`, and the per-imposter SSE alias |
+| `imposter.write` | mutating `POST`/`PUT` on an imposter, its stubs, scenarios or flow state |
+| `imposter.delete` | any `DELETE` under `/imposters` — **and `PUT /imposters`**, which reconciles the whole set and so removes everything not in the payload |
+| `imposter.verify` | `POST /imposters/:port/verify`, which mutates nothing |
+| `events.read` | `GET /events`, the cross-imposter stream |
+| `intercept.read` / `intercept.write` | `/intercept` and below |
+
+`events.read` is separate from `imposter.read` on purpose: `/events` carries recorded requests from
+*every* imposter, so granting read on one port must not implicitly grant all of them.
+
+### Targeting: `port`, `space`, `params`, `scope`
+
+`port`, `space` and `params` come from the router's own parser, so they cannot drift from what the
+handler will actually act on.
+
+`scope` is different. It is read verbatim from the **`x-rift-scope` request header** and exists
+because some routes have no target to key on — `POST /imposters` creates a port rather than naming
+one. Because it is a request header, **it is caller-asserted**: any authenticated caller can set it
+to any value. Cross-check it against what the credential entitles the caller to; never use it
+directly as the authorization subject.
+
+The data plane is never authorized. Gateway traffic (`/__rift/...`) skips this hook for the same
+reason it skips the api key — it is app-under-test traffic, and requiring an admin identity for it
+would force the application to carry the admin credential.
+
 ## Backend errors and annotations
 
 A custom backend signals unavailability by attaching `BackendUnavailable` to a failed operation's

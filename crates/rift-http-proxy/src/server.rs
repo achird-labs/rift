@@ -18,6 +18,7 @@ use crate::sources::{
 };
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
+use rift_mock_core::extensions::authz::AdminAuthorizer;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -328,6 +329,7 @@ pub struct ServerBuilder {
     manager: Option<Arc<ImposterManager>>,
     accept_runtimes: Vec<tokio::runtime::Handle>,
     imposter_sources: Vec<Arc<dyn ImposterSource>>,
+    admin_authorizer: Option<Arc<dyn AdminAuthorizer>>,
 }
 
 impl ServerBuilder {
@@ -339,6 +341,7 @@ impl ServerBuilder {
             manager: None,
             accept_runtimes: Vec::new(),
             imposter_sources: Vec::new(),
+            admin_authorizer: None,
         }
     }
 
@@ -364,6 +367,21 @@ impl ServerBuilder {
         self
     }
 
+    /// Install a per-request admin-API authorization hook (issue #854).
+    ///
+    /// Consulted after authentication and after the route is parsed, so the hook receives the
+    /// action, port and path params instead of having to re-parse the path itself. Install
+    /// nothing and nothing changes: without one, the `--api-key` comparison decides alone.
+    ///
+    /// Authentication still runs first and unconditionally — an unauthenticated request answers
+    /// `401` whatever the path, so unknown paths never become a route-existence oracle. A `Deny`
+    /// on an authenticated request is a `403`.
+    #[must_use]
+    pub fn admin_authorizer(mut self, authorizer: Arc<dyn AdminAuthorizer>) -> Self {
+        self.admin_authorizer = Some(authorizer);
+        self
+    }
+
     /// Inject a pre-built manager (skipping internal construction, including `--datadir`
     /// write-through and TLS defaults) — the embedding seam.
     #[must_use]
@@ -384,6 +402,7 @@ impl ServerBuilder {
     pub async fn start(self) -> anyhow::Result<RunningServer> {
         let cli = self.cli;
         let extra_sources = self.imposter_sources;
+        let admin_authorizer = self.admin_authorizer;
         // Refuse a blank `--api-key` before anything binds (issue #844). Same reasoning as the
         // front-door check below, with a security edge: a blank key enables the auth gate and then
         // authenticates every request, so the admin plane must never reach the accept loop in that
@@ -516,6 +535,9 @@ impl ServerBuilder {
         // Injection gating is threaded explicitly (issue #342) rather than read from env.
         let mut server = AdminApiServer::new(addr, manager, cli.api_key)
             .with_allow_injection(cli.allow_injection);
+        if let Some(authorizer) = admin_authorizer {
+            server = server.with_admin_authorizer(authorizer);
+        }
         if let Some(scripts_dir) = cli.scripts_dir {
             server = server.with_scripts_dir(scripts_dir);
         }
