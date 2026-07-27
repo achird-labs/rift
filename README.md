@@ -70,9 +70,10 @@ Temurin 21 vs Rift from `master`. `oha` at **256 keep-alive connections**, 20s/s
 warmup — identical for both engines, each run alone. Median of 3 reps; spread ≤5.6% (Rift ≤1.2%).
 WireMock's Jetty pool is pinned to 256 so its 10-thread default is not the ceiling — a fairness
 guarantee, not a speedup: the stock-default column lands within noise of it on this hardware. Its
-request journal is off, matching how Rift and Mountebank are measured. Ratios move with the
-connection count, so quote it. Full methodology, all 13 scenarios and two caveats we do not bury:
-[docs/performance](docs/performance/index.md#rift-vs-wiremock).</sub>
+request journal is off, matching how Rift and Mountebank are measured. Ratios move with offered
+concurrency — the same suite at **50** connections measures 3.1x-8.1x — so always quote the
+connection count. Full methodology, both connection points, all 13 scenarios and two caveats we do
+not bury: [docs/performance](docs/performance/index.md#rift-vs-wiremock).</sub>
 
 ### Full Feature Support
 
