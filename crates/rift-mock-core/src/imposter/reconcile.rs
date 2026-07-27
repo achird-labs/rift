@@ -44,11 +44,36 @@ pub enum ImposterEvent {
     AllDeleted,
 }
 
+/// Who caused a change event (issue #855).
+///
+/// Attribution rides here, on the listener signature, rather than on [`ImposterEvent`]: the enum
+/// is not `#[non_exhaustive]`, so adding a field to every variant would break every downstream
+/// `match` — the wrong trade for a seam whose premise is that installing nothing changes nothing.
+/// `#[non_exhaustive]` for the same reason attribution is not on [`ImposterEvent`]: the next
+/// attribution field (scope, request id, remote addr) must not be a second breaking change to the
+/// same seam. Embedders read this type; to build one in a test, start from
+/// [`Default`] and assign — a struct literal, including `..Default::default()`, is not available
+/// outside this crate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EventContext {
+    /// The principal an [`AdminAuthorizer`](crate::extensions::authz::AdminAuthorizer) attributed
+    /// the causing request to, via `AuthzDecision::Allow { principal }`.
+    ///
+    /// `None` whenever there is nobody to name — no authorizer installed, an authorizer that
+    /// allowed without identifying anyone, or a mutation with no request behind it at all (a
+    /// config-file load, or an embedder driving [`ImposterManager`](super::ImposterManager)
+    /// directly). Absent attribution is reported as absent; it is never guessed.
+    pub principal: Option<String>,
+}
+
 /// Observer for [`ImposterEvent`]s; register via
 /// [`ImposterManager::with_event_listener`](super::ImposterManager::with_event_listener).
 /// Called synchronously on the mutating path — keep implementations fast and non-blocking.
+///
+/// `ctx` carries attribution (issue #855). A listener that only cares *what* changed ignores it.
 pub trait ImposterEventListener: Send + Sync {
-    fn on_event(&self, event: &ImposterEvent);
+    fn on_event(&self, event: &ImposterEvent, ctx: &EventContext);
 }
 
 /// Stable stub identity: the explicit `id` (issue #202) if set, else
