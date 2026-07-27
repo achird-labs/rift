@@ -268,17 +268,133 @@ resources:
 
 ---
 
+## Rift vs WireMock
+
+WireMock is the most widely used JVM mock server, so this is the comparison most teams migrating to
+Rift actually care about. It runs as its own suite (`tests/benchmark/scripts/bench_wiremock.py`)
+because WireMock cannot consume imposter JSON — its mappings are *generated* from the same fixture
+`bench_direct.py` uses, so the two suites cannot drift onto different workloads.
+
+**Rift is 4.0x–14.0x WireMock's throughput**, and holds a p99 of ~2.5 ms where WireMock's climbs
+from 7 ms to 31 ms as matching work grows.
+
+| Scenario | WireMock (256t) | Rift | Rift/WM | WireMock p99 | Rift p99 |
+|:---------|----------------:|-----:|--------:|-------------:|---------:|
+| Simple static stub | 83,048 | 334,025 | **4.0x** | 7.0 ms | 2.4 ms |
+| API first stub | 78,906 | 326,778 | **4.1x** | 7.5 ms | 2.5 ms |
+| API middle stub | 42,668 | 326,601 | **7.7x** | 15.8 ms | 2.5 ms |
+| Deep path match (410 stubs) | 24,264 | 326,779 | **13.5x** | 31.6 ms | 2.5 ms |
+| No match | 24,589 | 345,114 | **14.0x** | — | — |
+| Regex path (100 patterns) | 48,982 | 311,815 | **6.4x** | — | — |
+| Complex AND/OR predicates | 56,541 | 251,170 | **4.4x** | — | — |
+| JSON body equals | 63,814 | 314,939 | **4.9x** | — | — |
+| JSONPath predicate | 63,995 | 310,350 | **4.8x** | — | — |
+| XPath predicate | 46,408 | 231,868 | **5.0x** | — | — |
+| Response templating | 48,541 | 260,762 | **5.4x** | — | — |
+| Header match (last of 100) | 24,539 | 180,255 | **7.3x** | — | — |
+| Query match (last of 100) | 20,529 | 190,867 | **9.3x** | — | — |
+
+<sub>Intel Xeon Platinum 8573C, 16 vCPU (GitHub `ubuntu-16core`), 2026-07-27. WireMock 3.9.1 on
+Temurin 21, Rift built from `master`. `oha` at 256 keep-alive connections, 20s per scenario after a
+10s warmup — identical settings for both engines, which each ran alone. Median of 3 repetitions;
+spread ≤5.6% for WireMock, ≤1.2% for Rift. Reproduce with
+`gh workflow run benchmark-publish.yml -f connections=256 -f run_sweep=false`.</sub>
+
+### The gap widens with matching work
+
+Rift is roughly flat across the suite — 334k on a trivial stub, 327k on a 410-stub deep path match.
+WireMock falls from 83k to 24k on the same pair. That shape, not the headline multiple, is the
+thing worth understanding: Rift's matcher cost is small relative to its per-request overhead, so
+adding stubs barely moves it, while WireMock pays per candidate.
+
+### Why WireMock's thread pool is pinned, and why it is not a thumb on the scale
+
+WireMock is thread-per-request. Its default pool is 10 threads, which bounds in-flight requests at
+10 — far below the 256 connections offered here. Benchmarking against that default would measure
+the pool, not the engine, and any WireMock user would rightly reject the result. So the headline
+series pins the Jetty pool to `max(cores, connections)`.
+
+**The pin is a fairness guarantee, not a speedup.** The stock 10-thread column is published beside
+it, and on this hardware the two are within noise of each other — 86,840 vs 83,048 on a simple
+stub. The CPU saturates before the thread pool binds, so the pin changed essentially nothing. The
+gap is not an artefact of how WireMock was configured.
+
+WireMock's request journal is also **off** (`--no-request-journal`). It records every request
+unbounded by default, and Rift and Mountebank are both measured with recording off; leaving it on
+would compare WireMock-with-recording against Rift-without. In our own measurements that one flag
+was worth ~30% throughput and ~5x p99.9 to WireMock.
+
+### Two caveats we will not bury
+
+**`complex_predicate` is not a pure predicate comparison.** WireMock cannot express an OR across
+two *different* headers within one stub, so that imposter's 50 stubs become 101 mappings and the
+measured request matches the 50th candidate where Rift matches the 25th — roughly twice the scan.
+That is a genuine cost of modelling the workload in WireMock, but it is not like-for-like, and the
+4.4x on that row should be read with it in mind.
+
+**The all-2xx sanity gate is weaker for WireMock.** WireMock 404s an unmatched request, so the
+suite installs a catch-all empty-200 to reproduce Rift's no-match default — which means an all-2xx
+status distribution no longer proves anything matched. The per-scenario body-marker assertion is
+the gate that actually catches a mistranslated stub.
+
+### Throughput depends on offered concurrency — quote the connection count
+
+At 50 connections Rift's advantage is smaller. This is not noise, and it is not Rift slowing down:
+at 50 connections Rift is bounded by the **closed-loop harness** rather than by its own capacity.
+Its per-request service time is small enough that `connections ÷ latency` caps throughput before
+the engine does — observed throughput tracks that quotient within ~10% at every connection count we
+have measured. WireMock is engine-bound at both points, so the ratio compresses. **Any
+Rift-vs-WireMock number is meaningless without its connection count attached.**
+
+> [!WARNING]
+> **The 50-connection table below is provisional.** It comes from a *smoke* dispatch — 5s per
+> scenario, 3s warmup, 2 repetitions — run to validate the pipeline, not to publish. A 3s warmup is
+> thin for a JVM's JIT and biases against WireMock. Treat these as indicative only; the 256-
+> connection table above is the measured one. A full 50-connection run (20s/10s/3 reps) will
+> replace this.
+
+| Scenario | Mountebank | WireMock (stock, 10t) | WireMock (50t) | Rift | Rift/WM |
+|:---------|-----------:|----------------------:|---------------:|-----:|--------:|
+| Simple static stub | 10,647 | 127,032 | 122,772 | 320,926 | **2.6x** |
+| API first stub | 9,429 | 120,859 | 117,638 | 320,395 | **2.7x** |
+| API middle stub | 1,152 | 52,171 | 47,313 | 319,528 | **6.8x** |
+| Deep path match (410 stubs) | 575 | 31,429 | 28,441 | 320,903 | **11.3x** |
+| No match | 584 | 32,532 | 28,853 | 326,672 | **11.3x** |
+| Regex path (100 patterns) | 62 | 60,995 | 56,213 | 316,031 | **5.6x** |
+| Complex AND/OR predicates | 1,963 | 75,506 | 74,207 | 272,310 | **3.7x** |
+| JSON body equals | 3,140 | 92,196 | 91,873 | 314,276 | **3.4x** |
+| JSONPath predicate | 2,030 | 92,351 | 90,803 | 310,124 | **3.4x** |
+| XPath predicate | 2,079 | 56,450 | 57,921 | 263,819 | **4.6x** |
+| Response templating | 3,993 | 67,520 | 69,021 | 287,204 | **4.2x** |
+| Header match (last of 100) | 1,270 | 30,816 | 31,932 | 207,826 | **6.5x** |
+| Query match (last of 100) | 1,190 | 27,010 | 27,934 | 225,435 | **8.1x** |
+
+<sub>Provisional. Same host as above (Intel Xeon Platinum 8573C, 16 vCPU), 2026-07-27, but **5s per
+scenario after a 3s warmup, 2 repetitions** — smoke settings. Median of 2 reps.</sub>
+
+Two things are visible here that the 256-connection table does not show. Rift is nearly identical
+across every scenario (320,926 on a trivial stub, 320,903 on a 410-stub deep match) — the signature
+of a harness bound rather than an engine one. And stock 10-thread WireMock slightly *out-runs* the
+50-thread pin (127,032 vs 122,772), which is what a no-op pin plus run-ordering noise looks like:
+the stock series runs second in the same session.
+
 ## Comparison with Alternatives
 
-| Tool | Language | Typical RPS | Best For |
-|:-----|:---------|:------------|:---------|
-| **Rift** | Rust | 200,000+ | High-performance mocking |
-| Mountebank | Node.js | 500-2,000 | Feature-rich service virtualization |
-| WireMock | Java | 1,000-5,000 | Java ecosystem integration |
-| MockServer | Java | 1,000-3,000 | Contract testing |
+Measured, not estimated. Every figure below comes from the same run of the same 13-scenario suite
+on the same host — see [Rift vs WireMock](#rift-vs-wiremock) for the per-scenario breakdown and the
+caveats that go with it.
 
-Rift provides 20-6,000x better performance while maintaining Mountebank compatibility.
-(Rift's figure is native/unconstrained; it scales with hardware.)
+| Tool | Language | Measured RPS<br><sub>simple stub → deep path match</sub> | Best For |
+|:-----|:---------|:---------|:---------|
+| **Rift** | Rust | **334,025 → 326,779** | High-performance mocking |
+| WireMock | Java | 83,048 → 24,264 | Java ecosystem integration |
+| Mountebank | Node.js | 4,309 → 419 | Feature-rich service virtualization |
+
+<sub>Intel Xeon Platinum 8573C, 16 vCPU (GitHub `ubuntu-16core`), 2026-07-27. `oha` at 256
+keep-alive connections, 20s per scenario after a 10s warmup, native processes, each engine run
+alone. Median of 3 repetitions; per-scenario spread ≤5.6% for every engine (Rift ≤1.2%).
+WireMock 3.9.1 with its Jetty pool pinned to 256 and its request journal off; Mountebank 2.9.1.</sub>
+
 
 ---
 
