@@ -470,6 +470,7 @@ mod tests {
         "intercept": {
             "host": "0.0.0.0",
             "port": 8080,
+            "auth": {"username":"ci","password":"s3cr3t"},
             "rules": [{"host":"cdn.example.com","action":{"forward":{"port":4545}}}]
         }
     }"#;
@@ -561,6 +562,11 @@ mod tests {
         assert_eq!(intercept.port, Some(8080));
         assert_eq!(intercept.rules.len(), 1);
         assert_eq!(intercept.rules[0].host.as_deref(), Some("cdn.example.com"));
+        // Issue #878: the config-file door had no coverage of `auth` at all — it had never been
+        // proven to parse, let alone reach the listener.
+        let auth = intercept.auth.expect("the block's auth is read");
+        assert_eq!(auth.username, "ci");
+        assert_eq!(auth.password, "s3cr3t");
     }
 
     /// AC2: absent block → exactly today's behaviour, imposters untouched.

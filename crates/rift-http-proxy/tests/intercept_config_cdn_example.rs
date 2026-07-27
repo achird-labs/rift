@@ -45,7 +45,7 @@ async fn intercepts_external_config_cdn_without_mitmproxy() {
     // 3. Start the intercept listener. An embedder would also expose the admin API by building the
     //    admin server `with_intercept(...)`; here we drive the rule store directly.
     let resolver = Arc::new(SniCertResolver::new(ca));
-    let listener = InterceptListener::bind("127.0.0.1:0".parse().unwrap(), resolver, rules)
+    let listener = InterceptListener::bind("127.0.0.1:0".parse().unwrap(), resolver, rules, None)
         .await
         .expect("bind intercept listener");
 

@@ -127,6 +127,10 @@ async fn start_from_bytes(
                 // Same code the runtime rule route returns for a full store, so one condition has
                 // one status whichever door reports it (issue #655).
                 InterceptStartError::Rules(_) => StatusCode::TOO_MANY_REQUESTS,
+                // Policy refusal, not a malformed body (issue #878): the options are valid, the
+                // server is configured to refuse an off-host listener with no credential. `403`
+                // rather than `400` so a caller can tell "fix your JSON" from "not allowed here".
+                InterceptStartError::Exposed(_) => StatusCode::FORBIDDEN,
                 _ => StatusCode::BAD_REQUEST,
             };
             error_response(status, &e.to_string())
@@ -505,6 +509,7 @@ mod tests {
             "127.0.0.1:0".parse().unwrap(),
             resolver,
             state.rules.clone(),
+            None,
         )
         .await
         .expect("bind");

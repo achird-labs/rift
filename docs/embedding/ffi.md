@@ -187,7 +187,7 @@ per handle; `rift_stop_intercept` stops it, and `rift_stop` shuts it down with t
 
 | Function | Signature | Returns |
 |---|---|---|
-| `rift_start_intercept` | `char* rift_start_intercept(RiftHandle* h, const char* options_json)` | JSON `{"interceptPort","interceptUrl"}` (**caller frees**), or `NULL` on error (bad JSON, bind failure, half-configured CA pair, both CA pairs supplied, CA load failure, already started). `options_json`: `{"host":"127.0.0.1","port":0,"caCertPath":null,"caKeyPath":null,"caCertPem":null,"caKeyPem":null,"returnCaKey":false}` (port 0 = OS-assigned); `NULL`/`{}` for defaults. Supply the CA as files (`caCertPath`/`caKeyPath`) **or** inline PEM bytes (`caCertPem`/`caKeyPem`, issue #593 — each pair both-or-neither, mutually exclusive). `"returnCaKey":true` (only with no CA source) mints a fresh CA and adds `"caCertPem"`/`"caKeyPem"` to the response once — CA private-key material, treat as secret. |
+| `rift_start_intercept` | `char* rift_start_intercept(RiftHandle* h, const char* options_json)` | JSON `{"interceptPort","interceptUrl"}` (**caller frees**), or `NULL` on error (bad JSON, bind failure, half-configured CA pair, both CA pairs supplied, CA load failure, already started). `options_json`: `{"host":"127.0.0.1","port":0,"caCertPath":null,"caKeyPath":null,"caCertPem":null,"caKeyPem":null,"returnCaKey":false,"auth":null}` (port 0 = OS-assigned); `NULL`/`{}` for defaults. Supply the CA as files (`caCertPath`/`caKeyPath`) **or** inline PEM bytes (`caCertPem`/`caKeyPem`, issue #593 — each pair both-or-neither, mutually exclusive). `"returnCaKey":true` (only with no CA source) mints a fresh CA and adds `"caCertPem"`/`"caKeyPem"` to the response once — CA private-key material, treat as secret. |
 | `rift_stop_intercept` | `int rift_stop_intercept(RiftHandle* h)` | `0` on success (**including** the idempotent nothing-running case), `-1` only on a null handle / caught panic. Stops the listener, releases its port, and drops its rules + CA — RFC-003 parity with `DELETE /intercept`. A later `rift_start_intercept` without CA paths mints a fresh CA. |
 | `rift_intercept_add_rules` | `int rift_intercept_add_rules(RiftHandle* h, const char* rules_json)` | `0`/`-1`. One rule (object) or many (array), same shape as `/intercept/rules`. |
 | `rift_intercept_list_rules` | `char* rift_intercept_list_rules(RiftHandle* h)` | The current rules as a JSON array (**caller frees**), or `NULL` on error. |
@@ -221,6 +221,18 @@ return its cert **and** key once in the response (`caCertPem`/`caKeyPem`), for a
 start with `returnCaKey`, persist the pair, then supply it back via `caCertPem`/`caKeyPem` on later
 starts. The returned `caKeyPem` is CA private-key material — treat it as secret. Combining
 `returnCaKey` with any supplied CA source is a hard error.
+
+`auth` (issue #878) requires `Proxy-Authorization: Basic <base64(user:pass)>` on every `CONNECT`:
+`{"auth":{"username":"ci","password":"s3cr3t"}}`. Omit it and the proxy is open, which is what it
+has always been. A blank username or password is rejected at start — a blank secret would switch the
+gate on and then admit everyone. Bear in mind what this listener is: a TLS-MITM proxy serving
+certificates forged by a CA your clients are asked to trust, so an unauthenticated one reachable
+off-host is worth more care than an unauthenticated admin plane, not less.
+
+Unlike `rift_serve_admin`'s options (see [#877](#detecting-which-options-an-engine-accepts)), this
+struct has always used `deny_unknown_fields` — so sending `auth` to an engine that predates it is a
+**hard error naming the field**, not a silent ignore. That makes it deterministically detectable;
+state the required engine release (0.17.0+) in any SDK that offers it.
 
 `interceptUrl`/`interceptPort` in the response are derived from the listener's **actual bound
 address** (v0.11.2, #425/#426) — not hardcoded to `127.0.0.1`. A loopback `host` (the default)

@@ -1482,6 +1482,12 @@ pub unsafe extern "C" fn rift_start_intercept(
                     InterceptStartError::InvalidAddr(s) => {
                         format!("rift_start_intercept: invalid host/port: {s}")
                     }
+                    InterceptStartError::InvalidAuth(s) => {
+                        format!("rift_start_intercept: invalid auth: {s}")
+                    }
+                    InterceptStartError::Exposed(s) => {
+                        format!("rift_start_intercept: refused: {s}")
+                    }
                     // `{err:#}` so the chained cause (missing file, bad PEM, mismatched pair)
                     // reaches the caller — `rift_last_error` is their only diagnostic channel.
                     // (`InterceptControl::start` already `warn!`s the CA/bind failure server-side.)

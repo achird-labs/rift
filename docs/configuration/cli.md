@@ -151,6 +151,7 @@ Options:
       --default-tls-key <FILE>     Default TLS private key (PEM), paired with --default-tls-cert
       --no-self-signed-tls         Disable the self-signed fallback; an HTTPS imposter with no cert is an error
       --intercept-port <PORT>      Start the TLS-MITM intercept/redirect proxy on this port (epic #394); off when unset
+      --intercept-auth <USER:PASS>  Require Proxy-Authorization: Basic on every CONNECT to the intercept proxy; open when unset
       --intercept-ca-cert <FILE>   PEM CA certificate for interception (with --intercept-ca-key); a CA is generated if omitted
       --intercept-ca-key <FILE>    PEM CA private key for interception (required with --intercept-ca-cert)
       --intercept-ca-cert-pem <PEM>  Inline PEM CA certificate for interception (with --intercept-ca-key-pem); mutually exclusive with file paths
@@ -177,6 +178,36 @@ it starts the listener **with its rules already installed**, so a container need
 call. The block and these `--intercept-*` flags are two spellings of one listener — supplying both
 is a startup error rather than a silent precedence guess, so pick one. (Each flag also has a
 `RIFT_INTERCEPT_*` environment variable, which counts as supplying it.)
+
+#### The intercept proxy is unauthenticated unless you say otherwise
+
+The listener has **no credential by default** — it is off unless asked for, and most uses are a
+loopback test rig where auth is pure friction. But it is a TLS-MITM proxy: anyone who can reach the
+port can route traffic through it and be served certificates forged by Rift's CA, which are trusted
+wherever that CA is installed — and installing it is the whole point of the feature. On a shared or
+LAN-reachable host, set a credential:
+
+```bash
+rift-http-proxy --intercept-port 8888 --intercept-auth ci:s3cr3t
+```
+
+Every `CONNECT` must then carry `Proxy-Authorization: Basic <base64(user:pass)>`; anything else gets
+`407 Proxy Authentication Required`. Standard clients do this for you —
+`HTTPS_PROXY=http://ci:s3cr3t@host:8888`, `curl -x http://ci:s3cr3t@host:8888`, or a JVM
+`Authenticator`. A value with no `:`, or with a blank half, is a startup error rather than a
+silently-disabled gate — as is `--intercept-auth` without `--intercept-port`, which would otherwise
+read as protection while guarding nothing.
+
+**On a shared host prefer `RIFT_INTERCEPT_AUTH`**: a value passed on the command line is visible to
+anyone who can run `ps`.
+
+Note this is **`Proxy-Authorization`, not the admin `--api-key`**. The two are different credentials
+on purpose: `Proxy-Authorization` is hop-by-hop and is consumed here, whereas `Authorization` is
+end-to-end and would be forwarded to every intercepted origin — sending your admin key onward to the
+very servers you are intercepting.
+
+`--require-admin-auth` covers this listener too: a non-loopback intercept bind with no credential
+warns by default and refuses to start under that flag.
 
 ### API-key authentication
 
@@ -295,6 +326,7 @@ Environment variables override CLI defaults:
 | `RIFT_DEFAULT_TLS_KEY` | Default TLS private key (PEM) | |
 | `RIFT_NO_SELF_SIGNED_TLS` | Disable self-signed TLS fallback (`true`/`false`) | `false` |
 | `RIFT_INTERCEPT_PORT` | Start the intercept/TLS-MITM proxy on this port (epic #394) | |
+| `RIFT_INTERCEPT_AUTH` | `user:pass` required in `Proxy-Authorization` on every `CONNECT` to the intercept proxy (env alias of `--intercept-auth`); open when unset | |
 | `RIFT_INTERCEPT_CA_CERT` | PEM CA certificate **file** for interception (with `RIFT_INTERCEPT_CA_KEY`) | |
 | `RIFT_INTERCEPT_CA_KEY` | PEM CA private key **file** for interception | |
 | `RIFT_INTERCEPT_CA_CERT_PEM` | Inline PEM CA certificate (the bytes, not a path; with `RIFT_INTERCEPT_CA_KEY_PEM`) — mutually exclusive with the `_CA_CERT`/`_CA_KEY` file pair | |

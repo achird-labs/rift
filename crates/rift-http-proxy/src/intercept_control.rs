@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use crate::admin_api::{AdminExposurePolicy, check_intercept_exposure};
 use crate::intercept::InterceptListener;
 use crate::intercept_rules::{InterceptRule, InterceptRules, InterceptState, RulesAtCapacity};
 use rift_mock_core::proxy::intercept_ca::{CaSource, CertificateAuthority, SniCertResolver};
@@ -39,7 +40,15 @@ pub struct InterceptPlane {
 /// (an `Arc` inside). The `std` mutex is never held across an `.await` (see [`InterceptControl::start`]);
 /// poisoning is recovered rather than propagated, like [`InterceptRules`].
 #[derive(Clone, Default)]
-pub struct InterceptControl(Arc<Mutex<Option<InterceptPlane>>>);
+pub struct InterceptControl {
+    plane: Arc<Mutex<Option<InterceptPlane>>>,
+    /// What to do when a start would expose this listener off-host with no credential (issue #878).
+    ///
+    /// Deployment policy, so it lives on the control rather than on [`InterceptStartOptions`] — it
+    /// is the operator's call, not the caller's, and putting it in the request body would let the
+    /// very caller being judged turn the judgement off.
+    exposure: AdminExposurePolicy,
+}
 
 /// Start options — the exact shape (and serde attributes) of the FFI's former `InterceptOptions`,
 /// so the admin `POST /intercept` body and `rift_start_intercept` parse identically.
@@ -66,12 +75,55 @@ pub struct InterceptStartOptions {
     /// Generate a fresh CA and return its cert **and** key in the start response (issue #593).
     /// Only valid when no CA source is supplied — combining it with a path/PEM pair is a `400`.
     pub return_ca_key: Option<bool>,
+    /// Require `Proxy-Authorization: Basic <base64(user:pass)>` on `CONNECT` (issue #878).
+    /// `None` leaves the listener open, which is what it has always been — auth is opt-in because
+    /// the listener is off unless asked for and most uses are loopback test rigs.
+    pub auth: Option<InterceptAuth>,
     /// Rules to install before the listener accepts anything (issue #655). Lets one declarative
     /// document — a `--configfile` `intercept` block, a `POST /intercept` body, or an FFI start —
     /// bring up a listener that is already correct, instead of requiring a follow-up
     /// `POST /intercept/rules` that traffic can race.
     #[serde(default)]
     pub rules: Vec<InterceptRule>,
+}
+
+/// The credential the intercept proxy demands (issue #878).
+///
+/// Basic only. It is what every HTTP client and every `HTTPS_PROXY=http://user:pass@host` URL
+/// already speaks, and the tunnel it guards is plaintext to the client anyway — a stronger scheme
+/// here would imply a confidentiality this hop cannot provide.
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InterceptAuth {
+    pub username: String,
+    pub password: String,
+}
+
+impl InterceptAuth {
+    /// Reject a blank username or password, mirroring `validate_admin_api_key` (issue #844): a
+    /// blank secret switches the gate on and then admits everyone, which is strictly worse than
+    /// no gate because the operator believes one is in force. Whitespace-only counts as blank.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.username.trim().is_empty() || self.password.trim().is_empty() {
+            return Err(
+                "intercept proxy auth needs a non-blank username and password; a blank value \
+                 would enable the gate and then accept every request. Omit it entirely to run the \
+                 intercept listener explicitly unauthenticated."
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for InterceptAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Secret material — the username is shown because it is an identity, the password never is.
+        f.debug_struct("InterceptAuth")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for InterceptStartOptions {
@@ -88,6 +140,7 @@ impl std::fmt::Debug for InterceptStartOptions {
                 &self.ca_key_pem.as_ref().map(|_| "<redacted>"),
             )
             .field("return_ca_key", &self.return_ca_key)
+            .field("auth", &self.auth)
             // Count only: a rule's serve body can be an arbitrarily large payload.
             .field("rules", &self.rules.len())
             .finish()
@@ -161,6 +214,14 @@ pub enum InterceptStartError {
     AlreadyRunning,
     #[error("invalid host/port: {0}")]
     InvalidAddr(String),
+    /// A supplied proxy credential is unusable (issue #878). Its own variant rather than folded
+    /// into `InvalidAddr` so the admin API's 400 names the real problem.
+    #[error("invalid intercept auth: {0}")]
+    InvalidAuth(String),
+    /// The start would expose the listener off-host with no credential, under a `Refuse` policy
+    /// (issue #878). Distinct from `InvalidAuth`: the options are well-formed, the *posture* is not.
+    #[error("{0}")]
+    Exposed(String),
     // `{0:#}` keeps the anyhow chain (missing file, bad PEM, mismatched pair). Never file contents.
     #[error("CA setup failed: {0:#}")]
     Ca(#[source] anyhow::Error),
@@ -173,8 +234,20 @@ pub enum InterceptStartError {
 }
 
 impl InterceptControl {
+    /// Set the exposure policy every [`start`](Self::start) through this control is judged against
+    /// (issue #878). The standalone binary threads `--require-admin-auth` in here, so a listener
+    /// brought up at runtime over `POST /intercept` gets the same answer as one asked for at boot.
+    ///
+    /// Clone-before-configure would lose it: set this on the control **before** handing clones to
+    /// the admin server.
+    #[must_use]
+    pub fn with_exposure_policy(mut self, policy: AdminExposurePolicy) -> Self {
+        self.exposure = policy;
+        self
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<InterceptPlane>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.plane.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// True if a listener currently occupies the slot. A sync helper so the (`!Send`) `std`
@@ -212,6 +285,22 @@ impl InterceptControl {
         let addr: SocketAddr = format!("{host}:{}", opts.port.unwrap_or(0))
             .parse()
             .map_err(|e| InterceptStartError::InvalidAddr(format!("{e}")))?;
+
+        // Validate the credential before any side effect: a blank secret must never reach the
+        // listener, where it would switch the gate on and then admit everyone (issue #878/#844).
+        let auth = opts.auth;
+        if let Some(ref auth) = auth {
+            auth.validate().map_err(InterceptStartError::InvalidAuth)?;
+        }
+
+        // Judge the exposure here, at the one point all four doors converge, rather than only at
+        // the CLI ones (issue #878). `POST /intercept` and `rift_start_intercept` can bring up a
+        // listener long after boot: checking only at startup would let an operator who set
+        // `--require-admin-auth` still end up with an open MITM proxy on `0.0.0.0`, which is
+        // precisely the assurance that flag is supposed to give. Before any side effect, so a
+        // refusal never has to unwind a bound listener.
+        check_intercept_exposure(addr, auth.is_some(), self.exposure)
+            .map_err(|e| InterceptStartError::Exposed(format!("{e:#}")))?;
 
         // Resolve the single CA source (validating both-or-neither + pair exclusion) before binding.
         // Log CA/option failures here so every surface (FFI, admin `POST /intercept`, CLI flag) gets
@@ -256,7 +345,7 @@ impl InterceptControl {
         })?;
 
         let resolver = Arc::new(SniCertResolver::new(ca.clone()));
-        let listener = InterceptListener::bind(addr, resolver, rules.clone())
+        let listener = InterceptListener::bind(addr, resolver, rules.clone(), auth)
             .await
             .map_err(|e| {
                 warn_intercept_start_failure(&e, "bind failed");
