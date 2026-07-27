@@ -204,7 +204,7 @@ curl -H "Authorization: s3cr3t" http://localhost:2525/imposters
 
 `--host` defaults to `0.0.0.0`, so a bare `rift-http-proxy` with no `--api-key` already serves the
 full admin API — which can create imposters and drive the TLS intercept proxy — on every interface
-with no authentication. Since 0.18.0 that posture is stated at startup instead of being silent:
+with no authentication. Since 0.17.0 that posture is stated at startup instead of being silent:
 
 ```
 WARN the admin API is bound to 0.0.0.0:2525, which is reachable from outside this host, with no
