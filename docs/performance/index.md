@@ -346,38 +346,35 @@ the engine does — observed throughput tracks that quotient within ~10% at ever
 have measured. WireMock is engine-bound at both points, so the ratio compresses. **Any
 Rift-vs-WireMock number is meaningless without its connection count attached.**
 
-> [!WARNING]
-> **The 50-connection table below is provisional.** It comes from a *smoke* dispatch — 5s per
-> scenario, 3s warmup, 2 repetitions — run to validate the pipeline, not to publish. A 3s warmup is
-> thin for a JVM's JIT and biases against WireMock. Treat these as indicative only; the 256-
-> connection table above is the measured one. A full 50-connection run (20s/10s/3 reps) will
-> replace this.
-
 | Scenario | Mountebank | WireMock (stock, 10t) | WireMock (50t) | Rift | Rift/WM |
 |:---------|-----------:|----------------------:|---------------:|-----:|--------:|
-| Simple static stub | 10,647 | 127,032 | 122,772 | 320,926 | **2.6x** |
-| API first stub | 9,429 | 120,859 | 117,638 | 320,395 | **2.7x** |
-| API middle stub | 1,152 | 52,171 | 47,313 | 319,528 | **6.8x** |
-| Deep path match (410 stubs) | 575 | 31,429 | 28,441 | 320,903 | **11.3x** |
-| No match | 584 | 32,532 | 28,853 | 326,672 | **11.3x** |
-| Regex path (100 patterns) | 62 | 60,995 | 56,213 | 316,031 | **5.6x** |
-| Complex AND/OR predicates | 1,963 | 75,506 | 74,207 | 272,310 | **3.7x** |
-| JSON body equals | 3,140 | 92,196 | 91,873 | 314,276 | **3.4x** |
-| JSONPath predicate | 2,030 | 92,351 | 90,803 | 310,124 | **3.4x** |
-| XPath predicate | 2,079 | 56,450 | 57,921 | 263,819 | **4.6x** |
-| Response templating | 3,993 | 67,520 | 69,021 | 287,204 | **4.2x** |
-| Header match (last of 100) | 1,270 | 30,816 | 31,932 | 207,826 | **6.5x** |
-| Query match (last of 100) | 1,190 | 27,010 | 27,934 | 225,435 | **8.1x** |
+| Simple static stub | 4,247 | 64,611 | 65,602 | 204,687 | **3.1x** |
+| API first stub | 4,149 | 61,407 | 61,259 | 190,659 | **3.1x** |
+| API middle stub | 817 | 37,262 | 37,066 | 184,714 | **5.0x** |
+| Deep path match (410 stubs) | 417 | 22,867 | 22,846 | 183,847 | **8.0x** |
+| No match | 420 | 23,383 | 23,310 | 188,958 | **8.1x** |
+| Regex path (100 patterns) | 38 | 40,512 | 41,274 | 179,502 | **4.3x** |
+| Complex AND/OR predicates | 1,322 | 45,300 | 44,957 | 152,548 | **3.4x** |
+| JSON body equals | 2,001 | 50,722 | 50,637 | 176,988 | **3.5x** |
+| JSONPath predicate | 1,436 | 50,304 | 50,930 | 175,149 | **3.4x** |
+| XPath predicate | 1,477 | 39,812 | 39,493 | 144,593 | **3.7x** |
+| Response templating | 2,339 | 39,769 | 39,572 | 162,102 | **4.1x** |
+| Header match (last of 100) | 892 | 22,961 | 22,699 | 125,173 | **5.5x** |
+| Query match (last of 100) | 833 | 19,770 | 19,617 | 130,354 | **6.6x** |
 
-<sub>Provisional. Same host as above (Intel Xeon Platinum 8573C, 16 vCPU), 2026-07-27, but **5s per
-scenario after a 3s warmup, 2 repetitions** — smoke settings. Median of 2 reps.</sub>
+<sub>Same host and method as the 256-connection table (Intel Xeon Platinum 8573C, 16 vCPU,
+`ubuntu-16core`), 2026-07-27, 50 keep-alive connections, 20s per scenario after a 10s warmup,
+median of 3 repetitions. Spread ≤4.8% for every engine. Rift's p99 is 0.83–0.97 ms here against
+WireMock's 2.9–6.8 ms.</sub>
 
-Two things are visible here that the 256-connection table does not show. Rift is nearly identical
-across every scenario (320,926 on a trivial stub, 320,903 on a 410-stub deep match) — the signature
-of a harness bound rather than an engine one. And stock 10-thread WireMock slightly *out-runs* the
-50-thread pin (127,032 vs 122,772), which is what a no-op pin plus run-ordering noise looks like:
-the stock series runs second in the same session.
+Rift is **3.1x–8.1x** WireMock at 50 connections, against 4.0x–14.0x at 256. Both engines post
+lower absolute throughput at 50 connections than at 256 — Rift 204,687 vs 334,025 on a simple stub,
+WireMock 65,602 vs 83,048 — so this is not WireMock catching up. It is Rift having less room to use
+the machine.
 
+The pin is a no-op at this connection count too: stock 10-thread WireMock (64,611) and the
+50-thread series (65,602) are within a percent of each other, so nothing here depends on how
+WireMock's pool was configured.
 ## Comparison with Alternatives
 
 Measured, not estimated. Every figure below comes from the same run of the same 13-scenario suite
