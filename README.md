@@ -65,6 +65,13 @@ WireMock is the most widely used JVM mock server. Same suite, same host, same lo
 Rift stays roughly flat from a trivial stub to a 410-stub deep match (334k → 327k); WireMock falls
 from 83k to 24k. That shape matters more than the headline multiple.
 
+This is an architecture comparison, not a quality judgement. WireMock is mature, well-engineered,
+and far more widely adopted than Rift, with a much larger ecosystem — extensions, a Kotlin DSL,
+OpenAPI-driven mocking, commercial support — and its in-process story on the JVM is genuinely good.
+If you are an all-JVM shop and WireMock is working for you, Rift's case is weaker.
+[Rift vs WireMock](https://achird-labs.github.io/rift/comparisons/wiremock/) covers both directions,
+including when *not* to switch.
+
 <sub>Intel Xeon Platinum 8573C, 16 vCPU (GitHub `ubuntu-16core`), 2026-07-27. WireMock 3.9.1 on
 Temurin 21 vs Rift from `master`. `oha` at **256 keep-alive connections**, 20s/scenario after a 10s
 warmup — identical for both engines, each run alone. Median of 3 reps; spread ≤5.6% (Rift ≤1.2%).

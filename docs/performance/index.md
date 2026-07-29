@@ -383,15 +383,22 @@ caveats that go with it.
 
 | Tool | Language | Measured RPS<br><sub>simple stub → deep path match</sub> | Best For |
 |:-----|:---------|:---------|:---------|
-| **Rift** | Rust | **334,025 → 326,779** | High-performance mocking |
-| WireMock | Java | 83,048 → 24,264 | Java ecosystem integration |
-| Mountebank | Node.js | 4,309 → 419 | Feature-rich service virtualization |
+| **Rift** | Rust | **334,025 → 326,779** | Large stub sets, polyglot orgs, in-process embedding |
+| WireMock | Java | 83,048 → 24,264 | The mature default: deep JVM/Spring integration, extensions, OpenAPI-driven mocking, commercial support |
+| Mountebank | Node.js | 4,309 → 419 | Protocols beyond HTTP (TCP, SMTP), and the API/config format Rift implements |
 
 <sub>Intel Xeon Platinum 8573C, 16 vCPU (GitHub `ubuntu-16core`), 2026-07-27. `oha` at 256
 keep-alive connections, 20s per scenario after a 10s warmup, native processes, each engine run
 alone. Median of 3 repetitions; per-scenario spread ≤5.6% for every engine (Rift ≤1.2%).
 WireMock 3.9.1 with its Jetty pool pinned to 256 and its request journal off; Mountebank 2.9.1.</sub>
 
+These are architecture comparisons, not quality judgements. Both engines are well-built and more
+widely adopted than Rift, and each does things Rift does not — see
+[Rift vs WireMock]({{ site.baseurl }}/comparisons/wiremock/) for both directions.
+
+<sub>WireMock and WireMock Cloud are products of WireMock Inc.; Mountebank is an independent open
+source project. Rift is not affiliated with, endorsed by, or derived from either. All comparative
+claims here are measured, and the harness is published so they can be checked.</sub>
 
 ---
 

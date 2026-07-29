@@ -192,6 +192,7 @@ for version-pinning every module at once.
 ### Reference
 - [REST API]({{ site.baseurl }}/api/) - Admin API reference
 - [Performance]({{ site.baseurl }}/performance/) - Benchmark results
+- [Rift vs WireMock]({{ site.baseurl }}/comparisons/wiremock/) - Where each one wins, and when not to switch
 - [Changelog]({{ site.baseurl }}/changelog/) - Notable user-facing changes
 
 ### Embedding & Extension
