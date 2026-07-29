@@ -91,8 +91,8 @@ ecosystems:
 |:--|:--|:--|
 | Java / JVM | Panama FFM | JUnit 5, Spring, Testcontainers |
 | Node / TypeScript | koffi | Vitest, Jest testkits |
-| Go | purego (**no cgo**) | testing helpers |
-| Scala 3 | via rift-java | ZIO, Cats Effect 3 / FS2, Kyo, pure |
+| Go | purego (**no cgo**) | `testing.T` helpers |
+| Scala 3 | via rift-java | ZIO, Cats Effect 3 / FS2, pure |
 
 A JVM library cannot become a Go library. If your organisation runs more than one language,
 the practical outcome today is several mocking tools with incompatible fixtures — and a

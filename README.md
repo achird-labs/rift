@@ -232,7 +232,7 @@ See the [rift-java docs](https://achird-labs.github.io/rift-java/) for the full 
 ### Scala
 
 For Scala 3, use the official [rift-scala](https://github.com/achird-labs/rift-scala) SDK. It is
-effect-library-native — ZIO, Cats Effect 3 / FS2, Kyo, or no effect system at all — over the same
+effect-library-native — ZIO, Cats Effect 3 / FS2, or no effect system at all — over the same
 four transports (embedded, connect, spawn, container):
 
 ```scala
@@ -259,6 +259,39 @@ It also ships a [zio-bdd](https://github.com/EtaCassiopeia/zio-bdd) `MockControl
 against zio-bdd's published conformance catalogue. See the
 [rift-scala docs](https://achird-labs.github.io/rift-scala/).
 
+### Go
+
+For Go projects, use the official [rift-go](https://github.com/achird-labs/rift-go) SDK. It runs the
+engine three ways — embedded in-process, connected to any running admin endpoint, or as a managed
+spawned binary — with a fluent DSL plus `testing.T` helpers.
+
+The embedded transport loads the engine through
+[purego](https://github.com/ebitengine/purego) rather than cgo, so **`CGO_ENABLED=0` keeps
+working**: no C toolchain, no cross-compilation penalty, and nothing about a consumer's build
+changes by depending on it.
+
+```bash
+go get github.com/achird-labs/rift-go
+go run github.com/achird-labs/rift-go/cmd/rift-fetch@latest -version v0.16.0
+```
+
+```go
+func TestUserLookup(t *testing.T) {
+    users := rifttest.Imposter(t, rift.NewImposter("users").
+        Stub(rift.OnGet("/api/users/1").
+            Return(rift.OKJSON(map[string]rift.JSON{"id": 1, "name": "Alice"}))))
+
+    callSUT(t, users.BaseURL())               // point your SUT at users.BaseURL()
+
+    rifttest.AssertReceived(t, users, rift.OnGet("/api/users/1"), rift.Once())
+}
+```
+
+Assertion counting runs through the engine's own predicate evaluator, so `xpath`, `jsonpath` and
+`inject` predicates mean the same thing in a verification as in a stub — and a failure reports the
+nearest non-matching request with the clauses it failed. See the
+[rift-go docs](https://achird-labs.github.io/rift-go/).
+
 ---
 
 ## Documentation
@@ -269,6 +302,7 @@ against zio-bdd's published conformance catalogue. See the
 - [Node.js Integration](https://achird-labs.github.io/rift/getting-started/nodejs/) - npm package for Node.js
 - [Java / JVM SDK](https://github.com/achird-labs/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
 - [Scala SDK](https://github.com/achird-labs/rift-scala) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
+- [Go SDK](https://github.com/achird-labs/rift-go) - rift-go for `testing.T`, embedded via purego (no cgo)
 - [Migration Guide](https://achird-labs.github.io/rift/getting-started/migration) - Using Rift with Mountebank configs
 
 ### Mountebank Compatibility
