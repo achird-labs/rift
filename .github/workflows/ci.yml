@@ -51,10 +51,28 @@ jobs:
 
       # `--lib` runs only library unit tests; every `tests/*.rs` integration binary (the handler
       # contract tests, the FFI round-trip, the corpus-replay gate, admin_api_integration, …) runs
-      # in the dedicated `integration-tests` job below (issue #510). This job stays fast and matrixed
-      # over stable+beta for the unit surface; the integration surface runs once on stable.
+      # in the dedicated `integration-tests` job below (issue #510), and doctests need their own
+      # `--doc` step (next). This job stays fast and matrixed over stable+beta for the unit and
+      # doctest surfaces; the integration surface runs once on stable.
       - name: Run unit tests
         run: cargo test --workspace --all-features --lib
+
+      # Issue #888: no cargo invocation in this workflow ran doctests — `--lib`, `--tests` and even
+      # `--all-targets` all exclude them — so a `///` example that stopped compiling shipped green.
+      # That is the worst surface to leave unguarded: a doctest is code we publish for embedders to
+      # copy, and it breaks on exactly the signature changes nobody thinks to re-check.
+      #
+      # It lives in this job rather than its own because the ~300-crate dependency graph is already
+      # built here under the same `--all-features` set. `--doc` is not free on top of `--lib`
+      # (the latter builds each member as a *test* rlib; doctests link the plain rlib, so the leaf
+      # libs — rift-http-proxy, rift-lint, rift-tui — do get one extra rustc each), but a dedicated
+      # job would rebuild the whole third-party graph for a handful of doctests.
+      #
+      # Bounded deliberately: `--doc` only collects doctests from *library* targets, so a Rust
+      # example added to a `main.rs`/`src/bin/*` is still ungated. Nothing is lost today (those
+      # fences are all ```bash), but do not read this step as total coverage.
+      - name: Run doctests
+        run: cargo test --workspace --all-features --doc
 
       # Issue #460: prove the corpus packager (release step) works end-to-end — version stamping,
       # tar structure, fixture-count round-trip — without needing an engine build.
@@ -72,7 +90,7 @@ jobs:
       - name: rift-ffi C-ABI smoke test
         run: ./scripts/verify-ffi-cdylib.sh
 
-  # Issue #510: the matrix `test` job runs `--lib` only, so every `tests/*.rs` integration binary
+  # Issue #510: the matrix `test` job runs `--lib` and `--doc` only, so every `tests/*.rs` binary
   # (admin_api_integration, verify_dynamic, the issue_* handler contracts, the FFI round-trip, the
   # corpus-replay gate, …) never ran in CI — a regression in those contracts would ship green. This
   # job runs the whole integration surface with `--tests`. `--workspace` covers only the six
@@ -81,8 +99,8 @@ jobs:
   # own server, so it runs on the Docker-enabled runner without extra setup. The Redis suite moved to
   # `rift-store-redis` with the store itself (#853) and is no longer `#[ignore]`d, so it both
   # compiles and *runs* here as well as in the dedicated `redis-integration` job below. Runs on
-  # stable only (the unit surface already covers beta) to keep the heavier integration run off the
-  # critical path.
+  # stable only (the unit and doctest surfaces already cover beta) to keep the heavier integration
+  # run off the critical path.
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
