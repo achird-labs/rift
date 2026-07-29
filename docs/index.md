@@ -150,6 +150,36 @@ See the [rift-java documentation](https://achird-labs.github.io/rift-java/) for 
 surface, and the [BOM](https://github.com/achird-labs/rift-java/blob/master/rift-java-bom/README.md)
 for version-pinning every module at once.
 
+### Go Integration
+
+For Go projects, use the official [rift-go](https://github.com/achird-labs/rift-go) SDK. It runs the
+engine three ways — embedded in-process, connected to any running admin endpoint, or as a managed
+spawned binary — with a fluent DSL plus `testing.T` helpers.
+
+The embedded transport loads the engine through
+[purego](https://github.com/ebitengine/purego) rather than cgo, so **`CGO_ENABLED=0` keeps
+working**: no C toolchain, and cross-compilation is unaffected.
+
+```bash
+go get github.com/achird-labs/rift-go
+go run github.com/achird-labs/rift-go/cmd/rift-fetch@latest -version v0.16.0
+```
+
+```go
+func TestUserLookup(t *testing.T) {
+    users := rifttest.Imposter(t, rift.NewImposter("users").
+        Stub(rift.OnGet("/api/users/1").
+            Return(rift.OKJSON(map[string]rift.JSON{"id": 1, "name": "Alice"}))))
+
+    callSUT(t, users.BaseURL())
+
+    rifttest.AssertReceived(t, users, rift.OnGet("/api/users/1"), rift.Once())
+}
+```
+
+See the [rift-go documentation](https://achird-labs.github.io/rift-go/) for the full feature
+surface.
+
 ---
 
 ## Documentation
@@ -160,6 +190,7 @@ for version-pinning every module at once.
 - [Node.js Integration]({{ site.baseurl }}/getting-started/nodejs/) - npm package for Node.js projects
 - [Java / JVM SDK](https://github.com/achird-labs/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
 - [Scala SDK](https://github.com/achird-labs/rift-scala) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
+- [Go SDK](https://github.com/achird-labs/rift-go) - rift-go for `testing.T`, embedded via purego (no cgo)
 - [Migration from Mountebank]({{ site.baseurl }}/getting-started/migration/) - Switch from Mountebank to Rift
 
 ### Concepts

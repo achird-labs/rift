@@ -107,6 +107,34 @@ running admin endpoint. See the
 [rift-java documentation](https://achird-labs.github.io/rift-java/) for the JUnit 5, Spring, and
 Testcontainers integrations.
 
+### Go
+
+For Go projects, add the official [rift-go](https://github.com/achird-labs/rift-go) SDK and fetch
+the native library once:
+
+```bash
+go get github.com/achird-labs/rift-go
+go run github.com/achird-labs/rift-go/cmd/rift-fetch@latest -version v0.16.0
+```
+
+Usage:
+
+```go
+func TestUserLookup(t *testing.T) {
+    users := rifttest.Imposter(t, rift.NewImposter("users").
+        Stub(rift.OnGet("/api/users/1").Return(rift.OKJSON(`{"id":1}`))))
+
+    callSUT(t, users.BaseURL())
+
+    rifttest.AssertReceived(t, users, rift.OnGet("/api/users/1"), rift.Once())
+}
+```
+
+The engine runs in-process through [purego](https://github.com/ebitengine/purego) rather than cgo,
+so `CGO_ENABLED=0` keeps working and no C toolchain is needed. `rift.Spawn(ctx, …)` manages a
+binary instead, and `rift.Connect(url, …)` targets any running admin endpoint — neither needs the
+native library. See the [rift-go documentation](https://achird-labs.github.io/rift-go/).
+
 ---
 
 ## Verify Installation
@@ -209,6 +237,7 @@ Example `imposters.json`:
 - [Node.js Integration]({{ site.baseurl }}/getting-started/nodejs/) - npm package for Node.js projects
 - [Java / JVM SDK](https://github.com/achird-labs/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
 - [Scala SDK](https://github.com/achird-labs/rift-scala) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
+- [Go SDK](https://github.com/achird-labs/rift-go) - rift-go for `testing.T`, embedded via purego (no cgo)
 - [Predicates Guide]({{ site.baseurl }}/mountebank/predicates/) - Request matching
 - [Responses Guide]({{ site.baseurl }}/mountebank/responses/) - Response configuration
 - [Migration Guide]({{ site.baseurl }}/getting-started/migration/) - Switching from Mountebank
