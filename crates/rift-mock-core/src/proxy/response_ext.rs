@@ -19,7 +19,16 @@ pub trait ResponseExt {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// `response_ext` is a private module with no re-export, so `ResponseExt` has no path
+    /// from outside this crate — and since doctests compile as a separate crate, neither
+    /// `crate::` nor any external path can resolve to it. The example below is illustrative
+    /// of crate-internal use only; behaviour is covered by the unit tests in this file.
+    ///
+    /// ```text
+    /// use http_body_util::Full;
+    /// use hyper::Response;
+    /// use hyper::body::Bytes;
+    ///
     /// use crate::proxy::response_ext::ResponseExt;
     ///
     /// let response = Response::new(Full::new(Bytes::from("hello")));
