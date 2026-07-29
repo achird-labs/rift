@@ -100,16 +100,26 @@ for root, _, files in os.walk(site):
             href = href.strip()
             if not href or href.startswith("#") or EXTERNAL.match(href):
                 continue
-            path = unquote(urljoin(page_url, href).split("#")[0].split("?")[0])
-            if baseurl:
-                if path == baseurl:
-                    path = "/"
-                elif path.startswith(baseurl + "/"):
-                    path = path[len(baseurl):]
-                else:
-                    # Absolute link that ignores baseurl — cannot resolve once deployed.
-                    broken.append((page_url, href, "outside baseurl"))
-                    continue
+            target = href.split("#")[0].split("?")[0]
+            if not target:
+                continue
+            if target.startswith("/"):
+                # Absolute: written with the baseurl, which is not part of the file layout.
+                if baseurl:
+                    if target == baseurl:
+                        target = "/"
+                    elif target.startswith(baseurl + "/"):
+                        target = target[len(baseurl):]
+                    else:
+                        # An absolute link that omits the baseurl cannot resolve once deployed.
+                        broken.append((page_url, href, "outside baseurl"))
+                        continue
+            else:
+                # Relative: the browser resolves it against the *served* URL, so the baseurl
+                # cancels out on both sides and `page_url` (already site-root-relative) is the
+                # correct base. Stripping a baseurl here would be wrong — there is none to strip.
+                target = urljoin(page_url, target)
+            path = unquote(target)
             if not resolves(path):
                 broken.append((page_url, href, "404"))
 
@@ -136,10 +146,13 @@ self_test() {
   printf '<a href="/rift/features/spaces/">spaces</a>' > "$tmp/broken/index.html"
   printf 'spaces' > "$tmp/broken/features/spaces.html"
 
-  # The same link under `permalink: pretty` — served by the directory index.
-  mkdir -p "$tmp/fixed/features/spaces"
-  printf '<a href="/rift/features/spaces/">spaces</a>' > "$tmp/fixed/index.html"
-  printf 'spaces' > "$tmp/fixed/features/spaces/index.html"
+  # The same link under `permalink: pretty` — served by the directory index. Also covers the two
+  # relative-link shapes the docs actually use: a relative link carries no baseurl, so resolving it
+  # as though it did reports a false 404 (which is exactly what this checker did on first run).
+  mkdir -p "$tmp/fixed/features/spaces" "$tmp/fixed/performance"
+  printf '<a href="/rift/features/spaces/">abs</a><a href="performance/">rel</a>' > "$tmp/fixed/index.html"
+  printf '<a href="../../performance/">up</a>' > "$tmp/fixed/features/spaces/index.html"
+  printf 'perf' > "$tmp/fixed/performance/index.html"
 
   if check_site "$tmp/broken" "/rift" >/dev/null 2>&1; then
     echo "verify-docs-links --self-test: FAILED — checker passed the known-broken #898 layout." >&2
