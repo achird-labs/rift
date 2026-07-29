@@ -225,7 +225,7 @@ organisations running more than one language.
 
 There is no config compatibility between WireMock and Rift, so this is genuine translation
 work, not a drop-in. (If you are coming from **Mountebank**, it *is* a drop-in — see the
-[migration guide]({{ site.baseurl }}/getting-started/migration).)
+[migration guide]({{ site.baseurl }}/getting-started/migration/).)
 
 ### Concept mapping
 

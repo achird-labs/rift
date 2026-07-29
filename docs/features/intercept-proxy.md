@@ -259,7 +259,7 @@ A rule matches an intercepted request by **host** (exact, case-insensitive; omit
 
 Body predicates see a request body that is not valid UTF-8 (protobuf, gzip, an image upload) as
 its **standard base64 encoding** (with padding) — the same convention as
-[binary recorded requests]({{ site.baseurl }}/mountebank/imposters) and binary responses. Write
+[binary recorded requests]({{ site.baseurl }}/mountebank/imposters/) and binary responses. Write
 the predicate against the base64 string, e.g.
 `{ "equals": { "body": "H4sIAAAAAAAA/w==" } }`. A valid-UTF-8 (text or JSON) body is matched
 as-is, unchanged. Forwarding always relays the raw bytes regardless of classification.

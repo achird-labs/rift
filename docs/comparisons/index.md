@@ -15,7 +15,7 @@ How Rift relates to the other mock servers you might be choosing between.
 For Mountebank, the relationship is different in kind: Rift implements Mountebank's admin API
 and loads its `imposters.json` unchanged, so the relevant page is
 [Mountebank Compatibility]({{ site.baseurl }}/mountebank/) rather than a comparison, plus the
-[migration guide]({{ site.baseurl }}/getting-started/migration).
+[migration guide]({{ site.baseurl }}/getting-started/migration/).
 
 ---
 
