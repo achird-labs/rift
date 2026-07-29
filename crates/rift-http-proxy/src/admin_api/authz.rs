@@ -8,21 +8,55 @@
 //! dispatch: the mapping from route to permission is the security-relevant part, and it should be
 //! testable without standing up a server or a manager.
 //!
+//! This module is public (issue #887) for the embedder that terminates some admin routes itself
+//! and proxies the rest — a shape `ServerBuilder`/`RunningServer` already invite. Such a host gets
+//! no classification for free from upstream's `service_fn`, and reimplementing it re-runs an
+//! experiment already run here once: a second parser that filtered empty path segments,
+//! while the router does not, so `PUT /imposters/:port/scenarios//state` dispatched a mutation
+//! that the classifier had never seen. Under `/imposters` that is now unrepresentable — [`classify`]
+//! calls the router's own parser — which is precisely the property a hand-written copy loses.
+//!
 //! [`AdminAuthorizer`]: rift_mock_core::extensions::authz::AdminAuthorizer
 
 use crate::admin_api::router::ImposterRoute;
 use hyper::Method;
 use rift_mock_core::extensions::authz::actions;
 
+/// Header carrying the embedder-defined scope selector handed to an [`AdminAuthorizer`]
+/// (issue #854). Upstream never parses or interprets the value — it exists because an authorizer
+/// often cannot derive the target from the port alone (`POST /imposters` has no port yet).
+///
+/// Public so an embedder's own admin front reads the same header rather than a copied literal
+/// (issue #887). It is caller-asserted: any authenticated caller can set it to any value.
+///
+/// [`AdminAuthorizer`]: rift_mock_core::extensions::authz::AdminAuthorizer
+pub const SCOPE_HEADER: &str = "x-rift-scope";
+
 /// A route as the authorizer needs to see it: what is being attempted, and against what.
 ///
 /// Owns its param strings because they are borrowed slices of a path that the caller may not keep
 /// alive; [`AuthzRequest`](rift_mock_core::extensions::authz::AuthzRequest) borrows from this.
+///
+/// `#[non_exhaustive]` for the same reason [`EventContext`] carries it: this is a produced-by-
+/// upstream, read-by-the-embedder struct on an opt-in seam, so the next piece of route metadata
+/// worth handing an authorizer must not be a breaking change to everyone who destructures one.
+/// Reading fields and matching with `..` are unaffected.
+///
+/// [`EventContext`]: rift_mock_core::imposter::EventContext
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AuthzTarget {
+    /// The action being attempted, e.g. `"imposter.write"` — one of [`actions`].
+    ///
+    /// [`actions`]: rift_mock_core::extensions::authz::actions
     pub action: &'static str,
+    /// The imposter port the route targets. `None` for system routes and for collection routes
+    /// that name no port yet (`POST /imposters`).
     pub port: Option<u16>,
+    /// The flow/space identifier, for the correlated-isolation routes.
     pub space: Option<String>,
+    /// Every path param the router extracted, including `port` and `space` when present, so an
+    /// authorizer can key on a route's own vocabulary without re-parsing the path.
     pub params: Vec<(&'static str, String)>,
 }
 
@@ -74,6 +108,27 @@ fn imposter_action(method: &Method) -> &'static str {
 /// handler and changes nothing, so there is no action to authorize. Note the consequence — an
 /// authenticated caller can still distinguish a 404 from a 403, so the hook bounds what a
 /// principal can *do*, not what it can learn about which routes exist.
+///
+/// # Examples
+///
+/// An embedder fronting the admin API classifies a parameterised route the same way upstream does,
+/// and reads the params the handler will act on:
+///
+/// ```
+/// use hyper::Method;
+/// use rift_http_proxy::admin_api::authz::classify;
+/// use rift_http_proxy::extensions::authz::actions;
+///
+/// let target = classify(&Method::PUT, "/imposters/4545/scenarios/checkout/state")
+///     .expect("a dispatchable admin route classifies");
+///
+/// assert_eq!(target.action, actions::IMPOSTER_WRITE);
+/// assert_eq!(target.port, Some(4545));
+/// assert!(target.params.contains(&("scenario", "checkout".to_string())));
+///
+/// // Data-plane traffic is deliberately not admin-gated.
+/// assert_eq!(classify(&Method::GET, "/__rift/4545/orders"), None);
+/// ```
 #[must_use]
 pub fn classify(method: &Method, path: &str) -> Option<AuthzTarget> {
     // Belt-and-braces, and deliberately kept as such: `/__rift/...` matches none of the branches
@@ -321,6 +376,34 @@ mod tests {
                 .params
                 .contains(&("scenario", "checkout".to_string()))
         );
+    }
+
+    #[test]
+    fn empty_segments_are_classified_rather_than_filtered_away() {
+        // The regression that makes a single parser non-negotiable, pinned. Hyper does not
+        // normalise `//`, so a classifier that filtered empty segments saw a different route from
+        // the one the router dispatched: the mutation ran, authorized as something else or never
+        // classified at all. Reintroducing the filter makes the first `expect` panic (no route
+        // matches `["scenarios", "state"]`) and the second assert read `Some("stubs")`.
+        let scenario = classify(&Method::PUT, "/imposters/4545/scenarios//state")
+            .expect("the router dispatches this, so it must classify");
+        assert_eq!(scenario.action, actions::IMPOSTER_WRITE);
+        assert!(scenario.params.contains(&("scenario", String::new())));
+
+        let space = classify(&Method::POST, "/imposters/4545/spaces//stubs")
+            .expect("the router dispatches this, so it must classify");
+        assert_eq!(space.space.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn the_flow_state_branch_filters_empty_segments_exactly_as_its_router_twin_does() {
+        // `classify_admin_flow_state` is the one branch that does NOT delegate to the router — it
+        // hand-copies `route_admin_flow_state`, filter included. They agree today; this pins the
+        // agreement, because that is the branch where the divergence above could come back.
+        let t = classify(&Method::DELETE, "/admin/imposters/4545/flow-state//cart")
+            .expect("the filter collapses the empty segment, so this is the 3-segment route");
+        assert_eq!(t.space.as_deref(), Some("cart"));
+        assert!(!t.params.iter().any(|(name, _)| *name == "key"));
     }
 
     #[test]

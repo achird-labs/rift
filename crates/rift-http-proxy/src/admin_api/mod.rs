@@ -8,7 +8,11 @@
 //!
 //! The API listens on a configurable port (default: 2525).
 
-pub(crate) mod authz;
+// Public because the `AdminAuthorizer` hook (#854) is only usable when upstream parses your
+// routes. An embedder that terminates some admin routes itself needs the same classifier, and the
+// alternative — a second route parser — is the divergence `authz`'s own doc comment records as a
+// shipped security bug (issue #887).
+pub mod authz;
 mod handlers;
 mod request_filter;
 mod router;

@@ -114,6 +114,22 @@ record.
   from your own `tokio::spawn`ed task reports `None`. The admin SSE bus (`/events`) is **not**
   attributed — only the in-process listener is. See `docs/embedding/spi.md`.
 
+- **Admin route classification is now public — `admin_api::authz::{classify, AuthzTarget,
+  SCOPE_HEADER}`** (issue #887). The `AdminAuthorizer` hook (#854) is only usable when upstream
+  parses your routes, so an embedder that terminates some admin routes itself and proxies the rest —
+  a shape `ServerBuilder`/`RunningServer` already invite — had to assemble the
+  action/port/space/params tuple by hand. That means a second route parser, and this codebase has
+  already shipped the bug that follows: a classifier that filtered empty path segments (hyper does
+  not normalise `//`) saw a different route from the one dispatched, so
+  `PUT /imposters/:port/scenarios//state` mutated a scenario it had never classified.
+
+  `classify` is the same pure `(method, path) -> Option<AuthzTarget>` upstream calls, sharing the
+  router's own parser; `SCOPE_HEADER` replaces a copied `"x-rift-scope"` literal. `AuthzTarget` is
+  `#[non_exhaustive]` for the same reason `EventContext` is — you only ever read one back from
+  `classify`, so the next piece of route metadata worth handing an authorizer must not be a second
+  break to the same seam. Export only — no behaviour change, and nothing changes for an embedder
+  whose requests flow through upstream's request loop. See `docs/embedding/spi.md`.
+
 ### Security
 
 - **The TLS intercept proxy was reachable off-host with no authentication** (issue #878). Every

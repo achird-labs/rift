@@ -34,11 +34,6 @@ use tracing::{debug, error, info, warn};
 /// Bounded grace given to in-flight connections on `shutdown()` before the wait is abandoned.
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
-/// Header carrying the embedder-defined scope selector handed to an [`AdminAuthorizer`]
-/// (issue #854). Upstream never parses or interprets the value — it exists because an authorizer
-/// often cannot derive the target from the port alone (`POST /imposters` has no port yet).
-const SCOPE_HEADER: &str = "x-rift-scope";
-
 /// Admin API server for Rift
 pub struct AdminApiServer {
     addr: SocketAddr,
@@ -626,7 +621,7 @@ async fn accept_loop(
                                 space: target.space.as_deref(),
                                 scope: req
                                     .headers()
-                                    .get(SCOPE_HEADER)
+                                    .get(authz::SCOPE_HEADER)
                                     .and_then(|v| v.to_str().ok()),
                                 params: &params,
                             });
