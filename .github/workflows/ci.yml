@@ -193,6 +193,29 @@ jobs:
           ./scripts/verify-feature-propagation.sh --self-test
           ./scripts/verify-feature-propagation.sh
 
+  docs-links:
+    name: Docs Links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Issue #898: the docs shipped with 156 dead cross-references because the authored URL shape
+      # (`/features/spaces/`) never matched the built one (`features/spaces.html`). Source-level
+      # checks cannot see that — the links are well-formed, and the just-the-docs nav is generated
+      # from `page.url` so it stayed correct and hid the breakage. The site has to be built and its
+      # links resolved the way GitHub Pages serves them, which is what this gate does.
+      - name: Build the docs site
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./docs
+          destination: ./_site
+
+      # --self-test first proves the checker isn't a no-op: it must reject the #898 layout.
+      - name: Verify every internal docs link resolves
+        run: |
+          ./scripts/verify-docs-links.sh --self-test
+          ./scripts/verify-docs-links.sh ./_site
+
   benchmark-scripts:
     name: Benchmark Scripts
     runs-on: ubuntu-latest

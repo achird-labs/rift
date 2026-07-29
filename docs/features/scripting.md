@@ -78,7 +78,7 @@ config.request.headers     // { "content-type": "application/json" }
 config.request.body        // Request body (string or parsed object)
 ```
 
-> Path parameters (`request.pathParams`, from a stub's [`routePattern`](../configuration/native/#route-patterns-routepattern)) are exposed to the `_rift.script` engines — Rhai and JavaScript — not to this Mountebank `inject` `config.request` object.
+> Path parameters (`request.pathParams`, from a stub's [`routePattern`]({{ site.baseurl }}/configuration/native/#route-patterns-routepattern)) are exposed to the `_rift.script` engines — Rhai and JavaScript — not to this Mountebank `inject` `config.request` object.
 
 ### State Object
 

@@ -4,6 +4,14 @@ description: High-performance Mountebank-compatible HTTP/HTTPS mock server writt
 baseurl: "/rift"
 url: "https://achird-labs.github.io"
 
+# Every hand-written cross-reference in docs/ is of the form
+# `{{ site.baseurl }}/features/spaces/` — a trailing-slash URL. Jekyll's default
+# permalink emits `features/spaces.html`, which GitHub Pages does NOT serve at
+# `features/spaces/`, so all 156 of those links 404'd (the nav was unaffected:
+# just-the-docs builds it from `page.url`, which stayed correct). `pretty` emits
+# `features/spaces/index.html` so the authored URL shape is the served one.
+permalink: pretty
+
 # Theme
 remote_theme: just-the-docs/just-the-docs
 color_scheme: dark
