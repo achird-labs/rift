@@ -10,6 +10,11 @@ permalink: /mountebank/
 
 Rift implements the [Mountebank](http://www.mbtest.org/) REST API and configuration format. This allows you to use Rift as a drop-in replacement for Mountebank with significantly better performance.
 
+**Scope:** Rift imposters are **HTTP/HTTPS only**. Mountebank also supports `tcp` and `smtp`
+imposters, which Rift rejects — see the [migration guide]({{ site.baseurl }}/getting-started/migration)
+for the full compatibility table before you migrate. (This is separate from TCP *fault injection*,
+which HTTP imposters do support.)
+
 > New to the model? Start with [Concepts]({{ site.baseurl }}/concepts/) — it explains imposters,
 > stubs, predicates, responses, and behaviors conceptually, then the Rift-specific stateful features.
 > This section is the syntax-level reference for the Mountebank-compatible surface.
