@@ -2,7 +2,7 @@
 # Using Rust nightly for if-let-chains feature (required by regress 0.10.5, a boa_engine dependency)
 # Digest-pinned (issue #664): `nightly` floats daily, so an unpinned tag makes this build
 # irreproducible. Dependabot reads the tag and bumps the digest.
-FROM rustlang/rust:nightly@sha256:cb1f9cc4facad7f84e6cf1a07fe0b8c6d54cac10abd4036f82b751d0c7e76a33 AS builder
+FROM rustlang/rust:nightly@sha256:9e64894d8a6e2dfa206f2cf4f7445a9ecf454a6d50c33e2150ee2daa8d8fd949 AS builder
 
 WORKDIR /build
 
