@@ -378,6 +378,43 @@ The data plane is never authorized. Gateway traffic (`/__rift/...`) skips this h
 reason it skips the api key — it is app-under-test traffic, and requiring an admin identity for it
 would force the application to carry the admin credential.
 
+### Fronting the admin API yourself
+
+Everything above assumes your requests reach upstream's own request loop, which parses the route and
+calls the hook for you. If instead you **terminate some admin routes yourself** and proxy the rest,
+you have no parsed route to authorize against — so call the same classifier upstream does:
+
+```rust
+use rift_http_proxy::admin_api::authz::{SCOPE_HEADER, classify};
+use rift_mock_core::extensions::authz::AuthzRequest;
+
+// `None` = not an authorizable admin route: the data plane (`/__rift/...`), or a path that
+// matches no route at all and so reaches no handler.
+if let Some(target) = classify(req.method(), req.uri().path()) {
+    let params: Vec<(&str, &str)> = target
+        .params
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    let decision = my_authorizer.authorize(AuthzRequest {
+        credential: req.headers().get("authorization").and_then(|v| v.to_str().ok()),
+        action: target.action,
+        port: target.port,
+        space: target.space.as_deref(),
+        scope: req.headers().get(SCOPE_HEADER).and_then(|v| v.to_str().ok()),
+        params: &params,
+    });
+}
+```
+
+Do not write a second parser for this. Two parsers diverging is a silent bypass, and this codebase
+has already shipped it: a classifier that filtered empty path segments — which hyper does not
+normalise — saw a different route from the one dispatched, so `PUT /imposters/:port/scenarios//state`
+mutated a scenario the classifier had never seen. Under `/imposters` that is now unrepresentable,
+because `classify` calls the router's own parser and matches its route enum exhaustively — which is
+exactly the property a hand-written copy gives up. `SCOPE_HEADER` likewise spares you a copied
+header literal.
+
 ## Backend errors and annotations
 
 A custom backend signals unavailability by attaching `BackendUnavailable` to a failed operation's
