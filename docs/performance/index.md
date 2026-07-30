@@ -101,18 +101,26 @@ issue #423 fixed) takes Rift 6.6ms vs Mountebank's 114.7ms, and grows memory +9M
 
 ## Why Is Rift Faster?
 
-Two separate answers, and conflating them is the usual mistake:
+The usual answer is "it is written in Rust", and that is genuinely a large part of it: native code,
+no GC pauses showing up in the tail, a work-stealing async runtime, and parsing that avoids copying.
+Those are real and they are why each individual request is cheap.
 
-- **The *shape* — flat instead of linear — is the matching architecture.** It is an index, not a
-  scan, and nothing about it depends on the implementation language.
-- **The *constant factor* — how fast each request is served — is the implementation stack.** Native
-  code, no GC, a work-stealing async runtime.
+But it is only half the answer, and it is the half that always gets said. The other half is the
+**matching architecture** — how Rift decides *which* stub answers a request — and that is what
+governs the shape of the curve: whether throughput holds as your stub count grows, or slides. Rift's
+matcher is an index, not a scan.
 
-The architecture is the part that actually answers "why does throughput not fall as I add stubs", so
-it goes first. The Microcks comparison is the evidence that these two are genuinely independent:
-Microcks is *also* indexed rather than scanning, so it is also flat by stub position — the gap
-against it is almost entirely constant factor. Against Mountebank and WireMock, which do scan, the
-architecture is what produces the widening gap.
+The two compound rather than compete. The architecture decides how much work a request costs at all;
+the implementation decides how fast that work runs. Every number on this page is the product of both,
+and the same design in a slower runtime, or the same runtime over a linear scan, would give up a
+different part of the result.
+
+Microcks is a useful check on the distinction. It is *also* indexed rather than scanning, so it is
+also flat by stub position — which is why the gap against it is mostly per-request cost rather than
+scaling. Mountebank and WireMock do scan, so against them the gap *widens* with stub count. Same
+engine, two different shapes, for two different reasons.
+
+The architecture is the part that is usually left out, so it goes first.
 
 ### The matching architecture
 
@@ -209,8 +217,9 @@ change of complexity class, from "one search per pattern" to "one search".
 
 ### The implementation stack
 
-This is the constant factor: it makes each request cheap, and it is what separates Rift from a
-similarly-indexed engine like Microcks.
+The other half, and the reason the index's savings actually show up in the numbers rather than being
+absorbed by per-request overhead. It is also most of what separates Rift from a similarly-indexed
+engine like Microcks.
 
 | Aspect | Mountebank | Rift |
 |:-------|:-----------|:-----|
@@ -538,10 +547,10 @@ across that same interval.
 | Trivial stub → 310 stubs | −60% | **−3%** | −71% |
 | First → last of the same 310 | **−0.6%** | **−0.06%** | −69% |
 
-So "throughput stays flat" separates Rift from Mountebank and WireMock on *scan behaviour*, and from
-Microcks on *constant factor* — which is exactly the split
-[Why Is Rift Faster?](#why-is-rift-faster) opens with, and Microcks is the evidence that the two
-halves are independent.
+So "throughput stays flat" means something different in each comparison: against Mountebank and
+WireMock it is about *scan behaviour*, and against Microcks — which does not scan either — it is
+about per-request cost. That is the distinction
+[Why Is Rift Faster?](#why-is-rift-faster) opens with, and Microcks is what makes it visible.
 
 Two limits, because the first row above is doing two things at once. The trivial-stub point is a
 *different service* with a smaller `text/plain` response, so that −60% mixes corpus size with

@@ -105,9 +105,11 @@ record.
   an empty candidate set. Plus a "what this does not buy you" section, since an imposter that indexes
   on nothing falls back to the scan.
 
-  The split is the point: **architecture explains the shape, the stack explains the constant factor**,
-  and Microcks is the evidence they are independent — it is indexed too, so it is flat by position,
-  and the gap against it is constant factor alone.
+  The framing is that the two **compound**, rather than one explaining everything: the runtime is a
+  large and real part of the answer, but it is the half that always gets said, and the architecture —
+  which is what governs whether the curve stays flat — is the half that did not. Microcks makes the
+  distinction visible: it is indexed too, so it is also flat by stub position, and the gap against it
+  is mostly per-request cost rather than scaling.
 
 - **Published the measured comparison — `docs/comparisons/microcks.md`** (issue #900). AMD EPYC 7763,
   16 vCPU, 256 connections, median of 3 reps (spread ≤3.3% Microcks / ≤2.7% Rift). Rift is
