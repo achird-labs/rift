@@ -87,6 +87,41 @@ DEFAULT_WARMUP = "10s"
 # making two runs non-comparable. 4g committed up front so heap growth is not measured as latency.
 DEFAULT_HEAP = "4g"
 
+# --------------------------------------------------------------------------------------------
+# The two mock-path defaults that have to be turned off for this to be a comparison at all
+# --------------------------------------------------------------------------------------------
+#
+# `mocks.enable-invocation-stats` defaults to **true** and is the direct analogue of WireMock's
+# request journal, which this harness already disables for fairness. Microcks counts every mock
+# invocation and persists a per-service/per-day/per-hour record (verified: 500 requests produce
+# `dailyCount: 500` on `/api/metrics/invocations/<service>/<version>`). Rift and Mountebank are both
+# measured with recording OFF, and journaling is a deliberately separate, additive, Rift-only
+# scenario precisely because it is a distinct cost — so leaving this on would compare
+# Microcks-with-recording against Rift-without. Note which way that error runs: unlike every other
+# deviation in this suite, this one would flatter **Rift**, which is the direction that must never be
+# taken silently.
+#
+# `mocks.rest.enable-cors-policy` defaults to **true** and adds four `Access-Control-*` headers to
+# every mock response. Neither Rift nor WireMock emits them, so leaving it on charges Microcks for
+# bytes and header work its counterparts are not doing.
+#
+# Both are published in the secondary `microcks-stock` series below, so the out-of-the-box number a
+# user actually gets is reported beside the tuned one rather than hidden by it.
+FAIRNESS_FLAGS = (
+    "--mocks.enable-invocation-stats=false",
+    "--mocks.rest.enable-cors-policy=false",
+)
+
+# The stock-defaults secondary series, same idea as the WireMock leg's `wiremock-stock` (issue #865):
+# identical workload, Microcks launched exactly as it ships — invocation stats on, CORS on, Tomcat's
+# own thread pool — benched at the headline connection count only. Its own engine label keeps it out
+# of the headline Rift/Microcks ratio while still being reportable next to it.
+STOCK_ENGINE = "microcks-stock"
+
+# Tomcat's documented connector default, reported beside the pinned value so a reader can tell a
+# thread-pool ceiling from an engine throughput ceiling.
+STOCK_TOMCAT_THREADS = 200
+
 MICROCKS_JAR_HELP = """\
 Microcks publishes only non-repackaged jars to Maven Central (`microcks-app-1.14.0.jar` is 750KB of
 classes with no `Main-Class`), so the runnable Spring Boot fat jar has to come out of the official
@@ -419,8 +454,15 @@ def tomcat_thread_count(conn_list, override=None):
     return max(os.cpu_count() or 1, max(conn_list))
 
 
-def microcks_cmd(jar, port, threads, heap=DEFAULT_HEAP, java="java"):
+def microcks_cmd(jar, port, threads, heap=DEFAULT_HEAP, java="java", stock=False):
     """The JVM argv for one Microcks instance.
+
+    `stock=True` is the secondary series: no Tomcat pin and none of `FAIRNESS_FLAGS`, i.e. Microcks
+    exactly as it ships. Heap stays pinned even there — that is a determinism knob, not a fairness
+    one, and letting it float would make the stock column non-comparable between hosts rather than
+    more representative. Logging also stays at WARN in both series, for the same reason the tuned
+    series does it: at INFO a per-request log site measures the logging pipeline (#718), which would
+    misattribute a logging cost to the defaults being benchmarked.
 
     Every flag here is either a fairness requirement or a determinism requirement:
 
@@ -443,7 +485,7 @@ def microcks_cmd(jar, port, threads, heap=DEFAULT_HEAP, java="java"):
       site turns a throughput benchmark into a measurement of the logging pipeline; the same trap
       exists here and is worth an explicit flag rather than a hope about defaults.
     """
-    return [
+    cmd = [
         java,
         f"-Xms{heap}", f"-Xmx{heap}",
         "-Dspring.profiles.active=uber",
@@ -451,11 +493,14 @@ def microcks_cmd(jar, port, threads, heap=DEFAULT_HEAP, java="java"):
         "-Dasync-api.enabled=false",
         "-jar", jar,
         f"--server.port={port}",
-        f"--server.tomcat.threads.max={threads}",
         "--logging.level.root=WARN",
         "--logging.level.io.github.microcks=WARN",
         "--spring.main.banner-mode=off",
     ]
+    if not stock:
+        cmd.append(f"--server.tomcat.threads.max={threads}")
+        cmd.extend(FAIRNESS_FLAGS)
+    return cmd
 
 
 def api_ready(port, tries=360):
@@ -597,7 +642,8 @@ def _status_ok(name, codes):
 
 
 def bench_microcks(jar, logdir, duration, warmup, conn_list, threads, heap, java,
-                   csv_suffix="", engine="microcks", microcks_version=DEFAULT_MICROCKS_VERSION):
+                   csv_suffix="", engine="microcks", microcks_version=DEFAULT_MICROCKS_VERSION,
+                   stock=False):
     """Launch one Microcks per imposter in turn, bench that imposter's scenarios, tear it down.
 
     Sequential and one-service-at-a-time on purpose — see the module docstring. The cost is ~14s of
@@ -616,9 +662,11 @@ def bench_microcks(jar, logdir, duration, warmup, conn_list, threads, heap, java
         port = base_port + MICROCKS_OFFSET
         log = os.path.join(logdir, f"microcks-{service}-{port}.log")
         free_ports([port])
+        pool = f"{STOCK_TOMCAT_THREADS} (stock)" if stock else str(threads)
         print(f"[{engine}] {service}: launching on {port} "
-              f"({threads} tomcat threads, heap {heap})")
-        proc = launch(microcks_cmd(jar, port, threads, heap, java), log)
+              f"({pool} tomcat threads, heap {heap}"
+              f"{', stats+CORS on (stock defaults)' if stock else ''})")
+        proc = launch(microcks_cmd(jar, port, threads, heap, java, stock), log)
         try:
             if not api_ready(port):
                 raise SystemExit(f"bench_microcks: {service} on {port} never became ready "
@@ -649,13 +697,23 @@ def bench_microcks(jar, logdir, duration, warmup, conn_list, threads, heap, java
 
     path = write_results_csv(engine, csv_suffix, rows)
     print(f"[{engine}] wrote {path}")
-    record_run_settings(csv_suffix, warmup, threads, heap, version)
+    if not stock:
+        # Only the tuned series records the sidecars: the stock series' whole point is that it did
+        # NOT use the pin, so filing its (unused) thread value would describe the wrong run.
+        record_run_settings(csv_suffix, warmup, threads, heap, version)
     return path
 
 
 def run_all(jar, duration, warmup, conn_list, csv_suffix="",
             microcks_version=DEFAULT_MICROCKS_VERSION, tomcat_threads=None,
-            heap=DEFAULT_HEAP, java="java"):
+            heap=DEFAULT_HEAP, java="java", stock_conns=None, skip_stock=False):
+    """Bench Microcks twice: the tuned headline series, then the stock-default secondary series.
+
+    The stock series runs at the headline connection count only — it exists to tell the
+    out-of-the-box story, not to be swept — and is written under its own engine label so the report
+    can show it beside the headline without it entering the Rift/Microcks ratio. Same shape as the
+    WireMock leg (issue #865), for the same reason: a reader needs to be able to tell "Microcks is
+    slower" from "Microcks ships with per-request invocation accounting on"."""
     major, java_line = java_preflight(java)
     print(f"[microcks] java {major} ({java_line})")
     if not os.path.exists(jar):
@@ -664,8 +722,13 @@ def run_all(jar, duration, warmup, conn_list, csv_suffix="",
             + MICROCKS_JAR_HELP.format(version=microcks_version))
     threads = tomcat_thread_count(conn_list, tomcat_threads)
     logdir = os.path.join(RESULTS_DIR, "logs")
-    return bench_microcks(jar, logdir, duration, warmup, conn_list, threads, heap, java,
+    path = bench_microcks(jar, logdir, duration, warmup, conn_list, threads, heap, java,
                           csv_suffix, "microcks", microcks_version)
+    if not skip_stock:
+        bench_microcks(jar, logdir, duration, warmup, [stock_conns or conn_list[-1]],
+                       threads, heap, java, csv_suffix, STOCK_ENGINE, microcks_version,
+                       stock=True)
+    return path
 
 
 # --------------------------------------------------------------------------------------------
@@ -757,26 +820,59 @@ def propagate_run_settings(base_suffix=""):
 # Aggregation across repetitions
 # --------------------------------------------------------------------------------------------
 
-def find_rep_files(base_suffix=""):
-    """Every `direct_microcks<base_suffix>_repN.csv`, in rep order.
+def find_rep_files(base_suffix="", engine="microcks"):
+    """Every `direct_<engine><base_suffix>_repN.csv`, in rep order.
 
     Matching on the shared `_rep<digits>.csv` tail (`REP_FILE_RX`) rather than the glob alone keeps
     a stale unsuffixed file out of the aggregate."""
-    pattern = os.path.join(RESULTS_DIR, f"direct_microcks{base_suffix}_rep*.csv")
+    pattern = os.path.join(RESULTS_DIR, f"direct_{engine}{base_suffix}_rep*.csv")
     matched = [(int(m.group(1)), p) for p in glob.glob(pattern)
                for m in [REP_FILE_RX.search(p)] if m]
     return [p for _n, p in sorted(matched)]
 
 
-def aggregate(base_suffix=""):
-    """Collapse this engine's reps into `direct_microcks<base_suffix>_median.csv`.
+def aggregate_all(base_suffix=""):
+    """Collapse every series this suite produces, plus rift's if its reps are here.
+
+    `rift` is included because the ratio needs its median at the same point, and a standalone
+    Rift-vs-Microcks dispatch has no WireMock leg to have aggregated it already. `bench_direct`'s own
+    comparison path writes a report rather than per-engine CSVs, so aggregating it here is what keeps
+    `bench_direct.py` untouched."""
+    done = {}
+    for engine in ("microcks", STOCK_ENGINE, "rift"):
+        result = aggregate(base_suffix, engine)
+        if result is not None:
+            done[engine] = result[1]
+    if "microcks" not in done:
+        raise SystemExit(
+            f"bench_microcks: no tuned Microcks rep files matched "
+            f"direct_microcks{base_suffix}_rep*.csv in {RESULTS_DIR} — the headline ratio is computed "
+            f"from that series, so there is nothing to publish (run `--run-all --rep N` first).")
+    # Unequal replication favours whichever engine got more samples, and the spread column makes it
+    # worse rather than better: peak-to-peak over a single rep is 0.0%, so the LEAST-replicated engine
+    # renders as the most stable one. Refused for the same reason the other suites refuse it.
+    ratio_legs = {e: n for e, n in done.items() if e in ("microcks", "rift")}
+    if len(set(ratio_legs.values())) > 1:
+        detail = ", ".join(f"{e}={n}" for e, n in sorted(ratio_legs.items()))
+        raise SystemExit(
+            f"bench_microcks: rep-count mismatch across the ratio legs ({detail}). A table built "
+            f"from unequal replication favours whichever engine got more samples, and a one-rep "
+            f"column reports 0.0% spread — the least-replicated engine would read as the most "
+            f"stable. Re-run the short engine, or move the stale reps out of {RESULTS_DIR}.")
+    counts = ", ".join(f"{e}={n}" for e, n in sorted(done.items()))
+    print(f"[aggregate] {counts}; render with --report --csv-suffix {base_suffix}_median")
+    return done
+
+
+def aggregate(base_suffix="", engine="microcks"):
+    """Collapse one engine's reps into `direct_<engine><base_suffix>_median.csv`.
 
     The median maths is `bench_direct.aggregate_reps`, imported rather than reimplemented — issue
     #746's lesson was that a single rep can land on a degraded host, and a per-engine definition of
     "median" would reintroduce that asymmetry by the back door. The output filename and the two
     extra columns (`reps`, `rps_spread_pct`) match the WireMock leg so `--report --csv-suffix
     <base>_median` reads every engine the same way."""
-    paths = find_rep_files(base_suffix)
+    paths = find_rep_files(base_suffix, engine)
     if not paths:
         return None
     reps = []
@@ -793,20 +889,20 @@ def aggregate(base_suffix=""):
         detail = ", ".join(f"{s}@c={c}/{m}: {n} of {len(paths)}"
                            for (s, c, m), n in sorted(incomplete.items())[:8])
         raise SystemExit(
-            f"bench_microcks: incomplete repetitions across {len(paths)} rep files: {detail}"
-            f"{' …' if len(incomplete) > 8 else ''}\n"
+            f"bench_microcks: incomplete repetitions for '{engine}{base_suffix}' across "
+            f"{len(paths)} rep files: {detail}{' …' if len(incomplete) > 8 else ''}\n"
             f"Every point must appear in every rep, or the median silently rests on fewer samples "
             f"than the report claims. Re-run the missing reps, or aggregate a consistent subset.")
 
-    out = os.path.join(RESULTS_DIR, f"direct_microcks{base_suffix}_median.csv")
+    out = os.path.join(RESULTS_DIR, f"direct_{engine}{base_suffix}_median.csv")
     with open(out, "w") as fh:
         fh.write(CSV_HEADER + ",reps,rps_spread_pct\n")
         for (scen, conns, mode), c in sorted(agg.items(), key=lambda kv: (kv[0][1], kv[0][0])):
             spread = f"{c['rps_spread_pct']:.1f}" if c["rps_spread_pct"] != "" else ""
             fh.write(f"{csv_row(scen, conns, mode, c)},{c['reps']},{spread}\n")
-    propagate_run_settings(base_suffix)
-    print(f"[microcks] {len(paths)} reps -> {os.path.basename(out)}; "
-          f"render with --report --csv-suffix {base_suffix}_median")
+    if engine == "microcks":
+        propagate_run_settings(base_suffix)
+    print(f"  {engine}: {len(paths)} reps -> {os.path.basename(out)}")
     return out, len(paths)
 
 
@@ -873,6 +969,7 @@ def report(conns, csv_suffix="", duration=None):
     configuration nothing measured."""
     rift = load_engine_csv("rift", csv_suffix, conns)
     microcks = load_engine_csv("microcks", csv_suffix, conns)
+    stock = load_engine_csv(STOCK_ENGINE, csv_suffix, conns)
     wiremock = load_engine_csv("wiremock", csv_suffix, conns)
     if not microcks:
         raise SystemExit(f"bench_microcks: no Microcks CSV at {engine_csv_path('microcks', csv_suffix)} "
@@ -939,6 +1036,35 @@ def report(conns, csv_suffix="", duration=None):
             except (TypeError, ValueError, ZeroDivisionError):
                 pass
 
+    if stock:
+        lines += [
+            "", "## Tuned vs stock defaults", "",
+            "Microcks ships with `mocks.enable-invocation-stats` **on** — it counts every mock "
+            "invocation and persists a per-service/per-day record — and with a CORS policy that adds "
+            "four `Access-Control-*` headers to every response. Neither Rift nor WireMock does either, "
+            "and WireMock's request journal is disabled in its own leg for exactly this reason, so the "
+            "headline series turns both off.",
+            "",
+            "That is a tuning decision worth publishing rather than burying, so here is the same "
+            "workload with Microcks launched exactly as it ships (stock Tomcat pool too):",
+            "",
+            "| Scenario | Microcks (tuned) | Microcks (stock defaults) | Cost of the defaults |",
+            "|:---------|-----------------:|--------------------------:|---------------------:|",
+        ]
+        for name in COMPARABLE:
+            trow, srow = microcks.get(name), stock.get(name)
+            if not (trow and srow):
+                continue
+            try:
+                t, s = float(trow["rps"]), float(srow["rps"])
+                delta = f"**{(s - t) / t * 100:+.0f}%**" if t > 0 else "—"
+            except (TypeError, ValueError, ZeroDivisionError):
+                delta = "—"
+            lines.append(f"| {name} | {_fmt(trow.get('rps'))} | {_fmt(srow.get('rps'))} | {delta} |")
+        lines += ["", "The stock column is the number a user gets out of the box; the tuned column is "
+                  "the one the Rift ratio above is computed from. Quote whichever you mean, and say "
+                  "which."]
+
     lines += ["", "## What is not comparable, and why", "",
               "Microcks is spec-driven, so several fixture scenarios have no faithful OpenAPI "
               "analogue. They are **excluded rather than approximated** — an approximation would "
@@ -993,9 +1119,15 @@ def resolve_suffix(csv_suffix, rep):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Microcks benchmark suite (issue #900)")
-    ap.add_argument("--run-all", action="store_true", help="bench Microcks and write its CSV")
+    ap.add_argument("--run-all", action="store_true",
+                    help="bench Microcks (tuned + stock series) and write their CSVs")
     ap.add_argument("--report", action="store_true", help="write the comparison report from CSVs")
-    ap.add_argument("--aggregate", action="store_true", help="median-of-reps into the base CSV")
+    ap.add_argument("--aggregate", action="store_true",
+                    help="median-of-reps for every series present, plus rift's if its reps are here")
+    ap.add_argument("--skip-stock", action="store_true",
+                    help="tuned series only — halves the wall clock, drops the out-of-the-box column")
+    ap.add_argument("--stock-connections", type=int, default=None,
+                    help="connection count for the stock series (default: the headline count)")
     ap.add_argument("--emit-spec", metavar="IMPOSTER",
                     help="print the generated OpenAPI document for one imposter and exit")
     ap.add_argument("--duration", default="20s")
@@ -1026,9 +1158,10 @@ if __name__ == "__main__":
 
     if args.run_all:
         run_all(args.jar, args.duration, args.warmup, conn_list, suffix,
-                args.microcks_version, args.tomcat_threads, args.heap, args.java)
+                args.microcks_version, args.tomcat_threads, args.heap, args.java,
+                args.stock_connections, args.skip_stock)
     if args.aggregate:
-        aggregate(args.csv_suffix)
+        aggregate_all(args.csv_suffix)
     if args.report:
         report(conn_list[-1], args.csv_suffix, args.duration)
     if not (args.run_all or args.report or args.aggregate):

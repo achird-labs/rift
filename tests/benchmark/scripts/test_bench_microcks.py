@@ -288,6 +288,39 @@ class FairnessKnobs(unittest.TestCase):
         cmd = bm.microcks_cmd("/tmp/app.jar", 4845, 256)
         self.assertIn("-Dspring.profiles.active=uber", cmd)
 
+    def test_tuned_series_disables_invocation_stats(self):
+        """The whole reason this class matters. `mocks.enable-invocation-stats` defaults to ON and
+        persists a record per mock call — the analogue of WireMock's request journal, which is
+        disabled in its leg. Leaving it on would compare Microcks-with-recording against
+        Rift-without, and unlike every other deviation here that error flatters RIFT."""
+        cmd = bm.microcks_cmd("/tmp/app.jar", 4845, 256)
+        self.assertIn("--mocks.enable-invocation-stats=false", cmd)
+
+    def test_tuned_series_disables_the_cors_policy(self):
+        """Four Access-Control-* headers on every response that neither Rift nor WireMock emits."""
+        cmd = bm.microcks_cmd("/tmp/app.jar", 4845, 256)
+        self.assertIn("--mocks.rest.enable-cors-policy=false", cmd)
+
+    def test_stock_series_restores_every_default_it_claims_to(self):
+        """A "stock defaults" column that quietly keeps a tune is worse than no column."""
+        cmd = bm.microcks_cmd("/tmp/app.jar", 4845, 256, stock=True)
+        for flag in bm.FAIRNESS_FLAGS:
+            self.assertNotIn(flag, cmd)
+        self.assertFalse([c for c in cmd if c.startswith("--server.tomcat.threads.max")],
+                         "the stock series must not pin the pool")
+
+    def test_stock_series_still_pins_heap_and_logging(self):
+        """Determinism knobs, not fairness ones: floating them would make the stock column
+        non-comparable between hosts, and INFO logging would measure the logging pipeline (#718)."""
+        cmd = bm.microcks_cmd("/tmp/app.jar", 4845, 256, heap="4g", stock=True)
+        self.assertIn("-Xmx4g", cmd)
+        self.assertIn("--logging.level.root=WARN", cmd)
+
+    def test_stock_engine_label_is_distinct(self):
+        """It must not enter the headline Rift/Microcks ratio."""
+        self.assertEqual(bm.STOCK_ENGINE, "microcks-stock")
+        self.assertNotEqual(bm.STOCK_ENGINE, "microcks")
+
     def test_command_disables_asyncapi_and_lowers_logging(self):
         """Per #718: a per-request log site turns a throughput benchmark into a measurement of the
         logging pipeline. The same trap applies to every engine, not just Rift."""
@@ -470,6 +503,24 @@ class PublishWorkflow(unittest.TestCase):
 
     def test_the_install_verifies_the_jar_is_a_spring_boot_launcher(self):
         self.assertIn("Start-Class: io.github.microcks.MicrocksApplication", self.text)
+
+    def test_microcks_only_skips_the_legs_it_does_not_need(self):
+        """Mountebank and WireMock contribute nothing to a Rift-vs-Microcks table, and re-measuring
+        them turns a ~30min dispatch into ~2h."""
+        self.assertEqual(self.text.count("!inputs.microcks_only"), 3,
+                         "expected the mb, wiremock and sweep legs to be gated")
+
+    def test_microcks_only_measures_rift_itself(self):
+        """Rift is the ratio's denominator, so it must come from the SAME dispatch — the one column
+        that cannot be cited from a previous run."""
+        self.assertIn("bench_direct.py --run-all --engines rift", self.text)
+        self.assertIn("BENCH_MICROCKS_ONLY", self.text)
+
+    def test_microcks_only_does_not_read_the_parked_wiremock_artefacts(self):
+        """Those only exist when the WireMock leg ran; an unconditional `cp` would fail the job."""
+        guarded = self.text.split('if [ "$BENCH_MICROCKS_ONLY" != "true" ]; then', 1)
+        self.assertEqual(len(guarded), 2, "the cp-back must be guarded")
+        self.assertIn("direct_rift_comparison_median.csv", guarded[1].split("fi", 1)[0])
 
     def test_the_leg_aggregates_before_reporting(self):
         """Publishing a single rep is what #746 had to retract."""

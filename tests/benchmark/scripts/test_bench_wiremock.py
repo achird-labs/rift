@@ -787,10 +787,11 @@ class PublishWorkflow(unittest.TestCase):
         with open(cls.WORKFLOW) as f:
             cls.text = f.read()
 
-    # rift/mb comparison, wiremock, microcks (#900), and the rift-only sweep. The count is asserted
-    # as well as the agreement because "all legs agree" is trivially true of one leg: a refactor that
-    # dropped a `--warmup` would otherwise pass this test while publishing an unwarmed column.
-    BENCHED_LEGS = 4
+    # rift/mb comparison, wiremock, microcks (#900), microcks-only's own rift reps (#900), and the
+    # rift-only sweep. The count is asserted as well as the agreement because "all legs agree" is
+    # trivially true of one leg: a refactor that dropped a `--warmup` would otherwise pass this test
+    # while publishing an unwarmed column.
+    BENCHED_LEGS = 5
 
     def test_all_benched_engines_are_warmed_by_one_and_the_same_expression(self):
         # The whole point of issue #866. Capturing to end-of-line, not to the first space: a regex
@@ -847,10 +848,14 @@ class PublishWorkflow(unittest.TestCase):
         # WireMock-only dispatch must be able to turn it off — and ONLY it. Gating a comparison
         # leg by mistake would publish a table missing an engine.
         self.assertIn("run_sweep:", self.text)
-        gated = [l for l in self.text.splitlines() if "if: inputs.run_sweep" in l]
+        # `inputs.run_sweep` also appears in its own input declaration, so match the step-level `if:`
+        # only. The gate carries a second condition since #900 (a Microcks-only dispatch skips the
+        # sweep too), hence a prefix match rather than an exact one.
+        gated = [l for l in self.text.splitlines() if l.strip().startswith("if:")
+                 and "inputs.run_sweep" in l]
         self.assertEqual(len(gated), 1, "exactly one leg may be gated by run_sweep")
         sweep_at = self.text.index("Rift concurrency sweep")
-        gate_at = self.text.index("if: inputs.run_sweep")
+        gate_at = self.text.index(gated[0].strip())
         self.assertLess(
             abs(self.text[:gate_at].count("\n") - self.text[:sweep_at].count("\n")), 3,
             "the run_sweep gate must sit on the sweep step, not on a comparison leg")

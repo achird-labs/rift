@@ -369,6 +369,26 @@ from a report that claims to cover the suite.
 Every deviation below moves the number in **Microcks'** favour, which is the safe direction for a
 comparison published by Rift. All of them are repeated in the generated report, not just here.
 
+- **Invocation statistics are off** (`mocks.enable-invocation-stats=false`). This one is the
+  exception to the sentence above, and it is the most important knob here: Microcks defaults it to
+  **on**, counting every mock call and persisting a per-service/per-day/per-hour record (verified —
+  500 requests produce `dailyCount: 500` on `/api/metrics/invocations/<service>/<version>`). It is the
+  direct analogue of WireMock's request journal, which *is* disabled in its leg, and Rift and
+  Mountebank are both measured with recording off. Leaving it on would compare
+  Microcks-with-recording against Rift-without — an error that flatters **Rift**, which is the one
+  direction that must never be taken quietly.
+- **The CORS policy is off** (`mocks.rest.enable-cors-policy=false`). It defaults to on and adds four
+  `Access-Control-*` headers to every mock response; neither Rift nor WireMock emits them.
+- **Both are published anyway**, in a secondary `microcks-stock` series — same workload, Microcks
+  launched exactly as it ships (stats on, CORS on, stock Tomcat pool), benched at the headline
+  connection count. It goes in its own CSV under its own engine label so it never enters the headline
+  ratio, and the report renders a *Tuned vs stock defaults* table beside it. Same pattern, and the
+  same reasoning, as `wiremock-stock` (issue #865): a reader has to be able to tell "Microcks is
+  slower" from "Microcks ships with per-request invocation accounting on". `--skip-stock` drops it and
+  halves the wall clock. **On a 10-core laptop at 50 connections the two series land within noise of
+  each other** (deltas scattered both ways, the stock series sometimes ahead), which is what you would
+  expect if the stats write is off the request thread until the CPU saturates — quote the number the
+  report actually prints for the host in question rather than this sentence.
 - **Tomcat's pool is pinned to `max(cores, connections)`.** Its default is 200 while the published
   table drives 256 — benchmarking that would measure the pool, not the engine. Same fairness argument
   as WireMock's `--container-threads`, and `--tomcat-threads N` overrides it.
@@ -401,7 +421,22 @@ Translator logic is gate-tested in `scripts/test_bench_microcks.py`, including t
 property, the query-dispatch collapse, the fatality of an untranslatable predicate, and the
 `benchmark-publish.yml` leg itself. CI runs it via the same `Benchmark Scripts` job.
 
-The publish workflow takes `-f microcks_version=1.14.0` and `-f run_microcks=false` to skip the leg.
+#### Publishing just the Rift-vs-Microcks table
+
+Re-measuring Mountebank and both WireMock series to publish a *Microcks* page is waste: the only
+column that must come from the same dispatch is **Rift**, because it is the ratio's denominator.
+WireMock's figures are already published and are cited rather than re-measured.
+
+```
+gh workflow run benchmark-publish.yml \
+  -f runner=ubuntu-16core -f reps=3 -f duration=20s -f connections=256 -f warmup=10s \
+  -f microcks_only=true
+```
+
+`microcks_only=true` skips the Mountebank, WireMock and sweep legs and has the Microcks leg run its
+own Rift reps at the same settings — roughly 30 minutes instead of ~2 hours. The WireMock column in
+the growth table renders as `—`. `-f run_microcks=false` skips the leg entirely in a full dispatch,
+and `-f microcks_version=` pins the version.
 
 ### Matching-dimension scenarios (Rift-only, additive)
 

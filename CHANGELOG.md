@@ -42,13 +42,26 @@ record.
   are emitted as raw strings so Microcks' bytes stay identical to Rift's and the existing body-marker
   assertion keeps its strength.
 
-  Fairness deviations all move the number in Microcks' favour and are repeated in the generated
+  Most fairness deviations move the number in Microcks' favour and are repeated in the generated
   report: Tomcat's pool pinned above the offered concurrency (its 200 default sits below the published
   256), heap pinned so a runner and a laptop agree, one imposter per JVM so its resident corpus
   matches WireMock's, AsyncAPI off, logging at WARN (per #718), and an in-memory store. Nothing runs
   in a container at bench time — the measured process is a native JVM, like WireMock's.
 
-  Wired into `benchmark-publish.yml` behind `run_microcks` with a pinned `microcks_version`.
+  **One deviation runs the other way and so is handled explicitly.** Microcks defaults
+  `mocks.enable-invocation-stats` to *on*, counting and persisting a record for every mock call — the
+  direct analogue of WireMock's request journal, which is disabled in its leg, while Rift and
+  Mountebank are both measured with recording off. Leaving it on would compare
+  Microcks-with-recording against Rift-without, an error that flatters *Rift*. It is therefore off in
+  the headline series, together with the CORS policy that adds four `Access-Control-*` headers Rift
+  never emits — and both are published anyway in a secondary `microcks-stock` series (stats on, CORS
+  on, stock Tomcat pool) so the out-of-the-box number sits beside the tuned one, exactly as
+  `wiremock-stock` does for #865.
+
+  Wired into `benchmark-publish.yml` behind `run_microcks` with a pinned `microcks_version`, plus
+  `microcks_only` for a standalone Rift-vs-Microcks dispatch that skips the Mountebank, WireMock and
+  sweep legs and measures its own Rift reps (~30min rather than ~2h; Rift is the only column that
+  must come from the same dispatch, being the ratio's denominator).
   Benchmark-only: no engine, API or configuration change.
 
 - **Serve options are now feature-detectable — `serveOptions` on `rift_build_info` and `GET /config`**
