@@ -501,7 +501,7 @@ pub(crate) struct StubResponseRaw {
     #[serde(rename = "_rift", skip_serializing_if = "Option::is_none")]
     pub rift: Option<RiftResponseExtension>,
     /// Flat / recorded response form (issue #304): `statusCode`/`headers`/`body`/`_mode` at the
-    /// top level with no `is` wrapper (the shape emitted by recorded/Mimeo-solo mocks). Mountebank
+    /// top level with no `is` wrapper (the shape emitted by recorded/migrated mocks). Mountebank
     /// renders these exactly like `is: { … }`. `is` still takes precedence when both are present.
     #[serde(default, deserialize_with = "deserialize_optional_status_code")]
     pub status_code: Option<u16>,

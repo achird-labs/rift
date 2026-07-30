@@ -1,7 +1,7 @@
 {
   "port": 4520,
   "protocol": "http",
-  "name": "20 · mimeo-solo migration compat — Mountebank forms real cof-primary repos use",
+  "name": "20 · migration compat — Mountebank forms real-world repos use",
   "allowCORS": true,
   "recordRequests": true,
   "stubs": [
@@ -18,7 +18,7 @@
       }]
     },
     {
-      "scenarioName": "THub Transactions (ledger) — anchored regex path (rift-verify-synthesizable; the raw [a-zA-Z0-9+=%/]+ char-class variant is driven dynamically in conformance-migration.sh)",
+      "scenarioName": "Transactions (ledger) — anchored regex path (rift-verify-synthesizable; the raw [a-zA-Z0-9+=%/]+ char-class variant is driven dynamically in conformance-migration.sh)",
       "predicates": [{ "matches": { "path": "^/deposits/accounts/[0-9]+/transactions$", "method": "GET" } }],
       "responses": [{
         "is": {
@@ -47,11 +47,11 @@
       }]
     },
     {
-      "scenarioName": "LLDS retrieve (saffron) — rooted jsonpath selector routing",
+      "scenarioName": "Dataset retrieve — rooted jsonpath selector routing",
       "predicates": [
         { "equals": { "body": "3U5mJmLnK" }, "jsonpath": { "selector": "$.searchValue" } },
         { "deepEquals": { "method": "POST" } },
-        { "equals": { "path": "/llds/retrieve-dataset" } }
+        { "equals": { "path": "/dataset/retrieve" } }
       ],
       "responses": [{
         "is": {
@@ -62,7 +62,7 @@
       }]
     },
     {
-      "scenarioName": "Valuation (Inventory/RENUW) — rules alias + rooted jsonpath + equals-on-headers routing + delayRange + inline decorate (real rules+decorate shape)",
+      "scenarioName": "Valuation (Inventory) — rules alias + rooted jsonpath + equals-on-headers routing + delayRange + inline decorate (real rules+decorate shape)",
       "rules": [
         { "equals": { "body": "4T1BF3EK5BU211477" }, "jsonpath": { "selector": "$.bookValueRequests[0].valuationByVin.vin" } },
         { "equals": { "method": "POST" } },
@@ -94,7 +94,7 @@
       }
     },
     {
-      "scenarioName": "hello-world (RENUW scaffold) — behaviors ARRAY [wait, decorate] + proxy:null alongside is",
+      "scenarioName": "hello-world (scaffold) — behaviors ARRAY [wait, decorate] + proxy:null alongside is",
       "predicates": [
         { "deepEquals": { "path": "/hello-world" } },
         { "deepEquals": { "method": "GET" } }
@@ -107,13 +107,13 @@
         "is": {
           "statusCode": "200",
           "headers": { "Content-type": "application/json", "Accept": "application/json;v=1" },
-          "body": "{\"message\": \"Hello world from Mimeo Solo!\"}"
+          "body": "{\"message\": \"Hello world!\"}"
         },
         "proxy": null
       }]
     },
     {
-      "scenarioName": "Promote offer 204 (auto-digital) — contains predicate + STRING statusCode 204 + empty body",
+      "scenarioName": "Promote offer 204 — contains predicate + STRING statusCode 204 + empty body",
       "predicates": [
         { "contains": { "path": "204204" } },
         { "deepEquals": { "method": "POST" } }
