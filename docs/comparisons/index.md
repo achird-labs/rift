@@ -11,6 +11,9 @@ How Rift relates to the other mock servers you might be choosing between.
 
 - [Rift vs WireMock]({{ site.baseurl }}/comparisons/wiremock/) — the JVM incumbent, and the
   comparison most teams evaluating Rift actually care about.
+- [Rift vs Microcks]({{ site.baseurl }}/comparisons/microcks/) — the Apache-2.0, CNCF-incubating
+  alternative. Spec-driven rather than stub-driven, and it does contract testing and seven protocols
+  Rift does not, so the overlap is narrower than the throughput table suggests.
 
 For Mountebank, the relationship is different in kind: Rift implements Mountebank's admin API
 and loads its `imposters.json` unchanged, so the relevant page is

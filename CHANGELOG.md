@@ -28,6 +28,60 @@ record.
 
 ### Added
 
+- **Microcks is now a benchmark subject — `tests/benchmark/scripts/bench_microcks.py`** (issue #900).
+  The stub-growth claim was only ever demonstrated against WireMock, a commercial alternative;
+  Microcks is the Apache-2.0, CNCF-incubating one a buyer usually reaches first, and we had no data on
+  how it behaves as stub count grows.
+
+  Microcks is **spec-driven rather than stub-authored**, so the suite generates an OpenAPI 3.0.2
+  document per imposter instead of stubs, translating "N stubs" as "N `path` × `verb` operations" —
+  the nearest honest analogue, and a translation rather than an identity. **Only six of the thirteen
+  scenarios are comparable**; the other seven are refused with a stated reason rather than
+  approximated, because an approximation publishes a ratio between two different workloads, and a
+  scenario added to the fixture now fails the run until it is classified either way. Response bodies
+  are emitted as raw strings so Microcks' bytes stay identical to Rift's and the existing body-marker
+  assertion keeps its strength.
+
+  Most fairness deviations move the number in Microcks' favour and are repeated in the generated
+  report: Tomcat's pool pinned above the offered concurrency (its 200 default sits below the published
+  256), heap pinned so a runner and a laptop agree, one imposter per JVM so its resident corpus
+  matches WireMock's, AsyncAPI off, logging at WARN (per #718), and an in-memory store. Nothing runs
+  in a container at bench time — the measured process is a native JVM, like WireMock's.
+
+  **One deviation runs the other way and so is handled explicitly.** Microcks defaults
+  `mocks.enable-invocation-stats` to *on*, counting and persisting a record for every mock call — the
+  direct analogue of WireMock's request journal, which is disabled in its leg, while Rift and
+  Mountebank are both measured with recording off. Leaving it on would compare
+  Microcks-with-recording against Rift-without, an error that flatters *Rift*. It is therefore off in
+  the headline series, together with the CORS policy that adds four `Access-Control-*` headers Rift
+  never emits — and both are published anyway in a secondary `microcks-stock` series (stats on, CORS
+  on, stock Tomcat pool) so the out-of-the-box number sits beside the tuned one, exactly as
+  `wiremock-stock` does for #865.
+
+  Wired into `benchmark-publish.yml` behind `run_microcks` with a pinned `microcks_version`, plus
+  `microcks_only` for a standalone Rift-vs-Microcks dispatch that skips the Mountebank, WireMock and
+  sweep legs and measures its own Rift reps (~30min rather than ~2h; Rift is the only column that
+  must come from the same dispatch, being the ratio's denominator).
+  Benchmark-only: no engine, API or configuration change.
+
+- **Published the measured comparison — `docs/comparisons/microcks.md`** (issue #900). AMD EPYC 7763,
+  16 vCPU, 256 connections, median of 3 reps (spread ≤3.3% Microcks / ≤2.7% Rift). Rift is
+  **13.6x–54.6x** Microcks on the HTTP matching path, with a p99 of ~2.4 ms against 75–250 ms.
+
+  The result worth reading is the *mechanism*, not the multiple. Over the trivial-stub → 310-stub
+  interval Microcks loses **60%** and Rift **3%**, so the flat-under-stub-growth claim does
+  generalise — but Microcks' three API points sit within **0.6%** of each other, meaning stub
+  *position* costs it nothing. WireMock loses 69% on that same within-corpus interval. So Microcks
+  does **not** pay per candidate the way Mountebank and WireMock do, and the page says so: against
+  Microcks the advantage is absolute throughput and tail latency, not scan behaviour. The page also
+  states what the data does *not* support — including that the 60% mixes corpus size with payload,
+  and that the cited WireMock column came from a different physical CPU in the same runner pool, so
+  each column is sound read downwards but the cross-column absolutes are not.
+
+  Also records that turning Microcks' invocation-stats and CORS defaults off — the fairness change
+  above — was worth **nothing measurable** (−4% to +2%, scattered both ways), which is published
+  rather than dropped now that it is no longer a dramatic number.
+
 - **Serve options are now feature-detectable — `serveOptions` on `rift_build_info` and `GET /config`**
   (issue #877). `ServeOptions` fields have no symbol for an SDK to probe, so the "additive symbols are
   discovered by presence" convention `rift_abi_version` documents could not reach them: an SDK sending
