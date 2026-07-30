@@ -370,7 +370,7 @@ impl ServerBuilder {
     ///
     /// Repeatable. The `file:` and `https:` built-ins are always registered; claiming a scheme
     /// that is already taken is a startup error rather than a silent override, so an embedder
-    /// that shadows a built-in finds out immediately. This is the seam the enterprise
+    /// that shadows a built-in finds out immediately. This is the seam the cluster
     /// `git:`/`s3:`/`registry:` providers attach through.
     #[must_use]
     pub fn imposter_source(mut self, source: Arc<dyn ImposterSource>) -> Self {
@@ -737,7 +737,7 @@ impl RunningServer {
     /// testing what your code does when the admin plane dies (issue #825).
     ///
     /// An embedder that races [`wait`](Self::wait) and propagates the outcome to process exit
-    /// (rift-enterprise #42) cannot otherwise reach that `Err` path from outside this crate: the
+    /// (rift-cluster #42) cannot otherwise reach that `Err` path from outside this crate: the
     /// real accept loop only fails by genuinely breaking the listener. Pass a future returning
     /// `Err` (or one that panics) and assert your reaction.
     ///
