@@ -710,7 +710,7 @@ async fn running_server_wait_completes_when_shutdown_from_another_task() {
     assert!(waited.is_ok(), "a shutdown-driven exit is not an error");
 }
 
-// AC2: the rift-enterprise pattern — race wait() against a termination signal. The signal wins,
+// AC2: the rift-cluster pattern — race wait() against a termination signal. The signal wins,
 // and the arm that wins can still call shutdown(): proof the select! borrow has ended.
 #[tokio::test]
 async fn running_server_wait_loses_race_to_signal_then_shuts_down() {

@@ -83,8 +83,8 @@ pub trait ResponseDecorator: Send + Sync {
 ///   ride inside the error object rather than being flattened into `message`, because naming
 ///   *which* backend failed is this door's whole purpose.
 /// - top-level `error`/`feature`/`detail` — the legacy 0.15.0 keys, **frozen**. Deprecated in
-///   0.16.0, removed in 0.17.0 by issue #801. They stay because `rift-enterprise` parses
-///   them today; dropping them here would break the distributed edition mid-bump.
+///   0.16.0, removed in 0.17.0 by issue #801. They stay because `rift-cluster` parses
+///   them today; dropping them here would break the cluster mid-bump.
 pub fn backend_error_response(err: &anyhow::Error) -> Response<Full<Bytes>> {
     let (status, body) = match err.downcast_ref::<BackendUnavailable>() {
         Some(b) => (

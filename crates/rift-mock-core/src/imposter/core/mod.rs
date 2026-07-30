@@ -281,7 +281,7 @@ impl Imposter {
     /// Normally always true. It is false only for an imposter registered under
     /// [`ImposterManager::with_serve_unbound`] (issue #143) after its port bind failed: it has no
     /// accept loop, but it is in the port map and therefore still answers every in-process route
-    /// (the gateway and, in the enterprise build, the front door) — both resolve through
+    /// (the gateway and, in the cluster build, the front door) — both resolve through
     /// `get_imposter`, and request handling reads none of the accept-loop machinery.
     ///
     /// Derived from [`Self::serve_handles`] rather than tracked in a separate flag: the manager

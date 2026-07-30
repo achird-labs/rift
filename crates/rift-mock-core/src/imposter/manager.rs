@@ -4517,7 +4517,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Issue #143 (enterprise RFC-001 §7.4.6): serve an imposter whose port could
+    // Issue #143 (rift-cluster RFC-001 §7.4.6): serve an imposter whose port could
     // not be bound. Opt-in, apply-path only — a clustered node must keep serving
     // the imposter in-process (front door / gateway both resolve through the port
     // map) when an unrelated process holds its port on that one node.
@@ -4576,7 +4576,7 @@ mod tests {
 
         // AC1 + AC2: with the flag on, the imposter is registered in the port map (which is
         // what both in-process addressing routes resolve through) and the bind failure is
-        // still reported under `failed` — NOT `created`, so the enterprise gauge and the
+        // still reported under `failed` — NOT `created`, so the cluster gauge and the
         // `local-engine=` warning keep firing off exactly the field they already read.
         #[tokio::test]
         async fn an_unbound_apply_registers_the_imposter_and_reports_the_bind_failure() {
@@ -4612,7 +4612,7 @@ mod tests {
             assert!(
                 !report.created.contains(&19611),
                 "an unbound imposter is not a completed create — reporting it as one would \
-                 clear the enterprise apply-failure entry and the gauge with it"
+                 clear the cluster apply-failure entry and the gauge with it"
             );
             drop(blocker);
         }
@@ -4648,7 +4648,7 @@ mod tests {
             assert!(
                 report.created.contains(&19612),
                 "a successful rebind reports the port as created — that is what clears the \
-                 enterprise apply-failure entry and the gauge: {report:?}"
+                 cluster apply-failure entry and the gauge: {report:?}"
             );
             assert!(
                 failure_for(&report, 19612).is_none(),
@@ -4670,7 +4670,7 @@ mod tests {
             manager.delete_imposter(19612).await.expect("delete");
         }
 
-        // The rebind attempt must keep re-reporting while it keeps failing, so the enterprise
+        // The rebind attempt must keep re-reporting while it keeps failing, so the cluster
         // failure entry carries a current reason rather than a stale one from the first apply.
         #[tokio::test]
         async fn a_still_squatted_port_reports_the_failure_on_every_apply() {

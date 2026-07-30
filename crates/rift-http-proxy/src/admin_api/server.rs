@@ -314,7 +314,7 @@ impl RunningAdminApi {
     /// The real [`bind`](AdminApiServer::bind) can only fail its accept loop by genuinely breaking
     /// the listener, so the exactly-once error delivery of [`wait`](Self::wait) / [`join`](Self::join)
     /// — and the [`ReleaseWaiters`] drop guard behind it — is otherwise unreachable from outside this
-    /// crate. An embedder that propagates a `RunningServer` outcome to process exit (rift-enterprise
+    /// crate. An embedder that propagates a `RunningServer` outcome to process exit (rift-cluster
     /// #42) needs to prove it reacts correctly, so pass a future that returns `Err`, or panics, and
     /// assert what your code does with it.
     ///

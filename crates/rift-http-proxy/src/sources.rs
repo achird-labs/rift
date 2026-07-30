@@ -2,7 +2,7 @@
 //!
 //! A source is a scheme plus a way to turn a [`SourceRef`] into imposter configs. Two are built
 //! in — `file:` and `https:` — and embedders register their own with
-//! [`crate::server::ServerBuilder::imposter_source`]; that is how the enterprise `git:`/`s3:`/
+//! [`crate::server::ServerBuilder::imposter_source`]; that is how the cluster `git:`/`s3:`/
 //! `registry:` providers attach without this crate knowing they exist.
 //!
 //! Two properties are load-bearing and easy to lose in a refactor:
@@ -48,7 +48,7 @@ impl SourceRef {
     ///
     /// A bare path is `file`, so `--imposters mocks.json` works like `--configfile mocks.json`.
     /// The `://` form is checked before the bare `scheme:` form so that a compound scheme such as
-    /// `git+https://…` (an enterprise provider) resolves to `git+https` rather than to `git`.
+    /// `git+https://…` (a cluster provider) resolves to `git+https` rather than to `git`.
     pub fn scheme(&self) -> &str {
         match self.uri.split_once("://") {
             Some((scheme, _)) => scheme,
@@ -481,7 +481,7 @@ mod tests {
         assert_eq!(SourceRef::new("file:mocks.json").scheme(), "file");
         assert_eq!(SourceRef::new("https://h/i.json").scheme(), "https");
         assert_eq!(SourceRef::new("http://h/i.json").scheme(), "http");
-        // The enterprise providers (#136) ride the same dispatch; `git+https` must not be read
+        // The cluster providers (#136) ride the same dispatch; `git+https` must not be read
         // as `git`, or a compound scheme would collide with a plain one.
         assert_eq!(
             SourceRef::new("git+https://h/r#main:p").scheme(),

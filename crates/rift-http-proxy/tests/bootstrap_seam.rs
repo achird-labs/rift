@@ -1,5 +1,5 @@
 //! Issue #807: `--rcfile`, `stop`, `restart` and `save` were private functions in the `rift`
-//! binary's `main.rs`, so an alternative binary (rift-enterprise's `rift-ee-server`) could only
+//! binary's `main.rs`, so an alternative binary (rift-cluster's `rift-cluster-server`) could only
 //! reach them by copy-paste — forking behaviour that is meant to stay shared.
 //!
 //! This suite is deliberately an *integration* test: it compiles as an external crate, so it fails
@@ -559,7 +559,7 @@ fn stop_for_restart_stops_a_live_process() {
 //
 // This suite is an integration test on purpose: it compiles as an external crate, so it only
 // builds if the constructors are genuinely public under the `test-util` feature — which is the
-// property the issue is about (rift-enterprise could not reach the accept-loop Err path at all).
+// property the issue is about (rift-cluster could not reach the accept-loop Err path at all).
 
 #[tokio::test]
 async fn running_server_admin_failure_is_observable_by_an_embedder() {

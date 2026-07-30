@@ -2,7 +2,7 @@
 //!
 //! `--rcfile` defaults, `stop`/`restart` PID-file handling, and `--save` were originally private
 //! functions in the `rift` binary's `main.rs`. That made them unreachable from an alternative
-//! binary composed on top of this crate (e.g. rift-enterprise's `rift-ee-server`), which could
+//! binary composed on top of this crate (e.g. rift-cluster's `rift-cluster-server`), which could
 //! only get the same behaviour by copy-pasting the functions — a fork of behaviour that is meant
 //! to stay identical across binaries. Promoting them here, unchanged, gives every binary a single
 //! shared implementation instead.
