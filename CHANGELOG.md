@@ -64,6 +64,24 @@ record.
   must come from the same dispatch, being the ratio's denominator).
   Benchmark-only: no engine, API or configuration change.
 
+- **Published the measured comparison — `docs/comparisons/microcks.md`** (issue #900). AMD EPYC 7763,
+  16 vCPU, 256 connections, median of 3 reps (spread ≤3.3% Microcks / ≤2.7% Rift). Rift is
+  **13.6x–54.6x** Microcks on the HTTP matching path, with a p99 of ~2.4 ms against 75–250 ms.
+
+  The result worth reading is the *mechanism*, not the multiple. Over the trivial-stub → 310-stub
+  interval Microcks loses **60%** and Rift **3%**, so the flat-under-stub-growth claim does
+  generalise — but Microcks' three API points sit within **0.6%** of each other, meaning stub
+  *position* costs it nothing. WireMock loses 69% on that same within-corpus interval. So Microcks
+  does **not** pay per candidate the way Mountebank and WireMock do, and the page says so: against
+  Microcks the advantage is absolute throughput and tail latency, not scan behaviour. The page also
+  states what the data does *not* support — including that the 60% mixes corpus size with payload,
+  and that the cited WireMock column came from a different physical CPU in the same runner pool, so
+  each column is sound read downwards but the cross-column absolutes are not.
+
+  Also records that turning Microcks' invocation-stats and CORS defaults off — the fairness change
+  above — was worth **nothing measurable** (−4% to +2%, scattered both ways), which is published
+  rather than dropped now that it is no longer a dramatic number.
+
 - **Serve options are now feature-detectable — `serveOptions` on `rift_build_info` and `GET /config`**
   (issue #877). `ServeOptions` fields have no symbol for an SDK to probe, so the "additive symbols are
   discovered by presence" convention `rift_abi_version` documents could not reach them: an SDK sending

@@ -396,6 +396,13 @@ These are architecture comparisons, not quality judgements. Both engines are wel
 widely adopted than Rift, and each does things Rift does not — see
 [Rift vs WireMock]({{ site.baseurl }}/comparisons/wiremock/) for both directions.
 
+**Microcks** is compared separately, in [Rift vs Microcks]({{ site.baseurl }}/comparisons/microcks/),
+and is deliberately *not* a row in the table above: its figures come from a different dispatch, and
+the table's value is that every cell in it came from one run on one host. That page also carries the
+more interesting finding — Microcks does **not** pay per candidate stub the way Mountebank and
+WireMock do (stub *position* costs it nothing), so "throughput stays flat" distinguishes Rift from
+Microcks on absolute throughput and tail latency rather than on scan behaviour.
+
 <sub>WireMock and WireMock Cloud are products of WireMock Inc.; Mountebank is an independent open
 source project. Rift is not affiliated with, endorsed by, or derived from either. All comparative
 claims here are measured, and the harness is published so they can be checked.</sub>
