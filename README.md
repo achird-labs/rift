@@ -28,7 +28,7 @@ much of the gap is the engine and how much is the hardware:
 | Workload | Apple M4 laptop<br><sub>Mountebank → Rift</sub> | AMD EPYC 9V74, 16 vCPU<br><sub>Mountebank → Rift</sub> |
 |:---------|:--------------------------|:----------------------------|
 | Simple static stub | 8,898 → 214,818 RPS (**24x**) | 5,982 → 324,952 RPS (**54x**) |
-| Deep path match (410 stubs) | 1,344 → 209,523 RPS (**156x**) | 542 → 322,530 RPS (**595x**) |
+| Deep path match (310 stubs) | 1,344 → 209,523 RPS (**156x**) | 542 → 322,530 RPS (**595x**) |
 | Complex AND/OR predicates | 4,703 → 191,987 RPS (**41x**) | 1,814 → 259,548 RPS (**143x**) |
 | JSON body equals | 7,611 → 199,670 RPS (**26x**) | 2,730 → 294,294 RPS (**108x**) |
 | JSONPath predicate | 4,312 → 199,404 RPS (**46x**) | 1,921 → 304,796 RPS (**159x**) |
@@ -57,12 +57,12 @@ WireMock is the most widely used JVM mock server. Same suite, same host, same lo
 | Workload | WireMock → Rift | p99 |
 |:---------|:----------------|:----|
 | Simple static stub | 83,048 → 334,025 RPS (**4.0x**) | 7.0 ms → 2.4 ms |
-| Deep path match (410 stubs) | 24,264 → 326,779 RPS (**13.5x**) | 31.6 ms → 2.5 ms |
+| Deep path match (310 stubs) | 24,264 → 326,779 RPS (**13.5x**) | 31.6 ms → 2.5 ms |
 | Regex path (100 patterns) | 48,982 → 311,815 RPS (**6.4x**) | — |
 | JSON body equals | 63,814 → 314,939 RPS (**4.9x**) | — |
 | Query match (last of 100) | 20,529 → 190,867 RPS (**9.3x**) | — |
 
-Rift stays roughly flat from a trivial stub to a 410-stub deep match (334k → 327k); WireMock falls
+Rift stays roughly flat from a trivial stub to a 310-stub deep match (334k → 327k); WireMock falls
 from 83k to 24k. That shape matters more than the headline multiple.
 
 This is an architecture comparison, not a quality judgement. WireMock is mature, well-engineered,
@@ -81,6 +81,49 @@ request journal is off, matching how Rift and Mountebank are measured. Ratios mo
 concurrency — the same suite at **50** connections measures 3.1x-8.1x — so always quote the
 connection count. Full methodology, both connection points, all 13 scenarios and two caveats we do
 not bury: [docs/performance](docs/performance/index.md#rift-vs-wiremock).</sub>
+
+#### vs Microcks
+
+[Microcks](https://microcks.io/) is the Apache-2.0, CNCF-incubating alternative, and the one many
+teams reach for before a commercial tool. Same suite, same load — **Rift is 13.6x–54.6x its
+throughput** on the HTTP matching path:
+
+| Workload | Microcks → Rift | p99 |
+|:---------|:----------------|:----|
+| Simple static stub | 16,192 → 347,604 RPS (**21.5x**) | 78.9 ms → 2.3 ms |
+| API first stub (1st of 310) | 6,457 → 338,592 RPS (**52.4x**) | 239.3 ms → 2.4 ms |
+| Deep path match (310 stubs) | 6,420 → 338,404 RPS (**52.7x**) | 238.0 ms → 2.4 ms |
+| No match | 6,487 → 354,170 RPS (**54.6x**) | 166.2 ms → 2.3 ms |
+| Query match (last of 100) | 14,397 → 195,966 RPS (**13.6x**) | 74.8 ms → 4.0 ms |
+
+**That multiple is larger than WireMock's, and it is the least interesting thing here.** Microcks is
+not a slower mock server so much as a different kind of product: a spec-driven mocking *and contract
+testing* platform, with a web UI, multi-tenancy and eight protocols, built on Spring Boot with a
+datastore behind it. Raw stub-serving throughput is not what it was built for, and for most of its
+users it is not the binding constraint. Quoting 54x without that context would be misleading.
+
+The genuinely interesting result is the *shape*. Microcks' first, middle and last API points land
+within **0.6%** of each other, so — like Rift, and unlike WireMock and Mountebank — **stub position
+costs it nothing**; it resolves by path and verb rather than scanning candidates. So against Microcks
+Rift's advantage is absolute throughput and tail latency, not scan behaviour, and the "competitors
+pay per candidate stub" story does not apply to it.
+
+Where Microcks is better, plainly: it generates mocks from OpenAPI/AsyncAPI/Postman specs so they
+cannot drift from your contract, it does contract testing against a live implementation, it speaks
+seven protocols Rift does not (AsyncAPI, Kafka, MQTT, AMQP, WebSocket, gRPC, GraphQL), and it has
+CNCF governance behind it. Rift has none of that. If your workflow starts from a spec or leaves HTTP,
+Microcks is the right tool and this table is beside the point.
+[Rift vs Microcks](https://achird-labs.github.io/rift/comparisons/microcks/) covers both directions.
+
+<sub>AMD EPYC 7763, 16 vCPU (GitHub `ubuntu-16core`), 2026-07-30. Microcks 1.14.0 on Temurin 21 as a
+native JVM (no container — a container's virtualised network is not a property of the engine) vs Rift
+from source. `oha` at **256 keep-alive connections**, 20s/scenario after a 10s warmup, each engine run
+alone. Median of 3 reps; spread ≤3.3% (Rift ≤2.7%). Microcks' per-request invocation statistics and
+CORS policy are off, matching how WireMock's request journal is off and how Rift is measured — that
+change turned out to be worth nothing measurable (−4% to +2%), and the stock-defaults column is
+published anyway. Six of the 13 scenarios are comparable; the other seven are listed with the reason
+each is excluded rather than approximated. Full methodology, the stock-defaults column, and what the
+data does *not* support: [docs/comparisons/microcks](docs/comparisons/microcks.md).</sub>
 
 ### Full Feature Support
 

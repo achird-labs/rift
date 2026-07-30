@@ -13,6 +13,18 @@ record.
 
 ### Fixed
 
+- **The published benchmark tables labelled the flagship row with the wrong stub count** (issue #906).
+  Every comparison table called the deep-path-match scenario "410 stubs", and the latency table called
+  it "last of 500"; `api_stubs()` in the shared fixture produces **310**
+  (10 resources × (1 collection + 10 items × 3 verbs)), and has done since before those numbers were
+  published. 13 occurrences across `README.md`, `docs/performance/index.md` and
+  `docs/comparisons/wiremock.md`, all now 310.
+
+  The measured RPS and latency figures were never in question — only the label. But it overstated the
+  corpus by a third on the row that carries Rift's central performance claim, on pages that
+  explicitly invite adversarial re-checking, where a reader who reproduces the harness counts 310 and
+  concludes the headline was inflated. Found while deriving the stub-count ladder for #900.
+
 - **Server-level `flowState.ttlSeconds` below 1 is now rejected** (issue #860). The per-imposter
   path has refused a non-positive TTL at construction since #530, but the server-level
   `flowState` block had no such check: `ttlSeconds: 0` was accepted and then misbehaved late and
@@ -63,6 +75,33 @@ record.
   sweep legs and measures its own Rift reps (~30min rather than ~2h; Rift is the only column that
   must come from the same dispatch, being the ratio's denominator).
   Benchmark-only: no engine, API or configuration change.
+
+- **The Microcks comparison is now on the README, and "Why Is Rift Faster?" explains the actual
+  architecture** (issue #900 follow-up). Two changes to how the performance story is told.
+
+  The README carries the Rift-vs-Microcks table beside the Mountebank and WireMock ones. The multiple
+  is larger than WireMock's (13.6x-54.6x), which is exactly why the section leads with the context
+  rather than the number: Microcks is a spec-driven mocking *and contract testing* platform with a UI,
+  a datastore and eight protocols, so stub-serving throughput is not what it was built for, and it
+  does **not** pay per candidate stub — stub position costs it 0.6%. Where Microcks is better is
+  stated in the same breath.
+
+  `docs/performance/index.md` previously answered "why is Rift faster" almost entirely with the
+  implementation stack — native code, no GC, async I/O — and described the matcher as "Stub matching:
+  Optimized matching". That undersold the part that actually produces the flat curve. It now documents
+  the real design: a two-stage matcher whose Stage-1 prefilter is the **Lucent bit-vector technique
+  from packet classification**, six independent dimensions intersected as dense bitsets over
+  declaration-ordered stub ids (so ascending iteration *is* first-match-wins order, making the
+  optimization semantics-preserving by construction), the over-approximation soundness rule that
+  keeps it safe, the data structure behind each dimension (fixed method slots, a folded-path hash map,
+  one Aho-Corasick automaton for path literals, one multi-pattern automaton for path regexes, a
+  structural body hash, a quamina field automaton), and the cheapest-first fold that short-circuits on
+  an empty candidate set. Plus a "what this does not buy you" section, since an imposter that indexes
+  on nothing falls back to the scan.
+
+  The split is the point: **architecture explains the shape, the stack explains the constant factor**,
+  and Microcks is the evidence they are independent — it is indexed too, so it is flat by position,
+  and the gap against it is constant factor alone.
 
 - **Published the measured comparison — `docs/comparisons/microcks.md`** (issue #900). AMD EPYC 7763,
   16 vCPU, 256 connections, median of 3 reps (spread ≤3.3% Microcks / ≤2.7% Rift). Rift is
