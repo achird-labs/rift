@@ -14,7 +14,18 @@ configs, with sub-millisecond tail latency that stays flat as stub count grows.
 
 ## Benchmark Summary
 
-The suite was run on two deliberately different hosts. Publishing both is the point:
+Three comparisons live on this page, each with its own hardware, date and engine versions, because
+mixing them would produce a number nothing measured:
+
+- **[vs Mountebank](#benchmark-summary)** (below) — two hosts, 50 connections, 2026-07-20.
+- **[vs WireMock](#rift-vs-wiremock)** — 256 and 50 connections, 2026-07-27.
+- **[vs Microcks](#rift-vs-microcks)** — 256 connections, 2026-07-30.
+
+And if you only read one section, read [Why Is Rift Faster?](#why-is-rift-faster) — the flat curve is
+the matching architecture, not the language, and the three comparisons above are what separate those
+two claims.
+
+The Mountebank suite was run on two deliberately different hosts. Publishing both is the point:
 the multiplier depends heavily on the machine, and a single number would overstate
 the result.
 
@@ -90,30 +101,153 @@ issue #423 fixed) takes Rift 6.6ms vs Mountebank's 114.7ms, and grows memory +9M
 
 ## Why Is Rift Faster?
 
-### Architecture Comparison
+The usual answer is "it is written in Rust", and that is genuinely a large part of it: native code,
+no GC pauses showing up in the tail, a work-stealing async runtime, and parsing that avoids copying.
+Those are real and they are why each individual request is cheap.
+
+But it is only half the answer, and it is the half that always gets said. The other half is the
+**matching architecture** — how Rift decides *which* stub answers a request — and that is what
+governs the shape of the curve: whether throughput holds as your stub count grows, or slides. Rift's
+matcher is an index, not a scan.
+
+The two compound rather than compete. The architecture decides how much work a request costs at all;
+the implementation decides how fast that work runs. Every number on this page is the product of both,
+and the same design in a slower runtime, or the same runtime over a linear scan, would give up a
+different part of the result.
+
+Microcks is a useful check on the distinction. It is *also* indexed rather than scanning, so it is
+also flat by stub position — which is why the gap against it is mostly per-request cost rather than
+scaling. Mountebank and WireMock do scan, so against them the gap *widens* with stub count. Same
+engine, two different shapes, for two different reasons.
+
+The architecture is the part that is usually left out, so it goes first.
+
+### The matching architecture
+
+Naively, "does this request match any of my stubs" is a linear scan: evaluate every stub's
+predicates until one matches. That is what Mountebank does, and it is why its per-request cost tracks
+stub count. Rift splits it in two
+([`crates/rift-mock-core/src/imposter/core/`](https://github.com/achird-labs/rift/tree/master/crates/rift-mock-core/src/imposter/core)):
+
+**Stage 1 — a candidate prefilter** (`stub_index.rs`) narrows thousands of stubs to the handful that
+*could* match. **Stage 2 — full predicate evaluation** (`matching.rs`) is the unchanged Mountebank
+semantics, and remains the single source of truth. Stage 1 only ever decides what Stage 2 does not
+need to look at.
+
+#### Dimensions and a bitset intersection
+
+The index is a set of independent **dimensions** — six of them, over four request attributes (the
+path carries three, one each for exact, literal and regex constraints). Each answers one question:
+*which stubs can this attribute not rule out?* The answers are **dense bitsets over stub
+ids**, and a stub's id is its position in the declaration-ordered stub vector — so a candidate set is
+a fixed-width bitset rather than a list of indices. `candidates()` ANDs the per-dimension bitsets and
+walks the surviving bits in ascending order.
+
+This is the **Lucent bit-vector technique from packet classification**, applied to stub matching:
+each dimension prunes independently, and the intersection is the candidate set. Three consequences
+worth stating:
+
+- **Ascending bit order *is* Mountebank's first-match-wins order**, so *ordering* is a property of
+  the data structure rather than something a test has to cover. Note the limit of that guarantee: it
+  fixes the order of the candidates, not which stubs are in the set — see the soundness rule below.
+- **Word-wise `AND` autovectorizes**, and the bitsets are small enough to stay in cache: 4,096 stubs
+  is 512 bytes. It is hand-rolled rather than pulling in `roaring`/`fixedbitset` because the only
+  operations needed are intersect, union and ascending iteration, and at this scale a dense word
+  vector beats a compressed one.
+- **Dimensions are concrete struct fields, not `Box<dyn Dimension>`**, so the match loop dispatches
+  statically and allocates nothing *extra* for dispatch. (Matching is not allocation-free: the
+  accumulator and a per-dimension scratch bitset are allocated per request, and a path containing
+  uppercase bytes allocates a folded copy.)
+
+#### The soundness rule
+
+Each dimension's bitset is `matched_bits | always_bits`: stubs whose constraint the request
+satisfies, **plus** every stub that either does not constrain this attribute or constrains it in a
+shape the dimension cannot index.
+
+> A dimension may only ever exclude a stub it can *prove* cannot match.
+
+So the index is a strict **over-approximation** — `candidates()` returns a superset of the true
+matches. That is what makes the whole thing safe in one direction: a dimension that keeps *too many*
+stubs costs only performance, so widening a dimension's eligibility later is a pure optimization and
+never a semantics question.
+
+The other direction is not safe, and is not pretended to be: a dimension that wrongly *excludes* a
+stub makes it silently stop matching. That is the failure this design has to be defended against
+rather than reasoned away, so a differential test
+(`differential_index_matches_linear_oracle`) runs the index against a linear oracle and fails
+immediately on any under-approximation.
+
+#### The six dimensions, and the data structure each uses
+
+Ordered cheapest-first, and the fold **short-circuits as soon as the candidate set is empty** — so a
+request that no stub can match usually stops after the first dimension or two:
+
+| # | Dimension | Indexes | Data structure |
+|:--|:----------|:--------|:---------------|
+| 1 | Method | `equals` on method | **Eight fixed slots** — the seven common verbs plus an "other" bucket, selected by a case-insensitive comparison with no hashing and no allocation |
+| 2 | Path (exact) | `equals` on path | Hash map keyed on the case-folded path |
+| 3 | Path literals | `startsWith` / `contains` / `endsWith` | **An Aho-Corasick automaton** over every anchor — one pass instead of walking a bucket per anchor (two automata at most: one per case class) |
+| 4 | Path regexes | `matches` on path | **A multi-pattern automaton** (`regex-automata`'s meta engine, which picks its own engine per search), reporting every matching pattern id in one overlapping search into a reused thread-local scratch set (again two at most, by case class) |
+| 5 | Body (whole) | `deepEquals` on a JSON body | **Structural hash** of the expected body → the stubs sharing it |
+| 6 | Body (field) | `equals` on body fields | **A [quamina](https://crates.io/crates/quamina) field automaton** (the Rust port of Tim Bray's design) — "which of N field-equals stubs matches this body" in one pass instead of an O(N) scan |
+
+Two honest asterisks on that table. Dimension 6 is behind the `quamina-matching` cargo feature: it is
+**on by default**, but a `default-features = false` build has five dimensions, and those body-field
+stubs simply fall through to Stage 2. And dimension 6 *deactivates itself* when no request could ever
+reach two body-field stubs at once — if every such stub owns a distinct `(path, method)`, the earlier
+dimensions have already done the work, and building the automaton would be pure overhead (worth ~6.5%
+throughput to skip).
+
+The two body dimensions run last because they are the only ones that touch the request body, so the
+cheap path and method dimensions get to empty the accumulator first; and the field automaton runs
+only if the hash dimension left survivors. The body is parsed as JSON **once per request** and shared
+across both.
+
+A dimension that indexes nothing is skipped entirely rather than paying a full-width copy and
+intersect to learn nothing — so an imposter whose stubs the index cannot help with degrades to the
+plain scan instead of paying for an index it is not using.
+
+#### Why regex stopped being the exception
+
+Regex used to be Rift's own slow path: it cannot be hash-dispatched, so at the 100th pattern Rift
+managed ~54k RPS. Dimension 4 replaced a per-pattern loop with a single multi-pattern automaton, and
+regex now runs at ~207k RPS, in line with every other predicate type — not a micro-optimization but a
+change of complexity class, from "one search per pattern" to "one search".
+
+### The implementation stack
+
+The other half, and the reason the index's savings actually show up in the numbers rather than being
+absorbed by per-request overhead. It is also most of what separates Rift from a similarly-indexed
+engine like Microcks.
 
 | Aspect | Mountebank | Rift |
 |:-------|:-----------|:-----|
 | **Language** | Node.js (JavaScript) | Rust |
-| **Concurrency** | Single-threaded event loop | Multi-threaded (Tokio) |
-| **Memory Model** | Garbage collected | Zero-copy, no GC |
-| **Regex Engine** | JavaScript RegExp | Rust regex crate |
-| **JSON Parsing** | JavaScript JSON | serde_json (SIMD) |
-| **Stub Matching** | Linear scan | Optimized matching |
+| **Concurrency** | Single-threaded event loop | Multi-threaded (Tokio, work-stealing) |
+| **Memory model** | Garbage collected | No GC; per-request allocation avoided on the hot path |
+| **Regex engine** | JavaScript `RegExp`, per pattern | `regex-automata`, one multi-pattern automaton |
+| **JSON parsing** | `JSON.parse` | `serde_json`, parsed once per request and shared (as are the query map and, lazily, the XML DOM) |
+| **Stub matching** | Linear scan | Two-stage: bitset prefilter → full evaluation |
+| **Allocator** | — | mimalloc in the server binary (see [below](#memory-allocator-mimalloc)); deliberately *not* in the embedded C-ABI library, which must not impose an allocator on its host |
 
-### Key Optimizations
+Plus: native code with no interpreter warm-up, connection reuse to upstream services, and a
+dedicated worker pool for script execution so a slow `inject` cannot stall the request path.
 
-1. **Native Code**: Rust compiles to native machine code, avoiding interpreter overhead.
+### What this does not buy you
 
-2. **Async I/O**: Tokio runtime provides efficient async networking with work-stealing scheduler.
+Being clear about the limits, since the section above is the optimistic half:
 
-3. **Zero-Copy Parsing**: serde_json parses JSON without unnecessary allocations.
-
-4. **Efficient Regex**: Rust's regex crate uses finite automata for O(n) matching.
-
-5. **Connection Pooling**: Reuses connections to upstream services.
-
-6. **Thread Pool**: Dedicated workers for script execution.
+- **The index helps when stubs are distinguishable on an indexed attribute.** An imposter where
+  every stub is, say, a body regex indexes on nothing, falls back to the scan, and is as linear as
+  Mountebank — just with a much better constant.
+- **Stage 2 still runs.** There is nothing for a prefilter to save on a one- or two-stub imposter, so
+  the simple-stub row is among the *lowest* multiples in every table on this page (24x vs Mountebank
+  on the M4, 4.0x vs WireMock, 21.5x vs Microcks) — the big multiples come from scenarios where the
+  index removes work, not from the stack alone. Where something other than matching dominates the
+  request — response templating, query-argument dispatch — the multiple can be lower still.
+- **None of this is a throughput claim about your workload.** It is why the *curve* is flat; the
+  absolute numbers depend on your hardware, your predicates and your response sizes.
 
 ---
 
@@ -123,7 +257,7 @@ issue #423 fixed) takes Rift 6.6ms vs Mountebank's 114.7ms, and grows memory +9M
 
 | Scenario | Mountebank | Rift |
 |:---------|:-----------|:-----|
-| Exact stub match (last of 500) | 40ms | 0.6ms |
+| Exact stub match (last of 310) | 40ms | 0.6ms |
 | Complex AND/OR predicate | 17ms | 0.8ms |
 | JSONPath match | 17ms | 1.0ms |
 | Regex (100th pattern) | 641ms | 1.8ms |
@@ -131,7 +265,7 @@ issue #423 fixed) takes Rift 6.6ms vs Mountebank's 114.7ms, and grows memory +9M
 ### Throughput Scaling
 
 Rift maintains consistent throughput regardless of:
-- Stub count (500+ stubs with minimal degradation)
+- Stub count (310 stubs with minimal degradation)
 - Stub position (first vs last stub match)
 - Predicate complexity
 
@@ -283,7 +417,7 @@ from 7 ms to 31 ms as matching work grows.
 | Simple static stub | 83,048 | 334,025 | **4.0x** | 7.0 ms | 2.4 ms |
 | API first stub | 78,906 | 326,778 | **4.1x** | 7.5 ms | 2.5 ms |
 | API middle stub | 42,668 | 326,601 | **7.7x** | 15.8 ms | 2.5 ms |
-| Deep path match (410 stubs) | 24,264 | 326,779 | **13.5x** | 31.6 ms | 2.5 ms |
+| Deep path match (310 stubs) | 24,264 | 326,779 | **13.5x** | 31.6 ms | 2.5 ms |
 | No match | 24,589 | 345,114 | **14.0x** | — | — |
 | Regex path (100 patterns) | 48,982 | 311,815 | **6.4x** | — | — |
 | Complex AND/OR predicates | 56,541 | 251,170 | **4.4x** | — | — |
@@ -302,7 +436,7 @@ spread ≤5.6% for WireMock, ≤1.2% for Rift. Reproduce with
 
 ### The gap widens with matching work
 
-Rift is roughly flat across the suite — 334k on a trivial stub, 327k on a 410-stub deep path match.
+Rift is roughly flat across the suite — 334k on a trivial stub, 327k on a 310-stub deep path match.
 WireMock falls from 83k to 24k on the same pair. That shape, not the headline multiple, is the
 thing worth understanding: Rift's matcher cost is small relative to its per-request overhead, so
 adding stubs barely moves it, while WireMock pays per candidate.
@@ -351,7 +485,7 @@ Rift-vs-WireMock number is meaningless without its connection count attached.**
 | Simple static stub | 4,247 | 64,611 | 65,602 | 204,687 | **3.1x** |
 | API first stub | 4,149 | 61,407 | 61,259 | 190,659 | **3.1x** |
 | API middle stub | 817 | 37,262 | 37,066 | 184,714 | **5.0x** |
-| Deep path match (410 stubs) | 417 | 22,867 | 22,846 | 183,847 | **8.0x** |
+| Deep path match (310 stubs) | 417 | 22,867 | 22,846 | 183,847 | **8.0x** |
 | No match | 420 | 23,383 | 23,310 | 188,958 | **8.1x** |
 | Regex path (100 patterns) | 38 | 40,512 | 41,274 | 179,502 | **4.3x** |
 | Complex AND/OR predicates | 1,322 | 45,300 | 44,957 | 152,548 | **3.4x** |
@@ -375,6 +509,61 @@ the machine.
 The pin is a no-op at this connection count too: stock 10-thread WireMock (64,611) and the
 50-thread series (65,602) are within a percent of each other, so nothing here depends on how
 WireMock's pool was configured.
+
+---
+
+## Rift vs Microcks
+
+[Microcks](https://microcks.io/) is the Apache-2.0, CNCF-incubating alternative. Rift is
+**13.6x–54.6x** its throughput on the HTTP matching path, with a p99 of ~2.4 ms against 75–250 ms:
+
+| Scenario | Microcks | Rift | Rift/Microcks | Microcks p99 | Rift p99 |
+|:---------|---------:|-----:|--------------:|-------------:|---------:|
+| Simple static stub | 16,192 | 347,604 | **21.5x** | 78.9 ms | 2.3 ms |
+| API first stub (1st of 310) | 6,457 | 338,592 | **52.4x** | 239.3 ms | 2.4 ms |
+| API middle stub | 6,447 | 339,056 | **52.6x** | 249.5 ms | 2.4 ms |
+| Deep path match (310 stubs) | 6,420 | 338,404 | **52.7x** | 238.0 ms | 2.4 ms |
+| No match | 6,487 | 354,170 | **54.6x** | 166.2 ms | 2.3 ms |
+| Query match (last of 100) | 14,397 | 195,966 | **13.6x** | 74.8 ms | 4.0 ms |
+
+<sub>AMD EPYC 7763, 16 vCPU (GitHub `ubuntu-16core`), 2026-07-30. Microcks 1.14.0 on Temurin 21 as a
+native JVM; Rift from source. `oha` at 256 keep-alive connections, 20s/scenario after a 10s warmup,
+each engine run alone. Median of 3 reps; spread ≤3.3% Microcks, ≤2.7% Rift.</sub>
+
+### The multiple is the least interesting part
+
+Microcks is not a slower mock server so much as a different kind of product — a spec-driven mocking
+*and contract testing* platform with a web UI, multi-tenancy, a datastore and eight protocols. Raw
+stub-serving throughput is not what it was built for. Quoting 54x without that is misleading.
+
+**The result that matters is that Microcks does *not* pay per candidate stub.** Its three API points
+sit within **0.6%** of each other across first, middle and last of the same 310 operations — it
+resolves by path and verb rather than scanning, which is the same architectural property described in
+[the matching architecture](#the-matching-architecture) above. Compare WireMock, which loses **69%**
+across that same interval.
+
+| Interval | Microcks | Rift | WireMock |
+|:---------|---------:|-----:|---------:|
+| Trivial stub → 310 stubs | −60% | **−3%** | −71% |
+| First → last of the same 310 | **−0.6%** | **−0.06%** | −69% |
+
+So "throughput stays flat" means something different in each comparison: against Mountebank and
+WireMock it is about *scan behaviour*, and against Microcks — which does not scan either — it is
+about per-request cost. That is the distinction
+[Why Is Rift Faster?](#why-is-rift-faster) opens with, and Microcks is what makes it visible.
+
+Two limits, because the first row above is doing two things at once. The trivial-stub point is a
+*different service* with a smaller `text/plain` response, so that −60% mixes corpus size with
+payload — the confound-free number is the −0.6%. And the WireMock column comes from the 2026-07-27
+run on an Intel Xeon 8573C while Microcks and Rift are from 2026-07-30 on an AMD EPYC 7763 (GitHub's
+`ubuntu-16core` pool is heterogeneous; Rift itself reads 334k vs 347k across them), so each column is
+sound read downwards and the cross-column absolutes are not.
+
+Full methodology, the stock-defaults column, where Microcks is genuinely better, and what the data
+does *not* support: [Rift vs Microcks]({{ site.baseurl }}/comparisons/microcks/).
+
+---
+
 ## Comparison with Alternatives
 
 Measured, not estimated. Every figure below comes from the same run of the same 13-scenario suite
@@ -396,12 +585,10 @@ These are architecture comparisons, not quality judgements. Both engines are wel
 widely adopted than Rift, and each does things Rift does not — see
 [Rift vs WireMock]({{ site.baseurl }}/comparisons/wiremock/) for both directions.
 
-**Microcks** is compared separately, in [Rift vs Microcks]({{ site.baseurl }}/comparisons/microcks/),
-and is deliberately *not* a row in the table above: its figures come from a different dispatch, and
-the table's value is that every cell in it came from one run on one host. That page also carries the
-more interesting finding — Microcks does **not** pay per candidate stub the way Mountebank and
-WireMock do (stub *position* costs it nothing), so "throughput stays flat" distinguishes Rift from
-Microcks on absolute throughput and tail latency rather than on scan behaviour.
+**Microcks** is measured in [Rift vs Microcks](#rift-vs-microcks) above and written up in full at
+[Rift vs Microcks]({{ site.baseurl }}/comparisons/microcks/). It is deliberately *not* a row in the
+table above: its figures come from a different dispatch on different hardware, and this table's whole
+value is that every cell in it came from one run on one host.
 
 <sub>WireMock and WireMock Cloud are products of WireMock Inc.; Mountebank is an independent open
 source project. Rift is not affiliated with, endorsed by, or derived from either. All comparative

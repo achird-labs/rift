@@ -25,8 +25,8 @@ better, where WireMock is genuinely better, and where you should not switch.
 | Maturity | Mature, ~a decade, company-backed | **Beta** (v0.16.x), single maintainer |
 | Ecosystem | Large — extensions, Cloud, Spring, a decade of answers | Small |
 | Throughput at 1 stub | 83,048 RPS | 334,025 RPS |
-| Throughput at 410 stubs | 24,264 RPS (**−71%**) | 326,779 RPS (**−2%**) |
-| p99 at 410 stubs | 31.6 ms | 2.5 ms |
+| Throughput at 310 stubs | 24,264 RPS (**−71%**) | 326,779 RPS (**−2%**) |
+| p99 at 310 stubs | 31.6 ms | 2.5 ms |
 | In-process embedding | JVM only | Java, Node, Go, Scala 3 |
 | Config format | WireMock mappings JSON / Java DSL | Mountebank `imposters.json` + native YAML |
 | Response templating | Handlebars, mature | Date templates, `decorate`, Rhai/JS scripting |
@@ -51,7 +51,7 @@ This is the difference that matters, and it is architectural rather than inciden
 | Simple static stub | 83,048 | 334,025 | 4.0x |
 | API first stub | 78,906 | 326,778 | 4.1x |
 | API middle stub | 42,668 | 326,601 | 7.7x |
-| Deep path match (410 stubs) | 24,264 | 326,779 | 13.5x |
+| Deep path match (310 stubs) | 24,264 | 326,779 | 13.5x |
 | No match | 24,589 | 345,114 | 14.0x |
 | Regex path (100 patterns) | 48,982 | 311,815 | 6.4x |
 | Complex AND/OR predicates | 56,541 | 251,170 | 4.4x |
@@ -64,7 +64,7 @@ This is the difference that matters, and it is architectural rather than inciden
 
 Read the two engines down their own columns rather than across:
 
-- WireMock: **83,048 → 24,264** from a trivial stub to a 410-stub deep path match. It loses 71%.
+- WireMock: **83,048 → 24,264** from a trivial stub to a 310-stub deep path match. It loses 71%.
 - Rift: **334,025 → 326,779** over the same pair. It loses 2%.
 
 WireMock pays per candidate stub, so per-request cost tracks the size of your mappings. Rift's
@@ -77,7 +77,7 @@ forty that outlive it. The person who adds the stub pays nothing; the cost lands
 profiles the suite two years later.
 
 The same effect shows up as latency, which is what you actually feel per test: **p99 of 31.6 ms
-vs 2.5 ms** on the 410-stub scenario.
+vs 2.5 ms** on the 310-stub scenario.
 
 ### 2. One engine, four languages, in-process
 
