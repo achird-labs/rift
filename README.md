@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-nightly-orange)](https://www.rust-lang.org/)
 
-Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible mock server that delivers **~20–150x faster throughput on typical workloads, and up to ~450x on large regex predicate sets**. Use your existing Mountebank configurations and enjoy faster test execution.
+Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible mock server that delivers **~20–150x faster throughput on typical workloads, and up to ~1,850x on large regex predicate sets** — the conservative laptop figures from the table below; the 16-vCPU server column is higher still. Use your existing Mountebank configurations and enjoy faster test execution.
 
 **[Documentation](https://achird-labs.github.io/rift/)** | **[Quick Start](#quick-start)** | **[Examples](examples/)**
 

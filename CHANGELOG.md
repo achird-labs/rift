@@ -25,6 +25,12 @@ record.
   explicitly invite adversarial re-checking, where a reader who reproduces the harness counts 310 and
   concludes the headline was inflated. Found while deriving the stub-count ladder for #900.
 
+- **The README's headline regex figure was stale** — it advertised "up to ~450x on large regex
+  predicate sets" while the table three lines below it reported **1,857x** on the same laptop. This
+  one *understated* the measured result rather than inflating it, but a summary that disagrees with
+  its own table is a correctness problem either way. Now ~1,850x, with the provenance stated (these
+  are the conservative laptop figures; the 16-vCPU column is higher).
+
 - **Server-level `flowState.ttlSeconds` below 1 is now rejected** (issue #860). The per-imposter
   path has refused a non-positive TTL at construction since #530, but the server-level
   `flowState` block had no such check: `ttlSeconds: 0` was accepted and then misbehaved late and
