@@ -787,7 +787,12 @@ class PublishWorkflow(unittest.TestCase):
         with open(cls.WORKFLOW) as f:
             cls.text = f.read()
 
-    def test_all_three_engines_are_warmed_by_one_and_the_same_expression(self):
+    # rift/mb comparison, wiremock, microcks (#900), and the rift-only sweep. The count is asserted
+    # as well as the agreement because "all legs agree" is trivially true of one leg: a refactor that
+    # dropped a `--warmup` would otherwise pass this test while publishing an unwarmed column.
+    BENCHED_LEGS = 4
+
+    def test_all_benched_engines_are_warmed_by_one_and_the_same_expression(self):
         # The whole point of issue #866. Capturing to end-of-line, not to the first space: a regex
         # that stops at whitespace matches the shared `"${{` prefix of ANY expression, so one leg
         # silently warmed from a different variable would still look identical.
@@ -798,7 +803,8 @@ class PublishWorkflow(unittest.TestCase):
             m = re.search(r"--warmup\s+(.+)$", line)
             if m:
                 runs.append(m.group(1).strip().rstrip("\\").strip())
-        self.assertEqual(len(runs), 3, f"expected 3 benched legs, saw {runs}")
+        self.assertEqual(len(runs), self.BENCHED_LEGS,
+                         f"expected {self.BENCHED_LEGS} benched legs, saw {runs}")
         self.assertEqual(len(set(runs)), 1,
                          f"the legs are warmed differently, so the ratio is not like-for-like: {runs}")
 

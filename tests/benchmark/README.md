@@ -17,6 +17,9 @@ npm install --prefix ~/bench-mb mountebank@2.9.1  # reference engine
 # python3 is used to orchestrate the runs
 ```
 
+The Microcks suite (`bench_microcks.py`) needs a **JDK 21** and its own jar — see
+[Microcks comparison](#microcks-comparison-issue-900).
+
 For the WireMock suite (optional — only needed for `bench_wiremock.py`) you also need a JRE 11+
 (use an LTS, 17 or 21) and the standalone jar:
 
@@ -297,6 +300,108 @@ values actually used. `--report` prints the **recorded** warmup, not the flag de
 > The Rift-only sweep now runs at the same `warmup` input as everything else (previously a hardcoded
 > `3s`). Sweep figures published from this workflow before that change are not comparable with ones
 > produced after it.
+
+### Microcks comparison (issue #900)
+
+[Microcks](https://microcks.io/) is the Apache-2.0, CNCF-incubating alternative a buyer usually
+reaches for before a commercial one, so the stub-growth claim needs to hold against it too. It lives
+in its own suite for a reason the other two do not share: **Microcks is spec-driven, not
+stub-authored.** You do not hand it a stub; you hand it an OpenAPI document and it derives operations
+and example responses from that.
+
+```bash
+cd tests/benchmark
+
+# One Microcks JVM per imposter, in turn -> results/direct_microcks.csv
+python3 scripts/bench_microcks.py --run-all --duration 20s --warmup 10s --connections 50
+
+# Combine whatever CSVs exist from the SAME box and settings -> MICROCKS_BENCHMARK_REPORT.md
+python3 scripts/bench_microcks.py --report --connections 50
+
+# Inspect what a given imposter translates to, without launching anything
+python3 scripts/bench_microcks.py --emit-spec API | head -40
+```
+
+**Prerequisites: JDK 21 and the Microcks app jar.** Microcks 1.14 is Spring Boot 3.5 compiled at
+class file version 65, so a Java 17 JRE dies at launch with `UnsupportedClassVersionError`. Maven
+Central publishes only non-repackaged jars, so the runnable one is lifted out of the official image —
+a *download*, not a deployment, and nothing runs in a container at bench time:
+
+```bash
+mkdir -p ~/bench-microcks
+cid=$(docker create microcks/microcks-uber:1.14.0)
+docker cp "$cid:/deployments/app.jar" ~/bench-microcks/microcks-app.jar
+docker rm -f "$cid"
+```
+
+Pass `--java /path/to/jdk21/bin/java` if `java` on `PATH` is older.
+
+#### How "N stubs" is translated
+
+For Microcks, *"410 stubs"* is not a thing that exists. The nearest honest analogue is **N matchable
+request shapes**, which in OpenAPI means N `path` × `verb` operations — and that is what the
+translator emits. Two shapes come out, chosen by the fixture rather than by us:
+
+| Fixture shape | OpenAPI shape | Microcks dispatcher |
+|---|---|---|
+| distinct literal paths (`Simple`, `API`) | one operation per `path` × `verb`, one response example each | none — path/verb resolution |
+| one shared path + query args (`Query`) | one operation, N *named* examples + request-parameter examples under the same names | `URI_PARAMS`, rules `page && size` |
+
+Response bodies are emitted as **raw strings**, not parsed objects. Microcks serves a string example
+verbatim but re-serializes an object, and the fixture builds bodies with `json.dumps` (`{"id": 1}`,
+with spaces) — so the raw string is what keeps Microcks' bytes identical to Rift's and lets this
+suite reuse `EXPECT_BODY`/`verify_body` unchanged. If that ever regresses, the fix is to restore the
+raw string, **not** to weaken the marker to a whitespace-insensitive match.
+
+#### Only six of the thirteen scenarios are comparable
+
+The rest are **excluded rather than approximated**, because an approximation publishes a ratio
+between two different workloads. `check_scenario_coverage()` makes this a hard error: a scenario added
+to `bench_direct.SCENARIOS` fails the run until someone classifies it, so it cannot silently vanish
+from a report that claims to cover the suite.
+
+| Measured | Refused, and why |
+|---|---|
+| `simple_health`, `api_first`, `api_middle`, `api_last`, `no_match`, `query_last` | `regex_last` (no regex path dispatcher), `complex_predicate` / `header_last` (no header dispatcher for REST — only a Groovy SCRIPT, which measures the scripting engine), `json_body_equals` (the 50 stubs sit on distinct paths, so Microcks would resolve on path alone and never read the body), `jsonpath` (different expression dialect), `xpath` (none for REST), `template` (different templating language; a static example would be reported under a templating label) |
+
+#### What we did to keep it fair
+
+Every deviation below moves the number in **Microcks'** favour, which is the safe direction for a
+comparison published by Rift. All of them are repeated in the generated report, not just here.
+
+- **Tomcat's pool is pinned to `max(cores, connections)`.** Its default is 200 while the published
+  table drives 256 — benchmarking that would measure the pool, not the engine. Same fairness argument
+  as WireMock's `--container-threads`, and `--tomcat-threads N` overrides it.
+- **Heap is pinned** (`-Xms == -Xmx`, default `4g`) rather than left to ergonomic sizing, which is a
+  fraction of *host* RAM and would silently differ between a runner and a laptop.
+- **One imposter per process.** Microcks multiplexes every service on one port, and its throughput is
+  measurably sensitive to *total resident corpus size*, so loading all 14 imposters into one JVM would
+  have penalised it against WireMock's per-imposter JVM. Each instance holds exactly the imposter
+  under test.
+- **AsyncAPI off** (`-Dasync-api.enabled=false`) — background work unrelated to HTTP mocking.
+- **Logging at WARN.** Per #718, a per-request log site turns a throughput benchmark into a
+  measurement of the logging pipeline. That trap is not Rift-specific.
+- **`no_match` is measured as the 404 it genuinely returns.** Rift answers an unmatched request with
+  an empty 200 and WireMock is given a catch-all to reproduce that; Microcks has no catch-all
+  mechanism. The status gate expects `4xx` *for that scenario only* — relaxing it to "any status"
+  would stop it catching a genuinely mis-served stub. The body is empty either way, so the
+  `EXPECT_BODY[no_match] is None` assertion still proves nothing matched.
+- **In-memory MongoDB.** The `uber` profile keeps everything in an embedded store; a production
+  Microcks talks to a real MongoDB over a socket, so this configuration is *faster* than a real
+  deployment.
+- **Protocol scope.** Microcks also covers AsyncAPI, Kafka, MQTT, AMQP, WebSocket and gRPC, which
+  Rift does not. This benchmark is confined to the HTTP matching path where the two overlap and says
+  nothing about the rest.
+
+Engines stay on disjoint ports: rift +0, mb +100, wiremock +200, **microcks +300**. Import is
+verified by operation count — Microcks returns 201 for an artifact whose parser quietly discarded
+operations, and a thinner corpus than Rift's would publish as a faster number.
+
+Translator logic is gate-tested in `scripts/test_bench_microcks.py`, including the byte-identical-body
+property, the query-dispatch collapse, the fatality of an untranslatable predicate, and the
+`benchmark-publish.yml` leg itself. CI runs it via the same `Benchmark Scripts` job.
+
+The publish workflow takes `-f microcks_version=1.14.0` and `-f run_microcks=false` to skip the leg.
 
 ### Matching-dimension scenarios (Rift-only, additive)
 

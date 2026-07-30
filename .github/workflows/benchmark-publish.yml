@@ -42,6 +42,16 @@ on:
       wiremock_version:
         description: "WireMock version (pinned, same reason as Mountebank)"
         default: "3.9.1"
+      microcks_version:
+        description: "Microcks version (pinned, same reason as Mountebank)"
+        default: "1.14.0"
+      run_microcks:
+        description: >-
+          Run the Microcks leg (issue #900). Adds ~1 JVM start per imposter per rep on top of the
+          scenario time, and only six of the thirteen scenarios are comparable, so it is separable
+          from the 3-way table rather than welded to it.
+        type: boolean
+        default: true
       run_sweep:
         description: >-
           Run the Rift-only connection sweep. It is ~75% of the wall clock and contributes nothing
@@ -66,6 +76,7 @@ jobs:
       BENCH_WARMUP: ${{ inputs.warmup }}
       BENCH_MB_VERSION: ${{ inputs.mb_version }}
       BENCH_WIREMOCK_VERSION: ${{ inputs.wiremock_version }}
+      BENCH_MICROCKS_VERSION: ${{ inputs.microcks_version }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -94,6 +105,28 @@ jobs:
           # 40 minutes later inside the first rep.
           unzip -qt "$HOME/bench-wiremock/wiremock-standalone.jar"
           java -version
+
+      # Microcks publishes only non-repackaged jars to Maven Central, so the runnable Spring Boot fat
+      # jar has to be lifted out of the official image. `docker create` materialises the filesystem
+      # without ever starting a container: the registry is a download source here, exactly like Maven
+      # Central above, and the benchmarked process is a native JVM. That is not a detail — a
+      # container's virtualised network is not a property of the engine, and measuring one would make
+      # the Microcks column non-comparable with the other three.
+      - name: Install Microcks ${{ inputs.microcks_version }} (native jar, no container at bench time)
+        if: inputs.run_microcks
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/bench-microcks"
+          cid=$(docker create "microcks/microcks-uber:$BENCH_MICROCKS_VERSION")
+          docker cp "$cid:/deployments/app.jar" "$HOME/bench-microcks/microcks-app.jar"
+          docker rm -f "$cid"
+          # Same integrity check as the WireMock jar, same reason: a truncated 138MB jar downloads
+          # cleanly and only fails inside the first rep, an hour in.
+          unzip -qt "$HOME/bench-microcks/microcks-app.jar"
+          # Fail here, loudly, if the image ever stops shipping a Spring Boot launcher — the
+          # alternative is an opaque "no main manifest attribute" at first launch.
+          unzip -p "$HOME/bench-microcks/microcks-app.jar" META-INF/MANIFEST.MF \
+            | grep -q 'Start-Class: io.github.microcks.MicrocksApplication'
 
       - name: Record environment
         run: |
@@ -181,6 +214,48 @@ jobs:
           rm -f results/direct_rift_rep*.csv results/direct_mb_rep*.csv
           ls results/wiremock
 
+      # The fourth engine (issue #900). Runs after the WireMock leg and before the sweep, for the same
+      # reason WireMock does: the table needs rift at the SAME point, and the sweep re-writes
+      # direct_rift_rep*.csv at other connection counts.
+      #
+      # Microcks is spec-driven, so its suite generates an OpenAPI document per imposter rather than
+      # stubs, and only six of the thirteen scenarios have a faithful analogue — the report lists the
+      # other seven with the reason each is excluded rather than approximating them. One Microcks JVM
+      # per imposter, holding only that imposter's service, so its resident corpus matches what
+      # WireMock's per-imposter JVM holds.
+      - name: Microcks ${{ inputs.microcks_version }} + Rift comparison (repeated)
+        if: inputs.run_microcks
+        working-directory: tests/benchmark
+        run: |
+          set -euo pipefail
+          for rep in $(seq 1 "$BENCH_REPS"); do
+            echo "===== microcks rep=$rep ====="
+            python3 -u scripts/bench_microcks.py --run-all --rep "$rep" \
+              --connections "$BENCH_CONNECTIONS" --duration "$BENCH_DURATION" \
+              --warmup "$BENCH_WARMUP" \
+              --jar "$HOME/bench-microcks/microcks-app.jar" \
+              --microcks-version "$BENCH_MICROCKS_VERSION"
+          done
+          python3 -u scripts/bench_microcks.py --aggregate
+          # The report compares against rift and wiremock at the same point, and the WireMock step
+          # parked both medians. Copy them back under the plain names --report reads, rather than
+          # teaching the report about CI's directory layout.
+          cp results/wiremock/direct_rift_comparison_median.csv results/direct_rift_median.csv
+          cp results/wiremock/direct_wiremock_median.csv results/direct_wiremock_median.csv
+          # No --warmup here on purpose: the report states what the reps recorded, so a mismatch
+          # between what CI asked for and what ran shows up instead of being papered over.
+          python3 -u scripts/bench_microcks.py --report --csv-suffix _median \
+            --connections "$BENCH_CONNECTIONS" --duration "$BENCH_DURATION"
+          # Park, then remove the borrowed medians: the sweep writes its own direct_rift_median.csv,
+          # and two files with that basename in one artefact is how the wrong one gets published.
+          mkdir -p results/microcks
+          mv results/direct_microcks*.csv results/microcks/
+          mv results/direct_microcks*.warmup results/direct_microcks*.threads results/microcks/
+          mv results/direct_microcks*.heap results/direct_microcks*.version results/microcks/
+          mv results/MICROCKS_BENCHMARK_REPORT.md results/microcks/
+          rm -f results/direct_rift_median.csv results/direct_wiremock_median.csv
+          ls results/microcks
+
       # Rift-only sweep: connection scaling plus the matching-dimension scenarios that the
       # comparison set deliberately excludes (it is a stability contract).
       - name: Rift concurrency sweep + matching dimensions (repeated)
@@ -215,6 +290,7 @@ jobs:
             tests/benchmark/results/*.md
             tests/benchmark/results/comparison/*
             tests/benchmark/results/wiremock/*
+            tests/benchmark/results/microcks/*
             tests/benchmark/results/environment.txt
             tests/benchmark/results/*.log
             tests/benchmark/results/logs/*.log

@@ -28,6 +28,29 @@ record.
 
 ### Added
 
+- **Microcks is now a benchmark subject — `tests/benchmark/scripts/bench_microcks.py`** (issue #900).
+  The stub-growth claim was only ever demonstrated against WireMock, a commercial alternative;
+  Microcks is the Apache-2.0, CNCF-incubating one a buyer usually reaches first, and we had no data on
+  how it behaves as stub count grows.
+
+  Microcks is **spec-driven rather than stub-authored**, so the suite generates an OpenAPI 3.0.2
+  document per imposter instead of stubs, translating "N stubs" as "N `path` × `verb` operations" —
+  the nearest honest analogue, and a translation rather than an identity. **Only six of the thirteen
+  scenarios are comparable**; the other seven are refused with a stated reason rather than
+  approximated, because an approximation publishes a ratio between two different workloads, and a
+  scenario added to the fixture now fails the run until it is classified either way. Response bodies
+  are emitted as raw strings so Microcks' bytes stay identical to Rift's and the existing body-marker
+  assertion keeps its strength.
+
+  Fairness deviations all move the number in Microcks' favour and are repeated in the generated
+  report: Tomcat's pool pinned above the offered concurrency (its 200 default sits below the published
+  256), heap pinned so a runner and a laptop agree, one imposter per JVM so its resident corpus
+  matches WireMock's, AsyncAPI off, logging at WARN (per #718), and an in-memory store. Nothing runs
+  in a container at bench time — the measured process is a native JVM, like WireMock's.
+
+  Wired into `benchmark-publish.yml` behind `run_microcks` with a pinned `microcks_version`.
+  Benchmark-only: no engine, API or configuration change.
+
 - **Serve options are now feature-detectable — `serveOptions` on `rift_build_info` and `GET /config`**
   (issue #877). `ServeOptions` fields have no symbol for an SDK to probe, so the "additive symbols are
   discovered by presence" convention `rift_abi_version` documents could not reach them: an SDK sending
