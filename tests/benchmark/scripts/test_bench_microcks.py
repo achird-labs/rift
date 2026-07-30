@@ -467,6 +467,113 @@ class RunSettingsPropagation(unittest.TestCase):
                          {"warmup", "threads", "heap", "version"})
 
 
+class ReportRendering(unittest.TestCase):
+    """The combiner, driven from CSVs on disk rather than a live engine.
+
+    Worth testing because the report is the artefact people actually read, and its failure modes are
+    all silent: a missing engine rendering as a slow one, a stale sweep row blended into the headline
+    table, or a ratio computed against a column that was not there."""
+
+    HEADER = ("scenario,connections,mode,rps,p50_ms,p90_ms,p99_ms,p999_ms,avg_ms,"
+              "rss_mb_peak,rss_mb_end,reps,rps_spread_pct")
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._real = bm.RESULTS_DIR
+        bm.RESULTS_DIR = self.tmp.name
+        self.addCleanup(lambda: setattr(bm, "RESULTS_DIR", self._real))
+
+    def _csv(self, engine, rows, suffix="_median"):
+        path = os.path.join(self.tmp.name, f"direct_{engine}{suffix}.csv")
+        with open(path, "w") as fh:
+            fh.write(self.HEADER + "\n")
+            for scen, conns, mode, rps in rows:
+                fh.write(f"{scen},{conns},{mode},{rps},1.0,2.0,3.0,4.0,1.5,,,3,1.2\n")
+        return path
+
+    def _read(self, path):
+        with open(path) as fh:
+            return fh.read()
+
+    def _all_six(self, base, conns=256, mode="closed"):
+        return [(n, conns, mode, base + i * 10) for i, n in enumerate(bm.COMPARABLE)]
+
+    def test_renders_with_only_microcks_and_rift(self):
+        """The microcks_only dispatch shape: no WireMock column available."""
+        self._csv("microcks", self._all_six(5000))
+        self._csv("rift", self._all_six(300000))
+        text = self._read(bm.report(256, "_median", "20s"))
+        self.assertIn("Rift vs Microcks", text)
+        for name in bm.COMPARABLE:
+            self.assertIn(name, text)
+
+    def test_ratio_is_rift_over_microcks(self):
+        self._csv("microcks", [("api_last", 256, "closed", 10000)])
+        self._csv("rift", [("api_last", 256, "closed", 300000)])
+        text = self._read(bm.report(256, "_median", "20s"))
+        self.assertIn("**30.0x**", text)
+
+    def test_absent_rift_does_not_render_as_zero(self):
+        """An empty cell must read as "not measured", never as a number."""
+        self._csv("microcks", [("api_last", 256, "closed", 10000)])
+        text = self._read(bm.report(256, "_median", "20s"))
+        self.assertNotIn("0.0x", text)
+        self.assertIn("—", text)
+
+    def test_rows_from_another_connection_count_are_not_blended_in(self):
+        """A CSV left behind by a sweep holds non-comparable rows; #866's stale-artefact guard."""
+        self._csv("microcks", [("api_last", 256, "closed", 10000),
+                               ("api_last", 50, "closed", 999999)])
+        text = self._read(bm.report(256, "_median", "20s"))
+        self.assertIn("10,000", text)
+        self.assertNotIn("999,999", text)
+
+    def test_open_loop_rows_are_excluded(self):
+        self._csv("microcks", [("api_last", 256, "closed", 10000),
+                               ("api_middle", 256, "open@5000", 888888)])
+        text = self._read(bm.report(256, "_median", "20s"))
+        self.assertNotIn("888,888", text)
+
+    def test_missing_microcks_csv_is_refused_not_rendered_empty(self):
+        self._csv("rift", self._all_six(300000))
+        with self.assertRaises(SystemExit):
+            bm.report(256, "_median", "20s")
+
+    def test_stock_series_renders_its_own_table(self):
+        self._csv("microcks", [("api_last", 256, "closed", 10000)])
+        self._csv(bm.STOCK_ENGINE, [("api_last", 256, "closed", 5000)])
+        text = self._read(bm.report(256, "_median", "20s"))
+        self.assertIn("Tuned vs stock defaults", text)
+        self.assertIn("-50%", text)   # 5000 vs 10000
+
+    def test_no_stock_series_means_no_stock_table(self):
+        """--skip-stock must not leave an empty section implying a measurement."""
+        self._csv("microcks", [("api_last", 256, "closed", 10000)])
+        text = self._read(bm.report(256, "_median", "20s"))
+        self.assertNotIn("Tuned vs stock defaults", text)
+
+    def test_growth_delta_is_simple_health_to_api_last(self):
+        self._csv("microcks", [("simple_health", 256, "closed", 10000),
+                               ("api_last", 256, "closed", 5000)])
+        text = self._read(bm.report(256, "_median", "20s"))
+        self.assertIn("-50%", text)
+
+    def test_every_exclusion_reason_reaches_the_report(self):
+        """The exclusions are the report's main honesty claim; they must not live only in code."""
+        self._csv("microcks", self._all_six(5000))
+        text = self._read(bm.report(256, "_median", "20s"))
+        for name in bm.UNTRANSLATABLE:
+            self.assertIn(f"`{name}`", text)
+
+    def test_report_states_the_asymmetries(self):
+        self._csv("microcks", self._all_six(5000))
+        text = self._read(bm.report(256, "_median", "20s"))
+        for phrase in ("in-memory", "catch-all", "Protocol scope", "spec"):
+            self.assertIn(phrase, text)
+
+
 class PublishWorkflow(unittest.TestCase):
     """The Microcks leg of `benchmark-publish.yml`.
 
