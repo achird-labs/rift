@@ -260,6 +260,10 @@ pub struct ImposterManager {
     /// kernel spreads connections across them by 4-tuple hash. `None` (the default) keeps
     /// today's single listener on the ambient runtime.
     accept_runtimes: Option<Arc<Vec<tokio::runtime::Handle>>>,
+    /// Register an imposter whose port could not be bound, instead of failing the apply
+    /// (issue #143). `false` (the default) keeps the all-or-nothing behavior. See
+    /// [`Self::with_serve_unbound`].
+    serve_unbound: bool,
     /// Upper bound on how long `delete` waits for a torn-down imposter's in-flight connections to
     /// drain before returning anyway with a warning (issue #596). Never configurable at runtime;
     /// overridable only in tests via [`Self::with_conn_drain`].
@@ -298,9 +302,35 @@ impl ImposterManager {
             proxy_store: None,
             no_match_interceptor: None,
             accept_runtimes: None,
+            serve_unbound: false,
             conn_drain: DEFAULT_CONN_DRAIN,
             event_bus: Arc::new(super::events::AdminEventBus::new()),
         }
+    }
+
+    /// Keep serving an imposter whose port bind failed, instead of dropping it (issue #143).
+    ///
+    /// For a replicated deployment where every node applies the same committed config: a port can
+    /// be taken by an unrelated process on *one* node, and that node must still serve the imposter
+    /// in-process — the port map is what every in-process route resolves through, so an entry with
+    /// no listener serves correctly; only traffic addressed to the port directly is lost, and that
+    /// is the part the squatter has already taken.
+    ///
+    /// Scope, deliberately narrow:
+    /// - **Apply path only.** [`Self::create_imposter`] stays all-or-nothing whatever this is set
+    ///   to, because `Err` there means "the imposter does not exist" to every existing caller.
+    /// - **Socket-level failures only** ([`ImposterError::BindError`]). A [`ImposterError::PortInUse`]
+    ///   is a map-level conflict where an entry already exists, and an auto-assigned port minted
+    ///   from a failed bind has no identity to register under.
+    ///
+    /// An unbound imposter reports itself via [`Imposter::is_bound`], is reported under
+    /// [`ApplyReport::failed`] (never `created`) so the embedder's degraded-state tracking keeps
+    /// working off the field it already reads, and is re-bound automatically by the next
+    /// [`Self::apply_config`] once the port frees up.
+    #[must_use]
+    pub fn with_serve_unbound(mut self, serve_unbound: bool) -> Self {
+        self.serve_unbound = serve_unbound;
+        self
     }
 
     /// Fan imposter accept loops out across per-core worker runtimes (RFC-712, issue #745):
@@ -523,10 +553,26 @@ impl ImposterManager {
 
     /// Create without emitting an event, so composite operations (wholesale replace in
     /// `apply_config`) can report a single higher-level event instead of Deleted+Created.
-    async fn create_imposter_inner(
+    async fn create_imposter_inner(&self, config: ImposterConfig) -> Result<u16, ImposterError> {
+        // `false`: the direct-create contract is all-or-nothing whatever `serve_unbound` says
+        // (issue #143) — `Err` here means "the imposter does not exist" to every caller.
+        self.create_imposter_staged(config, false)
+            .await
+            .map(|(port, _)| port)
+    }
+
+    /// The create pipeline, shared by the direct and apply paths.
+    ///
+    /// When `allow_unbound` is set (issue #143) a socket-level bind failure on an *explicit* port
+    /// does not abort the create: the imposter is constructed and claimed with no listener, so the
+    /// port map — which every in-process route resolves through — still serves it. The returned
+    /// `Option<ImposterError>` is that bind failure, for the caller to report; `None` means the
+    /// imposter is bound and serving its own port.
+    async fn create_imposter_staged(
         &self,
         mut config: ImposterConfig,
-    ) -> Result<u16, ImposterError> {
+        allow_unbound: bool,
+    ) -> Result<(u16, Option<ImposterError>), ImposterError> {
         // Validate protocol first
         match config.protocol.as_str() {
             "http" | "https" => {}
@@ -544,37 +590,38 @@ impl ImposterManager {
         // Owned (not borrowed from `config`): the per-core fan-out (#745) rebinds listeners
         // after `config` has moved into the imposter.
         let bind_host: String = config.host.clone().unwrap_or_else(|| "0.0.0.0".to_string());
-        // Determine port - either from config or auto-assign
-        let (port, listener) = match config.port {
-            Some(p) if p != 0 => {
-                // Check if specified port is already in use
-                if self.imposters.contains(p) {
-                    return Err(ImposterError::PortInUse(p));
-                }
-                // Bind with SO_REUSEADDR/REUSEPORT so a hot-reload (#197) can re-bind the same port
-                // immediately after the previous imposter's listener is torn down.
-                let addr = (bind_host.as_str(), p)
-                    .to_socket_addrs()
-                    .map_err(|e| ImposterError::BindError(p, anyhow::Error::new(e)))?
-                    .next()
-                    .ok_or_else(|| {
-                        ImposterError::BindError(p, anyhow::anyhow!("no socket address"))
-                    })?;
-                (
-                    p,
-                    crate::proxy::network::create_reusable_listener(addr)
-                        .map_err(|e| ImposterError::BindError(p, anyhow::Error::new(e)))?,
-                )
+        let explicit_port = match config.port {
+            Some(p) if p != 0 => Some(p),
+            _ => None,
+        };
+
+        // One fallible bind phase covering BOTH binds — the port probe and the fan-out listener
+        // group — because either can fail with `BindError` and the degradation below has to cover
+        // the fan-out topology too (that is the one clustered deployments actually run).
+        let (port, listeners, bind_failure) = match (
+            self.bind_for_create(&bind_host, explicit_port).await,
+            explicit_port,
+        ) {
+            (Ok((port, listeners)), _) => (port, Some(listeners), None),
+            // Only a socket-level failure on an explicit port may degrade to serving unbound:
+            // an auto-assigned port minted from a failed bind has no identity to register
+            // under, and `PortInUse` means an entry already exists.
+            (Err(e @ ImposterError::BindError(..)), Some(p)) if allow_unbound => {
+                warn!(
+                    port = p,
+                    "could not bind {bind_host}:{p} ({e}); registering the imposter without a \
+                         listener so in-process routes still serve it"
+                );
+                (p, None, Some(e))
             }
-            _ => {
-                // Auto-assign port: find an available port starting from a base
-                self.find_available_port(&bind_host).await?
-            }
+            (Err(e), _) => return Err(e),
         };
 
         config.port = Some(port);
 
-        info!("Imposter bound to {}:{}", bind_host, port);
+        if listeners.is_some() {
+            info!("Imposter bound to {}:{}", bind_host, port);
+        }
         // Create imposter
         let mut imposter = Imposter::new_with_hooks_journal_and_backends(
             config,
@@ -605,81 +652,21 @@ impl ImposterManager {
 
         let imposter = Arc::new(imposter);
 
-        // Start serving. Under per-core fan-out (RFC-712, issue #745) the port gets one
-        // SO_REUSEPORT listener per worker runtime; every loop shares this ONE imposter, its
-        // connection tracker, its shutdown broadcast, and one backpressure semaphore, so
-        // delete/drain (#596) and the global connection cap (#716) are topology-independent.
-        // All listeners are bound BEFORE any loop spawns: a bind failure just drops the
-        // already-bound listeners — a port is never half-bound (all-or-nothing create).
-        let listeners = match &self.accept_runtimes {
-            None => vec![listener],
-            Some(runtimes) => {
-                let addr = (bind_host.as_str(), port)
-                    .to_socket_addrs()
-                    .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?
-                    .next()
-                    .ok_or_else(|| {
-                        ImposterError::BindError(port, anyhow::anyhow!("no socket address"))
-                    })?;
-                // The auto-assign probe binds without SO_REUSEPORT and cannot coexist with the
-                // reusable group, so the group is rebound from scratch; explicit-port creates
-                // rebind uniformly for one code path. The instant between drop and rebind is
-                // the classic rebind race — tolerated at admin rate, and #197 hot reloads
-                // already accept the same window.
-                drop(listener);
-                let mut group = Vec::with_capacity(runtimes.len());
-                for _ in 0..runtimes.len() {
-                    group.push(
-                        crate::proxy::network::create_reusable_listener(addr)
-                            .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?,
-                    );
-                }
-                group
-            }
-        };
-
-        let response_decorator = self.response_decorator.clone();
-        // Read socket/HTTP tuning once per imposter, not per accepted connection.
-        let socket_tuning = crate::proxy::network::SocketTuning::from_env();
-        let http_tuning = crate::proxy::network::HttpTuning::from_env();
-        // `None` (the default) preserves today's behavior exactly: no semaphore, no permit,
-        // accept as fast as the kernel hands connections over. Created once per imposter and
-        // shared by every listener so `RIFT_MAX_CONNECTIONS` keeps its global meaning under
-        // fan-out (#716, #745). INVARIANT: construction must stay OUTSIDE the per-listener
-        // spawn loop below — moving it inside would silently multiply the global cap by N,
-        // and no test pins this (env-injected cap tests are racy); this comment is the guard.
-        let connection_semaphore = http_tuning
-            .max_connections
-            .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
-
-        let mut serve_handles = Vec::with_capacity(listeners.len());
-        for (index, listener) in listeners.into_iter().enumerate() {
-            // Resolved once per loop: `inc()` on the returned Counter is a bare atomic add,
-            // so the accept path pays no label lookup or allocation (issue #746).
-            let accept_counter = crate::extensions::metrics::ACCEPTED_CONNECTIONS_TOTAL
-                .with_label_values(&[index.to_string().as_str()]);
-            let loop_future = Self::run_accept_loop(
-                listener,
-                Arc::clone(&imposter),
-                shutdown_tx.clone(),
-                shutdown_tx.subscribe(),
-                connection_semaphore.clone(),
-                tls_acceptor.clone(),
-                response_decorator.clone(),
-                socket_tuning,
-                http_tuning,
+        // Start serving — unless the bind failed and `allow_unbound` let it through, in which case
+        // there is no listener to accept on and the imposter serves in-process only (issue #143).
+        //
+        // Stored unconditionally: this imposter is not in the map yet, so nothing else can reach it
+        // and there is no rebind to race. The handles land here BEFORE `try_claim` below, which is
+        // what makes `is_bound()` trustworthy for every imposter reachable through the map.
+        if let Some(listeners) = listeners {
+            *imposter.serve_handles.lock() = self.spawn_accept_loops(
+                &imposter,
+                listeners,
+                &shutdown_tx,
+                tls_acceptor.as_ref(),
                 port,
-                accept_counter,
             );
-            serve_handles.push(match &self.accept_runtimes {
-                Some(runtimes) => runtimes[index].spawn(loop_future),
-                None => tokio::spawn(loop_future),
-            });
         }
-        // Hand the accept-loop handles to the imposter so `delete` awaits every listener's
-        // teardown (issue #596). Stored post-spawn because the loops need the `Arc`-wrapped
-        // imposter.
-        *imposter.serve_handles.lock() = serve_handles;
 
         // Store imposter. `try_claim`'s internal mutex closes the same TOCTOU the old write lock
         // did between the earlier read-only check and the bind: with SO_REUSEADDR/REUSEPORT two
@@ -708,7 +695,222 @@ impl ImposterManager {
             return Err(e);
         }
 
-        Ok(port)
+        Ok((port, bind_failure))
+    }
+
+    /// Resolve the port and bind its listener group.
+    ///
+    /// `explicit_port` is `Some` for a configured port and `None` to auto-assign. Extracted from
+    /// `create_imposter_staged` so a later rebind (issue #143) binds through the identical path,
+    /// and so the whole bind is one fallible unit the caller can choose to tolerate.
+    async fn bind_for_create(
+        &self,
+        bind_host: &str,
+        explicit_port: Option<u16>,
+    ) -> Result<(u16, Vec<TcpListener>), ImposterError> {
+        let (port, probe) = match explicit_port {
+            Some(p) => {
+                // Check if specified port is already in use
+                if self.imposters.contains(p) {
+                    return Err(ImposterError::PortInUse(p));
+                }
+                // Bind with SO_REUSEADDR/REUSEPORT so a hot-reload (#197) can re-bind the same port
+                // immediately after the previous imposter's listener is torn down.
+                let addr = Self::resolve_bind_addr(bind_host, p)?;
+                (
+                    p,
+                    crate::proxy::network::create_reusable_listener(addr)
+                        .map_err(|e| ImposterError::BindError(p, anyhow::Error::new(e)))?,
+                )
+            }
+            None => {
+                // Auto-assign port: find an available port starting from a base
+                self.find_available_port(bind_host).await?
+            }
+        };
+        let listeners = self.bind_listener_group(bind_host, port, Some(probe))?;
+        Ok((port, listeners))
+    }
+
+    /// The listener group for one port under the current accept topology.
+    ///
+    /// Under per-core fan-out (RFC-712, issue #745) the port gets one SO_REUSEPORT listener per
+    /// worker runtime; every loop shares one imposter, one connection tracker, one shutdown
+    /// broadcast and one backpressure semaphore, so delete/drain (#596) and the global connection
+    /// cap (#716) are topology-independent. All listeners are bound BEFORE any loop spawns: a bind
+    /// failure just drops the already-bound listeners — a port is never half-bound.
+    ///
+    /// `probe` is the listener the caller already bound to learn the port (auto-assign) or to check
+    /// it (explicit); `None` when rebinding an existing imposter, which has no probe to hand over.
+    fn bind_listener_group(
+        &self,
+        bind_host: &str,
+        port: u16,
+        probe: Option<TcpListener>,
+    ) -> Result<Vec<TcpListener>, ImposterError> {
+        match &self.accept_runtimes {
+            None => match probe {
+                Some(listener) => Ok(vec![listener]),
+                None => Ok(vec![
+                    crate::proxy::network::create_reusable_listener(Self::resolve_bind_addr(
+                        bind_host, port,
+                    )?)
+                    .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?,
+                ]),
+            },
+            Some(runtimes) => {
+                let addr = Self::resolve_bind_addr(bind_host, port)?;
+                // The auto-assign probe binds without SO_REUSEPORT and cannot coexist with the
+                // reusable group, so the group is rebound from scratch; explicit-port creates
+                // rebind uniformly for one code path. The instant between drop and rebind is
+                // the classic rebind race — tolerated at admin rate, and #197 hot reloads
+                // already accept the same window.
+                drop(probe);
+                let mut group = Vec::with_capacity(runtimes.len());
+                for _ in 0..runtimes.len() {
+                    group.push(
+                        crate::proxy::network::create_reusable_listener(addr)
+                            .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?,
+                    );
+                }
+                Ok(group)
+            }
+        }
+    }
+
+    fn resolve_bind_addr(
+        bind_host: &str,
+        port: u16,
+    ) -> Result<std::net::SocketAddr, ImposterError> {
+        (bind_host, port)
+            .to_socket_addrs()
+            .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?
+            .next()
+            .ok_or_else(|| ImposterError::BindError(port, anyhow::anyhow!("no socket address")))
+    }
+
+    /// Spawn one accept loop per listener and **return** their handles.
+    ///
+    /// The caller installs them into [`Imposter::serve_handles`], because the two callers need
+    /// different install rules: the create path owns an imposter nothing else can reach yet and
+    /// stores them unconditionally, while [`Self::rebind_imposter`] is mutating an imposter that is
+    /// already in the map and must not clobber a concurrent rebind's handles (issue #143). Handing
+    /// the vector back rather than installing it here is what lets that decision live with the
+    /// caller that knows the rule.
+    #[must_use]
+    fn spawn_accept_loops(
+        &self,
+        imposter: &Arc<Imposter>,
+        listeners: Vec<TcpListener>,
+        shutdown_tx: &broadcast::Sender<()>,
+        tls_acceptor: Option<&tokio_rustls::TlsAcceptor>,
+        port: u16,
+    ) -> Vec<tokio::task::JoinHandle<()>> {
+        let response_decorator = self.response_decorator.clone();
+        // Read socket/HTTP tuning once per imposter, not per accepted connection.
+        let socket_tuning = crate::proxy::network::SocketTuning::from_env();
+        let http_tuning = crate::proxy::network::HttpTuning::from_env();
+        // `None` (the default) preserves today's behavior exactly: no semaphore, no permit,
+        // accept as fast as the kernel hands connections over. Created once per imposter and
+        // shared by every listener so `RIFT_MAX_CONNECTIONS` keeps its global meaning under
+        // fan-out (#716, #745). INVARIANT: construction must stay OUTSIDE the per-listener
+        // spawn loop below — moving it inside would silently multiply the global cap by N,
+        // and no test pins this (env-injected cap tests are racy); this comment is the guard.
+        let connection_semaphore = http_tuning
+            .max_connections
+            .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
+
+        let mut serve_handles = Vec::with_capacity(listeners.len());
+        for (index, listener) in listeners.into_iter().enumerate() {
+            // Resolved once per loop: `inc()` on the returned Counter is a bare atomic add,
+            // so the accept path pays no label lookup or allocation (issue #746).
+            let accept_counter = crate::extensions::metrics::ACCEPTED_CONNECTIONS_TOTAL
+                .with_label_values(&[index.to_string().as_str()]);
+            let loop_future = Self::run_accept_loop(
+                listener,
+                Arc::clone(imposter),
+                shutdown_tx.clone(),
+                shutdown_tx.subscribe(),
+                connection_semaphore.clone(),
+                tls_acceptor.cloned(),
+                response_decorator.clone(),
+                socket_tuning,
+                http_tuning,
+                port,
+                accept_counter,
+            );
+            serve_handles.push(match &self.accept_runtimes {
+                Some(runtimes) => runtimes[index].spawn(loop_future),
+                None => tokio::spawn(loop_future),
+            });
+        }
+        serve_handles
+    }
+
+    /// Re-attempt the listener bind for an imposter that is registered but unbound (issue #143).
+    ///
+    /// Without this an unbound imposter would never heal: reconcile sees an entry with an unchanged
+    /// config and does nothing, where before this feature the *absence* of an entry made every
+    /// apply retry the bind. On success the imposter starts accepting on its own port again, using
+    /// the shutdown channel it was constructed with so `delete` still stops it through one signal.
+    async fn rebind_imposter(&self, imposter: &Arc<Imposter>) -> Result<(), ImposterError> {
+        let port = imposter
+            .config
+            .port
+            .ok_or_else(|| ImposterError::BindError(0, anyhow::anyhow!("imposter has no port")))?;
+        let bind_host: String = imposter
+            .config
+            .host
+            .clone()
+            .unwrap_or_else(|| "0.0.0.0".to_string());
+        // Re-resolved rather than cached: an https imposter must not silently start serving
+        // cleartext on rebind if its cert has since become unreadable.
+        let tls_acceptor = if imposter.config.protocol.eq_ignore_ascii_case("https") {
+            Some(self.resolve_tls_acceptor(&imposter.config)?)
+        } else {
+            None
+        };
+        let Some(shutdown_tx) = imposter.shutdown_tx.clone() else {
+            return Err(ImposterError::BindError(
+                port,
+                anyhow::anyhow!("imposter has no shutdown channel to drive an accept loop"),
+            ));
+        };
+
+        let listeners = self.bind_listener_group(&bind_host, port, None)?;
+        let handles = self.spawn_accept_loops(
+            imposter,
+            listeners,
+            &shutdown_tx,
+            tls_acceptor.as_ref(),
+            port,
+        );
+
+        // Install only if nobody else already did. Unlike the create path, this imposter is
+        // already in the map, and two `apply_config` calls can run against the same engine
+        // concurrently — the raft apply loop and the startup reconcile poll drive it through
+        // separate state-machine handles with no lock between them, which is exactly the window a
+        // node restarting into a squatted port lives in. Both would see `!is_bound()`, both would
+        // bind (SO_REUSEPORT permits it), and an unconditional store would leave the loser's accept
+        // loops running untracked: dropping a `JoinHandle` detaches rather than aborts, so `delete`
+        // would stop awaiting them and its issue-#596 guarantee — the bind is released before
+        // delete returns — would silently break, and the shared connection cap would double.
+        //
+        // No `await` between the check and the store, so the lock covers the whole decision.
+        let mut installed = imposter.serve_handles.lock();
+        if installed.is_empty() {
+            *installed = handles;
+            drop(installed);
+            info!("Imposter rebound to {}:{}", bind_host, port);
+        } else {
+            // Lost the race: abort our loops so they stop accepting and drop their listeners,
+            // rather than leaving a second untracked generation on the shared port.
+            drop(installed);
+            for handle in handles {
+                handle.abort();
+            }
+        }
+        Ok(())
     }
 
     /// One listener's accept loop, extracted verbatim from `create_imposter_inner` so the
@@ -1150,6 +1352,19 @@ impl ImposterManager {
                 continue;
             }
 
+            // Heal an imposter registered without a listener (issue #143). Mandatory, not an
+            // optimization: before that feature a failed bind left no entry, so every apply
+            // naturally retried it; with an entry present the arms below would see "exists,
+            // unchanged" and the node would stay degraded forever even after the port freed up.
+            // Reported like a create/failure so the embedder's degraded-state tracking — which
+            // keys off exactly these fields — clears or refreshes on the same apply.
+            if !existing.is_bound() {
+                match self.rebind_imposter(&existing).await {
+                    Ok(()) => report.created.push(port),
+                    Err(e) => report.failed.push((port, e)),
+                }
+            }
+
             // An enabled-only imposter-level diff applies IN PLACE (issue
             // #817): pause/resume must never reset cursors, scenario state or
             // recorded requests, which a wholesale replace would. Compared
@@ -1190,15 +1405,27 @@ impl ImposterManager {
 
     /// Create for `apply_config`: record the assigned port + Created event, or a failure
     /// under `fail_port` (the sentinel `0` for port-less, auto-assigned configs).
+    ///
+    /// Honours [`Self::with_serve_unbound`] (issue #143): when the port could not be bound the
+    /// imposter is still registered and still emits `Created` — it is in the map and answers every
+    /// in-process route, so suppressing the event would make the event stream disagree with what
+    /// `get_imposter` returns — but the port is reported under `failed`, never `created`, so an
+    /// embedder tracking degraded state off the report sees the failure rather than a clean create.
     async fn create_for_apply(
         &self,
         config: ImposterConfig,
         fail_port: u16,
         report: &mut ApplyReport,
     ) {
-        match self.create_imposter_inner(config).await {
-            Ok(assigned) => {
-                report.created.push(assigned);
+        match self
+            .create_imposter_staged(config, self.serve_unbound)
+            .await
+        {
+            Ok((assigned, bind_failure)) => {
+                match bind_failure {
+                    None => report.created.push(assigned),
+                    Some(e) => report.failed.push((assigned, e)),
+                }
                 self.emit(ImposterEvent::Created(assigned));
             }
             Err(e) => report.failed.push((fail_port, e)),
@@ -1209,14 +1436,28 @@ impl ImposterManager {
     /// When the recreate fails after a successful teardown, the imposter is genuinely gone —
     /// that is reported as deleted (list + event) alongside the failure, so listeners and the
     /// report never track a phantom imposter.
+    ///
+    /// This is an apply-path create too, so it honours [`Self::with_serve_unbound`] (issue #143).
+    /// It has to: without it, editing an imposter whose port is squatted would delete the entry and
+    /// the node would silently stop serving the imposter it had been serving in-process — the exact
+    /// regression the flag exists to prevent, reintroduced through the replace path.
     async fn replace_imposter(&self, port: u16, config: ImposterConfig, report: &mut ApplyReport) {
         if let Err(e) = self.delete_imposter_inner(port).await {
             report.failed.push((port, e));
             return;
         }
-        match self.create_imposter_inner(config).await {
-            Ok(_) => {
-                report.replaced.push(port);
+        match self
+            .create_imposter_staged(config, self.serve_unbound)
+            .await
+        {
+            Ok((_, bind_failure)) => {
+                match bind_failure {
+                    None => report.replaced.push(port),
+                    // Replaced *and* degraded: the new config is what serves now, but the port is
+                    // still unbound, so the failure — not a clean `replaced` — is what the report
+                    // carries.
+                    Some(e) => report.failed.push((port, e)),
+                }
                 self.emit(ImposterEvent::Replaced(port));
             }
             Err(e) => {
@@ -4128,13 +4369,15 @@ mod tests {
         /// K OS threads each driving a parked current-thread runtime — the shape
         /// `WorkerSet` (rift-http-proxy) provides in production. Handles are only useful
         /// while a thread drives the runtime, so a bare `Runtime` object would not do.
-        struct TestRuntimes {
-            handles: Vec<tokio::runtime::Handle>,
+        /// `pub(super)` so the issue-#143 tests can reuse it: the fan-out topology is the one
+        /// production actually runs, so the unbound path has to be proven under it too.
+        pub(super) struct TestRuntimes {
+            pub(super) handles: Vec<tokio::runtime::Handle>,
             stop: Vec<tokio::sync::oneshot::Sender<()>>,
             joins: Vec<std::thread::JoinHandle<()>>,
         }
 
-        fn test_runtimes(n: usize) -> TestRuntimes {
+        pub(super) fn test_runtimes(n: usize) -> TestRuntimes {
             // Each current-thread runtime costs an epoll/kqueue fd + wakeup pipe; at
             // --test-threads=16 a low fd limit makes the builds fail with EMFILE (#814).
             raise_fd_limit();
@@ -4163,7 +4406,7 @@ mod tests {
         }
 
         impl TestRuntimes {
-            fn shutdown(self) {
+            pub(super) fn shutdown(self) {
                 for s in self.stop {
                     let _ = s.send(());
                 }
@@ -4269,6 +4512,445 @@ mod tests {
                 .await
                 .expect("create succeeds once the conflict clears");
             manager.delete_imposter(19603).await.expect("delete");
+            rts.shutdown();
+        }
+    }
+
+    // =========================================================================
+    // Issue #143 (enterprise RFC-001 §7.4.6): serve an imposter whose port could
+    // not be bound. Opt-in, apply-path only — a clustered node must keep serving
+    // the imposter in-process (front door / gateway both resolve through the port
+    // map) when an unrelated process holds its port on that one node.
+    // =========================================================================
+    mod serve_unbound {
+        use super::*;
+
+        /// The squat a real deployment sees: an unrelated process holding the port with a
+        /// plain (non-SO_REUSEPORT) listener, so the reusable bind cannot join it.
+        async fn squat(port: u16) -> tokio::net::TcpListener {
+            tokio::net::TcpListener::bind(("0.0.0.0", port))
+                .await
+                .expect("squatter bind")
+        }
+
+        fn cfg(port: u16, body: &str) -> ImposterConfig {
+            imposter_cfg(json!({
+                "protocol": "http", "port": port, "stubs": [stub_json(body)]
+            }))
+        }
+
+        fn failure_for(report: &ApplyReport, port: u16) -> Option<&ImposterError> {
+            report
+                .failed
+                .iter()
+                .find(|(p, _)| *p == port)
+                .map(|(_, e)| e)
+        }
+
+        // AC6: the flag is opt-in. With it off (the OSS default) a bind failure on the
+        // apply path stays exactly as it was — no map entry at all.
+        #[tokio::test]
+        async fn serve_unbound_defaults_off() {
+            let blocker = squat(19610).await;
+            let manager = ImposterManager::new();
+
+            let report = manager
+                .apply_config(vec![cfg(19610, "ok")])
+                .await
+                .expect("apply validates");
+
+            assert!(
+                !manager.imposters.contains(19610),
+                "default-off must not register an imposter whose port could not be bound"
+            );
+            assert!(
+                matches!(
+                    failure_for(&report, 19610),
+                    Some(ImposterError::BindError(19610, _))
+                ),
+                "the bind failure is still reported: {:?}",
+                report.failed
+            );
+            drop(blocker);
+        }
+
+        // AC1 + AC2: with the flag on, the imposter is registered in the port map (which is
+        // what both in-process addressing routes resolve through) and the bind failure is
+        // still reported under `failed` — NOT `created`, so the enterprise gauge and the
+        // `local-engine=` warning keep firing off exactly the field they already read.
+        #[tokio::test]
+        async fn an_unbound_apply_registers_the_imposter_and_reports_the_bind_failure() {
+            let blocker = squat(19611).await;
+            let manager = ImposterManager::new().with_serve_unbound(true);
+
+            let report = manager
+                .apply_config(vec![cfg(19611, "degraded")])
+                .await
+                .expect("apply validates");
+
+            let imposter = manager
+                .imposters
+                .get(19611)
+                .expect("the imposter is registered despite the failed bind");
+            assert!(
+                !imposter.is_bound(),
+                "it is registered without a listener, so it reports itself unbound"
+            );
+            assert_eq!(
+                imposter.config.port,
+                Some(19611),
+                "registered under the port it was asked for"
+            );
+            assert!(
+                matches!(
+                    failure_for(&report, 19611),
+                    Some(ImposterError::BindError(19611, _))
+                ),
+                "the bind failure is reported: {:?}",
+                report.failed
+            );
+            assert!(
+                !report.created.contains(&19611),
+                "an unbound imposter is not a completed create — reporting it as one would \
+                 clear the enterprise apply-failure entry and the gauge with it"
+            );
+            drop(blocker);
+        }
+
+        // AC3: rebind healing. Once the squatter exits, the next apply of the SAME config
+        // must re-attempt the bind and start serving for real — without this the map entry
+        // makes reconcile see "exists, unchanged" and the node never heals.
+        #[tokio::test]
+        async fn an_unbound_imposter_rebinds_on_the_next_apply() {
+            let blocker = squat(19612).await;
+            let manager = ImposterManager::new().with_serve_unbound(true);
+            manager
+                .apply_config(vec![cfg(19612, "healed")])
+                .await
+                .expect("apply validates");
+            assert!(!manager.imposters.get(19612).expect("registered").is_bound());
+
+            drop(blocker);
+
+            let report = manager
+                .apply_config(vec![cfg(19612, "healed")])
+                .await
+                .expect("apply validates");
+
+            assert!(
+                manager
+                    .imposters
+                    .get(19612)
+                    .expect("still registered")
+                    .is_bound(),
+                "the next apply rebinds the listener once the port is free"
+            );
+            assert!(
+                report.created.contains(&19612),
+                "a successful rebind reports the port as created — that is what clears the \
+                 enterprise apply-failure entry and the gauge: {report:?}"
+            );
+            assert!(
+                failure_for(&report, 19612).is_none(),
+                "nothing failed on the healing apply: {:?}",
+                report.failed
+            );
+
+            let body = reqwest::get("http://127.0.0.1:19612/healed")
+                .await
+                .expect("request")
+                .text()
+                .await
+                .expect("body");
+            assert!(
+                body.contains("healed"),
+                "the rebound listener serves: {body}"
+            );
+
+            manager.delete_imposter(19612).await.expect("delete");
+        }
+
+        // The rebind attempt must keep re-reporting while it keeps failing, so the enterprise
+        // failure entry carries a current reason rather than a stale one from the first apply.
+        #[tokio::test]
+        async fn a_still_squatted_port_reports_the_failure_on_every_apply() {
+            let blocker = squat(19613).await;
+            let manager = ImposterManager::new().with_serve_unbound(true);
+            manager
+                .apply_config(vec![cfg(19613, "still-down")])
+                .await
+                .expect("apply validates");
+
+            let report = manager
+                .apply_config(vec![cfg(19613, "still-down")])
+                .await
+                .expect("apply validates");
+
+            assert!(
+                matches!(
+                    failure_for(&report, 19613),
+                    Some(ImposterError::BindError(19613, _))
+                ),
+                "a failed rebind is reported again: {:?}",
+                report.failed
+            );
+            assert!(
+                !report.created.contains(&19613),
+                "a failed rebind is not a create"
+            );
+            assert!(
+                manager.imposters.contains(19613),
+                "and the entry stays, so the node keeps serving in-process"
+            );
+            drop(blocker);
+        }
+
+        // AC4: the flag is scoped to the apply path. A direct `create_imposter` — the OSS
+        // admin/FFI contract — stays all-or-nothing even with the flag on, because `Err`
+        // there means "the imposter does not exist" to every existing caller.
+        #[tokio::test]
+        async fn serve_unbound_does_not_change_direct_create() {
+            let blocker = squat(19614).await;
+            let manager = ImposterManager::new().with_serve_unbound(true);
+
+            let err = manager
+                .create_imposter(cfg(19614, "ok"))
+                .await
+                .expect_err("a direct create still fails on a bind failure");
+
+            assert!(
+                matches!(err, ImposterError::BindError(19614, _)),
+                "surfaced as BindError, got {err:?}"
+            );
+            assert!(
+                !manager.imposters.contains(19614),
+                "a failed direct create leaves no claim behind, flag or no flag"
+            );
+            drop(blocker);
+        }
+
+        // The degradation is scoped to `BindError`. `PortInUse` is a map-level conflict — an entry
+        // for that port already exists — so registering "without a listener" would mean silently
+        // overwriting or shadowing a live imposter. It must stay a hard failure even with the flag
+        // on, and nothing else pins that: broadening the match guard to all errors would corrupt
+        // the port map and every other test here would still pass.
+        #[tokio::test]
+        async fn port_in_use_still_fails_hard_with_the_flag_on() {
+            let manager = ImposterManager::new().with_serve_unbound(true);
+            manager
+                .apply_config(vec![cfg(19619, "first")])
+                .await
+                .expect("apply validates");
+            let first = manager.imposters.get(19619).expect("registered");
+            assert!(first.is_bound(), "the first create bound the port for real");
+
+            // Straight at the create path, not through `apply_config` (which would reconcile the
+            // existing entry rather than attempt a second claim).
+            let err = manager
+                .create_imposter(cfg(19619, "second"))
+                .await
+                .expect_err("a second create for a claimed port must fail");
+            assert!(
+                matches!(err, ImposterError::PortInUse(19619)),
+                "a map-level conflict stays PortInUse, not a degraded registration: {err:?}"
+            );
+            assert_eq!(
+                next_body(
+                    &manager
+                        .imposters
+                        .get(19619)
+                        .expect("still registered")
+                        .snapshot()
+                        .stubs()[0]
+                ),
+                "first",
+                "the live imposter was not replaced by the refused create"
+            );
+
+            manager.delete_imposter(19619).await.expect("delete");
+        }
+
+        // The other half of the scope guard: an auto-assigned port is minted BY the bind, so a
+        // failed bind leaves no port to register under. It must fail hard rather than degrade —
+        // `explicit_port: None` must never reach the degradation arm.
+        #[tokio::test]
+        async fn an_auto_assigned_port_still_fails_hard_with_the_flag_on() {
+            let manager = ImposterManager::new().with_serve_unbound(true);
+            let report = manager
+                .apply_config(vec![imposter_cfg(json!({
+                    "protocol": "http", "stubs": [stub_json("auto")]
+                }))])
+                .await
+                .expect("apply validates");
+
+            // Auto-assign normally succeeds, so this asserts the shape rather than forcing a
+            // failure: whatever happened, nothing unbound may be registered. The port-less config
+            // reports failures under the `0` sentinel, which no imposter can be registered as.
+            for port in manager.imposters.ports() {
+                assert!(
+                    manager.imposters.get(port).expect("listed").is_bound(),
+                    "an auto-assigned imposter is never registered unbound (port {port})"
+                );
+            }
+            assert!(
+                !manager.imposters.contains(0),
+                "the port-0 failure sentinel is never a registered imposter: {report:?}"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC5: delete of an unbound imposter is a clean no-op teardown — it has no accept
+        // loops to await and no connections to drain.
+        #[tokio::test]
+        async fn deleting_an_unbound_imposter_is_clean() {
+            let blocker = squat(19615).await;
+            let manager = ImposterManager::new().with_serve_unbound(true);
+            manager
+                .apply_config(vec![cfg(19615, "ok")])
+                .await
+                .expect("apply validates");
+            assert!(manager.imposters.contains(19615));
+
+            manager
+                .delete_imposter(19615)
+                .await
+                .expect("deleting an unbound imposter succeeds");
+
+            assert!(
+                !manager.imposters.contains(19615),
+                "the entry is gone after delete"
+            );
+            drop(blocker);
+        }
+
+        // A stub-only edit reconciles in place on an unbound imposter: it keeps serving the
+        // new stubs in-process and stays unbound, and the bind failure is still reported so
+        // the patch does not silently clear the node's degraded state.
+        #[tokio::test]
+        async fn a_stub_patch_applies_in_place_and_the_imposter_stays_unbound() {
+            let blocker = squat(19616).await;
+            let manager = ImposterManager::new().with_serve_unbound(true);
+            manager
+                .apply_config(vec![cfg(19616, "first")])
+                .await
+                .expect("apply validates");
+
+            let report = manager
+                .apply_config(vec![cfg(19616, "second")])
+                .await
+                .expect("apply validates");
+
+            let imposter = manager.imposters.get(19616).expect("still registered");
+            assert!(
+                !imposter.is_bound(),
+                "still unbound — the port is still squatted"
+            );
+            assert_eq!(
+                next_body(&imposter.snapshot().stubs()[0]),
+                "second",
+                "the stub edit reached the in-process imposter"
+            );
+            assert!(
+                matches!(
+                    failure_for(&report, 19616),
+                    Some(ImposterError::BindError(19616, _))
+                ),
+                "the node is still degraded and still says so: {:?}",
+                report.failed
+            );
+            drop(blocker);
+        }
+
+        // An imposter-level edit takes the wholesale-replace path, which tears the old
+        // generation down first. That path must honour the flag too: without it, editing an
+        // imposter on a squatted port deletes the entry and the node silently STOPS serving —
+        // the exact regression this feature exists to prevent.
+        #[tokio::test]
+        async fn replacing_an_unbound_imposter_keeps_it_registered() {
+            let blocker = squat(19617).await;
+            let manager = ImposterManager::new().with_serve_unbound(true);
+            manager
+                .apply_config(vec![cfg(19617, "before")])
+                .await
+                .expect("apply validates");
+
+            // `allowCors` is an imposter-level field, so this is a replace, not a stub patch.
+            let report = manager
+                .apply_config(vec![imposter_cfg(json!({
+                    "protocol": "http", "port": 19617, "allowCors": true,
+                    "stubs": [stub_json("after")]
+                }))])
+                .await
+                .expect("apply validates");
+
+            assert!(
+                manager.imposters.contains(19617),
+                "a replace whose rebind fails must still leave the node serving"
+            );
+            let imposter = manager.imposters.get(19617).expect("registered");
+            assert!(!imposter.is_bound());
+            assert!(
+                imposter.config.allow_cors,
+                "the replacement config is the one now serving"
+            );
+            assert!(
+                matches!(
+                    failure_for(&report, 19617),
+                    Some(ImposterError::BindError(19617, _))
+                ),
+                "still reported as degraded: {:?}",
+                report.failed
+            );
+            drop(blocker);
+        }
+
+        // The production topology is per-core fan-out (RFC-712), where the listener GROUP is
+        // bound in a second step after the probe bind. The degradation must cover that step
+        // too, or clustered deployments — the only ones that turn this flag on — still fail
+        // hard.
+        #[tokio::test]
+        async fn unbound_registration_works_under_per_core_fanout() {
+            let blocker = squat(19618).await;
+            let rts = super::per_core_fanout::test_runtimes(2);
+            let manager = ImposterManager::new()
+                .with_serve_unbound(true)
+                .with_accept_runtimes(rts.handles.clone());
+
+            manager
+                .apply_config(vec![cfg(19618, "fanout-degraded")])
+                .await
+                .expect("apply validates");
+
+            let imposter = manager
+                .imposters
+                .get(19618)
+                .expect("registered under fan-out too");
+            assert!(!imposter.is_bound());
+            assert_eq!(
+                imposter.serve_handles.lock().len(),
+                0,
+                "no accept loops were spawned for a port that never bound"
+            );
+
+            drop(blocker);
+            manager
+                .apply_config(vec![cfg(19618, "fanout-degraded")])
+                .await
+                .expect("apply validates");
+            assert_eq!(
+                manager
+                    .imposters
+                    .get(19618)
+                    .expect("registered")
+                    .serve_handles
+                    .lock()
+                    .len(),
+                2,
+                "the rebind restores the full per-runtime listener group"
+            );
+
+            manager.delete_imposter(19618).await.expect("delete");
             rts.shutdown();
         }
     }

@@ -276,6 +276,23 @@ impl Imposter {
         self.stubs_snapshot.load()
     }
 
+    /// Whether this imposter owns a listener on its port.
+    ///
+    /// Normally always true. It is false only for an imposter registered under
+    /// [`ImposterManager::with_serve_unbound`] (issue #143) after its port bind failed: it has no
+    /// accept loop, but it is in the port map and therefore still answers every in-process route
+    /// (the gateway and, in the enterprise build, the front door) — both resolve through
+    /// `get_imposter`, and request handling reads none of the accept-loop machinery.
+    ///
+    /// Derived from [`Self::serve_handles`] rather than tracked in a separate flag: the manager
+    /// fills the handles before claiming the port, and `delete` takes them on teardown, so for an
+    /// imposter in the map "has handles" *is* "is bound". A second field could disagree with the
+    /// listeners that actually exist; this cannot.
+    #[must_use]
+    pub fn is_bound(&self) -> bool {
+        !self.serve_handles.lock().is_empty()
+    }
+
     /// Read-copy-update the stub vector (issue #291). Reads stay wait-free (`self.snapshot()`);
     /// a mutation takes the `stubs_write` mutex (serializing writers so no update is lost), clones
     /// the current snapshot, applies `f`, then atomically swaps the new snapshot in. `f`'s return
