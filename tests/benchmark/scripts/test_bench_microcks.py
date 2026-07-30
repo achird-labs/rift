@@ -367,6 +367,73 @@ class SpecEnvelope(unittest.TestCase):
         self.assertIn(b'{"a":1}', body)
 
 
+class RunSettingsPropagation(unittest.TestCase):
+    """The median report must be able to state the settings it was measured with.
+
+    This class exists because the first draft got it wrong in two ways that both survive as a
+    plausible-looking report: settings filed under a suffix `--report` never reads (so it printed
+    flag *defaults* while claiming to describe the run), and first-rep-wins on disagreement (so a
+    median across reps with different heaps described a configuration nothing measured)."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._real = bm.RESULTS_DIR
+        bm.RESULTS_DIR = self.tmp.name
+        self.addCleanup(lambda: setattr(bm, "RESULTS_DIR", self._real))
+
+    def _rep(self, n, **settings):
+        """A rep's CSV (so `find_reps` sees it) plus its sidecars."""
+        with open(os.path.join(self.tmp.name, f"direct_microcks_rep{n}.csv"), "w") as fh:
+            fh.write("scenario,connections,mode,rps\napi_last,256,closed,1\n")
+        for name, value in settings.items():
+            with open(bm.sidecar_path(name, f"_rep{n}"), "w") as fh:
+                fh.write(str(value))
+
+    def test_settings_land_where_report_reads_them(self):
+        self._rep(1, warmup="10s", threads="256", heap="4g", version="1.14.0")
+        self._rep(2, warmup="10s", threads="256", heap="4g", version="1.14.0")
+        bm.propagate_run_settings("")
+        self.assertEqual(bm.recorded_setting("warmup", bm.median_suffix("")), "10s")
+        self.assertEqual(bm.recorded_setting("threads", bm.median_suffix("")), "256")
+        self.assertEqual(bm.recorded_setting("heap", bm.median_suffix("")), "4g")
+        self.assertEqual(bm.recorded_setting("version", bm.median_suffix("")), "1.14.0")
+
+    def test_median_suffix_is_what_ci_reports_on(self):
+        self.assertEqual(bm.median_suffix(""), "_median")
+
+    def test_disagreeing_reps_are_refused_not_averaged(self):
+        self._rep(1, heap="4g")
+        self._rep(2, heap="8g")
+        with self.assertRaises(SystemExit) as ctx:
+            bm.propagate_run_settings("")
+        self.assertIn("--heap", str(ctx.exception))
+
+    def test_disagreeing_warmup_is_refused(self):
+        """The setting the like-for-like claim rests on (#866)."""
+        self._rep(1, warmup="10s")
+        self._rep(2, warmup="3s")
+        with self.assertRaises(SystemExit):
+            bm.propagate_run_settings("")
+
+    def test_absent_settings_are_simply_absent(self):
+        self._rep(1)
+        self.assertEqual(bm.propagate_run_settings(""), {})
+        self.assertIsNone(bm.recorded_setting("heap", bm.median_suffix("")))
+
+    def test_finds_every_rep(self):
+        self._rep(1, heap="4g")
+        self._rep(2, heap="4g")
+        self._rep(3, heap="4g")
+        self.assertEqual(bm.find_reps(""), [1, 2, 3])
+
+    def test_every_reported_setting_is_propagated(self):
+        """A setting the report prints but nobody carries forward renders as a default."""
+        self.assertEqual(set(bm.PROPAGATED_SETTINGS),
+                         {"warmup", "threads", "heap", "version"})
+
+
 class PublishWorkflow(unittest.TestCase):
     """The Microcks leg of `benchmark-publish.yml`.
 

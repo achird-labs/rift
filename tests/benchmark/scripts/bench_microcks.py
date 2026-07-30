@@ -699,21 +699,58 @@ def recorded_setting(name, csv_suffix, default=None):
         return default
 
 
+# The settings a median report must be able to state, and the flag name to blame in an error.
+PROPAGATED_SETTINGS = {"warmup": "--warmup", "threads": "--tomcat-threads",
+                       "heap": "--heap", "version": "--microcks-version"}
+
+
+def median_suffix(base_suffix):
+    """Where `--aggregate` writes, and therefore what a later `--report` must read."""
+    return f"{base_suffix}_median"
+
+
+def find_reps(base_suffix=""):
+    """Rep numbers present for `base_suffix`, in order."""
+    return sorted(int(m.group(1)) for p in find_rep_files(base_suffix)
+                  for m in [REP_FILE_RX.search(p)] if m)
+
+
 def propagate_run_settings(base_suffix=""):
-    """Copy per-rep sidecars up to the aggregated suffix, so `--report` after an aggregation can
-    still state the settings the reps ran with."""
-    for name in ("warmup", "threads", "heap", "version"):
-        if recorded_setting(name, base_suffix) is not None:
+    """Carry the reps' recorded settings onto the `_median` suffix.
+
+    Two things here are load-bearing, and both were wrong in the first draft of this module:
+
+    The **destination is `<base_suffix>_median`**, not `base_suffix`. `--aggregate` writes
+    `direct_microcks<base>_median.csv` and CI renders it with `--report --csv-suffix _median`, so
+    settings filed under the bare suffix are settings the report cannot find — and a report that
+    cannot state the thread pin or the warmup it measured is indistinguishable, to a reader, from one
+    that was unfair. It would have printed the *defaults* while claiming to describe the run.
+
+    Disagreement between reps is a **hard error, not a majority vote or first-one-wins**: reps that
+    ran with different heaps, warmups or thread pins are different configurations, and a median
+    across them describes no configuration that was ever measured. Same rule as the WireMock leg."""
+    reps = find_reps(base_suffix)
+    resolved = {}
+    for name, flag in PROPAGATED_SETTINGS.items():
+        seen = {f"{base_suffix}_rep{n}": recorded_setting(name, f"{base_suffix}_rep{n}")
+                for n in reps}
+        known = {v for v in seen.values() if v is not None}
+        if not known:
             continue
-        for rep_file in sorted(glob.glob(sidecar_path(name, f"{base_suffix}_rep*"))):
-            try:
-                with open(rep_file) as fh:
-                    value = fh.read().strip()
-                with open(sidecar_path(name, base_suffix), "w") as out:
-                    out.write(value)
-                break
-            except OSError:
-                pass
+        if len(known) > 1:
+            detail = ", ".join(f"{s}={v}" for s, v in sorted(seen.items()) if v is not None)
+            raise SystemExit(
+                f"bench_microcks: reps disagree on {flag} ({detail}). A median across reps that ran "
+                f"with different {flag} values describes no configuration that was measured. "
+                f"Re-run them with one {flag}, or aggregate them separately.")
+        value = known.pop()
+        try:
+            with open(sidecar_path(name, median_suffix(base_suffix)), "w") as fh:
+                fh.write(f"{value}\n")
+        except OSError:
+            continue
+        resolved[name] = value
+    return resolved
 
 
 # --------------------------------------------------------------------------------------------
@@ -829,8 +866,11 @@ def report(conns, csv_suffix="", duration=None):
     A report of its own rather than a fourth column bolted onto the WireMock one: the comparable
     scenario set is a strict subset (six of thirteen), so the two tables have different row sets and
     merging them would either drop WireMock rows or show empty Microcks cells that read as "slow"
-    rather than "not comparable"."""
-    propagate_run_settings(csv_suffix)
+    rather than "not comparable".
+
+    Settings are *read*, never re-derived: `--aggregate` already propagated them onto the `_median`
+    suffix, and re-deriving them here from flag defaults is exactly how a report ends up describing a
+    configuration nothing measured."""
     rift = load_engine_csv("rift", csv_suffix, conns)
     microcks = load_engine_csv("microcks", csv_suffix, conns)
     wiremock = load_engine_csv("wiremock", csv_suffix, conns)
