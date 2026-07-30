@@ -317,12 +317,12 @@ Feature: Alternative Mountebank Format Compatibility
       """
       {
         "predicates": [{
-          "deepEquals": {"path": "/kaizen/auto/financing/lender-information/lenders"}
+          "deepEquals": {"path": "/api/auto/financing/lender-information/lenders"}
         }],
         "responses": [{"is": {"statusCode": 200, "body": "path matched"}}]
       }
       """
-    When I send GET request to "/kaizen/auto/financing/lender-information/lenders" on imposter 4545
+    When I send GET request to "/api/auto/financing/lender-information/lenders" on imposter 4545
     Then both services should return status 200
 
   # ==========================================================================

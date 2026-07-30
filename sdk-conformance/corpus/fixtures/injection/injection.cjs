@@ -1,10 +1,10 @@
-// Verbatim from cof-primary/auto-digital-digi-rtl-mimeo-solo/services/Kaizen/
+// Modeled on a decorate module from a real-world Mountebank migration corpus:
 //   injection_files/injection.cjs
 //
 // Migration probe: a `decorate` module loaded via require(). Exercises
 //   - config.request.body  + config.response.body (both STRING, JSON.parse'd)
 //   - copies the requested variant attribute onto every response buyRateVariant
-// See scripts/conformance-migration.sh (auto-digital · Kaizen).
+// See the conformance corpus manifest (lender service).
 module.exports = function (config) {
   const req = config.request;
   const res = config.response;

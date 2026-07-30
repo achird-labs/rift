@@ -1,11 +1,11 @@
-// Verbatim from cof-primary/RENUW-renuw-mimeo-solo/services/
-//   COAFPerformanceDeclineLookupLlds/v1/url/injection/timeShift.js
+// Modeled on a decorate module from a real-world Mountebank migration corpus:
+//   .../v1/url/injection/timeShift.js
 //
 // Migration probe: a `decorate` module loaded via require(). Exercises
 //   - config.stub.scenarioName  (scenario name available to the decorate)
 //   - config.response.body as a PARSED OBJECT (datasetRecords array walk)
 // The scenario name (…_less_than_48_hours) drives the hour offset it stamps
-// onto lldsRecordCreatedTime. See scripts/conformance-migration.sh (RENUW · COAF).
+// onto recordCreatedTime.
 module.exports = function (config) {
     // scenario name usually available as config.stub.scenarioName in decorate
     const scenarioName =
@@ -39,8 +39,8 @@ module.exports = function (config) {
         Array.isArray(config.response.body.datasetRecords)
     ) {
         config.response.body.datasetRecords.forEach((r) => {
-            if (r && Object.prototype.hasOwnProperty.call(r, "lldsRecordCreatedTime")) {
-                r.lldsRecordCreatedTime = dt;
+            if (r && Object.prototype.hasOwnProperty.call(r, "recordCreatedTime")) {
+                r.recordCreatedTime = dt;
             }
         });
     }

@@ -1,11 +1,11 @@
-// Verbatim from cof-primary/RENUW-renuw-mimeo-solo/services/Renuw_API_Executor/
+// Modeled on a decorate module from a real-world Mountebank migration corpus:
 //   v1/postAPIRequest/injection/appendExecutionId.cjs
 //
 // Migration probe: a Mountebank `decorate` module loaded via require(). Exercises
 //   - config.path         (shorthand request path on the decorate config)
 //   - config.request.headers
 //   - config.response.body as a STRING mutated via JSON.parse/JSON.stringify
-// See scripts/conformance-migration.sh (RENUW · Renuw_API_Executor).
+// See the conformance corpus manifest (API executor service).
 module.exports = function (config) {
     // Extract execution ID from request URL
     var executionId = null;
