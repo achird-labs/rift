@@ -504,8 +504,11 @@ async fn handle_request_inner(
             },
         };
 
-    // Record request if enabled
-    if imposter.config.record_requests {
+    // Record request if enabled. The journal index is kept (not discarded as before) so this
+    // request's match outcome can be attached to that exact entry once matching has finished;
+    // `None` means there is no entry to annotate — recording is off, or the backend has no stable
+    // indices.
+    let journal_index = if imposter.config.record_requests {
         let recorded = RecordedRequest {
             request_from: client_addr.to_string(),
             method: method.clone(),
@@ -517,9 +520,13 @@ async fn handle_request_inner(
             body: body_string.as_deref().map(str::to_string),
             mode: body_mode.clone(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            // Filled in after the match, via `attach_match_outcome` below.
+            match_outcome: None,
         };
-        imposter.record_request(recorded);
-    }
+        imposter.record_request(recorded)
+    } else {
+        None
+    };
 
     // Find matching stub
     let method_str = method.as_str();
@@ -585,8 +592,12 @@ async fn handle_request_inner(
     // Get client address info for requestFrom, ip predicates
     let request_from = client_addr.to_string();
     let client_ip = client_addr.ip().to_string();
-    let mut matched = match imposter
-        .find_matching_stub_with_client_bounded(
+    // Trace the scan only when there is a journal entry to attach the outcome to: with no entry
+    // the trace would be built and thrown away. That also means an imposter with recording off
+    // pays exactly what it paid before.
+    let want_trace = journal_index.is_some();
+    let (mut matched, mut trace) = match imposter
+        .find_matching_stub_with_client_bounded_inner(
             method_str,
             path_str,
             &headers_clone,
@@ -595,13 +606,15 @@ async fn handle_request_inner(
             Some(&request_from),
             Some(&client_ip),
             script_timeout,
+            want_trace,
         )
         .await
     {
-        Ok(matched) => matched,
+        Ok(traced) => traced,
         // A backend consulted during matching failed (issue #318), or a predicate-`inject`
         // errored (issue #440): surface it, never fall through to "no match" (which would
-        // serve the wrong response).
+        // serve the wrong response). No outcome is attached — the pass produced no verdict, and
+        // an absent outcome says exactly that.
         Err(e) => return Ok(matcher_error_response(&e)),
     };
 
@@ -621,8 +634,10 @@ async fn handle_request_inner(
             path: path_str,
         };
         if interceptor.on_no_match(ctx).await == NoMatchDirective::RetryMatch {
-            matched = match imposter
-                .find_matching_stub_with_client_bounded(
+            // The retry's own trace replaces the first pass's: a rescued request is served as a
+            // normal match, so the outcome must describe the scan that actually decided it.
+            (matched, trace) = match imposter
+                .find_matching_stub_with_client_bounded_inner(
                     method_str,
                     path_str,
                     &headers_clone,
@@ -631,13 +646,22 @@ async fn handle_request_inner(
                     Some(&request_from),
                     Some(&client_ip),
                     script_timeout,
+                    want_trace,
                 )
                 .await
             {
-                Ok(m) => m,
+                Ok(traced) => traced,
                 Err(e) => return Ok(matcher_error_response(&e)),
             };
         }
+    }
+
+    // Attach once, from the FINAL match state — after any rescue, and never on the paths that
+    // returned above (the debug branch and a matcher error), where absence of an outcome is the
+    // honest report that none was reached.
+    if let (Some(index), Some(trace)) = (journal_index, trace) {
+        let winner = matched.as_ref().map(|(state, i)| (&state.stub, *i));
+        imposter.attach_match_outcome(index, trace.into_outcome(winner));
     }
 
     if let Some((stub_state, stub_index)) = matched {

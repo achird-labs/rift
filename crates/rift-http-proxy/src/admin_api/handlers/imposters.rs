@@ -1135,6 +1135,7 @@ mod requests_filter_tests {
             headers,
             body: None,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
+            match_outcome: None,
         }
     }
 
@@ -1901,6 +1902,7 @@ mod verify_tests {
             headers: HashMap::new(),
             body: None,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
+            match_outcome: None,
         }
     }
 
@@ -2091,6 +2093,7 @@ mod replace_all_tests {
                 headers: std::collections::HashMap::new(),
                 body: None,
                 timestamp: "2026-01-01T00:00:00Z".to_string(),
+                match_outcome: None,
             });
 
         let body = serde_json::json!({"imposters": [cfg]}).to_string();

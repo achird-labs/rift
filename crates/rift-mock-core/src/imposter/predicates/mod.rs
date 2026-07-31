@@ -95,13 +95,58 @@ pub(crate) fn stub_matches_inner<SH>(
 where
     SH: BuildHasher,
 {
-    // If no predicates, match everything
-    if predicates.is_empty() {
-        return Ok(true);
-    }
+    Ok(stub_matches_explained(
+        predicates,
+        method,
+        path,
+        query,
+        headers,
+        body,
+        request_from,
+        client_ip,
+        form,
+        imposter_port,
+        body_json,
+        xml_dom,
+        query_map,
+    )?
+    .is_none())
+}
 
-    // All predicates must match (implicit AND)
-    for predicate in predicates {
+/// [`stub_matches_inner`]'s scan, reporting WHICH predicate rejected the stub: `Some(i)` is the
+/// position in `predicates` of the first predicate the request failed, `None` means every
+/// predicate passed (including the empty list, which matches everything).
+///
+/// This is the boolean scan, not a second one beside it — `stub_matches_inner` is defined in terms
+/// of it — so the answer can never disagree with the match itself. The index, not a field path, is
+/// the reportable datum: a predicate's field is a key inside its operation's map and `and`/`or`
+/// nest further, so there is no single path to name; the journal's consumer renders the predicate
+/// by indexing the stub config.
+///
+/// Predicates are implicitly AND-ed and the scan short-circuits, so predicates after the reported
+/// index were never evaluated.
+///
+/// See [`stub_matches`] for the `Err` contract (issue #440).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stub_matches_explained<SH>(
+    predicates: &[Predicate],
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+    headers: &HashMap<String, String, SH>,
+    body: Option<&str>,
+    request_from: Option<&str>,
+    client_ip: Option<&str>,
+    form: Option<&FastMap<String, String>>,
+    imposter_port: u16,
+    body_json: Option<&serde_json::Value>,
+    xml_dom: Option<&LazyXmlDom<'_>>,
+    query_map: Option<&FastMap<String, String>>,
+) -> anyhow::Result<Option<usize>>
+where
+    SH: BuildHasher,
+{
+    for (index, predicate) in predicates.iter().enumerate() {
         if !predicate_matches_inner(
             predicate,
             method,
@@ -117,10 +162,10 @@ where
             xml_dom,
             query_map,
         )? {
-            return Ok(false);
+            return Ok(Some(index));
         }
     }
-    Ok(true)
+    Ok(None)
 }
 
 /// Parse query string for predicate matching, URL-decoding both keys and values
@@ -2579,5 +2624,96 @@ mod tests {
         assert!(run(PredicateOperation::Contains(path_field("api/users"))));
         assert!(run(PredicateOperation::StartsWith(path_field("/api"))));
         assert!(run(PredicateOperation::EndsWith(path_field("USERS"))));
+    }
+
+    // =========================================================================
+    // stub_matches_explained — the same scan, reporting WHICH predicate rejected
+    // =========================================================================
+
+    /// Run `stub_matches_explained` over `predicates` for `GET /api/users`, headerless.
+    fn explain(predicates: &[Predicate]) -> Option<usize> {
+        stub_matches_explained(
+            predicates,
+            "GET",
+            "/api/users",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+            0,
+            None,
+            None,
+            None,
+        )
+        .expect("no inject predicate, so this cannot fail")
+    }
+
+    fn path_equals(path: &str) -> Predicate {
+        make_predicate(PredicateOperation::Equals(
+            [("path".to_string(), json!(path))].into_iter().collect(),
+        ))
+    }
+
+    // An empty predicate list matches everything, so there is no failing predicate to name.
+    #[test]
+    fn explained_reports_no_failure_for_an_empty_predicate_list() {
+        assert_eq!(explain(&[]), None);
+    }
+
+    // The reported index is the FIRST failure's position, not merely "some failure": with two
+    // failing predicates behind one passing one, the middle index must come back.
+    #[test]
+    fn explained_reports_the_first_failing_predicate_index() {
+        let predicates = vec![
+            path_equals("/api/users"),
+            path_equals("/nope"),
+            path_equals("/also-nope"),
+        ];
+        assert_eq!(explain(&predicates), Some(1));
+        // Reordering moves the reported index with the failure — it is positional, not incidental.
+        let predicates = vec![path_equals("/nope"), path_equals("/api/users")];
+        assert_eq!(explain(&predicates), Some(0));
+        // All passing ⇒ no failure.
+        assert_eq!(explain(&[path_equals("/api/users")]), None);
+    }
+
+    // The explained scan must be the boolean scan: `stub_matches_inner` is defined in terms of it,
+    // so any divergence would silently change which stub matches.
+    #[test]
+    fn explained_agrees_with_stub_matches_inner() {
+        let fixtures: Vec<Vec<Predicate>> = vec![
+            vec![],
+            vec![path_equals("/api/users")],
+            vec![path_equals("/nope")],
+            vec![path_equals("/api/users"), path_equals("/nope")],
+            vec![make_predicate(PredicateOperation::Equals(
+                [("method".to_string(), json!("GET"))].into_iter().collect(),
+            ))],
+        ];
+        for predicates in &fixtures {
+            let boolean = stub_matches_inner(
+                predicates,
+                "GET",
+                "/api/users",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+                None,
+                None,
+                None,
+            )
+            .expect("no inject predicate");
+            assert_eq!(
+                boolean,
+                explain(predicates).is_none(),
+                "explained and boolean scans disagreed on {predicates:?}"
+            );
+        }
     }
 }

@@ -223,7 +223,10 @@ async fn request_event_matches_saved_requests() {
     assert_eq!(v["request"]["path"], "/hello");
     assert_eq!(v["request"]["method"], "GET");
 
-    // The embedded request JSON must equal the savedRequests projection.
+    // The embedded request JSON must equal the savedRequests projection — modulo `matchOutcome`.
+    // The event is published at RECORD time, before matching has run, so the outcome the journal
+    // entry later carries cannot be on the pushed copy. That one key is the only permitted
+    // difference; everything else must still be identical.
     let saved: serde_json::Value =
         reqwest::get(format!("http://{addr}/imposters/{iport}/savedRequests"))
             .await
@@ -231,8 +234,23 @@ async fn request_event_matches_saved_requests() {
             .json()
             .await
             .expect("saved json");
+    let mut entry = saved[0].clone();
+    let outcome = entry
+        .as_object_mut()
+        .expect("savedRequests entry is an object")
+        .remove("matchOutcome");
+    assert!(
+        outcome.is_some(),
+        "the journal entry carries a match outcome: {}",
+        saved[0]
+    );
+    assert!(
+        v["request"].get("matchOutcome").is_none(),
+        "the pushed copy predates the match, so it cannot carry an outcome: {}",
+        v["request"]
+    );
     assert_eq!(
-        v["request"], saved[0],
+        v["request"], entry,
         "SSE request JSON must equal the savedRequests entry"
     );
     running.shutdown().await;

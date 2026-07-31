@@ -390,10 +390,38 @@ Multiple `match` clauses are AND-ed together. `since` is applied first, then the
       "host": "localhost:4545",
       "user-agent": "curl/7.88.0"
     },
-    "timestamp": "2024-01-15T10:30:00.000Z"
+    "timestamp": "2024-01-15T10:30:00.000Z",
+    "matchOutcome": {
+      "matched": false,
+      "tried": [
+        { "stubIndex": 0, "stubId": "users",
+          "why": { "reason": "failedPredicate", "predicateIndex": 1 } },
+        { "stubIndex": 1, "why": { "reason": "skippedScenarioState" } }
+      ]
+    }
   }
 ]
 ```
+
+#### Why a request did not match
+
+`matchOutcome` answers that without re-deriving the scan by hand. On a hit it carries
+`matched: true` plus `stubIndex`/`stubId`; on a miss, `matched: false` and no winner.
+
+`tried` lists the candidates the matcher **visited**, in visit order — a stub the candidate index
+ruled out before the scan, or one sitting after the winner, is not listed, because no verdict was
+ever reached for it. Each entry says why that candidate fell out: `failedPredicate` with the
+position of the first predicate the request failed (predicates are AND-ed and the scan
+short-circuits, so later ones were never evaluated), or `skippedSpace` / `skippedScenarioState`
+for a stub whose eligibility gate excluded it before predicates ran at all.
+
+The list is capped at 25 entries; anything beyond that is counted in `triedOmitted` rather than
+silently dropped.
+
+The whole object is **absent** when no outcome was recorded — `recordRequests` was off (in which
+case there is no entry at all), a custom `RequestJournal` backend has no stable indices to attach
+to, the request took the `X-Rift-Debug` path, or matching itself errored. Absence means "not
+recorded", never "did not match".
 
 #### Tailing with a cursor
 

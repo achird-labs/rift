@@ -319,6 +319,7 @@ mod tests {
             headers: hs,
             body: body.map(str::to_string),
             timestamp: "2026-01-01T00:00:00Z".to_string(),
+            match_outcome: None,
         }
     }
 
