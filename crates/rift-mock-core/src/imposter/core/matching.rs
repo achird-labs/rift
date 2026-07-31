@@ -3,8 +3,56 @@
 //! Part of the `Imposter` implementation; see `core/mod.rs` for the struct definition.
 
 use super::*;
+use crate::imposter::predicates::stub_matches_explained;
+// The differential oracle below is the ONLY remaining caller of the boolean scan here — the live
+// path asks for the failing predicate's index instead (and discards it when untraced).
+#[cfg(test)]
+use crate::imposter::predicates::stub_matches_inner;
+use crate::imposter::types::{MAX_TRIED_STUBS, MatchOutcome, TriedStub, TriedWhy};
 use crate::util::FastMap;
 use std::hash::BuildHasher;
+
+/// The accumulating form of [`MatchOutcome`]'s `tried`/`triedOmitted`, built during the stub scan.
+///
+/// It exists separately from `MatchOutcome` because the verdict is not known until the scan ends:
+/// the scan can only record the candidates it rejects, and whether the pass matched (and which
+/// stub won) is supplied by [`Self::into_outcome`] afterwards. Only VISITED candidates land here —
+/// stubs the Stage-1 index ruled out are never evaluated, so there is no verdict to report for
+/// them.
+#[derive(Debug, Default)]
+pub(crate) struct MatchTrace {
+    tried: Vec<TriedStub>,
+    omitted: u32,
+}
+
+impl MatchTrace {
+    /// Record a rejected candidate, or — past the cap — count it.
+    fn reject(&mut self, stub_index: usize, stub: &Stub, why: TriedWhy) {
+        if self.tried.len() >= MAX_TRIED_STUBS {
+            self.omitted += 1;
+            return;
+        }
+        self.tried.push(TriedStub {
+            stub_index,
+            stub_id: stub.id.clone(),
+            why,
+        });
+    }
+
+    /// Seal the trace with the pass's verdict: `Some((stub, index))` is the winner, `None` a miss.
+    pub(crate) fn into_outcome(self, winner: Option<(&Stub, usize)>) -> MatchOutcome {
+        MatchOutcome {
+            matched: winner.is_some(),
+            stub_index: winner.map(|(_, index)| index),
+            stub_id: winner.and_then(|(stub, _)| stub.id.clone()),
+            tried: self.tried,
+            tried_omitted: self.omitted,
+        }
+    }
+}
+
+/// A matching pass's result and, when one was requested, the trace of the candidates it visited.
+type TracedMatch = (Option<(Arc<StubState>, usize)>, Option<MatchTrace>);
 
 impl Imposter {
     /// Find a matching stub for a request and return a cloned copy with its index.
@@ -40,6 +88,42 @@ impl Imposter {
     where
         SH: BuildHasher,
     {
+        Ok(self
+            .find_matching_stub_with_client_inner(
+                method,
+                path,
+                headers_map,
+                query,
+                body,
+                request_from,
+                client_ip,
+                false,
+            )?
+            .0)
+    }
+
+    /// Body of [`Self::find_matching_stub_with_client`], optionally recording WHY each visited
+    /// candidate fell out (see [`MatchTrace`]).
+    ///
+    /// `want_trace` is a parameter rather than a separate scan so the traced and untraced paths
+    /// can never diverge on which stub wins: tracing observes the one scan, it does not repeat it.
+    /// With `want_trace: false` nothing is allocated and the pass is the pre-existing one.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn find_matching_stub_with_client_inner<SH>(
+        &self,
+        method: &str,
+        path: &str,
+        headers_map: &HashMap<String, String, SH>,
+        query: Option<&str>,
+        body: Option<&str>,
+        request_from: Option<&str>,
+        client_ip: Option<&str>,
+        want_trace: bool,
+    ) -> anyhow::Result<TracedMatch>
+    where
+        SH: BuildHasher,
+    {
+        let mut trace = want_trace.then(MatchTrace::default);
         // Stage 1 (issues #292, #707): one wait-free load yields the stubs and the index built over
         // those exact stubs, so they are consistent by construction. Every dimension over-
         // approximates (stubs it can't index sit in its always-bits), so `candidates` is a superset
@@ -77,6 +161,9 @@ impl Imposter {
             if let Some(space) = &stub.space
                 && flow_id != *space
             {
+                if let Some(trace) = trace.as_mut() {
+                    trace.reject(stub_idx, stub, TriedWhy::SkippedSpace);
+                }
                 continue;
             }
             // Scenario FSM eligibility gate (before predicate precedence): a stub guarded by
@@ -85,10 +172,15 @@ impl Imposter {
             if let Some(required) = &stub.required_scenario_state {
                 let scenario = stub.scenario_name.as_deref().unwrap_or("");
                 if self.scenario_state(&flow_id, scenario)? != *required {
+                    if let Some(trace) = trace.as_mut() {
+                        trace.reject(stub_idx, stub, TriedWhy::SkippedScenarioState);
+                    }
                     continue;
                 }
             }
-            if stub_matches_inner(
+            // `stub_matches_inner` IS this call with the index discarded, so asking for the index
+            // unconditionally costs nothing and keeps one scan for both paths.
+            match stub_matches_explained(
                 &stub.predicates,
                 method,
                 path,
@@ -103,17 +195,24 @@ impl Imposter {
                 xml_dom.as_ref(),
                 Some(&query_map),
             )? {
-                // Bump the refcount instead of deep-cloning the whole `StubState` (issue #287).
-                // The caller (`handler.rs`) holds the returned `Arc<StubState>` across `.await`
-                // points, so the arc-swap load guard must be released before returning (issue #291);
-                // the `Arc` lets it do so without a copy. Response-cycling state stays shared: the
-                // `cycler` is itself an `Arc`, so advancing it via this handle is visible through
-                // the stored stub, and an in-place replace swaps a new `Arc` while in-flight
-                // requests keep serving their snapshot.
-                return Ok(Some((Arc::clone(stub_state), stub_idx)));
+                None => {
+                    // Bump the refcount instead of deep-cloning the whole `StubState` (issue #287).
+                    // The caller (`handler.rs`) holds the returned `Arc<StubState>` across `.await`
+                    // points, so the arc-swap load guard must be released before returning (issue #291);
+                    // the `Arc` lets it do so without a copy. Response-cycling state stays shared: the
+                    // `cycler` is itself an `Arc`, so advancing it via this handle is visible through
+                    // the stored stub, and an in-place replace swaps a new `Arc` while in-flight
+                    // requests keep serving their snapshot.
+                    return Ok((Some((Arc::clone(stub_state), stub_idx)), trace));
+                }
+                Some(failed) => {
+                    if let Some(trace) = trace.as_mut() {
+                        trace.reject(stub_idx, stub, TriedWhy::FailedPredicate(failed));
+                    }
+                }
             }
         }
-        Ok(None)
+        Ok((None, trace))
     }
 
     /// As [`Self::find_matching_stub_with_client`], but bounded (issue #476): when the stub
@@ -142,6 +241,44 @@ impl Imposter {
         // `'static` worker closure when the snapshot needs offloading (inject/scenario-gate).
         SH: BuildHasher + Clone + Send + 'static,
     {
+        Ok(self
+            .find_matching_stub_with_client_bounded_inner(
+                method,
+                path,
+                headers_map,
+                query,
+                body,
+                request_from,
+                client_ip,
+                timeout,
+                false,
+            )
+            .await?
+            .0)
+    }
+
+    /// Body of [`Self::find_matching_stub_with_client_bounded`], optionally returning the trace of
+    /// the candidates the pass visited (see [`MatchTrace`]).
+    ///
+    /// Every bounding decision is unchanged — the same inline fast path, the same `spawn_blocking`
+    /// offload, the same deadline — because the trace is produced BY the scan rather than beside
+    /// it; it simply rides back out of the blocking task by value with the result.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn find_matching_stub_with_client_bounded_inner<SH>(
+        self: &Arc<Self>,
+        method: &str,
+        path: &str,
+        headers_map: &HashMap<String, String, SH>,
+        query: Option<&str>,
+        body: Option<&str>,
+        request_from: Option<&str>,
+        client_ip: Option<&str>,
+        timeout: std::time::Duration,
+        want_trace: bool,
+    ) -> anyhow::Result<TracedMatch>
+    where
+        SH: BuildHasher + Clone + Send + 'static,
+    {
         let snapshot = self.snapshot();
         let has_inject = snapshot.has_inject();
         // A scenario-gated stub reads flow state inside the matching pass; on a blocking backend
@@ -151,7 +288,7 @@ impl Imposter {
             has_inject || (snapshot.has_scenario_gate() && self.flow_store.is_blocking());
         drop(snapshot);
         if !needs_offload {
-            return self.find_matching_stub_with_client(
+            return self.find_matching_stub_with_client_inner(
                 method,
                 path,
                 headers_map,
@@ -159,6 +296,7 @@ impl Imposter {
                 body,
                 request_from,
                 client_ip,
+                want_trace,
             );
         }
 
@@ -171,7 +309,7 @@ impl Imposter {
         let request_from = request_from.map(str::to_string);
         let client_ip = client_ip.map(str::to_string);
         let handle = tokio::task::spawn_blocking(move || {
-            this.find_matching_stub_with_client(
+            this.find_matching_stub_with_client_inner(
                 &method,
                 &path,
                 &headers_map,
@@ -179,6 +317,7 @@ impl Imposter {
                 body.as_deref(),
                 request_from.as_deref(),
                 client_ip.as_deref(),
+                want_trace,
             )
         });
         // The wall-clock deadline exists to bound a runaway inject *script*. A blocking flow-store

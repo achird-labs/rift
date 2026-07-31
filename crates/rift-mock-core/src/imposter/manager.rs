@@ -2397,6 +2397,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             body: None,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
+            match_outcome: None,
         }
     }
 

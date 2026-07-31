@@ -9,7 +9,7 @@
 //! is shared across imposters and keyed by port; imposter deletion clears its port slice so
 //! stale entries never resurrect on a later imposter reusing the port.
 
-use super::types::RecordedRequest;
+use super::types::{MatchOutcome, RecordedRequest};
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -126,6 +126,24 @@ pub trait RequestJournal: Send + Sync {
     fn record_indexed(&self, port: u16, flow_id: &str, req: RecordedRequest) -> Option<u64> {
         self.record(port, flow_id, req);
         None
+    }
+
+    /// Attach a match outcome to an entry already recorded under `index`.
+    ///
+    /// The outcome is only known after matching, which is after the entry exists — so this is a
+    /// second write, not part of `record`. Two consequences are deliberate, and both are why this
+    /// returns nothing:
+    ///
+    /// * A backend with no stable indices (one that leaves [`record_indexed`](Self::record_indexed)
+    ///   at its default) has no way to address the entry, so the default here is a no-op. Such a
+    ///   backend simply never carries outcomes; nothing else about it changes.
+    /// * Attaching to an entry that is gone — evicted by the cap, or cleared between the record
+    ///   and the match — is not an error. The entry the annotation describes no longer exists, so
+    ///   there is nothing to say about it and nothing a caller could do.
+    ///
+    /// A diagnostic annotation must never be able to fail a request.
+    fn attach_match(&self, port: u16, index: u64, outcome: MatchOutcome) {
+        let _ = (port, index, outcome);
     }
 }
 
@@ -286,6 +304,16 @@ impl RequestJournal for LocalJournal {
     fn count(&self, port: u16) -> u64 {
         self.slot(port).count.load(Ordering::SeqCst)
     }
+
+    fn attach_match(&self, port: u16, index: u64, outcome: MatchOutcome) {
+        let slot = self.slot(port);
+        let mut entries = slot.entries.write();
+        // Indices are assigned under this same write lock, so the deque is always in strictly
+        // ascending index order — a binary search is exact here, not merely a heuristic.
+        if let Ok(position) = entries.binary_search_by(|(entry, _, _)| entry.cmp(&index)) {
+            entries[position].2.match_outcome = Some(outcome);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -303,6 +331,7 @@ mod tests {
             headers: Default::default(),
             body: None,
             timestamp: "t".into(),
+            match_outcome: None,
         }
     }
 
@@ -346,6 +375,47 @@ mod tests {
         // An always-false predicate yields nothing; always-true yields all.
         assert!(j.read_filtered(1, &|_| false).entries.is_empty());
         assert_eq!(j.read_filtered(1, &|_| true).entries.len(), 3);
+    }
+
+    fn outcome() -> MatchOutcome {
+        MatchOutcome {
+            matched: false,
+            stub_index: None,
+            stub_id: None,
+            tried: Vec::new(),
+            tried_omitted: 0,
+        }
+    }
+
+    // The outcome is attached AFTER the entry is recorded, so by the time it arrives the entry may
+    // legitimately be gone (evicted by the cap, or the whole port never recorded). Both are no-ops:
+    // a diagnostic annotation must never panic, and must never scribble on a neighbouring entry.
+    #[test]
+    fn attach_match_on_an_absent_entry_is_a_no_op() {
+        let j = LocalJournal::default();
+        for i in 0..(MAX_RECORDED_REQUESTS + 5) {
+            j.record_indexed(1, "f", req(&format!("/{i}")));
+        }
+        // Indices 1..=5 fell off the front; 6 is the oldest retained.
+        j.attach_match(1, 1, outcome());
+        j.attach_match(9999, 1, outcome());
+
+        let entries = j.read(1).entries;
+        assert_eq!(entries.len(), MAX_RECORDED_REQUESTS);
+        assert!(
+            entries.iter().all(|r| r.match_outcome.is_none()),
+            "attaching to an evicted index must not land on any surviving entry"
+        );
+
+        // Attaching to a live index still works, so the no-op above is about absence — not about
+        // attach being inert everywhere.
+        j.attach_match(1, 6, outcome());
+        let entries = j.read(1).entries;
+        assert!(entries[0].match_outcome.is_some(), "the addressed entry");
+        assert!(
+            entries[1..].iter().all(|r| r.match_outcome.is_none()),
+            "and only that entry"
+        );
     }
 
     // AC1: note_request counts even when nothing is recorded (recording off).

@@ -46,6 +46,17 @@ impl Imposter {
         }
     }
 
+    /// Attach a match outcome to the entry [`record_request`](Self::record_request) returned
+    /// `index` for, once this request's matching pass has finished.
+    ///
+    /// Infallible by design: see [`RequestJournal::attach_match`](crate::imposter::RequestJournal::attach_match)
+    /// for why a backend without indices, or an entry already evicted, is a no-op rather than an
+    /// error. Nothing about the response depends on it.
+    pub fn attach_match_outcome(&self, index: u64, outcome: MatchOutcome) {
+        self.journal
+            .attach_match(self.journal_port(), index, outcome);
+    }
+
     /// Read recorded requests with the backend's completeness flag intact, so embedders
     /// can observe a degraded read programmatically (issue #314).
     pub fn read_recorded_requests(&self) -> JournalRead {

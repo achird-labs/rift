@@ -6,13 +6,13 @@
 /// Default scenario state when a `(flow_id, scenario)` entry is absent (WireMock parity).
 pub const INITIAL_SCENARIO_STATE: &str = "Started";
 
-use super::predicates::stub_matches_inner;
 use super::response::{
     create_response_preview, create_stub_from_proxy_response, execute_stub_response_with_rift,
 };
 use super::types::{
     DebugImposter, DebugResponsePreview, DebugStubInfo, ImposterConfig, ImposterError,
-    ProxyResponse, RecordedRequest, ResponseMode, RiftResponseExtension, Stub, StubResponse,
+    MatchOutcome, ProxyResponse, RecordedRequest, ResponseMode, RiftResponseExtension, Stub,
+    StubResponse,
 };
 use crate::backends::InMemoryFlowStore;
 use crate::behaviors::{HasRepeatBehavior, RuleCycler};
@@ -1489,6 +1489,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             body: None,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
+            match_outcome: None,
         };
 
         use crate::imposter::journal::MAX_RECORDED_REQUESTS;
@@ -1528,6 +1529,7 @@ mod tests {
                 headers,
                 body: None,
                 timestamp: "2026-01-01T00:00:00Z".to_string(),
+                match_outcome: None,
             }
         };
         imposter.record_request(req("A"));

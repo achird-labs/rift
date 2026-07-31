@@ -97,6 +97,115 @@ pub struct RecordedRequest {
     #[serde(rename = "_mode", default, skip_serializing_if = "is_text_mode")]
     pub mode: ResponseMode,
     pub timestamp: String,
+    /// Why this request matched — or did not. Captured at request time and attached to this
+    /// entry once matching has finished, so an operator reading the journal can answer "why did
+    /// this not match?" without re-deriving the scan by hand.
+    ///
+    /// `None` (and therefore absent on the wire, like `_mode` above) whenever no outcome was
+    /// recorded: recording was off, the backend has no stable indices to attach to, the request
+    /// took the `X-Rift-Debug` path, or matching itself errored. Absence means "not recorded",
+    /// never "did not match".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_outcome: Option<MatchOutcome>,
+}
+
+/// Cap on the candidates named in [`MatchOutcome::tried`]; the rest are counted in
+/// [`MatchOutcome::tried_omitted`].
+///
+/// An outcome rides on every journal entry and the journal ring holds
+/// [`MAX_RECORDED_REQUESTS`](crate::imposter::MAX_RECORDED_REQUESTS) (10k) entries per port, so an
+/// uncapped list would let one imposter with a few hundred stubs multiply the journal's footprint
+/// by that stub count. Twenty-five is well past the point where reading the list by hand stops
+/// being how you diagnose a miss.
+pub const MAX_TRIED_STUBS: usize = 25;
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if contract
+fn is_zero(count: &u32) -> bool {
+    *count == 0
+}
+
+/// The compact record of one request's match, attached to its journal entry.
+///
+/// `tried` lists only the candidates the matcher actually VISITED, in visit order. The Stage-1
+/// index (`core::stub_index`) prunes stubs it can prove cannot match before the scan begins, and
+/// those are never evaluated — listing them would claim a verdict the matcher never reached. A
+/// stub's absence from `tried` therefore means "ruled out by the index, or never reached because
+/// an earlier stub already won", not "passed".
+///
+/// A miss:
+///
+/// ```json
+/// { "matched": false,
+///   "tried": [{ "stubIndex": 0, "stubId": "users",
+///               "why": { "reason": "failedPredicate", "predicateIndex": 1 } }] }
+/// ```
+///
+/// A hit, where `tried` holds only the candidates visited BEFORE the winner:
+///
+/// ```json
+/// { "matched": true, "stubIndex": 2, "stubId": "fallback", "tried": [] }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchOutcome {
+    pub matched: bool,
+    /// Position of the winning stub in the imposter's stub list; absent when nothing matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stub_index: Option<usize>,
+    /// The winning stub's `id`, when it declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stub_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tried: Vec<TriedStub>,
+    /// Candidates visited past [`MAX_TRIED_STUBS`] and therefore not named above. Counted rather
+    /// than dropped: a silently truncated `tried` would make "these are the stubs that were
+    /// tried" false with nothing on the wire to say so.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tried_omitted: u32,
+}
+
+/// One candidate the matcher visited and did not serve, with the reason it fell out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriedStub {
+    pub stub_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stub_id: Option<String>,
+    pub why: TriedWhy,
+}
+
+/// Why a visited candidate did not win.
+///
+/// Adjacently tagged, so every variant is one flat object with the same `reason` key and consumers
+/// can switch on it without type-testing the value:
+///
+/// ```json
+/// { "reason": "skippedSpace" }
+/// { "reason": "skippedScenarioState" }
+/// { "reason": "failedPredicate", "predicateIndex": 1 }
+/// ```
+///
+/// (An externally tagged enum would render the first two as the bare string `"skippedSpace"` and
+/// the third as `{ "failedPredicate": 1 }` — the same field alternating between a string and an
+/// object, which is exactly the shape that makes a consumer branch on JSON types.)
+///
+/// The failure datum is the predicate's INDEX in the stub's `predicates`, not a field path: a
+/// [`Predicate`]'s field is a key inside its operation's map (and `and`/`or`/`not` nest further),
+/// so there is no single path to name. A consumer renders the offending predicate by indexing the
+/// stub config it already has.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "reason", content = "predicateIndex", rename_all = "camelCase")]
+pub enum TriedWhy {
+    /// Correlated-isolation gate (issue #223): the stub is scoped to a space this request's
+    /// resolved `flow_id` is not. Never reached predicate evaluation.
+    SkippedSpace,
+    /// Scenario FSM gate: the stub's `requiredScenarioState` is not the current state. Never
+    /// reached predicate evaluation either.
+    SkippedScenarioState,
+    /// The first predicate (by position in the stub's `predicates`) that the request failed.
+    /// Predicates are implicitly AND-ed and the scan short-circuits, so later ones were never
+    /// evaluated.
+    FailedPredicate(usize),
 }
 
 // ============================================================================
@@ -2109,6 +2218,7 @@ mod tests {
             body: Some("hello".to_string()),
             mode: ResponseMode::Text,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
+            match_outcome: None,
         };
         let value = serde_json::to_value(&req).expect("serializes");
         assert!(
@@ -2131,10 +2241,34 @@ mod tests {
             body: Some("//4A".to_string()), // base64 of [0xFF, 0xFE, 0x00]
             mode: ResponseMode::Binary,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
+            match_outcome: None,
         };
         let value = serde_json::to_value(&req).expect("serializes");
         assert_eq!(value["_mode"], "binary");
         assert_eq!(value["body"], "//4A");
+    }
+
+    // An entry with no recorded match outcome must serialize byte-identically to the shape that
+    // predates `matchOutcome` — no key at all. Asserted as exact bytes rather than key-by-key,
+    // because the wire compatibility claim is about the whole document, and field order is part
+    // of what consumers (and golden fixtures) see.
+    #[test]
+    fn recorded_request_without_match_outcome_serializes_unchanged() {
+        let req = RecordedRequest {
+            request_from: "127.0.0.1:1234".to_string(),
+            method: "POST".to_string(),
+            path: "/x".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Some("hello".to_string()),
+            mode: ResponseMode::Text,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            match_outcome: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&req).expect("serializes"),
+            r#"{"requestFrom":"127.0.0.1:1234","method":"POST","path":"/x","query":{},"headers":{},"body":"hello","timestamp":"2026-01-01T00:00:00Z"}"#
+        );
     }
 
     // Issue #636: a recording written before `_mode` existed has no such key at all — it must

@@ -34,12 +34,13 @@ mod tests;
 #[allow(unused_imports)]
 pub use types::{
     DebugImposter, DebugMatchResult, DebugRequest, DebugResponse, DebugResponsePreview,
-    DebugStubInfo, ImposterConfig, ImposterError, IsResponse, PathRewrite, Predicate,
-    PredicateOperation, PredicateParameters, PredicateSelector, ProxyResponse, RecordedRequest,
-    ResponseMode, RiftConfig, RiftConnectionPoolConfig, RiftErrorFault, RiftFaultConfig,
-    RiftFlowStateConfig, RiftLatencyFault, RiftMetricsConfig, RiftProxyConfig, RiftRedisConfig,
-    RiftResponseExtension, RiftScriptConfig, RiftScriptEngineConfig, RiftTcpFault,
-    RiftUpstreamConfig, Stub, StubResponse,
+    DebugStubInfo, ImposterConfig, ImposterError, IsResponse, MAX_TRIED_STUBS, MatchOutcome,
+    PathRewrite, Predicate, PredicateOperation, PredicateParameters, PredicateSelector,
+    ProxyResponse, RecordedRequest, ResponseMode, RiftConfig, RiftConnectionPoolConfig,
+    RiftErrorFault, RiftFaultConfig, RiftFlowStateConfig, RiftLatencyFault, RiftMetricsConfig,
+    RiftProxyConfig, RiftRedisConfig, RiftResponseExtension, RiftScriptConfig,
+    RiftScriptEngineConfig, RiftTcpFault, RiftUpstreamConfig, Stub, StubResponse, TriedStub,
+    TriedWhy,
 };
 
 // Re-export script `file:`/`ref:` resolution (issue #356)
