@@ -11,6 +11,28 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **A `ProxyRecordingStore` can now settle a claim *after* the generated stub exists, and own stub
+  publication outright** (issue #910). The trait's `record` is called before predicate generation,
+  which is invisible for the in-process `LocalProxyStore` but inverts the guarantee for an embedder
+  whose store publishes recordings to a shared or durable backend: it is asked to commit "this
+  signature is Recorded" at a point where the stub it must publish does not exist yet, so a failed
+  publication leaves the signature recorded with nothing to replay — and the trait offered no later
+  opportunity to commit.
+
+  Two defaulted additions close that: `complete(..., &StubPublication)` is called instead of
+  `record` whenever a stub was generated, after generation and before publication, so a store can
+  make "Recorded" strictly conditional on its own publication ack; and `publishes_stubs() -> bool`
+  makes the engine skip its in-process insertion entirely so the store is the sole publisher. The
+  `StubPublication` carries the stub plus the placement the engine resolved (`BeforeProxy` for
+  `proxyOnce`, `AfterProxyMerging` for `proxyAlways`) and the `proxy.to` anchor it is relative to,
+  so a publisher reproduces the engine's positions rather than re-deriving them and drifting.
+
+  Both default to today's behaviour — `complete` delegates to `record`, `publishes_stubs` is
+  `false` — so `LocalProxyStore` and every existing implementor are untouched and still compile.
+  See [SPI: publishing stubs from the store](docs/embedding/spi.md).
+
 ### Fixed
 
 - **The published benchmark tables labelled the flagship row with the wrong stub count** (issue #906).

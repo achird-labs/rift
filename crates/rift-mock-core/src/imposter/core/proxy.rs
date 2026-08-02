@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::imposter::predicates::regex_cache::cached_regex;
+use crate::recording::{ClaimToken, StubPlacement, StubPublication};
 use std::hash::BuildHasher;
 
 /// Parts read from a successful upstream proxy response, before recording:
@@ -223,6 +224,19 @@ impl Imposter {
         });
     }
 
+    /// Resolve a proxy mode string to the placement its recorded stubs take.
+    ///
+    /// The single source of truth for that mapping: the engine's own insertion and the
+    /// [`StubPublication`] handed to a publishing store both go through here, so the position a
+    /// publisher is told to reproduce can never drift from the one the engine would use.
+    fn placement_for_mode(proxy_mode: &str) -> StubPlacement {
+        if proxy_mode == "proxyAlways" {
+            StubPlacement::AfterProxyMerging
+        } else {
+            StubPlacement::BeforeProxy
+        }
+    }
+
     /// Insert or append a generated stub based on proxy mode.
     ///
     /// Instead of trusting a previously-obtained stub index (which may be stale
@@ -232,6 +246,7 @@ impl Imposter {
     /// For proxyOnce: Insert new stub BEFORE the proxy stub (so it matches first next time)
     /// For proxyAlways: Append response to existing stub AFTER proxy stub, or insert new AFTER proxy
     pub fn insert_or_append_proxy_stub(&self, stub: Stub, proxy_to: &str, proxy_mode: &str) {
+        let placement = Self::placement_for_mode(proxy_mode);
         self.mutate_stubs(|stubs| {
             // Re-locate the proxy stub inside the write critical section to avoid stale-index races.
             let proxy_stub_index = stubs
@@ -244,7 +259,7 @@ impl Imposter {
                 })
                 .unwrap_or(stubs.len());
 
-            if proxy_mode == "proxyAlways" {
+            if placement == StubPlacement::AfterProxyMerging {
                 // For proxyAlways, recorded stubs go AFTER the proxy stub
                 // This ensures proxy always runs first and records each request
 
@@ -295,6 +310,44 @@ impl Imposter {
                 );
             }
         });
+    }
+
+    /// Settle a won proxy claim, offering the generated stub when one exists.
+    ///
+    /// A failed settle releases the claim so the signature stays retryable instead of wedging as
+    /// Recorded with nothing behind it (issue #315, and the publication-failure case of #910).
+    /// The caller keeps its upstream response either way: the upstream call succeeded, only
+    /// recording failed.
+    fn settle_proxy_claim(
+        &self,
+        port: u16,
+        signature: &RequestSignature,
+        token: ClaimToken,
+        resp: RecordedResponse,
+        publication: Option<&StubPublication<'_>>,
+    ) {
+        // The path is named in the warn below: for a publishing store a `complete` failure is a
+        // failed *publication*, which an operator has to correlate differently from a plain
+        // recording failure.
+        let (path, settled) = match publication {
+            Some(publication) => (
+                "complete",
+                self.proxy_store
+                    .complete(port, signature.clone(), token, resp, publication),
+            ),
+            None => (
+                "record",
+                self.proxy_store
+                    .record(port, signature.clone(), token, resp),
+            ),
+        };
+        if let Err(e) = settled {
+            warn!(
+                "Failed to settle proxy recording via {path}(), releasing claim so it stays \
+                 retryable: {e}"
+            );
+            self.proxy_store.release_claim(port, signature, token);
+        }
     }
 
     /// Forward a request through proxy and optionally record the response
@@ -460,32 +513,21 @@ impl Imposter {
             }
         };
 
-        // Record the response only if we hold a claim.
-        if let Some(token) = claim_token {
-            let recorded_response = RecordedResponse {
-                status,
-                headers: response_headers.clone(),
-                body: body_bytes.to_vec(),
-                latency_ms: if proxy_config.add_wait_behavior {
-                    Some(latency_ms)
-                } else {
-                    None
+        // Build the recording if we hold a claim, but do NOT settle the claim yet: a store that
+        // publishes stubs must be able to make "Recorded" conditional on publishing the stub, and
+        // the stub does not exist until predicate generation below has run (issue #910).
+        let mut recording = claim_token.map(|token| {
+            (
+                token,
+                RecordedResponse {
+                    status,
+                    headers: response_headers.clone(),
+                    body: body_bytes.to_vec(),
+                    latency_ms: proxy_config.add_wait_behavior.then_some(latency_ms),
+                    timestamp_secs: crate::util::unix_timestamp(),
                 },
-                timestamp_secs: crate::util::unix_timestamp(),
-            };
-
-            if let Err(e) =
-                self.proxy_store
-                    .record(port, signature.clone(), token, recorded_response)
-            {
-                // A failed record must release the claim, or the signature wedges for
-                // proxyOnce (issue #315) — symmetric with the upstream-failure path above.
-                warn!(
-                    "Failed to record proxy response, releasing claim so it stays retryable: {e}"
-                );
-                self.proxy_store.release_claim(port, &signature, token);
-            }
-        }
+            )
+        });
 
         // Generate and insert stub if predicateGenerators, addWaitBehavior, or addDecorateBehavior is configured
         // (Mountebank generates stubs automatically when these are enabled)
@@ -579,7 +621,34 @@ impl Imposter {
                     } else {
                         &proxy_config.mode
                     };
-                    self.insert_or_append_proxy_stub(new_stub, &proxy_config.to, mode);
+
+                    // Settle the claim now that the stub exists, and before it is published, so a
+                    // publishing store can refuse to commit "Recorded" if publication fails.
+                    let settled = if let Some((token, resp)) = recording.take() {
+                        let publication = StubPublication {
+                            stub: &new_stub,
+                            placement: Self::placement_for_mode(mode),
+                            proxy_to: &proxy_config.to,
+                        };
+                        self.settle_proxy_claim(port, &signature, token, resp, Some(&publication));
+                        true
+                    } else {
+                        false
+                    };
+
+                    // A store that publishes stubs is the only publisher; inserting locally too
+                    // would double-publish the recording (issue #910). When no claim was won there
+                    // was no `complete` call either, so nobody publishes this stub — say so, rather
+                    // than logging that the store took ownership of something it never saw.
+                    if self.proxy_store.publishes_stubs() {
+                        debug!(
+                            "Skipping local stub insertion for path {} (proxy store publishes \
+                             stubs; handed over: {settled})",
+                            uri.path()
+                        );
+                    } else {
+                        self.insert_or_append_proxy_stub(new_stub, &proxy_config.to, mode);
+                    }
                     debug!(
                         "Generated stub from proxy response for path {} (mode: {})",
                         uri.path(),
@@ -599,6 +668,12 @@ impl Imposter {
                         .push(("x-rift-generator-error".to_string(), token.to_string()));
                 }
             }
+        }
+
+        // No stub was generated — nothing configured to generate one, or generation failed — so
+        // there is nothing to publish and the claim settles through `record` exactly as before.
+        if let Some((token, resp)) = recording {
+            self.settle_proxy_claim(port, &signature, token, resp, None);
         }
 
         Ok((

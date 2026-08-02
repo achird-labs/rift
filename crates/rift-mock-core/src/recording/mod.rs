@@ -26,7 +26,8 @@ mod types;
 // Re-export main types
 pub use mode::ProxyMode;
 pub use proxy_store::{
-    ClaimOutcome, ClaimToken, LocalProxyStore, ProxyRecordingStore, ProxyStoreError,
+    ClaimOutcome, ClaimToken, LocalProxyStore, ProxyRecordingStore, ProxyStoreError, StubPlacement,
+    StubPublication,
 };
 pub use store::RecordingStore;
 #[allow(unused_imports)]
