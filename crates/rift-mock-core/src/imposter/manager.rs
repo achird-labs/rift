@@ -4133,7 +4133,7 @@ mod tests {
         use super::*;
         use crate::recording::{
             ClaimOutcome, ClaimToken, LocalProxyStore, ProxyMode, ProxyRecordingStore,
-            ProxyStoreError, RecordedResponse, RequestSignature,
+            ProxyStoreError, RecordedResponse, RequestSignature, StubPlacement, StubPublication,
         };
 
         /// Delegates to a LocalProxyStore while recording every claim/release/clear it sees.
@@ -4358,6 +4358,382 @@ mod tests {
                 spy.releases.lock().is_empty(),
                 "no claim was granted, so nothing to release"
             );
+
+            manager.delete_all().await;
+        }
+
+        // =====================================================================
+        // Issue #910: complete-after-stub + store-owned stub publication
+        // =====================================================================
+
+        /// A store that settles claims through `complete` and can own stub publication.
+        /// `publishes` drives `publishes_stubs()`; `fail_complete` injects the publication-failed
+        /// path a distributed backend takes when it cannot commit the stub.
+        struct PublishingProxyStore {
+            inner: LocalProxyStore,
+            publishes: bool,
+            fail_complete: bool,
+            /// `(port, placement, proxy_to, stub)` for every completion the engine handed over.
+            completions: Mutex<Vec<(u16, StubPlacement, String, Stub)>>,
+            /// Recordings settled through the pre-#910 `record` path (no stub was generated).
+            records: Mutex<Vec<u16>>,
+            releases: Mutex<Vec<u16>>,
+        }
+
+        impl PublishingProxyStore {
+            fn new(publishes: bool, fail_complete: bool) -> Self {
+                Self {
+                    inner: LocalProxyStore::new(ProxyMode::ProxyOnce),
+                    publishes,
+                    fail_complete,
+                    completions: Mutex::new(Vec::new()),
+                    records: Mutex::new(Vec::new()),
+                    releases: Mutex::new(Vec::new()),
+                }
+            }
+        }
+
+        impl ProxyRecordingStore for PublishingProxyStore {
+            fn try_claim(
+                &self,
+                port: u16,
+                sig: &RequestSignature,
+            ) -> std::result::Result<ClaimOutcome, ProxyStoreError> {
+                self.inner.try_claim(port, sig)
+            }
+            fn release_claim(&self, port: u16, sig: &RequestSignature, token: ClaimToken) {
+                self.releases.lock().push(port);
+                self.inner.release_claim(port, sig, token);
+            }
+            fn record(
+                &self,
+                port: u16,
+                sig: RequestSignature,
+                token: ClaimToken,
+                resp: RecordedResponse,
+            ) -> std::result::Result<(), ProxyStoreError> {
+                self.records.lock().push(port);
+                self.inner.record(port, sig, token, resp)
+            }
+            fn complete(
+                &self,
+                port: u16,
+                sig: RequestSignature,
+                token: ClaimToken,
+                resp: RecordedResponse,
+                publication: &StubPublication<'_>,
+            ) -> std::result::Result<(), ProxyStoreError> {
+                self.completions.lock().push((
+                    port,
+                    publication.placement,
+                    publication.proxy_to.to_string(),
+                    publication.stub.clone(),
+                ));
+                if self.fail_complete {
+                    return Err(ProxyStoreError::Unavailable("publication failed".into()));
+                }
+                self.inner.record(port, sig, token, resp)
+            }
+            fn publishes_stubs(&self) -> bool {
+                self.publishes
+            }
+            fn lookup(&self, port: u16, sig: &RequestSignature) -> Option<RecordedResponse> {
+                self.inner.lookup(port, sig)
+            }
+            fn clear(&self, port: u16) {
+                self.inner.clear(port);
+            }
+        }
+
+        /// A proxy imposter with `predicateGenerators`, so the engine builds a stub from the
+        /// proxied response and therefore reaches the publication seam. Returns the port.
+        async fn generating_proxy_imposter(manager: &ImposterManager, to: &str, mode: &str) -> u16 {
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http",
+                    "stubs": [{ "responses": [{ "proxy": {
+                        "to": to,
+                        "mode": mode,
+                        "predicateGenerators": [{ "matches": { "path": true } }]
+                    } }] }]
+                })))
+                .await
+                .expect("create generating proxy imposter")
+        }
+
+        // AC3/AC4: with `publishes_stubs() == true` the engine performs no stub insertion of its
+        // own, and the store receives the built stub plus the resolved insertion intent.
+        #[tokio::test]
+        async fn publishing_store_owns_stub_insertion() {
+            raise_fd_limit();
+            let spy = Arc::new(PublishingProxyStore::new(true, false));
+            let manager = ImposterManager::new()
+                .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
+            let up = upstream(&manager).await;
+            let to = format!("http://127.0.0.1:{up}");
+            let proxy_port = generating_proxy_imposter(&manager, &to, "proxyOnce").await;
+
+            let body = reqwest::get(format!("http://127.0.0.1:{proxy_port}/owned"))
+                .await
+                .expect("request")
+                .text()
+                .await
+                .expect("body");
+            assert_eq!(body, "UP");
+
+            {
+                let completions = spy.completions.lock();
+                assert_eq!(
+                    completions.len(),
+                    1,
+                    "the claim is settled through complete(), not record()"
+                );
+                assert_eq!(completions[0].0, proxy_port);
+                assert_eq!(
+                    completions[0].1,
+                    StubPlacement::BeforeProxy,
+                    "proxyOnce recordings belong before the proxy stub"
+                );
+                assert_eq!(
+                    completions[0].2, to,
+                    "the anchor the placement is relative to"
+                );
+                assert!(
+                    !completions[0].3.predicates.is_empty(),
+                    "the store receives the fully-built stub, generated predicates included"
+                );
+            }
+            assert!(
+                spy.records.lock().is_empty(),
+                "a generated stub settles via complete(), never via record()"
+            );
+
+            assert_eq!(
+                manager.get_imposter(proxy_port).unwrap().stub_count(),
+                1,
+                "the store owns publication; the engine inserted nothing locally"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC1: the default (`publishes_stubs() == false`) keeps the engine's own insertion, so a
+        // non-publishing store sees exactly today's behaviour.
+        #[tokio::test]
+        async fn non_publishing_store_keeps_engine_insertion() {
+            raise_fd_limit();
+            let spy = Arc::new(PublishingProxyStore::new(false, false));
+            let manager = ImposterManager::new()
+                .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
+            let up = upstream(&manager).await;
+            let to = format!("http://127.0.0.1:{up}");
+            let proxy_port = generating_proxy_imposter(&manager, &to, "proxyOnce").await;
+
+            let body = reqwest::get(format!("http://127.0.0.1:{proxy_port}/kept"))
+                .await
+                .expect("request")
+                .text()
+                .await
+                .expect("body");
+            assert_eq!(body, "UP");
+
+            assert_eq!(spy.completions.lock().len(), 1);
+            assert_eq!(
+                manager.get_imposter(proxy_port).unwrap().stub_count(),
+                2,
+                "the engine still inserts the recorded stub next to the proxy stub"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC4: proxyAlways resolves to the after-the-proxy-stub, merge-on-equal-predicates intent,
+        // so a publisher never has to re-derive it from the mode string.
+        #[tokio::test]
+        async fn proxy_always_completion_carries_after_proxy_placement() {
+            raise_fd_limit();
+            let spy = Arc::new(PublishingProxyStore::new(true, false));
+            let manager = ImposterManager::new()
+                .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
+            let up = upstream(&manager).await;
+            let to = format!("http://127.0.0.1:{up}");
+            let proxy_port = generating_proxy_imposter(&manager, &to, "proxyAlways").await;
+
+            let _ = reqwest::get(format!("http://127.0.0.1:{proxy_port}/always")).await;
+
+            {
+                let completions = spy.completions.lock();
+                assert_eq!(completions.len(), 1);
+                assert_eq!(
+                    completions[0].1,
+                    StubPlacement::AfterProxyMerging,
+                    "proxyAlways recordings belong after the proxy stub and merge on equal predicates"
+                );
+            }
+
+            manager.delete_all().await;
+        }
+
+        // AC6: a store that refuses to commit "Recorded" because its publication failed leaves the
+        // signature retryable — the claim is released, and the client still gets the upstream
+        // response because the upstream call itself succeeded.
+        #[tokio::test]
+        async fn complete_failure_releases_claim_end_to_end() {
+            raise_fd_limit();
+            let spy = Arc::new(PublishingProxyStore::new(true, true));
+            let manager = ImposterManager::new()
+                .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
+            let up = upstream(&manager).await;
+            let to = format!("http://127.0.0.1:{up}");
+            let proxy_port = generating_proxy_imposter(&manager, &to, "proxyOnce").await;
+
+            for _ in 0..2 {
+                let body = reqwest::get(format!("http://127.0.0.1:{proxy_port}/unpublished"))
+                    .await
+                    .expect("request")
+                    .text()
+                    .await
+                    .expect("body");
+                assert_eq!(body, "UP", "the client still gets the upstream response");
+            }
+
+            assert_eq!(
+                spy.completions.lock().len(),
+                2,
+                "the second request could claim again, so the signature never wedged"
+            );
+            assert_eq!(
+                spy.releases.lock().len(),
+                2,
+                "a failed complete releases the claim, exactly as a failed record does"
+            );
+            assert!(
+                spy.lookup(
+                    proxy_port,
+                    &RequestSignature::new("GET", "/unpublished", None, &[])
+                )
+                .is_none(),
+                "nothing is recorded when publication failed"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC1/AC4: `addWaitBehavior` is the other way a stub gets generated, and it reaches the
+        // same seam — the store is handed the stub, latency included, not just for generators.
+        #[tokio::test]
+        async fn add_wait_behavior_alone_reaches_the_publication_seam() {
+            raise_fd_limit();
+            let spy = Arc::new(PublishingProxyStore::new(true, false));
+            let manager = ImposterManager::new()
+                .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
+            let up = upstream(&manager).await;
+            let proxy_port = manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http",
+                    "stubs": [{ "responses": [{ "proxy": {
+                        "to": format!("http://127.0.0.1:{up}"),
+                        "mode": "proxyOnce",
+                        "addWaitBehavior": true
+                    } }] }]
+                })))
+                .await
+                .expect("create wait-behavior proxy imposter");
+
+            let _ = reqwest::get(format!("http://127.0.0.1:{proxy_port}/waited")).await;
+
+            {
+                let completions = spy.completions.lock();
+                assert_eq!(
+                    completions.len(),
+                    1,
+                    "addWaitBehavior generates a stub, so the claim settles via complete()"
+                );
+                let stub = serde_json::to_value(&completions[0].3).expect("stub serializes");
+                let behaviors = stub
+                    .pointer("/responses/0/behaviors")
+                    .and_then(serde_json::Value::as_array)
+                    .expect("the recorded stub carries behaviors");
+                assert!(
+                    behaviors.iter().any(|b| b.get("wait").is_some()),
+                    "the store receives the stub carrying the captured latency, not a bare shell"
+                );
+            }
+            assert!(spy.records.lock().is_empty());
+
+            manager.delete_all().await;
+        }
+
+        // AC1/AC6 + issue #498: when predicate generation FAILS there is no stub, so nothing may be
+        // published — the claim settles through `record` even for a publishing store, and the
+        // client still gets the generator-error marker.
+        #[cfg(feature = "javascript")]
+        #[tokio::test]
+        async fn failed_generation_settles_through_record_and_publishes_nothing() {
+            raise_fd_limit();
+            let spy = Arc::new(PublishingProxyStore::new(true, false));
+            let manager = ImposterManager::new()
+                .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
+            let up = upstream(&manager).await;
+            let proxy_port = manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http",
+                    "stubs": [{ "responses": [{ "proxy": {
+                        "to": format!("http://127.0.0.1:{up}"),
+                        "mode": "proxyOnce",
+                        "predicateGenerators": [
+                            { "inject": "function (config, logger, preds) { throw new Error('boom'); }" }
+                        ]
+                    } }] }]
+                })))
+                .await
+                .expect("create failing-generator proxy imposter");
+
+            let response = reqwest::get(format!("http://127.0.0.1:{proxy_port}/boom"))
+                .await
+                .expect("request");
+            assert!(
+                response.headers().contains_key("x-rift-generator-error"),
+                "the generation failure stays client-visible (issue #498)"
+            );
+
+            assert!(
+                spy.completions.lock().is_empty(),
+                "no stub was built, so nothing may be offered for publication"
+            );
+            assert_eq!(
+                spy.records.lock().len(),
+                1,
+                "the claim still settles exactly once, through record()"
+            );
+            assert_eq!(
+                manager.get_imposter(proxy_port).unwrap().stub_count(),
+                1,
+                "and no match-all stub is inserted locally either"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC1: with no generators or behaviors configured no stub is built, so there is nothing to
+        // publish and the claim settles through the pre-#910 `record` path.
+        #[tokio::test]
+        async fn no_generated_stub_still_settles_through_record() {
+            raise_fd_limit();
+            let spy = Arc::new(PublishingProxyStore::new(true, false));
+            let manager = ImposterManager::new()
+                .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
+            let up = upstream(&manager).await;
+            let proxy_port = proxy_imposter(&manager, &format!("http://127.0.0.1:{up}")).await;
+
+            let _ = reqwest::get(format!("http://127.0.0.1:{proxy_port}/plain")).await;
+
+            assert_eq!(
+                spy.records.lock().len(),
+                1,
+                "no stub to publish, so the recording settles via record()"
+            );
+            assert!(spy.completions.lock().is_empty());
 
             manager.delete_all().await;
         }

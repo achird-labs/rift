@@ -16,6 +16,7 @@
 
 use super::mode::ProxyMode;
 use super::types::{RecordedResponse, RequestSignature};
+use crate::imposter::Stub;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,6 +81,47 @@ pub enum ProxyStoreError {
 /// Convenience alias for fallible proxy-store operations.
 pub type Result<T> = std::result::Result<T, ProxyStoreError>;
 
+/// Where a proxy-recorded stub belongs relative to the proxy stub that produced it.
+///
+/// These are engine semantics, not a hint: a store that publishes stubs itself
+/// ([`ProxyRecordingStore::publishes_stubs`]) has to reproduce them, and deriving them from the
+/// proxy mode independently is how a publisher silently drifts from the engine.
+///
+/// `#[non_exhaustive]`: a downstream publisher `match`es on this, and a future placement must not
+/// break every one of them — the same reasoning [`EventContext`](crate::imposter::EventContext)
+/// carries. Match with a `_` arm and treat an unknown placement as unpublishable rather than
+/// guessing a position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StubPlacement {
+    /// `proxyOnce`: insert **before** the proxy stub, so the recording matches first next time.
+    BeforeProxy,
+    /// `proxyAlways`: place **after** the proxy stub — so the proxy keeps running and recording —
+    /// merging the responses into an existing stub whose predicates are structurally equal and
+    /// non-empty (issue #611) instead of appending a duplicate.
+    AfterProxyMerging,
+}
+
+/// The stub the engine generated from a proxied response, together with where it belongs.
+///
+/// Handed to [`ProxyRecordingStore::complete`] before the stub is published, so a store can make
+/// its own "recorded" commit conditional on publishing this successfully.
+///
+/// `#[non_exhaustive]`: embedders only ever read this type — the engine is the sole constructor —
+/// so the context it will predictably grow must not become a breaking change to the seam whose
+/// premise is stability. Same reasoning as [`EventContext`](crate::imposter::EventContext).
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct StubPublication<'a> {
+    /// The generated stub, exactly as the engine would insert it.
+    pub stub: &'a Stub,
+    /// Where the stub belongs relative to the proxy stub named by [`proxy_to`](Self::proxy_to).
+    pub placement: StubPlacement,
+    /// `proxy.to` of the proxy stub this recording came from — the anchor
+    /// [`placement`](Self::placement) is relative to.
+    pub proxy_to: &'a str,
+}
+
 /// Pluggable proxy-recording backend, keyed by imposter port.
 pub trait ProxyRecordingStore: Send + Sync {
     /// First caller per `(port, signature)` wins the right to record once. Returns
@@ -107,6 +149,60 @@ pub trait ProxyRecordingStore: Send + Sync {
         token: ClaimToken,
         resp: RecordedResponse,
     ) -> Result<()>;
+
+    /// Settles the claim once the engine has built the stub the recording will be replayed from,
+    /// and **before** that stub is published (issue #910).
+    ///
+    /// Called instead of [`record`](Self::record) whenever a stub was generated — that is, when
+    /// `predicateGenerators`, `addWaitBehavior` or `addDecorateBehavior` is configured and
+    /// predicate generation succeeded. When no stub exists (none of those is configured, or
+    /// generation failed and recording a match-all stub would be wrong — issue #498) there is
+    /// nothing to publish and the engine calls [`record`](Self::record) as before.
+    ///
+    /// This ordering is the point: a store that publishes stubs to a shared or durable backend can
+    /// make "this signature is Recorded" strictly conditional on its own publication ack, instead
+    /// of committing it against a stub that does not exist yet.
+    ///
+    /// It also means the claim is held for the whole of predicate generation. That is negligible
+    /// for the ordinary generators, but a `predicateGenerators.inject` script runs under the
+    /// script timeout (5s by default), and a concurrent `proxyOnce` request arriving inside that
+    /// window sees [`ClaimOutcome::InFlight`] rather than [`ClaimOutcome::AlreadyRecorded`] — so it
+    /// proxies upstream instead of replaying. The signature is still recorded exactly once.
+    ///
+    /// The default delegates to [`record`](Self::record), so a store that does not publish is
+    /// unaffected.
+    ///
+    /// `Err` = backend unavailable, including "I could not publish the stub". As with
+    /// [`record`](Self::record) the caller then releases the claim, so the signature stays
+    /// retryable rather than wedging as Recorded-but-stub-less; the client still receives the
+    /// upstream response, because the upstream call succeeded and only recording failed.
+    fn complete(
+        &self,
+        port: u16,
+        sig: RequestSignature,
+        token: ClaimToken,
+        resp: RecordedResponse,
+        publication: &StubPublication<'_>,
+    ) -> Result<()> {
+        let _ = publication;
+        self.record(port, sig, token, resp)
+    }
+
+    /// Whether this store publishes generated stubs itself.
+    ///
+    /// `true` makes the engine skip its own in-process stub insertion entirely, leaving the store
+    /// as the only publisher — it must then honour the position carried by
+    /// [`StubPublication::placement`]. `false` (the default) keeps the engine's insertion, and the
+    /// stub handed to [`complete`](Self::complete) is informational.
+    ///
+    /// "Skip entirely" is unconditional, and that is the trade a publisher accepts: when no claim
+    /// was won — a concurrent `proxyOnce` loser, or [`try_claim`](Self::try_claim) reporting the
+    /// backend unavailable — there is no [`complete`](Self::complete) call *and* no local
+    /// insertion, so that request's stub is published nowhere. The engine will not quietly keep a
+    /// private copy the store's peers do not have.
+    fn publishes_stubs(&self) -> bool {
+        false
+    }
 
     /// Returns the recorded response for replay, if any.
     fn lookup(&self, port: u16, sig: &RequestSignature) -> Option<RecordedResponse>;
@@ -313,6 +409,14 @@ mod tests {
         RequestSignature::new("GET", path, None, &[])
     }
 
+    fn generated_stub() -> Stub {
+        serde_json::from_value(serde_json::json!({
+            "predicates": [{ "equals": { "path": "/test" } }],
+            "responses": [{ "is": { "statusCode": 200, "body": "recorded" } }],
+        }))
+        .expect("valid stub")
+    }
+
     fn resp(status: u16, body: &str) -> RecordedResponse {
         RecordedResponse {
             status,
@@ -515,6 +619,95 @@ mod tests {
             store.try_claim(1, &s).unwrap(),
             ClaimOutcome::Claimed(_)
         ));
+    }
+
+    /// Implements only the methods that existed before #910 — the shape every pre-#910 store has.
+    /// Its mere existence is the source-compatibility assertion; the tests below use it to prove
+    /// the new defaults behave as documented.
+    #[derive(Default)]
+    struct LegacyStore {
+        recorded: Mutex<Vec<(u16, RequestSignature, RecordedResponse)>>,
+    }
+
+    impl ProxyRecordingStore for LegacyStore {
+        fn try_claim(&self, _port: u16, _sig: &RequestSignature) -> Result<ClaimOutcome> {
+            Ok(ClaimOutcome::Claimed(ClaimToken::new(1)))
+        }
+        fn release_claim(&self, _port: u16, _sig: &RequestSignature, _token: ClaimToken) {}
+        fn record(
+            &self,
+            port: u16,
+            sig: RequestSignature,
+            _token: ClaimToken,
+            resp: RecordedResponse,
+        ) -> Result<()> {
+            self.recorded.lock().push((port, sig, resp));
+            Ok(())
+        }
+        fn lookup(&self, _port: u16, _sig: &RequestSignature) -> Option<RecordedResponse> {
+            None
+        }
+        fn clear(&self, _port: u16) {}
+    }
+
+    // AC2/AC5 (#910): a store written before `complete` existed still compiles, and the default
+    // `complete` delegates to its `record`. Driven through `dyn` so object safety is asserted too.
+    #[test]
+    fn default_complete_delegates_to_record() {
+        let store = LegacyStore::default();
+        let stub = generated_stub();
+        let publication = StubPublication {
+            stub: &stub,
+            placement: StubPlacement::BeforeProxy,
+            proxy_to: "http://upstream",
+        };
+
+        let dynamic: &dyn ProxyRecordingStore = &store;
+        assert!(
+            !dynamic.publishes_stubs(),
+            "a store publishes nothing unless it opts in"
+        );
+        dynamic
+            .complete(
+                7,
+                sig("/legacy"),
+                ClaimToken::new(1),
+                resp(200, "ok"),
+                &publication,
+            )
+            .expect("default complete delegates to record");
+
+        let recorded = store.recorded.lock();
+        assert_eq!(recorded.len(), 1, "the recording reached record()");
+        assert_eq!(recorded[0].0, 7, "port is passed through");
+        assert_eq!(recorded[0].2.body, b"ok");
+    }
+
+    // AC1/AC6 (#910): completing a claim through `complete` is recording — same visible result as
+    // `record`, so `LocalProxyStore` is unchanged by the new seam.
+    #[test]
+    fn local_complete_records_like_record() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyOnce);
+        let s = sig("/complete");
+        let stub = generated_stub();
+        let publication = StubPublication {
+            stub: &stub,
+            placement: StubPlacement::BeforeProxy,
+            proxy_to: "http://upstream",
+        };
+
+        let t = claim_token(store.try_claim(1, &s).unwrap());
+        store
+            .complete(1, s.clone(), t, resp(200, "done"), &publication)
+            .unwrap();
+
+        assert_eq!(store.lookup(1, &s).unwrap().body, b"done");
+        assert_eq!(
+            store.try_claim(1, &s).unwrap(),
+            ClaimOutcome::AlreadyRecorded,
+            "complete settles the claim exactly as record does"
+        );
+        assert!(!store.publishes_stubs());
     }
 
     // The total-signatures cap drops new signatures once full (proxyOnce), as before.

@@ -150,6 +150,12 @@ pub trait ProxyRecordingStore: Send + Sync {
     /// Release a claim after a failed upstream call so the signature is retryable.
     fn release_claim(&self, port: u16, sig: &RequestSignature, token: ClaimToken);
     fn record(&self, /* port, sig, response, token */) -> Result<()>;
+    /// Settle the claim once the generated stub exists, before it is published.
+    /// Defaults to `record`, so implementing it is optional.
+    fn complete(&self, /* port, sig, token, response */
+                publication: &StubPublication<'_>) -> Result<()> { /* -> record */ }
+    /// `true` = this store publishes generated stubs itself; the engine then inserts none.
+    fn publishes_stubs(&self) -> bool { false }
     fn lookup(&self, port: u16, sig: &RequestSignature) -> Option<RecordedResponse>;
     fn clear(&self, port: u16);
 }
@@ -157,6 +163,59 @@ pub trait ProxyRecordingStore: Send + Sync {
 
 Its typed error is `ProxyStoreError` (`ProxyStoreError::Unavailable(String)`). Inject with
 `.with_proxy_store(Arc<dyn ProxyRecordingStore>)`.
+
+### Publishing stubs from the store
+
+`record` is called before the engine has generated the stub the recording will be replayed from,
+which is fine for an in-process store but not for one that must publish that stub somewhere durable
+or replicated: it would have to commit "this signature is Recorded" against a stub that does not
+exist yet, and a publication that then failed would leave the signature permanently recorded with
+nothing to replay.
+
+`complete` is the seam for that. It is called **instead of** `record` whenever a stub was generated
+(`predicateGenerators`, `addWaitBehavior` or `addDecorateBehavior` configured, and generation
+succeeded), and always **before** the stub is published — so a store can make its own commit
+conditional on its publication ack. Returning `Err` releases the claim, leaving the signature
+retryable; the client still receives the upstream response, because the upstream call succeeded and
+only recording failed. When no stub is generated — nothing configured to generate one, or predicate
+generation failed — there is nothing to publish and the engine calls `record` as before.
+
+`publishes_stubs() == true` additionally makes the engine skip its own in-process stub insertion, so
+the store is the sole publisher. It must then honour the position the engine resolved, which arrives
+alongside the stub:
+
+```rust
+pub struct StubPublication<'a> {
+    pub stub: &'a Stub,              // the generated stub, exactly as the engine would insert it
+    pub placement: StubPlacement,    // where it belongs relative to the proxy stub
+    pub proxy_to: &'a str,           // `proxy.to` of that proxy stub — the anchor
+}
+
+pub enum StubPlacement {
+    /// proxyOnce: insert BEFORE the proxy stub, so the recording matches first next time.
+    BeforeProxy,
+    /// proxyAlways: place AFTER the proxy stub (so the proxy keeps recording), merging responses
+    /// into an existing stub with structurally equal, non-empty predicates rather than appending
+    /// a duplicate.
+    AfterProxyMerging,
+}
+```
+
+Both additions are defaulted, so a store written against the pre-`complete` trait keeps compiling
+and behaving identically. `StubPublication` and `StubPlacement` are `#[non_exhaustive]` — match the
+placement with a `_` arm and treat an unknown one as unpublishable rather than guessing a position.
+
+Two consequences worth knowing before you set `publishes_stubs() == true`:
+
+- **Skipping is unconditional.** When no claim was won — a concurrent `proxyOnce` loser, or
+  `try_claim` reporting the backend unavailable — there is no `complete` call *and* no local
+  insertion, so that request's stub is published nowhere. The engine will not quietly keep a private
+  copy your store's peers do not have.
+- **The claim is held across predicate generation.** Negligible for the ordinary generators, but a
+  `predicateGenerators.inject` script runs under the script timeout (5s by default), and a
+  concurrent `proxyOnce` request arriving inside that window sees `InFlight` rather than
+  `AlreadyRecorded`, so it proxies upstream instead of replaying. The signature is still recorded
+  exactly once.
 
 ## `ImposterEventListener` — observe reconciliation
 
