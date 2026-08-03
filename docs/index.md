@@ -162,7 +162,7 @@ working**: no C toolchain, and cross-compilation is unaffected.
 
 ```bash
 go get github.com/achird-labs/rift-go
-go run github.com/achird-labs/rift-go/cmd/rift-fetch@latest -version v0.16.0
+go run github.com/achird-labs/rift-go/cmd/rift-fetch@latest -version v0.17.0
 ```
 
 ```go
