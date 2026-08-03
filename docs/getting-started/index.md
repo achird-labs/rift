@@ -135,6 +135,20 @@ so `CGO_ENABLED=0` keeps working and no C toolchain is needed. `rift.Spawn(ctx, 
 binary instead, and `rift.Connect(url, …)` targets any running admin endpoint — neither needs the
 native library. See the [rift-go documentation](https://achird-labs.github.io/rift-go/).
 
+### Scala 3
+
+```scala
+libraryDependencies += "io.github.achird-labs" %% "rift-scala-zio" % "0.1.3" % Test
+```
+
+There is a module per effect system — ZIO, Cats Effect 3 / FS2, or no effect system at all — over
+one shared typed model. See [rift-scala]({{ site.baseurl }}/sdk/scala/).
+
+### All four SDKs
+
+Install snippets, hello-worlds, the transport matrix and the version-compatibility table for Java,
+Scala, Node/TypeScript and Go live in [Language SDKs]({{ site.baseurl }}/sdk/).
+
 ---
 
 ## Verify Installation
@@ -235,9 +249,10 @@ Example `imposters.json`:
 
 - [Quick Start Tutorial]({{ site.baseurl }}/getting-started/quickstart/) - Detailed walkthrough
 - [Node.js Integration]({{ site.baseurl }}/getting-started/nodejs/) - npm package for Node.js projects
-- [Java / JVM SDK](https://github.com/achird-labs/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
-- [Scala SDK](https://github.com/achird-labs/rift-scala) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
-- [Go SDK](https://github.com/achird-labs/rift-go) - rift-go for `testing.T`, embedded via purego (no cgo)
+- [Language SDKs]({{ site.baseurl }}/sdk/) - Java, Scala, Node/TypeScript and Go, with the transport and version-compatibility matrices
+- [Java / JVM SDK]({{ site.baseurl }}/sdk/java/) - rift-java for JUnit 5, Spring, and Testcontainers
+- [Scala SDK]({{ site.baseurl }}/sdk/scala/) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
+- [Go SDK]({{ site.baseurl }}/sdk/go/) - rift-go for `testing.T`, embedded via purego (no cgo)
 - [Predicates Guide]({{ site.baseurl }}/mountebank/predicates/) - Request matching
 - [Responses Guide]({{ site.baseurl }}/mountebank/responses/) - Response configuration
 - [Migration Guide]({{ site.baseurl }}/getting-started/migration/) - Switching from Mountebank

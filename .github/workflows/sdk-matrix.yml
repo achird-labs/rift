@@ -1,0 +1,223 @@
+name: SDK Matrix
+
+# Issue #462 (SDK-M6): prove the four released SDKs still work against the *latest* engine release.
+#
+# Each SDK's own CI pins an engine version and tests against that pin, so an engine change that
+# breaks a released SDK is green everywhere: green here (no SDK is built in this repo), and green
+# there (it is still testing the old engine). The break only surfaces when a user upgrades. This
+# gate closes that hole by replaying each SDK's conformance lane at its latest release tag against
+# the newest published engine.
+#
+# Lives outside ci.yml deliberately, same reasoning as demo-compose.yml/perf.yml: ci.yml has no
+# schedule and ignores pushes to master, and none of the three triggers below can be expressed
+# there.
+#
+# Scope, stated rather than implied: every lane runs on ubuntu-latest only, and only the embedded
+# transport is overridden to the latest engine. Platform coverage (macOS/Windows) and the spawn
+# lanes stay each SDK's own CI's job — this gate is about *version* drift, and running a lane whose
+# engine version the SDK resolves internally would just re-test the pin.
+
+on:
+  schedule:
+    # Daily at 05:23 UTC. Off the hour: shared runners are contended on the hour.
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+    inputs:
+      engine_version:
+        description: "Engine release tag to test against (default: latest published release)"
+        required: false
+        type: string
+  release:
+    # A fresh engine release is the event most likely to break an SDK, so prove it within minutes
+    # rather than waiting up to a day for the cron.
+    types: [published]
+
+concurrency:
+  group: sdk-matrix
+  # Never cancel: a cancelled run reports nothing, and there is no PR waiting on this.
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write # the drift reporter opens/updates one tracking issue per SDK
+
+jobs:
+  engine:
+    name: Resolve engine release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.engine_version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            version="$INPUT_VERSION"
+          elif [ -n "${RELEASE_TAG:-}" ]; then
+            version="$RELEASE_TAG"
+          else
+            version="$(gh release view --repo ${{ github.repository }} --json tagName -q .tagName)"
+          fi
+          echo "Engine under test: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  sdk:
+    name: ${{ matrix.sdk.name }} @ latest release
+    needs: engine
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # one drifting SDK must not hide the state of the other three
+      matrix:
+        sdk:
+          - { name: java, repo: achird-labs/rift-java }
+          - { name: scala, repo: achird-labs/rift-scala }
+          - { name: node, repo: achird-labs/rift-node }
+          - { name: go, repo: achird-labs/rift-go }
+    env:
+      ENGINE: ${{ needs.engine.outputs.version }}
+    steps:
+      # This repo, for scripts/sdk-matrix-report.sh. The SDK goes in sdk/ below.
+      - uses: actions/checkout@v7
+
+      - name: Resolve the SDK's latest release tag
+        id: sdk-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh release view --repo ${{ matrix.sdk.repo }} --json tagName -q .tagName)"
+          echo "rift-${{ matrix.sdk.name }} latest release: $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # All four SDK repos are public, so the default token is enough for a cross-repo checkout —
+      # no dispatch-token secret is needed here, unlike release.yml's rift-node trigger (which
+      # needs actions:write on another repo, something GITHUB_TOKEN cannot have).
+      - name: Check out ${{ matrix.sdk.repo }} at ${{ steps.sdk-tag.outputs.tag }}
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ matrix.sdk.repo }}
+          ref: ${{ steps.sdk-tag.outputs.tag }}
+          path: sdk
+
+      # Asset naming is this repo's contract, so resolving it here — rather than letting each SDK
+      # fetch its pinned version — is exactly what makes the lane test the new engine.
+      - name: Download engine ${{ needs.engine.outputs.version }} assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p natives dist corpus
+          lib=librift_ffi-linux-x86_64.so
+          triple=x86_64-unknown-linux-gnu
+
+          gh release download "$ENGINE" --repo ${{ github.repository }} --dir dist \
+            --pattern "$lib" \
+            --pattern "rift-$ENGINE-$triple.tar.gz" \
+            --pattern "sdk-conformance-$ENGINE.tar.gz"
+
+          mv "dist/$lib" natives/
+          tar -xzf "dist/rift-$ENGINE-$triple.tar.gz" -C dist
+          tar -xzf "dist/sdk-conformance-$ENGINE.tar.gz" -C corpus
+
+          # Neither archive's internal layout is contractual, so locate rather than assume.
+          engine_bin="$(find dist -type f -name rift -perm -u+x | head -1)"
+          [ -n "$engine_bin" ] || { echo "::error::no rift binary in the release tarball"; exit 1; }
+          manifest="$(find corpus -type f -name manifest.json | head -1)"
+          [ -n "$manifest" ] || { echo "::error::no manifest.json in the corpus tarball"; exit 1; }
+
+          {
+            echo "RIFT_FFI_LIB=$PWD/natives/$lib"
+            echo "RIFT_BINARY=$PWD/$engine_bin"
+            # go wants the directory holding manifest.json; rift-java's Corpus.descend() wants the
+            # parent and resolves the single extracted sdk-conformance-* child itself.
+            echo "RIFT_CORPUS_DIR=$(dirname "$manifest")"
+            echo "RIFT_CORPUS_ROOT=$PWD/corpus"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up JDK 22
+        if: matrix.sdk.name == 'java' || matrix.sdk.name == 'scala'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "22"
+          cache: ${{ matrix.sdk.name == 'java' && 'maven' || 'sbt' }}
+
+      - name: Set up sbt
+        if: matrix.sdk.name == 'scala'
+        uses: sbt/setup-sbt@v1
+
+      - name: Set up Node 22
+        if: matrix.sdk.name == 'node'
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Set up Go
+        if: matrix.sdk.name == 'go'
+        uses: actions/setup-go@v5
+        with:
+          # go-version-file, not a pinned version: gofmt and the toolchain must match what the SDK
+          # builds with, per rift-go's own CI note.
+          go-version-file: sdk/go.mod
+
+      # Each lane below is the SDK's own conformance invocation, with the engine inputs it already
+      # reads from the environment pointed at the release resolved above. Those env names come from
+      # each SDK's own CI, which is what makes the override work rather than being ignored — if a
+      # lane ever stops honouring one, this gate reports drift against the pinned engine instead of
+      # the new one, which the first `workflow_dispatch` run against a known-good release will show.
+      - name: java — replay the corpus over the embedded transport
+        if: matrix.sdk.name == 'java'
+        working-directory: sdk
+        env:
+          RIFT_IT: "1"
+          CONFORMANCE_TRANSPORT: EMBEDDED
+        run: ./mvnw -B -ntp -pl rift-java-conformance -am verify
+
+      - name: scala — full suite with the embedded lane required
+        if: matrix.sdk.name == 'scala'
+        working-directory: sdk
+        env:
+          # Names the lane this job requires, so a silently-unavailable engine is red, not a green
+          # skip (rift-scala issue #63). The corpus is vendored in that repo, so this proves the
+          # SDK's pinned corpus still replays on the newest engine.
+          RIFT_G3_REQUIRE: embedded
+        run: sbt test
+
+      - name: node — conformance + embedded integration tests
+        if: matrix.sdk.name == 'node'
+        working-directory: sdk
+        env:
+          RIFT_SKIP_BINARY_DOWNLOAD: "1"
+        run: |
+          npm ci
+          npm run build
+          npm run test:embedded
+
+      - name: go — embedded engine + corpus replay
+        if: matrix.sdk.name == 'go'
+        working-directory: sdk
+        run: |
+          set -euo pipefail
+          go test -count=1 ./riftembed/...
+          # A fixture may be skipped only when the manifest's `requires` names a capability this
+          # lane lacks, so a run that silently skipped everything would still report green.
+          go test -count=1 -v ./conformance/... 2>&1 | tee conformance.log
+          grep -q -- "--- PASS: TestServeAndReplay/embedded" conformance.log \
+            || { echo "::error::the embedded conformance lane did not run"; exit 1; }
+
+      # The whole point of a scheduled gate: there is no PR to turn red, so the failure has to
+      # become an issue. The reporter keeps one open issue per SDK and comments on it thereafter.
+      - name: Report drift
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/sdk-matrix-report.sh \
+            --sdk "${{ matrix.sdk.name }}" \
+            --tag "${{ steps.sdk-tag.outputs.tag }}" \
+            --engine "$ENGINE" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

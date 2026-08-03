@@ -180,6 +180,12 @@ func TestUserLookup(t *testing.T) {
 See the [rift-go documentation](https://achird-labs.github.io/rift-go/) for the full feature
 surface.
 
+### All four SDKs
+
+Java, Scala, Node/TypeScript and Go are all officially supported and all replay the same
+conformance corpus. The [Language SDKs]({{ site.baseurl }}/sdk/) section has the install snippet and
+hello-world for each, plus the transport and version-compatibility matrices.
+
 ---
 
 ## Documentation
@@ -188,9 +194,10 @@ surface.
 - [Installation]({{ site.baseurl }}/getting-started/) - Docker, binary, and build from source
 - [Quick Start]({{ site.baseurl }}/getting-started/quickstart/) - Create your first imposter
 - [Node.js Integration]({{ site.baseurl }}/getting-started/nodejs/) - npm package for Node.js projects
-- [Java / JVM SDK](https://github.com/achird-labs/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
-- [Scala SDK](https://github.com/achird-labs/rift-scala) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
-- [Go SDK](https://github.com/achird-labs/rift-go) - rift-go for `testing.T`, embedded via purego (no cgo)
+- [Language SDKs]({{ site.baseurl }}/sdk/) - Java, Scala, Node/TypeScript and Go, with the transport and version-compatibility matrices
+- [Java / JVM SDK]({{ site.baseurl }}/sdk/java/) - rift-java for JUnit 5, Spring, and Testcontainers
+- [Scala SDK]({{ site.baseurl }}/sdk/scala/) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
+- [Go SDK]({{ site.baseurl }}/sdk/go/) - rift-go for `testing.T`, embedded via purego (no cgo)
 - [Migration from Mountebank]({{ site.baseurl }}/getting-started/migration/) - Switch from Mountebank to Rift
 
 ### Concepts
