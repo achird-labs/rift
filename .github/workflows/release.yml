@@ -395,18 +395,42 @@ jobs:
             # Idempotent re-runs: skip ONLY if this exact version is already on crates.io. Any
             # real failure (bad manifest, missing owner, unpublished/unresolvable dep) still fails
             # the job loudly — it is not swallowed.
-            if curl -sf "https://crates.io/api/v1/crates/${crate}/${VERSION}" >/dev/null 2>&1; then
-              echo "${crate} ${VERSION} already on crates.io — skipping"
-              return 0
-            fi
+            #
+            # -A is not decoration: crates.io rejects a request with no User-Agent with 403, so
+            # `curl -sf` failed for every crate and this check always concluded "not published".
+            # That made the re-run it exists to enable impossible — the job would re-publish an
+            # already-published version and die on "crate version is already uploaded". Distinguish
+            # 404 (genuinely absent) from any other status rather than treating all failure as
+            # absence, so a rate-limit or an outage stops the job instead of driving a bad publish.
+            local status
+            status="$(curl -s -o /dev/null -w '%{http_code}' \
+              -A "rift-release/${VERSION} (+https://github.com/achird-labs/rift)" \
+              "https://crates.io/api/v1/crates/${crate}/${VERSION}")"
+            case "$status" in
+              200)
+                echo "${crate} ${VERSION} already on crates.io — skipping"
+                return 0
+                ;;
+              404)
+                ;;
+              *)
+                echo "::error::crates.io returned HTTP ${status} for ${crate} ${VERSION}; refusing to guess whether it is published"
+                return 1
+                ;;
+            esac
             echo "Publishing ${crate} ${VERSION}..."
             cargo publish -p "${crate}" --allow-dirty
             # Let crates.io index the new version before a dependent crate tries to resolve it.
             sleep 30
           }
+          # Dependency order — a crate must be on the index before anything that depends on it is
+          # packaged. rift-store-redis was extracted from rift-mock-core in #853 and never added
+          # here, so v0.17.0 published three crates and then died packaging rift-http-proxy with
+          # "no matching package named `rift-store-redis` found".
           publish_crate rift-lint
           publish_crate rift-types
           publish_crate rift-mock-core
+          publish_crate rift-store-redis
           publish_crate rift-http-proxy
 
   # =============================================================================
