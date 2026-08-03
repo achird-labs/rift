@@ -16,6 +16,11 @@ name: SDK Matrix
 # transport is overridden to the latest engine. Platform coverage (macOS/Windows) and the spawn
 # lanes stay each SDK's own CI's job — this gate is about *version* drift, and running a lane whose
 # engine version the SDK resolves internally would just re-test the pin.
+#
+# A consequence worth naming, since it is invisible in a green run: some SDK suites self-skip the
+# sub-suites this gate does not feed. rift-node's spawn replay block and rift-scala's G3 spawn lane
+# both skip here by design. What must never skip is the embedded replay — hence the explicit
+# assertion in the go lane below, which is what caught the corpus path bug on the first live run.
 
 on:
   schedule:
@@ -124,14 +129,27 @@ jobs:
           tar -xzf "dist/sdk-conformance-$ENGINE.tar.gz" -C corpus
 
           # Neither archive's internal layout is contractual, so locate rather than assume.
-          engine_bin="$(find dist -type f -name rift -perm -u+x | head -1)"
+          # Search from an absolute root so every path below is absolute by construction: these are
+          # exported to lanes that run with `working-directory: sdk`, where a relative path quietly
+          # resolves under the SDK checkout instead. A corpus that resolves to nowhere does not fail
+          # — the suite reports "corpus unavailable" and skips itself green.
+          engine_bin="$(find "$PWD/dist" -type f -name rift -perm -u+x | head -1)"
           [ -n "$engine_bin" ] || { echo "::error::no rift binary in the release tarball"; exit 1; }
-          manifest="$(find corpus -type f -name manifest.json | head -1)"
+          manifest="$(find "$PWD/corpus" -type f -name manifest.json | head -1)"
           [ -n "$manifest" ] || { echo "::error::no manifest.json in the corpus tarball"; exit 1; }
+
+          # Belt and braces: assert absoluteness rather than trusting the two `find` roots above to
+          # stay absolute through a future edit. This is the check that would have caught the bug.
+          for p in "$engine_bin" "$manifest"; do
+            case "$p" in
+              /*) ;;
+              *) echo "::error::expected an absolute path for the SDK lanes, got: $p"; exit 1 ;;
+            esac
+          done
 
           {
             echo "RIFT_FFI_LIB=$PWD/natives/$lib"
-            echo "RIFT_BINARY=$PWD/$engine_bin"
+            echo "RIFT_BINARY=$engine_bin"
             # go wants the directory holding manifest.json; rift-java's Corpus.descend() wants the
             # parent and resolves the single extracted sdk-conformance-* child itself.
             echo "RIFT_CORPUS_DIR=$(dirname "$manifest")"
