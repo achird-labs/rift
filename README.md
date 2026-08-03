@@ -279,7 +279,7 @@ effect-library-native â€” ZIO, Cats Effect 3 / FS2, or no effect system at all â
 four transports (embedded, connect, spawn, container):
 
 ```scala
-libraryDependencies += "io.github.achird-labs" %% "rift-scala-zio" % "0.1.0" % Test
+libraryDependencies += "io.github.achird-labs" %% "rift-scala-zio" % "0.1.3" % Test
 ```
 
 ```scala
@@ -335,6 +335,13 @@ Assertion counting runs through the engine's own predicate evaluator, so `xpath`
 nearest non-matching request with the clauses it failed. See the
 [rift-go docs](https://achird-labs.github.io/rift-go/).
 
+### All four SDKs
+
+Java, Scala, Node/TypeScript and Go are all officially supported, and all four replay the same
+conformance corpus so their DSLs stay in lockstep with the engine grammar. The
+[Language SDKs](https://achird-labs.github.io/rift/sdk/) section collects the install snippets,
+hello-worlds, transport matrix and version-compatibility table.
+
 ---
 
 ## Documentation
@@ -343,6 +350,7 @@ nearest non-matching request with the clauses it failed. See the
 - [Installation](https://achird-labs.github.io/rift/getting-started/) - Docker, binary, build from source
 - [Quick Start](https://achird-labs.github.io/rift/getting-started/quickstart) - Create your first imposter
 - [Node.js Integration](https://achird-labs.github.io/rift/getting-started/nodejs/) - npm package for Node.js
+- [Language SDKs](https://achird-labs.github.io/rift/sdk/) - Java, Scala, Node/TypeScript and Go, with the transport and version-compatibility matrices
 - [Java / JVM SDK](https://github.com/achird-labs/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
 - [Scala SDK](https://github.com/achird-labs/rift-scala) - rift-scala for ZIO, Cats Effect, FS2, and zio-bdd
 - [Go SDK](https://github.com/achird-labs/rift-go) - rift-go for `testing.T`, embedded via purego (no cgo)

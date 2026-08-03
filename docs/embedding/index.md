@@ -28,6 +28,7 @@ the source, the source wins — please file an issue.
 | Replace a storage backend (flow-state, request journal, proxy recording, response sequencing) | SPI traits on `ImposterManager` | [Extension Points (SPI)]({{ site.baseurl }}/embedding/spi/) |
 | Observe reconciliation events or decorate responses | `ImposterEventListener` / `ResponseDecorator` | [Extension Points (SPI)]({{ site.baseurl }}/embedding/spi/) |
 | Drive Rift from a non-Rust host (JVM, Node, Go, …) | The C-ABI (`rift-ffi`) | [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/) |
+| Drive Rift from Java, Scala, Node/TypeScript or Go without writing an FFI bridge yourself | An official SDK | [Language SDKs]({{ site.baseurl }}/sdk/) |
 
 > **Runtime topology is yours to choose when embedding.** The `--runtime per-core` flag
 > ([Performance → Runtime Topology]({{ site.baseurl }}/performance/#runtime-topology-per-core-experimental))
