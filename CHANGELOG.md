@@ -11,6 +11,8 @@ record.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-03
+
 ### Added
 
 - **A `ProxyRecordingStore` can now settle a claim *after* the generated stub exists, and own stub
@@ -33,40 +35,6 @@ record.
   `false` — so `LocalProxyStore` and every existing implementor are untouched and still compile.
   See [SPI: publishing stubs from the store](docs/embedding/spi.md).
 
-### Fixed
-
-- **The published benchmark tables labelled the flagship row with the wrong stub count** (issue #906).
-  Every comparison table called the deep-path-match scenario "410 stubs", and the latency table called
-  it "last of 500"; `api_stubs()` in the shared fixture produces **310**
-  (10 resources × (1 collection + 10 items × 3 verbs)), and has done since before those numbers were
-  published. 13 occurrences across `README.md`, `docs/performance/index.md` and
-  `docs/comparisons/wiremock.md`, all now 310.
-
-  The measured RPS and latency figures were never in question — only the label. But it overstated the
-  corpus by a third on the row that carries Rift's central performance claim, on pages that
-  explicitly invite adversarial re-checking, where a reader who reproduces the harness counts 310 and
-  concludes the headline was inflated. Found while deriving the stub-count ladder for #900.
-
-- **The README's headline regex figure was stale** — it advertised "up to ~450x on large regex
-  predicate sets" while the table three lines below it reported **1,857x** on the same laptop. This
-  one *understated* the measured result rather than inflating it, but a summary that disagrees with
-  its own table is a correctness problem either way. Now ~1,850x, with the provenance stated (these
-  are the conservative laptop figures; the 16-vCPU column is higher).
-
-- **Server-level `flowState.ttlSeconds` below 1 is now rejected** (issue #860). The per-imposter
-  path has refused a non-positive TTL at construction since #530, but the server-level
-  `flowState` block had no such check: `ttlSeconds: 0` was accepted and then misbehaved late and
-  backend-dependently — the in-memory store expired every write instantly, Redis failed on the
-  first `SETEX`. A static config error surfaced as a runtime mystery, which is the exact failure
-  #530 set out to remove.
-
-  Both paths now share one guard, so they cannot drift on the rule or the message. The error
-  surface stays deliberately different: the per-imposter path answers `400`, while the
-  server-level path fails startup, which is correct for an embedder configuring the server rather
-  than a client creating an imposter. **If you were setting `ttlSeconds: 0` at server level**, it
-  was never doing what it looked like — set a real TTL, or omit the key for the default.
-
-### Added
 
 - **Microcks is now a benchmark subject — `tests/benchmark/scripts/bench_microcks.py`** (issue #900).
   The stub-growth claim was only ever demonstrated against WireMock, a commercial alternative;
@@ -253,39 +221,31 @@ record.
   break to the same seam. Export only — no behaviour change, and nothing changes for an embedder
   whose requests flow through upstream's request loop. See `docs/embedding/spi.md`.
 
-### Security
+- **The request journal now records *why* each request matched or did not** (issue #909). A
+  `matchOutcome` is captured at request time alongside each entry: for a miss, the candidate stubs
+  actually evaluated and the reason each was rejected (`failedPredicate` with the failing
+  predicate's index, `skippedScenarioState`, …); for a hit, the winning `stubIndex`/`stubId` plus
+  any candidates visited before it. `tried` is capped at 25 with `triedOmitted` counting the
+  remainder rather than truncating silently. The field is optional and `skip_serializing_if`, so an
+  entry without an outcome serializes byte-identically to before and every pre-upgrade entry stays
+  valid. This answers "why did this request 404?" from recorded traffic, which the journal could
+  not previously do — `X-Rift-Debug` evaluates a hypothetical match rather than reporting a real
+  one.
 
-- **The TLS intercept proxy was reachable off-host with no authentication** (issue #878). Every
-  release that shipped `--intercept-port` bound the listener to the admin host — `0.0.0.0` by
-  default — with no credential and no way to add one. Anyone who could reach the port could route
-  traffic through it and receive certificates forged by Rift's CA, which are trusted wherever that
-  CA has been installed; installing it in the system or JVM truststore is the documented way to use
-  the feature, so the trusted case is the normal one.
+- **`ImposterManager::with_serve_unbound(bool)` — register an imposter whose port bind failed**
+  (issue #903), **default off**. For an embedder replicating one config set across many nodes, a
+  squatted port on a single node meant no port-map entry at all, so that node answered `404` for an
+  imposter the rest of the fleet was serving — even though nothing on the in-process request path
+  needs the listener. With the flag on, an **apply-path** create whose **explicit-port** bind fails
+  with a socket-level `BindError` constructs the imposter and claims the port without a listener;
+  the port is reported under `ApplyReport::failed` and never `created`, so existing degraded-state
+  tracking keeps working. `create_imposter` stays all-or-nothing regardless of the flag.
 
-  **If you run `--intercept-port` on anything but loopback**, set `--intercept-auth user:pass` (see
-  *Added*), or restrict the bind with `--local-only` / `--host 127.0.0.1`. The default is unchanged
-  and still open — turning auth on by default would break every existing intercept user — so this
-  needs an explicit action from you. Setting `--require-admin-auth` makes the exposed case a startup
-  failure instead.
-
-- **An empty `--api-key` enabled the admin auth gate and then authenticated everyone** (issue #844).
-  `Some("")` is `Some`, so the gate switched on; a request with no `Authorization` header degrades
-  to `""`, and comparing two empty strings matched. The admin API — which can create imposters and
-  drive the TLS intercept proxy — reported as protected while being fully open, on the configuration
-  that most looks like it should fail closed.
-
-  A blank key (empty or whitespace) is now refused where it is configured: at CLI startup, before
-  anything binds, and in `rift_serve_admin`, which is the boundary every language SDK reaches the
-  admin plane through — so this is fixed once for the CLI and all SDKs rather than in four guards
-  that can each drift. Rejecting rather than silently downgrading to "no auth" is deliberate: a
-  downgrade would leave the operator believing a key is in force. As defence in depth, the key
-  comparison itself now fails closed on a blank configured key.
-
-  The realistic trigger was ordinary plumbing — an unset-but-defaulted `MB_APIKEY`, a Helm value
-  that renders empty, or an SDK passing `apiKey(getProperty("rift.apikey", ""))`. **If you were
-  relying on `--api-key ""` to mean "no authentication", omit the flag instead**; that has always
-  been the supported spelling and is unchanged. A key containing spaces is still a valid key and is
-  compared byte for byte, untrimmed.
+- **Language SDK documentation — `docs/sdk/`** (issue #462). A landing page per official SDK
+  (Java, Scala 3, Node/TypeScript, Go) with install snippets and hello-worlds, plus the transport
+  matrix and the SDK-to-engine version-compatibility table. Scala previously had no page on the
+  docs site at all. A scheduled cross-SDK matrix now replays each SDK's conformance lane against
+  the newest engine release, so compatibility drift surfaces here rather than in a user's build.
 
 ### Changed
 
@@ -370,6 +330,38 @@ record.
 
 ### Fixed
 
+- **The published benchmark tables labelled the flagship row with the wrong stub count** (issue #906).
+  Every comparison table called the deep-path-match scenario "410 stubs", and the latency table called
+  it "last of 500"; `api_stubs()` in the shared fixture produces **310**
+  (10 resources × (1 collection + 10 items × 3 verbs)), and has done since before those numbers were
+  published. 13 occurrences across `README.md`, `docs/performance/index.md` and
+  `docs/comparisons/wiremock.md`, all now 310.
+
+  The measured RPS and latency figures were never in question — only the label. But it overstated the
+  corpus by a third on the row that carries Rift's central performance claim, on pages that
+  explicitly invite adversarial re-checking, where a reader who reproduces the harness counts 310 and
+  concludes the headline was inflated. Found while deriving the stub-count ladder for #900.
+
+- **The README's headline regex figure was stale** — it advertised "up to ~450x on large regex
+  predicate sets" while the table three lines below it reported **1,857x** on the same laptop. This
+  one *understated* the measured result rather than inflating it, but a summary that disagrees with
+  its own table is a correctness problem either way. Now ~1,850x, with the provenance stated (these
+  are the conservative laptop figures; the 16-vCPU column is higher).
+
+- **Server-level `flowState.ttlSeconds` below 1 is now rejected** (issue #860). The per-imposter
+  path has refused a non-positive TTL at construction since #530, but the server-level
+  `flowState` block had no such check: `ttlSeconds: 0` was accepted and then misbehaved late and
+  backend-dependently — the in-memory store expired every write instantly, Redis failed on the
+  first `SETEX`. A static config error surfaced as a runtime mystery, which is the exact failure
+  #530 set out to remove.
+
+  Both paths now share one guard, so they cannot drift on the rule or the message. The error
+  surface stays deliberately different: the per-imposter path answers `400`, while the
+  server-level path fails startup, which is correct for an embedder configuring the server rather
+  than a client creating an imposter. **If you were setting `ttlSeconds: 0` at server level**, it
+  was never doing what it looked like — set a real TTL, or omit the key for the default.
+
+
 - **Reverse-proxy `*.` host routes matched hosts they should not have.** A wildcard route's host
   check was `host.ends_with("example.com")` after stripping `*.`, which has no label boundary: a
   route for `*.example.com` also matched `evilexample.com` and the bare `example.com`. The first is
@@ -379,6 +371,47 @@ record.
   case-insensitive, matching RFC 4343 and the intercept-rule matcher, which has always compared
   with `eq_ignore_ascii_case` — the same `Host` could previously get two different verdicts
   depending on which matcher saw it.
+
+- **Every hand-written cross-reference on the docs site 404'd** (issue #898). `docs/_config.yml`
+  emitted `features/spaces.html` while all 183 authored links pointed at `features/spaces/` — 156
+  of them dead, including the WireMock comparison linked from the README. It stayed invisible
+  because just-the-docs builds its navigation from `page.url`, so the theme's own links were fine
+  and only human-authored ones broke. Fixed with `permalink: pretty`, plus a CI gate that builds
+  the site and resolves every internal link the way GitHub Pages does.
+
+### Security
+
+- **The TLS intercept proxy was reachable off-host with no authentication** (issue #878). Every
+  release that shipped `--intercept-port` bound the listener to the admin host — `0.0.0.0` by
+  default — with no credential and no way to add one. Anyone who could reach the port could route
+  traffic through it and receive certificates forged by Rift's CA, which are trusted wherever that
+  CA has been installed; installing it in the system or JVM truststore is the documented way to use
+  the feature, so the trusted case is the normal one.
+
+  **If you run `--intercept-port` on anything but loopback**, set `--intercept-auth user:pass` (see
+  *Added*), or restrict the bind with `--local-only` / `--host 127.0.0.1`. The default is unchanged
+  and still open — turning auth on by default would break every existing intercept user — so this
+  needs an explicit action from you. Setting `--require-admin-auth` makes the exposed case a startup
+  failure instead.
+
+- **An empty `--api-key` enabled the admin auth gate and then authenticated everyone** (issue #844).
+  `Some("")` is `Some`, so the gate switched on; a request with no `Authorization` header degrades
+  to `""`, and comparing two empty strings matched. The admin API — which can create imposters and
+  drive the TLS intercept proxy — reported as protected while being fully open, on the configuration
+  that most looks like it should fail closed.
+
+  A blank key (empty or whitespace) is now refused where it is configured: at CLI startup, before
+  anything binds, and in `rift_serve_admin`, which is the boundary every language SDK reaches the
+  admin plane through — so this is fixed once for the CLI and all SDKs rather than in four guards
+  that can each drift. Rejecting rather than silently downgrading to "no auth" is deliberate: a
+  downgrade would leave the operator believing a key is in force. As defence in depth, the key
+  comparison itself now fails closed on a blank configured key.
+
+  The realistic trigger was ordinary plumbing — an unset-but-defaulted `MB_APIKEY`, a Helm value
+  that renders empty, or an SDK passing `apiKey(getProperty("rift.apikey", ""))`. **If you were
+  relying on `--api-key ""` to mean "no authentication", omit the flag instead**; that has always
+  been the supported spelling and is unchanged. A key containing spaces is still a valid key and is
+  compared byte for byte, untrimmed.
 
 ## [0.16.0] - 2026-07-22
 
@@ -1683,7 +1716,8 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/achird-labs/rift/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/achird-labs/rift/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/achird-labs/rift/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/achird-labs/rift/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/achird-labs/rift/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/achird-labs/rift/compare/v0.13.6...v0.14.0
