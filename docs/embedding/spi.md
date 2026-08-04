@@ -499,15 +499,12 @@ failed:
     "message": "flowState: redis connection refused",
     "feature": "flowState",
     "detail": "redis connection refused"
-  }],
-  "error": "backendUnavailable",
-  "feature": "flowState",
-  "detail": "redis connection refused"
+  }]
 }
 ```
 
-> **Deprecated:** the **top-level** `error`/`feature`/`detail` keys are retained for backward
-> compatibility and will be **removed in 0.17.0** (#801). Read `errors[0]` instead.
+> **Removed in 0.18.0:** the **top-level** `error`/`feature`/`detail` duplicates (deprecated in
+> 0.16.0, #801) are gone; `errors[0]` is the only shape.
 
 Per-request operational metadata travels through a tokio task-local annotation scope:
 `annotate(key: &'static str, value: String)` records a `(key, value)` that a `ResponseDecorator` later

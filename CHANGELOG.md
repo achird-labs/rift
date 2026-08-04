@@ -11,6 +11,14 @@ record.
 
 ## [Unreleased]
 
+### Removed
+
+- **The deprecated top-level `error` / `feature` / `detail` keys on backend-error responses**
+  (issue #801). Deprecated in 0.16.0 and retained through 0.17.0, the pre-envelope duplicates are
+  now gone: the Mountebank `errors` envelope is the only shape this door serves. Branch on
+  `errors[0].type == "backend unavailable"`; `errors[0].feature` / `errors[0].detail` carry the
+  same information the top-level keys did.
+
 ## [0.17.0] - 2026-08-03
 
 ### Added
@@ -577,7 +585,8 @@ record.
 
   **Deprecation:** the **top-level** `error`/`feature`/`detail` keys are unchanged and still
   served, so nothing breaks — but they are deprecated and will be **removed in 0.17.0** (#801).
-  Read `errors[0]` instead.
+  Read `errors[0]` instead. *(Correction, 2026-08-04: the removal missed the 0.17.0 train and
+  ships in 0.18.0 — see the `Removed` entry above.)*
 
 
 ## [0.15.0] - 2026-07-21

@@ -3849,10 +3849,14 @@ mod backend_errors {
             "decorator header must land on the wire"
         );
         let body: serde_json::Value = resp.json().await.expect("json");
-        assert_eq!(body["error"], "backendUnavailable");
-        assert_eq!(body["feature"], "flowState");
-        // Issue #800: a real request over the wire must carry the envelope too, not just the
-        // legacy keys — the unit tests exercise the mapper, this proves it survives serialization.
+        // Issue #801: over the wire the envelope is the only shape — the removed legacy
+        // top-level keys must not survive serialization either.
+        assert!(
+            body.get("error").is_none()
+                && body.get("feature").is_none()
+                && body.get("detail").is_none(),
+            "top-level legacy keys were removed in 0.18.0 (#801), got: {body}"
+        );
         assert_eq!(body["errors"][0]["code"], "503");
         assert_eq!(body["errors"][0]["type"], "backend unavailable");
         assert_eq!(body["errors"][0]["feature"], "flowState");
