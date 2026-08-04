@@ -23,10 +23,87 @@ env:
 
 jobs:
   # =============================================================================
+  # Refuse to release with stale install docs
+  # =============================================================================
+  # Every install snippet in README.md and docs/ names a release version literally, because a
+  # release asset URL and `rift-fetch -version` have no "latest" spelling. That made them rot
+  # silently on each release: the docs shipped an asset name that had never existed, and the site
+  # footer sat four releases behind (v0.13.0 against a v0.17.0 engine) for three weeks.
+  #
+  # Rather than open a follow-up PR nobody merges — and which GITHUB_TOKEN could not get CI to run
+  # on anyway — this makes the bump part of cutting a release: it is a one-command edit
+  # (`scripts/verify-docs-version.sh --set vX.Y.Z`) that belongs in the release-prep PR alongside
+  # the CHANGELOG, and CI already gates that the snippets match this file on that PR.
+  #
+  # Fail-closed and FIRST, so a stale docs tree stops the release in ~15s instead of after seven
+  # target builds. `build` needs this job.
+  docs-version:
+    name: Docs version matches the tag
+    runs-on: ubuntu-latest
+    outputs:
+      VERSION: ${{ steps.version.outputs.VERSION }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Assert docs/_data/rift.yml names this release
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.VERSION }}"
+          DECLARED="$(sed -n 's/^latest_release:[[:space:]]*\(v[0-9][0-9.]*\).*/\1/p' docs/_data/rift.yml | head -1)"
+
+          if [ -z "$DECLARED" ]; then
+            echo "::error::docs/_data/rift.yml has no 'latest_release: vX.Y.Z' key"
+            exit 1
+          fi
+
+          if [ "$DECLARED" != "$TAG" ]; then
+            echo "::error::docs/_data/rift.yml declares ${DECLARED}, but this release is ${TAG}."
+            echo "::error::The install snippets in README.md and docs/ would 404 for ${TAG}."
+            echo "::error::Fix on the release-prep branch, then re-tag:"
+            echo "::error::  scripts/verify-docs-version.sh --set ${TAG}"
+            exit 1
+          fi
+
+          # Belt and braces: the declared value is right, but prove the snippets actually match it,
+          # in case someone edited a snippet without running the script.
+          ./scripts/verify-docs-version.sh
+
+          echo "docs install snippets name ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+
+      # Not a gate — a nudge, surfaced at the one moment someone is looking. sync.yml records the
+      # revision a human last reconciled the docs against, so automation must never bump it (that
+      # would assert a review that never happened). But letting it drift unnoticed is exactly how
+      # the docs fell four releases behind, so say so in the release summary.
+      - name: Report docs-reconciliation staleness
+        continue-on-error: true
+        run: |
+          MARKER="$(sed -n 's/^release:[[:space:]]*\(v[0-9][0-9.]*\).*/\1/p' docs/_data/sync.yml | head -1)"
+          TAG="${{ steps.version.outputs.VERSION }}"
+          if [ -n "$MARKER" ] && [ "$MARKER" != "$TAG" ]; then
+            {
+              echo ""
+              echo "> **Docs reconciliation is behind.** \`docs/_data/sync.yml\` was last reconciled"
+              echo "> at \`${MARKER}\`; this release is \`${TAG}\`. Install snippets are current"
+              echo "> (gated above), but prose describing behaviour may not be. Consider a docs pass:"
+              echo "> \`git log --oneline \$(sed -n 's/^commit: //p' docs/_data/sync.yml)..HEAD\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # =============================================================================
   # Build binaries for all platforms
   # =============================================================================
   build:
     name: Build ${{ matrix.target }}
+    needs: docs-version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
