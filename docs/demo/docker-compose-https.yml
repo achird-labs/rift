@@ -1,9 +1,6 @@
 # Rift Demo - HTTPS/TLS Mode
 #
 # Prerequisites:
-#   1. Build the local image:
-#      docker build -t rift-proxy:local -f crates/rift-http-proxy/Dockerfile .
-#
 #   2. Generate certificates:
 #      ./generate-certs.sh
 #
@@ -18,7 +15,7 @@
 
 services:
   rift:
-    image: rift-proxy:local
+    image: zainalpour/rift-proxy:latest
     container_name: rift-https-demo
     ports:
       - "2525:2525"    # Admin API

@@ -26,10 +26,21 @@ Rift provides advanced features for service virtualization and chaos engineering
 
 - **Fault Injection** - Probabilistic latency, error, and TCP fault injection
 - **Scripting** - Rhai and JavaScript engines for dynamic behavior
-- **Flow State** - Stateful scenarios with InMemory or Redis backends
+- **Scenarios (FSM)** - Stateful stubs as declarative state machines
+- **Flow State** - Per-flow key/value store with InMemory or Redis backends
+- **Correlated Isolation (Spaces)** - Per-flow stub and state partitioning
 - **Stub Analysis** - Overlap detection and conflict warnings
 - **Debug Mode** - Request matching diagnostics with `X-Rift-Debug` header
 - **Metrics** - Prometheus integration
+
+### Server-Level Capabilities
+
+- **Front Door** - One listener routing to many imposters by host, path, header or method
+- **Single-Port Gateway** - Reach every imposter through the admin port
+- **Intercept Proxy** - TLS-MITM a hard-coded external HTTPS host, no mitmproxy needed
+- **Hot Reload** - Re-read configuration without restarting the process
+- **Imposter Sources** - Load from a path or a URI, merging several sources
+- **Embedding** - Run the engine in-process from Rust, or any language over the C ABI
 
 ---
 
@@ -44,13 +55,22 @@ Rift provides advanced features for service virtualization and chaos engineering
 | JavaScript Injection | ✅ | — |
 | Probabilistic Faults | Via injection | ✅ `_rift.fault` |
 | Rhai/JS Scripting | — | ✅ `_rift.script` |
+| Scenarios (FSM) | Via injection | ✅ stub `scenarioName` |
 | Flow State | Via injection | ✅ `_rift.flowState` |
+| Correlated Isolation | — | ✅ stub `space` |
 | Stub Analysis | — | ✅ `_rift.warnings` |
 | Stub IDs | — | ✅ `id` field |
 | Debug Mode | — | ✅ `X-Rift-Debug` header |
 | Prometheus Metrics | ✅ | ✅ |
+| Front Door | — | ✅ `--front-door` |
+| Single-Port Gateway | — | ✅ via the admin port |
+| Intercept Proxy (TLS-MITM) | — | ✅ `--intercept-port` |
+| Hot Reload | — | ✅ `POST /admin/reload` |
 | Config Linting | — | ✅ `rift-lint` |
+| Stub Verification | — | ✅ `rift-verify` |
 | Terminal UI | — | ✅ `rift-tui` |
+| In-Process Embedding | — | ✅ Rust API + C ABI |
+| Official Typed SDKs | — | ✅ Java, Scala, Node, Go |
 
 ---
 

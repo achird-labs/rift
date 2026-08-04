@@ -133,7 +133,7 @@ Redis support requires building with the `redis-backend` feature:
 cargo build --release --features redis-backend
 
 # Run with Redis backend
-rift-http-proxy --configfile imposters.json
+rift --configfile imposters.json
 ```
 
 ---

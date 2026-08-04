@@ -382,7 +382,7 @@ docker run -v $(pwd)/imposters.json:/imposters.json \
   zainalpour/rift-proxy:latest --configfile /imposters.json
 
 # Binary
-./rift-http-proxy --configfile imposters.json
+./rift --configfile imposters.json
 ```
 
 ### Via REST API

@@ -11,7 +11,7 @@ permalink: /
 **High-performance Mountebank-compatible HTTP/HTTPS mock server written in Rust**
 {: .fs-6 .fw-300 }
 
-Rift is a drop-in replacement for [Mountebank](http://www.mbtest.org/) that provides **2-250x better performance** while maintaining full API compatibility. Use your existing Mountebank configurations and enjoy faster test execution.
+Rift is a drop-in replacement for [Mountebank](https://www.mbtest.dev/) that delivers **~20–150x faster throughput on typical workloads, and up to ~1,850x on large regex predicate sets** — while maintaining full API compatibility. Use your existing Mountebank configurations and enjoy faster test execution.
 
 [Get Started]({{ site.baseurl }}/getting-started/){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
 [View on GitHub](https://github.com/achird-labs/rift){: .btn .fs-5 .mb-4 .mb-md-0 }
@@ -56,6 +56,22 @@ Rift supports all major Mountebank features:
 - **Behaviors** - wait, decorate, copy, lookup
 - **Recording** - Proxy mode with response recording
 
+### And Then Some
+
+Compatibility is the floor, not the ceiling. Rift adds the things you would otherwise build by hand
+on top of a mock server:
+
+- **[Fault Injection]({{ site.baseurl }}/features/fault-injection/)** - probabilistic latency, error and TCP faults, declaratively
+- **[Scripting]({{ site.baseurl }}/features/scripting/)** - Rhai and JavaScript engines, with a `script check` / `script run` CLI
+- **[Scenarios]({{ site.baseurl }}/features/scenarios/)** and **[Flow State]({{ site.baseurl }}/features/flow-state/)** - declarative state machines and a per-flow key/value store
+- **[Correlated Isolation]({{ site.baseurl }}/features/spaces/)** - per-flow partitioning so parallel tests don't collide
+- **[Front Door]({{ site.baseurl }}/features/front-door/)** and **[Gateway]({{ site.baseurl }}/features/gateway/)** - route many imposters through one listener
+- **[Intercept Proxy]({{ site.baseurl }}/features/intercept-proxy/)** - TLS-MITM a hard-coded external host without mitmproxy
+- **[Stub Analysis]({{ site.baseurl }}/features/stub-analysis/)** and **[Debug Mode]({{ site.baseurl }}/features/debug-mode/)** - find shadowed stubs, and see why a request matched
+- **[Embedding & FFI]({{ site.baseurl }}/embedding/)** - run the engine in-process from Rust or any language over the C ABI
+
+The [Features]({{ site.baseurl }}/features/) section covers all of them.
+
 ---
 
 ## Quick Start
@@ -63,10 +79,7 @@ Rift supports all major Mountebank features:
 ### Using Docker (Recommended)
 
 ```bash
-# Pull the latest image (from GitHub Container Registry)
-docker pull zainalpour/rift-proxy:latest
-
-# Or from Docker Hub
+# Pull the latest image from Docker Hub
 docker pull zainalpour/rift-proxy:latest
 
 # Run Rift (Mountebank-compatible mode)
@@ -110,15 +123,19 @@ npm install @rift-vs/rift
 ```
 
 ```javascript
-import rift from '@rift-vs/rift';
+import { rift, imposter, onGet, okJson, times } from '@rift-vs/rift';
 
-// Start a Rift server (drop-in replacement for Mountebank)
-const server = await rift.create({ port: 2525 });
+await using engine = await rift.embedded(); // or rift.connect(url) / rift.spawn()
 
-// Create imposters, run your tests...
+const users = await engine.create(
+  imposter('users').stub(onGet('/api/users/1').willReturn(okJson({ id: 1, name: 'Alice' }))));
 
-await server.close();
+await fetch(`${users.url}/api/users/1`);
+await users.verify(onGet('/api/users/1'), times(1)); // throws with a diff on mismatch
 ```
+
+Migrating from Mountebank? The Mountebank-compatible `rift.create({ port })` API stays available as
+a permanent drop-in, so adopting the typed DSL above is incremental rather than a rewrite.
 
 See the [Node.js Integration Guide]({{ site.baseurl }}/getting-started/nodejs/) for complete documentation.
 
@@ -218,10 +235,22 @@ hello-world for each, plus the transport and version-compatibility matrices.
 - [CLI Reference]({{ site.baseurl }}/configuration/cli/) - Command-line options
 
 ### Features
+- [Features Overview]({{ site.baseurl }}/features/) - Every extension, with the Mountebank comparison table
 - [Fault Injection]({{ site.baseurl }}/features/fault-injection/) - Latency and error simulation
 - [Scripting]({{ site.baseurl }}/features/scripting/) - Rhai and JavaScript engines
+- [Scenarios (FSM)]({{ site.baseurl }}/features/scenarios/) - Stateful stubs as declarative state machines
+- [Correlated Isolation (Spaces)]({{ site.baseurl }}/features/spaces/) - Per-flow stub and state partitioning
+- [Flow State]({{ site.baseurl }}/features/flow-state/) - Per-flow key/value store
+- [Front Door]({{ site.baseurl }}/features/front-door/) - One listener routing to many imposters
+- [Single-Port Gateway]({{ site.baseurl }}/features/gateway/) - Reach every imposter through the admin port
+- [Intercept Proxy (TLS-MITM)]({{ site.baseurl }}/features/intercept-proxy/) - Mock a hard-coded external HTTPS host
+- [Hot Reload]({{ site.baseurl }}/features/hot-reload/) - Re-read config without restarting
+- [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) - Overlap detection and warnings
+- [Debug Mode]({{ site.baseurl }}/features/debug-mode/) - Why a request matched, or didn't
 - [TLS/HTTPS]({{ site.baseurl }}/features/tls/) - Secure connections
 - [Metrics]({{ site.baseurl }}/features/metrics/) - Prometheus integration
+- [Configuration Linting]({{ site.baseurl }}/features/linting/) - Validate configs before they load
+- [Terminal UI]({{ site.baseurl }}/features/tui/) - Interactive imposter management
 
 ### Deployment
 - [Docker]({{ site.baseurl }}/deployment/docker/) - Container deployment
@@ -243,19 +272,23 @@ hello-world for each, plus the transport and version-compatibility matrices.
 
 ## Project Status
 
-Rift is under active development. Current status:
+The HTTP/HTTPS surface is stable and actively developed. Current status:
 
-| Feature | Status |
-|:--------|:-------|
-| HTTP Imposters | Stable |
-| HTTPS Imposters | Stable |
-| All Predicates | Stable |
-| Static Responses | Stable |
-| Proxy Mode | Stable |
-| Behaviors (wait, decorate) | Stable |
-| Injection (JavaScript) | Stable |
-| TCP Protocol | Planned |
-| SMTP Protocol | Planned |
+| Area | Status |
+|:-----|:-------|
+| HTTP / HTTPS imposters | Stable |
+| All predicates, static responses, behaviors | Stable |
+| Proxy mode (record & replay) | Stable |
+| JavaScript injection | Stable |
+| Fault injection, scripting (Rhai / JS) | Stable |
+| Scenarios, flow state, correlated isolation | Stable |
+| Front door, single-port gateway | Stable |
+| Intercept proxy (TLS-MITM) | Stable |
+| Stub analysis, debug mode, hot reload | Stable |
+| Prometheus metrics, linting, terminal UI | Stable |
+| Embedding (Rust API, C ABI) and the four SDKs | Stable |
+| TCP protocol | Planned |
+| SMTP protocol | Planned |
 
 ---
 

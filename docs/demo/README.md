@@ -9,7 +9,14 @@ permalink: /demo/
 
 Quick-start demos for Rift in different modes.
 
-> **Note**: These demos use a locally-built Docker image. Run `docker build -t rift-proxy:local -f crates/rift-http-proxy/Dockerfile .` from the project root first.
+> **Nothing to build.** These demos pull the published `zainalpour/rift-proxy:latest` image, so
+> `docker compose up -d` works from a fresh clone. To run one against your own working tree instead,
+> build and retag it first:
+>
+> ```bash
+> docker build -t rift-proxy:local -f crates/rift-http-proxy/Dockerfile .
+> docker tag rift-proxy:local zainalpour/rift-proxy:latest
+> ```
 
 ## Demo 1: Mountebank Mode (HTTP)
 

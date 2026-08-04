@@ -9,7 +9,7 @@
 
 services:
   rift:
-    image: rift-proxy:local
+    image: zainalpour/rift-proxy:latest
     container_name: rift-demo
     ports:
       - "2525:2525"    # Admin API

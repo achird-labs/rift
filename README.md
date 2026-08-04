@@ -2,9 +2,12 @@
 
 **High-performance Mountebank-compatible HTTP/HTTPS mock server written in Rust**
 
-[![Status](https://img.shields.io/badge/status-beta-blue)](https://github.com/achird-labs/rift)
+[![Status](https://img.shields.io/badge/status-stable-brightgreen)](https://github.com/achird-labs/rift/releases/latest)
+[![Release](https://img.shields.io/github/v/release/achird-labs/rift)](https://github.com/achird-labs/rift/releases/latest)
+[![crates.io](https://img.shields.io/crates/v/rift-http-proxy)](https://crates.io/crates/rift-http-proxy)
+[![Docker](https://img.shields.io/docker/v/zainalpour/rift-proxy?label=docker)](https://hub.docker.com/r/zainalpour/rift-proxy)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-nightly-orange)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.92%2B%20stable-orange)](https://www.rust-lang.org/)
 
 Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible mock server that delivers **~20–150x faster throughput on typical workloads, and up to ~1,850x on large regex predicate sets** — the conservative laptop figures from the table below; the 16-vCPU server column is higher still. Use your existing Mountebank configurations and enjoy faster test execution.
 
@@ -127,11 +130,37 @@ data does *not* support: [docs/comparisons/microcks](docs/comparisons/microcks.m
 
 ### Full Feature Support
 
+Everything Mountebank does:
+
 - **Imposters** - HTTP/HTTPS mock servers
 - **Predicates** - equals, contains, matches, exists, jsonpath, xpath, and, or, not
 - **Responses** - Static, proxy, injection
 - **Behaviors** - wait, decorate, copy, lookup
 - **Proxy Mode** - Record and replay
+
+...and a good deal it doesn't:
+
+| | |
+|:--|:--|
+| [Fault Injection](docs/features/fault-injection.md) | Probabilistic latency, error, and TCP faults — chaos testing without a sidecar |
+| [Scripting](docs/features/scripting.md) | Rhai and JavaScript engines for dynamic responses, with a `script check`/`script run` CLI |
+| [Scenarios (FSM)](docs/features/scenarios.md) | Declarative state machines instead of hand-rolled stateful injection |
+| [Flow State](docs/features/flow-state.md) | Per-flow key/value store, in-memory or Redis-backed |
+| [Correlated Isolation](docs/features/spaces.md) | Per-flow stub and state partitioning, so parallel tests don't collide |
+| [Front Door](docs/features/front-door.md) | One listener routing to many imposters by host, path, header or method |
+| [Single-Port Gateway](docs/features/gateway.md) | Reach every imposter through the admin port |
+| [Intercept Proxy](docs/features/intercept-proxy.md) | TLS-MITM a hard-coded external HTTPS host — no mitmproxy needed |
+| [Stub Analysis](docs/features/stub-analysis.md) | Overlap and conflict detection before a stub silently shadows another |
+| [Debug Mode](docs/features/debug-mode.md) | `X-Rift-Debug` explains why a request matched, or didn't |
+| [Hot Reload](docs/features/hot-reload.md) | Re-read config without dropping the process |
+| [Metrics](docs/features/metrics.md) | Prometheus endpoint |
+| [Linting](docs/features/linting.md) | `rift-lint` validates configs in CI before they ever load |
+| [Terminal UI](docs/features/tui.md) | `rift-tui` for interactive imposter management |
+| [Embedding & FFI](docs/embedding/index.md) | Run the engine in-process from Rust, or any language over the C ABI |
+
+Four official SDKs — [Java](docs/sdk/java.md), [Scala](docs/sdk/scala.md),
+[Node/TypeScript](docs/sdk/node.md), [Go](docs/sdk/go.md) — wrap all of it behind a typed DSL, and
+all four replay the same conformance corpus. See [Language SDKs](docs/sdk/index.md).
 
 ---
 
@@ -196,11 +225,19 @@ cargo install rift-http-proxy
 Download pre-built binaries from [GitHub Releases](https://github.com/achird-labs/rift/releases):
 
 ```bash
-# Example for Linux x86_64
-curl -LO https://github.com/achird-labs/rift/releases/latest/download/rift-vX.X.X-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf rift-vX.X.X-x86_64-unknown-linux-gnu.tar.gz
-sudo mv rift-vX.X.X-x86_64-unknown-linux-gnu/bin/* /usr/local/bin/
+# Example for Linux x86_64 — set VERSION to the release you want
+VERSION=v0.17.0
+TARGET=x86_64-unknown-linux-gnu
+
+curl -LO https://github.com/achird-labs/rift/releases/download/$VERSION/rift-$VERSION-$TARGET.tar.gz
+tar -xzf rift-$VERSION-$TARGET.tar.gz
+sudo mv rift-$VERSION-$TARGET/bin/* /usr/local/bin/
+
+rift --version
 ```
+
+Each archive unpacks to a `bin/` directory containing `rift` (the server), `rift-lint`, `rift-tui`,
+and `rift-verify`.
 
 Available platforms:
 - Linux: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`
@@ -529,4 +566,4 @@ Apache License 2.0 - see [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
-- [Mountebank](http://www.mbtest.org/) - The original service virtualization tool that inspired Rift's API and configuration format
+- [Mountebank](https://www.mbtest.dev/) - The original service virtualization tool that inspired Rift's API and configuration format
