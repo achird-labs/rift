@@ -79,6 +79,12 @@ jobs:
       - name: SDK conformance packager self-test
         run: ./scripts/gen-sdk-conformance.sh --self-test
 
+      # Issue #915: the sdk-matrix drift reporter's lifecycle (create once, comment while red,
+      # close on green, per-SDK marker isolation, fail-closed red path / fail-open green path)
+      # is only ever exercised by its self-test — the real workflow runs it against live issues.
+      - name: SDK matrix drift-reporter self-test
+        run: ./scripts/sdk-matrix-report.sh --self-test
+
       # Issue #344: a pinned cbindgen so the header regenerate-diff in the smoke test is
       # deterministic (cbindgen output varies across versions) and actually runs (the step
       # skips the diff when cbindgen is absent). Keep the version in sync with the header's.

@@ -44,7 +44,7 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write # the drift reporter opens/updates one tracking issue per SDK
+  issues: write # the drift reporter opens/updates one tracking issue per SDK, and closes it on green
 
 jobs:
   engine:
@@ -228,13 +228,29 @@ jobs:
             || { echo "::error::the embedded conformance lane did not run"; exit 1; }
 
       # The whole point of a scheduled gate: there is no PR to turn red, so the failure has to
-      # become an issue. The reporter keeps one open issue per SDK and comments on it thereafter.
+      # become an issue. The reporter keeps one open issue per SDK, comments on it while the lane
+      # stays red, and the green half below closes it when the lane recovers.
       - name: Report drift
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           ./scripts/sdk-matrix-report.sh \
+            --sdk "${{ matrix.sdk.name }}" \
+            --tag "${{ steps.sdk-tag.outputs.tag }}" \
+            --engine "$ENGINE" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      # The green half (#915): a passing lane closes its SDK's open drift issue, so a transient
+      # red (infra flake, asset race) self-resolves instead of costing a human close — and an open
+      # drift issue always means live drift. The script fails open by design: bookkeeping errors
+      # must never turn a green conformance lane red.
+      - name: Close drift issue
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/sdk-matrix-report.sh --resolved \
             --sdk "${{ matrix.sdk.name }}" \
             --tag "${{ steps.sdk-tag.outputs.tag }}" \
             --engine "$ENGINE" \

@@ -63,7 +63,8 @@ release behind for long. The table names each SDK's *floor* — the engine it is
 and a newer engine is expected to work. That expectation is not taken on trust: the
 [cross-SDK matrix](https://github.com/achird-labs/rift/blob/master/.github/workflows/sdk-matrix.yml)
 replays every SDK's conformance lane against the newest engine release daily and on every publish,
-so drift shows up as a tracking issue rather than as a user's broken build.
+so drift shows up as a tracking issue rather than as a user's broken build — and the issue closes
+itself when the lane goes green again, so an open one always means live drift.
 
 ---
 
