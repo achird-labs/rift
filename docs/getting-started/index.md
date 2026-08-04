@@ -114,7 +114,7 @@ the native library once:
 
 ```bash
 go get github.com/achird-labs/rift-go
-go run github.com/achird-labs/rift-go/cmd/rift-fetch@latest -version v0.16.0
+go run github.com/achird-labs/rift-go/cmd/rift-fetch@latest -version v0.17.0
 ```
 
 Usage:
@@ -138,7 +138,7 @@ native library. See the [rift-go documentation](https://achird-labs.github.io/ri
 ### Scala 3
 
 ```scala
-libraryDependencies += "io.github.achird-labs" %% "rift-scala-zio" % "0.1.3" % Test
+libraryDependencies += "io.github.achird-labs" %% "rift-scala-zio" % "0.1.4" % Test
 ```
 
 There is a module per effect system — ZIO, Cats Effect 3 / FS2, or no effect system at all — over

@@ -17,7 +17,7 @@ Testcontainers integrations.
 <dependency>
   <groupId>io.github.achird-labs</groupId>
   <artifactId>rift-java-core</artifactId>
-  <version>0.2.2</version>
+  <version>0.2.3</version>
   <scope>test</scope>
 </dependency>
 ```

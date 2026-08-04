@@ -14,10 +14,10 @@ never hand-write Mountebank JSON or an FFI bridge.
 
 | SDK | Package | Latest | Docs |
 |---|---|---|---|
-| [Java / JVM]({{ site.baseurl }}/sdk/java/) | `io.github.achird-labs:rift-java-core` | `v0.2.2` | [rift-java](https://achird-labs.github.io/rift-java/) |
-| [Scala 3]({{ site.baseurl }}/sdk/scala/) | `io.github.achird-labs::rift-scala-*` | `v0.1.3` | [rift-scala](https://achird-labs.github.io/rift-scala/) |
-| [Node / TypeScript]({{ site.baseurl }}/sdk/node/) | `@rift-vs/rift` | `v0.15.0` | [rift-node](https://achird-labs.github.io/rift-node/) |
-| [Go]({{ site.baseurl }}/sdk/go/) | `github.com/achird-labs/rift-go` | `v0.1.0` | [rift-go](https://achird-labs.github.io/rift-go/) |
+| [Java / JVM]({{ site.baseurl }}/sdk/java/) | `io.github.achird-labs:rift-java-core` | `v0.2.3` | [rift-java](https://achird-labs.github.io/rift-java/) |
+| [Scala 3]({{ site.baseurl }}/sdk/scala/) | `io.github.achird-labs::rift-scala-*` | `v0.1.4` | [rift-scala](https://achird-labs.github.io/rift-scala/) |
+| [Node / TypeScript]({{ site.baseurl }}/sdk/node/) | `@rift-vs/rift` | `v0.15.1` | [rift-node](https://achird-labs.github.io/rift-node/) |
+| [Go]({{ site.baseurl }}/sdk/go/) | `github.com/achird-labs/rift-go` | `v0.2.0` | [rift-go](https://achird-labs.github.io/rift-go/) |
 
 ---
 
@@ -52,10 +52,10 @@ rift-go ships a `rift-fetch` command that downloads and SHA-256-verifies it.
 
 | SDK | SDK version | Engine floor |
 |---|---|---|
-| rift-java | `v0.2.2` | `v0.16.0` |
-| rift-scala | `v0.1.3` | `v0.16.0` |
-| rift-node | `v0.15.0` | `v0.16.0` |
-| rift-go | `v0.1.0` | `v0.16.0` |
+| rift-java | `v0.2.3` | `v0.17.0` |
+| rift-scala | `v0.1.4` | `v0.17.0` |
+| rift-node | `v0.15.1` | `v0.17.0` |
+| rift-go | `v0.2.0` | `v0.17.0` |
 
 **How this table stays honest.** Each SDK pins an engine version and has its own bump automation
 that opens a PR when a new engine release lands, so an SDK release is never more than one engine
