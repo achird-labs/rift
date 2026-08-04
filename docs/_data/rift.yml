@@ -1,0 +1,11 @@
+# The newest published engine release.
+#
+# Every *install snippet* in README.md and docs/ must name this exact version, because those
+# commands only work if the version resolves to a real release asset. `scripts/verify-docs-version.sh`
+# gates that agreement in CI and can rewrite the snippets (`--fix`); the release workflow bumps this
+# value and opens the follow-up PR, so the snippets track releases without anyone remembering to.
+#
+# This is NOT the same thing as `sync.yml`'s `release:`. That one records the last revision a human
+# actually reconciled the docs against, and is deliberately left alone by automation — bumping it
+# mechanically would assert a docs review that never happened.
+latest_release: v0.17.0

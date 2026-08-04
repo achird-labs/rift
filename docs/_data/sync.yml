@@ -1,8 +1,19 @@
 # Docs sync marker — the code revision these docs were last reconciled against.
 #
+# HUMAN-MAINTAINED, DELIBERATELY. Automation must never bump this: it is a claim that someone read
+# the prose against the code, and moving it mechanically would assert a review that never happened.
+# That is also why it is NOT the file the install snippets track — see `rift.yml`, which names the
+# newest release and IS machine-maintained. Conflating the two is what let this marker sit at
+# v0.13.0 against a v0.17.0 engine for three weeks.
+#
+# `release.yml` cannot fail on this (a docs pass is judgement, not a gate), so it prints a
+# staleness nudge in the release summary instead — visible at the one moment someone is looking.
+#
 # Starting a docs-update pass (see issue #280):
 #   1. Enumerate user-facing changes since the marker:
-#        git log --oneline --merges <commit>..origin/master
+#        git log --oneline <commit>..origin/master
+#      (use --merges only if the branch history is merge-based; this repo squash-merges, so
+#      --merges returned 3 commits where the real answer was 50)
 #   2. Update the affected pages.
 #   3. Bump this file AND the version in _config.yml footer_content in the same PR.
 release: v0.17.0

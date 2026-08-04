@@ -199,6 +199,18 @@ jobs:
           ./scripts/verify-feature-propagation.sh --self-test
           ./scripts/verify-feature-propagation.sh
 
+      # An install snippet names a release version, because a release asset URL and
+      # `rift-fetch -version` have no "latest" spelling — so every one of them rots the moment a
+      # release lands. Nothing caught that: the docs shipped an asset name that never existed and
+      # the site footer sat four releases behind. release.yml now bumps docs/_data/rift.yml and
+      # runs `--fix`; this gate catches the other direction, a hand-edited or newly-added snippet
+      # left at a stale version. Hermetic — no GitHub API call, so it cannot flake.
+      # --self-test first proves the checker isn't a no-op.
+      - name: Verify install snippets name the current release
+        run: |
+          ./scripts/verify-docs-version.sh --self-test
+          ./scripts/verify-docs-version.sh
+
   docs-links:
     name: Docs Links
     runs-on: ubuntu-latest
