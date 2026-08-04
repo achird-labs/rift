@@ -19,8 +19,10 @@ name: SDK Matrix
 #
 # A consequence worth naming, since it is invisible in a green run: some SDK suites self-skip the
 # sub-suites this gate does not feed. rift-node's spawn replay block and rift-scala's G3 spawn lane
-# both skip here by design. What must never skip is the embedded replay — hence the explicit
-# assertion in the go lane below, which is what caught the corpus path bug on the first live run.
+# both skip here by design. What must never skip is the embedded replay — hence every lane carries
+# an anti-silent-skip guard: go's grep (which caught the corpus path bug on the first live run),
+# scala's RIFT_G3_REQUIRE, and the java/node report checks added by issue #920. Post-#915 a silent
+# skip is worse than uninformative: a green lane auto-closes its SDK's open drift issue.
 
 on:
   schedule:
@@ -193,7 +195,26 @@ jobs:
         env:
           RIFT_IT: "1"
           CONFORMANCE_TRANSPORT: EMBEDDED
-        run: ./mvnw -B -ntp -pl rift-java-conformance -am verify
+        run: |
+          set -euo pipefail
+          ./mvnw -B -ntp -pl rift-java-conformance -am verify
+          # Anti-silent-skip (issue #920), mirroring the go lane: CorpusReplayIT aborts its
+          # fixtures (= `skipped` in the module's surefire report; its pom routes *IT.java
+          # through surefire — there is no failsafe binding), and `-am` runs upstream modules'
+          # tests too — so green maven output alone cannot prove the embedded replay executed.
+          # Only the module's own report can. The `|| true` on each substitution keeps the
+          # ::error:: diagnostics reachable: under pipefail a failing pipeline would otherwise
+          # abort the step at the assignment, before the crafted message.
+          report="$(find rift-java-conformance/target -name 'TEST-*CorpusReplayIT.xml' -type f 2>/dev/null | head -1 || true)"
+          [ -n "$report" ] || { echo "::error::no CorpusReplayIT report — the embedded conformance suite did not run"; exit 1; }
+          tests="$(grep -m1 -o 'tests="[0-9]*"' "$report" | tr -dc '0-9' || true)"
+          skipped="$(grep -m1 -o 'skipped="[0-9]*"' "$report" | tr -dc '0-9' || true)"
+          [ "${tests:-0}" -gt "${skipped:-0}" ] \
+            || { echo "::error::CorpusReplayIT ran ${tests:-0} tests with ${skipped:-0} skipped — the embedded replay was silently skipped"; exit 1; }
+          # The count proves something executed; the transport tag in the dynamic-test names
+          # proves it was the embedded lane — a SPAWN run would satisfy the count check equally.
+          grep -q 'EMBEDDED\]' "$report" \
+            || { echo "::error::CorpusReplayIT executed, but no [EMBEDDED] test appears in its report — wrong transport"; exit 1; }
 
       - name: scala — full suite with the embedded lane required
         if: matrix.sdk.name == 'scala'
@@ -211,9 +232,32 @@ jobs:
         env:
           RIFT_SKIP_BINARY_DOWNLOAD: "1"
         run: |
+          set -euo pipefail
           npm ci
           npm run build
-          npm run test:embedded
+          # `-w` invokes the same workspace script the root `test:embedded` delegates to. Going
+          # through the root script would swallow the jest flags below: each nested `npm run`
+          # layer eats one `--`, which is exactly the kind of forwarding that breaks silently.
+          npm run test:embedded -w @rift-vs/rift -- --json --outputFile="$PWD/embedded-report.json"
+          # Anti-silent-skip (issue #920), mirroring the go lane: the embedded replay describe
+          # self-skips (jest `pending`) when the engine cannot load, and this lane pins
+          # RIFT_SKIP_BINARY_DOWNLOAD so the replay suite's spawn twin always skips here — a
+          # green jest summary can therefore be 100% skips. Require at least one *passed* test
+          # inside the embedded-transport replay describe specifically (full describe title:
+          # a bare "embedded transport" would also match the embedded smoke suite, letting the
+          # replay skip green behind a passing smoke test). jest --json calls the per-test
+          # array `assertionResults`, not `testResults`.
+          node -e '
+            const report = require(process.argv[1]);
+            const passed = (report.testResults ?? [])
+              .flatMap(s => s.assertionResults ?? [])
+              .filter(t => t.status === "passed"
+                && (t.ancestorTitles ?? []).some(a => a.includes("conformance replay over the embedded transport")));
+            if (passed.length === 0) {
+              console.error("::error::the embedded replay specs did not run");
+              process.exit(1);
+            }
+          ' "$PWD/embedded-report.json"
 
       - name: go — embedded engine + corpus replay
         if: matrix.sdk.name == 'go'
