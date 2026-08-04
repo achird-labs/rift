@@ -1,6 +1,6 @@
 services:
   rift:
-    image: rift-proxy:local
+    image: zainalpour/rift-proxy:latest
     ports:
       - "2525:2525"   # Admin API
       - "4550:4550"   # Scripting demo

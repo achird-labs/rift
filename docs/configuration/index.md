@@ -135,7 +135,7 @@ docker run -e MB_PORT=2525 -e MB_ALLOW_INJECTION=true \
 ## Command Line Options
 
 ```bash
-rift-http-proxy [OPTIONS]
+rift [OPTIONS]
 
 Options:
       --port <PORT>          Admin API port [default: 2525]

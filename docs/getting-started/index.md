@@ -26,30 +26,53 @@ docker pull zainalpour/rift-proxy:latest
 docker run -p 2525:2525 zainalpour/rift-proxy:latest
 ```
 
-### Download Binary
-
-Download pre-built binaries from the [releases page](https://github.com/achird-labs/rift/releases):
+### Homebrew (macOS/Linux)
 
 ```bash
-# Linux (x86_64)
-curl -L https://github.com/achird-labs/rift/releases/latest/download/rift-http-proxy-linux-x86_64 -o rift
-chmod +x rift
-./rift
-
-# macOS (Apple Silicon)
-curl -L https://github.com/achird-labs/rift/releases/latest/download/rift-http-proxy-darwin-aarch64 -o rift
-chmod +x rift
-./rift
-
-# macOS (Intel)
-curl -L https://github.com/achird-labs/rift/releases/latest/download/rift-http-proxy-darwin-x86_64 -o rift
-chmod +x rift
-./rift
+brew tap achird-labs/rift
+brew install rift
 ```
+
+This installs four binaries: `rift` (the server), `rift-lint`, `rift-tui`, and `rift-verify`.
+
+### Download Binary
+
+Release archives are published per platform on the
+[releases page](https://github.com/achird-labs/rift/releases), named
+`rift-vX.Y.Z-<target>.tar.gz` (`.zip` on Windows). Each unpacks to a `bin/` directory
+containing `rift`, `rift-lint`, `rift-tui`, and `rift-verify`.
+
+```bash
+# macOS (Apple Silicon) — substitute your platform triple from the list below
+VERSION=v0.17.0
+TARGET=aarch64-apple-darwin
+
+curl -LO https://github.com/achird-labs/rift/releases/download/$VERSION/rift-$VERSION-$TARGET.tar.gz
+tar -xzf rift-$VERSION-$TARGET.tar.gz
+sudo mv rift-$VERSION-$TARGET/bin/* /usr/local/bin/
+
+rift --version
+```
+
+Available platform triples:
+
+- Linux: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`
+- macOS: `x86_64-apple-darwin`, `aarch64-apple-darwin`
+- Windows: `x86_64-pc-windows-msvc`
+
+### Cargo (crates.io)
+
+```bash
+cargo install rift-http-proxy
+```
+
+Note that cargo names the installed binary after the crate — `rift-http-proxy`, not `rift`. Every
+other install method above puts it on your `PATH` as `rift`, which is the name used throughout
+these docs.
 
 ### Build from Source
 
-Requires Rust 1.70+:
+Requires Rust 1.92+ (see `rust-version` in `Cargo.toml`):
 
 ```bash
 git clone https://github.com/achird-labs/rift.git
@@ -69,12 +92,18 @@ npm install @rift-vs/rift
 Usage:
 
 ```javascript
-import rift from '@rift-vs/rift';
+import { rift, imposter, onGet, okJson, times } from '@rift-vs/rift';
 
-const server = await rift.create({ port: 2525 });
-// Create imposters, run tests...
-await server.close();
+await using engine = await rift.embedded(); // or rift.connect(url) / rift.spawn()
+
+const users = await engine.create(
+  imposter('users').stub(onGet('/api/users/1').willReturn(okJson({ id: 1, name: 'Alice' }))));
+
+await users.verify(onGet('/api/users/1'), times(1));
 ```
+
+The Mountebank-compatible `rift.create({ port })` API stays available as a permanent drop-in if you
+are migrating.
 
 See the [Node.js Integration Guide]({{ site.baseurl }}/getting-started/nodejs/) for complete documentation.
 
@@ -159,12 +188,12 @@ Once Rift is running, verify it's working:
 # Check the admin API
 curl http://localhost:2525/
 
-# Expected response:
+# Expected response (hrefs are absolute, built from the admin host and port):
 {
   "_links": {
-    "imposters": { "href": "/imposters" },
-    "config": { "href": "/config" },
-    "logs": { "href": "/logs" }
+    "config": { "href": "http://localhost:2525/config" },
+    "imposters": { "href": "http://localhost:2525/imposters" },
+    "logs": { "href": "http://localhost:2525/logs" }
   }
 }
 ```

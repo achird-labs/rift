@@ -8,7 +8,7 @@ permalink: /concepts/
 
 # Concepts
 
-Rift is a high-performance mock server. It speaks the [Mountebank](http://www.mbtest.org/) API for
+Rift is a high-performance mock server. It speaks the [Mountebank](https://www.mbtest.dev/) API for
 compatibility, but it is a tool in its own right — with a stateful model (flow-state, scenarios,
 correlated isolation) that goes well beyond record/replay. This section explains the mental model
 once, conceptually, so the reference and feature pages make sense.

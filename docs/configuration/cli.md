@@ -9,19 +9,24 @@ nav_order: 3
 
 Rift provides Mountebank-compatible CLI options for easy migration.
 
+> **The command is `rift`.** Docker, Homebrew, the release archives and the install script all put
+> the server on your `PATH` under that name. The one exception is `cargo install rift-http-proxy`,
+> which names the binary after the crate — substitute `rift-http-proxy` for `rift` in every example
+> below if you installed that way.
+
 ---
 
 ## Basic Usage
 
 ```bash
 # Start the server
-rift-http-proxy
+rift
 
 # With configuration file
-rift-http-proxy --configfile imposters.json
+rift --configfile imposters.json
 
 # With custom port
-rift-http-proxy --port 3525
+rift --port 3525
 ```
 
 
@@ -34,15 +39,15 @@ merged in the order given, and `POST /admin/reload` re-fetches all of them.
 
 ```bash
 # A local file (these three are identical)
-rift-http-proxy --configfile mocks.json
-rift-http-proxy --imposters file:mocks.json
-rift-http-proxy --imposters mocks.json
+rift --configfile mocks.json
+rift --imposters file:mocks.json
+rift --imposters mocks.json
 
 # A document served over HTTP
-rift-http-proxy --imposters https://config.example.com/imposters.json
+rift --imposters https://config.example.com/imposters.json
 
 # Several sources merged into one running set
-rift-http-proxy --imposters file:base.json,https://config.example.com/team-overrides.json
+rift --imposters file:base.json,https://config.example.com/team-overrides.json
 ```
 
 `--configfile <p>` is sugar for `--imposters file:<p>` and behaves identically; passing both is an
@@ -121,7 +126,7 @@ grow its own dialect of the config format.
 ## CLI Options
 
 ```bash
-rift-http-proxy [OPTIONS]
+rift [OPTIONS]
 
 Options:
       --port <PORT>                Admin API port [default: 2525]
@@ -211,7 +216,7 @@ wherever that CA is installed — and installing it is the whole point of the fe
 LAN-reachable host, set a credential:
 
 ```bash
-rift-http-proxy --intercept-port 8888 --intercept-auth ci:s3cr3t
+rift --intercept-port 8888 --intercept-auth ci:s3cr3t
 ```
 
 Every `CONNECT` must then carry `Proxy-Authorization: Basic <base64(user:pass)>`; anything else gets
@@ -250,13 +255,13 @@ counts as blank. Omit the flag entirely to run the admin API explicitly unauthen
 merely *contains* spaces is still a valid key and is compared exactly as given.
 
 ```bash
-rift-http-proxy --api-key s3cr3t
+rift --api-key s3cr3t
 curl -H "Authorization: s3cr3t" http://localhost:2525/imposters
 ```
 
 ### Unauthenticated admin plane on a public interface
 
-`--host` defaults to `0.0.0.0`, so a bare `rift-http-proxy` with no `--api-key` already serves the
+`--host` defaults to `0.0.0.0`, so a bare `rift` with no `--api-key` already serves the
 full admin API — which can create imposters and drive the TLS intercept proxy — on every interface
 with no authentication. Since 0.17.0 that posture is stated at startup instead of being silent:
 
@@ -274,9 +279,9 @@ and every keyless quickstart. Fleets that want fail-closed opt in:
 
 ```bash
 # Refuse to start unless the admin plane is authenticated or loopback-only
-rift-http-proxy --require-admin-auth              # errors: 0.0.0.0 with no key
-rift-http-proxy --require-admin-auth --api-key s3cr3t   # ok — authenticated
-rift-http-proxy --require-admin-auth --local-only       # ok — not reachable off-host
+rift --require-admin-auth                    # errors: 0.0.0.0 with no key
+rift --require-admin-auth --api-key s3cr3t   # ok — authenticated
+rift --require-admin-auth --local-only       # ok — not reachable off-host
 ```
 
 `--require-admin-auth` gates on *authentication*, not on the address: a real `--api-key` satisfies
@@ -296,7 +301,7 @@ self-signed certificate. Pass `--no-self-signed-tls` to turn a missing certifica
 error instead of silently self-signing.
 
 ```bash
-rift-http-proxy \
+rift \
   --default-tls-cert ./certs/server.pem \
   --default-tls-key ./certs/server-key.pem \
   --no-self-signed-tls
@@ -306,20 +311,20 @@ rift-http-proxy \
 
 ```bash
 # Start with custom port
-rift-http-proxy --port 3525
+rift --port 3525
 
 # Load configuration and enable injection
-rift-http-proxy --configfile imposters.json --allow-injection
+rift --configfile imposters.json --allow-injection
 
 # Debug logging
-rift-http-proxy --loglevel debug
+rift --loglevel debug
 
 # Restrict access
-rift-http-proxy --local-only
-rift-http-proxy --api-key s3cr3t --require-admin-auth
+rift --local-only
+rift --api-key s3cr3t --require-admin-auth
 
 # With persistent data directory
-rift-http-proxy --datadir ./mb-data
+rift --datadir ./mb-data
 ```
 
 ---
@@ -414,10 +419,10 @@ services:
 
 ```bash
 # Via CLI
-rift-http-proxy --loglevel debug
+rift --loglevel debug
 
 # Via environment
-RUST_LOG=debug rift-http-proxy
+RUST_LOG=debug rift
 ```
 
 | Level | Description |
@@ -432,13 +437,13 @@ RUST_LOG=debug rift-http-proxy
 
 ```bash
 # Debug only rift modules
-RUST_LOG=rift=debug rift-http-proxy
+RUST_LOG=rift=debug rift
 
 # Debug HTTP handling
-RUST_LOG=rift::http=debug rift-http-proxy
+RUST_LOG=rift::http=debug rift
 
 # Multiple modules
-RUST_LOG=rift=info,rift::proxy=debug rift-http-proxy
+RUST_LOG=rift=info,rift::proxy=debug rift
 ```
 
 ---
@@ -466,10 +471,10 @@ curl http://localhost:9090/metrics
 
 ```bash
 # Graceful shutdown
-kill -TERM $(pidof rift-http-proxy)
+kill -TERM $(pidof rift)
 
 # Force kill (not recommended)
-kill -9 $(pidof rift-http-proxy)
+kill -9 $(pidof rift)
 ```
 
 ---
@@ -494,8 +499,8 @@ Rift supports several subcommands for server management:
 Start the Rift server (default behavior when no subcommand is specified):
 
 ```bash
-rift-http-proxy start
-rift-http-proxy start --port 3525 --configfile imposters.json
+rift start
+rift start --port 3525 --configfile imposters.json
 ```
 
 ### stop
@@ -504,10 +509,10 @@ Stop a running Rift server using its PID file:
 
 ```bash
 # Stop server using default PID file (rift.pid)
-rift-http-proxy stop
+rift stop
 
 # Stop using custom PID file
-rift-http-proxy stop --pidfile /var/run/rift.pid
+rift stop --pidfile /var/run/rift.pid
 ```
 
 ### restart
@@ -515,7 +520,7 @@ rift-http-proxy stop --pidfile /var/run/rift.pid
 Restart a running Rift server:
 
 ```bash
-rift-http-proxy restart --pidfile /var/run/rift.pid
+rift restart --pidfile /var/run/rift.pid
 ```
 
 ### save
@@ -524,10 +529,10 @@ Save current imposters to a file for later replay:
 
 ```bash
 # Save imposters to file
-rift-http-proxy save --savefile recorded.json
+rift save --savefile recorded.json
 
 # Save with proxies removed (pure recorded responses)
-rift-http-proxy save --savefile mocks.json --remove-proxies
+rift save --savefile mocks.json --remove-proxies
 ```
 
 ### replay
@@ -535,7 +540,7 @@ rift-http-proxy save --savefile mocks.json --remove-proxies
 Replay saved imposters from a file:
 
 ```bash
-rift-http-proxy replay --configfile recorded.json
+rift replay --configfile recorded.json
 ```
 
 ### script
@@ -549,9 +554,9 @@ the intended hook, and (for a config) `state`-used-without-`flowState`. Exits no
 error — so a script whose entrypoint is misnamed fails here instead of at request time.
 
 ```bash
-rift-http-proxy script check scripts/fail-twice.rhai
-rift-http-proxy script check scripts/decorate.js --hook respond
-rift-http-proxy script check imposters.yaml            # every _rift.script in the config
+rift script check scripts/fail-twice.rhai
+rift script check scripts/decorate.js --hook respond
+rift script check imposters.yaml            # every _rift.script in the config
 ```
 
 | Flag | Description | Default |
@@ -563,8 +568,8 @@ printing the decision, the mutated flow state, captured `ctx.logger` output, and
 duration. No server runs.
 
 ```bash
-rift-http-proxy script run scripts/fail-twice.rhai --state attempts=2
-rift-http-proxy script run scripts/echo.js --request fixtures/get-resource.json --flow-id t1
+rift script run scripts/fail-twice.rhai --state attempts=2
+rift script run scripts/echo.js --request fixtures/get-resource.json --flow-id t1
 ```
 
 | Flag | Description | Default |
@@ -588,9 +593,9 @@ configuration. A bind-any host (`0.0.0.0`, `::`) is probed on loopback, since th
 bound to every interface answers.
 
 ```bash
-rift-http-proxy healthcheck                                        # probes http://127.0.0.1:2525/health
-MB_PORT=3000 rift-http-proxy healthcheck                           # follows MB_PORT
-rift-http-proxy healthcheck --url http://localhost:9090/metrics    # probe something else
+rift healthcheck                                        # probes http://127.0.0.1:2525/health
+MB_PORT=3000 rift healthcheck                           # follows MB_PORT
+rift healthcheck --url http://localhost:9090/metrics    # probe something else
 ```
 
 | Flag | Description | Default |

@@ -8,7 +8,7 @@ permalink: /mountebank/
 
 # Mountebank Compatibility
 
-Rift implements the [Mountebank](http://www.mbtest.org/) REST API and configuration format. This allows you to use Rift as a drop-in replacement for Mountebank with significantly better performance.
+Rift implements the [Mountebank](https://www.mbtest.dev/) REST API and configuration format. This allows you to use Rift as a drop-in replacement for Mountebank with significantly better performance.
 
 **Scope:** Rift imposters are **HTTP/HTTPS only**. Mountebank also supports `tcp` and `smtp`
 imposters, which Rift rejects — see the [migration guide]({{ site.baseurl }}/getting-started/migration/)

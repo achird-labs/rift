@@ -1,6 +1,6 @@
 services:
   rift:
-    image: rift-proxy:local
+    image: zainalpour/rift-proxy:latest
     ports:
       - "2525:2525"   # Admin API
       - "4547:4547"   # Fault Injection demo

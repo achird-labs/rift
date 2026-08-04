@@ -14,10 +14,7 @@ Deploy Rift using Docker for quick setup and consistent environments.
 ## Quick Start
 
 ```bash
-# Pull the image (from GitHub Container Registry)
-docker pull zainalpour/rift-proxy:latest
-
-# Or from Docker Hub
+# Pull the image from Docker Hub
 docker pull zainalpour/rift-proxy:latest
 
 # Run with default settings
@@ -373,9 +370,8 @@ docker compose down -v
 # Check logs
 docker logs rift
 
-# Verify config
-docker run --rm -v $(pwd)/imposters.json:/imposters.json \
-  zainalpour/rift-proxy:latest --validate /imposters.json
+# Verify config (rift-lint ships as its own image; the server image does not include it)
+docker run --rm -v $(pwd):/imposters zainalpour/rift-lint /imposters/imposters.json
 ```
 
 ### Port Already in Use

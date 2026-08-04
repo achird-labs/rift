@@ -30,9 +30,9 @@ curl http://localhost:9090/metrics
 Change the port with `--metrics-port` or `RIFT_METRICS_PORT`:
 
 ```bash
-rift-http-proxy --metrics-port 8090
+rift --metrics-port 8090
 # or
-RIFT_METRICS_PORT=8090 rift-http-proxy
+RIFT_METRICS_PORT=8090 rift
 ```
 
 There is no environment variable to disable the metrics server; if you don't scrape it, it sits

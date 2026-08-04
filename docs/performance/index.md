@@ -644,13 +644,13 @@ alternative topology (RFC-712) trades a little complexity for **materially lower
 
 ```bash
 # Default — one work-stealing runtime (unchanged behaviour)
-rift-http-proxy --runtime work-stealing
+rift --runtime work-stealing
 
 # Per-core: N single-threaded runtimes, N = physical cores
-rift-http-proxy --runtime per-core
+rift --runtime per-core
 
 # …or pin the worker count explicitly
-rift-http-proxy --runtime per-core=8
+rift --runtime per-core=8
 
 # Env-var equivalent (the CLI flag wins if both are set)
 RIFT_RUNTIME=per-core rift-http-proxy
