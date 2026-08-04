@@ -74,17 +74,15 @@ pub trait ResponseDecorator: Send + Sync {
 /// Map a backend/handler error to its response: [`BackendUnavailable`] anywhere in the
 /// chain → `503`; anything else → `500`. Never a silent fallback.
 ///
-/// Serves **two shapes in one body** (issue #800). This door predates the #611/#797 envelope
-/// sweeps and was the last one still serving only its own `{"error":"backendUnavailable",…}`
-/// shape, so a client that followed #797's guidance and switched to reading `errors[0].type` got
-/// nothing here. It now carries the Mountebank envelope *as well*:
+/// Serves the Mountebank envelope only. This door predates the #611/#797 envelope sweeps and
+/// served its own `{"error":"backendUnavailable",…}` shape through 0.15.0; #800 added the
+/// envelope alongside those keys, and #801 removed them in 0.18.0 after the deprecation window
+/// (deprecated 0.16.0, retained through 0.17.0, no consumer left parsing them — confirmed via
+/// rift-enterprise#90).
 ///
-/// - `errors[0]` — the envelope, with the `type` slug new consumers branch on. `feature`/`detail`
-///   ride inside the error object rather than being flattened into `message`, because naming
-///   *which* backend failed is this door's whole purpose.
-/// - top-level `error`/`feature`/`detail` — the legacy 0.15.0 keys, **frozen**. Deprecated in
-///   0.16.0, removed in 0.17.0 by issue #801. They stay because `rift-cluster` parses
-///   them today; dropping them here would break the cluster mid-bump.
+/// `errors[0]` carries the `type` slug consumers branch on; `feature`/`detail` ride inside the
+/// error object rather than being flattened into `message`, because naming *which* backend
+/// failed is this door's whole purpose.
 pub fn backend_error_response(err: &anyhow::Error) -> Response<Full<Bytes>> {
     let (status, body) = match err.downcast_ref::<BackendUnavailable>() {
         Some(b) => (
@@ -97,9 +95,6 @@ pub fn backend_error_response(err: &anyhow::Error) -> Response<Full<Bytes>> {
                     "feature": b.feature,
                     "detail": b.detail,
                 }],
-                "error": "backendUnavailable",
-                "feature": b.feature,
-                "detail": b.detail,
             }),
         ),
         None => (
@@ -108,12 +103,10 @@ pub fn backend_error_response(err: &anyhow::Error) -> Response<Full<Bytes>> {
                 "errors": [{
                     "code": StatusCode::INTERNAL_SERVER_ERROR.as_str(),
                     "type": crate::response::ErrorKind::InternalError.slug(),
+                    // "{err:#}" keeps the whole context chain — the outermost message alone
+                    // rarely says why ("Redis GET failed" without the refused connection).
                     "message": format!("{err:#}"),
                 }],
-                "error": "internalError",
-                // "{err:#}" keeps the whole context chain — the outermost message alone
-                // rarely says why ("Redis GET failed" without the refused connection).
-                "detail": format!("{err:#}"),
             }),
         ),
     };
@@ -174,12 +167,14 @@ mod tests {
         assert_eq!(resp.status(), hyper::StatusCode::SERVICE_UNAVAILABLE);
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
-        // Legacy top-level keys (issue #800 AC2): byte-identical to 0.15.0. Deprecated in 0.16.0
-        // and removed in 0.17.0 — these three assertions are what the removal issue deletes, and
-        // until then they are what stops the deprecation window closing by accident.
-        assert_eq!(json["error"], "backendUnavailable");
-        assert_eq!(json["feature"], "flowState");
-        assert_eq!(json["detail"], "redis connection refused");
+        // Issue #801: the deprecation window is closed — the legacy 0.15.0 top-level keys are
+        // gone, and these assertions are what stops them creeping back.
+        assert!(
+            json.get("error").is_none()
+                && json.get("feature").is_none()
+                && json.get("detail").is_none(),
+            "top-level legacy keys were removed in 0.18.0 (#801), got: {json}"
+        );
 
         // AC1: the door now also serves the Mountebank envelope with the #797 `type` slug.
         assert_eq!(
@@ -191,11 +186,11 @@ mod tests {
             "a dedicated slug — generic `unavailable` would not distinguish a backend outage \
              from any other 503, which is the whole reason this door exists"
         );
-        assert!(
-            json["errors"][0]["message"]
-                .as_str()
-                .is_some_and(|m| !m.is_empty()),
-            "message must be non-empty, got: {json}"
+        // The exact join both docs promise — coverage previously carried by the deleted
+        // dual-shape tripwire test, and independent of the legacy keys' existence.
+        assert_eq!(
+            json["errors"][0]["message"], "flowState: redis connection refused",
+            "message is the `feature: detail` join the docs show verbatim"
         );
         // AC3: the structured split stays machine-readable inside the envelope — `feature` names
         // WHICH backend failed, which is the door's entire value and must not be flattened away.
@@ -209,8 +204,11 @@ mod tests {
         assert_eq!(resp.status(), hyper::StatusCode::INTERNAL_SERVER_ERROR);
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
-        // Legacy key, frozen (AC2).
-        assert_eq!(json["error"], "internalError");
+        // Issue #801: no legacy keys on the 500 branch either.
+        assert!(
+            json.get("error").is_none() && json.get("detail").is_none(),
+            "top-level legacy keys were removed in 0.18.0 (#801), got: {json}"
+        );
         // AC1: envelope on this branch too — a generic internal error is exactly what it is.
         assert_eq!(json["errors"][0]["code"], "500");
         assert_eq!(json["errors"][0]["type"], "internal error");
@@ -225,28 +223,6 @@ mod tests {
             json["errors"][0]["feature"].is_null() && json["errors"][0]["detail"].is_null(),
             "the non-backend branch has neither `feature` nor `detail` inside the envelope, \
              got: {json}"
-        );
-    }
-
-    // Drift tripwire, not an independent equivalence proof: both shapes are populated from the
-    // same `b.feature`/`b.detail` in one `json!` literal, so this passes trivially today. Its job
-    // is to fail the moment someone edits one shape and not the other — e.g. a fix applied only to
-    // the legacy keys — which is how the two would silently start describing different failures.
-    #[tokio::test]
-    async fn legacy_and_envelope_shapes_agree_on_the_same_error() {
-        let err = anyhow::Error::new(BackendUnavailable {
-            feature: "proxyStore",
-            detail: "connection reset".to_string(),
-        });
-        let resp = backend_error_response(&err);
-        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
-        assert_eq!(json["feature"], json["errors"][0]["feature"]);
-        assert_eq!(json["detail"], json["errors"][0]["detail"]);
-        let msg = json["errors"][0]["message"].as_str().expect("message");
-        assert!(
-            msg.contains("proxyStore") && msg.contains("connection reset"),
-            "message must carry both halves of the legacy split, got: {msg}"
         );
     }
 

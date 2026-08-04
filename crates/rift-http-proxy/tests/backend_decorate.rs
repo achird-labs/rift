@@ -108,8 +108,8 @@ async fn data_plane_scenario_gate_returns_structured_503() {
         .expect("request");
     assert_eq!(resp.status(), 503);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "backendUnavailable");
-    assert_eq!(body["feature"], "flowState");
+    assert_eq!(body["errors"][0]["type"], "backend unavailable");
+    assert_eq!(body["errors"][0]["feature"], "flowState");
 
     manager.delete_all().await;
 }
@@ -134,7 +134,7 @@ async fn flow_state_admin_endpoint_returns_structured_503() {
         "backend failure must be a structured 503"
     );
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "backendUnavailable");
+    assert_eq!(body["errors"][0]["type"], "backend unavailable");
 
     manager.delete_all().await;
 }
@@ -154,7 +154,7 @@ async fn scenario_list_maps_backend_error_to_503() {
         .expect("request");
     assert_eq!(resp.status(), 503);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "backendUnavailable");
+    assert_eq!(body["errors"][0]["type"], "backend unavailable");
 
     manager.delete_all().await;
 }
@@ -219,7 +219,7 @@ async fn transition_write_failure_returns_structured_503() {
         .expect("request");
     assert_eq!(resp.status(), 503, "a lost transition must fail loudly");
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "backendUnavailable");
+    assert_eq!(body["errors"][0]["type"], "backend unavailable");
 
     manager.delete_all().await;
 }
@@ -284,7 +284,7 @@ async fn gateway_503_is_decorated_with_admin_phase() {
         "gateway responses are decorated"
     );
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "backendUnavailable");
+    assert_eq!(body["errors"][0]["type"], "backend unavailable");
 
     let calls = recorder.calls.lock().clone();
     let call = calls

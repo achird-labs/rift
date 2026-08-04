@@ -759,9 +759,8 @@ port alike — carries three fields:
 { "errors": [ { "code": "...", "type": "...", "message": "..." } ] }
 ```
 
-**One door carries extra keys.** A backend outage (an unavailable flow-store or proxy store, and any
-matcher failure that is not an injection error) serves the envelope *plus* a legacy shape it
-predates:
+**One door carries extra fields.** A backend outage (an unavailable flow-store or proxy store, and
+any matcher failure that is not an injection error) enriches the envelope's error object:
 
 ```json
 {
@@ -771,18 +770,14 @@ predates:
     "message": "flowState: redis connection refused",
     "feature": "flowState",
     "detail": "redis connection refused"
-  }],
-  "error": "backendUnavailable",
-  "feature": "flowState",
-  "detail": "redis connection refused"
+  }]
 }
 ```
 
-`feature` names *which* backend failed and `detail` gives the underlying cause; both are available
-inside `errors[0]`, so nothing needs the legacy keys.
+`feature` names *which* backend failed and `detail` gives the underlying cause.
 
-> **Deprecated:** the **top-level** `error`, `feature` and `detail` keys are retained unchanged for
-> backward compatibility and will be **removed in 0.17.0**. Read `errors[0]` instead.
+> **Removed in 0.18.0:** this door used to duplicate `error`/`feature`/`detail` as **top-level**
+> keys (the pre-0.16.0 shape, deprecated in 0.16.0, #801). They are gone; read `errors[0]`.
 
 | Field | Read it? | What it is |
 |:------|:---------|:-----------|

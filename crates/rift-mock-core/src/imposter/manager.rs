@@ -3538,8 +3538,8 @@ mod tests {
                 .expect("request");
             assert_eq!(resp.status(), 503, "sequencer outage is a structured 503");
             let body: serde_json::Value = resp.json().await.expect("json");
-            assert_eq!(body["error"], "backendUnavailable");
-            assert_eq!(body["feature"], "sequencer");
+            assert_eq!(body["errors"][0]["type"], "backend unavailable");
+            assert_eq!(body["errors"][0]["feature"], "sequencer");
 
             manager.delete_all().await;
         }
