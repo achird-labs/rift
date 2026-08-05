@@ -655,11 +655,11 @@ mod tests {
             host: Some(host.to_string()),
             predicates: vec![],
             action: crate::intercept_rules::InterceptAction::Serve(
-                crate::intercept_rules::ServeStub {
-                    status_code: 200,
-                    headers: Default::default(),
-                    body: Some("seeded".to_string()),
-                },
+                crate::intercept_rules::ServeStub::new(
+                    200,
+                    Default::default(),
+                    Some(serde_json::json!("seeded")),
+                ),
             ),
         }
     }

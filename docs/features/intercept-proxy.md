@@ -281,10 +281,21 @@ curl -X POST http://localhost:2525/intercept/rules -d '{
   "action": { "serve": {
     "statusCode": 200,
     "headers": { "content-type": "application/json" },
-    "body": "{\"featureX\":\"ON\"}"
+    "body": { "featureX": "ON" }
   }}
 }'
 ```
+
+`body` takes **any JSON value**, exactly like `is.body` on an imposter stub. A string is served
+verbatim — byte for byte, no re-quoting — so the equivalent `"body": "{\"featureX\":\"ON\"}"`
+above puts the same bytes on the wire. Any other value (object, array, number, boolean) is
+rendered as **compact JSON**, once when the rule is stored rather than on each intercepted
+request. Omitting `body`, or sending `null`, serves an empty body with `content-length: 0`.
+Note that `body` does not set `content-type` for you: an object body still needs
+`"content-type": "application/json"` in `headers` if the SUT checks it.
+
+`GET /intercept/rules` returns the body in the shape you posted — an object stays an object, not
+its rendered string.
 
 ### Forward to one of your imposters
 
