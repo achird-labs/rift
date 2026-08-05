@@ -178,7 +178,7 @@ jobs:
 
       - name: Set up Go
         if: matrix.sdk.name == 'go'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # go-version-file, not a pinned version: gofmt and the toolchain must match what the SDK
           # builds with, per rift-go's own CI note.
