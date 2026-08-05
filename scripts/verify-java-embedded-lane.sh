@@ -50,7 +50,7 @@ MVN="${MVN:-./mvnw}"
 CANARY_TRANSPORT='__DRIFT_CANARY__'
 
 usage() {
-  sed -n '3,37p' "${BASH_SOURCE[0]}" >&2
+  sed -n '3,41p' "${BASH_SOURCE[0]}" >&2
   exit 2
 }
 
@@ -59,8 +59,12 @@ fail() {
   return 1
 }
 
+# The `|| true` is load-bearing under `set -euo pipefail`: with no `target/` directory `find` exits
+# 1, and `head` closing early on a multi-match can hand back SIGPIPE (141). Either would abort the
+# caller's bare assignment before its `::error::` annotation is emitted, turning a diagnosed failure
+# into a silent red — which, given #927's own lesson, is the most expensive way for this to break.
 find_report() {
-  find "$1/target" -name 'TEST-*CorpusReplayIT.xml' -type f 2>/dev/null | head -1
+  find "$1/target" -name 'TEST-*CorpusReplayIT.xml' -type f 2>/dev/null | head -1 || true
 }
 
 # Reads a numeric attribute off the report's <testsuite> element. `-m1` takes that element, which
@@ -96,10 +100,18 @@ verify() {
     || fail "CorpusReplayIT ran $tests tests with $skipped skipped — the embedded replay was silently skipped" \
     || return 1
 
-  # Negative control. Runs the compiled test classes directly: the main verify already built them,
-  # and `resolve()` throws during setup, so this costs seconds rather than a second full replay.
+  # Negative control. Mirrors the main invocation's reactor shape — `-pl <module> -am` — rather than
+  # invoking `surefire:test` on the module alone. `-pl` without `-am` prunes the reactor to one
+  # module, so the SDK's sibling artifacts must resolve from a repository; at v0.2.3 they are
+  # `-SNAPSHOT` versions that the preceding `verify` never installed (it stops a phase short of
+  # `install`) and that no declared repository serves. That canary dies at dependency resolution,
+  # never reaches the suite, and takes the "failed outside the suite" branch below — a lane red
+  # against a healthy SDK, which is #924's failure mode rebuilt. `-Dtest` narrows surefire to the
+  # replay class; `failIfNoSpecifiedTests=false` stops the upstream modules, which have no such
+  # class, from failing on that filter.
   if CONFORMANCE_TRANSPORT="$CANARY_TRANSPORT" \
-     "$MVN" -B -ntp -pl "$module" surefire:test -Dtest=CorpusReplayIT; then
+     "$MVN" -B -ntp -pl "$module" -am verify \
+       -Dtest=CorpusReplayIT -Dsurefire.failIfNoSpecifiedTests=false; then
     fail "transport canary passed — \$CONFORMANCE_TRANSPORT is not honoured by this SDK tag (or the replay self-skipped); the embedded result above proves nothing" || return 1
   fi
 
@@ -110,6 +122,18 @@ verify() {
   failures="$(attr "$report" failures)"
   [ "$((errors + failures))" -gt 0 ] \
     || fail "transport canary failed but its CorpusReplayIT report records no error — it failed outside the suite (maven plumbing), so it proves nothing about transport selection" \
+    || return 1
+
+  # Attribution. An in-suite error only says *something* broke; a flaky fixture or a port collision
+  # with the replay that just finished would satisfy the count while the transport selector was
+  # never consulted. `resolve()` quotes the offending value back —
+  #   unknown CONFORMANCE_TRANSPORT '<value>' (expected SPAWN or EMBEDDED)
+  # — so the sentinel's presence in the report names the rejection instead of inferring it.
+  # Unlike #924's grep this asserts text the default reporter demonstrably carries: an exception
+  # message, which surefire writes into the report, not a JUnit 5 dynamic display name, which it
+  # does not.
+  grep -qF "$CANARY_TRANSPORT" "$report" \
+    || fail "transport canary failed inside the suite, but its report never names '$CANARY_TRANSPORT' — something other than the transport selector rejected it, so the embedded result is unproven" \
     || return 1
 
   printf 'java embedded lane: OK — %s replays ran (%s skipped), transport canary rejected as expected\n' \
@@ -134,8 +158,15 @@ set -euo pipefail
 printf '%s\n' "${CONFORMANCE_TRANSPORT:-<unset>}" >>"$STUB_STATE/transports"
 if [ -n "${STUB_REPORT_ERRORS:-}" ]; then
   mkdir -p "$STUB_STATE/module/target/surefire-reports"
-  printf '<testsuite name="io.rift.conformance.CorpusReplayIT" tests="1" errors="%s" skipped="0" failures="0"/>\n' \
-    "$STUB_REPORT_ERRORS" >"$STUB_STATE/module/target/surefire-reports/TEST-io.rift.conformance.CorpusReplayIT.xml"
+  # Mirrors what surefire writes for a @BeforeAll failure: the exception message, verbatim, in the
+  # testcase's <error>. The default is resolve()'s real message shape at rift-java v0.2.3.
+  {
+    printf '<testsuite name="io.github.achirdlabs.rift.conformance.CorpusReplayIT" tests="1" errors="%s" skipped="0" failures="0">\n' \
+      "$STUB_REPORT_ERRORS"
+    printf '  <testcase name="replay()"><error message="%s"/></testcase>\n' \
+      "${STUB_ERROR_MESSAGE:-unknown CONFORMANCE_TRANSPORT '${CONFORMANCE_TRANSPORT:-}' (expected SPAWN or EMBEDDED)}"
+    printf '</testsuite>\n'
+  } >"$STUB_STATE/module/target/surefire-reports/TEST-io.github.achirdlabs.rift.conformance.CorpusReplayIT.xml"
 fi
 exit "${STUB_EXIT:-1}"
 STUB
@@ -193,6 +224,15 @@ STUB
   : >"$tmp/transports"
   STUB_EXIT=1 STUB_REPORT_ERRORS=1 case_is 'E healthy lane' pass ''
 
+  # J — the canary failed inside the suite for a reason that has nothing to do with the transport
+  # (here a port collision with the replay that just finished). The count check cannot tell this
+  # from a real rejection; only the sentinel can, and without it the guard would report the embedded
+  # transport proven on the strength of an unrelated flake.
+  rm -rf "$module"; write_report 15 2
+  STUB_EXIT=1 STUB_REPORT_ERRORS=1 \
+    STUB_ERROR_MESSAGE='java.net.BindException: Address already in use' \
+    case_is 'J canary failed for an unrelated reason' fail "never names '$CANARY_TRANSPORT'"
+
   # G — the step stopped setting $CONFORMANCE_TRANSPORT (the regression #927's acceptance criterion
   # names). The canary sets its own value, so nothing else here would notice; an SDK tag defaulting
   # an absent value to SPAWN would otherwise replay non-embedded and still be reported OK.
@@ -206,10 +246,30 @@ STUB
   CONFORMANCE_TRANSPORT='SPAWN' STUB_EXIT=1 STUB_REPORT_ERRORS=1 \
     case_is 'H ambient transport is SPAWN' fail 'must run with CONFORMANCE_TRANSPORT=EMBEDDED'
 
+  # I — the real entry path, as a subprocess. Every case above calls `verify` in-process from a
+  # command substitution, where bash suppresses `set -e` for the whole function body; production
+  # does not, so a pipeline that exits non-zero mid-function aborts before its `::error::` is
+  # printed and the lane goes red with no diagnostic at all. That divergence is invisible to an
+  # in-process case by construction — it can only be caught by running the script the way CI does.
+  rm -rf "$module"; mkdir -p "$module"
+  local e2e_out e2e_rc=0
+  e2e_out="$(CONFORMANCE_TRANSPORT='EMBEDDED' MVN="$tmp/mvn" STUB_EXIT=1 \
+    bash "${BASH_SOURCE[0]}" --module-dir "$module" 2>&1)" || e2e_rc=$?
+  if [ "$e2e_rc" -eq 0 ]; then
+    printf 'FAIL: I end-to-end missing report — expected red, got green\n' >&2
+    status=1
+  elif ! printf '%s' "$e2e_out" | grep -qF 'the embedded conformance suite did not run'; then
+    printf 'FAIL: I end-to-end missing report — red with no ::error:: diagnostic (got %q)\n' \
+      "$e2e_out" >&2
+    status=1
+  fi
+
   # F — the canary is only a control if it carried a value `resolve()` cannot map. Asserted against
   # the real transport names rather than against $CANARY_TRANSPORT, which would make this vacuous:
   # a canary retargeted at a legitimate transport would be accepted, so its failure — and with it
-  # every case above — would say nothing about whether the variable is read.
+  # every case above — would say nothing about whether the variable is read. The names mirror
+  # `ConformanceTransport`'s cases in rift-java; a transport added there weakens this check until
+  # it is added here, which is the cost of the gate replaying released tags it cannot import from.
   local canary_value
   canary_value="$(tail -1 "$tmp/transports")"
   case "$canary_value" in
@@ -221,7 +281,7 @@ STUB
   esac
 
   if [ "$status" -eq 0 ]; then
-    printf 'self-test: OK — a missing or all-skipped report, a wrong/absent ambient transport, an accepted canary, and a canary that never reached the suite are all red; a healthy lane is green\n'
+    printf 'self-test: OK — a missing or all-skipped report, a wrong/absent ambient transport, an accepted canary, and a canary that failed outside the suite or for an unrelated reason are all red, with the diagnostic surviving the real entry path; a healthy lane is green\n'
   fi
   return "$status"
 }
