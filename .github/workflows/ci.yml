@@ -85,6 +85,14 @@ jobs:
       - name: SDK matrix drift-reporter self-test
         run: ./scripts/sdk-matrix-report.sh --self-test
 
+      # Issue #927: the java lane's anti-silent-skip and transport guards only ever run inside a
+      # scheduled matrix job against a released SDK tag, so a guard that can never pass — #924's
+      # grep for a display name maven-surefire does not write to its XML — looked exactly like
+      # engine drift. The self-test drives the guard's polarity against a stub build tool, which
+      # is the only place a vacuously-green or unsatisfiable check is caught before it ships.
+      - name: SDK matrix java-lane guard self-test
+        run: ./scripts/verify-java-embedded-lane.sh --self-test
+
       # Issue #344: a pinned cbindgen so the header regenerate-diff in the smoke test is
       # deterministic (cbindgen output varies across versions) and actually runs (the step
       # skips the diff when cbindgen is absent). Keep the version in sync with the header's.
