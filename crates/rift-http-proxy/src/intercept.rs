@@ -308,7 +308,7 @@ async fn write_stub_response<S>(stream: &mut S, stub: &ServeStub) -> anyhow::Res
 where
     S: AsyncWrite + Unpin,
 {
-    let body = stub.body.clone().unwrap_or_default();
+    let body = stub.body_str();
     let mut head = format!(
         "HTTP/1.1 {} {}\r\n",
         stub.status_code,
@@ -617,6 +617,87 @@ mod tests {
     /// takes it and the "dead" upstream answers (issue #859).
     const CLOSED_PORT: u16 = 1;
 
+    // ===== Issue #933: a `serve` stub with a non-string JSON body, on the wire =====
+
+    async fn rendered_stub_response(stub: &ServeStub) -> String {
+        let mut out: Vec<u8> = Vec::new();
+        write_stub_response(&mut out, stub)
+            .await
+            .expect("writing to a Vec cannot fail");
+        String::from_utf8(out).expect("the test stubs are all valid UTF-8")
+    }
+
+    // AC1 at the wire level: the object body is serialized compactly into the response body, and
+    // `content-length` counts the rendered bytes.
+    #[tokio::test]
+    async fn write_stub_response_serves_object_body_as_compact_json() {
+        let stub = ServeStub::new(
+            200,
+            HashMap::from([("content-type".to_string(), "application/json".to_string())]),
+            Some(serde_json::json!({ "featureX": "ON" })),
+        );
+        let response = rendered_stub_response(&stub).await;
+        let (head, body) = response
+            .split_once("\r\n\r\n")
+            .expect("a well-formed response has a head/body separator");
+        assert_eq!(body, r#"{"featureX":"ON"}"#);
+        assert!(
+            head.contains(&format!("content-length: {}", body.len())),
+            "content-length counts the rendered body: {head}"
+        );
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"));
+    }
+
+    // `content-length` is a *byte* count — a multi-byte body must not report its character count.
+    #[tokio::test]
+    async fn write_stub_response_object_body_content_length_is_bytes() {
+        let stub = ServeStub::new(
+            200,
+            HashMap::new(),
+            Some(serde_json::json!({ "msg": "héllo→" })),
+        );
+        let response = rendered_stub_response(&stub).await;
+        let (head, body) = response
+            .split_once("\r\n\r\n")
+            .expect("well-formed response");
+        let byte_len = body.len();
+        assert!(
+            body.chars().count() < byte_len,
+            "the body is multi-byte, so a character count would differ from the byte count"
+        );
+        assert!(
+            head.contains(&format!("content-length: {byte_len}")),
+            "content-length is the byte length: {head}"
+        );
+    }
+
+    // AC3/AC4 at the wire level: the pre-#933 behaviour for string and absent bodies is unchanged.
+    #[tokio::test]
+    async fn write_stub_response_string_and_absent_bodies_are_unchanged() {
+        let string_body = ServeStub::new(
+            200,
+            HashMap::new(),
+            Some(serde_json::json!(r#"{"featureX":"ON"}"#)),
+        );
+        let response = rendered_stub_response(&string_body).await;
+        let (_, body) = response
+            .split_once("\r\n\r\n")
+            .expect("well-formed response");
+        assert_eq!(
+            body, r#"{"featureX":"ON"}"#,
+            "a string body reaches the wire byte-identically to before the widening"
+        );
+
+        let absent = ServeStub::new(404, HashMap::new(), None);
+        let response = rendered_stub_response(&absent).await;
+        assert!(response.starts_with("HTTP/1.1 404 Not Found\r\n"));
+        assert!(response.contains("content-length: 0\r\n"));
+        assert!(
+            response.ends_with("\r\n\r\n"),
+            "no body follows the head: {response:?}"
+        );
+    }
+
     // Issue #522: a panicked accept loop must not be swallowed by `shutdown`/`stop` — its
     // `JoinError` is logged rather than discarded.
     #[tokio::test]
@@ -691,11 +772,11 @@ mod tests {
                 .expect("valid predicate JSON")
         };
         let serve = |marker: &str| {
-            InterceptAction::Serve(ServeStub {
-                status_code: 200,
-                headers: HashMap::new(),
-                body: Some(marker.to_string()),
-            })
+            InterceptAction::Serve(ServeStub::new(
+                200,
+                HashMap::new(),
+                Some(serde_json::Value::String(marker.to_string())),
+            ))
         };
 
         let rules = InterceptRules::new();
@@ -725,8 +806,8 @@ mod tests {
         );
         match action {
             Some(InterceptAction::Serve(stub)) => assert_eq!(
-                stub.body.as_deref(),
-                Some("base64"),
+                stub.body_str(),
+                "base64",
                 "the base64-keyed rule matches; the lossy-keyed rule does not"
             ),
             other => panic!("expected the base64-keyed serve rule to match, got {other:?}"),
@@ -998,11 +1079,11 @@ mod tests {
             .add(InterceptRule {
                 host: Some("cdn.example.com".to_string()),
                 predicates: vec![],
-                action: InterceptAction::Serve(ServeStub {
-                    status_code: 418,
-                    headers: HashMap::from([("x-rift".to_string(), "1".to_string())]),
-                    body: Some("brewed".to_string()),
-                }),
+                action: InterceptAction::Serve(ServeStub::new(
+                    418,
+                    HashMap::from([("x-rift".to_string(), "1".to_string())]),
+                    Some(serde_json::json!("brewed")),
+                )),
             })
             .unwrap();
         let (listener, ca_pem) = start_listener(rules).await;
@@ -1043,11 +1124,11 @@ mod tests {
                     serde_json::from_value(serde_json::json!({ "equals": { "body": b64 } }))
                         .expect("valid predicate JSON"),
                 ],
-                action: InterceptAction::Serve(ServeStub {
-                    status_code: 418,
-                    headers: HashMap::new(),
-                    body: Some("matched-binary".to_string()),
-                }),
+                action: InterceptAction::Serve(ServeStub::new(
+                    418,
+                    HashMap::new(),
+                    Some(serde_json::json!("matched-binary")),
+                )),
             })
             .unwrap();
         let (listener, ca_pem) = start_listener(rules).await;

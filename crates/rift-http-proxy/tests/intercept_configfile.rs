@@ -71,7 +71,12 @@ async fn configfile_intercept_block_serves_without_any_admin_call() {
                       "predicates": [{ "equals": { "path": "/datafiles/key-a.json" } }],
                       "action": { "serve": { "statusCode": 200,
                                              "headers": { "content-type": "application/json" },
-                                             "body": "{\"featureX\":\"ON\"}" } } }
+                                             "body": "{\"featureX\":\"ON\"}" } } },
+                    { "host": "cdn.example.com",
+                      "predicates": [{ "equals": { "path": "/datafiles/key-b.json" } }],
+                      "action": { "serve": { "statusCode": 200,
+                                             "headers": { "content-type": "application/json" },
+                                             "body": { "featureX": "ON" } } } }
                 ]
             }
         }"#,
@@ -97,6 +102,18 @@ async fn configfile_intercept_block_serves_without_any_admin_call() {
         .send()
         .await
         .expect("the SUT's hard-coded HTTPS call is intercepted");
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), r#"{"featureX":"ON"}"#);
+
+    // Issue #933: a `serve` body declared as a JSON *object* survives the whole boot path — parsed
+    // out of the config file, seeded into the rule store before `bind`, and rendered compactly on
+    // the wire. The two rules above differ only in how the same body is written, so this also pins
+    // that the object form is byte-identical to the escaped-string form it replaces.
+    let resp = sut_client(intercept, &ca_pem)
+        .get("https://cdn.example.com/datafiles/key-b.json")
+        .send()
+        .await
+        .expect("an object serve body declared in the config file is intercepted");
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().await.unwrap(), r#"{"featureX":"ON"}"#);
 

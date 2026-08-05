@@ -11,6 +11,19 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **An intercept `serve` rule's `body` now accepts any JSON value**, not just a string (issue
+  #933). `body` was `Option<String>` while the imposter stub path's `is.body` has always taken any
+  value, so an object body — legal Mountebank semantics — was refused by serde, and because rules
+  parse through an untagged enum the caller saw only `data did not match any variant of untagged
+  enum RuleOrRules` with no hint that `body` was at fault. A non-string body is rendered once, at
+  rule-insert time, with compact `serde_json::to_string` (the same render-once shape as `is.body`,
+  issue #479), so the intercept request path never re-serializes it. Strictly widening: a string
+  body is still served byte-identically, `null`/absent still means an empty body, and
+  `GET /intercept/rules` gives the body back in its original JSON shape. See
+  [Intercept proxy](docs/features/intercept-proxy.md#serve-an-inline-stub).
+
 ### Fixed
 
 - **`--imposters` now dispatches on a bare `scheme:` URI instead of always reading it as a file

@@ -399,11 +399,7 @@ mod tests {
             .add(InterceptRule {
                 host: None,
                 predicates: vec![],
-                action: InterceptAction::Serve(ServeStub {
-                    status_code: 200,
-                    headers: Default::default(),
-                    body: None,
-                }),
+                action: InterceptAction::Serve(ServeStub::new(200, Default::default(), None)),
             })
             .unwrap();
 
@@ -444,6 +440,44 @@ mod tests {
         assert_eq!(state.rules.len(), 1, "a rejected body must not add a rule");
     }
 
+    // Issue #933 at the door it actually failed on. A non-string `serve` body used to be refused
+    // here, and because rules parse through the untagged `RuleOrRules` the caller got only "data
+    // did not match any variant of untagged enum RuleOrRules" — no mention of `body`. The single
+    // and batch shapes are both asserted because the untagged enum tries them in order, so a
+    // regression could plausibly break one and not the other.
+    #[test]
+    fn add_rules_from_bytes_accepts_non_string_serve_bodies() {
+        let state = test_state();
+        let one = br#"{"host":"cdn.example.com","action":{"serve":{"statusCode":200,"body":{"featureX":"ON"}}}}"#;
+        assert_eq!(
+            add_rules_from_bytes(one, &state, true).status(),
+            StatusCode::CREATED,
+            "an object serve body is accepted, not rejected by the untagged enum"
+        );
+
+        let many = br#"[{"action":{"serve":{"body":[1,2,3]}}},{"action":{"serve":{"body":42}}}]"#;
+        assert_eq!(
+            add_rules_from_bytes(many, &state, true).status(),
+            StatusCode::CREATED,
+            "array and number bodies are accepted in the batch shape too"
+        );
+
+        let served: Vec<String> = state
+            .rules
+            .list()
+            .iter()
+            .map(|rule| match &rule.action {
+                InterceptAction::Serve(stub) => stub.body_str().to_string(),
+                other => panic!("expected a serve action, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            served,
+            vec![r#"{"featureX":"ON"}"#, "[1,2,3]", "42"],
+            "each stored rule carries the compact rendering the listener will serve"
+        );
+    }
+
     // Issue #554: once the store is at MAX_RULES, POST /intercept/rules is rejected with 429 for
     // both the single-rule and the batch shape, and stores nothing.
     #[test]
@@ -453,11 +487,7 @@ mod tests {
         let filler = InterceptRule {
             host: None,
             predicates: vec![],
-            action: InterceptAction::Serve(ServeStub {
-                status_code: 200,
-                headers: Default::default(),
-                body: None,
-            }),
+            action: InterceptAction::Serve(ServeStub::new(200, Default::default(), None)),
         };
         state
             .rules

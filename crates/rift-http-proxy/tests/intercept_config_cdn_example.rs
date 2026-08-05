@@ -34,11 +34,11 @@ async fn intercepts_external_config_cdn_without_mitmproxy() {
         .add(InterceptRule {
             host: Some("cdn.example.com".to_string()),
             predicates: vec![path_predicate],
-            action: InterceptAction::Serve(ServeStub {
-                status_code: 200,
+            action: InterceptAction::Serve(ServeStub::new(
+                200,
                 headers,
-                body: Some(r#"{"featureX":"ON"}"#.to_string()),
-            }),
+                Some(serde_json::json!({ "featureX": "ON" })),
+            )),
         })
         .unwrap();
 
