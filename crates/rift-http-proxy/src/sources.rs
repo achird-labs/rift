@@ -49,11 +49,17 @@ impl SourceRef {
     /// A bare path is `file`, so `--imposters mocks.json` works like `--configfile mocks.json`.
     /// The `://` form is checked before the bare `scheme:` form so that a compound scheme such as
     /// `git+https://…` (a cluster provider) resolves to `git+https` rather than to `git`.
+    ///
+    /// The bare `scheme:` form dispatches too — `s3:key` is scheme `s3`, not a file named
+    /// `s3:key` — but only when what precedes the colon is actually scheme-shaped; see
+    /// [`is_scheme`]. Anything else is a path, and paths are `file`.
     pub fn scheme(&self) -> &str {
         match self.uri.split_once("://") {
             Some((scheme, _)) => scheme,
-            None if self.uri.starts_with("file:") => "file",
-            None => "file",
+            None => match self.uri.split_once(':') {
+                Some((scheme, _)) if is_scheme(scheme) => scheme,
+                _ => "file",
+            },
         }
     }
 
@@ -62,6 +68,21 @@ impl SourceRef {
     pub fn target(&self) -> &str {
         self.uri.strip_prefix("file:").unwrap_or(&self.uri)
     }
+}
+
+/// Is `s` shaped like a URI scheme, for the purpose of reading `scheme:rest` as a scheme rather
+/// than as a path that happens to contain a colon?
+///
+/// RFC 3986 §3.1 — `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` — with one deliberate deviation:
+/// the length must exceed 1, so a Windows drive-letter path (`C:\mocks.json`) stays a `file:`
+/// path instead of dispatching to a scheme named `C` that no provider will ever be registered
+/// for. Single-letter schemes are RFC-legal; none exist here, and keeping drive letters working
+/// is worth more than reserving them.
+fn is_scheme(s: &str) -> bool {
+    s.len() > 1
+        && s.as_bytes()[0].is_ascii_alphabetic()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
 }
 
 /// What a source knows about the version it just served, used to skip redundant work.
@@ -488,6 +509,67 @@ mod tests {
             "git+https"
         );
         assert_eq!(SourceRef::new("s3://bucket/key").scheme(), "s3");
+    }
+
+    #[test]
+    fn bare_colon_form_dispatches_on_its_scheme() {
+        // The `scheme:rest` spelling is not sugar for a filename — it dispatches, so a cluster
+        // provider registered for `s3` is reached by `s3:key` as well as by `s3://bucket/key`.
+        assert_eq!(SourceRef::new("s3:bucket/key").scheme(), "s3");
+        assert_eq!(SourceRef::new("registry:svc-a,svc-b").scheme(), "registry");
+        assert_eq!(SourceRef::new("git+https:h/r#main:p").scheme(), "git+https");
+        // Digits, `+`, `-` and `.` are all scheme characters; the first byte must be a letter.
+        assert_eq!(SourceRef::new("s3v2:key").scheme(), "s3v2");
+        assert_eq!(SourceRef::new("my-source:key").scheme(), "my-source");
+        assert_eq!(SourceRef::new("my.source:key").scheme(), "my.source");
+    }
+
+    #[test]
+    fn a_path_that_merely_contains_a_colon_is_still_a_file() {
+        // A Windows drive letter is the case this guard exists for: `C` is scheme-shaped by RFC
+        // 3986 but one byte long, so it stays a path and `target()` hands it over verbatim.
+        for uri in ["C:\\mocks.json", "C:/mocks.json", "c:\\mocks.json"] {
+            assert_eq!(SourceRef::new(uri).scheme(), "file", "{uri}");
+            assert_eq!(SourceRef::new(uri).target(), uri, "{uri}");
+        }
+        // A leading non-letter is not a scheme, however colon-laden the rest is.
+        assert_eq!(SourceRef::new("./a:b.json").scheme(), "file");
+        assert_eq!(SourceRef::new("/tmp/a:b.json").scheme(), "file");
+        assert_eq!(SourceRef::new("../a:b.json").scheme(), "file");
+        assert_eq!(SourceRef::new("2024:notes.json").scheme(), "file");
+        // An underscore is not in the RFC 3986 scheme set, so this stays a path.
+        assert_eq!(SourceRef::new("my_source:key").scheme(), "file");
+        // An empty scheme is not a scheme.
+        assert_eq!(SourceRef::new(":mocks.json").scheme(), "file");
+        // No colon at all, the ordinary case.
+        assert_eq!(SourceRef::new("mocks.json").scheme(), "file");
+    }
+
+    #[test]
+    fn a_scheme_shaped_prefix_wins_even_when_it_was_meant_as_a_path() {
+        // The guard is a grammar, not a mind-reader: a path whose leading segment happens to be
+        // scheme-shaped now dispatches on it. Both of these fail *loudly* at startup — the
+        // registry lookup in `SourceSet::fetch_all` names the scheme and lists the known ones —
+        // rather than being opened as a literal filename. `file:` is the escape hatch.
+        assert_eq!(SourceRef::new("weird:path.json").scheme(), "weird");
+        // A Unix filename may legally end in a colon; such a path must be spelled `file:`.
+        assert_eq!(SourceRef::new("mocks.json:").scheme(), "mocks.json");
+        assert_eq!(SourceRef::new("file:mocks.json:").scheme(), "file");
+        assert_eq!(SourceRef::new("file:mocks.json:").target(), "mocks.json:");
+    }
+
+    #[test]
+    fn file_prefix_survives_the_grammar_guard() {
+        // `file:` used to be recognised by its own arm. It is now just a scheme that satisfies
+        // the grammar — same answer, and `target()` still strips exactly that prefix.
+        assert_eq!(SourceRef::new("file:mocks.json").scheme(), "file");
+        assert_eq!(SourceRef::new("file:mocks.json").target(), "mocks.json");
+        assert_eq!(SourceRef::new("file:/abs/mocks.json").scheme(), "file");
+        assert_eq!(SourceRef::new("file:C:\\mocks.json").scheme(), "file");
+        assert_eq!(
+            SourceRef::new("file:C:\\mocks.json").target(),
+            "C:\\mocks.json"
+        );
     }
 
     #[test]

@@ -11,6 +11,20 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--imposters` now dispatches on a bare `scheme:` URI instead of always reading it as a file
+  path.** `SourceRef::scheme` split on `://` and otherwise returned `file`, through two
+  byte-identical `None` arms — the second of which made the first dead code, and with it the
+  shorter `s3:key` / `registry:svc` spelling that a registered provider should answer. The
+  fallback is restored behind an [RFC 3986 §3.1](https://www.rfc-editor.org/rfc/rfc3986#section-3.1)
+  scheme grammar with a length-greater-than-one rule, so a Windows drive-letter path
+  (`C:\mocks.json`) stays a path rather than becoming a scheme named `C`. **Behaviour change:** a
+  path whose leading segment is scheme-shaped (`weird:path.json`) is now taken as a scheme and
+  fails at startup naming the known schemes, where it was previously opened as a literal filename;
+  spell it `file:weird:path.json` to keep the old reading. See
+  [Imposter Sources](docs/configuration/cli.md#how-a-scheme-is-recognised).
+
 ### Removed
 
 - **The deprecated top-level `error` / `feature` / `detail` keys on backend-error responses**
