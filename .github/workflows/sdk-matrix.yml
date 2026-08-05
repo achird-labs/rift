@@ -198,23 +198,14 @@ jobs:
         run: |
           set -euo pipefail
           ./mvnw -B -ntp -pl rift-java-conformance -am verify
-          # Anti-silent-skip (issue #920), mirroring the go lane: CorpusReplayIT aborts its
-          # fixtures (= `skipped` in the module's surefire report; its pom routes *IT.java
-          # through surefire — there is no failsafe binding), and `-am` runs upstream modules'
-          # tests too — so green maven output alone cannot prove the embedded replay executed.
-          # Only the module's own report can. The `|| true` on each substitution keeps the
-          # ::error:: diagnostics reachable: under pipefail a failing pipeline would otherwise
-          # abort the step at the assignment, before the crafted message.
-          report="$(find rift-java-conformance/target -name 'TEST-*CorpusReplayIT.xml' -type f 2>/dev/null | head -1 || true)"
-          [ -n "$report" ] || { echo "::error::no CorpusReplayIT report — the embedded conformance suite did not run"; exit 1; }
-          tests="$(grep -m1 -o 'tests="[0-9]*"' "$report" | tr -dc '0-9' || true)"
-          skipped="$(grep -m1 -o 'skipped="[0-9]*"' "$report" | tr -dc '0-9' || true)"
-          [ "${tests:-0}" -gt "${skipped:-0}" ] \
-            || { echo "::error::CorpusReplayIT ran ${tests:-0} tests with ${skipped:-0} skipped — the embedded replay was silently skipped"; exit 1; }
-          # The count proves something executed; the transport tag in the dynamic-test names
-          # proves it was the embedded lane — a SPAWN run would satisfy the count check equally.
-          grep -q 'EMBEDDED\]' "$report" \
-            || { echo "::error::CorpusReplayIT executed, but no [EMBEDDED] test appears in its report — wrong transport"; exit 1; }
+          # Anti-silent-skip (#920) and transport proof (#924, #927). CorpusReplayIT aborts its
+          # fixtures as surefire `skipped` rather than failing, and `-am` runs upstream modules'
+          # tests too, so green maven output above proves neither that the replay executed nor
+          # which transport it used. Both checks live in the script — inline here they were
+          # exercised only by live matrix runs against released SDK tags, which is how #924 shipped
+          # a transport check that no run could satisfy (it grepped the surefire XML for a display
+          # name surefire does not record). ci.yml runs the script's --self-test on every PR.
+          "$GITHUB_WORKSPACE/scripts/verify-java-embedded-lane.sh"
 
       - name: scala — full suite with the embedded lane required
         if: matrix.sdk.name == 'scala'
