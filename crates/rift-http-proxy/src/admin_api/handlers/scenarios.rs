@@ -232,6 +232,76 @@ pub async fn handle_delete_flow_state(
 
 // ── Correlated-isolation "space" endpoints (issue #223) ─────────────────────────
 
+/// Every field name a `Stub` recognises, in the JSON spelling a client sends (issue #336).
+///
+/// Kept beside the check that uses it rather than derived from `StubRaw`: `StubRaw` is private to
+/// `rift-mock-core` and its `rename_all = "camelCase"` means the Rust identifiers are not the wire
+/// names anyway. The cost is that a new stub field must be added here too — which is why the
+/// message this list produces names the fields, so a client hitting it can see immediately whether
+/// the list is stale rather than being told only that their body was rejected.
+const STUB_FIELD_NAMES: [&str; 12] = [
+    "scenarioName",
+    "requiredScenarioState",
+    "newScenarioState",
+    "space",
+    "id",
+    "routePattern",
+    "predicates",
+    "rules",
+    "responses",
+    "recordedFrom",
+    "delayRange",
+    "_verify",
+];
+
+/// Refuse a body that is not shaped like a stub (issue #336).
+///
+/// `Stub` deserializes through `StubRaw`, where every field is `#[serde(default)]` and unknown keys
+/// are discarded — so **any** JSON object deserializes, and an object with only unrecognised keys
+/// deserializes to the vacuous stub: no id, no predicates, no responses. That stub is the worst one
+/// the engine can hold. No predicates means it matches everything in its space, shadowing the stubs
+/// that were meant to answer; no responses means it serves a default nobody authored; and no id
+/// means the console cannot address it to delete it. Recovery is tearing down the whole space.
+///
+/// The trap is reachable by an ordinary typo because the two sibling routes disagree about their
+/// envelope: `POST /imposters/:port/stubs` takes `{"stub": {…}}`, this route takes the bare stub.
+/// Posting the documented shape of the former here yields exactly the vacuous stub above — the
+/// `stub` key is unrecognised and every field it carried is discarded.
+///
+/// The rule is deliberately about **shape, not emptiness**: it asks the raw JSON whether any
+/// recognised field name is present, before serde erases the distinction. After deserialization
+/// `{}` and an explicit `{"predicates": []}` are indistinguishable, so a post-hoc emptiness check
+/// would also reject the legitimate, explicitly-authored space-wide default. This does not change
+/// what a legal `Stub` is; it only refuses bodies that are not stubs at all.
+///
+/// Scoped to this route on purpose. The space surface is a Rift extension (issue #223), not a
+/// Mountebank-parity one, so tightening it breaks no compatibility contract — the imposter-level
+/// routes keep `additionalProperties: true` and the bare-`{}`-inside-the-envelope allowance exactly
+/// as upstream Mountebank has them.
+fn reject_if_not_a_stub(payload: &serde_json::Value) -> Option<Response<Full<Bytes>>> {
+    let object = payload.as_object()?;
+    if object
+        .keys()
+        .any(|key| STUB_FIELD_NAMES.contains(&key.as_str()))
+    {
+        return None;
+    }
+    // Name the actual mistake when we can recognise it. A caller who sent the imposter-level
+    // envelope has made a specific, common error, and "no recognised stub field present" would
+    // leave them re-reading their stub for a fault that is not in it.
+    let message = if object.contains_key("stub") {
+        "this route takes the stub object directly — the `{\"stub\": …}` envelope belongs to \
+         POST /imposters/{port}/stubs"
+            .to_string()
+    } else {
+        format!(
+            "body is not a stub: no recognised stub field present (expected at least one of {})",
+            STUB_FIELD_NAMES.join(", ")
+        )
+    };
+    Some(error_response(StatusCode::BAD_REQUEST, &message))
+}
+
 /// POST /imposters/:port/spaces/:flowId/stubs — register a stub scoped to that space.
 pub async fn handle_add_space_stub(
     port: u16,
@@ -245,6 +315,10 @@ pub async fn handle_add_space_stub(
         Ok(v) => v,
         Err(resp) => return resp,
     };
+    // Before serde, which cannot tell "not a stub" from "an empty stub" (issue #336).
+    if let Some(rejection) = reject_if_not_a_stub(&payload) {
+        return rejection;
+    }
     let mut stub: Stub = match serde_json::from_value(payload) {
         Ok(s) => s,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub: {e}")),
