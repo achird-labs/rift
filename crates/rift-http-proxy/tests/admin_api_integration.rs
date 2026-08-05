@@ -487,6 +487,87 @@ async fn space_teardown_resets_scenario_state_and_leaves_others() {
     let _ = manager.delete_imposter(19774).await;
 }
 
+/// Issue #336: a body that is not a stub must be refused, not turned into a catch-all.
+///
+/// Before this, `Stub`'s every-field-`default` deserialization meant *any* JSON object was a valid
+/// stub, so a typo produced `201` and installed the worst stub the engine can hold: no predicates
+/// (matches everything in the space, shadowing the stubs meant to answer), no responses (serves a
+/// default nobody wrote), and no id (the console cannot address it to delete it). Recovery was
+/// tearing down the whole space.
+///
+/// The `{"stub": …}` case is called out separately because it is how the bug is actually reached:
+/// the sibling route `POST /imposters/:port/stubs` requires that envelope and this one does not, so
+/// posting the documented shape of one at the other is an ordinary mistake with a catastrophic
+/// outcome. It gets an error that names the mistake rather than one that sends the operator
+/// re-reading a stub that was never at fault.
+#[tokio::test]
+async fn a_space_stub_body_that_is_not_a_stub_is_refused() {
+    let manager = std::sync::Arc::new(ImposterManager::new());
+    let config = serde_json::from_value(correlated_config(19782, serde_json::json!([]))).unwrap();
+    manager.create_imposter(config).await.expect("create");
+
+    let admin_addr = "127.0.0.1:12601".parse().unwrap();
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
+    tokio::spawn(server.run());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let c = reqwest::Client::new();
+    let admin = "http://127.0.0.1:12601";
+    let post = |body: &'static str| {
+        c.post(format!("{admin}/imposters/19782/spaces/alpha/stubs"))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+    };
+
+    // The exact body from the report.
+    let r = post(r#"{"complete":"nonsense","zzz":123}"#).await.unwrap();
+    assert_eq!(r.status(), 400, "a non-stub body must not be accepted");
+    let text = r.text().await.unwrap();
+    assert!(
+        text.contains("not a stub") && text.contains("predicates"),
+        "the refusal must say what was expected: {text}"
+    );
+
+    // The envelope mistake, named.
+    let r = post(r#"{"stub":{"predicates":[],"responses":[]}}"#)
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    let text = r.text().await.unwrap();
+    assert!(
+        text.contains("envelope") && text.contains("/imposters/{port}/stubs"),
+        "the envelope mistake must be named, not reported as a generic shape error: {text}"
+    );
+
+    // And nothing was installed by either attempt — the harm was never the status code, it was the
+    // stub left behind.
+    let listed = c
+        .get(format!("{admin}/imposters/19782/spaces/alpha/stubs"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(
+        listed["stubs"].as_array().map(Vec::len),
+        Some(0),
+        "a refused body must leave no stub behind: {listed}"
+    );
+
+    // The rule is about shape, not emptiness: an explicitly authored space-wide default still
+    // works. Rejecting this would break a legitimate use and change what a legal stub is.
+    let r = post(r#"{"predicates":[],"responses":[{"is":{"statusCode":204}}]}"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        201,
+        "an explicit empty-predicate stub is legal Mountebank semantics and must still be accepted"
+    );
+}
+
 #[tokio::test]
 async fn space_stub_registration_and_inspection_endpoints() {
     let manager = std::sync::Arc::new(ImposterManager::new());
