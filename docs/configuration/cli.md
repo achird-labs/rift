@@ -60,6 +60,35 @@ error. `RIFT_IMPOSTERS` is the environment-variable spelling.
 | `file:` | `file:<path>`, or a bare path | none — always re-read |
 | `http:` / `https:` | a full URL | the response `ETag` |
 
+Embedders register their own schemes (this is how the Rift Cluster `git+https:`, `s3:` and
+`registry:` providers attach), so the table above is the built-in set, not the whole set.
+
+### How a scheme is recognised
+
+Both `scheme://rest` and the shorter `scheme:rest` dispatch on their scheme, so `s3://bucket/key`
+and `s3:bucket/key` reach the same provider. The `://` form is checked first, so a compound scheme
+such as `git+https://…` resolves to `git+https` rather than to `git`.
+
+A URI without `://` is read as `scheme:rest` only when what precedes the first colon is actually
+scheme-shaped — [RFC 3986 §3.1](https://www.rfc-editor.org/rfc/rfc3986#section-3.1)
+(`ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`) **and longer than one character**. Everything else
+is a path, and paths are `file:`:
+
+```bash
+rift --imposters s3:bucket/key       # scheme `s3`
+rift --imposters C:\mocks.json       # a path — a drive letter is one character, so not a scheme
+rift --imposters ./a:b.json          # a path — does not start with a letter
+rift --imposters my_source:key       # a path — `_` is not an RFC 3986 scheme character
+```
+
+The one-character rule is a deliberate deviation from the RFC: single-letter schemes are legal
+there, but keeping Windows drive-letter paths working is worth more than reserving them.
+
+A path whose leading segment *is* scheme-shaped (`weird:path.json`, or a Unix filename ending in a
+colon) is taken as a scheme and fails at startup with `no imposter source is registered for the
+'weird:' scheme`, listing the schemes that are. Spell such a path `file:weird:path.json` — the
+`file:` prefix is stripped verbatim and the rest is opened as-is.
+
 ### Merging
 
 Every source contributes its imposters to one set. A port declared by **two** sources is a
