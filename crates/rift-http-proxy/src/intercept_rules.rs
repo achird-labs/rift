@@ -13,6 +13,7 @@ use std::sync::{Arc, RwLock};
 use rift_mock_core::imposter::stub_matches;
 use rift_mock_core::proxy::intercept_ca::CertificateAuthority;
 use rift_types::Predicate;
+use rift_types::wire::{deserialize_optional_status_code, multi_value_headers};
 
 /// A single intercept rule: an optional host filter plus predicates (AND-ed together), and the
 /// action to take when both match.
@@ -44,10 +45,15 @@ pub enum InterceptAction {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", from = "ServeStubRaw")]
 pub struct ServeStub {
-    #[serde(default = "default_status")]
+    // No field-level `default`s here: `#[serde(from = "ServeStubRaw")]` means the derived
+    // `Deserialize` never reads them, so the parsing and defaulting rules live on the shim below
+    // and nowhere else. Only the `serialize_with` half is live.
     pub status_code: u16,
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
+    /// Issue #936: one or many values per name, matching `is.headers` on the imposter stub path.
+    /// Serialized back through the shared helper, so a single value lists as a bare string and
+    /// only a genuinely multi-value header becomes an array.
+    #[serde(serialize_with = "multi_value_headers::serialize")]
+    pub headers: HashMap<String, Vec<String>>,
     /// Issue #933: any JSON value, matching `is.body` on the imposter stub path. A string body is
     /// served verbatim; any other value is pre-rendered into `rendered_body`. Read it through
     /// [`Self::body`]; writing it directly would strand the rendering.
@@ -64,7 +70,7 @@ pub struct ServeStub {
 impl ServeStub {
     pub fn new(
         status_code: u16,
-        headers: HashMap<String, String>,
+        headers: HashMap<String, Vec<String>>,
         body: Option<serde_json::Value>,
     ) -> Self {
         // Only a non-string body needs rendering; a string body is served as-is. `Display` on a
@@ -109,17 +115,27 @@ impl ServeStub {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ServeStubRaw {
-    #[serde(default = "default_status")]
-    status_code: u16,
-    #[serde(default)]
-    headers: HashMap<String, String>,
+    /// Issue #936: `Option` rather than a serde default, because the number-or-string parser runs
+    /// only when the field is present — the 200 default is applied in `From` below. Same shape as
+    /// `StubResponseRaw::status_code` on the imposter path, which also means an explicit
+    /// `"statusCode": null` now reads as absent (200) where it used to be an error; that is the
+    /// imposter path's own rule, and it widens what is accepted without changing any rule that
+    /// was already valid.
+    #[serde(default, deserialize_with = "deserialize_optional_status_code")]
+    status_code: Option<u16>,
+    #[serde(default, deserialize_with = "multi_value_headers::deserialize")]
+    headers: HashMap<String, Vec<String>>,
     #[serde(default)]
     body: Option<serde_json::Value>,
 }
 
 impl From<ServeStubRaw> for ServeStub {
     fn from(raw: ServeStubRaw) -> Self {
-        ServeStub::new(raw.status_code, raw.headers, raw.body)
+        ServeStub::new(
+            raw.status_code.unwrap_or_else(default_status),
+            raw.headers,
+            raw.body,
+        )
     }
 }
 
@@ -397,6 +413,115 @@ mod tests {
         // The cache must also survive the clone `match_request` hands to the request path.
         let cloned = stub.clone();
         assert_eq!(cloned.body_str(), r#"{"featureX":"ON"}"#);
+    }
+
+    // ===== Issue #936: statusCode and headers accept the same forms as the imposter stub path ====
+
+    // AC2: a numeric-string `statusCode` is accepted (the form Mountebank takes and `is.statusCode`
+    // already handles); a number still works; genuine junk is still refused rather than defaulted.
+    #[test]
+    fn serve_stub_status_code_takes_number_or_numeric_string() {
+        assert_eq!(
+            serve_stub_from_action(serde_json::json!({ "statusCode": 418 })).status_code,
+            418
+        );
+        assert_eq!(
+            serve_stub_from_action(serde_json::json!({ "statusCode": "418" })).status_code,
+            418,
+            "the string form is what this issue adds"
+        );
+        assert_eq!(
+            serve_stub_from_action(serde_json::json!({})).status_code,
+            200,
+            "an absent statusCode still defaults to 200"
+        );
+        // The one accept-set change beyond the string form: an explicit null used to be an error
+        // and now reads as absent, because the shared parser treats it that way for the imposter
+        // path too. Strictly widening — no previously-valid rule changed meaning — but pinned
+        // here so it stays a decision rather than a surprise.
+        assert_eq!(
+            serve_stub_from_action(serde_json::json!({ "statusCode": null })).status_code,
+            200,
+            "an explicit null statusCode reads as absent, matching `is.statusCode`"
+        );
+
+        for junk in [
+            serde_json::json!("abc"),
+            serde_json::json!(true),
+            // One past `u16::MAX` in both spellings — the out-of-range boundary, not just an
+            // obviously-silly number.
+            serde_json::json!("65536"),
+            serde_json::json!(65536),
+        ] {
+            let rule = serde_json::from_value::<InterceptRule>(serde_json::json!({
+                "action": { "serve": { "statusCode": junk } }
+            }));
+            assert!(
+                rule.is_err(),
+                "statusCode {junk} must be refused, not coerced or defaulted"
+            );
+        }
+    }
+
+    // AC5: #754 parity — Mountebank recorders emit non-string scalar header values and coerce them
+    // to strings. Sharing the stub path's helper means the intercept path inherits that, and this
+    // pins it deliberately rather than leaving it an accident of the shared module.
+    #[test]
+    fn serve_stub_coerces_scalar_header_values() {
+        let stub = serve_stub_from_action(serde_json::json!({
+            "headers": { "X-Retry": 3, "X-Flag": true, "X-Ratio": 1.5 }
+        }));
+        assert_eq!(stub.headers["X-Retry"], vec!["3".to_string()]);
+        assert_eq!(stub.headers["X-Flag"], vec!["true".to_string()]);
+        assert_eq!(stub.headers["X-Ratio"], vec!["1.5".to_string()]);
+    }
+
+    // AC3 (parse half) + AC4/AC6: multi-value headers survive the wire, a single value still
+    // round-trips as a bare string rather than a one-element array, and the whole rule is
+    // byte-identical through the `ServeStubRaw` shim — which is what catches the shim drifting
+    // out of step with `ServeStub` as fields are added.
+    #[test]
+    fn serve_stub_round_trips_multi_value_headers_and_string_status() {
+        let stub = serve_stub_from_action(serde_json::json!({
+            "headers": { "set-cookie": ["a=1", "b=2"] }
+        }));
+        assert_eq!(
+            stub.headers["set-cookie"],
+            vec!["a=1".to_string(), "b=2".to_string()]
+        );
+
+        let posted = serde_json::json!({
+            "host": "cdn.example.com",
+            "predicates": [],
+            "action": { "serve": {
+                "statusCode": 503,
+                "headers": { "content-type": "application/json", "set-cookie": ["a=1", "b=2"] },
+                "body": { "featureX": "ON" }
+            }}
+        });
+        let rule: InterceptRule =
+            serde_json::from_value(posted.clone()).expect("the widened forms are accepted");
+        assert_eq!(
+            serde_json::to_value(&rule).expect("a rule serializes"),
+            posted,
+            "a listed rule is byte-for-byte what was posted: the number status stays a number, \
+             the single-value header stays a bare string, and the multi-value one stays an array"
+        );
+    }
+
+    // A string `statusCode` is normalised to the number form on the way out — the rule is stored
+    // as `u16`, so listing it back as `"418"` would be inventing a shape the store does not hold.
+    #[test]
+    fn serve_stub_lists_a_string_status_code_back_as_a_number() {
+        let rule: InterceptRule = serde_json::from_value(serde_json::json!({
+            "action": { "serve": { "statusCode": "418" } }
+        }))
+        .expect("string status accepted");
+        let listed = serde_json::to_value(&rule).expect("a rule serializes");
+        assert_eq!(
+            listed["action"]["serve"]["statusCode"],
+            serde_json::json!(418)
+        );
     }
 
     // AC6: `GET /intercept/rules` must give back what was posted — an object body round-trips as an

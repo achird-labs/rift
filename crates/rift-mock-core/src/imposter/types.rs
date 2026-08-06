@@ -5,74 +5,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Serde for multi-value headers (issue #238). Accepts the Mountebank-style `"k": "v"` *and*
-/// `"k": ["v1", "v2"]` on the wire; serializes a single value back as a plain string and multiple
-/// values as an array, so existing single-value consumers are unaffected.
-pub(crate) mod multi_value_headers {
-    use serde::Deserialize;
-    use serde::de::Deserializer;
-    use serde::ser::{SerializeMap, Serializer};
-    use std::collections::HashMap;
-
-    pub fn serialize<S: Serializer>(
-        headers: &HashMap<String, Vec<String>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(headers.len()))?;
-        for (key, values) in headers {
-            match values.as_slice() {
-                [] => continue, // a key with no values would emit no header line; omit it
-                [single] => map.serialize_entry(key, single)?,
-                many => map.serialize_entry(key, many)?,
-            }
-        }
-        map.end()
-    }
-
-    /// A single header value on the wire. Mountebank tolerates non-string scalars — its recorders
-    /// routinely emit `"Content-Length": 124` (a JSON number) and `"X-Flag": true` — and coerces
-    /// them to their string form. Rift matches that so real recorded imposters load unchanged
-    /// (issue #754); previously a numeric/bool value failed both `OneOrMany` variants and rejected
-    /// the whole imposter with a 400.
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Scalar {
-        Str(String),
-        Num(serde_json::Number),
-        Bool(bool),
-    }
-
-    impl Scalar {
-        fn into_string(self) -> String {
-            match self {
-                Scalar::Str(s) => s,
-                Scalar::Num(n) => n.to_string(),
-                Scalar::Bool(b) => b.to_string(),
-            }
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<HashMap<String, Vec<String>>, D::Error> {
-        // Order matters for `#[serde(untagged)]`: a scalar can never match `Many` and an array can
-        // never match `One`, so either order is sound — `One` first keeps the common case first.
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum OneOrMany {
-            One(Scalar),
-            Many(Vec<Scalar>),
-        }
-        let raw = HashMap::<String, OneOrMany>::deserialize(deserializer)?;
-        Ok(raw
-            .into_iter()
-            .map(|(k, v)| match v {
-                OneOrMany::One(s) => (k, vec![s.into_string()]),
-                OneOrMany::Many(v) => (k, v.into_iter().map(Scalar::into_string).collect()),
-            })
-            .collect())
-    }
-}
+// Issue #936: the Mountebank wire-shape tolerance helpers moved to `rift-types::wire` so the
+// intercept rule schema can share them — the imposter path and the intercept path parse the
+// same JSON and must agree about what it means. Re-exported here so every
+// `#[serde(with = "multi_value_headers")]` attribute path in this file resolves unchanged.
+pub(crate) use rift_types::wire::{
+    deserialize_optional_status_code, deserialize_status_code, multi_value_headers,
+};
 
 // ============================================================================
 // Recorded Request Types
@@ -690,43 +629,6 @@ where
 
 pub(crate) fn default_status_code() -> u16 {
     200
-}
-
-/// Parse a JSON `statusCode` value that may be a number or a (numeric) string.
-fn parse_status_code_value<E: serde::de::Error>(value: serde_json::Value) -> Result<u16, E> {
-    match value {
-        serde_json::Value::Number(n) => n
-            .as_u64()
-            .and_then(|n| u16::try_from(n).ok())
-            .ok_or_else(|| E::custom("invalid status code number")),
-        serde_json::Value::String(s) => s
-            .parse::<u16>()
-            .map_err(|_| E::custom(format!("invalid status code string: {s}"))),
-        _ => Err(E::custom("statusCode must be a number or string")),
-    }
-}
-
-/// Deserialize statusCode from either a number or a string
-pub(crate) fn deserialize_status_code<'de, D>(deserializer: D) -> Result<u16, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    parse_status_code_value(serde_json::Value::deserialize(deserializer)?)
-}
-
-/// Deserialize an optional top-level `statusCode` (flat response form, issue #304), reusing the
-/// number-or-string parsing. Only invoked when the field is present; a `null` is treated as
-/// absent (`None`) so a stray null on a non-flat response stays accepted as before.
-pub(crate) fn deserialize_optional_status_code<'de, D>(
-    deserializer: D,
-) -> Result<Option<u16>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    match serde_json::Value::deserialize(deserializer)? {
-        serde_json::Value::Null => Ok(None),
-        value => parse_status_code_value(value).map(Some),
-    }
 }
 
 impl From<StubResponseRaw> for StubResponse {

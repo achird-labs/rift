@@ -29,7 +29,10 @@ async fn intercepts_external_config_cdn_without_mitmproxy() {
         serde_json::from_value(serde_json::json!({ "equals": { "path": "/config.json" } }))
             .expect("valid predicate");
     let mut headers = HashMap::new();
-    headers.insert("content-type".to_string(), "application/json".to_string());
+    headers.insert(
+        "content-type".to_string(),
+        vec!["application/json".to_string()],
+    );
     rules
         .add(InterceptRule {
             host: Some("cdn.example.com".to_string()),

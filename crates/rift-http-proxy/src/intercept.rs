@@ -314,16 +314,26 @@ where
         stub.status_code,
         reason_phrase(stub.status_code)
     );
-    for (name, value) in &stub.headers {
+    for (name, values) in &stub.headers {
         if is_hop_by_hop(name) {
             continue;
         }
-        // Guard against header/response splitting via CR/LF in admin-supplied stub headers.
-        if name.contains(['\r', '\n']) || value.contains(['\r', '\n']) {
-            tracing::warn!(header = %name, "skipping intercept stub header containing CR/LF");
+        // Guard against header/response splitting via CR/LF in admin-supplied stub headers. The
+        // name is checked once — a poisoned name disqualifies every one of its values — while the
+        // value check is per value, so one bad value does not take its clean siblings with it.
+        if name.contains(['\r', '\n']) {
+            tracing::warn!(header = %name, "skipping intercept stub header name containing CR/LF");
             continue;
         }
-        head.push_str(&format!("{name}: {value}\r\n"));
+        // One line per value (issue #936); comma-joining would be wrong for `set-cookie`, which is
+        // the header multi-value support exists for.
+        for value in values {
+            if value.contains(['\r', '\n']) {
+                tracing::warn!(header = %name, "skipping intercept stub header value containing CR/LF");
+                continue;
+            }
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
     }
     head.push_str(&format!("content-length: {}\r\n", body.len()));
     head.push_str("connection: close\r\n\r\n");
@@ -627,13 +637,83 @@ mod tests {
         String::from_utf8(out).expect("the test stubs are all valid UTF-8")
     }
 
+    // Issue #936 / AC3: a header with several values becomes several header lines. Collapsing them
+    // into one comma-joined line is wrong for `set-cookie`, which is the header that motivates
+    // multi-value support at all.
+    #[tokio::test]
+    async fn write_stub_response_emits_one_line_per_header_value() {
+        let stub = ServeStub::new(
+            200,
+            HashMap::from([
+                (
+                    "set-cookie".to_string(),
+                    vec!["a=1".to_string(), "b=2".to_string()],
+                ),
+                (
+                    "content-type".to_string(),
+                    vec!["application/json".to_string()],
+                ),
+            ]),
+            None,
+        );
+        let response = rendered_stub_response(&stub).await;
+        let (head, _) = response
+            .split_once("\r\n\r\n")
+            .expect("well-formed response");
+        let lines: Vec<&str> = head.lines().collect();
+
+        assert!(
+            lines.contains(&"set-cookie: a=1") && lines.contains(&"set-cookie: b=2"),
+            "each value gets its own line: {head}"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.starts_with("set-cookie:"))
+                .count(),
+            2,
+            "two values, two lines — never comma-joined: {head}"
+        );
+        assert!(lines.contains(&"content-type: application/json"));
+    }
+
+    // The CR/LF response-splitting guard has to apply per value, not per header name — otherwise
+    // widening to multi-value would quietly reopen the injection hole it closed.
+    #[tokio::test]
+    async fn write_stub_response_skips_only_the_injecting_header_value() {
+        let stub = ServeStub::new(
+            200,
+            HashMap::from([(
+                "x-multi".to_string(),
+                vec![
+                    "clean".to_string(),
+                    "bad\r\nx-injected: yes".to_string(),
+                    "also-clean".to_string(),
+                ],
+            )]),
+            None,
+        );
+        let response = rendered_stub_response(&stub).await;
+        assert!(
+            !response.to_ascii_lowercase().contains("x-injected"),
+            "the CR/LF-bearing value is dropped: {response}"
+        );
+        assert!(
+            response.contains("x-multi: clean") && response.contains("x-multi: also-clean"),
+            "its clean siblings still go out: {response}"
+        );
+    }
+
     // AC1 at the wire level: the object body is serialized compactly into the response body, and
     // `content-length` counts the rendered bytes.
     #[tokio::test]
     async fn write_stub_response_serves_object_body_as_compact_json() {
         let stub = ServeStub::new(
             200,
-            HashMap::from([("content-type".to_string(), "application/json".to_string())]),
+            HashMap::from([(
+                "content-type".to_string(),
+                vec!["application/json".to_string()],
+            )]),
             Some(serde_json::json!({ "featureX": "ON" })),
         );
         let response = rendered_stub_response(&stub).await;
@@ -1081,7 +1161,7 @@ mod tests {
                 predicates: vec![],
                 action: InterceptAction::Serve(ServeStub::new(
                     418,
-                    HashMap::from([("x-rift".to_string(), "1".to_string())]),
+                    HashMap::from([("x-rift".to_string(), vec!["1".to_string()])]),
                     Some(serde_json::json!("brewed")),
                 )),
             })

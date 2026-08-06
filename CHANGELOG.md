@@ -13,6 +13,20 @@ record.
 
 ### Added
 
+- **An intercept `serve` rule now accepts a numeric-string `statusCode` and multi-value `headers`**
+  (issue #936), completing the parity #933 started for `body`. `"statusCode": "418"` and
+  `"set-cookie": ["a=1", "b=2"]` are the forms Mountebank accepts and the imposter stub path has
+  always handled; on the intercept path they were refused, and because rules parse through an
+  untagged enum the caller saw only `data did not match any variant`. Non-string scalar header
+  values (`"x-retry": 3`) coerce to strings, matching what recorders emit. Each value of a
+  multi-value header becomes its own line on the wire — never comma-joined, which is what
+  `set-cookie` requires — and the CR/LF response-splitting guard applies per value.
+  The helpers behind this moved from `rift-mock-core`'s crate-private module into the shared
+  `rift-types::wire`, so the two paths cannot drift apart again; no crate gained a dependency.
+  Strictly widening: previously-valid rules deserialize identically and
+  `GET /intercept/rules` still lists a single-value header as a plain string and a status as a
+  number. See [Intercept proxy](docs/features/intercept-proxy.md#serve-an-inline-stub).
+
 - **An intercept `serve` rule's `body` now accepts any JSON value**, not just a string (issue
   #933). `body` was `Option<String>` while the imposter stub path's `is.body` has always taken any
   value, so an object body — legal Mountebank semantics — was refused by serde, and because rules
