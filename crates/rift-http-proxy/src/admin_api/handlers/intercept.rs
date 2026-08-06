@@ -478,6 +478,56 @@ mod tests {
         );
     }
 
+    // Issue #936 / AC1 at the door it fails on. Both shapes are asserted because the untagged
+    // `RuleOrRules` tries them in order, so a regression could break one and not the other.
+    #[test]
+    fn add_rules_from_bytes_accepts_string_status_code_and_multi_value_headers() {
+        let state = test_state();
+        let one =
+            br#"{"action":{"serve":{"statusCode":"418","headers":{"set-cookie":["a=1","b=2"]}}}}"#;
+        assert_eq!(
+            add_rules_from_bytes(one, &state, true).status(),
+            StatusCode::CREATED,
+            "a numeric-string statusCode and a multi-value header are accepted, not refused by \
+             the untagged enum"
+        );
+
+        let many = br#"[{"action":{"serve":{"statusCode":"503"}}},{"action":{"serve":{"headers":{"x-retry":3}}}}]"#;
+        assert_eq!(
+            add_rules_from_bytes(many, &state, true).status(),
+            StatusCode::CREATED,
+            "the batch shape accepts them too"
+        );
+
+        let stored: Vec<(u16, Option<Vec<String>>)> = state
+            .rules
+            .list()
+            .iter()
+            .map(|rule| match &rule.action {
+                InterceptAction::Serve(stub) => {
+                    (stub.status_code, stub.headers.get("set-cookie").cloned())
+                }
+                other => panic!("expected a serve action, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            stored,
+            vec![
+                (418, Some(vec!["a=1".to_string(), "b=2".to_string()])),
+                (503, None),
+                (200, None),
+            ],
+            "each rule is stored with its parsed status and headers"
+        );
+
+        // Junk must still be refused at this door rather than silently defaulting to 200.
+        let bad = br#"{"action":{"serve":{"statusCode":"not-a-number"}}}"#;
+        assert_eq!(
+            add_rules_from_bytes(bad, &state, true).status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
     // Issue #554: once the store is at MAX_RULES, POST /intercept/rules is rejected with 429 for
     // both the single-rule and the batch shape, and stores nothing.
     #[test]

@@ -76,6 +76,12 @@ async fn configfile_intercept_block_serves_without_any_admin_call() {
                       "predicates": [{ "equals": { "path": "/datafiles/key-b.json" } }],
                       "action": { "serve": { "statusCode": 200,
                                              "headers": { "content-type": "application/json" },
+                                             "body": { "featureX": "ON" } } } },
+                    { "host": "cdn.example.com",
+                      "predicates": [{ "equals": { "path": "/datafiles/key-c.json" } }],
+                      "action": { "serve": { "statusCode": "418",
+                                             "headers": { "content-type": "application/json",
+                                                          "set-cookie": ["a=1", "b=2"] },
                                              "body": { "featureX": "ON" } } } }
                 ]
             }
@@ -115,6 +121,29 @@ async fn configfile_intercept_block_serves_without_any_admin_call() {
         .await
         .expect("an object serve body declared in the config file is intercepted");
     assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), r#"{"featureX":"ON"}"#);
+
+    // Issue #936: a numeric-string `statusCode` and a multi-value header declared in the config
+    // file survive the same boot path. The config door is the one #933's note calls out as
+    // ungated by `verify-docs-coverage.sh`, so it gets its own assertion rather than riding on
+    // the admin-API tests.
+    let resp = sut_client(intercept, &ca_pem)
+        .get("https://cdn.example.com/datafiles/key-c.json")
+        .send()
+        .await
+        .expect("a string statusCode and multi-value headers from the config file are intercepted");
+    assert_eq!(resp.status(), 418, "the string \"418\" parsed as a status");
+    let cookies: Vec<&str> = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().expect("ascii cookie"))
+        .collect();
+    assert_eq!(
+        cookies,
+        vec!["a=1", "b=2"],
+        "both values arrive as separate header lines"
+    );
     assert_eq!(resp.text().await.unwrap(), r#"{"featureX":"ON"}"#);
 
     server.shutdown().await;

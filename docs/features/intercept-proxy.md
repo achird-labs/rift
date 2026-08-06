@@ -294,8 +294,28 @@ request. Omitting `body`, or sending `null`, serves an empty body with `content-
 Note that `body` does not set `content-type` for you: an object body still needs
 `"content-type": "application/json"` in `headers` if the SUT checks it.
 
+`statusCode` takes a number **or** a numeric string (`"418"`), and `headers` takes one value or
+many per name — the same forms an imposter stub's `is.statusCode` / `is.headers` accept:
+
+```bash
+curl -X POST http://localhost:2525/intercept/rules -d '{
+  "host": "cdn.example.com",
+  "action": { "serve": {
+    "statusCode": "418",
+    "headers": { "set-cookie": ["a=1", "b=2"], "content-type": "application/json" },
+    "body": { "featureX": "ON" }
+  }}
+}'
+```
+
+Each value of a multi-value header becomes its own header line on the intercepted response — they
+are never comma-joined, which is what `set-cookie` requires. A non-string scalar header value
+(`"x-retry": 3`) is coerced to its string form, matching what Mountebank recorders emit.
+
 `GET /intercept/rules` returns the body in the shape you posted — an object stays an object, not
-its rendered string.
+its rendered string. A single-value header lists back as a plain string rather than a one-element
+array, and a `statusCode` given as a string lists back as a number, since that is what the rule
+store holds.
 
 ### Forward to one of your imposters
 
