@@ -39,6 +39,10 @@ struct Origin {
     /// Requests that arrived carrying `If-None-Match`.
     conditional_hits: Arc<AtomicUsize>,
     body: Arc<std::sync::Mutex<Reply>>,
+    /// Errors the origin hit that are *not* a client hanging up on purpose (issue #935). Each
+    /// connection is served on a detached thread, so a panic there would never reach the test
+    /// harness — the fault has to be carried back here to be assertable.
+    faults: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl Origin {
@@ -48,14 +52,20 @@ impl Origin {
         let hits = Arc::new(AtomicUsize::new(0));
         let conditional_hits = Arc::new(AtomicUsize::new(0));
         let body = Arc::new(std::sync::Mutex::new(reply));
+        let faults = Arc::new(std::sync::Mutex::new(Vec::new()));
 
-        let (h, ch, b) = (hits.clone(), conditional_hits.clone(), body.clone());
+        let (h, ch, b, f) = (
+            hits.clone(),
+            conditional_hits.clone(),
+            body.clone(),
+            faults.clone(),
+        );
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let (h, ch, b) = (h.clone(), ch.clone(), b.clone());
+                let (h, ch, b, f) = (h.clone(), ch.clone(), b.clone(), f.clone());
                 std::thread::spawn(move || {
-                    let _ = serve_one(stream, &h, &ch, &b);
+                    serve_one(stream, &h, &ch, &b, &f);
                 });
             }
         });
@@ -64,7 +74,15 @@ impl Origin {
             hits,
             conditional_hits,
             body,
+            faults,
         }
+    }
+
+    /// Origin-side failures that were not an expected client disconnect. Empty is the only
+    /// healthy value; a test asserting on a counter should check this too, or it will read a
+    /// server-side fault as a protocol result.
+    fn faults(&self) -> Vec<String> {
+        self.faults.lock().unwrap().clone()
     }
 
     fn uri(&self) -> String {
@@ -84,22 +102,46 @@ impl Origin {
     }
 }
 
-/// Serve exactly one request, then let the caller drop the socket.
+/// Serve exactly one request, then let the socket drop — classifying anything that went wrong on
+/// the way into "the client hung up, which some tests do on purpose" versus "a real fault the
+/// suite must be able to see" (issue #935).
+fn serve_one(
+    mut stream: TcpStream,
+    hits: &AtomicUsize,
+    conditional_hits: &AtomicUsize,
+    reply: &std::sync::Mutex<Reply>,
+    faults: &std::sync::Mutex<Vec<String>>,
+) {
+    if let Err(e) = respond(&mut stream, hits, conditional_hits, reply) {
+        // A client that hangs up part-way through is this fixture's contract, not a fault:
+        // `Oversized` exists to make the reader bail mid-body, and `Slow` deliberately outlives
+        // its client's timeout. Every *other* error is a real failure, and blanket-discarding the
+        // lot is what let a failed read masquerade as a protocol result (issue #935). Recorded
+        // here, while `stream` is still open, so the client cannot observe EOF and assert before
+        // the fault lands.
+        if !matches!(
+            e.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+        ) {
+            faults.lock().unwrap().push(format!("{:?}: {e}", e.kind()));
+        }
+    }
+}
+
+/// Read one request and write its answer.
 ///
 /// Every response carries `Connection: close` (issue #872). The server genuinely does close after
 /// one request, so saying so is the correct behaviour rather than a workaround: HTTP/1.1 defaults
 /// to keep-alive, so without it `reqwest` pools the socket, reuses it for the next fetch, and
 /// races the close — which surfaced as an intermittent transport error under full-suite load, not
 /// as the parse error the 304 test is designed to catch.
-fn serve_one(
-    mut stream: TcpStream,
+fn respond(
+    stream: &mut TcpStream,
     hits: &AtomicUsize,
     conditional_hits: &AtomicUsize,
     reply: &std::sync::Mutex<Reply>,
 ) -> std::io::Result<()> {
-    let mut buf = [0u8; 8192];
-    let n = stream.read(&mut buf)?;
-    let request = String::from_utf8_lossy(&buf[..n]).to_string();
+    let request = read_request_head(stream)?;
     hits.fetch_add(1, Ordering::SeqCst);
 
     let if_none_match = request
@@ -113,33 +155,25 @@ fn serve_one(
     let reply = reply.lock().unwrap().clone();
     match reply {
         Reply::Etagged { body, etag } => {
-            if if_none_match.as_deref() == Some(etag.as_str()) {
-                write!(
-                    stream,
-                    "HTTP/1.1 304 Not Modified\r\nETag: {etag}\r\nContent-Length: 0\r\n\
-                     Connection: close\r\n\r\n"
-                )?;
-            } else {
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nETag: {etag}\r\nContent-Type: application/json\r\n\
-                     Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
-                )?;
-            }
+            stream
+                .write_all(etagged_response(&body, &etag, if_none_match.as_deref()).as_bytes())?;
         }
         Reply::Redirect { location } => {
-            write!(
-                stream,
-                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\
-                 Connection: close\r\n\r\n"
+            stream.write_all(
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\
+                     Connection: close\r\n\r\n"
+                )
+                .as_bytes(),
             )?;
         }
         Reply::Oversized { size } => {
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\
-                 Content-Length: {size}\r\n\r\n"
+            stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\
+                     Content-Length: {size}\r\n\r\n"
+                )
+                .as_bytes(),
             )?;
             // Written in chunks so the reader can bail part-way; a broken pipe here is the
             // expected outcome, not a failure.
@@ -155,13 +189,91 @@ fn serve_one(
         }
         Reply::Slow { delay } => {
             std::thread::sleep(delay);
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n[]"
+            stream.write_all(
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n[]",
             )?;
         }
     }
     stream.flush()
+}
+
+/// Hard cap on the request head the fixture will buffer — reads are clamped to what is left, so
+/// `head` never exceeds it.
+const MAX_REQUEST_HEAD: usize = 8192;
+
+/// Bounds a peer that connects and then stalls. The old single `read` could only ever block once;
+/// looping to the terminator makes an indefinite wedge reachable, so the wait is capped and the
+/// timeout surfaces as a recorded fault rather than a hung suite.
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Read the request head until its `\r\n\r\n` terminator rather than taking whatever one packet
+/// happened to carry (issue #935). A single `read` was the root of the fixture's load-dependent
+/// failures twice over: it could miss a trailing `If-None-Match` — so the origin answered 200
+/// where the test expected 304 — and it left unread bytes in the receive queue, which makes the
+/// OS answer the socket's close with RST instead of FIN and truncate the response the client was
+/// still reading.
+fn read_request_head(stream: &mut TcpStream) -> std::io::Result<String> {
+    stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT))?;
+    let mut head = Vec::new();
+    let mut chunk = [0u8; 1024];
+    // Rescans the whole buffer, so a terminator split across two reads is still found.
+    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+        // Both exits below are errors rather than "serve what we have": every caller in this file
+        // sends a complete, terminated head, so a short one is always anomalous. Answering it
+        // anyway would parse no `If-None-Match` and serve 200 where the test expects 304 — the
+        // very wrong-but-plausible answer #935 exists to stop.
+        let room = MAX_REQUEST_HEAD - head.len();
+        if room == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "request head reached {MAX_REQUEST_HEAD} bytes with no CRLFCRLF terminator"
+                ),
+            ));
+        }
+        let take = room.min(chunk.len());
+        let n = stream.read(&mut chunk[..take])?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "peer closed after {} byte(s), before the request head terminated",
+                    head.len()
+                ),
+            ));
+        }
+        head.extend_from_slice(&chunk[..n]);
+    }
+    Ok(String::from_utf8_lossy(&head).into_owned())
+}
+
+/// Render an `Etagged` reply into a single buffer (issue #935). Returning the whole response
+/// rather than writing it piecemeal is what lets `serve_one` put it on the wire with one
+/// `write_all`: a `write!` per format fragment is a syscall per fragment, and a peer that reads
+/// between two of them sees a truncated response.
+fn etagged_response(body: &str, etag: &str, if_none_match: Option<&str>) -> String {
+    if if_none_match == Some(etag) {
+        format!(
+            "HTTP/1.1 304 Not Modified\r\nETag: {etag}\r\nContent-Length: 0\r\n\
+             Connection: close\r\n\r\n"
+        )
+    } else {
+        format!(
+            "HTTP/1.1 200 OK\r\nETag: {etag}\r\nContent-Type: application/json\r\n\
+             Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+}
+
+/// Why a response read failed, in the terms that tell a truncated read apart from a genuine
+/// protocol mismatch (issue #935): how much arrived, what it was, and the underlying error. The
+/// partial is `{:?}`-escaped so its CR/LF cannot mangle the panic output it lands in.
+fn read_failure_message(read: usize, partial: &str, error: &std::io::Error) -> String {
+    format!(
+        "reading the origin's response failed after {read} byte(s): {error}; \
+         partial response: {partial:?}"
+    )
 }
 
 // ===== Helpers =====
@@ -194,16 +306,212 @@ fn cli(args: &[&str]) -> Cli {
 
 /// Read one raw HTTP response from the origin, sending `request_headers` verbatim.
 fn raw_request(port: u16, extra_headers: &str) -> String {
-    use std::io::{Read, Write};
     let mut sock = TcpStream::connect(("127.0.0.1", port)).expect("connect to origin");
-    write!(
-        sock,
-        "GET /imposters.json HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra_headers}\r\n"
-    )
-    .expect("write request");
+    // One `write_all` rather than a `write!` per format fragment (issue #935): each fragment is
+    // its own syscall, and a request that reaches the origin in pieces is exactly what let it
+    // answer before the whole head had arrived.
+    let request = format!("GET /imposters.json HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra_headers}\r\n");
+    sock.write_all(request.as_bytes()).expect("write request");
+    read_response(&mut sock)
+}
+
+/// Read the whole response, failing loudly if the socket dies part-way (issue #935). The discarded
+/// error this replaces turned a truncated read into a silent wrong answer: the assertion compared
+/// against a partial response and reported it as a protocol regression, which is how the same
+/// failure got misdiagnosed twice.
+fn read_response(sock: &mut impl Read) -> String {
     let mut out = String::new();
-    let _ = sock.read_to_string(&mut out);
+    if let Err(e) = sock.read_to_string(&mut out) {
+        panic!("{}", read_failure_message(out.len(), &out, &e));
+    }
     out
+}
+
+// ===== Issue #935: the fixture must survive fragmented I/O, and say so when it doesn't =====
+
+/// AC2 — the regression gate for the actual flake. `write!` on an unbuffered `TcpStream` emits one
+/// syscall per format fragment, so under full-workspace load the origin's request read used to
+/// return before `If-None-Match` arrived: it answered 200, and the 304 test reported that as a
+/// protocol regression. Splitting the request explicitly makes that race deterministic — this
+/// fails against a single-`read` `serve_one` every time, rather than once in a hundred runs.
+///
+/// It also covers the second half of the chain: leaving request bytes unread is what made the OS
+/// send RST instead of FIN and truncate the response mid-header.
+#[test]
+fn serve_one_reads_a_request_split_across_delayed_writes() {
+    let origin = Origin::start(Reply::Etagged {
+        body: imposter_doc(14932, "x"),
+        etag: "\"v1\"".to_string(),
+    });
+
+    let mut sock = TcpStream::connect(("127.0.0.1", origin.port)).expect("connect to origin");
+    sock.write_all(b"GET /imposters.json HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+        .expect("write the first fragment");
+    sock.flush().expect("flush the first fragment");
+    // Wider than any scheduler gap the real flake needed, so the origin is guaranteed to have
+    // woken on a partial head if it only reads once.
+    std::thread::sleep(Duration::from_millis(50));
+    sock.write_all(b"If-None-Match: \"v1\"\r\n\r\n")
+        .expect("write the trailing fragment");
+    sock.flush().expect("flush the trailing fragment");
+
+    let mut out = String::new();
+    sock.read_to_string(&mut out).expect("read the response");
+    assert!(
+        out.starts_with("HTTP/1.1 304"),
+        "the origin must wait for the whole request head before answering; got: {out:.120}"
+    );
+    assert_eq!(
+        origin.conditional_hits(),
+        1,
+        "the If-None-Match arriving in a later packet must still be seen"
+    );
+    assert!(
+        origin.faults().is_empty(),
+        "a fragmented request is normal traffic, not an origin fault: {:?}",
+        origin.faults()
+    );
+}
+
+/// Delivers `pending`, then fails the way a peer's RST does. `read_to_string` keeps the bytes it
+/// already decoded and returns the error, so this reproduces the exact state the old `let _ =`
+/// discarded — deterministically, without having to win a race against a real socket.
+struct ResetAfter {
+    pending: &'static [u8],
+}
+
+impl Read for ResetAfter {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pending.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "connection reset by peer",
+            ));
+        }
+        let n = self.pending.len().min(buf.len());
+        buf[..n].copy_from_slice(&self.pending[..n]);
+        self.pending = &self.pending[n..];
+        Ok(n)
+    }
+}
+
+/// The `n == 0` guard in `read_request_head` is load-bearing twice over: without it a peer that
+/// closes mid-head spins the loop forever (`read` keeps returning `Ok(0)`, and a read *timeout*
+/// never fires on a repeating instant-EOF), and before it the fixture answered the truncated head
+/// anyway — parsing no `If-None-Match` and serving 200 where the caller expected 304. This pins
+/// the branch, and with it that a genuine origin fault reaches the test rather than dying in the
+/// detached thread that produced it.
+#[test]
+fn a_request_head_that_never_terminates_is_recorded_as_a_fault() {
+    let origin = Origin::start(Reply::Etagged {
+        body: imposter_doc(14935, "x"),
+        etag: "\"v1\"".to_string(),
+    });
+
+    {
+        let mut sock = TcpStream::connect(("127.0.0.1", origin.port)).expect("connect to origin");
+        sock.write_all(b"GET /imposters.json HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+            .expect("write a head with no terminator");
+        sock.flush().expect("flush the partial head");
+    } // dropped without the terminating CRLFCRLF, so the origin reads EOF mid-head
+
+    // Nothing is left for this client to read, so there is no EOF to synchronise on the way the
+    // other tests do — poll the sink instead, bounded so a regression fails rather than hangs.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while origin.faults().is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let faults = origin.faults();
+    assert_eq!(
+        faults.len(),
+        1,
+        "the unterminated head is recorded exactly once: {faults:?}"
+    );
+    assert!(
+        faults[0].contains("UnexpectedEof"),
+        "classified as an early close: {faults:?}"
+    );
+    assert!(
+        faults[0].contains("before the request head terminated"),
+        "and says what was incomplete: {faults:?}"
+    );
+    assert_eq!(
+        origin.hits(),
+        0,
+        "a request whose head never arrived is not a served request"
+    );
+}
+
+/// AC1 — a truncated read must fail, naming all three facts that separate "the socket died
+/// mid-response" from "the origin sent the wrong thing". This is the gate on the *behaviour*: a
+/// `read_response` that goes back to discarding the error returns the partial and fails here.
+/// (The panic it provokes is expected and prints to stderr during a passing run.)
+#[test]
+fn read_response_panics_instead_of_returning_a_truncated_response() {
+    const PARTIAL: &str = "HTTP/1.1 200 OK\r\nETag: ";
+    let panicked = std::panic::catch_unwind(|| {
+        read_response(&mut ResetAfter {
+            pending: PARTIAL.as_bytes(),
+        })
+    })
+    .expect_err("a reset mid-response must panic, not hand back the partial read");
+
+    let msg = panicked
+        .downcast_ref::<String>()
+        .expect("the panic payload is the formatted failure message");
+    assert!(
+        msg.contains(&format!("{} byte", PARTIAL.len())),
+        "names how much arrived: {msg}"
+    );
+    assert!(
+        msg.contains("connection reset by peer"),
+        "names the underlying error: {msg}"
+    );
+    assert!(
+        msg.contains(r#""HTTP/1.1 200 OK\r\nETag: ""#),
+        "shows the partial response with escapes, so CR/LF cannot mangle the panic output: {msg}"
+    );
+}
+
+/// AC3 — rendering each response into one buffer is what makes "a single `write_all`" true by
+/// construction; testing the renderer directly also pins the bytes the 200/304 tests depend on.
+#[test]
+fn etagged_response_answers_304_only_on_a_matching_if_none_match() {
+    let body = imposter_doc(14933, "x");
+    let matched = etagged_response(&body, "\"v1\"", Some("\"v1\""));
+    assert!(matched.starts_with("HTTP/1.1 304 Not Modified\r\n"));
+    assert!(matched.contains("Content-Length: 0\r\n"));
+    assert!(matched.ends_with("\r\n\r\n"), "a 304 carries no body");
+
+    for stale in [Some("\"v0\""), None] {
+        let full = etagged_response(&body, "\"v1\"", stale);
+        assert!(
+            full.starts_with("HTTP/1.1 200 OK\r\n"),
+            "If-None-Match {stale:?} must not match"
+        );
+        assert!(full.ends_with(&body), "the 200 carries the body");
+        assert!(
+            full.contains(&format!("Content-Length: {}\r\n", body.len())),
+            "content-length counts the body bytes"
+        );
+    }
+}
+
+/// Every response the fixture can send announces the close it actually performs (issue #872).
+/// Regression-guards that the #935 rewrite kept that header on both branches.
+#[test]
+fn etagged_response_always_announces_connection_close() {
+    let body = imposter_doc(14934, "x");
+    for if_none_match in [Some("\"v1\""), None] {
+        let response = etagged_response(&body, "\"v1\"", if_none_match);
+        assert!(
+            response
+                .to_ascii_lowercase()
+                .contains("connection: close\r\n"),
+            "every branch announces the close: {response:.80}"
+        );
+    }
 }
 
 /// `serve_one` handles exactly one request and drops the socket. HTTP/1.1 defaults to keep-alive,
