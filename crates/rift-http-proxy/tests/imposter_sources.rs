@@ -741,40 +741,167 @@ async fn http_source_refuses_a_redirect_to_a_non_http_scheme() {
 /// A custom redirect policy REPLACES reqwest's default 10-hop limit, so without an explicit cap
 /// a self-referential redirect loops until the request timeout — burning the origin, and the
 /// fetch, for the whole budget. Asserted on the origin's own hit count, which is exact.
+///
+/// Served by the shared [`Origin`] rather than a hand-rolled listener (issue #939): the inline
+/// one read the head with a single fixed-buffer `read`, answered with one `write!` whose three
+/// format fragments each became their own write, and dropped the socket with request bytes still
+/// queued — which makes the OS answer with RST instead of FIN and truncate the response
+/// mid-header. `Origin` reads to the CRLFCRLF terminator, answers with one `write_all`, and
+/// records the errors it hits.
 #[tokio::test]
 async fn http_source_caps_the_redirect_chain() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("origin binds");
-    let port = listener.local_addr().unwrap().port();
-    let hits = Arc::new(AtomicUsize::new(0));
-    let h = hits.clone();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            h.fetch_add(1, Ordering::SeqCst);
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
-            // Always redirect back to ourselves: a loop that only a hop cap can stop.
-            let _ = write!(
-                stream,
-                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/loop\r\n\
-                 Content-Length: 0\r\n\r\n"
-            );
-            let _ = stream.flush();
-        }
+    // The Location has to name the port, which only exists once the listener is bound — so the
+    // self-referential loop, the one thing only a hop cap can stop, is set after start.
+    let origin = Origin::start(Reply::Redirect {
+        location: String::new(),
+    });
+    let uri = format!("http://127.0.0.1:{}/loop", origin.port);
+    origin.set(Reply::Redirect {
+        location: uri.clone(),
     });
 
     let source = HttpSource::with_timeout(Duration::from_secs(5)).unwrap();
     let err = source
-        .fetch(&SourceRef::new(format!("http://127.0.0.1:{port}/loop")))
+        .fetch(&SourceRef::new(uri))
         .await
         .map(|_| ())
         .expect_err("a redirect loop must terminate as an error");
-    let _ = err;
 
-    let seen = hits.load(Ordering::SeqCst);
+    if let Err(why) = redirect_chain_hit_the_cap(origin.hits(), &origin.faults(), &err.to_string())
+    {
+        panic!("the redirect cap was not what stopped this chain: {why}");
+    }
+}
+
+// ===== Issue #939: the cap assertion must not pass for the wrong reason =====
+
+/// Hops the origin must serve before the fetch gives up, mirroring the `attempt.previous().len()
+/// >= 10` guard in `sources.rs`.
+///
+/// The arithmetic is not the obvious one, which is why it is written down: reqwest pushes the
+/// current URL into `previous` *before* consulting the policy, so on the Nth response
+/// `previous().len() == N` — responses received so far, not hops taken before this one. Reading it
+/// the natural way gives 11 and makes this constant look off by one. It also means a reqwest
+/// upgrade that moves that push is what breaks the exact-equality check below.
+const REDIRECT_HOP_CAP: usize = 10;
+
+/// Decide whether a redirect-loop run actually proved the hop cap (issue #939).
+///
+/// Factored out of the test so it can be shown to *reject* the wrong reasons for a short chain.
+/// `seen <= 12` on its own is a green light for a chain a transport error cut off at hop two: the
+/// fetch still fails, the count is still under the bound, and the assertion proves nothing. All
+/// three conditions have to hold — the origin hit no fault of its own, the fetch failed *because
+/// of* a redirect rather than because the socket or the clock gave out first, and the origin
+/// served exactly the capped number of hops.
+///
+/// The middle check settles for "a redirect failure" rather than "too many redirects" because
+/// that is the most the error carries: `sources.rs` formats the reqwest error with `{e}`, and
+/// reqwest's `Display` emits `error following redirect for url (…)` without the
+/// `too many redirects` source underneath it. The scheme-refusal path produces a redirect error
+/// too, so it is the exact hop count — not this check — that pins *which* redirect failure.
+fn redirect_chain_hit_the_cap(seen: usize, faults: &[String], error: &str) -> Result<(), String> {
+    if !faults.is_empty() {
+        return Err(format!("the origin recorded faults of its own: {faults:?}"));
+    }
+    if !error.to_ascii_lowercase().contains("following redirect") {
+        return Err(format!(
+            "the fetch failed for some reason other than the redirect chain: {error}"
+        ));
+    }
+    if seen != REDIRECT_HOP_CAP {
+        return Err(format!(
+            "the origin served {seen} hop(s), not the {REDIRECT_HOP_CAP} the cap allows"
+        ));
+    }
+    Ok(())
+}
+
+/// What a fetch that died on the redirect chain actually reports, verbatim. Shared by every case
+/// below that has to look like a genuine redirect failure, so those cases differ only in the one
+/// input each is about.
+const REDIRECT_FAILURE: &str = "fetching imposter source http://127.0.0.1:1/loop: error following redirect for url \
+     (http://127.0.0.1:1/loop)";
+
+#[test]
+fn redirect_cap_check_accepts_a_chain_stopped_by_the_hop_cap() {
+    assert_eq!(
+        redirect_chain_hit_the_cap(REDIRECT_HOP_CAP, &[], REDIRECT_FAILURE),
+        Ok(())
+    );
+}
+
+/// The regression this issue is about: an origin whose socket dies mid-response cuts the chain
+/// off early, and a `seen <= 12` assertion calls that a proven cap.
+#[test]
+fn redirect_cap_check_rejects_a_chain_cut_short_by_a_transport_error() {
+    let rejection = redirect_chain_hit_the_cap(
+        2,
+        &[],
+        "fetching imposter source http://127.0.0.1:1/loop: error sending request for url \
+         (http://127.0.0.1:1/loop)",
+    )
+    .expect_err("a 2-hop chain must not count as a capped one");
     assert!(
-        seen <= 12,
-        "the chain must be capped at ~10 hops; the origin saw {seen} requests"
+        rejection.contains("error sending request"),
+        "the rejection must quote the transport error it rejected: {rejection}"
+    );
+}
+
+/// The nastiest shape, and the one the other cases short-circuit past: a chain that ended early
+/// while still *looking* like an ordinary redirect failure — no origin-side fault, and an error
+/// worded exactly like the capped run's. Only the hop count separates the two, so this is the
+/// case that proves the count is doing real work rather than riding along behind the other two
+/// checks.
+#[test]
+fn redirect_cap_check_rejects_a_short_chain_that_still_failed_on_a_redirect() {
+    let rejection = redirect_chain_hit_the_cap(3, &[], REDIRECT_FAILURE)
+        .expect_err("a 3-hop chain must not count as a capped one");
+    assert!(
+        rejection.contains("served 3 hop(s)"),
+        "the rejection must name the hop count it saw: {rejection}"
+    );
+    assert!(
+        rejection.contains(&REDIRECT_HOP_CAP.to_string()),
+        "the rejection must name the cap it expected: {rejection}"
+    );
+}
+
+#[test]
+fn redirect_cap_check_rejects_an_origin_that_recorded_a_fault() {
+    let rejection = redirect_chain_hit_the_cap(
+        REDIRECT_HOP_CAP,
+        &["InvalidData: request head reached 8192 bytes".to_string()],
+        REDIRECT_FAILURE,
+    )
+    .expect_err("an origin-side fault must not be masked by a hop count that happens to match");
+    assert!(
+        rejection.contains("InvalidData"),
+        "the rejection must carry the fault it saw: {rejection}"
+    );
+}
+
+#[test]
+fn redirect_cap_check_rejects_a_failure_that_was_not_the_redirect_chain() {
+    let rejection = redirect_chain_hit_the_cap(
+        REDIRECT_HOP_CAP,
+        &[],
+        "fetching imposter source http://127.0.0.1:1/loop: operation timed out",
+    )
+    .expect_err("the fetch must have failed because of the chain, not the clock");
+    assert!(
+        rejection.contains("timed out"),
+        "the rejection must quote the error it rejected: {rejection}"
+    );
+}
+
+/// The direction the original assertion did cover, kept: an uncapped policy loops past the cap.
+#[test]
+fn redirect_cap_check_rejects_an_uncapped_chain() {
+    let rejection = redirect_chain_hit_the_cap(REDIRECT_HOP_CAP + 5, &[], REDIRECT_FAILURE)
+        .expect_err("a chain that ran past the cap must fail");
+    assert!(
+        rejection.contains(&REDIRECT_HOP_CAP.to_string()),
+        "the rejection must name the cap it expected: {rejection}"
     );
 }
 
