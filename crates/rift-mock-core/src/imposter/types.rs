@@ -46,6 +46,39 @@ pub struct RecordedRequest {
     /// never "did not match".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_outcome: Option<MatchOutcome>,
+    /// The status that went back, and how long the imposter took to produce it (issue #364).
+    ///
+    /// Attached after the response exists, like [`Self::match_outcome`] and for the same reason:
+    /// the entry is journalled *before* matching, so neither is knowable at record time. They are
+    /// two fields rather than one because the console renders them as two columns, and one being
+    /// present without the other is not a state that can occur — both are attached together or
+    /// neither is.
+    ///
+    /// Absent means **not recorded**, never zero. A `0` here would read as "instant" and a
+    /// missing status as "no response"; both are claims this engine cannot make about a request
+    /// whose outcome it did not observe — the `X-Rift-Debug` path returns early, and a request
+    /// journalled before an error never reaches the attach.
+    ///
+    /// A present `latency_ms` of `0` is an ordinary reading, not a missing one: a stub answered
+    /// from memory usually takes well under a millisecond. The resolution is chosen for the
+    /// question the column exists to answer — *is this mock the slow thing?* — where the
+    /// interesting values are `behaviors.wait` delays and proxied upstreams, both far above 1 ms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    /// Which node served this request, when something clustered is embedding this engine.
+    ///
+    /// **Never set by this crate.** Single-node Rift has exactly one node and no name for it, so
+    /// the field exists here only because the journal entry is this crate's type: a
+    /// [`RequestJournal`](crate::imposter::RequestJournal) implementation that spans nodes stamps
+    /// it in its own `record`, where the node's identity is actually known.
+    ///
+    /// A `String`, not a numeric id: node identity is an identifier and never a magnitude, and an
+    /// embedder whose ids exceed 2^53 would otherwise have them silently rounded by any JavaScript
+    /// reading the journal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 /// Cap on the candidates named in [`MatchOutcome::tried`]; the rest are counted in
@@ -2106,6 +2139,69 @@ mod tests {
         assert_eq!(object.probability(), 0.25);
     }
 
+    /// Issue #364: recordings persist, so a journal written before these fields existed must still
+    /// read back — and must read back as *absent*, not as a zero status served instantly.
+    #[test]
+    fn a_recording_from_before_the_outcome_fields_still_deserializes() {
+        let before: RecordedRequest = serde_json::from_value(json!({
+            "requestFrom": "127.0.0.1:1234",
+            "method": "GET",
+            "path": "/x",
+            "query": {},
+            "headers": {},
+            "timestamp": "2026-01-01T00:00:00Z",
+        }))
+        .expect("a pre-#364 recording still deserializes");
+
+        assert_eq!(before.status, None);
+        assert_eq!(before.latency_ms, None);
+        assert_eq!(before.node, None);
+    }
+
+    /// Issue #364, the other half of the compatibility contract: an entry carrying no outcome
+    /// serializes byte-identically to the pre-#364 shape, so nothing that reads existing
+    /// recordings sees three new keys appear. Same discipline as `_mode` below.
+    #[test]
+    fn an_unannotated_recording_omits_the_outcome_fields() {
+        let req = RecordedRequest {
+            request_from: "127.0.0.1:1234".to_string(),
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+            mode: ResponseMode::Text,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            match_outcome: None,
+            status: None,
+            latency_ms: None,
+            node: None,
+        };
+        let value = serde_json::to_value(&req).expect("serializes");
+        let object = value.as_object().expect("an object");
+        // `latencyMs`, not `latency_ms`: this struct is `rename_all = "camelCase"`, so these are
+        // the names a client actually sees — and asserting the snake_case spelling would pass
+        // vacuously while proving nothing.
+        assert!(!object.contains_key("status"), "absent, not null: {value}");
+        assert!(
+            !object.contains_key("latencyMs"),
+            "absent, not null: {value}"
+        );
+        assert!(!object.contains_key("node"), "absent, not null: {value}");
+
+        // And when they are set, they are plain fields the console can read.
+        let annotated = RecordedRequest {
+            status: Some(503),
+            latency_ms: Some(42),
+            node: Some("rift-2".to_string()),
+            ..req
+        };
+        let value = serde_json::to_value(&annotated).expect("serializes");
+        assert_eq!(value["status"], 503);
+        assert_eq!(value["latencyMs"], 42);
+        assert_eq!(value["node"], "rift-2");
+    }
+
     // Issue #636: a text-bodied `RecordedRequest` must serialize byte-identically to the
     // pre-#636 shape — no `_mode` key at all — so existing recordings and all-text traffic are
     // unaffected by this change.
@@ -2121,6 +2217,9 @@ mod tests {
             mode: ResponseMode::Text,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             match_outcome: None,
+            status: None,
+            latency_ms: None,
+            node: None,
         };
         let value = serde_json::to_value(&req).expect("serializes");
         assert!(
@@ -2144,6 +2243,9 @@ mod tests {
             mode: ResponseMode::Binary,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             match_outcome: None,
+            status: None,
+            latency_ms: None,
+            node: None,
         };
         let value = serde_json::to_value(&req).expect("serializes");
         assert_eq!(value["_mode"], "binary");
@@ -2166,6 +2268,9 @@ mod tests {
             mode: ResponseMode::Text,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             match_outcome: None,
+            status: None,
+            latency_ms: None,
+            node: None,
         };
         assert_eq!(
             serde_json::to_string(&req).expect("serializes"),

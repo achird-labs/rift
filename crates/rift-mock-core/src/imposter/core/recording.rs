@@ -57,6 +57,17 @@ impl Imposter {
             .attach_match(self.journal_port(), index, outcome);
     }
 
+    /// Attach the response status and elapsed time to the entry [`record_request`](Self::record_request)
+    /// returned `index` for, once the response has been produced (issue #364).
+    ///
+    /// Infallible on the same terms as [`attach_match_outcome`](Self::attach_match_outcome), and
+    /// for the same reason: a journal annotation that could fail a request would trade a real
+    /// response for a diagnostic.
+    pub fn attach_response_outcome(&self, index: u64, status: u16, latency_ms: u64) {
+        self.journal
+            .attach_response(self.journal_port(), index, status, latency_ms);
+    }
+
     /// Read recorded requests with the backend's completeness flag intact, so embedders
     /// can observe a degraded read programmatically (issue #314).
     pub fn read_recorded_requests(&self) -> JournalRead {

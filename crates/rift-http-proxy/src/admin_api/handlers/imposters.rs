@@ -1136,6 +1136,9 @@ mod requests_filter_tests {
             body: None,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             match_outcome: None,
+            status: None,
+            latency_ms: None,
+            node: None,
         }
     }
 
@@ -1908,6 +1911,9 @@ mod verify_tests {
             body: None,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             match_outcome: None,
+            status: None,
+            latency_ms: None,
+            node: None,
         }
     }
 
@@ -2099,6 +2105,9 @@ mod replace_all_tests {
                 body: None,
                 timestamp: "2026-01-01T00:00:00Z".to_string(),
                 match_outcome: None,
+                status: None,
+                latency_ms: None,
+                node: None,
             });
 
         let body = serde_json::json!({"imposters": [cfg]}).to_string();

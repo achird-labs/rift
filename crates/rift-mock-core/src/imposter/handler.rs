@@ -41,7 +41,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, trace, warn};
 
 /// Maximum allowed request body size (10 MB)
@@ -331,11 +331,34 @@ pub async fn handle_imposter_request(
     let allow_cors = imposter.config.allow_cors;
     // Capture the method before `req` is consumed so we can record the request metric (issue #269).
     let method = req.method().to_string();
-    let mut response = handle_request_inner(req, imposter, client_addr).await?;
+    /*
+     * Issue #364. The journal entry is written inside `handle_request_inner`, before matching and
+     * long before a response exists, so the status and the elapsed time can only be attached from
+     * out here — where the finished response is, and where the clock started.
+     *
+     * The index travels out through an out-parameter rather than the return type because `inner`
+     * returns from eight places. Widening its return would touch every one of them to carry a
+     * value only this caller reads, and each extra site is a chance to drop it.
+     */
+    let started = Instant::now();
+    let mut journal_index = None;
+    let mut response =
+        handle_request_inner(req, Arc::clone(&imposter), client_addr, &mut journal_index).await?;
     // Record `rift_requests_total` once per request the imposter serves (issue #269). The imposter
     // serve path recorded no Prometheus metrics before; the recording proxy engine
     // (`proxy/handler.rs`) is a disjoint path, so there is no double-count.
     crate::extensions::record_request(&method, response.status().as_u16());
+    if let Some(index) = journal_index {
+        // Measured before CORS injection below, which is a header edit this node performs after
+        // the imposter has finished — counting it would report the engine as slower than it was.
+        imposter.attach_response_outcome(
+            index,
+            response.status().as_u16(),
+            // Saturating rather than `as`: a request parked long enough to overflow `u64`
+            // milliseconds is not reachable, but a silent wrap would report it as instant.
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
+    }
     if allow_cors {
         inject_cors_headers(response.headers_mut());
     }
@@ -381,10 +404,14 @@ fn sanitize_header_value(value: &str) -> String {
     sanitized
 }
 
+/// `journal_index` is an out-parameter: the index of the entry this request was recorded under, so
+/// the caller can attach the status and elapsed time once the response exists (issue #364). Left
+/// `None` when nothing was recorded — recording off, or a backend with no stable indices.
 async fn handle_request_inner(
     req: Request<Incoming>,
     imposter: Arc<Imposter>,
     client_addr: SocketAddr,
+    journal_index: &mut Option<u64>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     // Check if enabled
     if !imposter.is_enabled() {
@@ -508,7 +535,7 @@ async fn handle_request_inner(
     // request's match outcome can be attached to that exact entry once matching has finished;
     // `None` means there is no entry to annotate — recording is off, or the backend has no stable
     // indices.
-    let journal_index = if imposter.config.record_requests {
+    *journal_index = if imposter.config.record_requests {
         let recorded = RecordedRequest {
             request_from: client_addr.to_string(),
             method: method.clone(),
@@ -522,6 +549,12 @@ async fn handle_request_inner(
             timestamp: chrono::Utc::now().to_rfc3339(),
             // Filled in after the match, via `attach_match_outcome` below.
             match_outcome: None,
+            // Filled in after the response exists, by `attach_response_outcome` in the caller.
+            status: None,
+            latency_ms: None,
+            // Never set here: this engine is one node and has no name for itself. A clustered
+            // journal stamps it in its own `record` (issue #364).
+            node: None,
         };
         imposter.record_request(recorded)
     } else {
@@ -659,7 +692,7 @@ async fn handle_request_inner(
     // Attach once, from the FINAL match state — after any rescue, and never on the paths that
     // returned above (the debug branch and a matcher error), where absence of an outcome is the
     // honest report that none was reached.
-    if let (Some(index), Some(trace)) = (journal_index, trace) {
+    if let (Some(index), Some(trace)) = (*journal_index, trace) {
         let winner = matched.as_ref().map(|(state, i)| (&state.stub, *i));
         imposter.attach_match_outcome(index, trace.into_outcome(winner));
     }
