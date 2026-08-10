@@ -3,7 +3,7 @@
 This directory is published per Rift release as **`sdk-conformance-<version>.tar.gz`** (a GitHub
 release asset). Every official Rift SDK (rift-java, rift-go, rift-scala, rift-node) replays this
 corpus in its CI. It is the single source of truth for **DSL ↔ engine parity**: a fixture the SDK's
-typed DSL cannot express is a red SDK build (RFC-003 §9.2, risk R1).
+typed DSL cannot express is a red SDK build.
 
 The corpus is **engine-canonical**: it lives here, in the engine repo, alongside the `_verify`
 schema (issue #251) and its reference replayer `rift-verify`, and is version-locked to the engine

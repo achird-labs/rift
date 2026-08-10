@@ -58,8 +58,16 @@ Clippy is `-D warnings`. There is no warning budget. Doctests are part of the su
 in the docs are compiled, which is why they are trustworthy, and why breaking one fails the build.
 
 If you touched the FFI surface, also run `scripts/verify-ffi-cdylib.sh`. If you touched
-Mountebank-visible behaviour, run the conformance corpus — compatibility is the promise this project
-is built on, and it is tested rather than asserted.
+Mountebank-visible behaviour, replay the conformance corpus:
+
+```sh
+cargo test -p rift-http-proxy --test corpus_replay
+```
+
+That corpus in [`sdk-conformance/`](sdk-conformance/) is the single source of truth for DSL-to-engine
+parity, and all four SDKs replay it in their own CI — so a fixture that breaks here breaks four
+downstream repos. Compatibility is the promise this project is built on, and it is tested rather
+than asserted.
 
 ## What a good PR looks like
 
