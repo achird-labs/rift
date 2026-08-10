@@ -715,7 +715,24 @@ async fn http_source_enforces_its_timeout() {
         "the timeout must fire well before the origin answers; took {:?}",
         started.elapsed()
     );
-    let _ = err;
+    // The elapsed check alone proves only that the fetch failed *fast* — a refused connection or a
+    // reset origin satisfies it just as well as the timeout under test, which is what discarding
+    // the error with `let _ = err;` let through (issue #950).
+    //
+    // Asked of the error structurally rather than by message: `{err:#}` could tell the two apart,
+    // since `TimedOut` renders as "operation timed out" in the chain, but that would pin reqwest's
+    // wording where what matters is its classification. `is_timeout` walks the chain for the marker
+    // whichever phase planted it — connect, headers or body. The chain reaches us at all only
+    // because issue #951 stopped the wrap from severing it, which is why the two failures below
+    // are separate assertions: they are separate regressions.
+    let transport = err
+        .chain()
+        .find_map(|c| c.downcast_ref::<reqwest::Error>())
+        .expect("the transport error must survive as a link in the chain (issue #951)");
+    assert!(
+        transport.is_timeout(),
+        "the fetch must have failed on the timeout, not some other transport error: {err:#}"
+    );
 }
 
 /// Behaviour pin, not a proof of our own line: mutation testing showed reqwest refuses a
