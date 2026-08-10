@@ -225,13 +225,19 @@ impl HttpSource {
     ///
     /// Enforced while streaming rather than from `Content-Length`: the header is optional under
     /// chunked encoding and is attacker-supplied anyway, so trusting it would cap nothing.
+    ///
+    /// Every exit below names the source exactly once, which is why the caller wraps this in no
+    /// further context (issue #953): a wrap there would re-name the URI on the two branches that
+    /// already embed it.
     async fn read_capped(response: reqwest::Response, uri: &str) -> anyhow::Result<String> {
         use futures::StreamExt;
 
         let mut body: Vec<u8> = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            // Context, not `anyhow!("…: {e}")`: the reqwest error has to stay a link in the chain
+            // so `is_timeout()` can still find a body-phase timeout through it (issue #951).
+            let chunk = chunk.with_context(|| format!("reading imposter source {uri}"))?;
             if body.len() + chunk.len() > MAX_BODY_BYTES {
                 anyhow::bail!(
                     "imposter source {uri} exceeds the {MAX_BODY_BYTES}-byte limit; refusing to \

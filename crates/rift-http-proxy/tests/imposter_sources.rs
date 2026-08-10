@@ -31,6 +31,14 @@ enum Reply {
     Oversized { size: usize },
     /// Sleep before answering, to prove the timeout.
     Slow { delay: Duration },
+    /// Promise `promised` bytes, write only `sent`, then close — the client's body read fails
+    /// mid-stream. Distinct from `Oversized`, which fails because the body is too *large*: this
+    /// one fails in the transport, which is the path that loses the source URI (issue #953).
+    Truncated { promised: usize, sent: usize },
+    /// Write the headers and `sent` body bytes, then stall without closing. Unlike `Slow`, which
+    /// stalls *before* the response exists and so times out in `send()`, this reaches the client's
+    /// body loop first — the only way to exercise a body-phase timeout.
+    StallMidBody { sent: usize, stall: Duration },
 }
 
 struct Origin {
@@ -192,6 +200,33 @@ fn respond(
             stream.write_all(
                 b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n[]",
             )?;
+        }
+        Reply::Truncated { promised, sent } => {
+            stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\
+                     Content-Length: {promised}\r\n\r\n"
+                )
+                .as_bytes(),
+            )?;
+            stream.write_all(&vec![b'x'; sent])?;
+            // Returning `Ok` on a body we deliberately cut short is the point: the short write is
+            // this fixture's contract, so it must not land in `faults` (issue #935).
+        }
+        Reply::StallMidBody { sent, stall } => {
+            // One byte more than we will ever send, so the client stays in its body loop waiting
+            // for a remainder that never arrives.
+            stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\
+                     Content-Length: {}\r\n\r\n",
+                    sent + 1
+                )
+                .as_bytes(),
+            )?;
+            stream.write_all(&vec![b'x'; sent])?;
+            stream.flush()?;
+            std::thread::sleep(stall);
         }
     }
     stream.flush()
@@ -696,6 +731,103 @@ async fn http_source_refuses_an_oversized_body() {
     assert!(
         msg.contains("limit") || msg.contains("exceeds"),
         "the error must say the cap was hit: {msg}"
+    );
+    // The cap branch embeds the URI itself, so it is the other path a call-site wrap would make
+    // say "imposter source" twice (issue #953).
+    assert_eq!(
+        msg.matches("imposter source").count(),
+        1,
+        "the source must be named exactly once, not once per wrap: {msg}"
+    );
+}
+
+/// The third way `read_capped` can fail, and the last one that was still anonymous: the body dies
+/// mid-stream. The size-cap and non-UTF-8 branches embed the URI in their own messages, but a
+/// transport failure rode a bare `?`, so the operator saw `error decoding response body` with
+/// nothing to say *which* `--imposters` source had died (issue #953).
+///
+/// Both halves are asserted because they are separate regressions, exactly as in
+/// `http_source_error_keeps_the_reqwest_cause_in_its_chain`: the message half fails if the context
+/// wrap is dropped, and the chain half fails if someone re-adds it as `anyhow!("…: {e}")`, which
+/// reads identically but severs `source()` and takes `is_timeout()` with it.
+#[tokio::test]
+async fn body_read_failure_names_the_source() {
+    let origin = Origin::start(Reply::Truncated {
+        promised: 4096,
+        sent: 16,
+    });
+    let err = HttpSource::new()
+        .unwrap()
+        .fetch(&SourceRef::new(origin.uri()))
+        .await
+        .expect_err("a body that ends mid-stream must fail the fetch");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains(&format!("reading imposter source {}", origin.uri())),
+        "the failure must name the source that died: {msg}"
+    );
+    // Exactly once, and counted on the phrase rather than on the URI: what this pins is that our
+    // own wraps name the source once, and reqwest is free to put the URL in its own message text
+    // without that being a fault of ours. A `with_context` added at `read_capped`'s call site —
+    // the change this design deliberately does not make — would say "imposter source" twice here
+    // and still satisfy a `contains` check.
+    assert_eq!(
+        msg.matches("imposter source").count(),
+        1,
+        "the source must be named exactly once, not once per wrap: {msg}"
+    );
+    assert!(
+        err.chain()
+            .find_map(|c| c.downcast_ref::<reqwest::Error>())
+            .is_some(),
+        "the transport error must survive as a link in the chain, not be flattened into text \
+         (issue #951): {msg}"
+    );
+    let faults = origin.faults();
+    assert!(
+        faults.is_empty(),
+        "cutting the body short is this fixture's contract, not an origin fault: {faults:?}"
+    );
+}
+
+/// The body-phase half of the timeout guarantee, and the reason the issue #953 wrap uses
+/// `.with_context(…)` rather than `anyhow!("…: {e}")`.
+///
+/// `http_source_enforces_its_timeout` below cannot prove this: `Reply::Slow` sleeps *before*
+/// writing anything, so its timeout fires inside `send()` and never reaches the body loop — which
+/// left the newly wrapped line's stated rationale resting on the comment alone. Here the headers
+/// arrive and the body then stalls, so the timeout fires under the new wrap, where a severed
+/// chain would leave `is_timeout()` with nothing to find.
+#[tokio::test]
+async fn a_body_phase_timeout_stays_recognisable_through_the_context_wrap() {
+    let origin = Origin::start(Reply::StallMidBody {
+        sent: 16,
+        stall: Duration::from_secs(3),
+    });
+    let started = std::time::Instant::now();
+    let err = HttpSource::with_timeout(Duration::from_millis(150))
+        .unwrap()
+        .fetch(&SourceRef::new(origin.uri()))
+        .await
+        .expect_err("a body that never finishes must not hang the fetch");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the timeout must fire while the body is stalled; took {elapsed:?}"
+    );
+
+    let transport = err
+        .chain()
+        .find_map(|c| c.downcast_ref::<reqwest::Error>())
+        .expect("the transport error must survive the context wrap (issue #951)");
+    assert!(
+        transport.is_timeout(),
+        "a stalled body must report as a timeout, not some other transport error: {err:#}"
+    );
+    assert!(
+        format!("{err:#}").contains(&format!("reading imposter source {}", origin.uri())),
+        "and it must still name the source it stalled on: {err:#}"
     );
 }
 
