@@ -18,6 +18,11 @@ use crate::config_loader::{self, ConfigSource, LoadedConfig};
 use crate::front_door::RouteTable;
 use crate::imposter::ImposterConfig;
 use crate::intercept_control::InterceptStartOptions;
+// `.context(…)` keeps the original error as `source()`. `anyhow!("…: {e}")` does not — it renders
+// the cause into a string and returns a fresh, sourceless error, which is why every wrap in this
+// file with a cause worth keeping uses `Context` (issue #951). The `map_err(|_| …)` wraps on the
+// poisoned-mutex paths are the deliberate exception: a `PoisonError` carries nothing to keep.
+use anyhow::Context as _;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -235,8 +240,7 @@ impl HttpSource {
             }
             body.extend_from_slice(&chunk);
         }
-        String::from_utf8(body)
-            .map_err(|e| anyhow::anyhow!("imposter source {uri} is not valid UTF-8: {e}"))
+        String::from_utf8(body).with_context(|| format!("imposter source {uri} is not valid UTF-8"))
     }
 }
 
@@ -261,10 +265,14 @@ impl ImposterSource for HttpSource {
                 request = request.header(reqwest::header::IF_NONE_MATCH, &cached.etag);
             }
 
+            // The reqwest error must stay a link in the chain, not become text: its `Display` is
+            // only the kind ("error following redirect", "error sending request"), so the reason —
+            // our own `too many redirects` / scheme refusal, or the `TimedOut` marker that tells a
+            // timeout from a reset — lives solely in `source()` (issue #951).
             let response = request
                 .send()
                 .await
-                .map_err(|e| anyhow::anyhow!("fetching imposter source {}: {e}", r.uri))?;
+                .with_context(|| format!("fetching imposter source {}", r.uri))?;
 
             // Unchanged: serve the configs parsed on the last fetch. Nothing is re-parsed, and
             // the caller is told so it can skip re-applying an identical config.
@@ -302,7 +310,7 @@ impl ImposterSource for HttpSource {
                 .map(str::to_owned);
             let body = Self::read_capped(response, &r.uri).await?;
             let loaded = config_loader::parse_remote_document(&body, &r.uri)
-                .map_err(|e| anyhow::anyhow!("imposter source {}: {e}", r.uri))?;
+                .with_context(|| format!("imposter source {}", r.uri))?;
 
             if let Some(etag) = &etag {
                 self.cache
