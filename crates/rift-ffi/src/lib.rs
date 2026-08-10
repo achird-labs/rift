@@ -1509,7 +1509,7 @@ pub unsafe extern "C" fn rift_start_intercept(
 }
 
 /// Stop the intercept listener started by [`rift_start_intercept`] (or over the embedded admin
-/// plane's `POST /intercept`), releasing its port and dropping its rules + CA — RFC-003 parity with
+/// plane's `POST /intercept`), releasing its port and dropping its rules + CA — parity with
 /// `DELETE /intercept`. Idempotent: stopping when nothing is running is a successful no-op. Returns
 /// `0` on success, `-1` only on a null handle or a caught panic. A subsequent
 /// [`rift_start_intercept`] without CA paths mints a fresh CA, so re-export the CA afterwards.

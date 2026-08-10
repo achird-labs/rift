@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.92%2B%20stable-orange)](https://www.rust-lang.org/)
 
-Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible mock server that delivers **~20–150x faster throughput on typical workloads, and up to ~1,850x on large regex predicate sets** — the conservative laptop figures from the table below; the 16-vCPU server column is higher still. Use your existing Mountebank configurations and enjoy faster test execution.
+Rift is a [Mountebank](https://www.mbtest.dev/)-compatible mock server written in Rust. Its throughput stays **flat as your stub file grows** — on an M4 laptop, 211,378 → 209,523 RPS between the first and the last stub of the same 310-stub imposter, where Mountebank falls 8,546 → 1,344 across that same pair — and the same engine embeds in-process in **Java, Node, Go and Scala**. It loads your existing `imposters.json` unchanged.
 
 **[Documentation](https://achird-labs.github.io/rift/)** | **[Quick Start](#quick-start)** | **[Examples](examples/)**
 
@@ -23,7 +23,14 @@ Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible moc
 - **Same Configuration** - Load your `imposters.json` without changes
 - **Same Behavior** - Predicates, responses, behaviors all work identically
 
-### Blazing Fast Performance
+### Performance
+
+**The slope matters more than the multiple.** A mock server's job is to decide which of your stubs
+matches a request, and the straightforward way to do that is to try each one in turn — so its cost
+grows with a config file that only ever grows. Rift indexes stubs instead of scanning them. Measured
+against stub *position* alone, holding the corpus and the predicate shape fixed: moving from the
+first stub of a 310-stub imposter to the last costs Rift **0.9%** of its throughput and Mountebank
+**84%**. [How the matching works](https://achird-labs.github.io/rift/performance/).
 
 Both engines, same machine, same load — measured on two very different hosts so you can see how
 much of the gap is the engine and how much is the hardware:

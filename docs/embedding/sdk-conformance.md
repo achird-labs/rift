@@ -10,7 +10,7 @@ nav_order: 4
 Every Rift release publishes **`sdk-conformance-<version>.tar.gz`** as a GitHub release asset. It is
 the shared corpus that every official Rift SDK (rift-java, rift-go, rift-scala, rift-node) replays in
 its CI to prove its typed DSL stays in lockstep with the engine grammar — a fixture the DSL cannot
-express is a red SDK build (RFC-003 §9.2, risk R1).
+express is a red SDK build.
 
 The corpus is **engine-canonical**: it is vendored in this repo under `sdk-conformance/`, alongside
 the `_verify` schema and its reference replayer `rift-verify`, and is version-locked to the release
