@@ -40,6 +40,19 @@ record.
 
 ### Fixed
 
+- **A `--imposters` fetch that dies part-way through the body now names *which* source died**
+  (issue #953). `HttpSource::read_capped` can fail three ways, and two of them — the size-cap
+  refusal and the non-UTF-8 body — embed the source URI in their own message. The third, a
+  transport failure mid-body, rode a bare `?`, so all that reached the operator was `error decoding
+  response body`. With several `--imposters` sources configured that names none of them, which is
+  exactly the situation where the only useful question is *which one*. The chunk read is wrapped
+  with `.with_context(…)` now, matching the convention the send and parse paths in this file
+  adopted above. The wrap sits inside `read_capped` rather than around its call site, so every exit
+  path names the source exactly once — wrapping the call would have prefixed the cap and UTF-8
+  messages with a second copy of the URI they already carry. As in that earlier fix, the
+  `reqwest::Error` survives as a link in the chain rather than being rendered into text, so a
+  body-phase timeout stays distinguishable from a reset via `is_timeout()`.
+
 - **A failing `--imposters` fetch now tells you *why*.** `HttpSource::fetch` wrapped its errors
   with `anyhow!("fetching imposter source {uri}: {e}")`, which renders the cause into a string and
   returns a fresh error with no `source()` — severing the chain at the wrap, not merely hiding it
