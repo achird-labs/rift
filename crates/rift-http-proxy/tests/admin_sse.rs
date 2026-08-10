@@ -235,20 +235,32 @@ async fn request_event_matches_saved_requests() {
             .await
             .expect("saved json");
     let mut entry = saved[0].clone();
-    let outcome = entry
+    let object = entry
         .as_object_mut()
-        .expect("savedRequests entry is an object")
-        .remove("matchOutcome");
+        .expect("savedRequests entry is an object");
+    let outcome = object.remove("matchOutcome");
+    // Issue #364: `status` and `latencyMs` are attached after the response exists, exactly as
+    // `matchOutcome` is attached after the match — so they belong to the same category and are
+    // stripped for the same reason. The SSE push is a record-time copy by design.
+    let status = object.remove("status");
+    let latency = object.remove("latencyMs");
     assert!(
         outcome.is_some(),
         "the journal entry carries a match outcome: {}",
         saved[0]
     );
     assert!(
-        v["request"].get("matchOutcome").is_none(),
-        "the pushed copy predates the match, so it cannot carry an outcome: {}",
-        v["request"]
+        status.is_some() && latency.is_some(),
+        "the journal entry carries a response outcome (#364): {}",
+        saved[0]
     );
+    for annotation in ["matchOutcome", "status", "latencyMs"] {
+        assert!(
+            v["request"].get(annotation).is_none(),
+            "the pushed copy predates the response, so it cannot carry {annotation}: {}",
+            v["request"]
+        );
+    }
     assert_eq!(
         v["request"], entry,
         "SSE request JSON must equal the savedRequests entry"

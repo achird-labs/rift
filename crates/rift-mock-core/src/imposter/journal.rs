@@ -145,6 +145,20 @@ pub trait RequestJournal: Send + Sync {
     fn attach_match(&self, port: u16, index: u64, outcome: MatchOutcome) {
         let _ = (port, index, outcome);
     }
+
+    /// Attach the response status and the time taken to the entry `index` names (issue #364).
+    ///
+    /// A second write for the same reason [`attach_match`](Self::attach_match) is one: the entry is
+    /// journalled before the request is matched, let alone answered, so neither the status nor the
+    /// duration exists yet when `record` runs.
+    ///
+    /// Defaults to a no-op, and is infallible, on exactly the terms `attach_match` sets out — a
+    /// backend without stable indices cannot address the entry, and an entry evicted between the
+    /// record and the response is not an error. A diagnostic annotation must never be able to fail
+    /// a request.
+    fn attach_response(&self, port: u16, index: u64, status: u16, latency_ms: u64) {
+        let _ = (port, index, status, latency_ms);
+    }
 }
 
 #[derive(Default)]
@@ -314,6 +328,17 @@ impl RequestJournal for LocalJournal {
             entries[position].2.match_outcome = Some(outcome);
         }
     }
+
+    fn attach_response(&self, port: u16, index: u64, status: u16, latency_ms: u64) {
+        let slot = self.slot(port);
+        let mut entries = slot.entries.write();
+        // Same exactness as `attach_match`: indices are assigned under this write lock, so the
+        // deque is in strictly ascending index order and the search is precise, not heuristic.
+        if let Ok(position) = entries.binary_search_by(|(entry, _, _)| entry.cmp(&index)) {
+            entries[position].2.status = Some(status);
+            entries[position].2.latency_ms = Some(latency_ms);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -332,7 +357,90 @@ mod tests {
             body: None,
             timestamp: "t".into(),
             match_outcome: None,
+            status: None,
+            latency_ms: None,
+            node: None,
         }
+    }
+
+    /// Issue #364: the status and elapsed time land on the entry the index names, and only that one.
+    #[test]
+    fn attach_response_annotates_exactly_the_indexed_entry() {
+        let j = LocalJournal::default();
+        let first = j.record_indexed(1, "f", req("/a")).expect("indexed");
+        let second = j.record_indexed(1, "f", req("/b")).expect("indexed");
+
+        j.attach_response(1, second, 503, 42);
+
+        let entries = j.read(1).entries;
+        let a = entries
+            .iter()
+            .find(|r| r.path == "/a")
+            .expect("/a retained");
+        let b = entries
+            .iter()
+            .find(|r| r.path == "/b")
+            .expect("/b retained");
+        assert_eq!((b.status, b.latency_ms), (Some(503), Some(42)));
+        // The neighbour is untouched — absent, not defaulted to a zero that would read as
+        // "answered instantly with no status".
+        assert_eq!((a.status, a.latency_ms), (None, None));
+        assert_ne!(first, second);
+    }
+
+    /// Issue #364. Attaching to an entry that no longer exists is a no-op, never a panic: a
+    /// diagnostic annotation must not be able to fail the request it describes.
+    #[test]
+    fn attach_response_to_a_missing_entry_is_a_no_op() {
+        let j = LocalJournal::default();
+        let index = j.record_indexed(1, "f", req("/a")).expect("indexed");
+        j.clear(1).expect("clear");
+
+        j.attach_response(1, index, 200, 1);
+        j.attach_response(1, index + 9_999, 200, 1);
+
+        assert!(j.read(1).entries.is_empty());
+    }
+
+    /// Issue #364. A journal with no stable indices cannot address an entry, so the trait default
+    /// is a no-op — the backend simply never carries outcomes, and nothing else about it changes.
+    #[test]
+    fn a_backend_without_indices_ignores_the_attach() {
+        struct NoIndices(RwLock<Vec<RecordedRequest>>);
+        impl RequestJournal for NoIndices {
+            fn note_request(&self, _port: u16) {}
+            fn record(&self, _port: u16, _flow_id: &str, req: RecordedRequest) {
+                self.0.write().push(req);
+            }
+            fn read(&self, _port: u16) -> JournalRead {
+                JournalRead {
+                    entries: self.0.read().clone(),
+                    complete: true,
+                }
+            }
+            fn clear(&self, _port: u16) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn retain(&self, _port: u16, _keep: &dyn Fn(&RecordedRequest) -> bool) {}
+            fn clear_flow(&self, _port: u16, _flow_id: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn count(&self, _port: u16) -> u64 {
+                0
+            }
+        }
+
+        let j = NoIndices(RwLock::new(Vec::new()));
+        assert_eq!(
+            j.record_indexed(1, "f", req("/a")),
+            None,
+            "no stable indices"
+        );
+        j.attach_response(1, 0, 500, 7);
+
+        let entries = j.read(1).entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!((entries[0].status, entries[0].latency_ms), (None, None));
     }
 
     // AC1: the 10k cap evicts oldest-first, exactly like the embedded Vec did.
