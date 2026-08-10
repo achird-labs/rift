@@ -2,7 +2,7 @@
 
 **High-performance Mountebank-compatible HTTP/HTTPS mock server written in Rust**
 
-[![Status](https://img.shields.io/badge/status-stable-brightgreen)](https://github.com/achird-labs/rift/releases/latest)
+[![Status](https://img.shields.io/badge/status-beta-yellow)](https://github.com/achird-labs/rift/releases/latest)
 [![Release](https://img.shields.io/github/v/release/achird-labs/rift)](https://github.com/achird-labs/rift/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/rift-http-proxy)](https://crates.io/crates/rift-http-proxy)
 [![Docker](https://img.shields.io/docker/v/zainalpour/rift-proxy?label=docker)](https://hub.docker.com/r/zainalpour/rift-proxy)
@@ -12,6 +12,8 @@
 Rift is a [Mountebank](https://www.mbtest.dev/)-compatible mock server written in Rust. Its throughput stays **flat as your stub file grows** — on an M4 laptop, 211,378 → 209,523 RPS between the first and the last stub of the same 310-stub imposter, where Mountebank falls 8,546 → 1,344 across that same pair — and the same engine embeds in-process in **Java, Node, Go and Scala**. It loads your existing `imposters.json` unchanged.
 
 **[Documentation](https://achird-labs.github.io/rift/)** | **[Quick Start](#quick-start)** | **[Examples](examples/)**
+
+![Starting Rift in Docker, creating an imposter over the Mountebank-compatible admin API, and calling it](docs/assets/demo.gif)
 
 ---
 
@@ -31,6 +33,8 @@ grows with a config file that only ever grows. Rift indexes stubs instead of sca
 against stub *position* alone, holding the corpus and the predicate shape fixed: moving from the
 first stub of a 310-stub imposter to the last costs Rift **0.9%** of its throughput and Mountebank
 **84%**. [How the matching works](https://achird-labs.github.io/rift/performance/).
+
+![Throughput at the first, middle and last matching stub of one 310-stub imposter. Rift is flat on both hosts; WireMock falls 69% and Mountebank 84%.](docs/assets/flatness.png)
 
 Both engines, same machine, same load — measured on two very different hosts so you can see how
 much of the gap is the engine and how much is the hardware:
