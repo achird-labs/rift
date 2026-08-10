@@ -39,6 +39,9 @@ enum Reply {
     /// stalls *before* the response exists and so times out in `send()`, this reaches the client's
     /// body loop first — the only way to exercise a body-phase timeout.
     StallMidBody { sent: usize, stall: Duration },
+    /// 200 with these bytes verbatim — carried as bytes rather than as a `String` so that a test
+    /// can put invalid UTF-8 on the wire at all (issue #959).
+    Bytes { body: Vec<u8> },
 }
 
 struct Origin {
@@ -227,6 +230,17 @@ fn respond(
             stream.write_all(&vec![b'x'; sent])?;
             stream.flush()?;
             std::thread::sleep(stall);
+        }
+        Reply::Bytes { body } => {
+            stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\
+                     Content-Length: {}\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )?;
+            stream.write_all(&body)?;
         }
     }
     stream.flush()
@@ -788,6 +802,48 @@ async fn body_read_failure_names_the_source() {
     assert!(
         faults.is_empty(),
         "cutting the body short is this fixture's contract, not an origin fault: {faults:?}"
+    );
+}
+
+/// `read_capped`'s third exit, and the last one that had no test at all: the body arrives intact
+/// and is not valid UTF-8 (issue #959). Until this fixture gained a bytes-carrying variant the
+/// case was unreachable from a test, because every `Reply` held its body as a `String`.
+///
+/// The exactly-once assertion is the substantive half. PR #958 pinned that invariant on the other
+/// two exits precisely because a `with_context` added at `read_capped`'s call site would prefix
+/// every message with a second copy of the URI; this branch was the one remaining path where that
+/// regression could land unseen.
+#[tokio::test]
+async fn a_body_that_is_not_utf8_names_the_source() {
+    // Latin-1 `é` (0xE9). A lone high byte is never valid UTF-8, and an 8-bit-encoded document is
+    // the realistic way this happens — far more likely than a deliberately corrupt body.
+    let origin = Origin::start(Reply::Bytes {
+        body: b"[{\"name\": \"caf\xe9\"}]".to_vec(),
+    });
+    let err = HttpSource::new()
+        .unwrap()
+        .fetch(&SourceRef::new(origin.uri()))
+        .await
+        .expect_err("a body that is not valid UTF-8 must be refused");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains(&format!(
+            "imposter source {} is not valid UTF-8",
+            origin.uri()
+        )),
+        "the decode failure must name the source and say what was wrong with it: {msg}"
+    );
+    assert_eq!(
+        msg.matches("imposter source").count(),
+        1,
+        "the source must be named exactly once, not once per wrap: {msg}"
+    );
+
+    let faults = origin.faults();
+    assert!(
+        faults.is_empty(),
+        "serving the bytes verbatim is this fixture's contract, not an origin fault: {faults:?}"
     );
 }
 
