@@ -690,7 +690,9 @@ async fn http_source_refuses_an_oversized_body() {
         .fetch(&SourceRef::new(origin.uri()))
         .await
         .expect_err("a body past the cap must be refused");
-    let msg = err.to_string();
+    // `{err:#}` rather than `to_string()`: the cap message is outermost only because it rides a
+    // bare `?` today. Adding a context wrap on that path would otherwise gut this silently.
+    let msg = format!("{err:#}");
     assert!(
         msg.contains("limit") || msg.contains("exceeds"),
         "the error must say the cap was hit: {msg}"
@@ -721,6 +723,13 @@ async fn http_source_enforces_its_timeout() {
 /// because the *behaviour* is what the security claim rests on, and a future change of HTTP
 /// client would silently drop it. The redirect guarantee that is genuinely ours is the chain cap
 /// below — a custom `redirect::Policy` replaces reqwest's default limit rather than adding to it.
+///
+/// The assertion here stays negative because `file:` specifically never reaches our policy at
+/// all: reqwest neither follows nor errors on it, handing the 302 back as an ordinary response, so
+/// what the caller sees is our own `returned HTTP 302 Found` status check — a one-link chain with
+/// no `reqwest::Error` in it. That is peculiar to `file:`, not to blocked schemes in general;
+/// `redirect_to_a_blocked_scheme_names_our_own_refusal` below covers the reachable case and is
+/// what actually proves the scheme check does something.
 #[tokio::test]
 async fn http_source_refuses_a_redirect_to_a_non_http_scheme() {
     let origin = Origin::start(Reply::Redirect {
@@ -731,10 +740,67 @@ async fn http_source_refuses_a_redirect_to_a_non_http_scheme() {
         .fetch(&SourceRef::new(origin.uri()))
         .await
         .expect_err("a redirect off http(s) must be refused, never followed");
-    let msg = err.to_string();
+    let msg = format!("{err:#}");
     assert!(
         !msg.contains("root:"),
         "the target must never be read: {msg}"
+    );
+}
+
+/// The scheme check's first actual proof of effect. Its long-standing test above can only assert
+/// a negative, because `file:` never reaches our policy — which left the line itself unverified,
+/// as that test's own comment concedes ("disabling our scheme check leaves this test green"). A
+/// scheme reqwest *does* treat as a followable redirect target reaches the policy, so our refusal
+/// runs and, since issue #951, its message survives to the caller: this fails both if the check is
+/// removed and if the chain is severed again.
+#[tokio::test]
+async fn redirect_to_a_blocked_scheme_names_our_own_refusal() {
+    let origin = Origin::start(Reply::Redirect {
+        location: "ftp://127.0.0.1:1/x".to_string(),
+    });
+    let err = HttpSource::new()
+        .unwrap()
+        .fetch(&SourceRef::new(origin.uri()))
+        .await
+        .expect_err("a redirect off http(s) must be refused, never followed");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("refusing to follow a redirect to a non-http(s) URL: ftp://127.0.0.1:1/x"),
+        "our own refusal, naming the rejected target, must reach the caller: {msg}"
+    );
+}
+
+/// The structural half of issue #951: the `reqwest::Error` must still be *in* the chain, not just
+/// its text in a string. `anyhow!("…: {e}")` produced a fresh error with no source, so no caller
+/// could ever downcast to ask reqwest a question about the failure — which is precisely what
+/// distinguishing a timeout from a reset requires (`reqwest::Error::is_timeout` walks the chain).
+///
+/// Asserted on the hop cap rather than the timeout: the timeout assertion belongs to the test
+/// #950 fixes, and proving the chain survives does not depend on which kind of failure it is.
+#[tokio::test]
+async fn http_source_error_keeps_the_reqwest_cause_in_its_chain() {
+    let origin = Origin::start(Reply::Redirect {
+        location: String::new(),
+    });
+    origin.set(Reply::Redirect {
+        location: format!("http://127.0.0.1:{}/loop", origin.port),
+    });
+    let err = HttpSource::with_timeout(Duration::from_secs(5))
+        .unwrap()
+        .fetch(&SourceRef::new(format!(
+            "http://127.0.0.1:{}/loop",
+            origin.port
+        )))
+        .await
+        .expect_err("a redirect loop must terminate as an error");
+
+    let reqwest_cause = err
+        .chain()
+        .find_map(|c| c.downcast_ref::<reqwest::Error>())
+        .expect("the reqwest error must survive as a link in the chain, not be flattened to text");
+    assert!(
+        reqwest_cause.is_redirect(),
+        "the surviving cause must be the redirect failure itself: {reqwest_cause}"
     );
 }
 
@@ -767,7 +833,10 @@ async fn http_source_caps_the_redirect_chain() {
         .map(|_| ())
         .expect_err("a redirect loop must terminate as an error");
 
-    if let Err(why) = redirect_chain_hit_the_cap(origin.hits(), &origin.faults(), &err.to_string())
+    // `{err:#}` renders the whole chain (issue #951); `to_string()` would show only the outermost
+    // context and hide the cause the check below is now precise enough to demand.
+    if let Err(why) =
+        redirect_chain_hit_the_cap(origin.hits(), &origin.faults(), &format!("{err:#}"))
     {
         panic!("the redirect cap was not what stopped this chain: {why}");
     }
@@ -794,18 +863,19 @@ const REDIRECT_HOP_CAP: usize = 10;
 /// of* a redirect rather than because the socket or the clock gave out first, and the origin
 /// served exactly the capped number of hops.
 ///
-/// The middle check settles for "a redirect failure" rather than "too many redirects" because
-/// that is the most the error carries: `sources.rs` formats the reqwest error with `{e}`, and
-/// reqwest's `Display` emits `error following redirect for url (…)` without the
-/// `too many redirects` source underneath it. The scheme-refusal path produces a redirect error
-/// too, so it is the exact hop count — not this check — that pins *which* redirect failure.
+/// The middle check names the cap itself. It used to settle for "a redirect failure", because
+/// `sources.rs` formatted the reqwest error with `{e}` and reqwest's `Display` emits
+/// `error following redirect for url (…)` without the `too many redirects` source underneath it —
+/// so the scheme-refusal path was indistinguishable from the cap here, and only the exact hop
+/// count pinned *which* redirect failure this was. Issue #951 preserved the chain, so the caller
+/// now sees the message our own policy wrote and the check can demand it.
 fn redirect_chain_hit_the_cap(seen: usize, faults: &[String], error: &str) -> Result<(), String> {
     if !faults.is_empty() {
         return Err(format!("the origin recorded faults of its own: {faults:?}"));
     }
-    if !error.to_ascii_lowercase().contains("following redirect") {
+    if !error.to_ascii_lowercase().contains("too many redirects") {
         return Err(format!(
-            "the fetch failed for some reason other than the redirect chain: {error}"
+            "the fetch failed for some reason other than the redirect cap: {error}"
         ));
     }
     if seen != REDIRECT_HOP_CAP {
@@ -816,17 +886,40 @@ fn redirect_chain_hit_the_cap(seen: usize, faults: &[String], error: &str) -> Re
     Ok(())
 }
 
-/// What a fetch that died on the redirect chain actually reports, verbatim. Shared by every case
-/// below that has to look like a genuine redirect failure, so those cases differ only in the one
-/// input each is about.
+/// What a fetch that died on the hop cap actually reports, verbatim — the full chain as `{err:#}`
+/// renders it since issue #951, ending in the message our own redirect policy wrote. Shared by
+/// every case below that has to look like a genuine capped run, so those cases differ only in the
+/// one input each is about.
 const REDIRECT_FAILURE: &str = "fetching imposter source http://127.0.0.1:1/loop: error following redirect for url \
-     (http://127.0.0.1:1/loop)";
+     (http://127.0.0.1:1/loop): too many redirects";
 
 #[test]
 fn redirect_cap_check_accepts_a_chain_stopped_by_the_hop_cap() {
     assert_eq!(
         redirect_chain_hit_the_cap(REDIRECT_HOP_CAP, &[], REDIRECT_FAILURE),
         Ok(())
+    );
+}
+
+/// A redirect failure that is *not* the cap must still be rejected, independently of the hop
+/// count — which is why the count passed here is the capped one rather than something already
+/// wrong. This is the case the old `contains("following redirect")` check waved through: reqwest
+/// words every redirect failure identically at the top level, so matching on that wording alone
+/// accepted any of them. The input below is the real thing, not a hypothetical — it is the chain
+/// `redirect_to_a_blocked_scheme_names_our_own_refusal` produces.
+#[test]
+fn redirect_cap_check_rejects_a_blocked_scheme_redirect() {
+    let rejection = redirect_chain_hit_the_cap(
+        REDIRECT_HOP_CAP,
+        &[],
+        "fetching imposter source http://127.0.0.1:1/loop: error following redirect for url \
+         (http://127.0.0.1:1/loop): refusing to follow a redirect to a non-http(s) URL: \
+         file:///etc/passwd",
+    )
+    .expect_err("a scheme refusal is not the hop cap, however similar reqwest's wording is");
+    assert!(
+        rejection.contains("refusing to follow"),
+        "the rejection must quote the cause it rejected: {rejection}"
     );
 }
 
@@ -918,7 +1011,9 @@ async fn remote_document_refuses_ejs_include() {
         .fetch(&SourceRef::new(origin.uri()))
         .await
         .expect_err("a remote document must not include a local file");
-    let msg = err.to_string();
+    // `{err:#}`, not `to_string()`: since issue #951 the refusal is a cause under the
+    // "imposter source <uri>" context rather than being flattened into it.
+    let msg = format!("{err:#}");
     assert!(
         msg.contains("include"),
         "the error must name the refused tag: {msg}"
@@ -937,9 +1032,12 @@ async fn remote_document_refuses_ejs_stringify() {
         .fetch(&SourceRef::new(origin.uri()))
         .await
         .expect_err("a remote document must not stringify a local file");
+    // `{err:#}`, not `to_string()`: since issue #951 the refusal is a cause under the
+    // "imposter source <uri>" context rather than being flattened into it.
+    let msg = format!("{err:#}");
     assert!(
-        err.to_string().contains("stringify"),
-        "the error must name the refused tag: {err}"
+        msg.contains("stringify"),
+        "the error must name the refused tag: {msg}"
     );
 }
 
@@ -956,10 +1054,11 @@ async fn remote_document_refuses_a_file_script_reference() {
         .fetch(&SourceRef::new(origin.uri()))
         .await
         .expect_err("a remote document must not resolve a local `file:` script");
-    assert!(
-        !err.to_string().contains("root:"),
-        "the file must never be read: {err}"
-    );
+    // `{err:#}`, not `to_string()`: since issue #951 the refusal is a cause under the
+    // "imposter source <uri>" context. Rendering only the context would make this assertion
+    // unfalsifiable — the file's contents could not appear there however badly the refusal broke.
+    let msg = format!("{err:#}");
+    assert!(!msg.contains("root:"), "the file must never be read: {msg}");
 }
 
 /// The chosen half of the split: env substitution still runs for a remote document, because it is
@@ -1081,6 +1180,52 @@ async fn requests_for(client: &reqwest::Client, admin_port: u16, imposter: u16) 
         .and_then(|r| r.as_array())
         .map(Vec::len)
         .unwrap_or(0)
+}
+
+/// The operator-facing half of issue #951. A reload failure is the one place a source fetch error
+/// reaches a human, and `POST /admin/reload` answered with only reqwest's generic top line — so a
+/// hop-cap trip and a blocked-scheme redirect produced byte-identical 500s and neither named a
+/// cause anyone could act on. The handler renders the chain now, so the reason our own policy
+/// wrote arrives with the failure.
+#[tokio::test]
+async fn reload_failure_body_carries_the_fetch_cause() {
+    let origin = Origin::start(Reply::Etagged {
+        body: imposter_doc(21419, "v1"),
+        etag: "\"v1\"".to_string(),
+    });
+    let server = ServerBuilder::from_cli(cli(&[
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+        "--imposters",
+        &origin.uri(),
+    ]))
+    .start()
+    .await
+    .expect("server starts from an http source");
+    let admin = server.admin_addr();
+
+    // Flip the same source into a self-referential loop, so the re-fetch fails on the hop cap.
+    origin.set(Reply::Redirect {
+        location: origin.uri(),
+    });
+    let reload = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/admin/reload", admin.port()))
+        .send()
+        .await
+        .expect("reload responds");
+    assert_eq!(
+        reload.status(),
+        500,
+        "a source that cannot be fetched must fail the reload"
+    );
+
+    let body = reload.text().await.unwrap_or_default();
+    assert!(
+        body.contains("too many redirects"),
+        "the reload failure must name the cause, not just reqwest's generic wording: {body}"
+    );
 }
 
 // ===== `--configfile` is sugar, not a second code path =====

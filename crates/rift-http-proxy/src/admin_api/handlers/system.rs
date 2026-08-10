@@ -197,9 +197,12 @@ pub async fn handle_reload(
             {
                 Ok(Ok(loaded)) => (loaded, false),
                 Ok(Err(e)) => {
+                    // `{e:#}`, not `{e}`: anyhow prints only the outermost context otherwise, and
+                    // a reload failure is the one place a config-load error reaches an operator
+                    // (issue #951).
                     return error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("Reload failed (imposters unchanged): {e}"),
+                        &format!("Reload failed (imposters unchanged): {e:#}"),
                     );
                 }
                 Err(e) => {
@@ -228,9 +231,12 @@ pub async fn handle_reload(
                 )
             }
             Err(e) => {
+                // `{e:#}` renders the whole chain: a source fetch failure's actual reason — the
+                // hop cap, a refused redirect scheme, a timeout — is a cause under the
+                // "fetching imposter source <uri>" context, never the top line (issue #951).
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Reload failed (imposters unchanged): {e}"),
+                    &format!("Reload failed (imposters unchanged): {e:#}"),
                 );
             }
         },
@@ -325,6 +331,10 @@ pub async fn handle_reload(
                 }),
             )
         }
+        // Plain `{e}` here, unlike the two sites above: this is an `ImposterError`, whose own
+        // `#[error(…)]` attributes already render their nested chain with `{0:#}` (issue #688).
+        // thiserror's generated `Display` ignores an outer `#`, so `{e:#}` would be a no-op that
+        // reads as if it were doing something.
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("Reload failed (imposters unchanged): {e}"),

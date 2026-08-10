@@ -40,6 +40,24 @@ record.
 
 ### Fixed
 
+- **A failing `--imposters` fetch now tells you *why*.** `HttpSource::fetch` wrapped its errors
+  with `anyhow!("fetching imposter source {uri}: {e}")`, which renders the cause into a string and
+  returns a fresh error with no `source()` — severing the chain at the wrap, not merely hiding it
+  at render time. Since `reqwest`'s own `Display` prints only the kind (`error following redirect`,
+  `error sending request`) and never its source, the actual reason was destroyed before anyone
+  could read it: a hop-cap trip and a refused redirect scheme produced byte-identical messages, and
+  the `too many redirects` / `refusing to follow a redirect to a non-http(s) URL` text this code
+  takes care to write reached nobody. The wraps use `.with_context(…)` now, so a reload failure
+  names the cause it was always meant to. A `reqwest::Error` also survives as a link in the chain,
+  so callers can downcast to distinguish a timeout from a connection reset — the two are otherwise
+  worded identically. **Response-body change:** `POST /admin/reload`'s `500` message now carries
+  the whole chain, where it previously carried only the outermost context. This is the opposite of
+  the call made for the proxy `502` above, and deliberately so: a cause chain can name internal
+  hosts, which is why the *data* plane still gets only the outermost context — but `/admin/reload`
+  is the operator's own control plane and the hosts it names are the imposter sources they
+  configured. Operators who expose the admin plane should be running it behind `--api-key` /
+  `--require-auth` regardless.
+
 - **`--imposters` now dispatches on a bare `scheme:` URI instead of always reading it as a file
   path.** `SourceRef::scheme` split on `://` and otherwise returned `file`, through two
   byte-identical `None` arms — the second of which made the first dead code, and with it the
