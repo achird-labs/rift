@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.92%2B%20stable-orange)](https://www.rust-lang.org/)
 
-Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible mock server that delivers **~20–150x faster throughput on typical workloads, and up to ~1,850x on large regex predicate sets** — the conservative laptop figures from the table below; the 16-vCPU server column is higher still. Use your existing Mountebank configurations and enjoy faster test execution.
+Rift is a [Mountebank](https://www.mbtest.dev/)-compatible mock server written in Rust. Its throughput stays **flat as your stub file grows** — on an M4 laptop, 214,818 → 209,523 RPS from a single stub to a 310-stub deep match, where Mountebank falls 8,898 → 1,344 over the same two scenarios — and the same engine embeds in-process in **Java, Node, Go and Scala**. It loads your existing `imposters.json` unchanged.
 
 **[Documentation](https://achird-labs.github.io/rift/)** | **[Quick Start](#quick-start)** | **[Examples](examples/)**
 
@@ -23,7 +23,13 @@ Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible moc
 - **Same Configuration** - Load your `imposters.json` without changes
 - **Same Behavior** - Predicates, responses, behaviors all work identically
 
-### Blazing Fast Performance
+### Performance
+
+**The slope matters more than the multiple.** A mock server's job is to decide which of your stubs
+matches a request, and the straightforward way to do that is to try each one in turn — so its cost
+grows with a config file that only ever grows. Rift indexes stubs instead of scanning them, which is
+why the numbers below barely move between a one-stub imposter and a 310-stub deep match while
+Mountebank's fall by 85%. [How the matching works](https://achird-labs.github.io/rift/performance/).
 
 Both engines, same machine, same load — measured on two very different hosts so you can see how
 much of the gap is the engine and how much is the hardware:
