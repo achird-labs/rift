@@ -251,6 +251,37 @@ impl FlowStore for InMemoryFlowStore {
         Ok(())
     }
 
+    /// Every flow id currently holding at least one live (non-expired) key (issue #374). Reads
+    /// only — matches `get`/`exists`'s lazy-expiry rule (an expired entry is treated as absent on
+    /// read, actual removal happens on write via `remove_if_expired`/the amortized sweeper) rather
+    /// than inventing a second expiry rule here. A flow whose only keys have all expired is not
+    /// listed, exactly as `exists` would report `false` for each of them.
+    fn flow_ids(&self) -> Result<Option<Vec<String>>> {
+        let data = self.data.read();
+        let ids = data
+            .iter()
+            .filter(|(_, flow)| flow.values().any(|(_, expiry)| !Self::is_expired(expiry)))
+            .map(|(flow_id, _)| flow_id.clone())
+            .collect();
+        Ok(Some(ids))
+    }
+
+    /// Count of live (non-expired) keys under `flow_id` (issue #374) — `Some(0)` both for an empty
+    /// flow and for one that was never created, matching `exists`'s "absent looks like expired"
+    /// treatment rather than distinguishing the two.
+    fn entry_count(&self, flow_id: &str) -> Result<Option<usize>> {
+        let data = self.data.read();
+        let count = data
+            .get(flow_id)
+            .map(|flow| {
+                flow.values()
+                    .filter(|(_, expiry)| !Self::is_expired(expiry))
+                    .count()
+            })
+            .unwrap_or(0);
+        Ok(Some(count))
+    }
+
     /// Atomic under the single write lock (issue #311): compare and write happen with no
     /// interleaving window, unlike the trait's get-then-set default.
     fn compare_and_set(
@@ -856,5 +887,112 @@ mod tests {
         assert_eq!(store.stored_flow_count(), 1);
         // Clearing an absent flow is an idempotent no-op success.
         assert!(store.clear_flow("no-such-flow").is_ok());
+    }
+
+    // ===== flow_ids / entry_count (issue #374) =====
+
+    // An empty store can still enumerate — it just has nothing to report. `Some(vec![])`, not
+    // `None`: the store CAN answer, distinct from a backend that cannot enumerate at all.
+    #[test]
+    fn flow_ids_on_empty_store_is_some_empty() {
+        let store = InMemoryFlowStore::new(300);
+        assert_eq!(store.flow_ids().unwrap(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn flow_ids_lists_each_flow_exactly_once() {
+        let store = InMemoryFlowStore::new(300);
+        store.set("flow1", "a", json!(1)).unwrap();
+        store.set("flow1", "b", json!(2)).unwrap();
+        store.set("flow2", "a", json!(1)).unwrap();
+
+        let mut ids = store
+            .flow_ids()
+            .unwrap()
+            .expect("in-memory store enumerates");
+        ids.sort();
+        assert_eq!(ids, vec!["flow1".to_string(), "flow2".to_string()]);
+    }
+
+    #[test]
+    fn clear_flow_removes_the_id_from_flow_ids() {
+        let store = InMemoryFlowStore::new(300);
+        store.set("keep", "k", json!(1)).unwrap();
+        store.set("drop", "k", json!(1)).unwrap();
+
+        store.clear_flow("drop").unwrap();
+
+        let ids = store
+            .flow_ids()
+            .unwrap()
+            .expect("in-memory store enumerates");
+        assert_eq!(ids, vec!["keep".to_string()]);
+    }
+
+    #[test]
+    fn entry_count_counts_only_the_target_flows_keys() {
+        let store = InMemoryFlowStore::new(300);
+        store.set("f1", "a", json!(1)).unwrap();
+        store.set("f1", "b", json!(2)).unwrap();
+        store.set("f2", "x", json!(1)).unwrap();
+
+        assert_eq!(store.entry_count("f1").unwrap(), Some(2));
+        assert_eq!(store.entry_count("f2").unwrap(), Some(1));
+    }
+
+    // `Some(0)`, not `None`: the store can answer, and the answer is "no keys".
+    #[test]
+    fn entry_count_for_absent_flow_is_some_zero() {
+        let store = InMemoryFlowStore::new(300);
+        assert_eq!(store.entry_count("no-such-flow").unwrap(), Some(0));
+    }
+
+    #[test]
+    fn expired_flow_is_absent_from_flow_ids_and_entry_count() {
+        let store = InMemoryFlowStore::new(1); // 1s TTL
+        store.set("f", "k", json!("v")).unwrap();
+
+        // Live: appears in both.
+        assert_eq!(store.flow_ids().unwrap(), Some(vec!["f".to_string()]));
+        assert_eq!(store.entry_count("f").unwrap(), Some(1));
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        // Expired: gone from both, matching get/exists's lazy-expiry rule.
+        assert_eq!(store.flow_ids().unwrap(), Some(Vec::new()));
+        assert_eq!(store.entry_count("f").unwrap(), Some(0));
+    }
+
+    // A minimal third-party-style store that overrides nothing beyond the required methods must
+    // still compile and get `None` from both — proving the trait defaults are what an embedder
+    // gets without opting in.
+    #[test]
+    fn default_flow_ids_and_entry_count_are_none() {
+        use std::sync::Mutex;
+        struct Bare(Mutex<()>);
+        impl FlowStore for Bare {
+            fn get(&self, _: &str, _: &str) -> Result<Option<Value>> {
+                let _g = self.0.lock();
+                Ok(None)
+            }
+            fn set(&self, _: &str, _: &str, _: Value) -> Result<()> {
+                Ok(())
+            }
+            fn exists(&self, _: &str, _: &str) -> Result<bool> {
+                Ok(false)
+            }
+            fn delete(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn increment(&self, _: &str, _: &str) -> Result<i64> {
+                Ok(1)
+            }
+            fn set_ttl(&self, _: &str, _: i64) -> Result<()> {
+                Ok(())
+            }
+        }
+        let store = Bare(Mutex::new(()));
+        assert_eq!(store.flow_ids().unwrap(), None);
+        assert_eq!(store.entry_count("f").unwrap(), None);
     }
 }

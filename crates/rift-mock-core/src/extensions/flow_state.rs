@@ -112,6 +112,42 @@ pub trait FlowStore: Send + Sync {
             Ok(CasOutcome::Conflict(current))
         }
     }
+
+    /// List every flow id this store currently holds live (non-expired) state for (issue #374).
+    ///
+    /// A flow's "space" is created implicitly by whatever flow id a request happened to carry —
+    /// there is no explicit registration step — so today the only way to learn which spaces exist
+    /// is to read the request log and infer it from `_rift.flowState`-touching requests. This is
+    /// the enumeration primitive an "Active spaces" admin view needs instead.
+    ///
+    /// Defaulted, not required: `FlowStore` is implemented by the built-in backends *and* by any
+    /// embedder through [`FlowStoreProvider`] — which exists precisely so embedders can plug their
+    /// own store in. A required method would break every external implementor at compile time. The
+    /// trait already establishes this pattern: `increment_by`, `set_key_ttl` and `clear_flow` all
+    /// ship defaults for exactly this reason.
+    ///
+    /// Returns `Option`, not a bare `Vec`, for a reason that matters: `None` means "this store
+    /// cannot enumerate", while `Some(vec![])` means "it can, and there are none right now".
+    /// Collapsing those two into one empty-list answer would make an admin surface render "no
+    /// spaces exist" as fact when the truth is "this backend cannot tell you" — a wrong-but-quiet
+    /// answer that is worse than an honest "unsupported". The default is `Ok(None)`: an
+    /// unenumerable store by construction, since it has no data to walk.
+    fn flow_ids(&self) -> Result<Option<Vec<String>>> {
+        Ok(None)
+    }
+
+    /// Count the live (non-expired) keys currently stored under `flow_id` (issue #374) — the
+    /// per-space size an "Active spaces" table would show next to each id from [`Self::flow_ids`].
+    ///
+    /// Same reasoning as `flow_ids` on both counts: defaulted (not required) so third-party
+    /// `FlowStore` impls keep compiling, and `Option`-typed so "this store cannot answer" (`None`)
+    /// stays distinguishable from "the flow has zero live keys, or does not exist" (`Some(0)`) —
+    /// again, collapsing the two would let an admin screen quietly lie about a backend it cannot
+    /// actually inspect.
+    fn entry_count(&self, flow_id: &str) -> Result<Option<usize>> {
+        let _ = flow_id;
+        Ok(None)
+    }
 }
 
 /// Embedder hook for supplying a custom [`FlowStore`] per imposter (issue #312), e.g.
