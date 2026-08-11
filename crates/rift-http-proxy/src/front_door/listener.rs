@@ -10,6 +10,7 @@
 //! bodies have nothing in common; the accept-loop plumbing around them is what is common, and it
 //! is small enough that a shared abstraction would cost more to read than the duplication does.
 
+use crate::front_door::observer::RouteObserver;
 use crate::front_door::route_table::{CompiledRoutes, Route};
 use crate::imposter::ImposterManager;
 use crate::response::{ErrorKind, error_response_typed};
@@ -40,10 +41,31 @@ const NO_ROUTE_HEADER: &str = "x-rift-front-door";
 /// the bound address and can be shut down gracefully. `routes` is read fresh on every request via
 /// [`ArcSwap::load_full`], so an admin-API route-table update takes effect for the next request
 /// with no listener restart.
+///
+/// No [`RouteObserver`] — a single-node Rift has no route-hits column to feed and pays nothing
+/// for one. Embedders that need dispatches observed (a clustered admin plane's HITS counter,
+/// issue #368) call [`bind_front_door_with_observer`] instead; this is additive so existing
+/// callers of `bind_front_door` — this signature is `pub use`d from `front_door/mod.rs`, so
+/// external embedders depend on it — are unaffected.
 pub async fn bind_front_door(
     addr: SocketAddr,
     manager: Arc<ImposterManager>,
     routes: Arc<ArcSwap<CompiledRoutes>>,
+) -> anyhow::Result<RunningFrontDoor> {
+    bind_front_door_with_observer(addr, manager, routes, None).await
+}
+
+/// [`bind_front_door`] plus a [`RouteObserver`] notified once per request a route claims.
+///
+/// `observer` is `Option` rather than requiring a no-op implementation so the hot path costs
+/// nothing when nobody is watching: `None` is a single pointer-sized check per request, no
+/// allocation, no lock — the same shape as `RequestJournal`'s not existing at all in a build that
+/// never installs one.
+pub async fn bind_front_door_with_observer(
+    addr: SocketAddr,
+    manager: Arc<ImposterManager>,
+    routes: Arc<ArcSwap<CompiledRoutes>>,
+    observer: Option<Arc<dyn RouteObserver>>,
 ) -> anyhow::Result<RunningFrontDoor> {
     let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
@@ -53,8 +75,15 @@ pub async fn bind_front_door(
     let tracker = TaskTracker::new();
     let (loop_cancel, loop_tracker) = (cancel.clone(), tracker.clone());
     let task = tokio::spawn(async move {
-        let result =
-            front_door_accept_loop(listener, manager, routes, loop_cancel, loop_tracker).await;
+        let result = front_door_accept_loop(
+            listener,
+            manager,
+            routes,
+            observer,
+            loop_cancel,
+            loop_tracker,
+        )
+        .await;
         // Preserve the metrics-listener precedent: an accept-loop failure is logged here because
         // nothing else joins this task by default.
         if let Err(ref e) = result {
@@ -133,6 +162,7 @@ async fn front_door_accept_loop(
     listener: TcpListener,
     manager: Arc<ImposterManager>,
     routes: Arc<ArcSwap<CompiledRoutes>>,
+    observer: Option<Arc<dyn RouteObserver>>,
     cancel: CancellationToken,
     tracker: TaskTracker,
 ) -> anyhow::Result<()> {
@@ -242,6 +272,9 @@ async fn front_door_accept_loop(
         let conn_cancel = cancel.clone();
         let manager = Arc::clone(&manager);
         let routes = Arc::clone(&routes);
+        // `Option<Arc<_>>::clone` is a null check plus (when `Some`) one refcount bump — no
+        // allocation either way, so a `None` observer costs the same as not having this field.
+        let observer = observer.clone();
 
         tracker.spawn(async move {
             // Held for the connection's lifetime; released back to the semaphore when this task
@@ -250,7 +283,8 @@ async fn front_door_accept_loop(
             let service = service_fn(move |req: Request<Incoming>| {
                 let manager = Arc::clone(&manager);
                 let routes = Arc::clone(&routes);
-                async move { handle_front_door_request(req, manager, routes).await }
+                let observer = observer.clone();
+                async move { handle_front_door_request(req, manager, routes, observer).await }
             });
 
             // Both builders yield a Connection with the same drive/graceful-shutdown shape;
@@ -305,6 +339,7 @@ async fn handle_front_door_request(
     req: Request<Incoming>,
     manager: Arc<ImposterManager>,
     routes: Arc<ArcSwap<CompiledRoutes>>,
+    observer: Option<Arc<dyn RouteObserver>>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let host = request_host(&req);
 
@@ -322,7 +357,7 @@ async fn handle_front_door_request(
         .cloned();
 
     if let Some(route) = matched {
-        return Ok(dispatch_matched_route(route, req, &manager).await);
+        return Ok(dispatch_matched_route(route, req, &manager, observer.as_deref()).await);
     }
 
     // No route claimed it: the single-port gateway's own `/__rift/:port/<path>` addressing still
@@ -353,7 +388,18 @@ async fn dispatch_matched_route(
     route: Route,
     mut req: Request<Incoming>,
     manager: &ImposterManager,
+    observer: Option<&dyn RouteObserver>,
 ) -> Response<Full<Bytes>> {
+    // Fired unconditionally, before anything else in this function can fail or short-circuit:
+    // the route has claimed this request the moment we are here, and that is true whether the
+    // target imposter answers, answers 404 because it is gone, or a rewrite below fails with a
+    // 500. "This route is taking traffic" does not depend on how the traffic came out — a route
+    // that only ever 404s is exactly what a HITS column exists to reveal, so the miss must count
+    // too.
+    if let Some(observer) = observer {
+        observer.note_dispatch(&route.id);
+    }
+
     let target = route.target;
 
     if target.strip_prefix
