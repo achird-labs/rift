@@ -166,6 +166,12 @@ fn backend_err(op: &'static str, err: impl std::fmt::Display) -> anyhow::Error {
     })
 }
 
+// `flow_ids`/`entry_count` (issue #374) are deliberately left at the trait's `Ok(None)` defaults
+// and NOT implemented here. Enumerating them for real would mean a `KEYS`/`SCAN` walk over
+// however much of Redis this key prefix shares — and an unbounded keyspace walk triggered by an
+// admin screen loading is an operational hazard this crate should not hand out by default. `None`
+// is the honest answer, "this backend will not enumerate", and the `Option` in the trait's
+// signature exists precisely so that answer is representable instead of forcing a lie.
 impl FlowStore for RedisFlowStore {
     fn get(&self, flow_id: &str, key: &str) -> Result<Option<Value>> {
         let key_str = self.make_key(flow_id, key);
