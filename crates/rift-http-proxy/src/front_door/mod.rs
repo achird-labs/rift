@@ -16,9 +16,11 @@
 //! from the client side and have completely different fixes.
 
 pub mod listener;
+pub mod observer;
 pub mod route_table;
 
-pub use listener::{RunningFrontDoor, bind_front_door};
+pub use listener::{RunningFrontDoor, bind_front_door, bind_front_door_with_observer};
+pub use observer::RouteObserver;
 pub use route_table::{
     CompiledRoutes, HeaderMatch, Route, RouteMatch, RouteTable, RouteTableError, RouteTarget,
 };
