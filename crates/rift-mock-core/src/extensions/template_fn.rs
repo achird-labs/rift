@@ -29,6 +29,8 @@
 //! - `uuid` — a random UUID v4
 //! - `randomInt <a> <b>` — random integer in `[a, b]`
 //! - `state.<key>` — read-only flow-state lookup for the request's resolved flow id
+//! - `previousValue` — inside a `_rift.stateOps` `set` value only (issue #969): the key's value
+//!   before the operation, or empty when it had none
 //!
 //! Filters: `| last_segment` (trailing `/`-segment), `| regex '<pattern>' <group>` (capture group
 //! `<group>` of the first match), `| json` (JSON-string-escape the value so it is safe to place
@@ -57,6 +59,11 @@ pub struct TemplateContext<'a> {
     pub flow_id: &'a str,
     /// Read-only flow-state backend.
     pub flow_store: &'a dyn FlowStore,
+    /// The value `previousValue` renders (issue #969): set only while a `_rift.stateOps` `set`
+    /// evaluates its `value` template, to the key's value before that operation. `None` everywhere
+    /// else — and then `previousValue` renders as an empty string rather than an error, so an
+    /// accumulator's first write reads clean.
+    pub previous_value: Option<&'a Value>,
 }
 
 /// Render the full `{{ }}` template surface for a `templated: true` response: first expands the
@@ -243,6 +250,9 @@ fn eval_base(head: &str, args: &[String], ctx: &TemplateContext<'_>) -> Result<S
             eval_now(offset.as_deref(), format.as_deref())
         }
         "uuid" => Ok(uuid::Uuid::new_v4().to_string()),
+        // Absent is empty, not an error (unlike `state.<key>`): a `set` whose value template
+        // appends to `previousValue` must work on the very first write.
+        "previousValue" => Ok(ctx.previous_value.map(value_to_string).unwrap_or_default()),
         "randomInt" => {
             let lo_str = args.first().ok_or_else(|| {
                 "randomInt requires two integer arguments: randomInt a b".to_string()
@@ -525,6 +535,7 @@ mod tests {
             request,
             flow_id,
             flow_store: store,
+            previous_value: None,
         }
     }
 

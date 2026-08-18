@@ -20,6 +20,8 @@
 //! - **Exchange Inspector** (`exchange_inspector`): Synchronous per-imposter hooks that see a
 //!   request before matching and the response before it is written, and may replace either
 //!   (issue #966)
+//! - **State Operations** (`state_ops`): Declarative post-response flow-state writes on an `is`
+//!   response — `_rift.stateOps` (issue #969)
 
 pub mod authz;
 pub mod decorate;
@@ -30,6 +32,7 @@ pub mod matcher;
 pub mod metrics;
 pub mod no_match;
 pub mod routing;
+pub mod state_ops;
 pub mod stub_analysis;
 pub mod template;
 pub mod template_fn;
@@ -54,6 +57,8 @@ pub use metrics::{AcceptErrorCounters, AcceptOutageGuard, collect_metrics, recor
 pub use no_match::{NoMatchContext, NoMatchDirective, NoMatchInterceptor};
 #[allow(unused_imports)]
 pub use routing::Router;
+#[allow(unused_imports)]
+pub use state_ops::{StateOp, execute_state_ops};
 #[allow(unused_imports)]
 pub use stub_analysis::{
     StubAnalysisResult, StubWarning, WarningType, analyze_new_stub, analyze_stubs,

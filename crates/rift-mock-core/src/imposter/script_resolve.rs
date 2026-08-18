@@ -315,6 +315,7 @@ mod tests {
                     fault: None,
                     script: Some(script_config),
                     templated: false,
+                    state_ops: Vec::new(),
                 },
             }],
             scenario_name: None,
