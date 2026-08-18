@@ -142,6 +142,11 @@ pub struct Imposter {
     /// the request falls through to defaultForward/defaultResponse/empty-200 as before.
     pub(crate) no_match_interceptor:
         Option<Arc<dyn crate::extensions::no_match::NoMatchInterceptor>>,
+    /// Synchronous exchange inspector (issue #966), shared from the manager. `None` = no
+    /// inspector; every request is matched and every response is written exactly as before —
+    /// nothing else about the request or response path changes.
+    pub(crate) exchange_inspector:
+        Option<Arc<dyn crate::extensions::exchange_inspector::ExchangeInspector>>,
     /// Recorded-request storage (issue #314); defaults to a private LocalJournal,
     /// or the embedder's shared journal injected via the manager.
     pub(crate) journal: Arc<dyn crate::imposter::journal::RequestJournal>,
@@ -257,6 +262,7 @@ impl Imposter {
             proxy_store: Arc::new(LocalProxyStore::new(proxy_mode)),
             event_bus: None,
             no_match_interceptor: None,
+            exchange_inspector: None,
             journal: journal
                 .unwrap_or_else(|| Arc::new(crate::imposter::journal::LocalJournal::default())),
             enabled: AtomicBool::new(enabled),
@@ -569,6 +575,14 @@ mod tests {
             ..Default::default()
         };
         Imposter::new(config).expect("test imposter")
+    }
+
+    // Issue #966: inert by default — a freshly built imposter (no provider was consulted, since
+    // `Imposter::new` never has one) carries no exchange inspector.
+    #[test]
+    fn fresh_imposter_has_no_exchange_inspector() {
+        let imposter = make_test_imposter();
+        assert!(imposter.exchange_inspector.is_none());
     }
 
     // Issue #514: a stub declaring only `scenarioName` (no requiredScenarioState/newScenarioState)

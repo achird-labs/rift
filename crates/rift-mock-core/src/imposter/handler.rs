@@ -19,6 +19,7 @@ use crate::behaviors::{
 use crate::extensions::decorate::{
     ResponseDecorator, ResponsePhase, backend_error_response, with_annotation_scope,
 };
+use crate::extensions::exchange_inspector::{InspectRequest, InspectResponse, InspectVerdict};
 use crate::extensions::no_match::{NoMatchContext, NoMatchDirective};
 use crate::extensions::template::{RequestData, has_template_variables, process_template};
 use crate::scripting::{
@@ -296,6 +297,48 @@ fn matcher_error_response(e: &anyhow::Error) -> Response<Full<Bytes>> {
     backend_error_response(e)
 }
 
+/// The request-side view handed to an installed [`ExchangeInspector`](crate::extensions::exchange_inspector::ExchangeInspector)
+/// (issue #966), owned so it survives past `handle_request_inner` into the response-side hook in
+/// `handle_imposter_request`. Filled only when `imposter.exchange_inspector.is_some()` — an
+/// imposter with no inspector pays nothing beyond that one check.
+struct Inspection {
+    method: String,
+    path: String,
+    query: String,
+    headers: hyper::HeaderMap,
+    body: Option<String>,
+    mode: ResponseMode,
+}
+
+/// Map an [`InspectVerdict::Reject`]'s `status` to a `StatusCode`, falling back to `502 Bad
+/// Gateway` for a value outside the valid HTTP status range (an inspector bug, not a request the
+/// client can be blamed for) and logging it so the fallback is visible rather than silently wrong.
+fn inspector_reject_status(status: u16) -> StatusCode {
+    StatusCode::from_u16(status).unwrap_or_else(|_| {
+        tracing::warn!(
+            status,
+            "exchange inspector rejected with an out-of-range status code; using 502"
+        );
+        StatusCode::BAD_GATEWAY
+    })
+}
+
+impl Inspection {
+    /// Borrow this exchange's request view for a hook call, with the imposter's own `port`
+    /// (the same value the no-match hook's [`NoMatchContext`] uses).
+    fn view(&self, port: u16) -> InspectRequest<'_> {
+        InspectRequest {
+            port,
+            method: &self.method,
+            path: &self.path,
+            query: &self.query,
+            headers: &self.headers,
+            body: self.body.as_deref(),
+            mode: &self.mode,
+        }
+    }
+}
+
 /// [`handle_imposter_request`] inside a per-request annotation scope, with the configured
 /// [`ResponseDecorator`](crate::extensions::decorate::ResponseDecorator) applied (phase
 /// `DataPlane`, the imposter's `port`) before the response is written (issue #318). This
@@ -342,8 +385,58 @@ pub async fn handle_imposter_request(
      */
     let started = Instant::now();
     let mut journal_index = None;
-    let mut response =
-        handle_request_inner(req, Arc::clone(&imposter), client_addr, &mut journal_index).await?;
+    let mut inspection: Option<Inspection> = None;
+    let mut response = handle_request_inner(
+        req,
+        Arc::clone(&imposter),
+        client_addr,
+        &mut journal_index,
+        &mut inspection,
+    )
+    .await?;
+
+    // Issue #966: the response-side hook of an installed exchange inspector runs HERE — the one
+    // funnel every path shares (the serve loop, the `/__rift/` gateway and an embedder's
+    // in-process dispatch all call `handle_imposter_request`), after the response is built and
+    // before the metric below, the journal outcome and the decorator/CORS, so the journal and the
+    // client agree on the status actually served. Skipped when `inspection` is absent: no
+    // inspector installed, an early exit before there was anything to inspect, or the request-side
+    // hook already replaced the response itself (a verdict the inspector produced is not offered
+    // back to it for a second opinion).
+    if let Some(inspector) = &imposter.exchange_inspector
+        && let Some(seen) = inspection.as_ref()
+    {
+        let port = imposter.config.port.unwrap_or(0);
+        let (parts, body) = response.into_parts();
+        let bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            // `Full<Bytes>`'s `Body::Error` is `Infallible` — this arm can never run; matching it
+            // out explicitly (rather than `.unwrap()`) keeps that a checked fact, not an assumed
+            // one.
+            Err(never) => match never {},
+        };
+        let resp_view = InspectResponse {
+            status: parts.status.as_u16(),
+            headers: &parts.headers,
+            body: &bytes,
+        };
+        response = match inspector.inspect_response(&seen.view(port), &resp_view) {
+            InspectVerdict::Proceed => Response::from_parts(parts, Full::new(bytes)),
+            InspectVerdict::Reject {
+                status,
+                content_type,
+                body,
+            } => build_response_with_headers(
+                inspector_reject_status(status),
+                [
+                    ("content-type", content_type.as_str()),
+                    ("x-rift-imposter", "true"),
+                ],
+                body,
+            ),
+        };
+    }
+
     // Record `rift_requests_total` once per request the imposter serves (issue #269). The imposter
     // serve path recorded no Prometheus metrics before; the recording proxy engine
     // (`proxy/handler.rs`) is a disjoint path, so there is no double-count.
@@ -412,6 +505,7 @@ async fn handle_request_inner(
     imposter: Arc<Imposter>,
     client_addr: SocketAddr,
     journal_index: &mut Option<u64>,
+    inspection: &mut Option<Inspection>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     // Check if enabled
     if !imposter.is_enabled() {
@@ -560,6 +654,56 @@ async fn handle_request_inner(
     } else {
         None
     };
+
+    // Issue #966: the request-side hook of an installed exchange inspector runs HERE — after
+    // journaling (the request already arrived; hiding it would falsify `savedRequests`, and its
+    // entry carries the rejection's status like any other, attached by the caller once the
+    // response exists) and before stub matching, so a rejection never advances a cycler, a
+    // scenario FSM or a match counter — the only defensible semantics for "this request was
+    // off-policy". The owned view handed out through `inspection` survives into the response-side
+    // hook in `handle_imposter_request`.
+    if let Some(inspector) = &imposter.exchange_inspector {
+        let port = imposter.config.port.unwrap_or(0);
+        let req_view = InspectRequest {
+            port,
+            method: &method,
+            path: &path,
+            query: &query_str,
+            headers: &headers_for_context,
+            body: body_string.as_deref(),
+            mode: &body_mode,
+        };
+        match inspector.inspect_request(&req_view) {
+            // A rejection answers the exchange right here; `inspection` stays `None`, which is
+            // what tells the response-side hook there is nothing further to show.
+            InspectVerdict::Reject {
+                status,
+                content_type,
+                body,
+            } => {
+                return Ok(build_response_with_headers(
+                    inspector_reject_status(status),
+                    [
+                        ("content-type", content_type.as_str()),
+                        ("x-rift-imposter", "true"),
+                    ],
+                    body,
+                ));
+            }
+            // Materialised only here, and only on `Proceed` — an imposter with no inspector clones
+            // nothing, and a rejected request has no response-side hook to carry this into.
+            InspectVerdict::Proceed => {
+                *inspection = Some(Inspection {
+                    method: method.clone(),
+                    path: path.clone(),
+                    query: query_str.clone(),
+                    headers: headers_for_context.clone(),
+                    body: body_string.as_deref().map(str::to_string),
+                    mode: body_mode.clone(),
+                });
+            }
+        }
+    }
 
     // Find matching stub
     let method_str = method.as_str();
