@@ -1214,8 +1214,10 @@ pub struct RiftResponseExtension {
     pub templated: bool,
     /// Declarative post-response flow-state writes (issue #969): run in order against the
     /// request's resolved flow id after the response is rendered, just before it is written (see
-    /// `crate::extensions::state_ops`). Absent or empty ⇒ nothing runs and the response is served
-    /// exactly as before, prepared fast path included.
+    /// `crate::extensions::state_ops`). **`is` responses only** — carried here because this block
+    /// belongs to an `is` response; on a `proxy`, `inject` or script-only response it is not run
+    /// (`stub_analysis` warns). Absent or empty ⇒ nothing runs and the response is served exactly
+    /// as before, prepared fast path included.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub state_ops: Vec<crate::extensions::state_ops::StateOp>,
 }

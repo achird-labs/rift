@@ -482,11 +482,14 @@ fn resolve_script_text(config_file: &Path, script: &Value, registry: &Value) -> 
     None
 }
 
-/// Issue #358: a script that calls `ctx.state` (or the v1 `flow_store`) needs a flow store to
-/// persist its writes. Without `_rift.flowState` configured, `Imposter::create_flow_store`
+/// Issue #358 (scripts) / #969 (`_rift.stateOps`): both rely on the flow store without
+/// necessarily configuring `_rift.flowState`. Without it, `Imposter::create_flow_store`
 /// auto-provisions an in-memory store instead of a silent no-op — state works, but only for this
 /// process's lifetime and isn't shared across a cluster. Warn so that's a deliberate choice, not a
-/// surprise at scale.
+/// surprise at scale. `stateOps` triggers this unconditionally (any non-empty array reaches the
+/// store on every match — unlike a script, there's no text to inspect for whether it touches
+/// state; declaring the op *is* touching state), matching `ImposterManager::uses_state_ops`'s own
+/// unconditional auto-provisioning trigger.
 fn check_state_without_flow_state(file: &Path, imposter: &Value, result: &mut LintResult) {
     let has_flow_state = imposter
         .get("_rift")
@@ -510,13 +513,14 @@ fn check_state_without_flow_state(file: &Path, imposter: &Value, result: &mut Li
             continue;
         };
         for (resp_idx, response) in responses.iter().enumerate() {
-            let Some(script) = response.get("_rift").and_then(|rift| rift.get("script")) else {
+            let Some(rift) = response.get("_rift") else {
                 continue;
             };
-            let Some(code) = resolve_script_text(file, script, &registry) else {
-                continue;
-            };
-            if code.contains("ctx.state") || code.contains("flow_store") {
+
+            if let Some(script) = rift.get("script")
+                && let Some(code) = resolve_script_text(file, script, &registry)
+                && (code.contains("ctx.state") || code.contains("flow_store"))
+            {
                 result.add_issue(
                     LintIssue::warning(
                         "E042",
@@ -524,6 +528,27 @@ fn check_state_without_flow_state(file: &Path, imposter: &Value, result: &mut Li
                         file.to_path_buf(),
                     )
                     .with_location(format!("stubs[{idx}].responses[{resp_idx}]._rift.script"))
+                    .with_suggestion(
+                        "State will be auto-provisioned in-memory (won't persist across restarts \
+                         or be shared across a cluster) — configure _rift.flowState for production",
+                    ),
+                );
+            }
+
+            // Issue #969: any non-empty `stateOps` array reaches the flow store on every matched
+            // request — unlike a script, presence alone is the signal (no text to search).
+            if rift
+                .get("stateOps")
+                .and_then(|v| v.as_array())
+                .is_some_and(|ops| !ops.is_empty())
+            {
+                result.add_issue(
+                    LintIssue::warning(
+                        "E042",
+                        "_rift.stateOps is used but no _rift.flowState is configured",
+                        file.to_path_buf(),
+                    )
+                    .with_location(format!("stubs[{idx}].responses[{resp_idx}]._rift.stateOps"))
                     .with_suggestion(
                         "State will be auto-provisioned in-memory (won't persist across restarts \
                          or be shared across a cluster) — configure _rift.flowState for production",

@@ -1729,14 +1729,17 @@ async fn handle_request_inner(
                     })
                     .await;
                 if let Err(e) = outcome {
-                    // In debug mode `execute_state_ops` itself returns the `Err` (naming the
-                    // failing op) — surface it the same way a failed `{{ }}` render does (#359).
-                    // Outside debug mode it never returns `Err` (warn + continue is the policy),
-                    // so the only failure reaching here is a `run_flow_blocking` transport
-                    // failure (e.g. a panicked blocking task) — the existing backend-error
-                    // mapping used by the FSM transition above.
-                    return Ok(if state_ops_debug {
-                        state_ops_error_response(&e.to_string())
+                    // Two distinct failure sources reach here, and only one of them is a
+                    // stateOps failure: in debug mode `execute_state_ops` itself returns the
+                    // `Err` it built (`"stateOps: <op> failed: ..."`, see its doc) — surface that
+                    // the same way a failed `{{ }}` render does (#359). Outside debug mode it
+                    // never returns `Err` (warn + continue is the policy), so any failure reaching
+                    // here is instead a `run_flow_blocking` *transport* failure (e.g. a panicked
+                    // blocking task) — the same door the FSM transition above uses, not the
+                    // stateOps one, since it has nothing to do with a stateOps op failing.
+                    let message = e.to_string();
+                    return Ok(if state_ops_debug && message.starts_with("stateOps:") {
+                        state_ops_error_response(&message)
                     } else {
                         backend_error_response(&e)
                     });

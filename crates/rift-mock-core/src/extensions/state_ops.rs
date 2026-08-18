@@ -17,16 +17,35 @@
 //! - **`increment`** is `FlowStore::increment_by`: atomic on every backend that has one, so a
 //!   counter never loses a bump under concurrency. Never renders anything.
 //! - **`set`** renders `value` in the `{{ }}` grammar plus one extra head, `previousValue` — the
-//!   key's value before this operation, empty when it had none. A `set` whose value mentions
-//!   `previousValue` is a bounded compare-and-set loop (read → render → CAS on the value read;
-//!   retry on conflict, up to [`CAS_ATTEMPTS`]), so concurrent appends never lose one; a `set`
-//!   that does not is a plain write. The in-memory store's default CAS is get-then-set (not
-//!   atomic), which is exactly why the loop is bounded and the semantics are the *contract* an
-//!   atomic backend meets rather than something only it provides.
+//!   key's value before this operation, empty when it had none. A `set` whose value *reads the key
+//!   it writes* — through `previousValue`, or through `state.<that key>` — is a bounded
+//!   compare-and-set loop (read → render → CAS on the value read; retry on conflict, up to
+//!   [`CAS_ATTEMPTS`]), so concurrent read-modify-writes never lose one; a `set` that reads no
+//!   prior value is a plain write. The decision is made from the template's heads
+//!   ([`template_heads`]), not from a substring search. The `FlowStore` trait's *default* CAS is
+//!   get-then-set (not atomic) — both shipped backends override it atomically — which is why the
+//!   loop is bounded and the semantics are the contract a backend meets, not something only one
+//!   provides.
+//! - **What `set` stores.** A rendered value that is exactly a canonical integer (`"42"`, `"-3"`,
+//!   `"0"` — not `"007"`, not `"4.5"`) is stored as a JSON number, anything else as a string. That
+//!   is what lets `set hits "0"` seed a counter that `increment` then continues from — an
+//!   `increment` on a *string* value would otherwise silently restart at 0 — and what keeps
+//!   `{{ state.hits }}` reading back as the number it looks like.
 //! - **Errors** follow the templating policy: with `debug` on, the first failing op aborts and the
-//!   caller serves a 500 naming it; otherwise it is logged at `warn` and the remaining ops still
+//!   caller serves a 500 naming it — the ops *before* it have already been applied, this is
+//!   fail-loud, not transactional; otherwise it is logged at `warn` and the remaining ops still
 //!   run. A template token that fails inside a `set` value follows `template_fn`'s own policy
 //!   (empty substitution + warn, or an error in debug).
+//! - **Where they run, and where they do not.** `is` responses only: a `proxy`, `inject` or
+//!   `_rift.script` response has its own means, and `_rift.stateOps` on one of those is not run
+//!   (`stub_analysis` warns). Not run either when the response was pre-empted before it was built:
+//!   a fired `_rift.fault` / `fault` (a probabilistic fault therefore makes the ops probabilistic
+//!   too — the ops belong to the response that was actually served), a `strictBehaviors` failure,
+//!   a matcher error. A `wait` behaviour delays the ops with the response it delays.
+//! - **A store is always provisioned.** An imposter whose stubs carry `stateOps` but no
+//!   `_rift.flowState`, scenario or script gets the in-memory store automatically (with the same
+//!   warning a script-only imposter gets) rather than the no-op store, which would have discarded
+//!   every write silently.
 //! - **Absent field ⇒ byte-identical behaviour**, including the prepared-response fast path.
 
 use serde::{Deserialize, Serialize};
@@ -34,7 +53,7 @@ use serde_json::Value;
 
 use crate::extensions::flow_state::{CasOutcome, FlowStore};
 use crate::extensions::template::RequestData;
-use crate::extensions::template_fn::{TemplateContext, render_templated};
+use crate::extensions::template_fn::{TemplateContext, render_templated, template_heads};
 
 /// How many times a `previousValue`-bearing `set` retries its compare-and-set before giving up.
 ///
@@ -119,12 +138,12 @@ fn execute_one(
 ) -> Result<(), String> {
     match op {
         StateOp::Set { key, value } => {
-            if value.contains("previousValue") {
+            if reads_own_key(value, key) {
                 set_with_previous(store, flow_id, key, value, request, debug)
             } else {
                 let rendered = render_value(value, store, flow_id, request, None, debug)?;
                 store
-                    .set(flow_id, key, Value::String(rendered))
+                    .set(flow_id, key, stored_value(rendered))
                     .map_err(|e| format!("flow store: {e:#}"))
             }
         }
@@ -157,7 +176,7 @@ fn set_with_previous(
             .map_err(|e| format!("flow store: {e:#}"))?;
         let rendered = render_value(value, store, flow_id, request, current.as_ref(), debug)?;
         match store
-            .compare_and_set(flow_id, key, current.as_ref(), Value::String(rendered))
+            .compare_and_set(flow_id, key, current.as_ref(), stored_value(rendered))
             .map_err(|e| format!("flow store: {e:#}"))?
         {
             CasOutcome::Applied => return Ok(()),
@@ -168,6 +187,26 @@ fn set_with_previous(
         "lost the compare-and-set race {CAS_ATTEMPTS} times; the key is being written faster than \
          this operation can read-render-write it"
     ))
+}
+
+/// Whether a `set`'s value template reads the key it is about to write — through `previousValue`
+/// or through `state.<key>` — and therefore needs the compare-and-set loop rather than a plain
+/// write. Decided from the template's heads, so a literal `previousValue` in plain text does not
+/// trigger it and `{{ state.trail }}` on a `set` of `trail` does.
+fn reads_own_key(value: &str, key: &str) -> bool {
+    let own = format!("state.{key}");
+    template_heads(value)
+        .iter()
+        .any(|head| head == "previousValue" || *head == own)
+}
+
+/// What a rendered `set` value is stored as: a JSON number when it is exactly a canonical
+/// integer, otherwise a string (see the module doc for why).
+fn stored_value(rendered: String) -> Value {
+    match rendered.parse::<i64>() {
+        Ok(n) if n.to_string() == rendered => Value::Number(n.into()),
+        _ => Value::String(rendered),
+    }
 }
 
 fn render_value(
@@ -263,7 +302,8 @@ mod tests {
             },
         ];
         execute_state_ops(&ops, &store, "f", &request(), true).expect("ops run");
-        assert_eq!(store.get("f", "lastId").unwrap(), Some(json!("7")));
+        // `7` renders as a canonical integer, so it is stored as a number (see module doc).
+        assert_eq!(store.get("f", "lastId").unwrap(), Some(json!(7)));
         assert_eq!(store.get("f", "trail").unwrap(), Some(json!("|apple")));
         // The second time, `previousValue` is what the first write left.
         execute_state_ops(&ops, &store, "f", &request(), true).expect("ops run");
@@ -271,6 +311,38 @@ mod tests {
             store.get("f", "trail").unwrap(),
             Some(json!("|apple|apple"))
         );
+    }
+
+    #[test]
+    fn a_set_that_reads_its_own_key_uses_the_cas_loop_and_seeds_a_counter_as_a_number() {
+        let store = InMemoryFlowStore::new(300);
+        // `state.trail` on a set of `trail` is the accumulator idiom spelled the other way; it must
+        // take the same compare-and-set path `previousValue` does — and a literal mention of the
+        // word in plain text must not.
+        assert!(reads_own_key("{{ previousValue }}|x", "trail"));
+        assert!(reads_own_key("{{ state.trail | json }}|x", "trail"));
+        assert!(!reads_own_key("{{ state.other }}|x", "trail"));
+        assert!(!reads_own_key("previousValue unknown", "trail"));
+
+        // Seeding a counter with `set` stores a number, so `increment` continues from it instead
+        // of silently restarting at 0 (which is what an increment on a string would do).
+        let ops = vec![
+            StateOp::Set {
+                key: "hits".into(),
+                value: "40".into(),
+            },
+            StateOp::Increment {
+                key: "hits".into(),
+                by: 2,
+            },
+        ];
+        execute_state_ops(&ops, &store, "f", &request(), true).expect("ops run");
+        assert_eq!(store.get("f", "hits").unwrap(), Some(json!(42)));
+        // Non-canonical or non-integer renderings stay strings.
+        assert_eq!(stored_value("007".into()), json!("007"));
+        assert_eq!(stored_value("4.5".into()), json!("4.5"));
+        assert_eq!(stored_value("-3".into()), json!(-3));
+        assert_eq!(stored_value(String::new()), json!(""));
     }
 
     #[test]

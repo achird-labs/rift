@@ -92,7 +92,9 @@ async fn set_renders_from_request_data() {
 
     get(port, "/x?id=42", "s-set").await;
 
-    assert_eq!(state(&manager, port, "s-set", "lastId"), Some(json!("42")));
+    // A rendered value that is a canonical integer is stored as a number, so `{{ state.lastId }}`
+    // and an `increment` both see what it looks like.
+    assert_eq!(state(&manager, port, "s-set", "lastId"), Some(json!(42)));
     manager.delete_all().await;
 }
 
@@ -152,14 +154,14 @@ async fn delete_and_clear_flow() {
     .await;
 
     get(port, "/seed", "s-del").await;
-    assert_eq!(state(&manager, port, "s-del", "a"), Some(json!("1")));
-    assert_eq!(state(&manager, port, "s-del", "b"), Some(json!("2")));
+    assert_eq!(state(&manager, port, "s-del", "a"), Some(json!(1)));
+    assert_eq!(state(&manager, port, "s-del", "b"), Some(json!(2)));
 
     get(port, "/del", "s-del").await;
     assert_eq!(state(&manager, port, "s-del", "a"), None, "a was deleted");
     assert_eq!(
         state(&manager, port, "s-del", "b"),
-        Some(json!("2")),
+        Some(json!(2)),
         "b is untouched by deleting a"
     );
 
@@ -356,6 +358,72 @@ async fn state_ops_round_trips_through_serialized_config() {
         "stateOps must round-trip byte-for-byte through the admin-read serialization: {config_json}"
     );
 
+    manager.delete_all().await;
+}
+
+// (j) Regression: an imposter whose stubs carry `stateOps` but declare NO `_rift.flowState`, no
+// scenario and no script must still persist writes — the auto-provisioned in-memory store
+// (`ImposterManager::uses_state_ops`), not the silent `NoOpFlowStore` a `stateOps`-only imposter
+// used to fall through to before that provisioning existed. With no `flowIdSource` configured,
+// `resolve_flow_id` defaults to `"imposter_port"` (the port as a string) — that is the flow id
+// read back here.
+#[tokio::test]
+async fn state_ops_persist_without_flow_state_configured() {
+    let manager = ImposterManager::new();
+    let port = create(
+        &manager,
+        json!({
+            "port": 0, "protocol": "http",
+            "stubs": [{ "predicates": [], "responses": [{
+                "is": { "statusCode": 200 },
+                "_rift": { "stateOps": [{ "op": "increment", "key": "hits" }] }
+            }] }]
+        }),
+    )
+    .await;
+
+    let flow_id = port.to_string();
+    assert_eq!(get(port, "/x", "ignored").await.status(), 200);
+    assert_eq!(get(port, "/x", "ignored").await.status(), 200);
+
+    assert_eq!(
+        state(&manager, port, &flow_id, "hits"),
+        Some(json!(2)),
+        "stateOps must persist across requests even without an explicit _rift.flowState block \
+         (the auto-provisioned in-memory store, not NoOpFlowStore)"
+    );
+    manager.delete_all().await;
+}
+
+// (k) A fired fault preempts the response, so its stateOps never run: the response that would
+// have carried them was never served. `probability: 1.0` makes the fault deterministic.
+#[tokio::test]
+async fn a_fired_fault_skips_state_ops() {
+    let manager = ImposterManager::new();
+    let port = create(
+        &manager,
+        one_stub_config(
+            json!({
+                "fault": { "error": { "probability": 1.0, "status": 503 } },
+                "stateOps": [{ "op": "increment", "key": "hits" }]
+            }),
+            json!({ "statusCode": 200 }),
+        ),
+    )
+    .await;
+
+    let resp = get(port, "/x", "s-fault").await;
+    assert_eq!(
+        resp.status(),
+        503,
+        "the fault fired and served its own status"
+    );
+
+    assert_eq!(
+        state(&manager, port, "s-fault", "hits"),
+        None,
+        "stateOps on a response preempted by a fired fault must not run"
+    );
     manager.delete_all().await;
 }
 

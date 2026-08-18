@@ -81,6 +81,23 @@ pub fn render_templated(
     render(&expanded, ctx, debug)
 }
 
+/// The head word of every `{{ ... }}` expression in `input`, in order — `state.hits` for
+/// `{{ state.hits | json }}`, `previousValue` for `{{ previousValue }}` — without evaluating any of
+/// them. What a caller that must decide *how* to evaluate a template (the `_rift.stateOps` `set`
+/// choosing between a plain write and a compare-and-set loop, issue #969) reads, so that decision
+/// is made from the grammar and not from a substring search over the raw text.
+#[must_use]
+pub fn template_heads(input: &str) -> Vec<String> {
+    expr_regex()
+        .captures_iter(input)
+        .filter_map(|caps| {
+            let inner = caps.get(1)?.as_str().trim();
+            let base = split_top_level(inner, '|').into_iter().next()?;
+            tokenize_words(&base).into_iter().next()
+        })
+        .collect()
+}
+
 /// Evaluate every `{{ ... }}` expression in `input` against `ctx`. In debug mode the first
 /// failing token aborts the whole render with an error describing it; otherwise each failing
 /// token is replaced with an empty string and logged via `tracing::warn!`.
