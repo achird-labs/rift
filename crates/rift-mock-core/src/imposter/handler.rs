@@ -157,6 +157,26 @@ fn template_error_response(e: &str) -> Response<Full<Bytes>> {
     )
 }
 
+/// Build the 500 for a failed `_rift.stateOps` operation (issue #969), debug mode only —
+/// `execute_state_ops`'s `debug` policy is the only case that returns `Err`, and it names the
+/// failing op in `e`. Same envelope and imposter marker as [`template_error_response`], with its
+/// own `x-rift-state-ops-error` marker so the two failure kinds are distinguishable at the header
+/// level.
+fn state_ops_error_response(e: &str) -> Response<Full<Bytes>> {
+    build_response_with_headers(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [
+            ("x-rift-imposter", "true"),
+            ("x-rift-state-ops-error", "true"),
+            ("content-type", "application/json"),
+        ],
+        crate::response::error_body(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("state operation failed: {e}"),
+        ),
+    )
+}
+
 // The debug-endpoint doors (issue #695). The debug success path answers JSON (`X-Rift-Debug-Response`),
 // so these error paths do too — plain text here was the same-endpoint gap #687 closed elsewhere.
 // Split out from the match arms so each can be pinned by a test: neither is safely provokable
@@ -1342,6 +1362,7 @@ async fn handle_request_inner(
                     request: &request_data,
                     flow_id: &scenario_flow_id,
                     flow_store: imposter.flow_store.as_ref(),
+                    previous_value: None,
                 };
 
                 let template_error = match crate::extensions::template_fn::render_templated(
@@ -1672,6 +1693,57 @@ async fn handle_request_inner(
             // Signal a failed binary decode so serving the raw (still-encoded) body isn't silent (#323).
             if binary_decode_failed {
                 response = response.header("x-rift-binary-error", "true");
+            }
+
+            // Declarative post-response state writes (issue #969): opt-in via `_rift.stateOps`.
+            // Deliberately LAST — after templating and behaviors have rendered `body`/`headers`
+            // and after `body_bytes` above was finalized from that rendered `body` — so a body
+            // reading `{{ state.<key> }}` in the *same* response sees the value from *before*
+            // this request's ops (the semantics `state_ops`'s module doc pins: "show the count,
+            // then bump it"). Ops run sequentially, in array order. `run_flow_blocking` offloads
+            // the store calls onto a blocking backend exactly like the FSM transition above
+            // (issue #475's Redis rule): inline on the in-memory store, off the tokio worker on a
+            // backend that actually blocks.
+            if let Some(ops) = rift_ext.map(|r| &r.state_ops).filter(|ops| !ops.is_empty()) {
+                let request_data = RequestData::new(
+                    method_str,
+                    path_str,
+                    query_opt,
+                    &headers_for_context,
+                    body_string.as_deref(),
+                )
+                .with_route_pattern(stub_state.stub.route_pattern.as_deref());
+                let ops = ops.clone();
+                let flow_id = scenario_flow_id.clone();
+                let state_ops_debug = crate::util::rift_debug_env();
+                let outcome = imposter
+                    .run_flow_blocking(move |imp| {
+                        crate::extensions::execute_state_ops(
+                            &ops,
+                            imp.flow_store.as_ref(),
+                            &flow_id,
+                            &request_data,
+                            state_ops_debug,
+                        )
+                        .map_err(|e| anyhow::anyhow!(e))
+                    })
+                    .await;
+                if let Err(e) = outcome {
+                    // Two distinct failure sources reach here, and only one of them is a
+                    // stateOps failure: in debug mode `execute_state_ops` itself returns the
+                    // `Err` it built (`"stateOps: <op> failed: ..."`, see its doc) — surface that
+                    // the same way a failed `{{ }}` render does (#359). Outside debug mode it
+                    // never returns `Err` (warn + continue is the policy), so any failure reaching
+                    // here is instead a `run_flow_blocking` *transport* failure (e.g. a panicked
+                    // blocking task) — the same door the FSM transition above uses, not the
+                    // stateOps one, since it has nothing to do with a stateOps op failing.
+                    let message = e.to_string();
+                    return Ok(if state_ops_debug && message.starts_with("stateOps:") {
+                        state_ops_error_response(&message)
+                    } else {
+                        backend_error_response(&e)
+                    });
+                }
             }
 
             return Ok(response.body(Full::new(body_bytes)).unwrap_or_else(|e| {
@@ -2192,6 +2264,39 @@ mod template_error_tests {
                 .as_str()
                 .is_some_and(|m| m.contains("template rendering failed")),
             "the 500 must name the render failure, got: {body}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod state_ops_error_tests {
+    use super::state_ops_error_response;
+    use http_body_util::BodyExt;
+    use hyper::StatusCode;
+
+    // Issue #969: like the template door (#687), the `_rift.stateOps` debug-mode 500 fires only
+    // under `RIFT_DEBUG` — a process-global that `crate::util::rift_debug_env` additionally caches
+    // in a `OnceLock` for the life of the process, so no later test in this binary can toggle it at
+    // all, not merely race it. The contract is pinned here instead of end-to-end.
+    #[tokio::test]
+    async fn state_ops_error_response_is_500_with_marker_and_json_envelope() {
+        let resp = state_ops_error_response("stateOps: set \"a\" failed: template error");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(resp.headers().contains_key("x-rift-state-ops-error"));
+        assert_eq!(
+            resp.headers()["content-type"],
+            "application/json",
+            "the stateOps error door serves the JSON envelope, so it must declare it"
+        );
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).expect("utf8");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
+        assert_eq!(v["errors"][0]["code"], "500", "envelope code is the status");
+        assert!(
+            v["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("set \"a\"")),
+            "the 500 must name the failing op, got: {body}"
         );
     }
 }

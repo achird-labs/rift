@@ -12,6 +12,7 @@
 //! These features are Rift extensions for improved developer experience.
 
 use crate::imposter::Stub;
+use crate::imposter::StubResponse;
 use crate::imposter::{Predicate, PredicateOperation};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -62,6 +63,13 @@ pub enum WarningType {
     /// Analysis produced more warnings than the retained cap; the summary records how many were
     /// suppressed (issue #423).
     Truncated,
+    /// `_rift.stateOps` (issue #969) declared on a response shape that never runs it — `stateOps`
+    /// executes only after an `is` response is rendered (see `extensions::state_ops`'s module
+    /// doc). A `proxy` or `inject` response cannot carry this warning: parsing
+    /// (`StubResponse::from<StubResponseRaw>`) drops `_rift` entirely for those two shapes, so the
+    /// only reachable case is a `RiftScript` response — which also covers the bare-`_rift`
+    /// "flat" form (no `is`/`proxy`/`inject`/`fault`), since that too parses to `RiftScript`.
+    StateOpsNeverRuns,
 }
 
 /// Result of stub analysis
@@ -150,6 +158,30 @@ pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
                     shadowed_by_index: None,
                 },
             );
+        }
+
+        // `_rift.stateOps` on a response shape that never runs it (issue #969). `proxy`/`inject`
+        // drop `_rift` entirely during parsing, so the only reachable shape here is `RiftScript`
+        // (which also covers the bare-`_rift` "flat" form — see `WarningType::StateOpsNeverRuns`).
+        for response in &stub.responses {
+            if let StubResponse::RiftScript { rift } = response
+                && !rift.state_ops.is_empty()
+            {
+                push(
+                    &mut result.warnings,
+                    StubWarning {
+                        warning_type: WarningType::StateOpsNeverRuns,
+                        message: format!(
+                            "Stub at index {index} has _rift.stateOps on a non-`is` response; \
+                             stateOps only runs after an `is` response is rendered, so these \
+                             operations never execute"
+                        ),
+                        stub_index: Some(index),
+                        stub_id: stub.id.clone(),
+                        shadowed_by_index: None,
+                    },
+                );
+            }
         }
 
         // Exact predicate duplicates — O(1) hash lookup against the first stub with this key.
@@ -487,6 +519,7 @@ fn is_more_general_constraint(a: &PredicateConstraint, b: &PredicateConstraint) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imposter::RiftResponseExtension;
     use serde_json::json;
 
     fn predicates_from_jsons(predicates: Vec<serde_json::Value>) -> Vec<Predicate> {
@@ -767,6 +800,112 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| w.warning_type == WarningType::PotentiallyShadowed)
+        );
+    }
+
+    // Issue #969: `_rift.stateOps` on a `RiftScript` response (the reachable non-`is` shape —
+    // `proxy`/`inject` drop `_rift` entirely at parse time) must warn, since stateOps never runs
+    // outside an `is` response.
+    #[test]
+    fn state_ops_on_a_rift_script_response_warns() {
+        let rift: RiftResponseExtension = serde_json::from_value(json!({
+            "stateOps": [{ "op": "increment", "key": "hits" }]
+        }))
+        .expect("parses");
+        let stub = Stub {
+            id: None,
+            route_pattern: None,
+            predicates: vec![],
+            responses: vec![StubResponse::RiftScript { rift }],
+            scenario_name: None,
+            required_scenario_state: None,
+            new_scenario_state: None,
+            space: None,
+            recorded_from: None,
+            verify: None,
+        };
+
+        let result = analyze_stubs(&[stub]);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::StateOpsNeverRuns),
+            "a RiftScript response's stateOps must be flagged as never running: {:?}",
+            result.warnings
+        );
+    }
+
+    // A `RiftScript` response with NO `stateOps` (an actual script-only response) must not warn —
+    // only a non-empty `stateOps` block on a non-`is` response is the problem.
+    #[test]
+    fn a_script_only_response_without_state_ops_does_not_warn() {
+        let rift: RiftResponseExtension = serde_json::from_value(json!({
+            "script": { "code": "response.body = 'x';" }
+        }))
+        .expect("parses");
+        let stub = Stub {
+            id: None,
+            route_pattern: None,
+            predicates: vec![],
+            responses: vec![StubResponse::RiftScript { rift }],
+            scenario_name: None,
+            required_scenario_state: None,
+            new_scenario_state: None,
+            space: None,
+            recorded_from: None,
+            verify: None,
+        };
+
+        let result = analyze_stubs(&[stub]);
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::StateOpsNeverRuns),
+            "a script-only response with no stateOps must not warn: {:?}",
+            result.warnings
+        );
+    }
+
+    // `stateOps` on an `is` response — the reachable, correct shape — must never warn.
+    #[test]
+    fn state_ops_on_an_is_response_does_not_warn() {
+        let rift: RiftResponseExtension = serde_json::from_value(json!({
+            "stateOps": [{ "op": "increment", "key": "hits" }]
+        }))
+        .expect("parses");
+        let is_response = crate::imposter::StubResponse::new_is(
+            crate::imposter::IsResponse {
+                status_code: 200,
+                headers: Default::default(),
+                body: None,
+                mode: Default::default(),
+            },
+            None,
+            Some(rift),
+        );
+        let stub = Stub {
+            id: None,
+            route_pattern: None,
+            predicates: vec![],
+            responses: vec![is_response],
+            scenario_name: None,
+            required_scenario_state: None,
+            new_scenario_state: None,
+            space: None,
+            recorded_from: None,
+            verify: None,
+        };
+
+        let result = analyze_stubs(&[stub]);
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::StateOpsNeverRuns),
+            "stateOps on an `is` response must not warn: {:?}",
+            result.warnings
         );
     }
 

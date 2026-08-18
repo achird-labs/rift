@@ -236,7 +236,7 @@ impl PreparedResponse {
             return None;
         }
         if let Some(r) = rift
-            && (r.fault.is_some() || r.templated || r.script.is_some())
+            && (r.fault.is_some() || r.templated || r.script.is_some() || !r.state_ops.is_empty())
         {
             return None;
         }

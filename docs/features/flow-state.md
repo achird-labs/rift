@@ -7,9 +7,11 @@ nav_order: 22
 
 # Flow State
 
-Flow state is a per-flow key/value store that scripts read and write to build stateful mocks —
-retry-then-succeed, call counters, saga progress. It is keyed by `(flow_id, key)`, where the flow id
-is resolved exactly as for [Spaces]({{ site.baseurl }}/features/spaces/).
+Flow state is a per-flow key/value store used to build stateful mocks — retry-then-succeed, call
+counters, saga progress. It is keyed by `(flow_id, key)`, where the flow id is resolved exactly as
+for [Spaces]({{ site.baseurl }}/features/spaces/). Scripts read and write it through `ctx.state`;
+`_rift.stateOps` (below) writes it declaratively, with no script at all; and a `{{ state.<key> }}`
+token (under `_rift.templated`) reads it back into a response body or header.
 
 ---
 
@@ -52,17 +54,18 @@ An explicit `flowState` block that can't be honored now **fails imposter creatio
   than misbehaving later.
 
 Only imposters with genuinely **no state surface** stay on the silent no-op store: no `flowState`
-block, no scenario stubs, and no `_rift.script` stub. Such an imposter never touches the store, so
-there is nothing to auto-provision.
+block, no scenario stubs, no `_rift.script` stub, and no `_rift.stateOps`. Such an imposter never
+touches the store, so there is nothing to auto-provision.
 
-### No `flowState`, but a script or scenario stub — auto-provisioned in-memory
+### No `flowState`, but a script, scenario, or `stateOps` stub — auto-provisioned in-memory
 
-An imposter with a `_rift.script` stub (which might call `ctx.state` at runtime) or a
-scenario stub, but **no** `flowState` block, gets a real in-memory store auto-provisioned at the
-default TTL (300s) — a `tracing::warn!` (target `rift::script`) is logged so this doesn't go
-unnoticed, and `rift-lint` flags the same condition statically as `E042`. State works out of the
-box; it just doesn't persist across restarts or get shared across a cluster the way an explicit
-`flowState` (especially `backend: "redis"`) would.
+An imposter with a `_rift.script` stub (which might call `ctx.state` at runtime), a scenario stub,
+or a `_rift.stateOps` block, but **no** `flowState` block, gets a real in-memory store
+auto-provisioned at the default TTL (300s) — a `tracing::warn!` (target `rift::script` for a
+script stub, `rift::state_ops` for `stateOps`) is logged so this doesn't go unnoticed, and
+`rift-lint` flags the same condition statically as `E042`. State works out of the box; it just
+doesn't persist across restarts or get shared across a cluster the way an explicit `flowState`
+(especially `backend: "redis"`) would.
 
 ---
 
@@ -149,6 +152,94 @@ curl -i -H 'X-Flow-Id: t1' http://localhost:4506/api/resource   # 200 ok 3
 
 ---
 
+## `_rift.stateOps` — declarative writes, no script
+
+For the common case — bump a counter, remember a value — writing a script is more than the intent
+needs. `_rift.stateOps` is a declarative alternative: an array of state mutations on an `is`
+response's `_rift` block, run in order against the request's resolved flow id after the response is
+rendered, just before it is written:
+
+```json
+{
+  "_rift": {
+    "stateOps": [
+      { "op": "increment", "key": "hits" },
+      { "op": "set", "key": "lastId", "value": "{{ request.query.id }}" },
+      { "op": "delete", "key": "tmp" },
+      { "op": "clearFlow" }
+    ]
+  }
+}
+```
+
+| Op | Effect |
+|:---|:-------|
+| `{ "op": "increment", "key", "by"? }` | Add `by` (default `1`) to an integer key, creating it at `0`. Atomic on every backend that has one. |
+| `{ "op": "set", "key", "value" }` | Set `key` to the rendered `value` template (`{{ }}` grammar, plus one extra head: `previousValue`). |
+| `{ "op": "delete", "key" }` | Delete one key. |
+| `{ "op": "clearFlow" }` | Delete every key in the flow. |
+
+### Worked example — increment, then a `set` that reads it back
+
+```json
+{
+  "port": 4507,
+  "protocol": "http",
+  "stubs": [{
+    "predicates": [{ "equals": { "method": "GET", "path": "/api/resource" } }],
+    "responses": [{
+      "is": { "statusCode": 200, "body": "{{ state.hits }} (was {{ previousValue }})" },
+      "_rift": {
+        "templated": true,
+        "stateOps": [
+          { "op": "increment", "key": "hits" },
+          { "op": "set", "key": "trail", "value": "{{ previousValue }}|{{ state.hits }}" }
+        ]
+      }
+    }]
+  }]
+}
+```
+
+The body's `{{ state.hits }}` reads the value from *before* this request's own `increment` — the
+same "show the count, then bump it" order WireMock uses — because `stateOps` runs last, right
+before the response is written. The `set` on `trail` mentions `previousValue`, so it is a bounded
+compare-and-set loop rather than a plain write: concurrent requests never lose an update.
+
+### `is` responses only
+
+`stateOps` belongs to an `is` response. A `proxy`, `inject`, or script-only (`_rift.script`)
+response has its own means of touching state (a script reaches `ctx.state` directly); `stateOps` on
+one of those never runs, and `rift-lint`/the admin-API stub-analysis warning both flag it.
+
+### Not run when the response never serves
+
+`stateOps` runs only for the response actually served. It does **not** run when:
+
+- a `_rift.fault` (or bare `fault`) fires — a probabilistic fault therefore makes the ops
+  probabilistic too, since they belong to the response that was pre-empted;
+- a `strictBehaviors` failure serves the 500 instead;
+- a matcher error prevents a response from being selected at all.
+
+A `wait` behavior delays the ops along with the response it delays — it does not skip them.
+
+### What `set` stores
+
+A rendered `value` that is exactly a canonical integer (`"42"`, `"-3"`, `"0"` — not `"007"`, not
+`"4.5"`) is stored as a JSON number; anything else is stored as a string. This is what lets
+`set hits "0"` seed a counter that a later `increment` continues from — an `increment` on a
+*string* value would otherwise silently restart at `0` — and what keeps `{{ state.hits }}` reading
+back as the number it looks like.
+
+### Auto-provisioning and `rift-lint`
+
+Like a `_rift.script` stub, a `stateOps` block gets a real in-memory store auto-provisioned when no
+`_rift.flowState` is configured (see "auto-provisioned in-memory" above) — it does not silently fall
+through to the no-op store. `rift-lint`'s `E042` flags the same condition statically, so it's a
+deliberate choice rather than a surprise at scale.
+
+---
+
 ## Inspecting and arranging state (admin API)
 
 ```bash
@@ -168,8 +259,8 @@ curl -X DELETE http://localhost:2525/admin/imposters/4506/flow-state/t1
 ```
 
 Note: an imposter gets a real store when `_rift.flowState` is configured, or it declares scenario
-stubs, or it has a `_rift.script` stub (auto-provisioned in-memory); only an imposter
-with none of those uses a no-op store where values never persist.
+stubs, or it has a `_rift.script` stub, or a `_rift.stateOps` block (auto-provisioned in-memory);
+only an imposter with none of those uses a no-op store where values never persist.
 
 > **Embedding over the C-ABI (non-Rust)**: a non-Rust host can read, write, and delete flow-state
 > keys with zero loopback HTTP via [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/#admin-long-tail-over-ffi-scenario-state--correlated-spaces) —

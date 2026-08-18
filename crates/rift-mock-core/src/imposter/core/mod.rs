@@ -449,7 +449,33 @@ impl Imposter {
             )));
         }
 
+        if Self::uses_state_ops(&config.stubs) {
+            // Same reasoning as the script branch (issue #969): the ops write the store on every
+            // matched request, and the no-op store would discard every one of those writes
+            // without a word — the most natural first config a user writes must not do that.
+            tracing::warn!(
+                target: "rift::state_ops",
+                ttl_seconds = DEFAULT_FLOW_STATE_TTL_SECS,
+                "imposter has a _rift.stateOps stub but no _rift.flowState configured; \
+                 auto-provisioning an in-memory FlowStore. State will NOT persist across restarts \
+                 or be shared across a cluster — configure _rift.flowState for production."
+            );
+            return Ok(Arc::new(InMemoryFlowStore::new(
+                DEFAULT_FLOW_STATE_TTL_SECS,
+            )));
+        }
+
         Ok(Arc::new(NoOpFlowStore))
+    }
+
+    /// Whether any `is` response carries `_rift.stateOps` (issue #969) — such a stub writes the
+    /// flow store on every matched request, so its imposter needs a real store even without
+    /// `_rift.flowState` configured. `is` only: the ops do not run on any other response shape.
+    fn uses_state_ops(stubs: &[Stub]) -> bool {
+        stubs
+            .iter()
+            .flat_map(|s| &s.responses)
+            .any(|resp| matches!(resp, StubResponse::Is { rift: Some(r), .. } if !r.state_ops.is_empty()))
     }
 
     /// Whether any stub references a scenario — via the declarative FSM fields

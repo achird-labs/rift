@@ -1236,6 +1236,51 @@ fn e042_resolves_file_backed_scripts() {
     assert!(has_code(&r, "E042"), "expected E042, got {:?}", codes(&r));
 }
 
+// ─── Issue #969: E042 also fires for `_rift.stateOps` without `_rift.flowState` ─────────────
+
+fn state_ops_stub(ops: Value) -> Value {
+    json!({
+        "responses": [{ "is": { "statusCode": 200 }, "_rift": { "stateOps": ops } }]
+    })
+}
+
+#[test]
+fn e042_fires_for_state_ops_without_flow_state() {
+    let v = make_imposter(json!([state_ops_stub(json!([
+        { "op": "increment", "key": "hits" }
+    ]))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(has_code(&r, "E042"), "expected E042, got {:?}", codes(&r));
+}
+
+#[test]
+fn e042_does_not_fire_for_empty_state_ops() {
+    let v = make_imposter(json!([state_ops_stub(json!([]))]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(
+        !has_code(&r, "E042"),
+        "an empty stateOps array touches nothing, E042 must not fire, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn e042_does_not_fire_for_state_ops_when_flow_state_is_configured() {
+    let mut v = make_imposter(json!([state_ops_stub(json!([
+        { "op": "increment", "key": "hits" }
+    ]))]));
+    v["_rift"] = json!({ "flowState": { "backend": "inmemory" } });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(
+        !has_code(&r, "E042"),
+        "flowState is configured, E042 must not fire, got {:?}",
+        codes(&r)
+    );
+}
+
 #[test]
 fn e042_is_a_warning_not_an_error() {
     let v = make_imposter(json!([rift_script_stub(json!({

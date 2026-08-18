@@ -13,6 +13,18 @@ record.
 
 ### Added
 
+- **`_rift.stateOps`: declarative post-response flow-state writes, no script required** (issue
+  #969). An `is` response's `_rift` block can now carry a `stateOps` array —
+  `set`/`increment`/`delete`/`clearFlow` against the request's resolved flow id, run in order right
+  before the response is written — for the common "bump a counter" / "remember a value" cases that
+  previously needed a full `_rift.script` response. `set` renders its value through the same
+  `{{ }}` templating grammar plus one extra head, `previousValue`, which turns a `set` that reads
+  its own key into a bounded compare-and-set loop so concurrent read-modify-writes never lose an
+  update; `increment` is atomic on every backend that has one. An imposter with `stateOps` but no
+  `_rift.flowState` configured now auto-provisions an in-memory store, the same convenience a
+  `_rift.script` stub already got, rather than silently discarding every write on the no-op store.
+  See [Flow State](docs/features/flow-state.md#riftstateops--declarative-writes-no-script).
+
 - **An intercept `serve` rule now accepts a numeric-string `statusCode` and multi-value `headers`**
   (issue #936), completing the parity #933 started for `body`. `"statusCode": "418"` and
   `"set-cookie": ["a=1", "b=2"]` are the forms Mountebank accepts and the imposter stub path has
