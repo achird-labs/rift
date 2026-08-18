@@ -12,6 +12,7 @@ use super::reconcile::{
 use super::types::{ImposterConfig, ImposterError, Stub};
 use crate::behaviors::ResponseSequencer;
 use crate::extensions::decorate::ResponseDecorator;
+use crate::extensions::exchange_inspector::ExchangeInspectorProvider;
 use crate::extensions::flow_state::FlowStoreProvider;
 use crate::extensions::no_match::NoMatchInterceptor;
 use crate::imposter::journal::RequestJournal;
@@ -255,6 +256,9 @@ pub struct ImposterManager {
     proxy_store: Option<Arc<dyn ProxyRecordingStore>>,
     /// Last-chance no-match hook (issue #819); None = no interceptor, unchanged fallthrough.
     no_match_interceptor: Option<Arc<dyn NoMatchInterceptor>>,
+    /// Provider consulted per imposter for a synchronous exchange inspector (issue #966); None =
+    /// no provider, so every imposter gets no inspector regardless of its config.
+    exchange_inspector_provider: Option<Arc<dyn ExchangeInspectorProvider>>,
     /// Per-core accept runtimes (RFC-712, issue #745). When set, every imposter port binds one
     /// SO_REUSEPORT listener per runtime and each accept loop runs pinned to its runtime; the
     /// kernel spreads connections across them by 4-tuple hash. `None` (the default) keeps
@@ -301,6 +305,7 @@ impl ImposterManager {
             request_journal: None,
             proxy_store: None,
             no_match_interceptor: None,
+            exchange_inspector_provider: None,
             accept_runtimes: None,
             serve_unbound: false,
             conn_drain: DEFAULT_CONN_DRAIN,
@@ -466,6 +471,21 @@ impl ImposterManager {
     #[must_use]
     pub fn with_no_match_interceptor(mut self, interceptor: Arc<dyn NoMatchInterceptor>) -> Self {
         self.no_match_interceptor = Some(interceptor);
+        self
+    }
+
+    /// Register a provider that supplies a synchronous exchange inspector per imposter (issue
+    /// #966), consulted once with that imposter's config when it is created — mirroring
+    /// [`Self::with_flow_store_provider`]. `None` from the provider means that imposter runs with
+    /// no hooks at all; without a provider registered here, no imposter is ever consulted. See
+    /// [`ExchangeInspector`](crate::extensions::exchange_inspector::ExchangeInspector) for what
+    /// the hooks see and when they run.
+    #[must_use]
+    pub fn with_exchange_inspector_provider(
+        mut self,
+        provider: Arc<dyn ExchangeInspectorProvider>,
+    ) -> Self {
+        self.exchange_inspector_provider = Some(provider);
         self
     }
 
@@ -644,6 +664,12 @@ impl ImposterManager {
         // Inject the shared no-match interceptor, if one is registered (issue #819).
         if let Some(interceptor) = &self.no_match_interceptor {
             imposter.no_match_interceptor = Some(Arc::clone(interceptor));
+        }
+
+        // Consult the exchange-inspector provider, if one is registered (issue #966), with this
+        // imposter's own config — the provider decides per imposter, not per manager.
+        if let Some(provider) = &self.exchange_inspector_provider {
+            imposter.exchange_inspector = provider.provide(&imposter.config);
         }
 
         // Create shutdown channel for this imposter

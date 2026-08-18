@@ -17,9 +17,13 @@
 //!   defaultForward/defaultResponse/empty-200 fallthrough (issue #819)
 //! - **Admin Authorization** (`authz`): Pluggable per-request admin-API authorization with parsed
 //!   route context, consulted after authentication (issue #854)
+//! - **Exchange Inspector** (`exchange_inspector`): Synchronous per-imposter hooks that see a
+//!   request before matching and the response before it is written, and may replace either
+//!   (issue #966)
 
 pub mod authz;
 pub mod decorate;
+pub mod exchange_inspector;
 pub mod fault;
 pub mod flow_state;
 pub mod matcher;
@@ -31,6 +35,10 @@ pub mod template;
 pub mod template_fn;
 
 // Re-export commonly used types for library consumers
+#[allow(unused_imports)]
+pub use exchange_inspector::{
+    ExchangeInspector, ExchangeInspectorProvider, InspectRequest, InspectResponse, InspectVerdict,
+};
 #[allow(unused_imports)]
 pub use fault::{FaultDecision, create_error_response, decide_fault};
 #[allow(unused_imports)]
