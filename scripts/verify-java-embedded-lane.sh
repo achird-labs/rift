@@ -64,7 +64,9 @@ fail() {
 # caller's bare assignment before its `::error::` annotation is emitted, turning a diagnosed failure
 # into a silent red — which, given #927's own lesson, is the most expensive way for this to break.
 find_report() {
-  find "$1/target" -name 'TEST-*CorpusReplayIT.xml' -type f 2>/dev/null | head -1 || true
+  # `sort` before `head`: `find`'s order is filesystem-dependent, and a lane that ever holds two
+  # matching reports must read the same one on every runner rather than whichever came first.
+  find "$1/target" -name 'TEST-*CorpusReplayIT.xml' -type f 2>/dev/null | sort | head -1 || true
 }
 
 # Reads a numeric attribute off the report's <testsuite> element. `-m1` takes that element, which
@@ -166,7 +168,7 @@ if [ -n "${STUB_REPORT_ERRORS:-}" ]; then
     printf '  <testcase name="replay()"><error message="%s"/></testcase>\n' \
       "${STUB_ERROR_MESSAGE:-unknown CONFORMANCE_TRANSPORT '${CONFORMANCE_TRANSPORT:-}' (expected SPAWN or EMBEDDED)}"
     printf '</testsuite>\n'
-  } >"$STUB_STATE/module/target/surefire-reports/TEST-io.github.achirdlabs.rift.conformance.CorpusReplayIT.xml"
+  } >"$STUB_STATE/module/target/surefire-reports/TEST-io.rift.conformance.CorpusReplayIT.xml"
 fi
 exit "${STUB_EXIT:-1}"
 STUB
@@ -179,7 +181,11 @@ STUB
   # the step does not.
   export CONFORMANCE_TRANSPORT='EMBEDDED'
 
-  # Writes the report the main `./mvnw verify` would have left behind.
+  # Writes the report the main `./mvnw verify` would have left behind. Same file name as the
+  # stub above rewrites: surefire names the report after the test class, so the main run and the
+  # canary write ONE file, and the guard reads that one. Two differently named files here would
+  # leave `find_report` reading whichever `find` happened to list first — green on one filesystem
+  # and red on another, which is exactly what happened on the CI runner.
   write_report() {
     mkdir -p "$module/target/surefire-reports"
     printf '<testsuite name="io.rift.conformance.CorpusReplayIT" tests="%s" errors="0" skipped="%s" failures="0"/>\n' \
