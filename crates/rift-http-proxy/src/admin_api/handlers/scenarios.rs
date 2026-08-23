@@ -23,6 +23,10 @@ fn default_flow_id(imposter: &Imposter) -> String {
 }
 
 /// Collect and JSON-parse a request body, returning a `400` response on failure.
+// The error channel here *is* the rendered `400`, which is what lets a handler return it with
+// `?`. `Response` is hyper's type and its size is not ours to shrink; boxing it would only move
+// the unboxing to every call site, since each one hands the response straight back.
+#[allow(clippy::result_large_err)]
 async fn parse_json_body(
     req: Request<Incoming>,
 ) -> Result<serde_json::Value, Response<Full<Bytes>>> {
