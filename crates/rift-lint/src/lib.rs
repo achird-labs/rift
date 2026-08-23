@@ -6,19 +6,17 @@
 //!
 //! # Example
 //!
-//! ```no_run
-//! use rift_lint::{lint_file, lint_directory, LintOptions, LintResult};
-//! use std::path::Path;
+//! ```
+//! use rift_lint::{lint_json, LintOptions};
 //!
-//! // Lint a single file
-//! let result = lint_file(Path::new("imposter.json"), &LintOptions::default());
+//! let config = r#"{
+//!     "port": 3000,
+//!     "protocol": "http",
+//!     "stubs": [{ "responses": [{ "is": { "statusCode": 200 } }] }]
+//! }"#;
 //!
-//! // Lint a directory
-//! let result = lint_directory(Path::new("./imposters"), &LintOptions::default());
-//!
-//! if result.has_errors() {
-//!     eprintln!("Found {} errors", result.errors);
-//! }
+//! let result = lint_json(config, "imposter.json", &LintOptions::default());
+//! assert!(!result.has_errors());
 //! ```
 
 mod types;
