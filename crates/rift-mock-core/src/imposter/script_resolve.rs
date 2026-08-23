@@ -312,6 +312,7 @@ mod tests {
             predicates: vec![],
             responses: vec![StubResponse::RiftScript {
                 rift: RiftResponseExtension {
+                    dataset: None,
                     fault: None,
                     script: Some(script_config),
                     templated: false,

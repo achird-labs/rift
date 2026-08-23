@@ -40,7 +40,8 @@ pub use extraction::{
 pub(crate) use extraction::{LazyXmlDom, eval_xpath_on};
 #[allow(unused_imports)]
 pub use lookup::{
-    CsvCache, CsvData, CsvDataSource, DataSource, LookupBehavior, LookupKey, apply_lookup_behaviors,
+    CsvCache, CsvData, CsvDataSource, DataSource, DatasetBinding, LookupBehavior, LookupKey,
+    apply_lookup_behaviors,
 };
 pub use request::{RequestContext, header_to_title_case};
 pub use sequencer::{LocalSequencer, ResponseSequencer, SequenceKey};

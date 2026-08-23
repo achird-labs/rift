@@ -1220,6 +1220,16 @@ pub struct RiftResponseExtension {
     /// as before, prepared fast path included.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub state_ops: Vec<crate::extensions::state_ops::StateOp>,
+    /// A dataset-named `lookup` (`_rift.dataset`): **carried, never executed here.**
+    ///
+    /// A `lookup` behavior needs a filesystem path, which is node-local and so cannot travel in a
+    /// config that replicates. `rift-cluster` resolves the dataset on each node and rewrites this
+    /// into a real `behaviors.lookup` at apply time; standalone Rift serves a response carrying
+    /// one exactly as if it were absent. The field lives here so the declarative form survives a
+    /// config round-trip — without it the block is dropped on parse and the binding cannot be
+    /// stored at all. See [`crate::behaviors::DatasetBinding`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<crate::behaviors::DatasetBinding>,
 }
 
 /// Fault injection configuration for responses

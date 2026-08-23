@@ -260,6 +260,7 @@ mod tests {
             predicates: vec![],
             responses: vec![StubResponse::RiftScript {
                 rift: RiftResponseExtension {
+                    dataset: None,
                     fault: None,
                     script: Some(RiftScriptConfig {
                         engine: Some(engine.to_string()),
@@ -373,6 +374,7 @@ mod tests {
                 predicates: vec![],
                 responses: vec![StubResponse::RiftScript {
                     rift: RiftResponseExtension {
+                        dataset: None,
                         fault: None,
                         script: Some(RiftScriptConfig {
                             engine: Some("rhai".to_string()),
@@ -397,6 +399,7 @@ mod tests {
                 predicates: vec![],
                 responses: vec![StubResponse::RiftScript {
                     rift: RiftResponseExtension {
+                        dataset: None,
                         fault: None,
                         script: Some(RiftScriptConfig {
                             engine: Some("rhai".to_string()),
