@@ -13,6 +13,15 @@ record.
 
 ### Added
 
+- **`_rift.dataset`: a `lookup` named by dataset rather than by file path** — a **carrier field
+  only; nothing in the engine reads it.** A `lookup` behavior needs a filesystem path, and a path is
+  node-local, so a clustered deployment has no way to put one in a config that replicates. The
+  config schema now carries the declarative form — `name`, optional `version`, `key`, `keyColumn`,
+  `into`, and the `digest` the binder pins — so a cluster can resolve it to a content-addressed file
+  on each node and rewrite it into a real `behaviors.lookup` at apply time. Standalone Rift serves a
+  response carrying one exactly as if it were absent. Without this field the block was dropped on
+  parse, so the binding could not be stored at all.
+
 - **`_rift.stateOps`: declarative post-response flow-state writes, no script required** (issue
   #969). An `is` response's `_rift` block can now carry a `stateOps` array —
   `set`/`increment`/`delete`/`clearFlow` against the request's resolved flow id, run in order right

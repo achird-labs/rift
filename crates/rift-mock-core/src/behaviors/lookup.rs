@@ -57,6 +57,45 @@ fn default_delimiter() -> char {
     ','
 }
 
+/// A `_rift.dataset` block: a [`LookupBehavior`] named by *dataset* instead of by file path.
+///
+/// **Carried, never executed.** Nothing in this crate reads this type beyond serializing it back
+/// out, and a standalone Rift serves a response bearing one exactly as if it were absent. It
+/// exists because the path a `lookup` needs is node-local, so a clustered deployment cannot put
+/// one in a config that replicates: `rift-cluster` resolves the name to a content-addressed file
+/// on each node and rewrites this block into a real [`LookupBehavior`] at apply time. The engine
+/// then runs the same unmodified lookup code it always has.
+///
+/// Keeping the declarative form in the config — rather than only the compiled result — is what
+/// lets the cluster hand back the binding the operator actually wrote, and is why this type is
+/// part of the config schema rather than an internal detail of the cluster.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DatasetBinding {
+    /// The dataset's name, unique per tenant.
+    pub name: String,
+    /// Which version to bind. Absent means "the latest at bind time"; the binder is expected to
+    /// resolve it to a concrete version and record that here, so a later upload cannot silently
+    /// change what a serving stub returns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
+    /// Where the lookup key comes from — the same extraction a [`LookupBehavior`] uses, so the
+    /// compiled form carries this across unchanged.
+    pub key: LookupKey,
+    /// The dataset column matched against the key. Distinct from a CSV path's `keyColumn` only in
+    /// that a dataset *declares* its key columns, so a binder can reject an unknown one up front.
+    #[serde(rename = "keyColumn")]
+    pub key_column: String,
+    /// The token replaced in the response, e.g. `${row}`.
+    pub into: String,
+    /// The digest of the exact bytes this binding resolved to.
+    ///
+    /// Written by the binder when it pins `version`, not by the author of the config. It is the
+    /// pin: two nodes compiling the same block reach the same file because they agree on this,
+    /// not because they independently re-resolve a name whose latest version may have moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
 /// CSV data cache for performance
 pub struct CsvCache {
     data: RwLock<HashMap<String, Arc<CsvData>>>,
@@ -282,5 +321,68 @@ mod tests {
             vec!["a=1".to_string(), "n=World".to_string()]
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A `_rift.dataset` block survives a parse/serialize round trip.
+    ///
+    /// This is the whole contract of the type: the cluster stores what the operator wrote, and a
+    /// field that silently vanishes on parse means the binding cannot be stored at all. Asserted
+    /// on the *parsed* values rather than by string equality, so a reordering of the struct's
+    /// fields does not read as a regression.
+    #[test]
+    fn a_dataset_binding_round_trips() {
+        let json = r#"{
+            "name": "customers",
+            "version": 3,
+            "key": { "from": { "query": "id" }, "using": { "method": "regex", "selector": ".*" } },
+            "keyColumn": "customer_id",
+            "into": "${row}",
+            "digest": "abc123"
+        }"#;
+
+        let parsed: DatasetBinding = serde_json::from_str(json).expect("parses");
+        assert_eq!(parsed.name, "customers");
+        assert_eq!(parsed.version, Some(3));
+        assert_eq!(parsed.key_column, "customer_id");
+        assert_eq!(parsed.into, "${row}");
+        assert_eq!(parsed.digest.as_deref(), Some("abc123"));
+
+        let reparsed: DatasetBinding =
+            serde_json::from_str(&serde_json::to_string(&parsed).expect("serializes"))
+                .expect("re-parses");
+        assert_eq!(reparsed.name, parsed.name);
+        assert_eq!(reparsed.version, parsed.version);
+        assert_eq!(reparsed.key_column, parsed.key_column);
+        assert_eq!(reparsed.into, parsed.into);
+        assert_eq!(reparsed.digest, parsed.digest);
+    }
+
+    /// `version` and `digest` are optional going in, and absent going out.
+    ///
+    /// An unbound block is what an operator writes ("latest at bind time"); emitting
+    /// `"version": null` would make an unresolved binding indistinguishable from one pinned to a
+    /// version that failed to parse.
+    #[test]
+    fn an_unpinned_dataset_binding_omits_version_and_digest() {
+        let json = r#"{
+            "name": "customers",
+            "key": { "from": { "query": "id" }, "using": { "method": "regex", "selector": ".*" } },
+            "keyColumn": "id",
+            "into": "${row}"
+        }"#;
+
+        let parsed: DatasetBinding = serde_json::from_str(json).expect("parses");
+        assert_eq!(parsed.version, None);
+        assert_eq!(parsed.digest, None);
+
+        let out = serde_json::to_string(&parsed).expect("serializes");
+        assert!(
+            !out.contains("version"),
+            "unpinned block must omit version: {out}"
+        );
+        assert!(
+            !out.contains("digest"),
+            "unpinned block must omit digest: {out}"
+        );
     }
 }

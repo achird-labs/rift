@@ -1379,6 +1379,7 @@ mod prepared_response_tests {
     #[test]
     fn rift_templated_and_fault_force_slow_path() {
         let templated = RiftResponseExtension {
+            dataset: None,
             templated: true,
             ..Default::default()
         };
@@ -1393,6 +1394,7 @@ mod prepared_response_tests {
         );
 
         let faulted = RiftResponseExtension {
+            dataset: None,
             fault: Some(crate::imposter::types::RiftFaultConfig::default()),
             ..Default::default()
         };
@@ -1404,6 +1406,7 @@ mod prepared_response_tests {
         );
 
         let scripted = RiftResponseExtension {
+            dataset: None,
             script: Some(crate::imposter::types::RiftScriptConfig::default()),
             ..Default::default()
         };
