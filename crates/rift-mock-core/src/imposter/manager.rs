@@ -254,6 +254,14 @@ pub struct ImposterManager {
     request_journal: Option<Arc<dyn RequestJournal>>,
     /// Pluggable proxy-recording backend (issue #315); None = per-imposter LocalProxyStore.
     proxy_store: Option<Arc<dyn ProxyRecordingStore>>,
+    /// Client every `proxy` stub dials upstream with (issue #974); empty = the process-wide default
+    /// on the default trust policy.
+    ///
+    /// Behind an `ArcSwapOption` rather than a plain `Option` because the C-ABI builds its manager
+    /// in `rift_start()`, before `rift_serve_admin` has parsed the options carrying the trust
+    /// policy — a consuming builder cannot reach it by then. Imposters read this at creation, so a
+    /// store before the first `create_imposter` is what every caller needs.
+    upstream_client: ArcSwapOption<reqwest::Client>,
     /// Last-chance no-match hook (issue #819); None = no interceptor, unchanged fallthrough.
     no_match_interceptor: Option<Arc<dyn NoMatchInterceptor>>,
     /// Provider consulted per imposter for a synchronous exchange inspector (issue #966); None =
@@ -304,6 +312,7 @@ impl ImposterManager {
             sequencer: None,
             request_journal: None,
             proxy_store: None,
+            upstream_client: ArcSwapOption::empty(),
             no_match_interceptor: None,
             exchange_inspector_provider: None,
             accept_runtimes: None,
@@ -462,6 +471,41 @@ impl ImposterManager {
     pub fn with_proxy_store(mut self, store: Arc<dyn ProxyRecordingStore>) -> Self {
         self.proxy_store = Some(store);
         self
+    }
+
+    /// Use `client` for every `proxy` stub's upstream call (issue #974).
+    ///
+    /// This is how an operator-configured outbound TLS trust policy — an extra CA anchor, or
+    /// skip-verify — reaches the imposters. Build it from
+    /// [`OutboundTls`](crate::proxy::OutboundTls); the fallible part is realising the policy, which
+    /// happens at the caller so a bad `--upstream-ca-file` fails at startup rather than on the
+    /// first proxied request.
+    #[must_use]
+    pub fn with_upstream_client(self, client: Arc<reqwest::Client>) -> Self {
+        self.upstream_client.store(Some(client));
+        self
+    }
+
+    /// Set the upstream client on an already-constructed manager (issue #974).
+    ///
+    /// The C-ABI needs this: its manager exists from `rift_start()`, while the trust policy arrives
+    /// with `rift_serve_admin`'s options. Imposters read the client when they are created, so a
+    /// store before the first `create_imposter` is equivalent to having built with it. Imposters
+    /// that already exist keep the client they were created with.
+    pub fn set_upstream_client(&self, client: Arc<reqwest::Client>) {
+        // Imposters read the client when they are created, so any that already exist keep the
+        // policy they were built with. An embedder that creates imposters before serving would
+        // otherwise get the default policy back with no diagnostic — the exact `UnknownIssuer`
+        // this issue exists to remove.
+        let existing = self.count();
+        if existing > 0 {
+            warn!(
+                existing,
+                "outbound TLS policy set after {existing} imposter(s) were created; those keep \
+                 the previous policy. Set it before creating imposters."
+            );
+        }
+        self.upstream_client.store(Some(client));
     }
 
     /// Register a last-chance no-match interceptor (issue #819), consulted for every imposter
@@ -656,6 +700,12 @@ impl ImposterManager {
         // otherwise the imposter keeps its private per-mode LocalProxyStore.
         if let Some(store) = &self.proxy_store {
             imposter.proxy_store = Arc::clone(store);
+        }
+
+        // Inject the operator-configured upstream client, if one is registered (issue #974);
+        // otherwise the imposter keeps the process-wide default trust policy.
+        if let Some(client) = self.upstream_client.load_full() {
+            imposter.upstream_client = Some(client);
         }
 
         // Share the admin event bus so recorded requests fan out to the SSE stream (issue #461).

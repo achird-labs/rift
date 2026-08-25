@@ -49,4 +49,7 @@ pub const SERVE_OPTION_KEYS: &[&str] = &[
     "config",
     "allowInjection",
     "requireAdminAuth",
+    "upstreamCaFile",
+    "upstreamCaPem",
+    "upstreamTlsSkipVerify",
 ];

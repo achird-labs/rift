@@ -16,9 +16,11 @@ use crate::intercept_control::{InterceptAuth, InterceptControl, InterceptStartOp
 use crate::sources::{
     self, FileSource, HttpSource, ImposterSource, SourceRef, SourceRegistry, SourceSet,
 };
+use anyhow::Context as _;
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use rift_mock_core::extensions::authz::AdminAuthorizer;
+use rift_mock_core::proxy::OutboundTls;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -194,6 +196,17 @@ pub struct Cli {
     /// instead of serving with a generated self-signed cert (issue #206)
     #[arg(long, env = "RIFT_NO_SELF_SIGNED_TLS")]
     pub no_self_signed_tls: bool,
+
+    /// Extra CA certificate(s) (PEM) trusted for outbound TLS — `proxy` stubs and `--configfile`
+    /// URLs (issue #974). Appended to the OS trust store, so public roots keep working; prefer this
+    /// over SSL_CERT_FILE, which REPLACES the store rather than adding to it.
+    #[arg(long, value_name = "FILE", env = "RIFT_UPSTREAM_CA_FILE")]
+    pub upstream_ca_file: Option<PathBuf>,
+
+    /// Accept any certificate on outbound TLS (issue #974). Development only: a recording proxy
+    /// with verification off will faithfully record MITM'd traffic. Prefer --upstream-ca-file.
+    #[arg(long, env = "RIFT_UPSTREAM_TLS_SKIP_VERIFY")]
+    pub upstream_tls_skip_verify: bool,
 
     /// Start a TLS-MITM intercept/redirect proxy listener on this port (epic #394). Off when
     /// unset. Configure rules and export the CA via the admin API's `/intercept/*` routes.
@@ -487,6 +500,32 @@ impl ServerBuilder {
             .as_deref()
             .map(parse_front_door_addr)
             .transpose()?;
+        // One outbound TLS trust policy for the whole process (issue #974). Read here, beside the
+        // HTTPS-imposter defaults below, so a missing or malformed CA file fails at startup rather
+        // than on the first proxied request.
+        let outbound_tls = OutboundTls {
+            ca_pem: cli
+                .upstream_ca_file
+                .as_ref()
+                .map(|path| {
+                    std::fs::read_to_string(path)
+                        .with_context(|| format!("reading --upstream-ca-file {}", path.display()))
+                })
+                .transpose()?,
+            skip_verify: cli.upstream_tls_skip_verify,
+        };
+        // Realise a *configured* policy now: this is what turns a bad anchor into a startup error
+        // rather than a surprise on the first proxied request. An untouched default stays lazy —
+        // building it means reading the OS trust store, and paying that on every startup would
+        // delay the first bind for something no operator asked for.
+        let upstream_client = if outbound_tls.is_configured() {
+            Some(rift_mock_core::imposter::build_upstream_client(
+                &outbound_tls,
+            )?)
+        } else {
+            None
+        };
+
         let manager = match self.manager {
             Some(manager) => manager,
             None => {
@@ -508,12 +547,14 @@ impl ServerBuilder {
                     default_key,
                     allow_self_signed: !cli.no_self_signed_tls,
                 };
-                Arc::new(
-                    ImposterManager::with_datadir(cli.datadir.clone())
-                        .with_tls_defaults(tls_defaults)
-                        .with_accept_runtimes(self.accept_runtimes)
-                        .with_flow_store_backends(crate::default_flow_store_backends()),
-                )
+                let mut built = ImposterManager::with_datadir(cli.datadir.clone())
+                    .with_tls_defaults(tls_defaults)
+                    .with_accept_runtimes(self.accept_runtimes)
+                    .with_flow_store_backends(crate::default_flow_store_backends());
+                if let Some(client) = &upstream_client {
+                    built = built.with_upstream_client(Arc::clone(client));
+                }
+                Arc::new(built)
             }
         };
 
@@ -521,7 +562,7 @@ impl ServerBuilder {
         let mut routes_block: Option<RouteTable> = None;
         // `--configfile` and `--imposters` converge here: the flag is sugar for a single `file:`
         // ref, so both spellings run the same fetch, gating and block handling (U-12).
-        let source_set = resolve_source_set(&cli, extra_sources)?;
+        let source_set = resolve_source_set(&cli, extra_sources, &outbound_tls)?;
         if let Some(set) = &source_set {
             let loaded = load_imposters_from_sources(
                 &manager,
@@ -1285,6 +1326,7 @@ struct ConfigFileStartOptions {
 fn resolve_source_set(
     cli: &Cli,
     extra: Vec<Arc<dyn ImposterSource>>,
+    outbound_tls: &OutboundTls,
 ) -> anyhow::Result<Option<Arc<SourceSet>>> {
     let refs = match (&cli.imposters, &cli.configfile) {
         (Some(_), Some(_)) => anyhow::bail!(
@@ -1303,7 +1345,7 @@ fn resolve_source_set(
 
     let mut registry = SourceRegistry::new();
     registry.register(Arc::new(FileSource::new(cli.no_parse)))?;
-    registry.register(Arc::new(HttpSource::new()?))?;
+    registry.register(Arc::new(HttpSource::with_policy(outbound_tls)?))?;
     for source in extra {
         registry.register(source)?;
     }

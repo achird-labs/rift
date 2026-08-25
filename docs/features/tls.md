@@ -118,30 +118,35 @@ competitive) matters far more than bulk throughput. The provider is not user-con
 }
 ```
 
-### Skip Certificate Verification
+### Trusting a Private CA
 
-For self-signed certificates in development:
+Rift verifies outbound TLS against the operating system trust store. An origin issued by an
+internal CA — a corporate API gateway — needs that CA supplied:
 
-```json
-{
-  "proxy": {
-    "to": "https://internal-service.local",
-    "cert": null
-  }
-}
+```bash
+rift --upstream-ca-file /etc/rift/corp-ca.pem
+# or
+RIFT_UPSTREAM_CA_FILE=/etc/rift/corp-ca.pem rift
 ```
 
-### Proxy with Client Certificate
+The anchor is **appended** to the OS store, so public origins keep working. This applies to every
+outbound call Rift makes: `proxy` stub upstreams and `--configfile https://…` alike.
 
-```json
-{
-  "proxy": {
-    "to": "https://mtls-service.example.com",
-    "key": "-----BEGIN RSA PRIVATE KEY-----\n...",
-    "cert": "-----BEGIN CERTIFICATE-----\n..."
-  }
-}
+> `SSL_CERT_FILE` / `SSL_CERT_DIR` are also honoured, but they **replace** the trust store rather
+> than adding to it — pointing `SSL_CERT_FILE` at a lone private CA silently drops every public
+> root. Use `--upstream-ca-file` unless you are supplying a complete bundle.
+
+### Skipping Verification (development only)
+
+```bash
+rift --upstream-tls-skip-verify
 ```
+
+Accepts any certificate and logs a warning. Prefer `--upstream-ca-file`: a recording proxy with
+verification disabled will faithfully record MITM'd traffic.
+
+> `key`, `cert` and `ciphers` on a `proxy` response are accepted for Mountebank compatibility and
+> **are not honoured** — Rift's outbound trust is process-wide, configured by the two flags above.
 
 ---
 
@@ -301,7 +306,7 @@ openssl verify -CAfile ca.crt server.crt
 
 | Error | Cause | Solution |
 |:------|:------|:---------|
-| `certificate verify failed` | Self-signed cert | Use `verify: false` or add CA |
+| `certificate verify failed` / `UnknownIssuer` | Origin's CA is not in the OS trust store | `--upstream-ca-file <pem>`, or `--upstream-tls-skip-verify` in development |
 | `certificate has expired` | Expired cert | Regenerate certificate |
 | `hostname mismatch` | Wrong CN/SAN | Include correct hostname in cert |
 | `no suitable key` | Wrong key format | Convert to PEM format |

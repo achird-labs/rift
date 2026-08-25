@@ -61,6 +61,37 @@ record.
 
 ### Fixed
 
+- **Outbound TLS now trusts the OS certificate store, and a private CA can be supplied** (#974).
+  Every client Rift *initiates* TLS with used to decide trust for itself, and they disagreed: the
+  imposter `proxy` stub client and the `--configfile` URL fetcher carried reqwest's compiled-in
+  Mozilla roots with no knob at all, so an origin issued by an internal CA — a corporate API
+  gateway — failed with `invalid peer certificate: UnknownIssuer` no matter how the host was
+  configured, because that client never read the OS trust store where the CA lives. Installing the
+  CA did nothing; `curl` to the same URL worked while Rift did not.
+  - One shared policy (`rift_mock_core::proxy::OutboundTls`) now backs the proxy-stub client and
+    the config-source fetcher (`--configfile https://…`). Native roots are the base, so
+    `SSL_CERT_FILE` / `SSL_CERT_DIR` are honoured too — note those *replace* the trust store,
+    where `--upstream-ca-file` appends to it.
+  - `create_http_client` (the reverse-proxy/sidecar client in `rift_mock_core::proxy`) also takes
+    the policy, but nothing supplies a configured one yet: `ProxyServer` is not constructed by the
+    binary (see #975), so that path still runs on the default. It gains the panic-to-error fix
+    below, not the private-CA capability.
+  - `--upstream-ca-file` / `RIFT_UPSTREAM_CA_FILE` **appends** a PEM anchor to the OS store — unlike
+    `SSL_CERT_FILE`, which replaces it, silently dropping every public root.
+  - `--upstream-tls-skip-verify` / `RIFT_UPSTREAM_TLS_SKIP_VERIFY` accepts any certificate, with a
+    warning. Development only: a recording proxy with verification off records MITM'd traffic
+    faithfully.
+  - Over the C-ABI: `upstreamCaFile`, `upstreamCaPem` and `upstreamTlsSkipVerify` serve options,
+    advertised in `serveOptions` for feature detection (#877).
+  - The proxy client's builder no longer `.expect()`s: a trust policy that cannot be realised is a
+    returned error, matching the fix #543 made for the reverse-proxy client. It is resolved lazily,
+    on the first request that actually proxies — creating an imposter never realises an outbound
+    policy it may never use, so a host with no CA bundle can still serve static imposters.
+  - `docs/features/tls.md` and `docs/mountebank/proxy.md` documented `"cert": null` and
+    `verify: false` on a `proxy` response — inherited from Mountebank and never implemented here.
+    Both now describe the flags that exist, and say plainly that `key`/`cert` on a proxy response
+    are accepted and ignored.
+
 - **A `--imposters` fetch that dies part-way through the body now names *which* source died**
   (issue #953). `HttpSource::read_capped` can fail three ways, and two of them — the size-cap
   refusal and the non-UTF-8 body — embed the source URI in their own message. The third, a

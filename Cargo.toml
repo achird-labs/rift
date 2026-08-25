@@ -56,8 +56,12 @@ fake = { version = "2.9", features = ["derive", "uuid", "http", "chrono"] }
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
 
-# HTTP client — rustls everywhere (the project pins the ring crypto provider)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# HTTP client — rustls everywhere (the project pins the ring crypto provider).
+# `rustls-tls-native-roots`, NOT `rustls-tls` (issue #974): the latter resolves to
+# `rustls-tls-webpki-roots`, i.e. a compiled-in Mozilla bundle that ignores the OS trust store, so a
+# privately-issued origin was unreachable however the host was configured. Native roots also honour
+# SSL_CERT_FILE / SSL_CERT_DIR, and drop `webpki-roots` from the tree entirely.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 
 # Error handling
 anyhow = "1.0"

@@ -269,30 +269,35 @@ Add latency to proxied responses:
 }
 ```
 
-### Skip Certificate Verification
+### Trusting a Private CA
 
-For self-signed certificates:
+Rift verifies outbound TLS against the operating system trust store. An origin issued by an
+internal CA — a corporate API gateway — needs that CA supplied:
 
-```json
-{
-  "proxy": {
-    "to": "https://internal-api.local",
-    "cert": null
-  }
-}
+```bash
+rift --upstream-ca-file /etc/rift/corp-ca.pem
+# or
+RIFT_UPSTREAM_CA_FILE=/etc/rift/corp-ca.pem rift
 ```
 
-### Mutual TLS
+The anchor is **appended** to the OS store, so public origins keep working. This applies to every
+outbound call Rift makes: `proxy` stub upstreams and `--configfile https://…` alike.
 
-```json
-{
-  "proxy": {
-    "to": "https://api.example.com",
-    "key": "-----BEGIN RSA PRIVATE KEY-----\n...",
-    "cert": "-----BEGIN CERTIFICATE-----\n..."
-  }
-}
+> `SSL_CERT_FILE` / `SSL_CERT_DIR` are also honoured, but they **replace** the trust store rather
+> than adding to it — pointing `SSL_CERT_FILE` at a lone private CA silently drops every public
+> root. Use `--upstream-ca-file` unless you are supplying a complete bundle.
+
+### Skipping Verification (development only)
+
+```bash
+rift --upstream-tls-skip-verify
 ```
+
+Accepts any certificate and logs a warning. Prefer `--upstream-ca-file`: a recording proxy with
+verification disabled will faithfully record MITM'd traffic.
+
+> `key`, `cert` and `ciphers` on a `proxy` response are accepted for Mountebank compatibility and
+> **are not honoured** — Rift's outbound trust is process-wide, configured by the two flags above.
 
 ---
 

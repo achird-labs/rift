@@ -23,6 +23,7 @@ use crate::intercept_control::InterceptStartOptions;
 // file with a cause worth keeping uses `Context` (issue #951). The `map_err(|_| …)` wraps on the
 // poisoned-mutex paths are the deliberate exception: a `PoisonError` carries nothing to keep.
 use anyhow::Context as _;
+use rift_mock_core::proxy::OutboundTls;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -197,7 +198,25 @@ impl HttpSource {
     }
 
     pub fn with_timeout(timeout: Duration) -> anyhow::Result<Self> {
-        let client = reqwest::Client::builder()
+        Self::with_timeout_and_policy(timeout, &OutboundTls::default())
+    }
+
+    /// A source that fetches under `policy` (issue #974).
+    ///
+    /// `--configfile https://…` reaches an origin like any other outbound call, so a config
+    /// document served behind a privately-issued CA needs the same trust policy the proxy stubs
+    /// use — otherwise the operator's `--upstream-ca-file` fixes their proxying and leaves the
+    /// config fetch failing with the identical `UnknownIssuer`.
+    pub fn with_policy(policy: &OutboundTls) -> anyhow::Result<Self> {
+        Self::with_timeout_and_policy(DEFAULT_HTTP_TIMEOUT, policy)
+    }
+
+    pub fn with_timeout_and_policy(
+        timeout: Duration,
+        policy: &OutboundTls,
+    ) -> anyhow::Result<Self> {
+        let client = policy
+            .reqwest_builder()?
             .timeout(timeout)
             // A redirect is followed only while it stays on http(s). reqwest would reject an
             // exotic scheme on its own, but a config source is exactly the place to be explicit:

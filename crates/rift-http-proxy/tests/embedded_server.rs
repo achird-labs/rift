@@ -109,17 +109,20 @@ async fn server_builder_registers_the_shipped_flow_store_backends() {
         "--host",
         "127.0.0.1",
         "--port",
-        "12611",
+        // Not 12611: `dispatch_to_port_routes_in_process` binds that port directly, and these two
+        // run in parallel in this binary. Whichever loses the race sees the other's listener, so
+        // the collision surfaced as a confusing ConnectionRefused rather than a bind failure.
+        "12631",
         "--metrics-port",
         "19483",
     ])
     .expect("cli parse");
 
     tokio::spawn(ServerBuilder::from_cli(cli).run());
-    wait_for_http("http://127.0.0.1:12611/health").await;
+    wait_for_http("http://127.0.0.1:12631/health").await;
 
     let response = reqwest::Client::new()
-        .post("http://127.0.0.1:12611/imposters")
+        .post("http://127.0.0.1:12631/imposters")
         .header("content-type", "application/json")
         .body(
             serde_json::json!({

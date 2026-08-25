@@ -29,6 +29,7 @@ pub(crate) mod tls;
 
 mod context;
 pub mod intercept_ca;
+pub mod outbound_tls;
 #[cfg(test)]
 mod tests;
 pub mod truststore;
@@ -43,6 +44,8 @@ pub use handler::rule_applies_to_upstream;
 pub use server::ProxyServer;
 // TLS session-resumption config, shared with the intercept listener in rift-http-proxy (issue #705).
 pub use tls::{TLS_SESSION_CACHE_SIZE, configure_session_resumption};
+// One outbound-TLS trust policy for every client Rift initiates a connection with (issue #974).
+pub use outbound_tls::OutboundTls;
 // HTTP connection-builder tuning, shared with the metrics/admin accept loops in rift-http-proxy
 // (issue #716) — `network` itself stays `pub(crate)`, only this type is exposed.
 pub use network::{DEFAULT_HTTP_MAX_BUF, HttpTuning};
