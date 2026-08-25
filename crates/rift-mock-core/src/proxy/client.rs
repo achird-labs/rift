@@ -3,16 +3,14 @@
 //! This module provides functionality for creating and configuring
 //! the shared HTTP client used for proxying requests.
 
-use super::tls::NoVerifier;
+use super::outbound_tls::OutboundTls;
 use crate::config::Config;
-use anyhow::Context;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Bytes;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Type alias for the HTTP client used by the proxy.
 pub type HttpClient = Client<
@@ -24,13 +22,15 @@ pub type HttpClient = Client<
 ///
 /// # Arguments
 /// * `config` - The proxy configuration
-/// * `skip_tls_verify` - Whether to skip TLS certificate verification
+/// * `policy` - The process-wide outbound TLS trust policy (issue #974). A per-upstream
+///   `tls_skip_verify` in `config` widens it, so both spellings keep working.
 ///
 /// # Returns
-/// A configured HTTP client ready for proxying requests, or an error if the native root
-/// certificate store can't be loaded (e.g. a minimal/distroless image without `ca-certificates`),
-/// so the caller can fail gracefully instead of aborting the process (issue #543).
-pub fn create_http_client(config: &Config, skip_tls_verify: bool) -> anyhow::Result<HttpClient> {
+/// A configured HTTP client ready for proxying requests, or an error if the trust policy cannot be
+/// realised — e.g. an unparsable CA PEM, or a minimal/distroless image with no `ca-certificates`
+/// and no supplied anchor. Returned rather than panicked so the caller can fail gracefully
+/// (issue #543).
+pub fn create_http_client(config: &Config, policy: &OutboundTls) -> anyhow::Result<HttpClient> {
     // Create HTTP connector with connection pool settings
     let mut http_connector = hyper_util::client::legacy::connect::HttpConnector::new();
     http_connector.set_keepalive(Some(Duration::from_secs(
@@ -41,29 +41,18 @@ pub fn create_http_client(config: &Config, skip_tls_verify: bool) -> anyhow::Res
     )));
     http_connector.enforce_http(false); // Allow both HTTP and HTTPS
 
-    // Build HTTPS connector for HTTP/1.1 only
-    let https_connector = if skip_tls_verify {
-        warn!(
-            "TLS certificate verification DISABLED for one or more upstreams (development/testing only)"
-        );
-        hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config(
-                rustls::ClientConfig::builder()
-                    .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(NoVerifier))
-                    .with_no_client_auth(),
-            )
-            .https_or_http()
-            .enable_http1()
-            .wrap_connector(http_connector)
-    } else {
-        hyper_rustls::HttpsConnectorBuilder::new()
-            .with_native_roots()
-            .context("Failed to load native root certificates")?
-            .https_or_http()
-            .enable_http1()
-            .wrap_connector(http_connector)
+    // A per-upstream `tls_skip_verify` can only ever *widen* the process policy: an operator who
+    // marked one upstream insecure must not thereby tighten the rest, nor lose a configured CA.
+    let effective = OutboundTls {
+        ca_pem: policy.ca_pem.clone(),
+        skip_verify: policy.skip_verify || should_skip_tls_verify(config),
     };
+
+    let https_connector = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_tls_config(effective.client_config()?)
+        .https_or_http()
+        .enable_http1()
+        .wrap_connector(http_connector);
 
     let http_client = Client::builder(TokioExecutor::new())
         .pool_idle_timeout(Duration::from_secs(
@@ -107,8 +96,29 @@ mod tests {
         // Fix for issue #543: the fn returns a Result. On a normal host with a CA bundle both
         // paths succeed; the point is that a native-root load failure is a returned Err, never a
         // panic that aborts server construction.
-        assert!(create_http_client(&config, false).is_ok());
+        assert!(create_http_client(&config, &OutboundTls::default()).is_ok());
         // The skip-verify path never touches the native root store, so it cannot fail on it.
-        assert!(create_http_client(&config, true).is_ok());
+        assert!(
+            create_http_client(
+                &config,
+                &OutboundTls {
+                    ca_pem: None,
+                    skip_verify: true,
+                }
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn create_http_client_surfaces_a_bad_ca_pem() {
+        // Issue #974: a malformed anchor is a returned error here, not a client that quietly
+        // trusts only the OS store — the operator asked for an extra anchor and must be told.
+        let config = minimal_config();
+        let policy = OutboundTls {
+            ca_pem: Some("not a pem".to_string()),
+            skip_verify: false,
+        };
+        assert!(create_http_client(&config, &policy).is_err());
     }
 }

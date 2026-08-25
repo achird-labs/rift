@@ -184,6 +184,8 @@ Options:
       --default-tls-cert <FILE>    Default TLS certificate (PEM) for HTTPS imposters without their own
       --default-tls-key <FILE>     Default TLS private key (PEM), paired with --default-tls-cert
       --no-self-signed-tls         Disable the self-signed fallback; an HTTPS imposter with no cert is an error
+      --upstream-ca-file <FILE>    Extra CA certificate(s) (PEM) trusted for outbound TLS (proxy stubs, --configfile URLs); appended to the OS trust store
+      --upstream-tls-skip-verify   Accept any certificate on outbound TLS (development only; prefer --upstream-ca-file)
       --intercept-port <PORT>      Start the TLS-MITM intercept/redirect proxy on this port (epic #394); off when unset
       --intercept-auth <USER:PASS>  Require Proxy-Authorization: Basic on every CONNECT to the intercept proxy; open when unset
       --intercept-ca-cert <FILE>   PEM CA certificate for interception (with --intercept-ca-key); a CA is generated if omitted
@@ -382,6 +384,8 @@ Environment variables override CLI defaults:
 | `RIFT_DEFAULT_TLS_CERT` | Default TLS certificate (PEM) for HTTPS imposters | |
 | `RIFT_DEFAULT_TLS_KEY` | Default TLS private key (PEM) | |
 | `RIFT_NO_SELF_SIGNED_TLS` | Disable self-signed TLS fallback (`true`/`false`) | `false` |
+| `RIFT_UPSTREAM_CA_FILE` | Extra CA certificate(s) (PEM **file**) trusted for outbound TLS — `proxy` stubs and `--configfile` URLs. **Appended** to the OS trust store | |
+| `RIFT_UPSTREAM_TLS_SKIP_VERIFY` | Accept any certificate on outbound TLS (`true`/`false`); development only | `false` |
 | `RIFT_INTERCEPT_PORT` | Start the intercept/TLS-MITM proxy on this port (epic #394) | |
 | `RIFT_INTERCEPT_AUTH` | `user:pass` required in `Proxy-Authorization` on every `CONNECT` to the intercept proxy (env alias of `--intercept-auth`); open when unset | |
 | `RIFT_INTERCEPT_CA_CERT` | PEM CA certificate **file** for interception (with `RIFT_INTERCEPT_CA_KEY`) | |

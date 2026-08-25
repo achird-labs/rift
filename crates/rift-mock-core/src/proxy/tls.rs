@@ -14,7 +14,22 @@ use tokio_rustls::TlsAcceptor;
 /// # Warning
 /// This disables all TLS security checks - use only in development!
 #[derive(Debug)]
-pub struct NoVerifier;
+pub struct NoVerifier {
+    /// Taken from the crypto provider rather than hand-listed (issue #974): a hard-coded list
+    /// silently disagrees with the provider the connection actually negotiates with.
+    schemes: Vec<rustls::SignatureScheme>,
+}
+
+impl NoVerifier {
+    #[must_use]
+    pub fn new(provider: &rustls::crypto::CryptoProvider) -> Self {
+        Self {
+            schemes: provider
+                .signature_verification_algorithms
+                .supported_schemes(),
+        }
+    }
+}
 
 impl ServerCertVerifier for NoVerifier {
     fn verify_server_cert(
@@ -47,12 +62,7 @@ impl ServerCertVerifier for NoVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ED25519,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-        ]
+        self.schemes.clone()
     }
 }
 
@@ -145,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_no_verifier_supported_schemes() {
-        let verifier = NoVerifier;
+        let verifier = NoVerifier::new(&rustls::crypto::ring::default_provider());
         let schemes = verifier.supported_verify_schemes();
         assert!(!schemes.is_empty());
         assert!(schemes.contains(&rustls::SignatureScheme::RSA_PKCS1_SHA256));

@@ -2654,6 +2654,18 @@ fn ffi_a_document_using_every_advertised_option_still_serves() {
                 "config" => serde_json::json!({"imposters": []}),
                 "allowInjection" => serde_json::json!(true),
                 "requireAdminAuth" => serde_json::json!(false),
+                // Mutually exclusive with `upstreamCaPem` (issue #974), the same way `configFile`
+                // is with `config`; the file spelling is covered by its own test.
+                "upstreamCaFile" => continue,
+                // A real certificate: a malformed anchor is a hard error by design, so a
+                // placeholder here would assert the opposite of what this fixture is for.
+                "upstreamCaPem" => serde_json::json!(
+                    rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+                        .expect("generate a CA for the fixture")
+                        .cert
+                        .pem()
+                ),
+                "upstreamTlsSkipVerify" => serde_json::json!(false),
                 other => {
                     panic!("unhandled advertised serve option `{other}` — extend this fixture")
                 }
@@ -2663,6 +2675,89 @@ fn ffi_a_document_using_every_advertised_option_still_serves() {
 
         let info = serve_admin(h, &serde_json::Value::Object(doc).to_string());
         assert!(info["adminPort"].as_u64().expect("adminPort") > 0);
+        rift_stop(h);
+    }
+}
+
+// Issue #974: the outbound trust policy over the ABI. `upstreamCaFile` is the file spelling the
+// "every advertised option" fixture skips, so it is exercised here instead.
+#[test]
+fn ffi_upstream_ca_file_is_read_and_applied() {
+    unsafe {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ca_path = dir.path().join("corp-ca.pem");
+        std::fs::write(
+            &ca_path,
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+                .expect("generate")
+                .cert
+                .pem(),
+        )
+        .expect("write the CA");
+
+        let h = rift_start();
+        let info = serve_admin(
+            h,
+            &serde_json::json!({
+                "port": 0,
+                "upstreamCaFile": ca_path.to_string_lossy(),
+            })
+            .to_string(),
+        );
+        assert!(
+            info["adminPort"].as_u64().expect("adminPort") > 0,
+            "a readable CA file must serve"
+        );
+        rift_stop(h);
+    }
+}
+
+#[test]
+fn ffi_upstream_ca_file_and_pem_together_are_rejected() {
+    unsafe {
+        let h = rift_start();
+        let opts = cstr(
+            &serde_json::json!({
+                "port": 0,
+                "upstreamCaFile": "/tmp/rift-974-nonexistent.pem",
+                "upstreamCaPem": "-----BEGIN CERTIFICATE-----",
+            })
+            .to_string(),
+        );
+        assert!(
+            rift_serve_admin(h, opts.as_ptr()).is_null(),
+            "supplying both spellings of the anchor must be refused, not silently resolved"
+        );
+        let err = rift_last_error();
+        assert!(!err.is_null(), "the refusal records last_error");
+        let msg = CStr::from_ptr(err).to_str().expect("utf8").to_owned();
+        rift_free(err);
+        assert!(
+            msg.contains("mutually exclusive"),
+            "the message must say why, got: {msg}"
+        );
+        rift_stop(h);
+    }
+}
+
+#[test]
+fn ffi_unreadable_upstream_ca_file_fails_the_serve() {
+    unsafe {
+        let h = rift_start();
+        let opts = cstr(
+            &serde_json::json!({
+                "port": 0,
+                "upstreamCaFile": "/tmp/rift-974-definitely-not-here.pem",
+            })
+            .to_string(),
+        );
+        assert!(
+            rift_serve_admin(h, opts.as_ptr()).is_null(),
+            "a missing CA file must fail at serve, not on the first proxied request"
+        );
+        let err = rift_last_error();
+        assert!(!err.is_null());
+        rift_free(err);
         rift_stop(h);
     }
 }

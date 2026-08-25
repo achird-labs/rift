@@ -41,19 +41,64 @@ const PROXY_HTTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
 /// scenario state but no explicit flow-state TTL is configured.
 const DEFAULT_FLOW_STATE_TTL_SECS: u64 = 300;
 
-/// Global HTTP client for proxy requests
-static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+/// Process-wide default client for `proxy` stubs, built from the default trust policy.
+///
+/// Held behind a manual try-init rather than `get_or_init` (issue #974): building now consults the
+/// OS trust store and can genuinely fail, and a failure must not be cached as a poisoned success —
+/// the error is returned and the next call retries.
+static DEFAULT_UPSTREAM_CLIENT: std::sync::OnceLock<Arc<reqwest::Client>> =
+    std::sync::OnceLock::new();
 
-fn get_http_client() -> &'static reqwest::Client {
-    HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+/// The default client for `proxy` stubs when no operator-configured one was injected.
+///
+/// # Errors
+/// When the outbound trust policy cannot be realised — no usable trust anchors, or a reqwest
+/// builder failure. Returned rather than panicked: this replaces an `.expect` that aborted the
+/// process on a TLS/DNS misconfiguration, the same fix #543 made for the reverse-proxy client.
+fn default_upstream_client() -> anyhow::Result<Arc<reqwest::Client>> {
+    if let Some(client) = DEFAULT_UPSTREAM_CLIENT.get() {
+        return Ok(Arc::clone(client));
+    }
+    let client = build_upstream_client(&crate::proxy::OutboundTls::default())?;
+    // A racing caller may have stored its own equivalent client first; keep whichever landed.
+    Ok(Arc::clone(DEFAULT_UPSTREAM_CLIENT.get_or_init(|| client)))
+}
+
+/// The client this imposter proxies with: the injected one, else the process-wide default.
+///
+/// # Errors
+/// Only on the default path, when the trust policy cannot be realised. Surfacing here rather than
+/// at construction is deliberate — it makes the failure reachable only from a request that
+/// actually proxies, where the operator can act on it.
+pub(crate) fn resolve_upstream_client(
+    injected: Option<&Arc<reqwest::Client>>,
+) -> anyhow::Result<Arc<reqwest::Client>> {
+    match injected {
+        Some(client) => Ok(Arc::clone(client)),
+        None => default_upstream_client(),
+    }
+}
+
+/// Build a `proxy`-stub upstream client under `policy` (issue #974).
+///
+/// The timeout and pooling settings live here rather than at the call site so the operator-supplied
+/// client and the default one cannot drift apart.
+///
+/// # Errors
+/// When the policy cannot be realised — see [`OutboundTls::client_config`](crate::proxy::OutboundTls::client_config).
+pub fn build_upstream_client(
+    policy: &crate::proxy::OutboundTls,
+) -> anyhow::Result<Arc<reqwest::Client>> {
+    Ok(Arc::new(
+        policy
+            .reqwest_builder()?
             .timeout(PROXY_HTTP_CLIENT_TIMEOUT)
             // Keep connection pooling on (issue #482): every proxied request otherwise paid a
             // fresh TCP + TLS handshake. Staleness is bounded by reqwest's default
             // `pool_idle_timeout` (90s) — the standard reqwest pooling tradeoff.
             .build()
-            .expect("Failed to create HTTP client: check system TLS/DNS configuration")
-    })
+            .context("building the proxy HTTP client")?,
+    ))
 }
 
 /// Process-wide slot mint: globally unique tokens are trivially per-imposter unique, and a
@@ -135,6 +180,16 @@ pub struct Imposter {
     /// [`LocalProxyStore`] for this imposter's mode, or the embedder's shared store injected
     /// via [`ImposterManager::with_proxy_store`](crate::imposter::ImposterManager::with_proxy_store).
     pub(crate) proxy_store: Arc<dyn ProxyRecordingStore>,
+    /// Client used for every `proxy` stub's upstream call (issue #974). `None` means "resolve the
+    /// process-wide default lazily, on first use"; [`ImposterManager::with_upstream_client`] fills
+    /// it with the operator-configured one, exactly as `proxy_store` is injected.
+    ///
+    /// Deliberately NOT eagerly resolved at construction. Building the default policy reads the OS
+    /// trust store and can fail (a distroless image with no CA bundle), and an imposter with no
+    /// `proxy` stub at all must not fail to be created over an outbound policy it never uses —
+    /// still less when the operator supplied a working `--upstream-ca-file` that the manager is
+    /// about to inject over the top of it.
+    pub(crate) upstream_client: Option<Arc<reqwest::Client>>,
     /// Admin SSE event bus (issue #461), shared from the manager so recorded requests fan out to
     /// streaming clients. `None` for a standalone imposter (no manager) — then nothing is published.
     pub(crate) event_bus: Option<Arc<super::events::AdminEventBus>>,
@@ -260,6 +315,7 @@ impl Imposter {
             stubs_snapshot: ArcSwap::from_pointee(StubSnapshot::build(stubs)),
             stubs_write: Mutex::new(()),
             proxy_store: Arc::new(LocalProxyStore::new(proxy_mode)),
+            upstream_client: None,
             event_bus: None,
             no_match_interceptor: None,
             exchange_inspector: None,
@@ -588,10 +644,32 @@ mod tests {
     use serde_json::json;
 
     // Issue #482: removing `pool_max_idle_per_host(0)` (re-enabling connection pooling) must keep
-    // the client builder valid — a bad builder config would panic in the `.expect` on first use.
+    // the client builder valid. Issue #974 turned the old `.expect` into a returned error, so this
+    // now asserts the Ok rather than relying on the absence of a panic.
     #[test]
     fn proxy_http_client_builds() {
-        let _client = get_http_client();
+        assert!(default_upstream_client().is_ok());
+    }
+
+    // Issue #974: constructing an imposter must not realise any TLS trust policy. An imposter
+    // with no `proxy` stub never dials an upstream, and an eager build here made every
+    // `create_imposter` fail on a host with no CA bundle — including when the operator had
+    // supplied a working anchor the manager was about to inject.
+    #[test]
+    fn constructing_an_imposter_resolves_no_upstream_client() {
+        let imposter = make_test_imposter();
+        assert!(
+            imposter.upstream_client.is_none(),
+            "the client must stay unresolved until a proxy stub actually needs it"
+        );
+    }
+
+    // Issue #974: the process-wide default is shared, not rebuilt per imposter.
+    #[test]
+    fn default_upstream_client_is_shared() {
+        let a = default_upstream_client().expect("first build");
+        let b = default_upstream_client().expect("second build");
+        assert!(Arc::ptr_eq(&a, &b), "the default client must be reused");
     }
 
     fn make_test_imposter() -> Imposter {

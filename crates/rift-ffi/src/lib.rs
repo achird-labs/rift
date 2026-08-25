@@ -258,6 +258,15 @@ struct ServeOptions {
     /// (issue #863), instead of warning. Optional and defaulting to `false`, so every existing SDK
     /// that omits it keeps the previous behaviour unchanged.
     require_admin_auth: Option<bool>,
+    /// Path to extra CA certificate(s) (PEM) trusted for outbound TLS (issue #974) — `proxy` stubs
+    /// and `configFile` URLs. Appended to the OS trust store.
+    upstream_ca_file: Option<String>,
+    /// The same anchor supplied inline, as the intercept's `caCertPem` is. Mutually exclusive with
+    /// `upstreamCaFile`: an embedder that sets both has not decided which one is authoritative,
+    /// and silently preferring one would hide the other's failure.
+    upstream_ca_pem: Option<String>,
+    /// Accept any certificate on outbound TLS. Development only.
+    upstream_tls_skip_verify: Option<bool>,
 }
 
 /// Parse `{"imposters":[...]}` or a bare `[...]` into imposter configs (the reload input shape).
@@ -1899,6 +1908,34 @@ async fn build_admin_plane_inner(
         opts.require_admin_auth.unwrap_or(false).into(),
     )?;
 
+    // Outbound TLS trust policy (issue #974), before any imposter exists: imposters read the
+    // client when they are created, and a bad anchor must fail this call rather than surface later
+    // as a per-request proxy error. Both spellings of the anchor are accepted, but not together —
+    // an embedder setting both has not decided which is authoritative.
+    if opts.upstream_ca_file.is_some() && opts.upstream_ca_pem.is_some() {
+        anyhow::bail!("upstreamCaFile and upstreamCaPem are mutually exclusive; supply one");
+    }
+    let ca_pem = match (&opts.upstream_ca_file, &opts.upstream_ca_pem) {
+        (Some(path), _) => Some(
+            std::fs::read_to_string(path)
+                .with_context(|| format!("reading upstreamCaFile `{path}`"))?,
+        ),
+        (_, Some(pem)) => Some(pem.clone()),
+        _ => None,
+    };
+    let outbound_tls = rift_mock_core::proxy::OutboundTls {
+        ca_pem,
+        skip_verify: opts.upstream_tls_skip_verify.unwrap_or(false),
+    };
+    // Only when the embedder configured something: an untouched default stays lazy, so an embedder
+    // that never proxies does not pay an OS trust-store read on every `rift_serve_admin`.
+    if outbound_tls.is_configured() {
+        handle.manager.set_upstream_client(
+            rift_mock_core::imposter::build_upstream_client(&outbound_tls)
+                .context("applying the outbound TLS options")?,
+        );
+    }
+
     // configFile: apply the loaded set via apply_config, mirroring the inline `config` path and
     // POST /admin/reload. apply_config validates the whole set up front (Err => nothing mutated)
     // and reports per-port failures in its report rather than a half-applied create loop that
@@ -2187,6 +2224,9 @@ mod build_admin_plane_chain_tests {
             config: None,
             allow_injection: None,
             require_admin_auth: None,
+            upstream_ca_file: None,
+            upstream_ca_pem: None,
+            upstream_tls_skip_verify: None,
         };
         let Err(err) = handle.runtime.block_on(build_admin_plane(&handle, &opts)) else {
             panic!("a missing configFile must fail the admin build");
@@ -2476,6 +2516,9 @@ mod serve_option_capability_tests {
             "config": {"imposters": []},
             "allowInjection": true,
             "requireAdminAuth": false,
+            "upstreamCaFile": "/tmp/ca.pem",
+            "upstreamCaPem": "-----BEGIN CERTIFICATE-----",
+            "upstreamTlsSkipVerify": false,
         });
         assert_eq!(
             full.as_object().expect("object").len(),

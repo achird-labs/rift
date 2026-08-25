@@ -57,6 +57,9 @@ pub use journal::{
 };
 
 pub use core::Imposter;
+// Builds a `proxy`-stub upstream client under a trust policy (issue #974), so the binary and any
+// embedder share one timeout/pooling configuration.
+pub use core::build_upstream_client;
 pub use core::{ClosestMatch, FailedPredicate, VerifyOptions, VerifyOutcome};
 
 // Re-export the imposter request handler (single-port gateway dispatch, issue #212)

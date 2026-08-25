@@ -364,7 +364,8 @@ impl Imposter {
         // `spawn_blocking` `'static` closure below.
         SH: BuildHasher + Clone + Send + 'static,
     {
-        let client = get_http_client();
+        let client = super::resolve_upstream_client(self.upstream_client.as_ref())?;
+        let client = &*client;
 
         info!(
             "Proxy config - addDecorateBehavior: {:?}, addWaitBehavior: {}, predicateGenerators: {:?}",

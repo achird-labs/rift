@@ -3,7 +3,7 @@
 //! This module contains the ProxyServer struct which holds all state,
 //! and the main run loop that accepts connections and handles requests.
 
-use super::client::{HttpClient, create_http_client, should_skip_tls_verify};
+use super::client::{HttpClient, create_http_client};
 use super::handler::handle_request;
 use super::network::{HttpTuning, create_reusable_listener};
 use super::tls::create_tls_acceptor;
@@ -234,11 +234,10 @@ impl ProxyServer {
 
         let upstreams = config.upstreams.clone();
 
-        // Check if any upstream needs TLS verification skipped
-        let skip_tls_verify = should_skip_tls_verify(&config);
-
-        // Create shared HTTP client
-        let http_client = create_http_client(&config, skip_tls_verify)?;
+        // Create shared HTTP client. The process-wide trust policy defaults here; a per-upstream
+        // `tls_skip_verify` in `config` is folded in by `create_http_client` (issue #974).
+        let http_client =
+            create_http_client(&config, &super::outbound_tls::OutboundTls::default())?;
 
         // Extract recording mode before moving config into Arc
         let recording_mode = config.recording.mode;
