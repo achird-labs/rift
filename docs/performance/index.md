@@ -321,65 +321,6 @@ cat results/ADMIN_BENCHMARK_REPORT.md
 3. **Avoid unnecessary behaviors** - Each behavior adds overhead
 4. **Use native formats** - JSON body predicates are faster than string matching
 
-### For Script Fault Injection
-
-Script fault decisions are memoized in a decision cache, keyed on the request. By default the key
-includes **every** request header. That is always correct, but if your traffic carries a
-per-request-unique header — `x-request-id`, `traceparent`, `x-amzn-trace-id`, `date` — then every
-key is unique, nothing ever hits, and the cache becomes pure overhead: it pays hashing, allocation
-and lock traffic on the hot path and returns nothing.
-
-Rift cannot narrow the key for you: the cached value is *your* script's decision, and your script is
-handed every header, so it may branch on any of them. Dropping a header from the key that your
-script actually reads would serve one request's decision to a different request. So the allowlist is
-opt-in — it is your assertion about what your scripts read:
-
-```yaml
-# Proxy config (the same file that carries `script_rules`) — NOT the imposter `_rift` block.
-listen:
-  port: 8080
-script_rules:
-  - # ...
-decision_cache:
-  enabled: true
-  max_size: 10000
-  ttl_seconds: 300
-  key_headers: ["X-Tenant", "X-Feature-Flag"]
-```
-
-Only the listed headers enter the cache key; names are matched case-insensitively, and an empty
-list (`[]`) declares that no header affects your decisions. Your scripts still receive **all**
-headers either way — this only changes what makes two requests "the same" for caching.
-
-If the cache degenerates to a ~0% hit rate, Rift logs a warning once per process telling you so,
-rather than silently burning CPU.
-
-#### What makes two requests "the same"
-
-The key is the method, the path, the **query string**, the `key_headers` above, the rule id, and the
-**body**.
-
-The query is keyed on its **raw spelling**, so `?a=1&b=2` and `?b=2&a=1` are two entries even though
-they mean the same thing. That is deliberate: it can only cost you a cache miss, whereas keying on
-the parsed form could hand one request another's decision. Clients serialize query strings
-deterministically, so in practice it costs nothing.
-
-How the body counts depends on whether it is JSON:
-
-- **JSON** — keyed *structurally*, so whitespace and key order do not split the key. Two requests
-  whose bodies parse to the same value share one entry. The corollary: a script that branches on
-  the raw *formatting* of a valid-JSON body is outside the cache-key contract, the same way one
-  that reads a header you left out of `key_headers` is.
-- **Anything else** — binary, plain text, malformed JSON, or an empty body — is keyed on its raw
-  bytes, which is what your script reads via `ctx.request.raw_body`. Two different uploads are two
-  different keys.
-
-The two are kept in separate hash domains, so a JSON `null` body, an empty body, and a binary body
-are always three distinct keys.
-
-> The cache is only consulted on the fault-injection proxy path with `script_rules` configured and
-> flow state **not** configured — stateful scripts are never cached.
-
 ### For Lowest Latency
 
 1. **Minimize stub count** - Fewer stubs = faster matching

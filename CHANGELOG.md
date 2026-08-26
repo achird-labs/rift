@@ -63,11 +63,28 @@ record.
 
 - **The reverse-proxy / sidecar `Config` mode is gone** (#975). `rift_mock_core::config::Config` —
   the YAML surface with `upstreams`, `routing`, `rules` and `recording` — and the `ProxyServer` that
-  consumed it were **unreachable from the `rift` binary since ada6f30 (2025-11-30)**, when
-  `--configfile` was switched to Mountebank imposter JSON. They were undocumented (no `docs/` page
-  described them) and had no consumer anywhere: not in this repo, not in `rift-conformance` or
-  `rift-demo`, and not in the private embedder, whose crates use only the imposter-path recording
-  trait, the intercept CA, the truststore export and `HttpTuning`.
+  consumed it are the tail of a removal that began in **ada6f30 (2025-11-30)**, whose own message
+  reads: *"Remove native YAML config mode (`--rift-config` option removed) — All advanced features
+  now available through Mountebank JSON format."* That commit deleted the entry point and migrated
+  the features into the `_rift` namespace on imposter JSON; the implementation behind it was never
+  cleaned up. This finishes the job.
+
+  Since then it has been unreachable from the binary (`--rift-config` no longer exists;
+  `ProxyServer::new`'s only caller was its own unit test) and without a consumer anywhere: not in
+  this repo, not in `rift-conformance` or `rift-demo`, and not in the private embedder, whose crates
+  use only the imposter-path recording trait, the intercept CA, the truststore export and
+  `HttpTuning`. On crates.io it has zero reverse dependencies.
+
+  One documentation page did still describe it: `docs/performance/index.md`'s "For Script Fault
+  Injection" section explained how to tune the script-decision cache through this config file
+  (`listen:` / `script_rules:` / `decision_cache:`), a format the binary has not accepted since
+  ada6f30. That section is removed here. The "sidecar" and "reverse proxy" deployment patterns in
+  `docs/deployment/` are unaffected — they are built from imposters (`--configfile imposters.json`)
+  and the front door, neither of which this touches.
+
+  Note for follow-up: `scripting::decision_cache` (and its bench) was reachable **only** from this
+  proxy path — `scripting/trace.rs` says so — so it is now orphaned in the same way. It is left in
+  place rather than swept into this change; that is its own decision.
 
   Nine months of maintenance went into that dead path regardless — #543, #545, #555 and #834 all
   fixed bugs in code nobody could run. Removing it retires ~6.4k lines.
