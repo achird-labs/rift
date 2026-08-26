@@ -17,6 +17,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 ### Mountebank Compatibility
 
 - **Imposters** - Mock HTTP/HTTPS servers
+- **Mutual TLS** - Require, and optionally validate, a client certificate
 - **Predicates** - Flexible request matching
 - **Responses** - Static, proxy, and dynamic responses
 - **Behaviors** - Response modification and delays
@@ -39,6 +40,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 - **Single-Port Gateway** - Reach every imposter through the admin port
 - **Intercept Proxy** - TLS-MITM a hard-coded external HTTPS host, no mitmproxy needed
 - **Hot Reload** - Re-read configuration without restarting the process
+- **Outbound TLS Trust** - Reach an origin behind a private CA when proxying or recording
 - **Imposter Sources** - Load from a path or a URI, merging several sources
 - **Embedding** - Run the engine in-process from Rust, or any language over the C ABI
 
@@ -49,6 +51,8 @@ Rift provides advanced features for service virtualization and chaos engineering
 | Feature | Mountebank | Rift Extensions |
 |:--------|:-----------|:----------------|
 | HTTP/HTTPS Mocking | ✅ Full support | — |
+| Mutual TLS (client certs) | ⚠️ Accepted, never enforced | ✅ `mutualAuth` / `rejectUnauthorized` / `ca` |
+| Outbound TLS trust (private CAs) | — | ✅ `--upstream-ca-file` |
 | Request Matching | ✅ Full predicates | — |
 | Static Responses | ✅ | — |
 | Proxy Recording | ✅ | — |
