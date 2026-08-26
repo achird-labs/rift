@@ -1010,6 +1010,46 @@ pub struct RiftConfig {
     /// `file:` script — not `ref:` (no chains).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub scripts: HashMap<String, RiftScriptConfig>,
+    /// Response-sequencing configuration: **carried, never executed here.**
+    ///
+    /// [`ResponseSequencer`] lets an embedder replace the per-stub response cursor, but the trait
+    /// is registered once per [`ImposterManager`] — so a backend that should apply to some
+    /// imposters and not others, or that needs per-imposter options, has nowhere to read them
+    /// from. This block is that surface. Nothing in this crate reads it beyond serializing it
+    /// back out, and the built-in cycler behaves identically whether it is present or absent.
+    ///
+    /// Without a declared field the block would be dropped on parse, since `_rift` has no
+    /// catch-all.
+    ///
+    /// [`ResponseSequencer`]: crate::behaviors::ResponseSequencer
+    /// [`ImposterManager`]: crate::imposter::ImposterManager
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequencing: Option<RiftSequencingConfig>,
+}
+
+/// Per-imposter configuration for a provider-supplied response-cursor backend
+/// ([`ResponseSequencer`]).
+///
+/// Deliberately shaped like [`RiftFlowStateConfig`]: the same problem — an embedder plugging in a
+/// seam implementation with nowhere to put its configuration — already solved once for the
+/// [`FlowStore`] seam, so the answer is the same one rather than a second convention.
+///
+/// [`ResponseSequencer`]: crate::behaviors::ResponseSequencer
+/// [`FlowStore`]: crate::extensions::flow_state::FlowStore
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RiftSequencingConfig {
+    /// Which cursor backend this imposter wants, interpreted by the registered
+    /// [`ResponseSequencer`]. Absent ⇒ the embedder's own default; with no sequencer registered
+    /// it means nothing at all.
+    ///
+    /// [`ResponseSequencer`]: crate::behaviors::ResponseSequencer
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Options belonging to the provider-supplied sequencer, collected rather than dropped —
+    /// same reasoning as [`RiftFlowStateConfig::extra`], and this crate reads none of them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 // Hand-written (not derived) because `enabled` and `protocol` default to
@@ -1817,6 +1857,42 @@ mod tests {
         assert!(
             out.get("scripts").is_none(),
             "empty registry must be omitted on serialize"
+        );
+    }
+
+    // The `_rift.sequencing` block is carried for a provider-supplied `ResponseSequencer`:
+    // declared so it survives the parse (`_rift` has no catch-all), unknown keys collected
+    // rather than dropped, and absent unless the author wrote one.
+    #[test]
+    fn rift_config_sequencing_block_is_carried_with_its_extra_keys() {
+        let cfg: RiftConfig = serde_json::from_value(json!({
+            "sequencing": { "mode": "owner", "peekCacheMs": 50 }
+        }))
+        .unwrap();
+        let sequencing = cfg
+            .sequencing
+            .as_ref()
+            .expect("the block must survive the parse");
+        assert_eq!(sequencing.mode.as_deref(), Some("owner"));
+        assert_eq!(
+            sequencing.extra.get("peekCacheMs"),
+            Some(&json!(50)),
+            "a key this crate does not know belongs to the sequencer, not in the bin"
+        );
+
+        // Round-trips: an embedder reading the config back out sees what was written.
+        let out = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(out["sequencing"]["mode"], json!("owner"));
+        assert_eq!(out["sequencing"]["peekCacheMs"], json!(50));
+
+        let empty = RiftConfig::default();
+        assert!(empty.sequencing.is_none());
+        assert!(
+            serde_json::to_value(&empty)
+                .unwrap()
+                .get("sequencing")
+                .is_none(),
+            "an imposter that said nothing about sequencing must not grow a block"
         );
     }
 
