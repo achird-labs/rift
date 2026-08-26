@@ -11,6 +11,25 @@ Rift supports HTTPS for both listening and upstream connections.
 
 ---
 
+## Which certificate are you configuring?
+
+Four different things here involve a certificate, and they point in opposite directions. Pick the
+row that matches what is failing:
+
+| What is happening | Who has to trust whom | You want |
+|:------------------|:----------------------|:---------|
+| Rift proxies or records to a real origin, and fails with `UnknownIssuer` | **Rift** must trust the **origin's** CA | [`--upstream-ca-file`](#trusting-a-private-ca) |
+| Your app calls a Rift HTTPS imposter and rejects its certificate | Your **app** must trust **Rift's** imposter certificate | [`cert`/`key` on the imposter](#https-imposters-mountebank-mode), or trust the generated self-signed one |
+| Your app is pointed at Rift's intercept (MITM) proxy and rejects it | Your **app** must trust **Rift's generated CA** | [Intercept proxy]({{ site.baseurl }}/features/intercept-proxy/) — `GET /intercept/ca.pem`, or the PKCS#12/JKS truststore export |
+| You want Rift to demand a certificate *from* the caller | **Rift** must trust the **caller's** CA | [`mutualAuth` / `rejectUnauthorized` / `ca`](#mutual-tls-mtls) |
+
+The first and third are the ones most often confused. The intercept CA is Rift's *own* certificate
+authority, minted so a system under test will accept Rift standing in for someone else — it does
+nothing to help Rift reach an origin behind your company's private CA. If your error is
+`UnknownIssuer` on a `proxy` stub, you want the first row.
+
+---
+
 ## HTTPS Imposters (Mountebank Mode)
 
 ### Basic HTTPS Imposter
