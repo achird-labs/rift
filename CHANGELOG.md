@@ -13,6 +13,22 @@ record.
 
 ### Added
 
+- **In-process embedders can detect a TCP fault — `tcp_fault_carrier`** (#965). A TCP fault never
+  reaches the wire: Rift builds a placeholder *carrier* response and the serve loop aborts the
+  socket instead of sending it. A program embedding the engine and calling
+  `handle_imposter_request` directly receives that carrier, and had no reliable way to recognise
+  it — the only signal was the `x-rift-fault` header, which echoes the raw configured alias, is
+  also set by `_rift.fault.error` on a response the client genuinely receives, and was **absent
+  entirely** on the carrier a script's `reset()` produces. Classifying on it therefore both missed
+  a real fault and reported one that was not there.
+  - `rift_mock_core::tcp_fault_carrier(&response)` returns the fault's canonical name
+    (`CONNECTION_RESET_BY_PEER`, …) for all three carrier sites, or `None` for an ordinary
+    response. It reads the extension the serve loop itself acts on, not the header.
+  - `TcpFaultKind` is now public (and `#[non_exhaustive]`) for embedders that branch per fault.
+  - Both are re-exported from `rift-http-proxy` as well.
+  - The script-`reset()` carrier now also stamps `x-rift-fault: reset`, so all three carrier sites
+    carry the same marker for consumers written before this API existed.
+
 - **HTTPS imposters can require a client certificate — `mutualAuth`, `rejectUnauthorized`, `ca`**
   (#977). `docs/features/tls.md` has documented `mutualAuth` since before this engine implemented
   anything: `ImposterConfig` has no `deny_unknown_fields`, so the key was **silently dropped**. A

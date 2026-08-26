@@ -271,6 +271,50 @@ only**: it is a connection-level event, and aborting a socket mid-stream is inco
 HTTP/2 multiplexing — so an imposter with even one stub returning a top-level `fault` never
 negotiates HTTP/2, regardless of what its other stubs do.
 
+### Detecting a fault in-process (embedders)
+
+A TCP fault never reaches the wire as a response. Rift builds a placeholder **carrier** response and
+the serve loop aborts the socket instead of sending it, so a client over TCP observes only the
+transport error described above.
+
+A Rust program embedding the engine and calling `handle_imposter_request` directly — answering a
+"try this imposter" request in-process, with no socket involved — receives that carrier instead, and
+would otherwise present its `502` as the imposter's answer. Classify it with `tcp_fault_carrier`:
+
+```rust
+use rift_mock_core::imposter::handle_imposter_request;
+use rift_mock_core::tcp_fault_carrier;
+
+let response = handle_imposter_request(req, imposter, addr).await?;
+
+match tcp_fault_carrier(&response) {
+    // The connection would have been aborted; there is no response to show.
+    Some(fault) => println!("connection aborted: {fault}"),
+    None => println!("status {}", response.status()),
+}
+```
+
+It returns the **canonical** fault name (`CONNECTION_RESET_BY_PEER`, …) whatever alias the config
+used, for all three ways a fault is expressed — `_rift.fault.tcp`, a top-level `fault`, and a
+script's `reset()`.
+
+To branch per fault, read the `TcpFaultKind` extension instead. It is `#[non_exhaustive]`, so match
+with a `_` arm — a future transport fault must not break your build:
+
+```rust
+use rift_mock_core::TcpFaultKind;
+
+match response.extensions().get::<TcpFaultKind>() {
+    Some(TcpFaultKind::Reset) => { /* RST */ }
+    Some(TcpFaultKind::Empty) => { /* closed with no bytes */ }
+    Some(_) => { /* some other transport fault */ }
+    None => { /* an ordinary response */ }
+}
+```
+
+Do not classify on the `x-rift-fault` header: it echoes the raw configured string rather than the
+canonical name, and `_rift.fault.error` also sets it on a response the client genuinely receives.
+
 ### Fault Precedence
 
 When a single `_rift.fault` block combines `latency`, `tcp`, and `error`, they are evaluated in

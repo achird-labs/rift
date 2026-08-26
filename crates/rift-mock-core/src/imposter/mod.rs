@@ -18,7 +18,7 @@
 
 mod core;
 pub mod events;
-mod fault_io;
+pub mod fault_io;
 mod handler;
 mod manager;
 pub(crate) mod predicates;
