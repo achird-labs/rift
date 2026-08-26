@@ -55,18 +55,67 @@ Rift generates a self-signed certificate automatically.
 
 ### Mutual TLS (mTLS)
 
-Require client certificate:
+Three fields, matching Mountebank's grammar:
+
+| Field | Meaning |
+|:------|:--------|
+| `mutualAuth` | Request **and require** a client certificate. `https` only. |
+| `rejectUnauthorized` | Validate the client certificate against `ca`. Requires `ca`. |
+| `ca` | PEM trust anchor(s) client certificates must chain to. A string or an array. |
+
+**Require a certificate, without validating it.** Useful for virtualizing a server that demands
+mutual auth when you do not have that server's PKI — any certificate the client holds the key for
+is accepted, and a client presenting nothing fails the handshake:
 
 ```json
 {
   "port": 4545,
   "protocol": "https",
-  "key": "-----BEGIN RSA PRIVATE KEY-----\n...",
   "cert": "-----BEGIN CERTIFICATE-----\n...",
+  "key": "-----BEGIN RSA PRIVATE KEY-----\n...",
   "mutualAuth": true,
   "stubs": [...]
 }
 ```
+
+**Require and validate**, against your own CA:
+
+```json
+{
+  "port": 4545,
+  "protocol": "https",
+  "mutualAuth": true,
+  "rejectUnauthorized": true,
+  "ca": "-----BEGIN CERTIFICATE-----\n...",
+  "stubs": [...]
+}
+```
+
+`cert`/`key` are optional here as everywhere: omit them and the imposter serves its generated
+self-signed certificate, with client auth still enforced.
+
+Every combination that cannot take effect is refused at creation with a 400, rather than accepted
+and quietly ignored:
+
+| Config | Why it is refused |
+|:-------|:------------------|
+| `rejectUnauthorized` or `ca` without `mutualAuth` | No client certificate is ever requested, so neither can apply. |
+| `ca` without `rejectUnauthorized` | The certificate is required but its chain is never validated — the CA you supplied would be ignored. |
+| `rejectUnauthorized` without `ca` (or `ca: []`) | There is nothing to validate against. |
+| `mutualAuth: true` on `protocol: "http"` | A cleartext listener cannot request a certificate. |
+| `ca` containing no certificate (e.g. a private key by mistake) | It cannot serve as a trust anchor. |
+
+`"mutualAuth": false` on an `http` imposter stays valid, so existing configs keep working.
+
+This is stricter than Mountebank, which accepts all of the above and silently does nothing with
+them. That silence is the bug this feature was filed to fix — a security setting that reads back
+unchanged while having no effect is worse than one that is rejected, because nothing tells the
+author. Rift answers the `POST /imposters` with the reason instead.
+
+> **Divergence from Mountebank.** There, `mutualAuth` only *requests* a certificate and never
+> rejects one — and because its implementation gates the request on `rejectUnauthorized`, a bare
+> `mutualAuth: true` does nothing at all. Rift requires the certificate, because a mock whose job is
+> to stand in for an mTLS gateway should fail a client that forgot one.
 
 ---
 

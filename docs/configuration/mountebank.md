@@ -50,7 +50,9 @@ The Mountebank JSON format is the recommended way to configure Rift for service 
 | `allowCORS` | boolean | Add CORS headers to responses |
 | `key` | string | PEM private key (HTTPS) |
 | `cert` | string | PEM certificate (HTTPS) |
-| `mutualAuth` | boolean | Require client certificate |
+| `mutualAuth` | boolean | Request and **require** a client certificate (`https` only) |
+| `rejectUnauthorized` | boolean | Validate the client certificate against `ca`; requires `ca` |
+| `ca` | string or array | PEM trust anchor(s) client certificates must chain to |
 
 ### Rift-Specific Metadata Fields
 

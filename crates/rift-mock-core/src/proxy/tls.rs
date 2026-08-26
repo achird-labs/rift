@@ -6,6 +6,7 @@
 use rustls::DigitallySignedStruct;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use std::sync::Arc;
 use tokio_rustls::TlsAcceptor;
 
@@ -66,19 +67,125 @@ impl ServerCertVerifier for NoVerifier {
     }
 }
 
+/// What an HTTPS imposter asks of its clients (issue #977).
+///
+/// Derived once, at imposter creation, from `mutualAuth` / `rejectUnauthorized` / `ca`. The
+/// invalid combinations are rejected there, so anything reaching this layer is a decision rather
+/// than a config to re-interpret.
+///
+/// [`Verify`](Self::Verify) carries PEM-*decoded* DER, which is not the same as *usable*:
+/// `rustls_pemfile` only splits blocks, while `RootCertStore::add_parsable_certificates` runs
+/// webpki's trust-anchor validation and can still reject a well-formed CERTIFICATE that is not a
+/// valid anchor. That is why the `ignored > 0` guard below is reachable — it is not dead code.
+#[derive(Debug, Clone)]
+pub enum ClientAuth {
+    /// No client certificate is requested. The default, and every imposter's behaviour before #977.
+    Off,
+    /// A client certificate is **required**, but its chain is not validated: any certificate whose
+    /// private key the peer can prove it holds is accepted. This virtualizes a server that demands
+    /// mutual auth without the test needing that server's real PKI.
+    RequireAny,
+    /// Required, and validated against these trust anchors.
+    Verify { ca: Vec<CertificateDer<'static>> },
+}
+
+/// Accepts any client certificate chain, while still verifying the handshake signature.
+///
+/// The signature checks are deliberately **not** stubbed out the way [`NoVerifier`]'s are. That one
+/// is for outbound development against a self-signed origin, where the whole point is to skip
+/// verification. Here the point is the opposite: `mutualAuth` without `rejectUnauthorized` means
+/// "I do not have your PKI", not "I will accept anything" — so "any certificate" must still mean
+/// "any certificate you hold the key for", or the imposter would accept a chain copied off the wire.
+#[derive(Debug)]
+pub struct AcceptAnyClientCert {
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl AcceptAnyClientCert {
+    #[must_use]
+    pub fn new(provider: Arc<rustls::crypto::CryptoProvider>) -> Self {
+        Self { provider }
+    }
+}
+
+impl ClientCertVerifier for AcceptAnyClientCert {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        // No hints: we accept any issuer, so naming some would mislead a client into filtering.
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        // Required, not merely requested: a SUT that forgot its client certificate should see the
+        // handshake fail, which is what a real mTLS gateway does.
+        true
+    }
+}
+
 /// Create TLS acceptor from certificate and key files.
-pub fn create_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, anyhow::Error> {
+pub fn create_tls_acceptor(
+    cert_path: &str,
+    key_path: &str,
+    client_auth: &ClientAuth,
+) -> Result<TlsAcceptor, anyhow::Error> {
     let cert_pem = std::fs::read(cert_path)
         .map_err(|e| anyhow::anyhow!("Failed to open certificate file '{cert_path}': {e}"))?;
     let key_pem = std::fs::read(key_path)
         .map_err(|e| anyhow::anyhow!("Failed to open private key file '{key_path}': {e}"))?;
-    tls_acceptor_from_pem(&cert_pem, &key_pem)
+    tls_acceptor_from_pem(&cert_pem, &key_pem, client_auth)
 }
 
 /// Create a TLS acceptor from in-memory PEM bytes (per-imposter HTTPS, issue #206).
 pub fn tls_acceptor_from_pem(
     cert_pem: &[u8],
     key_pem: &[u8],
+    client_auth: &ClientAuth,
 ) -> Result<TlsAcceptor, anyhow::Error> {
     let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut &cert_pem[..])
         .collect::<Result<_, _>>()
@@ -93,12 +200,42 @@ pub fn tls_acceptor_from_pem(
         .map_err(|e| anyhow::anyhow!("Failed to parse private key PEM: {e}"))?
         .ok_or_else(|| anyhow::anyhow!("No private key found in key PEM"))?;
 
-    let mut config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to build TLS configuration (cert/key mismatch?): {e}")
-        })?;
+    // An explicit provider rather than the process default (issue #977): the client-cert verifiers
+    // below need a provider handle anyway, and taking it here means this no longer depends on
+    // `install_default()` having run — the same fix #974 made on the outbound side.
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ServerConfig::builder_with_provider(Arc::clone(&provider))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| anyhow::anyhow!("Failed to build TLS configuration: {e}"))?;
+    let builder = match client_auth {
+        ClientAuth::Off => builder.with_no_client_auth(),
+        ClientAuth::RequireAny => builder
+            .with_client_cert_verifier(Arc::new(AcceptAnyClientCert::new(Arc::clone(&provider)))),
+        ClientAuth::Verify { ca } => {
+            let mut roots = rustls::RootCertStore::empty();
+            let (added, ignored) = roots.add_parsable_certificates(ca.iter().cloned());
+            // Fail closed: a caller asked for validation against specific anchors, so quietly
+            // validating against fewer of them than they supplied is the wrong answer.
+            if ignored > 0 {
+                anyhow::bail!(
+                    "{ignored} of the supplied client-auth CA certificate(s) are unusable by rustls"
+                );
+            }
+            if added == 0 {
+                anyhow::bail!("no usable client-auth CA certificates were supplied");
+            }
+            let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+                Arc::new(roots),
+                Arc::clone(&provider),
+            )
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build the client-certificate verifier: {e}"))?;
+            builder.with_client_cert_verifier(verifier)
+        }
+    };
+    let mut config = builder.with_single_cert(certs, key).map_err(|e| {
+        anyhow::anyhow!("Failed to build TLS configuration (cert/key mismatch?): {e}")
+    })?;
     // Advertise HTTP/2 and HTTP/1.1 via ALPN so TLS clients can negotiate h2 (issue #295).
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     configure_session_resumption(&mut config)?;
@@ -139,13 +276,16 @@ pub fn configure_session_resumption(
 
 /// Generate an in-memory self-signed acceptor for zero-config HTTPS imposters (issue #206),
 /// matching Mountebank's built-in self-signed default. Valid for `localhost`/`127.0.0.1`.
-pub fn generate_self_signed_acceptor() -> Result<TlsAcceptor, anyhow::Error> {
+pub fn generate_self_signed_acceptor(
+    client_auth: &ClientAuth,
+) -> Result<TlsAcceptor, anyhow::Error> {
     let cert =
         rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
             .map_err(|e| anyhow::anyhow!("Failed to generate self-signed certificate: {e}"))?;
     tls_acceptor_from_pem(
         cert.cert.pem().as_bytes(),
         cert.key_pair.serialize_pem().as_bytes(),
+        client_auth,
     )
 }
 
@@ -202,6 +342,6 @@ mod tests {
     #[test]
     fn https_acceptor_builds_with_resumption() {
         // The real imposter-HTTPS path (self-signed) must still build once resumption is wired in.
-        assert!(generate_self_signed_acceptor().is_ok());
+        assert!(generate_self_signed_acceptor(&ClientAuth::Off).is_ok());
     }
 }

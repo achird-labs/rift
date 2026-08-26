@@ -564,14 +564,90 @@ impl ImposterManager {
         &self.event_bus
     }
 
+    /// Interpret `mutualAuth` / `rejectUnauthorized` / `ca` (issue #977) — the only place those
+    /// three fields are read, so every downstream layer receives a decision rather than a config.
+    ///
+    /// **Every** ambiguous combination is rejected, not just some. An earlier draft warned on two
+    /// of them for Mountebank parity and errored on the third, which is incoherent — and a `warn!`
+    /// reaches the server log, never the `POST /imposters` response, so the author who wrote the
+    /// setting is the one person who would not learn it does nothing. A security key that is
+    /// accepted and quietly ignored is the defect this issue was filed over; reproducing it inside
+    /// the fix would be worse than not fixing it.
+    fn client_auth_for(
+        config: &ImposterConfig,
+    ) -> Result<crate::proxy::tls::ClientAuth, ImposterError> {
+        use crate::proxy::tls::ClientAuth;
+
+        let is_https = config.protocol.eq_ignore_ascii_case("https");
+        if !config.mutual_auth {
+            if config.reject_unauthorized || config.ca.is_some() {
+                return Err(ImposterError::Tls(
+                    "`rejectUnauthorized`/`ca` require `mutualAuth: true`: without it no client \
+                     certificate is ever requested, so neither setting can take effect. Set \
+                     `mutualAuth: true`, or drop them."
+                        .to_string(),
+                ));
+            }
+            return Ok(ClientAuth::Off);
+        }
+
+        if !is_https {
+            return Err(ImposterError::Tls(format!(
+                "`mutualAuth` requires `protocol: \"https\"`, got \"{}\" — a client certificate \
+                 cannot be requested on a cleartext listener",
+                config.protocol
+            )));
+        }
+
+        if !config.reject_unauthorized {
+            if config.ca.is_some() {
+                return Err(ImposterError::Tls(
+                    "`ca` requires `rejectUnauthorized: true`: without it the client certificate \
+                     is required but its chain is never validated, so the supplied CA would be \
+                     ignored. Set `rejectUnauthorized: true`, or drop `ca`."
+                        .to_string(),
+                ));
+            }
+            return Ok(ClientAuth::RequireAny);
+        }
+
+        let Some(ca_pems) = config.ca.as_deref().filter(|pems| !pems.is_empty()) else {
+            return Err(ImposterError::Tls(
+                "`rejectUnauthorized` requires `ca`: supply the PEM trust anchor(s) client \
+                 certificates must chain to. (Mountebank falls back to the public CA bundle here; \
+                 validating a client certificate against public roots would verify nothing.)"
+                    .to_string(),
+            ));
+        };
+
+        let mut ca = Vec::new();
+        for pem in ca_pems {
+            let certs: Vec<_> = rustls_pemfile::certs(&mut pem.as_bytes())
+                .collect::<Result<_, _>>()
+                .map_err(|e| ImposterError::Tls(format!("parsing a `ca` entry: {e}")))?;
+            if certs.is_empty() {
+                return Err(ImposterError::Tls(
+                    "a `ca` entry contains no certificate: expected at least one \
+                     -----BEGIN CERTIFICATE----- block"
+                        .to_string(),
+                ));
+            }
+            ca.extend(certs);
+        }
+        Ok(ClientAuth::Verify { ca })
+    }
+
     /// Resolve the TLS acceptor for an HTTPS imposter by precedence: inline imposter cert/key →
     /// server default → self-signed fallback → error (never silent cleartext, issue #206).
     fn resolve_tls_acceptor(
         &self,
         config: &ImposterConfig,
     ) -> Result<tokio_rustls::TlsAcceptor, ImposterError> {
+        // Derived BEFORE the cert/key precedence below, so the two creation errors fire whatever
+        // the cert turns out to come from — inline, `TlsDefaults`, or the self-signed fallback.
+        let client_auth = Self::client_auth_for(config)?;
         let from_pem = |cert: &str, key: &str| {
-            crate::proxy::tls::tls_acceptor_from_pem(cert.as_bytes(), key.as_bytes())
+            crate::proxy::tls::tls_acceptor_from_pem(cert.as_bytes(), key.as_bytes(), &client_auth)
                 .map_err(|e| ImposterError::Tls(e.to_string()))
         };
         match (&config.cert, &config.key) {
@@ -598,7 +674,7 @@ impl ImposterManager {
             }
         }
         if self.tls_defaults.allow_self_signed {
-            return crate::proxy::tls::generate_self_signed_acceptor()
+            return crate::proxy::tls::generate_self_signed_acceptor(&client_auth)
                 .map_err(|e| ImposterError::Tls(e.to_string()));
         }
         Err(ImposterError::Tls(
@@ -642,6 +718,15 @@ impl ImposterManager {
             "http" | "https" => {}
             proto => return Err(ImposterError::InvalidProtocol(proto.to_string())),
         }
+
+        // Client-auth settings are validated for EVERY protocol, not just https (issue #977).
+        // `resolve_tls_acceptor` derives this again on the https branch; that is fine and
+        // deliberate — `client_auth_for` is pure, and having it self-contained is what lets the
+        // reload path (`rebind_imposter`) re-derive rather than cache a stale decision.
+        // `resolve_tls_acceptor` below runs only on the https branch, so leaving the check there
+        // would let `mutualAuth: true` on an http imposter through silently — the exact
+        // accepted-and-ignored failure this issue exists to remove.
+        Self::client_auth_for(&config)?;
 
         // For HTTPS, resolve the per-imposter TLS acceptor up front so a missing/invalid cert
         // fails loudly at creation rather than silently serving cleartext (issue #206).
