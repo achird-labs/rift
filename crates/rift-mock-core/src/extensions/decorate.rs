@@ -38,7 +38,7 @@ pub fn annotate(key: &'static str, value: String) {
 /// Run `fut` inside a fresh annotation scope and return its output together with the
 /// annotations collected while it ran. Task-locals follow the task across `.await`s, so
 /// synchronous backend calls made anywhere inside the request task land in this scope.
-pub async fn with_annotation_scope<F: Future>(fut: F) -> (F::Output, Vec<(&'static str, String)>) {
+pub async fn with_annotation_scope<F: Future>(fut: F) -> (F::Output, Annotations) {
     ANNOTATIONS
         .scope(RefCell::new(Vec::new()), async move {
             let out = fut.await;
@@ -46,6 +46,53 @@ pub async fn with_annotation_scope<F: Future>(fut: F) -> (F::Output, Vec<(&'stat
             (out, collected)
         })
         .await
+}
+
+/// Annotations collected on a thread that had no request scope, waiting to be replayed onto the
+/// request task by whoever awaited the work.
+pub(crate) type Annotations = Vec<(&'static str, String)>;
+
+/// The synchronous twin of [`with_annotation_scope`], for work that has left the request task.
+///
+/// `spawn_blocking` runs its closure on a pool thread that carries no task-locals, so an
+/// [`annotate`] made there hits the no-op path and is silently dropped (issue #987). Running the
+/// closure under a fresh scope on *that* thread collects those annotations so the caller can
+/// [`replay_annotations`] them once it is back on the request task.
+#[must_use = "dropping this discards the annotations collected off-task, which is the exact \
+              failure issue #987 fixed -- pass them to `replay_annotations`"]
+pub(crate) fn with_sync_annotation_scope<T>(f: impl FnOnce() -> T) -> (T, Annotations) {
+    ANNOTATIONS.sync_scope(RefCell::new(Vec::new()), || {
+        let out = f();
+        let collected = ANNOTATIONS.with(|a| a.borrow_mut().drain(..).collect());
+        (out, collected)
+    })
+}
+
+/// Append annotations collected off-task to the current task's scope, in order. Like [`annotate`],
+/// a no-op outside a scope.
+pub(crate) fn replay_annotations(collected: Annotations) {
+    for (key, value) in collected {
+        annotate(key, value);
+    }
+}
+
+/// The way request-path code spawns blocking work: the closure runs under its own annotation scope
+/// and the handle yields what it annotated alongside its result, for [`replay_annotations`] on the
+/// request task (issue #987).
+///
+/// Prefer this over a bare `tokio::task::spawn_blocking` anywhere a request-scoped annotation could
+/// be made — which is anywhere the offloaded work can reach a [`FlowStore`](crate::extensions::flow_state::FlowStore),
+/// since a failing backend annotates the op it failed on.
+///
+/// `spawn_blocking` is not the only way off the request task: the Mountebank JS pool
+/// (`scripting::js_engine`'s `with_mb_js_thread`) is a second thread hop that carries no
+/// task-locals either, and has no equivalent seam. That is harmless only because no flow store is
+/// ever bound on an MB worker — binding `ctx.state` there would reintroduce this bug with nothing
+/// to catch it.
+pub(crate) fn spawn_blocking_annotated<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> tokio::task::JoinHandle<(T, Annotations)> {
+    tokio::task::spawn_blocking(move || with_sync_annotation_scope(f))
 }
 
 /// Which response surface a decorator is being invoked for.
@@ -144,6 +191,83 @@ mod tests {
     #[test]
     fn annotate_outside_scope_is_noop() {
         annotate("orphan", "x".to_string());
+    }
+
+    // Issue #987: `spawn_blocking` runs on a pool thread that carries no task-locals, so an
+    // `annotate` made there is silently dropped. These pin the sync-scope + replay mechanism that
+    // carries them back.
+
+    // Edge case 2 + 1 + 3: annotations made off-thread are collected AND land in order relative to
+    // the inline ones around them. Ordering is the property the replay could plausibly get wrong.
+    #[tokio::test]
+    async fn sync_scope_collects_off_thread_and_replay_lands_in_order() {
+        let ((), notes) = with_annotation_scope(async {
+            annotate("before", "1".to_string());
+            // A real OS thread, not just a different task: this is what `spawn_blocking` does, and
+            // it is what makes the task-local invisible.
+            let collected = std::thread::spawn(|| {
+                let ((), notes) = with_sync_annotation_scope(|| {
+                    annotate("off-a", "2".to_string());
+                    annotate("off-b", "3".to_string());
+                });
+                notes
+            })
+            .join()
+            .expect("probe thread");
+            replay_annotations(collected);
+            annotate("after", "4".to_string());
+        })
+        .await;
+
+        assert_eq!(
+            notes,
+            vec![
+                ("before", "1".to_string()),
+                ("off-a", "2".to_string()),
+                ("off-b", "3".to_string()),
+                ("after", "4".to_string()),
+            ]
+        );
+    }
+
+    // Edge case 4 + 13: an offload that annotates nothing replays nothing, and the closure's return
+    // value still round-trips through the tuple.
+    #[test]
+    fn sync_scope_returns_the_value_and_an_empty_vec_when_nothing_annotates() {
+        let (value, notes) = with_sync_annotation_scope(|| 7_i64);
+        assert_eq!(value, 7);
+        assert!(notes.is_empty());
+    }
+
+    // Edge case 6: `sync_scope` shadows rather than inherits — a fresh scope must not observe the
+    // outer task's annotations, or replay would double-count them.
+    #[tokio::test]
+    async fn a_sync_scope_starts_empty_even_inside_an_outer_scope() {
+        let ((), notes) = with_annotation_scope(async {
+            annotate("outer", "1".to_string());
+            let ((), inner) = with_sync_annotation_scope(|| {
+                annotate("inner", "2".to_string());
+            });
+            assert_eq!(
+                inner,
+                vec![("inner", "2".to_string())],
+                "the sync scope must not see the outer scope's entries"
+            );
+            replay_annotations(inner);
+        })
+        .await;
+
+        // Edge case 7: exactly one `outer` and one `inner` — nothing leaked or double-counted.
+        assert_eq!(
+            notes,
+            vec![("outer", "1".to_string()), ("inner", "2".to_string())]
+        );
+    }
+
+    // Edge case 5: replay outside any scope is a silent no-op, exactly like `annotate` itself.
+    #[test]
+    fn replay_outside_a_scope_is_a_noop() {
+        replay_annotations(vec![("orphan", "x".to_string())]);
     }
 
     #[tokio::test]

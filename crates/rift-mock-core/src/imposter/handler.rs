@@ -835,7 +835,10 @@ async fn handle_request_inner(
         // Materialize an owned copy here (issue #561): `body_string` borrows from `body_bytes`,
         // which does not outlive this `spawn_blocking` closure's `'static` bound.
         let dbg_body = body_string.as_deref().map(str::to_string);
-        let handle = tokio::task::spawn_blocking(move || {
+        // Debug matching runs the same sync matcher the data plane offloads, so it reaches the
+        // flow store (scenario gate, inject scripts) and a failing backend annotates there —
+        // on a pool thread with no task-local unless the closure carries its own scope (#987).
+        let handle = crate::extensions::decorate::spawn_blocking_annotated(move || {
             handle_debug_request(
                 &debug_imposter,
                 &dbg_method,
@@ -847,7 +850,10 @@ async fn handle_request_inner(
             )
         });
         return match tokio::time::timeout(script_timeout, handle).await {
-            Ok(Ok(response)) => response,
+            Ok(Ok((response, annotations))) => {
+                crate::extensions::decorate::replay_annotations(annotations);
+                response
+            }
             Ok(Err(join_err)) => {
                 warn!("debug matching task panicked: {join_err}");
                 Ok(debug_matching_error_response())
@@ -1672,6 +1678,9 @@ async fn handle_request_inner(
                         let cmd = cmd.clone();
                         let rc = request_context.get_or_init(build_request_context).clone();
                         let body_in = body.clone();
+                        // Plain `spawn_blocking`, not `spawn_blocking_annotated` (issue #987):
+                        // `apply_shell_transform` is a fork/exec of an external command and never
+                        // touches a `FlowStore`, so nothing here can annotate.
                         tokio::task::spawn_blocking(move || {
                             apply_shell_transform(&cmd, &rc, &body_in, status)
                         })

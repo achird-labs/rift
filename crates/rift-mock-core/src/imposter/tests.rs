@@ -3793,6 +3793,310 @@ mod backend_errors {
     // AC2 + AC3 end-to-end on the data plane: a bare listener serving the decorated
     // entrypoint returns the structured 503, and the decorator sees the phase, the
     // imposter port, and the annotations the failing backend attached.
+
+    /// `FailingStore`, but reporting `is_blocking() == true` — i.e. shaped like the one production
+    /// backend that actually annotates (`rift-store-redis`, whose `backend_err` annotates and whose
+    /// `is_blocking()` is `true`). Delegates every op to `FailingStore` so the failure behaviour and
+    /// the annotations are identical; only the routing differs.
+    struct BlockingFailingStore;
+
+    impl FlowStore for BlockingFailingStore {
+        fn is_blocking(&self) -> bool {
+            true
+        }
+        fn get(&self, flow_id: &str, key: &str) -> anyhow::Result<Option<Value>> {
+            FailingStore.get(flow_id, key)
+        }
+        fn set(&self, flow_id: &str, key: &str, value: Value) -> anyhow::Result<()> {
+            FailingStore.set(flow_id, key, value)
+        }
+        fn exists(&self, flow_id: &str, key: &str) -> anyhow::Result<bool> {
+            FailingStore.exists(flow_id, key)
+        }
+        fn delete(&self, flow_id: &str, key: &str) -> anyhow::Result<()> {
+            FailingStore.delete(flow_id, key)
+        }
+        fn increment(&self, flow_id: &str, key: &str) -> anyhow::Result<i64> {
+            FailingStore.increment(flow_id, key)
+        }
+        fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> anyhow::Result<()> {
+            FailingStore.set_ttl(flow_id, ttl_seconds)
+        }
+        fn compare_and_set(
+            &self,
+            flow_id: &str,
+            key: &str,
+            expected: Option<&Value>,
+            new: Value,
+        ) -> anyhow::Result<crate::extensions::flow_state::CasOutcome> {
+            FailingStore.compare_and_set(flow_id, key, expected, new)
+        }
+    }
+
+    fn gated_imposter_blocking() -> Arc<Imposter> {
+        let config: ImposterConfig = serde_json::from_value(json!({
+            "protocol": "http", "port": 19491,
+            "stubs": [{
+                "scenarioName": "order",
+                "requiredScenarioState": "Started",
+                "predicates": [{"equals": {"path": "/gated"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "ok"}}]
+            }]
+        }))
+        .expect("config");
+        let mut imposter = Imposter::new(config).expect("test imposter");
+        imposter.flow_store = Arc::new(BlockingFailingStore);
+        Arc::new(imposter)
+    }
+
+    /// Issue #987: the **debug-matching** offload (`X-Rift-Debug: true`), the fifth seam this
+    /// change wraps.
+    ///
+    /// Debug matching runs the same sync matcher the data plane offloads, so it reaches the flow
+    /// store through the scenario gate — and before the fix its annotation was made on a pool
+    /// thread with no task-local. Without this test the seam's replay is unverified, so a slip in
+    /// its tuple destructuring would ship silently while the CHANGELOG claimed it fixed.
+    #[tokio::test]
+    async fn debug_matching_annotations_reach_the_decorator_on_a_blocking_store() {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+
+        // Same gated stub as the data-plane test, on its own port; the scenario gate is what makes
+        // the matcher read the store.
+        let config: ImposterConfig = serde_json::from_value(json!({
+            "protocol": "http", "port": 19493,
+            "stubs": [{
+                "scenarioName": "order",
+                "requiredScenarioState": "Started",
+                "predicates": [{"equals": {"path": "/gated"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "ok"}}]
+            }]
+        }))
+        .expect("config");
+        let mut imposter = Imposter::new(config).expect("test imposter");
+        imposter.flow_store = Arc::new(BlockingFailingStore);
+        let imposter = Arc::new(imposter);
+
+        let recorder = Arc::new(RecordingDecorator::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:19493")
+            .await
+            .expect("bind");
+        let imp = imposter.clone();
+        let rec = recorder.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, addr)) = listener.accept().await else {
+                    break;
+                };
+                let imp = imp.clone();
+                let rec = rec.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req| {
+                        let imp = imp.clone();
+                        let rec = rec.clone();
+                        async move {
+                            handle_imposter_request_decorated(
+                                req,
+                                imp,
+                                addr,
+                                19493,
+                                Some(rec as Arc<dyn ResponseDecorator>),
+                            )
+                            .await
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = reqwest::Client::new();
+        let _resp = client
+            .get("http://127.0.0.1:19493/gated")
+            .header("X-Rift-Debug", "true")
+            .send()
+            .await
+            .expect("request");
+
+        let calls = recorder.calls.lock().clone();
+        assert_eq!(calls.len(), 1);
+        let (_, _, annotations) = &calls[0];
+        assert!(
+            annotations
+                .iter()
+                .any(|(k, v)| *k == "flowStore.get" && v == "induced-failure"),
+            "the debug-matching offload must replay its annotations too: {annotations:?}"
+        );
+    }
+
+    fn script_imposter_blocking() -> Arc<Imposter> {
+        let config: ImposterConfig = serde_json::from_value(json!({
+            "protocol": "http", "port": 19492,
+            "stubs": [{
+                "predicates": [{"equals": {"path": "/scripted"}}],
+                "responses": [{
+                    "_rift": { "script": {
+                        "engine": "rhai",
+                        // `ctx.state` is unconditionally fail-loud (#358/#376), so this read is the
+                        // failure point under a failing backend — and the point at which the store
+                        // annotates the op it failed on.
+                        "code": "fn respond(ctx) { let v = ctx.state.get(\"k\"); pass() }"
+                    }}
+                }]
+            }]
+        }))
+        .expect("config");
+        let mut imposter = Imposter::new(config).expect("test imposter");
+        imposter.flow_store = Arc::new(BlockingFailingStore);
+        Arc::new(imposter)
+    }
+
+    /// Issue #987 (AC5, edge case 12): the **script** path — the worked example in
+    /// `docs/embedding/spi.md`, which promises that "a script that hits a down flow-store backend
+    /// records an annotation" a `ResponseDecorator` reads.
+    ///
+    /// A script's `ctx.state` runs inside `should_inject_bounded`'s `spawn_blocking`, so before the
+    /// fix its store annotation was made on a pool thread with no task-local and vanished. This is
+    /// a different seam from `run_flow_blocking` (`scripting/bounded.rs`, not
+    /// `imposter/core/matching.rs`), so the mechanism-level tests do not cover it.
+    #[tokio::test]
+    async fn script_ctx_state_annotations_reach_the_decorator_on_a_blocking_store() {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+
+        let imposter = script_imposter_blocking();
+        let recorder = Arc::new(RecordingDecorator::default());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:19492")
+            .await
+            .expect("bind");
+        let imp = imposter.clone();
+        let rec = recorder.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, addr)) = listener.accept().await else {
+                    break;
+                };
+                let imp = imp.clone();
+                let rec = rec.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req| {
+                        let imp = imp.clone();
+                        let rec = rec.clone();
+                        async move {
+                            handle_imposter_request_decorated(
+                                req,
+                                imp,
+                                addr,
+                                19492,
+                                Some(rec as Arc<dyn ResponseDecorator>),
+                            )
+                            .await
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let resp = reqwest::get("http://127.0.0.1:19492/scripted")
+            .await
+            .expect("request");
+        // The fail-loud contract (#358/#376) is unchanged by this fix; asserted so a regression
+        // there cannot masquerade as an annotation problem.
+        assert_eq!(resp.status(), 500, "ctx.state must stay fail-loud");
+
+        let calls = recorder.calls.lock().clone();
+        assert_eq!(calls.len(), 1);
+        let (_, _, annotations) = &calls[0];
+        assert!(
+            annotations
+                .iter()
+                .any(|(k, v)| *k == "flowStore.get" && v == "induced-failure"),
+            "a script's store annotation must reach the decorator from the script's \
+             blocking thread: {annotations:?}"
+        );
+    }
+
+    /// Issue #987 (AC7, edge case 11): the #318 contract on a **blocking** backend.
+    ///
+    /// This is `decorated_data_plane_serves_503_and_annotations` with one thing changed —
+    /// `is_blocking()` returns `true` — and it is the test that should have existed since #475.
+    /// The existing one passes only because its store runs inline; on a blocking store the failed
+    /// op's annotation is made on a `spawn_blocking` pool thread that carries no task-locals, so it
+    /// is silently dropped and the decorator sees an empty list. The 503 body stays correct
+    /// throughout (`BackendUnavailable` rides the `anyhow` chain, not the task-local), which is
+    /// exactly why this went unnoticed.
+    #[tokio::test]
+    async fn decorated_data_plane_serves_503_and_annotations_on_a_blocking_store() {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+
+        let imposter = gated_imposter_blocking();
+        let recorder = Arc::new(RecordingDecorator::default());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:12618")
+            .await
+            .expect("bind");
+        let imp = imposter.clone();
+        let rec = recorder.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, addr)) = listener.accept().await else {
+                    break;
+                };
+                let imp = imp.clone();
+                let rec = rec.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req| {
+                        let imp = imp.clone();
+                        let rec = rec.clone();
+                        async move {
+                            handle_imposter_request_decorated(
+                                req,
+                                imp,
+                                addr,
+                                19491,
+                                Some(rec as Arc<dyn ResponseDecorator>),
+                            )
+                            .await
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let resp = reqwest::get("http://127.0.0.1:12618/gated")
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), 503, "backend failure is a structured 503");
+
+        let calls = recorder.calls.lock().clone();
+        assert_eq!(calls.len(), 1);
+        let (phase, port, annotations) = &calls[0];
+        assert_eq!(*phase, ResponsePhase::DataPlane);
+        assert_eq!(*port, Some(19491));
+        assert!(
+            annotations
+                .iter()
+                .any(|(k, v)| *k == "flowStore.get" && v == "induced-failure"),
+            "a blocking backend's annotation must reach the decorator too: {annotations:?}"
+        );
+    }
+
     #[tokio::test]
     async fn decorated_data_plane_serves_503_and_annotations() {
         use hyper::server::conn::http1;

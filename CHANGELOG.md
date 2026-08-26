@@ -186,6 +186,24 @@ record.
 
 ### Fixed
 
+- **A failing Redis backend's annotation now reaches the `ResponseDecorator`** (#987). Per-request
+  operational metadata travels through a tokio **task-local** annotation scope (#318), and
+  `spawn_blocking` runs its closure on a pool thread that carries no task-locals — so every
+  `annotate()` made inside offloaded work hit the documented "no scope open" no-op and was silently
+  dropped.
+  - The two facts that made this invisible: `rift-store-redis` is the only production backend that
+    annotates its failures, and it is also the only one reporting `is_blocking() == true` — so the
+    only backend with something to say was the only one routed onto a thread where saying it did
+    nothing. The `503` body stayed correct throughout (`BackendUnavailable` rides the `anyhow`
+    chain, not the task-local), so the loss showed up only as an empty annotation list.
+  - True since the first offload (#475), and inherited by `_rift.stateOps` (#969) and the templated
+    render (#971). The one test of the contract used a store with `is_blocking() == false`, so it
+    ran inline and passed.
+  - Fixed at every request-path offload that can reach the store: the flow-store seam, the matcher,
+    both script-execution paths (the worked example in `docs/embedding/spi.md`), and debug matching.
+    The decorate-script and predicate-generator offloads provably cannot reach a store and are
+    commented as such rather than changed.
+
 - **`{{ state.<key> }}` no longer blocks the worker on a blocking flow-store backend** (#971).
   A `_rift.templated` response renders its `{{ }}` tokens on the request task, and
   `{{ state.<key> }}` reads the flow store — so on a backend that actually blocks (Redis, or an

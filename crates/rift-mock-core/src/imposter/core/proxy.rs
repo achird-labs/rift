@@ -559,6 +559,9 @@ impl Imposter {
                         let timeout = std::time::Duration::from_millis(
                             crate::scripting::resolve_script_timeout_ms(&self.config),
                         );
+                        // Plain `spawn_blocking`, not `spawn_blocking_annotated` (issue #987):
+                        // `execute_predicate_generator_inject` never installs a flow store, so a
+                        // predicate generator has no `ctx.state` and nothing here can annotate.
                         let handle = tokio::task::spawn_blocking(move || {
                             Self::generate_predicates_impl(
                                 &generators,

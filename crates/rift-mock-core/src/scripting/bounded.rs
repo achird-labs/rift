@@ -89,7 +89,10 @@ pub async fn should_inject_bounded_with_ctx(
 ) -> Result<FaultDecision> {
     let abort = Arc::new(AtomicBool::new(false));
     let run_abort = Arc::clone(&abort);
-    let handle = tokio::task::spawn_blocking(move || {
+    // A script's `ctx.state` reaches the flow store, and a failing backend annotates the op it
+    // failed on — on a pool thread with no task-local unless the closure carries its own scope
+    // (issue #987). This is the path `docs/embedding/spi.md` uses as its worked example.
+    let handle = crate::extensions::decorate::spawn_blocking_annotated(move || {
         run_should_inject_with_abort(
             &engine_type,
             &code,
@@ -102,7 +105,10 @@ pub async fn should_inject_bounded_with_ctx(
     });
 
     match tokio::time::timeout(timeout, handle).await {
-        Ok(Ok(result)) => result,
+        Ok(Ok((result, annotations))) => {
+            crate::extensions::decorate::replay_annotations(annotations);
+            result
+        }
         Ok(Err(join_err)) => Err(anyhow::anyhow!("script task panicked: {join_err}")),
         Err(_elapsed) => {
             // Signal the deadline: Rhai self-interrupts and frees its thread promptly; for
@@ -138,7 +144,8 @@ pub async fn should_inject_bounded_with_ctx_traced(
     let abort = Arc::new(AtomicBool::new(false));
     let run_abort = Arc::clone(&abort);
     let start = Instant::now();
-    let handle = tokio::task::spawn_blocking(move || {
+    // Same store reach as the untraced path above (issue #987).
+    let handle = crate::extensions::decorate::spawn_blocking_annotated(move || {
         capture_script_logs(|| {
             run_should_inject_with_abort(
                 &engine_type,
@@ -153,7 +160,10 @@ pub async fn should_inject_bounded_with_ctx_traced(
     });
 
     let (result, logs) = match tokio::time::timeout(timeout, handle).await {
-        Ok(Ok((result, logs))) => (result, logs),
+        Ok(Ok(((result, logs), annotations))) => {
+            crate::extensions::decorate::replay_annotations(annotations);
+            (result, logs)
+        }
         Ok(Err(join_err)) => (
             Err(anyhow::anyhow!("script task panicked: {join_err}")),
             Vec::new(),

@@ -308,7 +308,9 @@ impl Imposter {
         let body = body.map(str::to_string);
         let request_from = request_from.map(str::to_string);
         let client_ip = client_ip.map(str::to_string);
-        let handle = tokio::task::spawn_blocking(move || {
+        // The scenario gate reads the store and inject scripts can too, so the offloaded work
+        // annotates on a thread with no task-local unless it carries its own scope (issue #987).
+        let handle = crate::extensions::decorate::spawn_blocking_annotated(move || {
             this.find_matching_stub_with_client_inner(
                 &method,
                 &path,
@@ -325,12 +327,18 @@ impl Imposter {
         // purely for the scenario gate (no inject) we await the task without the script deadline.
         if !has_inject {
             return match handle.await {
-                Ok(result) => result,
+                Ok((result, annotations)) => {
+                    crate::extensions::decorate::replay_annotations(annotations);
+                    result
+                }
                 Err(join_err) => Err(anyhow::anyhow!("matching task panicked: {join_err}")),
             };
         }
         match tokio::time::timeout(timeout, handle).await {
-            Ok(Ok(result)) => result,
+            Ok(Ok((result, annotations))) => {
+                crate::extensions::decorate::replay_annotations(annotations);
+                result
+            }
             Ok(Err(join_err)) => Err(anyhow::anyhow!("matching task panicked: {join_err}")),
             Err(_elapsed) => {
                 tracing::warn!(
@@ -472,9 +480,15 @@ impl Imposter {
     {
         if self.flow_store.is_blocking() {
             let imp = Arc::clone(self);
-            tokio::task::spawn_blocking(move || f(&imp))
-                .await
-                .map_err(|e| anyhow::anyhow!("flow-store task panicked: {e}"))?
+            // A failing backend annotates the op it failed on, and the pool thread carries no
+            // task-locals — so the closure runs under its own scope and the annotations are
+            // replayed here, back on the request task (issue #987).
+            let (result, annotations) =
+                crate::extensions::decorate::spawn_blocking_annotated(move || f(&imp))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("flow-store task panicked: {e}"))?;
+            crate::extensions::decorate::replay_annotations(annotations);
+            result
         } else {
             f(self)
         }
@@ -884,6 +898,149 @@ mod bounded_matching_tests {
         let mut imp = Imposter::new(cfg).expect("test imposter");
         imp.flow_store = store;
         Arc::new(imp)
+    }
+
+    /// A blocking store whose `get` annotates the way `rift-store-redis`'s `backend_err` does.
+    /// The point is the pairing: Redis is the only production backend that annotates, and the only
+    /// one that reports `is_blocking() == true` (issue #987).
+    struct AnnotatingBlockingStore {
+        inner: crate::backends::inmemory::InMemoryFlowStore,
+    }
+
+    impl AnnotatingBlockingStore {
+        fn new() -> Self {
+            Self {
+                inner: crate::backends::inmemory::InMemoryFlowStore::new(300),
+            }
+        }
+    }
+
+    impl crate::extensions::flow_state::FlowStore for AnnotatingBlockingStore {
+        fn is_blocking(&self) -> bool {
+            true
+        }
+        fn get(&self, flow_id: &str, key: &str) -> anyhow::Result<Option<serde_json::Value>> {
+            crate::extensions::decorate::annotate("flowStore.get", "probe".to_string());
+            self.inner.get(flow_id, key)
+        }
+        fn set(&self, flow_id: &str, key: &str, value: serde_json::Value) -> anyhow::Result<()> {
+            self.inner.set(flow_id, key, value)
+        }
+        fn exists(&self, flow_id: &str, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(flow_id, key)
+        }
+        fn delete(&self, flow_id: &str, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(flow_id, key)
+        }
+        fn increment(&self, flow_id: &str, key: &str) -> anyhow::Result<i64> {
+            self.inner.increment(flow_id, key)
+        }
+        fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> anyhow::Result<()> {
+            self.inner.set_ttl(flow_id, ttl_seconds)
+        }
+        fn compare_and_set(
+            &self,
+            flow_id: &str,
+            key: &str,
+            expected: Option<&serde_json::Value>,
+            new: serde_json::Value,
+        ) -> anyhow::Result<crate::extensions::flow_state::CasOutcome> {
+            self.inner.compare_and_set(flow_id, key, expected, new)
+        }
+    }
+
+    // Issue #987, AC3 + edge case 10: an annotation made by the store on the blocking pool thread
+    // must reach the request's annotation scope. Red before the fix: `annotate` runs on a thread
+    // with no task-local, so the scope collects nothing.
+    #[tokio::test]
+    async fn run_flow_blocking_replays_annotations_from_the_blocking_thread() {
+        use crate::extensions::decorate::with_annotation_scope;
+
+        let imp = imposter_with_store(json!([]), Arc::new(AnnotatingBlockingStore::new()));
+        assert!(imp.flow_store.is_blocking());
+
+        let (result, notes) = with_annotation_scope(async {
+            imp.run_flow_blocking(|i| i.flow_store.get("flow-1", "k"))
+                .await
+        })
+        .await;
+
+        assert!(result.is_ok(), "the read itself must still succeed");
+        assert_eq!(
+            notes,
+            vec![("flowStore.get", "probe".to_string())],
+            "an annotation made on the blocking thread must reach the request scope"
+        );
+    }
+
+    // Edge case 9: the inline (non-blocking) path annotates directly and must not be double-counted
+    // by the replay. Green before and after — it guards the fix against over-collecting.
+    #[tokio::test]
+    async fn inline_path_annotates_exactly_once() {
+        use crate::extensions::decorate::with_annotation_scope;
+
+        struct AnnotatingInlineStore {
+            inner: crate::backends::inmemory::InMemoryFlowStore,
+        }
+        impl crate::extensions::flow_state::FlowStore for AnnotatingInlineStore {
+            fn is_blocking(&self) -> bool {
+                false
+            }
+            fn get(&self, flow_id: &str, key: &str) -> anyhow::Result<Option<serde_json::Value>> {
+                crate::extensions::decorate::annotate("flowStore.get", "inline".to_string());
+                self.inner.get(flow_id, key)
+            }
+            fn set(
+                &self,
+                flow_id: &str,
+                key: &str,
+                value: serde_json::Value,
+            ) -> anyhow::Result<()> {
+                self.inner.set(flow_id, key, value)
+            }
+            fn exists(&self, flow_id: &str, key: &str) -> anyhow::Result<bool> {
+                self.inner.exists(flow_id, key)
+            }
+            fn delete(&self, flow_id: &str, key: &str) -> anyhow::Result<()> {
+                self.inner.delete(flow_id, key)
+            }
+            fn increment(&self, flow_id: &str, key: &str) -> anyhow::Result<i64> {
+                self.inner.increment(flow_id, key)
+            }
+            fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> anyhow::Result<()> {
+                self.inner.set_ttl(flow_id, ttl_seconds)
+            }
+            fn compare_and_set(
+                &self,
+                flow_id: &str,
+                key: &str,
+                expected: Option<&serde_json::Value>,
+                new: serde_json::Value,
+            ) -> anyhow::Result<crate::extensions::flow_state::CasOutcome> {
+                self.inner.compare_and_set(flow_id, key, expected, new)
+            }
+        }
+
+        let imp = imposter_with_store(
+            json!([]),
+            Arc::new(AnnotatingInlineStore {
+                inner: crate::backends::inmemory::InMemoryFlowStore::new(300),
+            }),
+        );
+        assert!(!imp.flow_store.is_blocking());
+
+        let ((), notes) = with_annotation_scope(async {
+            let _ = imp
+                .run_flow_blocking(|i| i.flow_store.get("flow-1", "k"))
+                .await;
+        })
+        .await;
+
+        assert_eq!(
+            notes,
+            vec![("flowStore.get", "inline".to_string())],
+            "the inline path must annotate exactly once — no replay double-count"
+        );
     }
 
     // Issue #475: on a blocking backend, run_flow_blocking must dispatch the closure to a
