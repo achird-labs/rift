@@ -19,6 +19,13 @@ CA/key/truststore files) with a couple of Rift admin calls and **no committed cr
 > This is the Rift-native mechanism. The `zio-bdd` `MockControl` `Intercept` capability
 > (EtaCassiopeia/zio-bdd#219) wraps it for BDD tests via `EmbeddedRift`.
 
+
+> **Looking for the other direction?** The CA on this page is Rift's own, so a system under test can
+> trust Rift. If instead *Rift* is failing to reach a real origin with `invalid peer certificate:
+> UnknownIssuer` — typically a corporate API behind a private CA — that is outbound trust, and you
+> want `--upstream-ca-file`. See
+> [TLS/HTTPS → Which certificate are you configuring?]({{ site.baseurl }}/features/tls/#which-certificate-are-you-configuring).
+
 ---
 
 ## How it works
