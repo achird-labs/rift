@@ -570,6 +570,14 @@ pub async fn apply_decorate_bounded(
     timeout: std::time::Duration,
 ) -> Result<(String, u16, HashMap<String, String>), DecorateError> {
     let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+    // Deliberately a plain `spawn_blocking`, not `spawn_blocking_annotated` (issue #987): the
+    // decorate script has no `ctx.state`, so nothing on this thread can annotate. What makes that
+    // airtight is *which* code reads the store, not the thread's history: the `ctx.state.*` natives
+    // are registered only by `create_ctx_object`, which the decorate path never calls. Rhai
+    // decorate uses a bare `rhai::Engine::new()`, and MB-JS decorate binds only `config`/`logger`.
+    // (Do NOT reason from "the thread-local is always cleared" — it is not: `execute_js_script`
+    // has no RAII guard, so a panic skips its `clear_current_flow_store`, and `declared_functions_js`
+    // never clears at all. A stale `Arc<dyn FlowStore>` can outlive its job on a pool thread.)
     let handle = tokio::task::spawn_blocking(move || {
         apply_js_or_rhai_decorate(
             &script,
