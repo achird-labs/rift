@@ -517,6 +517,82 @@ fn sanitize_header_value(value: &str) -> String {
     sanitized
 }
 
+/// The outcome of a `_rift.templated` render.
+///
+/// A failed `{{ }}` and a failed *offload* are different events with different answers — a 500
+/// `x-rift-template-error` versus a backend-unavailable response — so they get different variants
+/// rather than one error channel the caller has to disambiguate by inspecting the message.
+#[derive(Debug)]
+enum TemplateRender {
+    Rendered {
+        body: String,
+        headers: HashMap<String, Vec<String>>,
+    },
+    /// A `{{ }}` expression failed to render (debug mode). Carries the message
+    /// `render_templated` produced.
+    Failed(String),
+}
+
+/// Render the `_rift.templated` body and header values (issue #359), off the tokio worker when the
+/// flow store blocks (issue #971).
+///
+/// `{{ state.<key> }}` reads the flow store, and doing that inline on the request task
+/// head-of-line-blocks the worker for the backend round trip on a blocking backend (Redis, or an
+/// embedder's store that parks on an owner RPC) — the same defect issue #475 removed for the
+/// scenario FSM and #969 for `_rift.stateOps`. On a current-thread runtime whose store is served by
+/// that same runtime it does not merely stall: it deadlocks until the store times out and the token
+/// renders empty. `run_flow_blocking` is the existing seam for exactly this, and it is transparent
+/// on the default in-memory store — the closure runs inline there, with no task hop.
+///
+/// The render is pure over its inputs, so it moves wholesale: `RequestData` and the flow id are
+/// owned, and the `TemplateContext` is rebuilt on the far side from the imposter's own store.
+///
+/// `Err` carries **only** a transport failure (a panicked blocking task); a template failure is
+/// `Ok(TemplateRender::Failed)`.
+async fn render_templated_response(
+    imposter: &Arc<Imposter>,
+    request_data: RequestData,
+    flow_id: String,
+    body: String,
+    mut headers: HashMap<String, Vec<String>>,
+    debug: bool,
+) -> anyhow::Result<TemplateRender> {
+    imposter
+        .run_flow_blocking(move |imp| {
+            let template_ctx = crate::extensions::template_fn::TemplateContext {
+                request: &request_data,
+                flow_id: &flow_id,
+                flow_store: imp.flow_store.as_ref(),
+                previous_value: None,
+            };
+
+            let body =
+                match crate::extensions::template_fn::render_templated(&body, &template_ctx, debug)
+                {
+                    Ok(rendered) => rendered,
+                    Err(e) => return Ok(TemplateRender::Failed(e)),
+                };
+
+            for values in headers.values_mut() {
+                for v in values.iter_mut() {
+                    match crate::extensions::template_fn::render_templated(v, &template_ctx, debug)
+                    {
+                        // Issue #359 B3 (header injection): a templated value can resolve to
+                        // attacker-controlled request data containing CR/LF/control chars. Strip
+                        // control characters before the value ever reaches the header map so it
+                        // cannot inject an extra header line; warn (never silently) if anything
+                        // had to be removed.
+                        Ok(rendered) => *v = sanitize_header_value(&rendered),
+                        Err(e) => return Ok(TemplateRender::Failed(e)),
+                    }
+                }
+            }
+
+            Ok(TemplateRender::Rendered { body, headers })
+        })
+        .await
+}
+
 /// `journal_index` is an out-parameter: the index of the entry this request was recorded under, so
 /// the caller can attach the status and elapsed time once the response exists (issue #364). Left
 /// `None` when nothing was recorded — recording off, or a backend with no stable indices.
@@ -1358,47 +1434,34 @@ async fn handle_request_inner(
                 // In debug mode (`RIFT_DEBUG`), a malformed/unknown/failed `{{ }}` token fails the
                 // request loudly instead of silently degrading to an empty string (issue #359 AC3).
                 let template_debug = crate::util::rift_debug_env();
-                let template_ctx = crate::extensions::template_fn::TemplateContext {
-                    request: &request_data,
-                    flow_id: &scenario_flow_id,
-                    flow_store: imposter.flow_store.as_ref(),
-                    previous_value: None,
-                };
-
-                let template_error = match crate::extensions::template_fn::render_templated(
-                    &body,
-                    &template_ctx,
+                // Offloaded when the store blocks (issue #971); inline on the in-memory default.
+                // `body`/`headers` move into the render and come back rendered, so they are taken
+                // here and reinstated from the outcome.
+                match render_templated_response(
+                    &imposter,
+                    request_data,
+                    scenario_flow_id.clone(),
+                    std::mem::take(&mut body),
+                    std::mem::take(&mut headers),
                     template_debug,
-                ) {
-                    Ok(rendered) => {
-                        body = rendered;
-                        None
+                )
+                .await
+                {
+                    Ok(TemplateRender::Rendered {
+                        body: rendered_body,
+                        headers: rendered_headers,
+                    }) => {
+                        body = rendered_body;
+                        headers = rendered_headers;
                     }
-                    Err(e) => Some(e),
-                };
-                let template_error = template_error.or_else(|| {
-                    for values in headers.values_mut() {
-                        for v in values.iter_mut() {
-                            match crate::extensions::template_fn::render_templated(
-                                v,
-                                &template_ctx,
-                                template_debug,
-                            ) {
-                                // Issue #359 B3 (header injection): a templated value can resolve to
-                                // attacker-controlled request data containing CR/LF/control chars.
-                                // Strip control characters before the value ever reaches the header
-                                // map so it cannot inject an extra header line; warn (never silently)
-                                // if anything had to be removed.
-                                Ok(rendered) => *v = sanitize_header_value(&rendered),
-                                Err(e) => return Some(e),
-                            }
-                        }
+                    Ok(TemplateRender::Failed(e)) => {
+                        warn!("Response template rendering failed: {e}");
+                        return Ok(template_error_response(&e));
                     }
-                    None
-                });
-                if let Some(e) = template_error {
-                    warn!("Response template rendering failed: {e}");
-                    return Ok(template_error_response(&e));
+                    // Not a template failure: the blocking task itself died, so this is the same
+                    // backend-transport door the FSM transition and `_rift.stateOps` use. Answering
+                    // `template_error_response` here would blame the config for an outage.
+                    Err(e) => return Ok(backend_error_response(&e)),
                 }
             }
 
@@ -2933,5 +2996,329 @@ mod upstream_error_tests {
             "the per-door marker must survive"
         );
         assert_eq!(response.headers()["content-type"], "application/json");
+    }
+}
+
+// =========================================================================
+// Issue #971: the `_rift.templated` render must offload to a blocking thread on a blocking
+// FlowStore, exactly as the scenario FSM (#475) and `_rift.stateOps` (#969) already do.
+// =========================================================================
+#[cfg(test)]
+mod templated_offload_tests {
+    use super::{TemplateRender, render_templated_response};
+    use crate::extensions::flow_state::{CasOutcome, FlowStore};
+    use crate::extensions::template::RequestData;
+    use crate::imposter::core::Imposter;
+    use crate::imposter::types::ImposterConfig;
+    use parking_lot::Mutex;
+    use serde_json::{Value, json};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::thread::ThreadId;
+
+    /// An in-memory store that records which thread served `get`, and lies about `is_blocking`
+    /// on demand. The recorded thread id is the whole point: it is the only direct evidence that
+    /// the render did (or did not) leave the caller's thread.
+    struct ThreadProbeStore {
+        inner: crate::backends::inmemory::InMemoryFlowStore,
+        blocking: bool,
+        get_thread: Arc<Mutex<Option<ThreadId>>>,
+        panic_on_get: bool,
+    }
+
+    impl ThreadProbeStore {
+        fn new(blocking: bool) -> Self {
+            Self {
+                inner: crate::backends::inmemory::InMemoryFlowStore::new(300),
+                blocking,
+                get_thread: Arc::new(Mutex::new(None)),
+                panic_on_get: false,
+            }
+        }
+
+        fn panicking() -> Self {
+            Self {
+                panic_on_get: true,
+                ..Self::new(true)
+            }
+        }
+    }
+
+    impl FlowStore for ThreadProbeStore {
+        fn is_blocking(&self) -> bool {
+            self.blocking
+        }
+        fn get(&self, flow_id: &str, key: &str) -> anyhow::Result<Option<Value>> {
+            assert!(!self.panic_on_get, "induced blocking-store panic");
+            *self.get_thread.lock() = Some(std::thread::current().id());
+            self.inner.get(flow_id, key)
+        }
+        fn set(&self, flow_id: &str, key: &str, value: Value) -> anyhow::Result<()> {
+            self.inner.set(flow_id, key, value)
+        }
+        fn exists(&self, flow_id: &str, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(flow_id, key)
+        }
+        fn delete(&self, flow_id: &str, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(flow_id, key)
+        }
+        fn increment(&self, flow_id: &str, key: &str) -> anyhow::Result<i64> {
+            self.inner.increment(flow_id, key)
+        }
+        fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> anyhow::Result<()> {
+            self.inner.set_ttl(flow_id, ttl_seconds)
+        }
+        fn compare_and_set(
+            &self,
+            flow_id: &str,
+            key: &str,
+            expected: Option<&Value>,
+            new: Value,
+        ) -> anyhow::Result<CasOutcome> {
+            self.inner.compare_and_set(flow_id, key, expected, new)
+        }
+    }
+
+    /// An imposter wired to `store`, with `state.hits` pre-seeded to `seed` on flow `flow-1`.
+    fn imposter_with(store: Arc<ThreadProbeStore>, seed: Option<Value>) -> Arc<Imposter> {
+        let cfg: ImposterConfig =
+            serde_json::from_value(json!({ "port": 0, "protocol": "http", "stubs": [] }))
+                .expect("valid imposter config");
+        if let Some(seed) = seed {
+            store.set("flow-1", "hits", seed).expect("seed");
+        }
+        let mut imp = Imposter::new(cfg).expect("test imposter");
+        imp.flow_store = store;
+        Arc::new(imp)
+    }
+
+    fn request() -> RequestData {
+        RequestData::new("GET", "/x", None, &hyper::HeaderMap::new(), None)
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> HashMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), vec![(*v).to_string()]))
+            .collect()
+    }
+
+    async fn render(
+        imp: &Arc<Imposter>,
+        body: &str,
+        hdrs: HashMap<String, Vec<String>>,
+        debug: bool,
+    ) -> anyhow::Result<TemplateRender> {
+        render_templated_response(
+            imp,
+            request(),
+            "flow-1".to_string(),
+            body.to_string(),
+            hdrs,
+            debug,
+        )
+        .await
+    }
+
+    fn rendered(outcome: TemplateRender) -> (String, HashMap<String, Vec<String>>) {
+        match outcome {
+            TemplateRender::Rendered { body, headers } => (body, headers),
+            TemplateRender::Failed(e) => panic!("expected a rendered response, got Failed({e})"),
+        }
+    }
+
+    // Edge case 1 + 13: on a blocking backend the store read happens off the caller thread, and
+    // the token still resolves to the stored value (the render is not skipped or emptied).
+    #[tokio::test]
+    async fn blocking_store_renders_state_off_the_caller_thread() {
+        let store = Arc::new(ThreadProbeStore::new(true));
+        let probe = store.get_thread.clone();
+        let imp = imposter_with(store, Some(json!(7)));
+        let caller = std::thread::current().id();
+
+        let (body, _) = rendered(
+            render(&imp, "hits={{ state.hits }}", HashMap::new(), false)
+                .await
+                .expect("no transport failure"),
+        );
+
+        assert_eq!(body, "hits=7");
+        assert_ne!(
+            probe.lock().expect("the store must have been read"),
+            caller,
+            "a blocking backend must not read the store on the tokio worker"
+        );
+    }
+
+    // Edge case 2: the #475 transparency guarantee — the default in-memory store keeps the render
+    // inline, with no task hop.
+    #[tokio::test]
+    async fn non_blocking_store_renders_state_inline_on_the_caller_thread() {
+        let store = Arc::new(ThreadProbeStore::new(false));
+        let probe = store.get_thread.clone();
+        let imp = imposter_with(store, Some(json!(7)));
+        let caller = std::thread::current().id();
+
+        let (body, _) = rendered(
+            render(&imp, "hits={{ state.hits }}", HashMap::new(), false)
+                .await
+                .expect("no transport failure"),
+        );
+
+        assert_eq!(body, "hits=7");
+        assert_eq!(
+            probe.lock().expect("the store must have been read"),
+            caller,
+            "the in-memory store must stay inline — no task hop"
+        );
+    }
+
+    // Edge case 4 + 3: header values are rendered too, not just the body.
+    #[tokio::test]
+    async fn header_values_are_rendered() {
+        let store = Arc::new(ThreadProbeStore::new(true));
+        let imp = imposter_with(store, Some(json!(42)));
+
+        let (body, hdrs) = rendered(
+            render(
+                &imp,
+                "static",
+                headers(&[("x-hits", "{{ state.hits }}")]),
+                false,
+            )
+            .await
+            .expect("no transport failure"),
+        );
+
+        assert_eq!(body, "static", "an untemplated body is served verbatim");
+        assert_eq!(hdrs["x-hits"], vec!["42".to_string()]);
+    }
+
+    // Edge case 6: issue #359 B3 must not regress — a rendered header value carrying CR/LF is
+    // stripped before it can inject a header line.
+    #[tokio::test]
+    async fn rendered_header_values_are_control_char_sanitized() {
+        let store = Arc::new(ThreadProbeStore::new(true));
+        let imp = imposter_with(store, Some(json!("a\r\nx-evil: injected")));
+
+        let (_, hdrs) = rendered(
+            render(&imp, "", headers(&[("x-echo", "{{ state.hits }}")]), false)
+                .await
+                .expect("no transport failure"),
+        );
+
+        let value = &hdrs["x-echo"][0];
+        assert!(
+            !value.contains('\r') && !value.contains('\n'),
+            "control characters must be stripped, got: {value:?}"
+        );
+    }
+
+    // Edge case 8: a bad `{{ }}` is a template failure, NOT a transport failure — it must not
+    // reach the caller as an Err and be answered as a backend outage.
+    #[tokio::test]
+    async fn a_bad_token_is_a_template_failure_not_a_transport_failure() {
+        let store = Arc::new(ThreadProbeStore::new(true));
+        let imp = imposter_with(store, None);
+
+        let outcome = render(&imp, "{{ nope.nothing }}", HashMap::new(), true)
+            .await
+            .expect("a bad token must not surface as a transport failure");
+
+        assert!(
+            matches!(outcome, TemplateRender::Failed(_)),
+            "expected TemplateRender::Failed for an unknown token"
+        );
+    }
+
+    // Edge case 7: the failure is detected in a header value too, not only in the body.
+    #[tokio::test]
+    async fn a_bad_token_in_a_header_is_reported() {
+        let store = Arc::new(ThreadProbeStore::new(true));
+        let imp = imposter_with(store, None);
+
+        let outcome = render(
+            &imp,
+            "fine",
+            headers(&[("x-bad", "{{ nope.nothing }}")]),
+            true,
+        )
+        .await
+        .expect("a bad token must not surface as a transport failure");
+
+        assert!(
+            matches!(outcome, TemplateRender::Failed(_)),
+            "a bad token in a header value must fail the render"
+        );
+    }
+
+    // Edge case 9: a panicking blocking store IS a transport failure and must surface as Err, so
+    // the caller can answer backend_error_response rather than template_error_response.
+    #[tokio::test]
+    async fn a_panicking_blocking_store_surfaces_as_a_transport_failure() {
+        let imp = imposter_with(Arc::new(ThreadProbeStore::panicking()), None);
+
+        let err = render(&imp, "{{ state.hits }}", HashMap::new(), false)
+            .await
+            .expect_err("a panicked blocking task must surface as Err");
+
+        assert!(
+            err.to_string().contains("flow-store task panicked"),
+            "got: {err}"
+        );
+    }
+
+    // Edge case 10: the offload must be output-transparent — the same input renders byte-identically
+    // whether or not the store claims to block. This is what makes the change a pure perf fix.
+    #[tokio::test]
+    async fn output_is_identical_on_both_paths() {
+        let hdrs = headers(&[("x-hits", "{{ state.hits }}"), ("x-static", "plain")]);
+
+        let blocking = imposter_with(Arc::new(ThreadProbeStore::new(true)), Some(json!(5)));
+        let inline = imposter_with(Arc::new(ThreadProbeStore::new(false)), Some(json!(5)));
+
+        let a = rendered(
+            render(&blocking, "n={{ state.hits }}", hdrs.clone(), false)
+                .await
+                .expect("no transport failure"),
+        );
+        let b = rendered(
+            render(&inline, "n={{ state.hits }}", hdrs, false)
+                .await
+                .expect("no transport failure"),
+        );
+
+        assert_eq!(a.0, "n=5");
+        assert_eq!(a, b, "the blocking and inline paths must agree exactly");
+    }
+
+    // Edge case 11: nothing to render is not an error.
+    #[tokio::test]
+    async fn empty_body_and_no_headers_render_cleanly() {
+        let imp = imposter_with(Arc::new(ThreadProbeStore::new(true)), None);
+
+        let (body, hdrs) = rendered(
+            render(&imp, "", HashMap::new(), false)
+                .await
+                .expect("no transport failure"),
+        );
+
+        assert_eq!(body, "");
+        assert!(hdrs.is_empty());
+    }
+
+    // Edge case 12: `previousValue` is a stateOps-only binding (#969); outside a stateOps `set` it
+    // renders empty rather than erroring, and the offload must not change that.
+    #[tokio::test]
+    async fn previous_value_renders_empty_outside_state_ops() {
+        let imp = imposter_with(Arc::new(ThreadProbeStore::new(true)), None);
+
+        let (body, _) = rendered(
+            render(&imp, "[{{ previousValue }}]", HashMap::new(), false)
+                .await
+                .expect("no transport failure"),
+        );
+
+        assert_eq!(body, "[]");
     }
 }
