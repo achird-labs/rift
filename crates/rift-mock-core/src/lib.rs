@@ -33,6 +33,11 @@ pub use extensions::flow_state;
 pub use extensions::stub_analysis;
 pub use extensions::template;
 
+// The TCP-fault carrier seam: an in-process embedder receives the carrier response the serve loop
+// would have replaced with a socket abort, and names these as `rift_mock_core::tcp_fault_carrier`
+// (issue #965), the same way it names `FastMap` below.
+pub use imposter::fault_io::{TcpFaultKind, tcp_fault_carrier};
+
 // Shared utilities
 pub mod util;
 // Embedded-Rust consumers name the aliases as `rift_mock_core::FastMap` (issue #704).

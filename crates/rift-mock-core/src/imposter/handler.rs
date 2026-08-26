@@ -1240,6 +1240,12 @@ async fn handle_request_inner(
                     let mut headers = vec![
                         ("x-rift-imposter".to_string(), "true".to_string()),
                         ("x-rift-script".to_string(), engine.clone()),
+                        // The marker the other two carrier sites (`handle_fault_response` and the
+                        // `_rift.fault.tcp` path) already stamp. Nothing in-tree reads it — new
+                        // consumers use `tcp_fault_carrier`, which reads the extension — but a
+                        // header-based consumer written before that seam existed saw two of the
+                        // three carrier sites and silently missed this one (issue #965).
+                        ("x-rift-fault".to_string(), "reset".to_string()),
                     ];
                     if let Some(trace) = trace_header {
                         headers.push(("x-rift-script-trace".to_string(), trace));
@@ -2537,9 +2543,9 @@ mod debug_serialize_tests {
 
 #[cfg(test)]
 mod fault_precedence_tests {
-    use super::super::fault_io::TcpFaultKind;
+    use super::super::fault_io::{TcpFaultKind, tcp_fault_carrier};
     use super::super::types::{RiftErrorFault, RiftFaultConfig, RiftLatencyFault, RiftTcpFault};
-    use super::{Bytes, Full, Response, apply_rift_fault, handle_fault_response};
+    use super::{Bytes, Full, Response, StatusCode, apply_rift_fault, handle_fault_response};
     use std::time::Instant;
 
     // Issue #309: a top-level `fault` response must reset/close the connection (via the same
@@ -2577,6 +2583,69 @@ mod fault_precedence_tests {
         // An unrecognized fault type stays a defined error, not a silent transport fault.
         let unknown = handle_fault_response("NOT_A_FAULT").expect("infallible");
         assert!(unknown.extensions().get::<TcpFaultKind>().is_none());
+    }
+
+    /// Issue #965, carrier site A. `x-rift-fault` echoes whatever the config author typed, which is
+    /// why an embedder had to mirror the whole alias list to interpret it; the seam collapses every
+    /// alias onto the one canonical name so that list can be deleted.
+    #[test]
+    fn carrier_seam_maps_a_top_level_fault_alias_to_one_canonical_name() {
+        let alias = handle_fault_response("garbage").expect("infallible");
+        assert_eq!(
+            alias.headers().get("x-rift-fault").unwrap(),
+            "garbage",
+            "the header still echoes the raw input — that is the thing the seam replaces"
+        );
+        assert_eq!(tcp_fault_carrier(&alias), Some("RANDOM_DATA_THEN_CLOSE"));
+
+        let canonical = handle_fault_response("RANDOM_DATA_THEN_CLOSE").expect("infallible");
+        assert_eq!(
+            tcp_fault_carrier(&canonical),
+            Some("RANDOM_DATA_THEN_CLOSE")
+        );
+    }
+
+    /// An unknown fault type is a framed 500 the client really receives, not a carrier — even
+    /// though it carries an `x-rift-fault` header.
+    #[test]
+    fn carrier_seam_rejects_an_unknown_top_level_fault() {
+        let unknown = handle_fault_response("NOT_A_FAULT").expect("infallible");
+        assert_eq!(unknown.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            unknown.headers().get("x-rift-fault").unwrap(),
+            "NOT_A_FAULT"
+        );
+        assert_eq!(tcp_fault_carrier(&unknown), None);
+    }
+
+    /// Issue #965, carrier site B: the `_rift.fault.tcp` path.
+    #[tokio::test]
+    async fn carrier_seam_reports_a_rift_tcp_fault() {
+        let config = RiftFaultConfig {
+            latency: None,
+            error: None,
+            tcp: Some(RiftTcpFault::Kind("garbage".to_string())),
+        };
+        let response = apply(&config).await;
+        assert_eq!(tcp_fault_carrier(&response), Some("RANDOM_DATA_THEN_CLOSE"));
+    }
+
+    /// The fail-open case the header cannot distinguish: `_rift.fault.error` sets
+    /// `x-rift-fault: error` with no extension, and is a real response, not a carrier.
+    #[tokio::test]
+    async fn carrier_seam_ignores_an_error_fault() {
+        let config = RiftFaultConfig {
+            latency: None,
+            error: Some(error_fault(503)),
+            tcp: None,
+        };
+        let response = apply(&config).await;
+        assert_eq!(response.headers().get("x-rift-fault").unwrap(), "error");
+        assert_eq!(
+            tcp_fault_carrier(&response),
+            None,
+            "an error fault is a framed response the client receives, never a TCP carrier"
+        );
     }
 
     fn error_fault(status: u16) -> RiftErrorFault {

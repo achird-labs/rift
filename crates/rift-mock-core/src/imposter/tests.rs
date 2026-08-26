@@ -4420,3 +4420,121 @@ mod proxy_generator_failure_tests {
         let _ = manager.delete_imposter(19823).await;
     }
 }
+
+// =========================================================================
+// Issue #965: the TCP-fault carrier seam, exercised the way an in-process embedder sees it
+// =========================================================================
+mod tcp_fault_carrier_seam {
+    use crate::imposter::core::Imposter;
+    use crate::imposter::fault_io::tcp_fault_carrier;
+    use crate::imposter::handler::handle_imposter_request;
+    use crate::imposter::types::ImposterConfig;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use parking_lot::Mutex;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    /// Drive one request through `handle_imposter_request` over a real connection and return what
+    /// the seam said about the response *before* hyper framed it.
+    ///
+    /// The extension only exists on the `Response` value; it never reaches the wire, so an embedder
+    /// answering its admin "try this imposter" endpoint in-process (rift-cluster #344) has to
+    /// classify exactly here. Serving it rather than synthesising a `Request<Incoming>` is what
+    /// makes this a test of the real handler path.
+    async fn classify_in_process(
+        config: serde_json::Value,
+        path: &str,
+    ) -> (Option<&'static str>, Option<String>) {
+        let config: ImposterConfig = serde_json::from_value(config).expect("valid imposter config");
+        let imposter = Arc::new(Imposter::new(config).expect("test imposter"));
+
+        type Verdict = (Option<&'static str>, Option<String>);
+        let seen: Arc<Mutex<Option<Verdict>>> = Arc::new(Mutex::new(None));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+
+        let imp = imposter.clone();
+        let captured = seen.clone();
+        tokio::spawn(async move {
+            let Ok((stream, peer)) = listener.accept().await else {
+                return;
+            };
+            let service = service_fn(move |req| {
+                let imp = imp.clone();
+                let captured = captured.clone();
+                async move {
+                    let response = handle_imposter_request(req, imp, peer).await?;
+                    let header = response
+                        .headers()
+                        .get("x-rift-fault")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned);
+                    *captured.lock() = Some((tcp_fault_carrier(&response), header));
+                    Ok::<_, std::convert::Infallible>(response)
+                }
+            });
+            let _ = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        });
+
+        let _ = reqwest::get(format!("http://{addr}{path}")).await;
+        let verdict = seen.lock().clone();
+        verdict.expect("the handler must have been invoked")
+    }
+
+    /// Carrier site C — the gap this issue exists for. A v2 script `reset()` (issue #357) attaches
+    /// the `TcpFaultKind` extension and, before this change, no `x-rift-fault` header at all, so a
+    /// header-based classifier read its carrier 502 as the imposter's real answer.
+    #[tokio::test]
+    async fn script_reset_carrier_is_classified() {
+        let (verdict, header) = classify_in_process(
+            json!({
+                "port": 0, "protocol": "http",
+                "stubs": [{
+                    "predicates": [{ "equals": { "path": "/boom" } }],
+                    "responses": [{
+                        "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { reset() }" } }
+                    }]
+                }]
+            }),
+            "/boom",
+        )
+        .await;
+
+        assert_eq!(
+            verdict,
+            Some("CONNECTION_RESET_BY_PEER"),
+            "a script reset() carrier must classify through the extension the serve loop reads"
+        );
+        assert_eq!(
+            header.as_deref(),
+            Some("reset"),
+            "site C must also stamp the marker the other two carrier sites already carry"
+        );
+    }
+
+    /// An ordinary stub response is not a carrier — the guard that stops the seam reporting every
+    /// in-process response as an aborted connection.
+    #[tokio::test]
+    async fn ordinary_response_is_not_a_carrier() {
+        let (verdict, header) = classify_in_process(
+            json!({
+                "port": 0, "protocol": "http",
+                "stubs": [{
+                    "predicates": [{ "equals": { "path": "/ok" } }],
+                    "responses": [{ "is": { "statusCode": 200, "body": "ok" } }]
+                }]
+            }),
+            "/ok",
+        )
+        .await;
+
+        assert_eq!(verdict, None);
+        assert_eq!(header, None, "an ordinary response carries no fault marker");
+    }
+}
