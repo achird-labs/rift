@@ -406,10 +406,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = JSON_MODE.set(json);
     let _ = PALETTE.set(Palette::detect(json));
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(args.timeout))
-        .danger_accept_invalid_certs(args.insecure)
-        .build()?;
+    let client = build_verify_client(args.timeout, args.insecure)?;
 
     // Check if demo mode
     if args.demo {
@@ -2495,9 +2492,100 @@ fn demo_enhanced_error_output() {
     outln!("{green}Demo complete!{reset}");
 }
 
+/// The HTTP client every verification request goes through.
+///
+/// Idle-connection reuse is **off** (issue #982). `--verify-dynamic` drives a succession of
+/// throwaway imposters, each created with `port: 0` and deleted straight after, so they land on
+/// *recycled* ephemeral ports. A pooled socket to `127.0.0.1:<port>` therefore outlives the
+/// imposter it was opened to: the next throwaway that happens to get the same port inherits a
+/// connection whose peer is gone, and the first request on it dies with `Connection reset by peer`
+/// — which then cascades, because the lost request is usually the one that would have advanced a
+/// counter or scenario state.
+///
+/// Pooling across throwaway imposters is never valid, so there is nothing here to keep. Contrast
+/// the imposter proxy client, where #482 turned pooling ON deliberately: that one talks to a single
+/// stable upstream for the process lifetime.
+fn build_verify_client(timeout_secs: u64, insecure: bool) -> Result<Client, reqwest::Error> {
+    Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .danger_accept_invalid_certs(insecure)
+        .pool_max_idle_per_host(0)
+        .build()
+}
+
 #[cfg(test)]
 mod verify_tests {
     use super::*;
+
+    // Issue #982: the verify client must open a NEW connection per request.
+    //
+    // `--verify-dynamic` creates a throwaway imposter with `port: 0`, drives it, deletes it, and
+    // repeats — so successive throwaways land on recycled ephemeral ports. A pooled idle socket
+    // outlives the imposter it was opened to, and the next throwaway that lands on that port
+    // inherits a dead connection whose first request fails with `Connection reset by peer`. That
+    // then cascades: the lost request is usually the one that would have advanced a counter.
+    //
+    // Counting accepts is what makes this discriminating. With pooling on (reqwest's default, and
+    // what shipped before this fix) the second request reuses the first socket and the server
+    // accepts exactly once. Asserting on a response body would pass either way.
+    #[tokio::test]
+    async fn verify_client_does_not_reuse_idle_connections() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepts);
+
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    // A REAL keep-alive server: serve request after request on the same socket
+                    // and never close it. If this handled one request and dropped the socket, the
+                    // client could not reuse the connection whatever its pool setting, and the
+                    // assertion below would hold for the wrong reason.
+                    let mut buf = [0u8; 1024];
+                    loop {
+                        match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(_) => {}
+                        }
+                        if socket
+                            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        let _ = socket.flush().await;
+                    }
+                });
+            }
+        });
+
+        let client = build_verify_client(5, false).expect("client builds");
+        for _ in 0..2 {
+            let resp = client
+                .get(format!("http://127.0.0.1:{port}/"))
+                .send()
+                .await
+                .expect("request succeeds");
+            assert_eq!(resp.status(), 200);
+            let _ = resp.text().await;
+        }
+
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "each request must open its own connection; 1 accept means the idle socket was pooled \
+             and reused, which is what breaks across recycled throwaway-imposter ports"
+        );
+    }
     use serde_json::json;
 
     // ── #1: not predicate ──────────────────────────────────────────────────
