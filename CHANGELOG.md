@@ -186,6 +186,21 @@ record.
 
 ### Fixed
 
+- **`{{ state.<key> }}` no longer blocks the worker on a blocking flow-store backend** (#971).
+  A `_rift.templated` response renders its `{{ }}` tokens on the request task, and
+  `{{ state.<key> }}` reads the flow store — so on a backend that actually blocks (Redis, or an
+  embedded store that parks on an owner RPC) the render held the tokio worker for the whole round
+  trip. Every *other* store touch on the request path already avoided this: the scenario FSM since
+  #475, `_rift.stateOps` since #969. The template render was the one that never got the treatment.
+  - On a multi-threaded runtime the symptom was head-of-line blocking: one slow store read stalled
+    every request multiplexed on that worker.
+  - On a **current-thread** runtime whose store is served by that same runtime it deadlocked
+    outright until the store timed out, and the token then rendered as an empty string — a wrong
+    response rather than a slow one.
+  - The render (body *and* header values) now goes through the same `run_flow_blocking` seam. The
+    default in-memory store is untouched: the closure still runs inline, with no task hop, and the
+    rendered output is byte-identical on both paths.
+
 - **Outbound TLS now trusts the OS certificate store, and a private CA can be supplied** (#974).
   Every client Rift *initiates* TLS with used to decide trust for itself, and they disagreed: the
   imposter `proxy` stub client and the `--configfile` URL fetcher carried reqwest's compiled-in
