@@ -6,8 +6,8 @@
 // the crate root so existing `crate::<module>` paths in the admin server, CLI and tests keep
 // resolving unchanged — the server is a thin consumer of the core.
 pub use rift_mock_core::{
-    backends, behaviors, config, extensions, fault, flow_state, imposter, matcher, predicate,
-    proxy, recording, response, routing, scripting, stub_analysis, template, util,
+    backends, behaviors, config, extensions, fault, flow_state, imposter, predicate, proxy,
+    recording, response, scripting, stub_analysis, template, util,
 };
 
 /// The named flow-state backends this build ships (issue #853).

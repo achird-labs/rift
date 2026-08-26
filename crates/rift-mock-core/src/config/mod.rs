@@ -1,656 +1,86 @@
-//! Configuration types for Rift proxy.
+//! Configuration types shared by the imposter path.
+//!
+//! This module used to also define `Config` — the reverse-proxy / sidecar YAML mode with
+//! `upstreams`, `routing`, `rules` and `recording`. That mode was unwired from the binary in
+//! ada6f30 (2025-11-30), had no consumer in any repo, and was removed in #975. What is left is the
+//! flow-state vocabulary the imposter path reads, plus the fault vocabulary — which has no in-tree
+//! reader (the imposter path uses its own `_rift.fault` type) and is retained as public API pending
+//! its own decision.
 
-mod listen;
-mod protocol;
-mod recording;
-mod routing;
 mod rules;
 mod scripting;
-mod upstream;
 
-use std::path::Path;
-
-use serde::{Deserialize, Serialize};
-
-// Re-export all types for library consumers
-#[allow(unused_imports)]
-pub use listen::{ListenConfig, MetricsConfig, TlsConfig};
-pub use protocol::{DeploymentMode, Protocol};
-#[allow(unused_imports)]
-pub use recording::{
-    PredicateGenerator, PredicateGeneratorMatches, RecordingConfig, RecordingPersistence,
-};
-#[allow(unused_imports)]
-pub use routing::{HeaderMatch, HostMatch, Route, RouteMatch};
-#[allow(unused_imports)]
-pub use rules::{
-    ErrorFault, FaultConfig, LatencyFault, MatchConfig, PathMatch, Rule, ScriptRule, TcpFault,
-};
-#[allow(unused_imports)]
-pub use scripting::{
-    DecisionCacheConfigFile, FlowStateConfig, RedisConfig, ScriptEngineConfig, ScriptPoolConfigFile,
-};
-#[allow(unused_imports)]
-pub use upstream::{ConnectionPoolConfig, HealthCheckConfig, Upstream, UpstreamConfig};
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Config {
-    /// Optional, informational only. The config is self-describing and supports
-    /// combining features (probabilistic rules, script rules, multi-upstream).
-    /// Deprecated: kept for backward compatibility.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-
-    /// Deployment mode: "sidecar" or "reverse-proxy"
-    /// Recommended: specify explicitly for clarity
-    /// If omitted, inferred from upstream/upstreams presence (backward compatible)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<DeploymentMode>,
-
-    pub listen: ListenConfig,
-    #[serde(default)]
-    pub metrics: MetricsConfig,
-
-    // ===== Deployment Mode Configuration =====
-    // Choose exactly ONE deployment mode:
-    //
-    // SIDECAR MODE:
-    //   - Define 'upstream' (single target)
-    //   - Do NOT define 'upstreams' or 'routing'
-    //   - Traffic: Client -> Rift -> Single Upstream
-    //
-    // REVERSE PROXY MODE:
-    //   - Define 'upstreams' (list of named services)
-    //   - Define 'routing' (map requests to upstream names)
-    //   - Do NOT define 'upstream'
-    //   - Traffic: Client -> Rift -> Multiple Upstreams (routed)
-    /// Single upstream target for sidecar mode
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream: Option<UpstreamConfig>,
-
-    /// Multiple upstream targets for reverse proxy mode
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub upstreams: Vec<Upstream>,
-
-    /// Routing rules for reverse proxy mode (required when 'upstreams' is used)
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub routing: Vec<Route>,
-
-    #[serde(default)]
-    pub rules: Vec<Rule>,
-    #[serde(default)]
-    pub script_engine: Option<ScriptEngineConfig>,
-    #[serde(default)]
-    pub flow_state: Option<FlowStateConfig>,
-    #[serde(default)]
-    pub script_rules: Vec<ScriptRule>,
-    #[serde(default)]
-    pub connection_pool: ConnectionPoolConfig,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub script_pool: Option<ScriptPoolConfigFile>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decision_cache: Option<DecisionCacheConfigFile>,
-    /// Recording configuration for proxy record/replay (Mountebank-compatible)
-    #[serde(default)]
-    pub recording: RecordingConfig,
-}
-
-impl Config {
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, anyhow::Error> {
-        let contents = std::fs::read_to_string(path)?;
-        let config: Config = serde_yaml::from_str(&contents)?;
-        config.validate()?;
-        Ok(config)
-    }
-
-    /// Validate configuration
-    pub fn validate(&self) -> Result<(), anyhow::Error> {
-        // Validate listener configuration
-        if self.listen.protocol == Protocol::Https && self.listen.tls.is_none() {
-            anyhow::bail!(
-                "TLS configuration is required when listener protocol is 'https'. \
-                 Please provide 'listen.tls.cert_path' and 'listen.tls.key_path'"
-            );
-        }
-
-        // Validate listener protocol is supported
-        if !self.listen.protocol.is_supported() {
-            anyhow::bail!(
-                "Unsupported listener protocol: '{}'. Currently supported: http, https",
-                self.listen.protocol.as_str()
-            );
-        }
-
-        // Validate upstream configuration (sidecar mode)
-        if let Some(ref upstream) = self.upstream {
-            let protocol = upstream.get_protocol();
-            if !protocol.is_supported() {
-                anyhow::bail!(
-                    "Unsupported upstream protocol: '{}'. Currently supported: http, https",
-                    protocol.as_str()
-                );
-            }
-        }
-
-        // Validate all upstreams (reverse proxy mode)
-        for upstream in &self.upstreams {
-            upstream.validate()?;
-        }
-
-        // Validate script rules if present
-        self.validate_script_rules()?;
-
-        Ok(())
-    }
-
-    /// Validate all script rules based on the configured script engine
-    fn validate_script_rules(&self) -> Result<(), anyhow::Error> {
-        if self.script_rules.is_empty() {
-            return Ok(());
-        }
-
-        let engine_type = self
-            .script_engine
-            .as_ref()
-            .map(|cfg| cfg.engine.as_str())
-            .unwrap_or("rhai");
-
-        for script_rule in &self.script_rules {
-            match engine_type {
-                "rhai" => {
-                    use crate::scripting::{RhaiValidator, ScriptValidator};
-                    RhaiValidator::new()
-                        .validate(&script_rule.script)
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "Invalid Rhai script in rule '{}': {}",
-                                script_rule.id,
-                                e
-                            )
-                        })?;
-                }
-                "lua" => {
-                    anyhow::bail!(
-                        "the Lua scripting engine was removed (issue #450); use engine \"rhai\" or \"javascript\""
-                    );
-                }
-                #[cfg(feature = "javascript")]
-                "javascript" | "js" => {
-                    use crate::scripting::{JsValidator, ScriptValidator};
-                    JsValidator::new()
-                        .validate(&script_rule.script)
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "Invalid JavaScript script in rule '{}': {}",
-                                script_rule.id,
-                                e
-                            )
-                        })?;
-                }
-                #[cfg(not(feature = "javascript"))]
-                "javascript" | "js" => {
-                    anyhow::bail!(
-                        "JavaScript engine specified but 'javascript' feature is not enabled"
-                    );
-                }
-                other => {
-                    anyhow::bail!("Unknown script engine type: '{other}'");
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
+pub use rules::{ErrorFault, FaultConfig, LatencyFault, TcpFault};
+pub use scripting::{FlowStateConfig, RedisConfig};
 
 #[cfg(test)]
 mod tests {
-    /// `docs/performance/index.md` tells users to put `decision_cache` on the **proxy** config next
-    /// to `script_rules` — NOT inside the imposter `_rift` block. That distinction is load-bearing:
-    /// neither `Config` nor `DecisionCacheConfigFile` sets `deny_unknown_fields`, so a wrong doc is
-    /// silently DROPPED rather than rejected — the knob would do nothing, with no error, while the
-    /// degenerate-cache warning kept telling the user to set the key they had already set.
-    ///
-    /// The docs-examples CI gate only boots the enumerated `docs/demo/*.json` files and never parses
-    /// inline doc snippets, so this test is what actually holds that doc honest (issue #630).
-    #[test]
-    fn documented_decision_cache_block_parses_on_the_proxy_config() {
-        let yaml = r#"
-listen:
-  port: 8080
-decision_cache:
-  enabled: true
-  max_size: 10000
-  ttl_seconds: 300
-  key_headers: ["X-Tenant", "X-Feature-Flag"]
-"#;
-        let config: Config = serde_yaml::from_str(yaml)
-            .expect("the documented decision_cache block must deserialize on the proxy Config");
-        let dc = config
-            .decision_cache
-            .expect("decision_cache must be parsed, not silently dropped");
-        assert_eq!(
-            dc.key_headers.as_deref(),
-            Some(&["X-Tenant".to_string(), "X-Feature-Flag".to_string()][..]),
-            "the documented key_headers spelling must be the one serde accepts"
-        );
-        assert_eq!(dc.max_size, 10000);
-    }
-
     use super::*;
-    use crate::recording::ProxyMode;
 
+    // NB: unlike `ImposterConfig`, none of these carry `rename_all = "camelCase"`, so their
+    // wire names are snake_case. That asymmetry is easy to "fix" by accident.
+    // Issue #975: the survivors of the reverse-proxy `Config` removal. `FlowStateConfig` /
+    // `RedisConfig` are read by the flow-state path; the fault types are retained public API with
+    // no in-tree reader. Pinning the wire shapes with literal expectations guards the one plausible
+    // way the deletion could go wrong — taking a live type with it, or silently changing what its
+    // serde attributes accept.
     #[test]
-    fn test_parse_config() {
-        let yaml = r#"
-version: v1
-listen:
-  port: 8080
-metrics:
-  port: 9090
-upstream:
-  host: 127.0.0.1
-  port: 8000
-rules:
-  - id: "test-latency"
-    match:
-      methods: ["POST"]
-      path:
-        prefix: "/api"
-    fault:
-      latency:
-        probability: 0.1
-        min_ms: 100
-        max_ms: 500
-  - id: "test-error"
-    match:
-      methods: ["GET"]
-      path:
-        exact: "/fail"
-    fault:
-      error:
-        probability: 0.5
-        status: 502
-        body: '{"error": "injected"}'
-"#;
-
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.version, Some("v1".to_string()));
-        assert_eq!(config.listen.port, 8080);
-        assert_eq!(config.upstream.as_ref().unwrap().port, 8000);
-        assert_eq!(config.rules.len(), 2);
-        assert_eq!(config.rules[0].id, "test-latency");
-        assert!(config.rules[0].fault.latency.is_some());
-        assert_eq!(config.rules[1].id, "test-error");
-        assert!(config.rules[1].fault.error.is_some());
+    fn flow_state_config_still_deserializes_with_a_nested_redis_block() {
+        let cfg: FlowStateConfig = serde_yaml::from_str(
+            "backend: redis\nttl_seconds: 42\nredis:\n  url: redis://127.0.0.1:6379\n  pool_size: 3\n  key_prefix: 'rift:'\n",
+        )
+        .expect("FlowStateConfig parses");
+        assert_eq!(cfg.backend, "redis");
+        assert_eq!(cfg.ttl_seconds, 42);
+        let redis = cfg.redis.expect("redis block present");
+        assert_eq!(redis.url, "redis://127.0.0.1:6379");
+        assert_eq!(redis.pool_size, 3);
+        assert_eq!(redis.key_prefix, "rift:");
     }
 
     #[test]
-    fn test_parse_v2_config() {
-        let yaml = r#"
-version: v2
-listen:
-  port: 8080
-upstream:
-  host: 127.0.0.1
-  port: 8000
-script_engine:
-  engine: rhai
-flow_state:
-  backend: inmemory
-  ttl_seconds: 300
-script_rules:
-  - id: "progressive-failure"
-    script: |
-      fn respond(ctx) {
-        let attempts = ctx.state.incr("attempts");
-        if attempts <= 2 {
-          return http(503, "Retry");
-        }
-        pass()
-      }
-    match:
-      methods: ["POST"]
-      path:
-        prefix: "/api"
-"#;
-
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.version, Some("v2".to_string()));
-        assert!(config.script_engine.is_some());
-        assert_eq!(config.script_engine.unwrap().engine, "rhai");
-        assert!(config.flow_state.is_some());
-        assert_eq!(config.flow_state.as_ref().unwrap().backend, "inmemory");
-        assert_eq!(config.flow_state.as_ref().unwrap().ttl_seconds, 300);
-        assert_eq!(config.script_rules.len(), 1);
-        assert_eq!(config.script_rules[0].id, "progressive-failure");
-        assert!(config.script_rules[0].script.contains("respond"));
+    fn flow_state_config_defaults_are_unchanged() {
+        let cfg: FlowStateConfig = serde_yaml::from_str("{}").expect("empty parses");
+        assert_eq!(cfg.backend, "inmemory");
+        assert_eq!(cfg.ttl_seconds, 300);
+        assert!(cfg.redis.is_none());
     }
 
     #[test]
-    fn test_parse_v3_multi_upstream_config() {
-        let yaml = r#"
-version: v3
-listen:
-  port: 8080
-upstreams:
-  - name: service-a
-    url: "http://service-a:8000"
-    health_check:
-      path: "/health"
-      interval_seconds: 30
-  - name: service-b
-    url: "http://service-b:8001"
-routing:
-  - name: "route-to-a"
-    match:
-      path_prefix: "/api/users"
-    upstream: service-a
-  - name: "route-to-b"
-    match:
-      path_prefix: "/api/orders"
-      headers:
-        - name: "x-version"
-          value: "v2"
-    upstream: service-b
-"#;
+    fn tcp_fault_still_deserializes_its_screaming_snake_names() {
+        let reset: TcpFault =
+            serde_yaml::from_str("CONNECTION_RESET_BY_PEER").expect("reset parses");
+        assert_eq!(reset, TcpFault::ConnectionResetByPeer);
+        let garbage: TcpFault =
+            serde_yaml::from_str("RANDOM_DATA_THEN_CLOSE").expect("garbage parses");
+        assert_eq!(garbage, TcpFault::RandomDataThenClose);
+    }
 
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.version, Some("v3".to_string()));
+    #[test]
+    fn fault_config_still_carries_latency_and_error() {
+        let cfg: FaultConfig = serde_yaml::from_str(
+            "latency:\n  probability: 0.5\n  min_ms: 10\n  max_ms: 20\nerror:\n  probability: 1.0\n  status: 503\n",
+        )
+        .expect("FaultConfig parses");
+        let latency = cfg.latency.expect("latency present");
+        assert_eq!(latency.probability, 0.5);
+        assert_eq!(latency.min_ms, 10);
+        assert_eq!(latency.max_ms, 20);
+        assert_eq!(cfg.error.expect("error present").status, 503);
+    }
 
-        // Verify multi-upstream mode
-        assert!(config.upstream.is_none());
-        assert_eq!(config.upstreams.len(), 2);
-        assert_eq!(config.upstreams[0].name, "service-a");
-        assert_eq!(config.upstreams[0].url, "http://service-a:8000");
-        assert!(config.upstreams[0].health_check.is_some());
-        assert_eq!(config.upstreams[1].name, "service-b");
-
-        // Verify routing
-        assert_eq!(config.routing.len(), 2);
-        assert_eq!(config.routing[0].name, "route-to-a");
-        assert_eq!(config.routing[0].upstream, "service-a");
-        assert_eq!(
-            config.routing[0].match_config.path_prefix,
-            Some("/api/users".to_string())
+    #[test]
+    fn fault_config_reads_tcp_fault_under_its_snake_case_name() {
+        // `tcp_fault`, not `tcpFault`: the field most likely to be "corrected" by someone applying
+        // `ImposterConfig`'s camelCase convention to a struct that does not carry it.
+        let cfg: FaultConfig =
+            serde_yaml::from_str("tcp_fault: CONNECTION_RESET_BY_PEER\n").expect("parses");
+        assert_eq!(cfg.tcp_fault, Some(TcpFault::ConnectionResetByPeer));
+        let camel: FaultConfig = serde_yaml::from_str("tcpFault: CONNECTION_RESET_BY_PEER\n")
+            .expect("unknown keys are ignored, so this parses");
+        assert!(
+            camel.tcp_fault.is_none(),
+            "camelCase must NOT bind — proving the snake_case name above is load-bearing"
         );
-
-        assert_eq!(config.routing[1].name, "route-to-b");
-        assert_eq!(config.routing[1].upstream, "service-b");
-        assert_eq!(config.routing[1].match_config.headers.len(), 1);
-        assert_eq!(config.routing[1].match_config.headers[0].name, "x-version");
-    }
-
-    #[test]
-    fn test_parse_error_fault_with_headers() {
-        let yaml = r#"
-version: v1
-listen:
-  port: 8080
-upstream:
-  host: 127.0.0.1
-  port: 8000
-rules:
-  - id: "error-with-headers"
-    match:
-      methods: ["GET"]
-      path:
-        prefix: "/api"
-    fault:
-      error:
-        probability: 1.0
-        status: 502
-        body: '{"error":"Service unavailable"}'
-        headers:
-          Server: "openresty"
-          X-Content-Type-Options: "nosniff"
-          Cache-Control: "no-cache, no-store, max-age=0, must-revalidate"
-          x-apigw-key: "CapiOne-IT-INT"
-"#;
-
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.rules.len(), 1);
-        assert_eq!(config.rules[0].id, "error-with-headers");
-
-        let error_fault = config.rules[0].fault.error.as_ref().unwrap();
-        assert_eq!(error_fault.status, 502);
-        assert_eq!(error_fault.headers.len(), 4);
-        assert_eq!(
-            error_fault.headers.get("Server"),
-            Some(&"openresty".to_string())
-        );
-        assert_eq!(
-            error_fault.headers.get("X-Content-Type-Options"),
-            Some(&"nosniff".to_string())
-        );
-        assert_eq!(
-            error_fault.headers.get("x-apigw-key"),
-            Some(&"CapiOne-IT-INT".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_per_upstream_fault_rules() {
-        let yaml = r#"
-version: v3
-listen:
-  port: 8080
-upstreams:
-  - name: service-a
-    url: "http://service-a:8000"
-  - name: service-b
-    url: "http://service-b:8001"
-routing:
-  - name: "route-a"
-    match:
-      path_prefix: "/api/a"
-    upstream: service-a
-  - name: "route-b"
-    match:
-      path_prefix: "/api/b"
-    upstream: service-b
-rules:
-  # Global rule (applies to all upstreams)
-  - id: "global-latency"
-    match:
-      methods: ["GET"]
-    fault:
-      latency:
-        probability: 0.1
-        min_ms: 100
-        max_ms: 200
-  # Service-specific rule (only applies to service-a)
-  - id: "service-a-error"
-    upstream: service-a
-    match:
-      methods: ["POST"]
-    fault:
-      error:
-        probability: 0.5
-        status: 503
-        body: "Service A unavailable"
-  # Another service-specific rule (only applies to service-b)
-  - id: "service-b-latency"
-    upstream: service-b
-    match:
-      path:
-        prefix: "/api/b"
-    fault:
-      latency:
-        probability: 0.8
-        min_ms: 500
-        max_ms: 1000
-"#;
-
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.version, Some("v3".to_string()));
-
-        // Verify rules with upstream filters
-        assert_eq!(config.rules.len(), 3);
-
-        // Global rule - no upstream filter
-        assert_eq!(config.rules[0].id, "global-latency");
-        assert!(config.rules[0].upstream.is_none());
-
-        // Service-specific rules
-        assert_eq!(config.rules[1].id, "service-a-error");
-        assert_eq!(config.rules[1].upstream.as_ref().unwrap(), "service-a");
-        assert!(config.rules[1].fault.error.is_some());
-
-        assert_eq!(config.rules[2].id, "service-b-latency");
-        assert_eq!(config.rules[2].upstream.as_ref().unwrap(), "service-b");
-        assert!(config.rules[2].fault.latency.is_some());
-    }
-
-    #[test]
-    fn test_parse_mountebank_behaviors() {
-        let yaml = r#"
-listen:
-  port: 8080
-upstream:
-  host: localhost
-  port: 9000
-rules:
-  - id: "behavior-wait-fixed"
-    match:
-      path:
-        prefix: "/wait-fixed"
-    fault:
-      error:
-        probability: 1.0
-        status: 200
-        body: '{"result": "delayed"}'
-        behaviors:
-          wait: 100
-  - id: "behavior-wait-range"
-    match:
-      path:
-        prefix: "/wait-range"
-    fault:
-      error:
-        probability: 1.0
-        status: 200
-        body: '{"result": "delayed-range"}'
-        behaviors:
-          wait:
-            min: 50
-            max: 150
-  - id: "tcp-reset"
-    match:
-      path:
-        prefix: "/tcp-reset"
-    fault:
-      tcp_fault: CONNECTION_RESET_BY_PEER
-  - id: "tcp-random"
-    match:
-      path:
-        prefix: "/tcp-random"
-    fault:
-      tcp_fault: RANDOM_DATA_THEN_CLOSE
-"#;
-
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.rules.len(), 4);
-
-        // Test wait behavior - fixed
-        let rule1 = &config.rules[0];
-        assert_eq!(rule1.id, "behavior-wait-fixed");
-        let error1 = rule1.fault.error.as_ref().unwrap();
-        assert!(error1.behaviors.is_some());
-        let behaviors1 = error1.behaviors.as_ref().unwrap();
-        assert!(behaviors1.wait.is_some());
-
-        // Test wait behavior - range
-        let rule2 = &config.rules[1];
-        assert_eq!(rule2.id, "behavior-wait-range");
-        let error2 = rule2.fault.error.as_ref().unwrap();
-        assert!(error2.behaviors.is_some());
-        let behaviors2 = error2.behaviors.as_ref().unwrap();
-        assert!(behaviors2.wait.is_some());
-
-        // Test TCP fault - connection reset
-        let rule3 = &config.rules[2];
-        assert_eq!(rule3.id, "tcp-reset");
-        assert!(rule3.fault.tcp_fault.is_some());
-        assert_eq!(
-            rule3.fault.tcp_fault.unwrap(),
-            TcpFault::ConnectionResetByPeer
-        );
-
-        // Test TCP fault - random data
-        let rule4 = &config.rules[3];
-        assert_eq!(rule4.id, "tcp-random");
-        assert!(rule4.fault.tcp_fault.is_some());
-        assert_eq!(
-            rule4.fault.tcp_fault.unwrap(),
-            TcpFault::RandomDataThenClose
-        );
-    }
-
-    #[test]
-    fn test_parse_recording_config_proxy_once() {
-        let yaml = r#"
-listen:
-  port: 8080
-upstream:
-  host: 127.0.0.1
-  port: 8000
-recording:
-  mode: proxyOnce
-rules: []
-"#;
-
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.recording.mode, ProxyMode::ProxyOnce);
-    }
-
-    #[test]
-    fn test_parse_recording_config_proxy_always() {
-        let yaml = r#"
-listen:
-  port: 8080
-upstream:
-  host: 127.0.0.1
-  port: 8000
-recording:
-  mode: proxyAlways
-rules: []
-"#;
-
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.recording.mode, ProxyMode::ProxyAlways);
-    }
-
-    #[test]
-    fn test_parse_recording_config_default_transparent() {
-        let yaml = r#"
-listen:
-  port: 8080
-upstream:
-  host: 127.0.0.1
-  port: 8000
-rules: []
-"#;
-
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        // Default should be proxyTransparent
-        assert_eq!(config.recording.mode, ProxyMode::ProxyTransparent);
-    }
-
-    #[test]
-    fn test_parse_recording_config_explicit_transparent() {
-        let yaml = r#"
-listen:
-  port: 8080
-upstream:
-  host: 127.0.0.1
-  port: 8000
-recording:
-  mode: proxyTransparent
-rules: []
-"#;
-
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.recording.mode, ProxyMode::ProxyTransparent);
     }
 }

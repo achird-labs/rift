@@ -1131,7 +1131,7 @@ mod tests {
     }
 
     /// Concurrent mixed traffic must not deadlock or panic — the cache is one `Arc` shared across
-    /// every tokio worker of a ProxyServer.
+    /// every tokio worker serving an imposter.
     #[test]
     fn concurrent_get_and_insert_do_not_deadlock() {
         use std::sync::Arc;

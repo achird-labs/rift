@@ -1,8 +1,9 @@
 //! Pluggable proxy-recording backend (issue #315): the trait extracted from the concrete
-//! per-imposter [`RecordingStore`](super::store::RecordingStore), so embedders can persist
+//! per-imposter in-memory store, so embedders can persist
 //! recordings or share the `proxyOnce` exactly-once gate across engine instances.
 //!
-//! The default [`LocalProxyStore`] is behavior-identical to the embedded store it replaces —
+//! The default [`LocalProxyStore`] kept the behaviour of the earlier embedded store (removed with
+//! the reverse-proxy mode in #975) —
 //! same `proxyOnce`/`proxyAlways`/`proxyTransparent` semantics, the same TOCTOU fix
 //! (#171/#118), and the same caps — **plus** a release-on-error fix: a claim taken by
 //! [`try_claim`](ProxyRecordingStore::try_claim) that never reaches
@@ -10,7 +11,7 @@
 //! [`release_claim`](ProxyRecordingStore::release_claim), so the signature stays retryable
 //! instead of wedging forever.
 //!
-//! Unlike the concrete store, this backend is **port-scoped**: [`RequestSignature`] carries no
+//! This backend is **port-scoped**: [`RequestSignature`] carries no
 //! port, so a manager-scoped store shared across imposters must key by port explicitly to keep
 //! identical signatures on different ports from colliding.
 
