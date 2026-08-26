@@ -914,6 +914,77 @@ fn is_default_enabled(enabled: &bool) -> bool {
     *enabled
 }
 
+/// `ca` accepts a single PEM string or an array of them, matching Mountebank.
+///
+/// Hand-written rather than `#[serde(untagged)]` for the reason stated on `TcpFaultSpec` below: an
+/// untagged enum reports only "data did not match any variant", which at the `POST /imposters`
+/// boundary tells an author nothing about what they got wrong.
+pub(crate) mod ca_pem_list {
+    use serde::Deserialize;
+    use serde::de::{Deserializer, Error as _};
+    use serde::ser::{SerializeSeq, Serializer};
+
+    /// One anchor serializes back as a bare string, many as an array — so a document round-trips
+    /// through `GET /imposters` in the spelling it arrived in. This mirrors the multi-value-header
+    /// helper (issue #238); the SDK parse-fidelity corpus compares reconstructed documents, so
+    /// normalizing one spelling into the other is a real difference, not a cosmetic one.
+    pub fn serialize<S: Serializer>(
+        ca: &Option<Vec<String>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match ca.as_deref() {
+            None => serializer.serialize_none(),
+            Some([single]) => serializer.serialize_str(single),
+            Some(many) => {
+                let mut seq = serializer.serialize_seq(Some(many.len()))?;
+                for pem in many {
+                    seq.serialize_element(pem)?;
+                }
+                seq.end()
+            }
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<String>>, D::Error> {
+        let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        match value {
+            serde_json::Value::Null => Ok(None),
+            serde_json::Value::String(pem) => Ok(Some(vec![pem])),
+            serde_json::Value::Array(items) => items
+                .into_iter()
+                .map(|item| match item {
+                    serde_json::Value::String(pem) => Ok(pem),
+                    other => Err(D::Error::custom(format!(
+                        "`ca` array entries must be PEM strings, got {}",
+                        kind_of(&other)
+                    ))),
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some),
+            other => Err(D::Error::custom(format!(
+                "`ca` must be a PEM string or an array of them, got {}",
+                kind_of(&other)
+            ))),
+        }
+    }
+
+    fn kind_of(v: &serde_json::Value) -> &'static str {
+        match v {
+            serde_json::Value::Null => "null",
+            serde_json::Value::Bool(_) => "a boolean",
+            serde_json::Value::Number(_) => "a number",
+            serde_json::Value::String(_) => "a string",
+            serde_json::Value::Array(_) => "an array",
+            serde_json::Value::Object(_) => "an object",
+        }
+    }
+}
+
 /// Configuration for creating an imposter
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -933,6 +1004,33 @@ pub struct ImposterConfig {
     /// Inline PEM private key for `protocol: "https"` (Mountebank-compatible). Paired with `cert`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// Request and **require** a client certificate (Mountebank `mutualAuth`, issue #977).
+    ///
+    /// Stricter than Mountebank, deliberately: there `mutualAuth` only *requests* a certificate and
+    /// never rejects one — and its implementation gates `requestCert` on `rejectUnauthorized` too,
+    /// so a bare `mutualAuth: true` is a no-op. For a mock whose job is to virtualize a server that
+    /// demands mutual auth, a client that presents nothing must fail the handshake.
+    ///
+    /// Without `reject_unauthorized` the chain is not validated — any certificate the peer holds
+    /// the key for is accepted. `https` only; `true` on an `http` imposter is a creation error.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mutual_auth: bool,
+    /// Validate the client certificate against `ca` (Mountebank `rejectUnauthorized`, issue #977).
+    ///
+    /// Requires `ca`. Mountebank falls back to Node's bundled public roots when `ca` is absent;
+    /// validating a *client* certificate against public CAs is meaningless for a mock, so that
+    /// combination is a creation error here rather than a silent fallback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reject_unauthorized: bool,
+    /// PEM trust anchor(s) client certificates must chain to (Mountebank `ca`, issue #977).
+    /// Accepts a single string or an array of them, as Mountebank does.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "ca_pem_list::deserialize",
+        serialize_with = "ca_pem_list::serialize"
+    )]
+    pub ca: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default)]
@@ -1063,6 +1161,11 @@ impl Default for ImposterConfig {
             protocol: default_protocol(),
             cert: None,
             key: None,
+            // Client auth is off unless asked for (issue #977): an imposter that silently began
+            // demanding client certificates would break every existing SUT.
+            mutual_auth: false,
+            reject_unauthorized: false,
+            ca: None,
             name: None,
             record_requests: false,
             enabled: default_enabled(),
@@ -1926,6 +2029,82 @@ mod tests {
 
     // Issue #238: multi-value headers accept "k":"v" and "k":["v1","v2"]; serialize back as
     // a string for one value and an array for many (via IsResponse, which uses the helper).
+    // Issue #977: `ca` mirrors Mountebank's shape — one PEM or a list of them.
+    // (The issue-#238 note below belongs to `multi_value_headers_deserialize_string_or_array`.)
+    #[test]
+    fn ca_accepts_a_string_or_an_array() {
+        let one: ImposterConfig =
+            serde_json::from_value(serde_json::json!({"protocol": "https", "ca": "PEM-A"}))
+                .expect("a bare string parses");
+        assert_eq!(one.ca.as_deref(), Some(["PEM-A".to_string()].as_slice()));
+
+        let many: ImposterConfig = serde_json::from_value(
+            serde_json::json!({"protocol": "https", "ca": ["PEM-A", "PEM-B"]}),
+        )
+        .expect("an array parses");
+        assert_eq!(
+            many.ca.as_deref(),
+            Some(["PEM-A".to_string(), "PEM-B".to_string()].as_slice())
+        );
+
+        let absent: ImposterConfig =
+            serde_json::from_value(serde_json::json!({"protocol": "https"}))
+                .expect("absent parses");
+        assert!(absent.ca.is_none());
+    }
+
+    // The error has to be actionable at the POST /imposters boundary — an untagged enum would say
+    // only "data did not match any variant", which is why this deserializer is hand-written.
+    #[test]
+    fn ca_rejects_a_non_string_with_an_actionable_message() {
+        let err = serde_json::from_value::<ImposterConfig>(
+            serde_json::json!({"protocol": "https", "ca": 42}),
+        )
+        .expect_err("a number is not a PEM");
+        assert!(
+            err.to_string().contains("PEM string"),
+            "message must say what was expected, got: {err}"
+        );
+
+        let err = serde_json::from_value::<ImposterConfig>(
+            serde_json::json!({"protocol": "https", "ca": ["PEM-A", 7]}),
+        )
+        .expect_err("a non-string array entry is not a PEM");
+        assert!(
+            err.to_string().contains("array entries"),
+            "message must point at the entry, got: {err}"
+        );
+    }
+
+    // Wire compatibility: an imposter that never mentions client auth must serialize exactly as it
+    // did before #977, or every SDK's parse-fidelity gate breaks on a field it has never seen.
+    #[test]
+    fn client_auth_defaults_are_not_serialized() {
+        let cfg: ImposterConfig =
+            serde_json::from_value(serde_json::json!({"port": 4545, "protocol": "http"}))
+                .expect("config");
+        let out = serde_json::to_value(&cfg).expect("serialize");
+        let obj = out.as_object().expect("object");
+        for k in ["mutualAuth", "rejectUnauthorized", "ca"] {
+            assert!(!obj.contains_key(k), "`{k}` must be omitted when unset");
+        }
+    }
+
+    // ...but once set they round-trip under their camelCase names.
+    #[test]
+    fn client_auth_round_trips_under_camel_case() {
+        let cfg: ImposterConfig = serde_json::from_value(serde_json::json!({
+            "protocol": "https", "mutualAuth": true, "rejectUnauthorized": true, "ca": "PEM"
+        }))
+        .expect("config");
+        assert!(cfg.mutual_auth && cfg.reject_unauthorized);
+        let out = serde_json::to_value(&cfg).expect("serialize");
+        assert_eq!(out["mutualAuth"], serde_json::json!(true));
+        assert_eq!(out["rejectUnauthorized"], serde_json::json!(true));
+        // One anchor round-trips as the bare string it arrived as (issue #238's precedent).
+        assert_eq!(out["ca"], serde_json::json!("PEM"));
+    }
+
     #[test]
     fn multi_value_headers_deserialize_string_or_array() {
         let single: IsResponse =

@@ -66,7 +66,9 @@ curl -X POST http://localhost:2525/imposters \
 | `service_info` | object | No | Additional service metadata |
 | `key` | string | HTTPS only | PEM-encoded private key |
 | `cert` | string | HTTPS only | PEM-encoded certificate |
-| `mutualAuth` | boolean | No | Require client certificate |
+| `mutualAuth` | boolean | No | Request and **require** a client certificate (`https` only) |
+| `rejectUnauthorized` | boolean | No | Validate the client certificate against `ca`; requires `ca` |
+| `ca` | string or array | No | PEM trust anchor(s) client certificates must chain to |
 
 ### HTTP/2 and h2c
 

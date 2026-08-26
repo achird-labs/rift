@@ -13,6 +13,39 @@ record.
 
 ### Added
 
+- **HTTPS imposters can require a client certificate — `mutualAuth`, `rejectUnauthorized`, `ca`**
+  (#977). `docs/features/tls.md` has documented `mutualAuth` since before this engine implemented
+  anything: `ImposterConfig` has no `deny_unknown_fields`, so the key was **silently dropped**. A
+  user following our own documentation to require client certificates got a listener that accepted
+  every client, with no error, no warning, and a config that read back unchanged — a security
+  control the docs promised and the code did not provide.
+  - `mutualAuth: true` requests **and requires** a client certificate; a client presenting none
+    fails the TLS handshake. Without `rejectUnauthorized` the chain is not validated, but the
+    signature still is — "any certificate" means "any certificate whose key you hold", not any
+    bytes copied off the wire.
+  - `rejectUnauthorized: true` + `ca` validates the chain against the supplied anchors.
+  - `ca` takes a single PEM string or an array, as Mountebank does.
+  - Both work on the self-signed fallback, so no `cert`/`key` is needed to test mTLS.
+  - **Every** combination that cannot take effect is refused at creation (400), not half-honoured:
+    `rejectUnauthorized`/`ca` without `mutualAuth`; `ca` without `rejectUnauthorized`;
+    `rejectUnauthorized` without `ca` (including `ca: []`); a `ca` holding no certificate; and
+    `mutualAuth: true` on `protocol: "http"`. `"mutualAuth": false` on http stays valid — it
+    appears in our own documented example.
+
+    Refused rather than logged, deliberately: a warning reaches the server log and never the
+    `POST /imposters` response, so the author who wrote the setting is the one person who would
+    not learn it does nothing — which is precisely the failure this issue exists to remove.
+  - Defaults are omitted from serialization, so an imposter that never mentions client auth
+    round-trips byte-identically through `GET /imposters`.
+
+  **Deliberate divergence from Mountebank**, in both directions. Mountebank's `mutualAuth` only
+  *requests* a certificate and never rejects one — and since its implementation gates the request on
+  `rejectUnauthorized`, a bare `mutualAuth: true` is a no-op there. Requiring the certificate is the
+  point of the feature for a mock standing in for an mTLS gateway. And where Mountebank silently
+  falls back to the public CA bundle when `ca` is missing, Rift errors: validating a *client*
+  certificate against public roots verifies nothing, and a silent fallback is the defect class this
+  issue was filed under.
+
 - **`_rift.dataset`: a `lookup` named by dataset rather than by file path** — a **carrier field
   only; nothing in the engine reads it.** A `lookup` behavior needs a filesystem path, and a path is
   node-local, so a clustered deployment has no way to put one in a config that replicates. The

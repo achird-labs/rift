@@ -1776,3 +1776,364 @@ async fn get_imposter_exposes_flowstate_redacted() {
         "the redis credential must not survive anywhere in the GET response"
     );
 }
+
+// Issue #977: `mutualAuth` / `rejectUnauthorized` / `ca` were documented on HTTPS imposters and
+// silently dropped — an author asking for client certificates got a listener accepting everyone.
+mod mutual_tls {
+    use super::*;
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+        KeyUsagePurpose,
+    };
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// A CA plus a client certificate it signed.
+    ///
+    /// The client cert must carry `ExtendedKeyUsage = ClientAuth`; webpki rejects a ServerAuth-only
+    /// certificate for client authentication, so the engine's own `mint_leaf` (ServerAuth) cannot
+    /// be reused here.
+    fn ca_and_client_cert() -> (String, String, String) {
+        let mut ca_params = CertificateParams::new(Vec::new()).expect("ca params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "rift-977-test-ca");
+        let ca_key = KeyPair::generate().expect("ca key");
+        let ca_cert = ca_params.self_signed(&ca_key).expect("self-signed ca");
+
+        let mut leaf = CertificateParams::new(vec!["rift-977-client".to_string()]).expect("leaf");
+        leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        leaf.distinguished_name
+            .push(DnType::CommonName, "rift-977-client");
+        let leaf_key = KeyPair::generate().expect("leaf key");
+        let leaf_cert = leaf
+            .signed_by(&leaf_key, &ca_cert, &ca_key)
+            .expect("sign leaf");
+
+        (ca_cert.pem(), leaf_cert.pem(), leaf_key.serialize_pem())
+    }
+
+    fn server_cert() -> (String, String) {
+        let c = rcgen::generate_simple_self_signed(vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+        ])
+        .expect("server cert");
+        (c.cert.pem(), c.key_pair.serialize_pem())
+    }
+
+    fn client_presenting(cert_pem: &str, key_pem: &str) -> reqwest::Client {
+        let identity = reqwest::Identity::from_pem(format!("{cert_pem}{key_pem}").as_bytes())
+            .expect("identity");
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .identity(identity)
+            .timeout(Duration::from_secs(3))
+            .build()
+            .expect("client with identity")
+    }
+
+    fn bare_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(Duration::from_secs(3))
+            .build()
+            .expect("bare client")
+    }
+
+    fn cfg(port: u16, extra: serde_json::Value) -> serde_json::Value {
+        let (cert, key) = server_cert();
+        let mut c = serde_json::json!({
+            "port": port,
+            "protocol": "https",
+            "cert": cert,
+            "key": key,
+            "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "mtls-ok"}}]}]
+        });
+        for (k, v) in extra.as_object().expect("object") {
+            c[k] = v.clone();
+        }
+        c
+    }
+
+    async fn serve(manager: &Arc<ImposterManager>, c: serde_json::Value) {
+        manager
+            .create_imposter(serde_json::from_value(c).expect("config"))
+            .await
+            .expect("create imposter");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn mutual_auth_rejects_a_client_with_no_certificate() {
+        let manager = Arc::new(ImposterManager::new());
+        serve(
+            &manager,
+            cfg(19872, serde_json::json!({"mutualAuth": true})),
+        )
+        .await;
+
+        // The refusal is at the TLS handshake, not an HTTP status — which is the whole point:
+        // a real mTLS gateway never lets a cert-less client reach the application.
+        let err = bare_client()
+            .get("https://localhost:19872/")
+            .send()
+            .await
+            .expect_err("a client with no certificate must not complete the handshake");
+        assert!(
+            !err.is_status(),
+            "expected a transport/handshake failure, got an HTTP status: {err}"
+        );
+        let _ = manager.delete_imposter(19872).await;
+    }
+
+    #[tokio::test]
+    async fn mutual_auth_accepts_any_presented_certificate() {
+        let (_ca, client_cert, client_key) = ca_and_client_cert();
+        let manager = Arc::new(ImposterManager::new());
+        serve(
+            &manager,
+            cfg(19873, serde_json::json!({"mutualAuth": true})),
+        )
+        .await;
+
+        let resp = client_presenting(&client_cert, &client_key)
+            .get("https://localhost:19873/")
+            .send()
+            .await
+            .expect("a presented certificate is accepted without validation");
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.text().await.unwrap_or_default(), "mtls-ok");
+        let _ = manager.delete_imposter(19873).await;
+    }
+
+    #[tokio::test]
+    async fn reject_unauthorized_accepts_a_certificate_from_the_ca() {
+        let (ca, client_cert, client_key) = ca_and_client_cert();
+        let manager = Arc::new(ImposterManager::new());
+        serve(
+            &manager,
+            cfg(
+                19874,
+                serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true, "ca": ca}),
+            ),
+        )
+        .await;
+
+        let resp = client_presenting(&client_cert, &client_key)
+            .get("https://localhost:19874/")
+            .send()
+            .await
+            .expect("a certificate from the declared CA is accepted");
+        assert_eq!(resp.status(), 200);
+        let _ = manager.delete_imposter(19874).await;
+    }
+
+    #[tokio::test]
+    async fn reject_unauthorized_refuses_a_certificate_from_another_ca() {
+        let (ca, _, _) = ca_and_client_cert();
+        // A second, unrelated CA — the imposter trusts only the first.
+        let (_other_ca, other_cert, other_key) = ca_and_client_cert();
+        let manager = Arc::new(ImposterManager::new());
+        serve(
+            &manager,
+            cfg(
+                19875,
+                serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true, "ca": ca}),
+            ),
+        )
+        .await;
+
+        let err = client_presenting(&other_cert, &other_key)
+            .get("https://localhost:19875/")
+            .send()
+            .await
+            .expect_err("a certificate from an untrusted CA must be refused");
+        assert!(!err.is_status(), "expected a handshake failure, got: {err}");
+        let _ = manager.delete_imposter(19875).await;
+    }
+
+    #[tokio::test]
+    async fn mutual_auth_works_on_the_self_signed_fallback() {
+        // No inline cert/key: the imposter generates its own server cert, and client auth must
+        // still apply — the derivation happens before the cert precedence, so it cannot be skipped.
+        let (_ca, client_cert, client_key) = ca_and_client_cert();
+        let manager = Arc::new(ImposterManager::new());
+        manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({
+                    "port": 19876,
+                    "protocol": "https",
+                    "mutualAuth": true,
+                    "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "mtls-ok"}}]}]
+                }))
+                .expect("config"),
+            )
+            .await
+            .expect("create imposter");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(
+            bare_client()
+                .get("https://localhost:19876/")
+                .send()
+                .await
+                .is_err(),
+            "the self-signed fallback must still require a client certificate"
+        );
+        let resp = client_presenting(&client_cert, &client_key)
+            .get("https://localhost:19876/")
+            .send()
+            .await
+            .expect("a presented certificate is accepted on the self-signed path");
+        assert_eq!(resp.status(), 200);
+        let _ = manager.delete_imposter(19876).await;
+    }
+
+    #[tokio::test]
+    async fn reject_unauthorized_without_ca_is_a_creation_error() {
+        let manager = Arc::new(ImposterManager::new());
+        let err = manager
+            .create_imposter(
+                serde_json::from_value(cfg(
+                    19877,
+                    serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true}),
+                ))
+                .expect("config"),
+            )
+            .await
+            .expect_err("rejectUnauthorized with no ca must not create an imposter");
+        assert!(
+            err.to_string().contains("ca"),
+            "the error must name the missing key, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mutual_auth_on_http_is_a_creation_error() {
+        let manager = Arc::new(ImposterManager::new());
+        let err = manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({
+                    "port": 19878,
+                    "protocol": "http",
+                    "mutualAuth": true,
+                    "stubs": []
+                }))
+                .expect("config"),
+            )
+            .await
+            .expect_err("a client certificate cannot be requested on a cleartext listener");
+        assert!(
+            err.to_string().contains("https"),
+            "the error must name the required protocol, got: {err}"
+        );
+    }
+
+    // The three combinations below all mean "you asked for something that cannot take effect".
+    // Each was a `warn!` in the first draft of this change — which reaches the server log, never
+    // the POST /imposters response, so the author who wrote the setting is the one person who
+    // would not learn it does nothing. That is the pre-#977 bug wearing a different hat.
+    #[tokio::test]
+    async fn reject_unauthorized_without_mutual_auth_is_a_creation_error() {
+        let manager = Arc::new(ImposterManager::new());
+        let err = manager
+            .create_imposter(
+                serde_json::from_value(cfg(
+                    19880,
+                    serde_json::json!({"rejectUnauthorized": true, "ca": "PEM"}),
+                ))
+                .expect("config"),
+            )
+            .await
+            .expect_err("without mutualAuth no certificate is requested, so neither key can apply");
+        assert!(
+            err.to_string().contains("mutualAuth"),
+            "the error must name the key that is missing, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ca_without_reject_unauthorized_is_a_creation_error() {
+        let (ca, _, _) = ca_and_client_cert();
+        let manager = Arc::new(ImposterManager::new());
+        let err = manager
+            .create_imposter(
+                serde_json::from_value(cfg(
+                    19881,
+                    serde_json::json!({"mutualAuth": true, "ca": ca}),
+                ))
+                .expect("config"),
+            )
+            .await
+            .expect_err("supplying a CA that would never be consulted must not be accepted");
+        assert!(
+            err.to_string().contains("rejectUnauthorized"),
+            "the error must name the key that would make the CA count, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_ca_array_is_a_creation_error_naming_ca() {
+        let manager = Arc::new(ImposterManager::new());
+        let err = manager
+            .create_imposter(
+                serde_json::from_value(cfg(
+                    19882,
+                    serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true, "ca": []}),
+                ))
+                .expect("config"),
+            )
+            .await
+            .expect_err("an empty anchor list validates nothing");
+        assert!(
+            err.to_string().contains("ca"),
+            "the error must name `ca`, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ca_pem_with_no_certificate_is_a_creation_error() {
+        // A private key instead of a certificate — the classic wrong-half-of-the-pair mistake.
+        let key_only = rcgen::KeyPair::generate().expect("key").serialize_pem();
+        let manager = Arc::new(ImposterManager::new());
+        let err = manager
+            .create_imposter(
+                serde_json::from_value(cfg(
+                    19883,
+                    serde_json::json!({
+                        "mutualAuth": true, "rejectUnauthorized": true, "ca": key_only
+                    }),
+                ))
+                .expect("config"),
+            )
+            .await
+            .expect_err("a PEM with no certificate cannot be a trust anchor");
+        assert!(
+            err.to_string().contains("certificate"),
+            "the error must say what was missing, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mutual_auth_false_on_http_is_accepted() {
+        // `"mutualAuth": false` on an http imposter appears in our own documentation example, so it
+        // must keep working — only `true` is protocol-constrained.
+        let manager = Arc::new(ImposterManager::new());
+        manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({
+                    "port": 19879,
+                    "protocol": "http",
+                    "mutualAuth": false,
+                    "stubs": []
+                }))
+                .expect("config"),
+            )
+            .await
+            .expect("mutualAuth: false must remain valid on http");
+        let _ = manager.delete_imposter(19879).await;
+    }
+}
