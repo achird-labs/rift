@@ -35,6 +35,13 @@ record.
     Refused rather than logged, deliberately: a warning reaches the server log and never the
     `POST /imposters` response, so the author who wrote the setting is the one person who would
     not learn it does nothing — which is precisely the failure this issue exists to remove.
+
+    **Upgrade note.** Because these keys were previously *dropped on parse*, a config carrying one
+    of the refused combinations — most plausibly `rejectUnauthorized` without `mutualAuth`, which
+    is valid in Mountebank — used to create an imposter successfully and now returns a 400. That is
+    intended: the imposter it created was not enforcing what the config asked for. If you hit it,
+    either add `mutualAuth: true` (to get the behaviour the config was asking for) or remove the
+    key (to keep the behaviour you were actually getting).
   - Defaults are omitted from serialization, so an imposter that never mentions client auth
     round-trips byte-identically through `GET /imposters`.
 
