@@ -533,8 +533,52 @@ enum TemplateRender {
     Failed(String),
 }
 
+/// The render itself, independent of *where* it runs. Both arms of
+/// [`render_templated_response`] call this, so the fast path and the offloaded path are the same
+/// code rather than two copies that have to be kept in step.
+///
+/// Renders the body first, then every header value, sanitizing each rendered header value; the
+/// first failure wins and is returned as [`TemplateRender::Failed`]. Pure over its inputs, which
+/// is what lets it run either on the request task or on a blocking thread.
+fn render_template_parts(
+    imposter: &Imposter,
+    request_data: &RequestData,
+    flow_id: &str,
+    body: String,
+    mut headers: HashMap<String, Vec<String>>,
+    debug: bool,
+) -> TemplateRender {
+    let template_ctx = crate::extensions::template_fn::TemplateContext {
+        request: request_data,
+        flow_id,
+        flow_store: imposter.flow_store.as_ref(),
+        previous_value: None,
+    };
+
+    let body = match crate::extensions::template_fn::render_templated(&body, &template_ctx, debug) {
+        Ok(rendered) => rendered,
+        Err(e) => return TemplateRender::Failed(e),
+    };
+
+    for values in headers.values_mut() {
+        for v in values.iter_mut() {
+            match crate::extensions::template_fn::render_templated(v, &template_ctx, debug) {
+                // Issue #359 B3 (header injection): a templated value can resolve to
+                // attacker-controlled request data containing CR/LF/control chars. Strip
+                // control characters before the value ever reaches the header map so it
+                // cannot inject an extra header line; warn (never silently) if anything
+                // had to be removed.
+                Ok(rendered) => *v = sanitize_header_value(&rendered),
+                Err(e) => return TemplateRender::Failed(e),
+            }
+        }
+    }
+
+    TemplateRender::Rendered { body, headers }
+}
+
 /// Render the `_rift.templated` body and header values (issue #359), off the tokio worker when the
-/// flow store blocks (issue #971).
+/// flow store blocks (issue #971) — and not at all when nothing here can reach the store (#986).
 ///
 /// `{{ state.<key> }}` reads the flow store, and doing that inline on the request task
 /// head-of-line-blocks the worker for the backend round trip on a blocking backend (Redis, or an
@@ -554,41 +598,40 @@ async fn render_templated_response(
     request_data: RequestData,
     flow_id: String,
     body: String,
-    mut headers: HashMap<String, Vec<String>>,
+    headers: HashMap<String, Vec<String>>,
     debug: bool,
 ) -> anyhow::Result<TemplateRender> {
+    // `{{ state.<key> }}` is the only head that reaches the flow store, so a template without one
+    // has nothing to offload — and on a blocking backend that hop is pure cost (issue #986). The
+    // predicate over-approximates toward offloading: a false positive is merely today's behaviour,
+    // while a false negative would put a blocking read back on the worker (issue #971).
+    let reads_state = crate::extensions::template_fn::reads_flow_state(&body)
+        || headers
+            .values()
+            .flatten()
+            .any(|v| crate::extensions::template_fn::reads_flow_state(v));
+
+    if !reads_state {
+        return Ok(render_template_parts(
+            imposter,
+            &request_data,
+            &flow_id,
+            body,
+            headers,
+            debug,
+        ));
+    }
+
     imposter
         .run_flow_blocking(move |imp| {
-            let template_ctx = crate::extensions::template_fn::TemplateContext {
-                request: &request_data,
-                flow_id: &flow_id,
-                flow_store: imp.flow_store.as_ref(),
-                previous_value: None,
-            };
-
-            let body =
-                match crate::extensions::template_fn::render_templated(&body, &template_ctx, debug)
-                {
-                    Ok(rendered) => rendered,
-                    Err(e) => return Ok(TemplateRender::Failed(e)),
-                };
-
-            for values in headers.values_mut() {
-                for v in values.iter_mut() {
-                    match crate::extensions::template_fn::render_templated(v, &template_ctx, debug)
-                    {
-                        // Issue #359 B3 (header injection): a templated value can resolve to
-                        // attacker-controlled request data containing CR/LF/control chars. Strip
-                        // control characters before the value ever reaches the header map so it
-                        // cannot inject an extra header line; warn (never silently) if anything
-                        // had to be removed.
-                        Ok(rendered) => *v = sanitize_header_value(&rendered),
-                        Err(e) => return Ok(TemplateRender::Failed(e)),
-                    }
-                }
-            }
-
-            Ok(TemplateRender::Rendered { body, headers })
+            Ok(render_template_parts(
+                imp,
+                &request_data,
+                &flow_id,
+                body,
+                headers,
+                debug,
+            ))
         })
         .await
 }
@@ -950,17 +993,25 @@ async fn handle_request_inner(
         let scenario_flow_id = imposter.resolve_flow_id(&headers_clone);
         // Offload the FSM transition to spawn_blocking on a blocking backend (Redis) so it can't
         // stall the tokio worker; inline on the in-memory backend (issue #475).
-        let transition = {
-            let flow_id = scenario_flow_id.clone();
-            let stub_state = Arc::clone(&stub_state);
-            imposter
-                .run_flow_blocking(move |imp| {
-                    imp.apply_scenario_transition(&flow_id, &stub_state.stub)
-                })
-                .await
-        };
-        if let Err(e) = transition {
-            return Ok(backend_error_response(&e));
+        //
+        // Guarded on `new_scenario_state` because that is the identical check
+        // `apply_scenario_transition` makes as its own first statement: with no transition set it
+        // returns `Ok(())` having touched nothing. A stub without one is the common case, so
+        // without this guard a blocking backend paid a spawn_blocking hop on every matched request
+        // to run a function that does nothing (issue #986).
+        if stub_state.stub.new_scenario_state.is_some() {
+            let transition = {
+                let flow_id = scenario_flow_id.clone();
+                let stub_state = Arc::clone(&stub_state);
+                imposter
+                    .run_flow_blocking(move |imp| {
+                        imp.apply_scenario_transition(&flow_id, &stub_state.stub)
+                    })
+                    .await
+            };
+            if let Err(e) = transition {
+                return Ok(backend_error_response(&e));
+            }
         }
 
         // Advance the shared response cycler exactly ONCE for this matched request and dispatch on
@@ -3205,6 +3256,152 @@ mod templated_offload_tests {
         }
     }
 
+    /// Counts how many times the seam consulted `is_blocking()`. `run_flow_blocking` is the only
+    /// thing on these paths that calls it, so a count of 0 proves the offload was skipped
+    /// entirely rather than merely taken and returned quickly.
+    struct OffloadCountingStore {
+        inner: crate::backends::inmemory::InMemoryFlowStore,
+        seam_entries: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl OffloadCountingStore {
+        fn new() -> Self {
+            Self {
+                inner: crate::backends::inmemory::InMemoryFlowStore::new(300),
+                seam_entries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl FlowStore for OffloadCountingStore {
+        fn is_blocking(&self) -> bool {
+            self.seam_entries
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            true
+        }
+        fn get(&self, flow_id: &str, key: &str) -> anyhow::Result<Option<Value>> {
+            self.inner.get(flow_id, key)
+        }
+        fn set(&self, flow_id: &str, key: &str, value: Value) -> anyhow::Result<()> {
+            self.inner.set(flow_id, key, value)
+        }
+        fn exists(&self, flow_id: &str, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(flow_id, key)
+        }
+        fn delete(&self, flow_id: &str, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(flow_id, key)
+        }
+        fn increment(&self, flow_id: &str, key: &str) -> anyhow::Result<i64> {
+            self.inner.increment(flow_id, key)
+        }
+        fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> anyhow::Result<()> {
+            self.inner.set_ttl(flow_id, ttl_seconds)
+        }
+        fn compare_and_set(
+            &self,
+            flow_id: &str,
+            key: &str,
+            expected: Option<&Value>,
+            new: Value,
+        ) -> anyhow::Result<crate::extensions::flow_state::CasOutcome> {
+            self.inner.compare_and_set(flow_id, key, expected, new)
+        }
+    }
+
+    fn counting_imposter(store: Arc<OffloadCountingStore>) -> Arc<Imposter> {
+        let cfg: ImposterConfig =
+            serde_json::from_value(json!({ "port": 0, "protocol": "http", "stubs": [] }))
+                .expect("valid imposter config");
+        let mut imp = Imposter::new(cfg).expect("test imposter");
+        imp.flow_store = store;
+        Arc::new(imp)
+    }
+
+    // Edge case 12: a template with no `state.` head must never reach the seam. Red before the
+    // fix: 1 entry.
+    #[tokio::test]
+    async fn state_free_template_never_reaches_the_seam() {
+        let store = Arc::new(OffloadCountingStore::new());
+        let seam = store.seam_entries.clone();
+        let imp = counting_imposter(store);
+
+        let (body, hdrs) = rendered(
+            render_templated_response(
+                &imp,
+                request(),
+                "flow-1".to_string(),
+                "path={{ request.path }}".to_string(),
+                headers(&[("x-when", "{{ now }}")]),
+                false,
+            )
+            .await
+            .expect("no transport failure"),
+        );
+
+        assert_eq!(body, "path=/x", "the render itself must still be correct");
+        assert!(!hdrs["x-when"][0].is_empty(), "{{ now }} still rendered");
+        assert_eq!(
+            seam.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a store-free template must not consult the offload seam at all"
+        );
+    }
+
+    // Edge case 14: only a HEADER reads state. Guards against a body-only pre-check, which would
+    // put a blocking read back on the worker.
+    #[tokio::test]
+    async fn a_state_read_in_a_header_alone_still_offloads() {
+        let store = Arc::new(OffloadCountingStore::new());
+        let seam = store.seam_entries.clone();
+        store.set("flow-1", "hits", json!(9)).expect("seed");
+        let imp = counting_imposter(store);
+
+        let (body, hdrs) = rendered(
+            render_templated_response(
+                &imp,
+                request(),
+                "flow-1".to_string(),
+                "no state here".to_string(),
+                headers(&[("x-hits", "{{ state.hits }}")]),
+                false,
+            )
+            .await
+            .expect("no transport failure"),
+        );
+
+        assert_eq!(body, "no state here");
+        assert_eq!(hdrs["x-hits"], vec!["9".to_string()]);
+        assert!(
+            seam.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "a state read in a header value must still take the offload"
+        );
+    }
+
+    // Edge case 13: the body-reads-state case still offloads (the #971 behaviour is preserved).
+    #[tokio::test]
+    async fn a_state_read_in_the_body_still_offloads() {
+        let store = Arc::new(OffloadCountingStore::new());
+        let seam = store.seam_entries.clone();
+        store.set("flow-1", "hits", json!(4)).expect("seed");
+        let imp = counting_imposter(store);
+
+        let (body, _) = rendered(
+            render_templated_response(
+                &imp,
+                request(),
+                "flow-1".to_string(),
+                "n={{ state.hits }}".to_string(),
+                HashMap::new(),
+                false,
+            )
+            .await
+            .expect("no transport failure"),
+        );
+
+        assert_eq!(body, "n=4");
+        assert!(seam.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    }
+
     // Edge case 1 + 13: on a blocking backend the store read happens off the caller thread, and
     // the token still resolves to the stored value (the render is not skipped or emptied).
     #[tokio::test]
@@ -3398,5 +3595,169 @@ mod templated_offload_tests {
         );
 
         assert_eq!(body, "[]");
+    }
+}
+
+// =========================================================================
+// Issue #986: the FSM transition must not pay a spawn_blocking hop to run a no-op. This is the
+// dominant half of the issue — a stub without `newScenarioState` is the common case, and on a
+// blocking backend it paid the hop on EVERY matched request.
+// =========================================================================
+#[cfg(test)]
+mod fsm_offload_tests {
+    use crate::extensions::flow_state::{CasOutcome, FlowStore};
+    use crate::imposter::core::Imposter;
+    use crate::imposter::handler::handle_imposter_request;
+    use crate::imposter::types::ImposterConfig;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts seam entries (`is_blocking()`) and store writes, so a test can tell "never offloaded"
+    /// apart from "offloaded and did nothing".
+    struct SeamCountingStore {
+        inner: crate::backends::inmemory::InMemoryFlowStore,
+        seam_entries: Arc<AtomicUsize>,
+        writes: Arc<AtomicUsize>,
+    }
+
+    impl SeamCountingStore {
+        fn new() -> Self {
+            Self {
+                inner: crate::backends::inmemory::InMemoryFlowStore::new(300),
+                seam_entries: Arc::new(AtomicUsize::new(0)),
+                writes: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl FlowStore for SeamCountingStore {
+        fn is_blocking(&self) -> bool {
+            self.seam_entries.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+        fn get(&self, flow_id: &str, key: &str) -> anyhow::Result<Option<Value>> {
+            self.inner.get(flow_id, key)
+        }
+        fn set(&self, flow_id: &str, key: &str, value: Value) -> anyhow::Result<()> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.set(flow_id, key, value)
+        }
+        fn exists(&self, flow_id: &str, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(flow_id, key)
+        }
+        fn delete(&self, flow_id: &str, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(flow_id, key)
+        }
+        fn increment(&self, flow_id: &str, key: &str) -> anyhow::Result<i64> {
+            self.inner.increment(flow_id, key)
+        }
+        fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> anyhow::Result<()> {
+            self.inner.set_ttl(flow_id, ttl_seconds)
+        }
+        fn compare_and_set(
+            &self,
+            flow_id: &str,
+            key: &str,
+            expected: Option<&Value>,
+            new: Value,
+        ) -> anyhow::Result<CasOutcome> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.compare_and_set(flow_id, key, expected, new)
+        }
+    }
+
+    /// Serve one request against `stubs` on a blocking counting store; return
+    /// `(seam_entries, writes, status)`.
+    async fn serve_once(stubs: Value, path: &str) -> (usize, usize, u16) {
+        let cfg: ImposterConfig =
+            serde_json::from_value(json!({ "port": 0, "protocol": "http", "stubs": stubs }))
+                .expect("valid imposter config");
+        let store = Arc::new(SeamCountingStore::new());
+        let seam = store.seam_entries.clone();
+        let writes = store.writes.clone();
+        let mut imp = Imposter::new(cfg).expect("test imposter");
+        imp.flow_store = store;
+        let imposter = Arc::new(imp);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let imp = imposter.clone();
+        tokio::spawn(async move {
+            let Ok((stream, peer)) = listener.accept().await else {
+                return;
+            };
+            let service = service_fn(move |req| {
+                let imp = imp.clone();
+                async move { handle_imposter_request(req, imp, peer).await }
+            });
+            let _ = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        });
+
+        let resp = reqwest::get(format!("http://{addr}{path}"))
+            .await
+            .expect("request");
+        let status = resp.status().as_u16();
+        (
+            seam.load(Ordering::SeqCst),
+            writes.load(Ordering::SeqCst),
+            status,
+        )
+    }
+
+    // Edge case 16: a plain stub — no scenario, no transition — must not enter the seam at all.
+    // Red before the fix: 1 entry, spent running a function that returns immediately.
+    #[tokio::test]
+    async fn a_stub_with_no_transition_never_reaches_the_seam() {
+        let (seam, writes, status) = serve_once(
+            json!([{
+                "predicates": [{ "equals": { "path": "/plain" } }],
+                "responses": [{ "is": { "statusCode": 200, "body": "ok" } }]
+            }]),
+            "/plain",
+        )
+        .await;
+
+        assert_eq!(status, 200, "the request must still be served normally");
+        assert_eq!(writes, 0, "a stub with no transition writes nothing");
+        assert_eq!(
+            seam, 0,
+            "a stub with no newScenarioState must not pay a spawn_blocking hop to run a no-op"
+        );
+    }
+
+    // Edge case 17: the other direction — a stub that DOES transition must still offload and must
+    // still apply the transition. Without this, "skip the offload" could be implemented by
+    // skipping the transition itself and the test above would still pass.
+    #[tokio::test]
+    async fn a_stub_with_a_transition_still_offloads_and_still_writes() {
+        let (seam, writes, status) = serve_once(
+            json!([{
+                "scenarioName": "order",
+                "newScenarioState": "Placed",
+                "predicates": [{ "equals": { "path": "/place" } }],
+                "responses": [{ "is": { "statusCode": 200, "body": "ok" } }]
+            }]),
+            "/place",
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert!(
+            seam > 0,
+            "a stub with newScenarioState must still take the offload"
+        );
+        assert!(
+            writes > 0,
+            "the transition must still be applied — skipping the offload must not mean \
+             skipping the write"
+        );
     }
 }

@@ -98,6 +98,34 @@ pub fn template_heads(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether rendering `input` can read the flow store — i.e. whether any `{{ }}` expression the
+/// evaluator sees has a `state.<key>` head. Derived from [`template_heads`], so the answer comes
+/// from the grammar rather than a substring search.
+///
+/// Deliberately a **superset** of "will read the store": `{{ state. }}` (empty key) counts as a
+/// read even though [`render_templated`] rejects it before touching the store. Callers use this to
+/// decide whether to *skip* an offload (issue #986), and the only safe error is to offload when it
+/// was not needed — staying inline when a read was coming is the deadlock issue #971 fixed.
+///
+/// Note it inspects the **date-expanded** text, exactly as [`render_templated`] does, and not the
+/// raw input. That pass never emits `{{`, but it does *delete* braces, so it can turn text that
+/// matched nothing into a live expression: raw `{{ state.x {{NOW}} }}` contains only the head
+/// `NOW`, yet after expansion it is a single `{{ state.x <date> }}` whose head reads the store.
+/// Judging the raw text would call that a no-op and strand a blocking read on the worker.
+///
+/// The `state.` substring pre-check keeps the common case cheap: the date pass emits only date
+/// strings, so if `state.` does not occur in the raw input it cannot occur after expansion either,
+/// and no head can start with it.
+#[must_use]
+pub fn reads_flow_state(input: &str) -> bool {
+    if !input.contains("state.") {
+        return false;
+    }
+    template_heads(&crate::extensions::template::apply_date_templates(input))
+        .iter()
+        .any(|head| head.starts_with("state."))
+}
+
 /// Evaluate every `{{ ... }}` expression in `input` against `ctx`. In debug mode the first
 /// failing token aborts the whole render with an error describing it; otherwise each failing
 /// token is replaced with an empty string and logged via `tracing::warn!`.
@@ -553,6 +581,147 @@ mod tests {
             flow_id,
             flow_store: store,
             previous_value: None,
+        }
+    }
+
+    // Issue #986: the predicate a caller uses to decide whether a render can be kept on the
+    // request task. Every expectation below is a literal.
+
+    #[test]
+    fn reads_flow_state_true_only_for_a_state_head() {
+        // Reads the store.
+        assert!(reads_flow_state("{{ state.hits }}"));
+        assert!(
+            reads_flow_state("{{state.a|json}}"),
+            "no spaces, with a filter"
+        );
+        assert!(
+            reads_flow_state("x {{ now }} {{ state.b }} y"),
+            "mixed heads"
+        );
+        assert!(
+            reads_flow_state("{{ state. }}"),
+            "empty key is a deliberate over-approximation: render errors on it before touching \
+             the store, and reporting a read is the safe direction"
+        );
+
+        // Does not.
+        assert!(!reads_flow_state("{{ request.path }}"));
+        assert!(!reads_flow_state("{{ now }}"));
+        assert!(!reads_flow_state("{{ uuid }}"));
+        assert!(!reads_flow_state("{{ previousValue }}"));
+        assert!(
+            !reads_flow_state("{{ state }}"),
+            "no dot: an unknown function to the evaluator, which never reaches the store"
+        );
+        assert!(!reads_flow_state("{{NOW}}"), "legacy date token");
+        assert!(!reads_flow_state("plain text with no template at all"));
+        assert!(!reads_flow_state(""));
+        assert!(!reads_flow_state("{{ unterminated"));
+
+        // The date pass deletes the inner braces before the evaluator runs, turning this into a
+        // single `{{ state.x <date> }}` whose head DOES read the store. The predicate must judge
+        // the expanded text, not the raw text.
+        assert!(reads_flow_state("{{ state.x {{NOW}} }}"));
+    }
+
+    /// A table of witnesses for the invariant — not a proof of it. If rendering an input actually
+    /// reaches the flow
+    /// store, `reads_flow_state` must have said so. A false negative here is not a lost
+    /// optimisation — it is the issue #971 deadlock coming back, because the caller would keep a
+    /// blocking store read on the tokio worker.
+    #[test]
+    fn a_render_that_touches_the_store_is_always_predicted() {
+        use crate::extensions::flow_state::FlowStore;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingStore {
+            inner: crate::backends::inmemory::InMemoryFlowStore,
+            gets: AtomicUsize,
+        }
+        impl FlowStore for CountingStore {
+            fn get(&self, flow_id: &str, key: &str) -> anyhow::Result<Option<Value>> {
+                self.gets.fetch_add(1, Ordering::SeqCst);
+                self.inner.get(flow_id, key)
+            }
+            fn set(&self, flow_id: &str, key: &str, value: Value) -> anyhow::Result<()> {
+                self.inner.set(flow_id, key, value)
+            }
+            fn exists(&self, flow_id: &str, key: &str) -> anyhow::Result<bool> {
+                self.inner.exists(flow_id, key)
+            }
+            fn delete(&self, flow_id: &str, key: &str) -> anyhow::Result<()> {
+                self.inner.delete(flow_id, key)
+            }
+            fn increment(&self, flow_id: &str, key: &str) -> anyhow::Result<i64> {
+                self.inner.increment(flow_id, key)
+            }
+            fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> anyhow::Result<()> {
+                self.inner.set_ttl(flow_id, ttl_seconds)
+            }
+            fn compare_and_set(
+                &self,
+                flow_id: &str,
+                key: &str,
+                expected: Option<&Value>,
+                new: Value,
+            ) -> anyhow::Result<crate::extensions::flow_state::CasOutcome> {
+                self.inner.compare_and_set(flow_id, key, expected, new)
+            }
+        }
+
+        let inputs = [
+            "{{ state.hits }}",
+            "{{state.a|json}}",
+            "x {{ now }} {{ state.b }} y",
+            "{{ state. }}",
+            "{{ request.path }}",
+            "{{ now }}",
+            "{{ uuid }}",
+            "{{ previousValue }}",
+            "{{ state }}",
+            "{{NOW}}",
+            "plain text with no template at all",
+            "",
+            "{{ unterminated",
+            // Belt and braces: a body that reads state twice, and one where the only read is
+            // behind a filter.
+            "{{ state.a }} and {{ state.b }}",
+            "{{ state.c | json }}",
+            // The adversarial shape this predicate exists to survive: the legacy date pass runs
+            // BEFORE the evaluator and deletes the inner braces, which *creates* a `{{ ... }}`
+            // match absent from the raw text. Judging the raw text alone sees only the head `NOW`
+            // and misses `state.x` — a false negative, i.e. the #971 deadlock reintroduced.
+            "{{ state.x {{NOW}} }}",
+        ];
+
+        for input in inputs {
+            let store = CountingStore {
+                inner: crate::backends::inmemory::InMemoryFlowStore::new(300),
+                gets: AtomicUsize::new(0),
+            };
+            store.set("flow-1", "hits", Value::from(1)).expect("seed");
+            store.gets.store(0, Ordering::SeqCst);
+
+            let request = RequestData::new("GET", "/x", None, &hyper::HeaderMap::new(), None);
+            let ctx = TemplateContext {
+                request: &request,
+                flow_id: "flow-1",
+                flow_store: &store,
+                previous_value: None,
+            };
+            // Non-debug so a missing key degrades instead of aborting the render — the store is
+            // still consulted either way, which is what this property is about.
+            let _ = render_templated(input, &ctx, false);
+
+            let touched = store.gets.load(Ordering::SeqCst) > 0;
+            assert!(
+                !touched || reads_flow_state(input),
+                "FALSE NEGATIVE for {input:?}: the render read the store but the predicate said \
+                 it would not — this is the #971 deadlock reintroduced. Note an enumerated table \
+                 can only catch shapes someone thought of: the `{{{{NOW}}}}` case below was missed \
+                 on the first pass and found by hand."
+            );
         }
     }
 

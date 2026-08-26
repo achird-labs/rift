@@ -668,6 +668,11 @@ multiply into N×512 blocking threads. Note that a few synchronous script paths 
 JavaScript `wait` function that computes a delay — run inline on the calling worker rather than on
 the blocking pool, so keep such scripts cheap under per-core.
 
+Flow-store work is offloaded only when it can actually reach the store. A matched stub with no
+`newScenarioState` has no transition to apply, and a `_rift.templated` response whose `{{ }}`
+expressions never read `state.<key>` has nothing to look up — both render on the worker even on a
+blocking backend, rather than paying a pool round trip to do nothing.
+
 ### Observing load spread
 
 `SO_REUSEPORT` balances by connection 4-tuple, so a load generator using **few source addresses**

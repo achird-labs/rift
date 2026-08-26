@@ -11,6 +11,31 @@ record.
 
 ## [Unreleased]
 
+### Changed
+
+- **Flow-store work is offloaded only when it can reach the store** (#986). `run_flow_blocking`
+  moves a closure to a blocking thread whenever the backend reports `is_blocking()`, without
+  knowing whether that closure will touch the store — it cannot know, since it receives an opaque
+  `FnOnce`. Two call sites can tell in advance, and now do:
+  - **The scenario-FSM transition.** `apply_scenario_transition` returns immediately when the
+    matched stub has no `newScenarioState` — the common case. On a Redis-backed imposter that meant
+    a `spawn_blocking` round trip on *every matched request* to run a function that does nothing.
+    The guard is the identical check that function makes as its own first statement, so the skipped
+    case is provably a no-op.
+  - **The `_rift.templated` render.** `{{ state.<key> }}` is the only expression head that reads the
+    store, so a template built from `{{ request.* }}` / `{{ now }}` / `{{ uuid }}` has nothing to
+    look up. The new `reads_flow_state` predicate answers this from the template grammar
+    (`template_heads`), behind a cheap `state.` substring reject, and deliberately over-approximates:
+    reporting a read that will not happen costs an unnecessary offload, whereas missing one would put
+    a blocking read back on the worker and reintroduce the deadlock #971 fixed.
+  - It judges the **date-expanded** text, as the evaluator does, not the raw input. The legacy date
+    pass never emits `{{`, but it does delete braces, so it can turn text that matched nothing into
+    a live expression — raw `{{ state.x {{NOW}} }}` shows only the head `NOW`, yet after expansion
+    its head is `state.x` and it reads the store. Judging the raw text called that a no-op, which
+    would have stranded a blocking read on the worker. That case is now pinned by a test.
+
+  Rendered output, FSM behaviour, and the default in-memory path are unchanged.
+
 ### Added
 
 - **In-process embedders can detect a TCP fault — `tcp_fault_carrier`** (#965). A TCP fault never
