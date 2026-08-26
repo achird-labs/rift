@@ -28,7 +28,6 @@ pub mod decorate;
 pub mod exchange_inspector;
 pub mod fault;
 pub mod flow_state;
-pub mod matcher;
 pub mod metrics;
 pub mod no_match;
 pub mod routing;
@@ -50,13 +49,13 @@ pub use flow_state::{
     NoOpFlowStore, create_flow_store,
 };
 #[allow(unused_imports)]
-pub use matcher::{CompiledMatch, CompiledRule};
-#[allow(unused_imports)]
 pub use metrics::{AcceptErrorCounters, AcceptOutageGuard, collect_metrics, record_request};
 #[allow(unused_imports)]
 pub use no_match::{NoMatchContext, NoMatchDirective, NoMatchInterceptor};
+// `Router` went with the reverse-proxy mode (#975); `routing` now exposes only the
+// host-matching helper the front door shares.
 #[allow(unused_imports)]
-pub use routing::Router;
+pub use routing::is_subdomain_of;
 #[allow(unused_imports)]
 pub use state_ops::{StateOp, execute_state_ops};
 #[allow(unused_imports)]

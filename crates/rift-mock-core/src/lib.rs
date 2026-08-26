@@ -30,8 +30,6 @@ pub mod response;
 // Re-export extension modules at top level for backward compatibility
 pub use extensions::fault;
 pub use extensions::flow_state;
-pub use extensions::matcher;
-pub use extensions::routing;
 pub use extensions::stub_analysis;
 pub use extensions::template;
 

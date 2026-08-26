@@ -56,7 +56,7 @@ env:
   BENCH_SAMPLES: "2"
   # Bench targets to gate, by workspace-unique target name (see run_benches.sh for why not `-p`).
   # A target missing from the PR base is skipped with a notice, so adding one here lands cleanly.
-  BENCH_TARGETS: "imposter_matcher_bench decision_cache_bench proxy_rules_bench response_serve_bench"
+  BENCH_TARGETS: "imposter_matcher_bench decision_cache_bench response_serve_bench"
 
 jobs:
   bench-regression:

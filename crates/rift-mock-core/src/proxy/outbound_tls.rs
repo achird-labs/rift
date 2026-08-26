@@ -2,8 +2,8 @@
 //!
 //! Before this module each outbound client decided its own trust independently: the imposter
 //! `proxy` stub client and the config-source fetcher carried reqwest's compiled-in webpki roots
-//! with no knob at all, while [`super::client`] used the OS store and honoured a per-upstream
-//! skip-verify flag. A privately-issued origin — a corporate API gateway — was therefore
+//! with no knob at all, while the (since removed, #975) reverse-proxy client used the OS store.
+//! A privately-issued origin — a corporate API gateway — was therefore
 //! unreachable from a `proxy` stub no matter how the host was configured, because that client
 //! never consulted the OS trust store where the CA lives.
 //!
@@ -41,19 +41,21 @@ pub struct OutboundTls {
 impl OutboundTls {
     /// The rustls config this policy describes.
     ///
-    /// The returned config leaves `alpn_protocols` **empty, and that is load-bearing**:
-    /// `hyper_rustls::HttpsConnectorBuilder::with_tls_config` asserts on it
-    /// (`assert!(config.alpn_protocols.is_empty(), "ALPN protocols should not be pre-defined")`)
-    /// and hyper-rustls sets ALPN itself from `enable_http2`/`enable_all_versions`. Setting ALPN
-    /// here is therefore a runtime panic in [`super::client`], not a preference. Consumers that
-    /// need ALPN must add it to their own copy — see [`Self::reqwest_builder`].
+    /// The returned config leaves `alpn_protocols` **empty**: this is the shared base, and each
+    /// consumer sets the protocols it actually negotiates. [`Self::reqwest_client_config`] adds
+    /// `http/1.1`, because reqwest populates ALPN only on its own rustls path and never for a
+    /// config handed to `use_preconfigured_tls`.
+    ///
+    /// Keep it empty for any future hyper-rustls consumer too:
+    /// `HttpsConnectorBuilder::with_tls_config` *asserts* `alpn_protocols.is_empty()` and sets ALPN
+    /// itself, so a pre-set value there is a runtime panic rather than a preference.
     ///
     /// # Errors
     /// - `ca_pem` is malformed, or contains no certificate;
     /// - no trust anchors could be assembled at all (an image with no CA bundle and no `ca_pem`).
     ///
     /// Never panics: this replaces a `.expect` that aborted the process on a TLS/DNS
-    /// misconfiguration (the same fix #543 made for [`super::client`]).
+    /// misconfiguration (the same fix #543 made for the reverse-proxy client, itself since removed).
     pub fn client_config(&self) -> anyhow::Result<rustls::ClientConfig> {
         // An explicit provider rather than the process default: `install_default()` is called by
         // the binary's `main`, but a unit test or an embedder constructing an `Imposter` directly
@@ -180,8 +182,8 @@ mod tests {
         let config = OutboundTls::default()
             .client_config()
             .expect("the default policy builds");
-        // Empty ALPN is required, not incidental: `HttpsConnectorBuilder::with_tls_config`
-        // asserts on it, so pinning ALPN here would panic `create_http_client` at runtime.
+        // Empty ALPN on the shared base is deliberate: each consumer sets its own (see
+        // `reqwest_client_config`), and hyper-rustls' `with_tls_config` asserts on a pre-set value.
         assert!(
             config.alpn_protocols.is_empty(),
             "the shared config must not pin ALPN, got {:?}",

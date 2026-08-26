@@ -1,47 +1,26 @@
-//! Proxy server module.
+//! Shared proxy/TLS utilities.
 //!
-//! This module provides the proxy server implementation with support for:
-//! - Fault injection (latency, error, TCP faults)
-//! - Script-based fault decisions (Rhai, JavaScript)
-//! - Mountebank-compatible response behaviors (wait, copy, lookup, decorate)
-//! - Request recording and replay (proxyOnce, proxyAlways modes)
-//! - Multi-upstream routing
-//! - TLS/HTTPS support
+//! This module used to host the reverse-proxy server and its request pipeline.
+//! That mode was unwired from the binary in ada6f30 (2025-11-30) and removed in #975; what is left
+//! is the TLS and listener machinery the imposter path and the intercept listener share.
 //!
 //! # Module Structure
 //!
-//! - `server` - ProxyServer struct and main run loop
-//! - `handler` - Request handling and fault injection logic
-//! - `forwarding` - Request forwarding to upstream servers
-//! - `client` - HTTP client creation and configuration
-//! - `tls` - TLS utilities and certificate handling
-//! - `network` - Network listener utilities (SO_REUSEPORT)
-//! - `response_ext` - Response extension traits for body transformations
+//! - `tls` - TLS acceptor construction and session resumption
+//! - `outbound_tls` - the shared trust policy for connections Rift initiates (#974)
+//! - `intercept_ca` - the TLS-MITM certificate authority and per-SNI resolver
+//! - `truststore` - PKCS#12 / JKS export of that CA
+//! - `network` - listener utilities (SO_REUSEPORT) and accept-error classification
 
-mod client;
-mod forwarding;
-mod handler;
-mod headers;
 pub(crate) mod network;
-mod response_ext;
-mod server;
 pub(crate) mod tls;
 
-mod context;
 pub mod intercept_ca;
 pub mod outbound_tls;
-#[cfg(test)]
-mod tests;
 pub mod truststore;
 
 // Re-export public API types
 // These are used by main.rs and may be used by external consumers
-#[allow(unused_imports)]
-pub use forwarding::error_response;
-#[allow(unused_imports)]
-pub use handler::rule_applies_to_upstream;
-#[allow(unused_imports)]
-pub use server::ProxyServer;
 // TLS session-resumption config, shared with the intercept listener in rift-http-proxy (issue #705).
 pub use tls::{TLS_SESSION_CACHE_SIZE, configure_session_resumption};
 // One outbound-TLS trust policy for every client Rift initiates a connection with (issue #974).

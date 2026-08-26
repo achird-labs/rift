@@ -3438,7 +3438,6 @@ dependencies = [
  "foldhash 0.2.0",
  "http-body-util",
  "hyper",
- "hyper-rustls",
  "hyper-util",
  "lazy_static",
  "libc",

@@ -252,7 +252,7 @@ pub fn apply_stream_tuning(stream: &TcpStream, tuning: &SocketTuning) {
 ///
 /// Not every loop wants this: the imposter serve loops deliberately never terminate, because a
 /// dying imposter loop is independently recoverable through the still-live admin API. Loops whose
-/// failure is the *only* signal an owner gets (the admin plane, the metrics plane, `ProxyServer::run`)
+/// failure is the *only* signal an owner gets (the admin plane, the metrics plane)
 /// consult this first.
 ///
 /// Unix-only by construction: these are POSIX errnos. On other platforms nothing is treated as

@@ -59,6 +59,75 @@ record.
   `GET /intercept/rules` gives the body back in its original JSON shape. See
   [Intercept proxy](docs/features/intercept-proxy.md#serve-an-inline-stub).
 
+### Removed
+
+- **The reverse-proxy / sidecar `Config` mode is gone** (#975). `rift_mock_core::config::Config` —
+  the YAML surface with `upstreams`, `routing`, `rules` and `recording` — and the `ProxyServer` that
+  consumed it are the tail of a removal that began in **ada6f30 (2025-11-30)**, whose own message
+  reads: *"Remove native YAML config mode (`--rift-config` option removed) — All advanced features
+  now available through Mountebank JSON format."* That commit deleted the entry point and migrated
+  the features into the `_rift` namespace on imposter JSON; the implementation behind it was never
+  cleaned up. This finishes the job.
+
+  Since then it has been unreachable from the binary (`--rift-config` no longer exists;
+  `ProxyServer::new`'s only caller was its own unit test) and without a consumer anywhere: not in
+  this repo, not in `rift-conformance` or `rift-demo`, and not in the private embedder, whose crates
+  use only the imposter-path recording trait, the intercept CA, the truststore export and
+  `HttpTuning`. On crates.io it has zero reverse dependencies.
+
+  One documentation page did still describe it: `docs/performance/index.md`'s "For Script Fault
+  Injection" section explained how to tune the script-decision cache through this config file
+  (`listen:` / `script_rules:` / `decision_cache:`), a format the binary has not accepted since
+  ada6f30. That section is removed here. The "sidecar" and "reverse proxy" deployment patterns in
+  `docs/deployment/` are unaffected — they are built from imposters (`--configfile imposters.json`)
+  and the front door, neither of which this touches.
+
+  Note for follow-up: `scripting::decision_cache` (and its bench) was reachable **only** from this
+  proxy path — `scripting/trace.rs` says so — so it is now orphaned in the same way. It is left in
+  place rather than swept into this change; that is its own decision.
+
+  Nine months of maintenance went into that dead path regardless — #543, #545, #555 and #834 all
+  fixed bugs in code nobody could run. Removing it retires ~6.4k lines.
+
+  This resolves the defect the issue was filed over. `Config.recording` accepted
+  `persistence`, `addWaitBehavior` and `predicateGenerators` `method`/`path`/`query` matchers and
+  **silently ignored** them — a known field that does nothing is worse than an unknown one, because
+  `deny_unknown_fields` cannot catch it. Those keys stop being ignored by ceasing to exist. (Same
+  reasoning as #879, where `--ip-whitelist` was accepted and never enforced and the fix was to stop
+  advertising it.)
+
+  **To be clear about what did *not* change:** `addWaitBehavior` and `predicateGenerators` are
+  fully implemented on the imposter `proxy` response and are untouched — see
+  [proxy responses](docs/mountebank/proxy.md). Only the duplicate, unreachable copies on
+  `Config.recording` are gone. `recording.persistence` is the one key with no surviving
+  counterpart.
+
+  Removed from `rift-mock-core`'s public API: `config::{Config, DeploymentMode, Protocol,
+  ListenConfig, MetricsConfig, TlsConfig, RecordingConfig, RecordingPersistence, PredicateGenerator,
+  PredicateGeneratorMatches, Route, RouteMatch, HostMatch, HeaderMatch, Rule, MatchConfig,
+  PathMatch, ScriptRule, ScriptEngineConfig, ScriptPoolConfigFile, DecisionCacheConfigFile,
+  Upstream, UpstreamConfig, ConnectionPoolConfig, HealthCheckConfig}`; `proxy::{ProxyServer,
+  error_response, rule_applies_to_upstream}`; `recording::{RecordingStore, generate_stub,
+  record_with_timing}`; `extensions::matcher` (`CompiledRule`, `CompiledMatch`) and
+  `extensions::routing::Router`.
+
+  **Kept:** `config::{FlowStateConfig, RedisConfig}` and all of `recording::{ProxyMode,
+  LocalProxyStore, ProxyRecordingStore, RecordedResponse, RequestSignature}`, which the imposter
+  path genuinely reads; and `extensions::routing::is_subdomain_of`, because the front door matches
+  hosts by the same rule.
+
+  Also kept, but with **no in-tree reader**: `config::{FaultConfig, TcpFault, LatencyFault,
+  ErrorFault}` and the `extensions::fault` helpers over them. The imposter path injects faults
+  through its own `_rift.fault` type, not these. They are left as public API rather than swept into
+  this change because that is a separate should-question — tracked separately.
+
+  Two top-level re-export paths also disappear: `rift_mock_core::matcher` and
+  `rift_mock_core::routing`. `is_subdomain_of` survives at its real path,
+  `rift_mock_core::extensions::routing::is_subdomain_of`.
+
+  A public-API removal on a 0.x crate, so a minor bump. `hyper-rustls` also leaves
+  `rift-mock-core`'s dependencies — `proxy/client.rs` was its only consumer.
+
 ### Fixed
 
 - **Outbound TLS now trusts the OS certificate store, and a private CA can be supplied** (#974).
@@ -72,10 +141,6 @@ record.
     the config-source fetcher (`--configfile https://…`). Native roots are the base, so
     `SSL_CERT_FILE` / `SSL_CERT_DIR` are honoured too — note those *replace* the trust store,
     where `--upstream-ca-file` appends to it.
-  - `create_http_client` (the reverse-proxy/sidecar client in `rift_mock_core::proxy`) also takes
-    the policy, but nothing supplies a configured one yet: `ProxyServer` is not constructed by the
-    binary (see #975), so that path still runs on the default. It gains the panic-to-error fix
-    below, not the private-CA capability.
   - `--upstream-ca-file` / `RIFT_UPSTREAM_CA_FILE` **appends** a PEM anchor to the OS store — unlike
     `SSL_CERT_FILE`, which replaces it, silently dropping every public root.
   - `--upstream-tls-skip-verify` / `RIFT_UPSTREAM_TLS_SKIP_VERIFY` accepts any certificate, with a
