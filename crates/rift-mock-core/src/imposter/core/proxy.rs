@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::imposter::predicates::regex_cache::cached_regex;
-use crate::recording::{ClaimToken, StubPlacement, StubPublication};
+use crate::recording::{ClaimToken, ProxyStoreError, StubPlacement, StubPublication};
 use std::hash::BuildHasher;
 
 /// Parts read from a successful upstream proxy response, before recording:
@@ -426,6 +426,15 @@ impl Imposter {
             }
             Ok(ClaimOutcome::InFlight) => None,
             Ok(ClaimOutcome::Claimed(token)) => Some(token),
+            // The store arbitrates exactly-once and could not answer: fail the request rather
+            // than forward it. Forwarding here would call the upstream while *nothing* is
+            // serializing claims, so the duplicate is bounded by the outage, not by one racing
+            // window — the outcome `proxyOnce` exists to prevent. The `BackendUnavailable` rides
+            // the chain so the response boundary can answer 503 through the #318 door.
+            Err(ProxyStoreError::Refused(cause)) => {
+                return Err(anyhow::Error::new(cause)
+                    .context("proxyOnce claim refused; request not forwarded"));
+            }
             Err(e) => {
                 warn!("Proxy recording store unavailable; forwarding without recording: {e}");
                 None

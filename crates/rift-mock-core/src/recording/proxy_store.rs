@@ -17,6 +17,7 @@
 
 use super::mode::ProxyMode;
 use super::types::{RecordedResponse, RequestSignature};
+use crate::extensions::decorate::BackendUnavailable;
 use crate::imposter::Stub;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
@@ -68,15 +69,33 @@ pub enum ClaimOutcome {
     AlreadyRecorded,
 }
 
-/// Error returned by a [`ProxyRecordingStore`] whose backend is unavailable.
+/// Error returned by a [`ProxyRecordingStore`] that could not answer.
 ///
-/// The built-in [`LocalProxyStore`] never returns this; it exists so external backends
-/// (shared, persistent) can signal a transient failure and let the caller degrade gracefully.
+/// Two shapes, because a store failure means two genuinely different things and the engine must
+/// do opposite things about them. The built-in [`LocalProxyStore`] returns neither.
+///
+/// `#[non_exhaustive]`: embedders `match` on this, and the two arms below are unlikely to be the
+/// last word on how a distributed backend can fail — the same reasoning [`StubPlacement`] carries.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ProxyStoreError {
-    /// The backing store could not be reached.
+    /// The backing store could not be reached, and the caller may **degrade**: forward upstream
+    /// without recording. This is the right answer when the store is a persistence aid and the
+    /// engine still enforces exactly-once itself — losing a recording costs a replay, not
+    /// correctness.
     #[error("proxy recording store unavailable: {0}")]
     Unavailable(String),
+    /// The store **is** the exactly-once arbiter and could neither grant nor deny the claim, so
+    /// the caller must **not** forward: with nothing serializing claims, every request for the
+    /// duration of the outage would reach the upstream, which is precisely what `proxyOnce`
+    /// exists to prevent. The engine fails the request instead, and the response boundary answers
+    /// it through [`backend_error_response`](crate::extensions::decorate::backend_error_response)
+    /// — a `503` naming the carried `feature`/`detail`.
+    ///
+    /// Distinct from [`ClaimOutcome::InFlight`], which also forwards without recording: there a
+    /// claim *was* serialized and the duplicate is bounded by the one racing window.
+    #[error("proxy claim refused: {0}")]
+    Refused(#[source] BackendUnavailable),
 }
 
 /// Convenience alias for fallible proxy-store operations.
@@ -129,7 +148,10 @@ pub trait ProxyRecordingStore: Send + Sync {
     /// [`ClaimOutcome::InFlight`] if another caller already holds the claim and
     /// [`ClaimOutcome::AlreadyRecorded`] if a response is already stored.
     ///
-    /// `Err` = backend unavailable (built-ins never fail).
+    /// `Err(`[`Unavailable`](ProxyStoreError::Unavailable)`)` = backend unavailable; the engine
+    /// degrades and forwards without recording. `Err(`[`Refused`](ProxyStoreError::Refused)`)` =
+    /// the store arbitrates exactly-once and could not answer; the engine fails the request and
+    /// does **not** forward it. Built-ins never fail.
     fn try_claim(&self, port: u16, sig: &RequestSignature) -> Result<ClaimOutcome>;
 
     /// Releases a claim after a failed upstream call so the signature is retryable.

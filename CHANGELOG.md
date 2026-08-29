@@ -38,6 +38,20 @@ record.
 
 ### Added
 
+- **A proxy-recording store can refuse a claim instead of being degraded around.**
+  `ProxyStoreError` gains `Refused(BackendUnavailable)` and becomes `#[non_exhaustive]`. The
+  existing `Unavailable` is unchanged and still means *degrade*: the engine forwards upstream
+  without recording, which is right when the store is a persistence aid and the engine enforces
+  exactly-once itself. `Refused` is for the other case — a store that **is** the exactly-once
+  arbiter (a shared or clustered backend) and could not decide. There, forwarding is the bug: with
+  nothing serializing claims, every request for the duration of the outage reaches the upstream, so
+  the duplicate is bounded by the outage rather than by one racing window. On `Refused` the engine
+  fails the request without calling the upstream, and both proxy-leg response arms (the stub proxy
+  and `defaultForward`) answer it `503` through the existing `backend_error_response` door, naming
+  the backend in `feature`/`detail`. A genuine upstream failure keeps its `502`, and the refusal is
+  not logged as an upstream failure — no upstream was called. `ClaimOutcome::InFlight` is
+  unaffected: a claim *was* serialized there, so that forward stays by design.
+
 - **In-process embedders can detect a TCP fault — `tcp_fault_carrier`** (#965). A TCP fault never
   reaches the wire: Rift builds a placeholder *carrier* response and the serve loop aborts the
   socket instead of sending it. A program embedding the engine and calling

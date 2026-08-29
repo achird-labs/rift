@@ -4295,6 +4295,7 @@ mod tests {
     // =========================================================================
     mod proxy_store {
         use super::*;
+        use crate::extensions::decorate::BackendUnavailable;
         use crate::recording::{
             ClaimOutcome, ClaimToken, LocalProxyStore, ProxyMode, ProxyRecordingStore,
             ProxyStoreError, RecordedResponse, RequestSignature, StubPlacement, StubPublication,
@@ -4306,6 +4307,9 @@ mod tests {
         struct SpyProxyStore {
             inner: LocalProxyStore,
             fail_claim: bool,
+            /// `try_claim` answers `Refused` — the exactly-once arbiter could not decide, so the
+            /// engine must fail the request rather than forward it.
+            refuse_claim: bool,
             fail_record: bool,
             claims: Mutex<Vec<u16>>,
             releases: Mutex<Vec<u16>>,
@@ -4319,8 +4323,25 @@ mod tests {
 
             fn with_faults(fail_claim: bool, fail_record: bool) -> Self {
                 Self {
+                    refuse_claim: false,
+                    ..Self::build(fail_claim, fail_record)
+                }
+            }
+
+            /// The arbiter-cannot-answer path: `try_claim` returns
+            /// [`ProxyStoreError::Refused`], so the engine must fail the request.
+            fn refusing() -> Self {
+                Self {
+                    refuse_claim: true,
+                    ..Self::build(false, false)
+                }
+            }
+
+            fn build(fail_claim: bool, fail_record: bool) -> Self {
+                Self {
                     inner: LocalProxyStore::new(ProxyMode::ProxyOnce),
                     fail_claim,
+                    refuse_claim: false,
                     fail_record,
                     claims: Mutex::new(Vec::new()),
                     releases: Mutex::new(Vec::new()),
@@ -4336,6 +4357,12 @@ mod tests {
                 sig: &RequestSignature,
             ) -> std::result::Result<ClaimOutcome, ProxyStoreError> {
                 self.claims.lock().push(port);
+                if self.refuse_claim {
+                    return Err(ProxyStoreError::Refused(BackendUnavailable {
+                        feature: "spy",
+                        detail: "spy refuses to arbitrate".to_owned(),
+                    }));
+                }
                 if self.fail_claim {
                     return Err(ProxyStoreError::Unavailable("spy".into()));
                 }
@@ -4493,6 +4520,54 @@ mod tests {
                 spy.releases.lock().len(),
                 2,
                 "a failed record releases the claim, so the second request can claim again"
+            );
+
+            manager.delete_all().await;
+        }
+
+        /// The refusal path (rift-cluster#529): when `try_claim` answers `Refused`, the store is
+        /// the exactly-once arbiter and could not decide, so the engine must **fail the request**
+        /// and never call the upstream. Forwarding here would mean a real upstream call for every
+        /// request the outage lasts — the unbounded duplicate `proxyOnce` exists to prevent.
+        ///
+        /// The zero-hit assertion is the load-bearing half: a 503 alone would also be produced by
+        /// an implementation that forwarded first and failed afterwards.
+        #[tokio::test]
+        async fn store_refusal_answers_503_and_never_forwards() {
+            raise_fd_limit();
+            let spy = Arc::new(SpyProxyStore::refusing());
+            let manager = ImposterManager::new()
+                .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
+            let up = upstream(&manager).await;
+            let proxy_port = proxy_imposter(&manager, &format!("http://127.0.0.1:{up}")).await;
+
+            let response = reqwest::get(format!("http://127.0.0.1:{proxy_port}/refused"))
+                .await
+                .expect("request");
+            assert_eq!(
+                response.status(),
+                503,
+                "a refused claim answers 503, not the upstream's response"
+            );
+            let body = response.text().await.expect("body");
+            assert!(
+                body.contains(crate::response::ErrorKind::BackendUnavailable.slug())
+                    && body.contains("spy"),
+                "the #318 envelope must name the backend that refused: {body}"
+            );
+
+            assert_eq!(
+                manager
+                    .get_imposter(up)
+                    .expect("upstream imposter")
+                    .get_request_count(),
+                0,
+                "the upstream must never be called for a refused claim — that duplicate call is \
+                 the whole reason the refusal exists"
+            );
+            assert!(
+                spy.releases.lock().is_empty(),
+                "no claim was granted, so nothing to release"
             );
 
             manager.delete_all().await;
