@@ -285,6 +285,28 @@ fn upstream_error_response(
     )
 }
 
+/// The response for a failed proxy leg — the stub-proxy and `defaultForward` arms share it so the
+/// door is one function rather than two that drift.
+///
+/// A [`BackendUnavailable`](crate::extensions::decorate::BackendUnavailable) anywhere in the chain
+/// means the proxy-recording store *refused* the claim and the request was never forwarded, so the
+/// upstream is not at fault and there is nothing to log as an upstream failure: it answers `503`
+/// through the #318 door, naming the backend. Everything else is a genuine upstream failure and
+/// keeps the `502` it has always had.
+fn proxy_leg_error_response(
+    e: &anyhow::Error,
+    log_context: &str,
+    marker: &'static str,
+    client_prefix: &str,
+) -> Response<Full<Bytes>> {
+    if e.downcast_ref::<crate::extensions::decorate::BackendUnavailable>()
+        .is_some()
+    {
+        return backend_error_response(e);
+    }
+    upstream_error_response(e, log_context, marker, client_prefix)
+}
+
 fn matcher_error_response(e: &anyhow::Error) -> Response<Full<Bytes>> {
     if let Some(t) = e.downcast_ref::<crate::scripting::ScriptTimeoutError>() {
         return inject_timeout_response(
@@ -1071,7 +1093,7 @@ async fn handle_request_inner(
                         }));
                 }
                 Err(e) => {
-                    return Ok(upstream_error_response(
+                    return Ok(proxy_leg_error_response(
                         &e,
                         "Proxy request failed",
                         "x-rift-proxy-error",
@@ -1919,7 +1941,7 @@ async fn handle_request_inner(
                         )
                     }))
             }
-            Err(e) => Ok(upstream_error_response(
+            Err(e) => Ok(proxy_leg_error_response(
                 &e,
                 &format!("defaultForward proxy to {upstream} failed"),
                 "x-rift-default-forward-error",
@@ -2990,7 +3012,7 @@ mod fault_precedence_tests {
 // hole, plus the string-interpolated JSON of the #611 class.
 #[cfg(test)]
 mod upstream_error_tests {
-    use super::{log_upstream_failure, upstream_error_response};
+    use super::{log_upstream_failure, proxy_leg_error_response, upstream_error_response};
     use http_body_util::BodyExt;
     use hyper::StatusCode;
     use tracing_test::traced_test;
@@ -3011,6 +3033,74 @@ mod upstream_error_tests {
             .expect("collect")
             .to_bytes();
         String::from_utf8(bytes.to_vec()).expect("utf8")
+    }
+
+    /// A proxy-recording store that refused the claim: the request never reached the upstream,
+    /// so the proxy leg must answer `503` through the #318 door rather than the `502` that blames
+    /// an upstream nobody called. Mirrors what `handle_proxy_request` returns for
+    /// `ProxyStoreError::Refused` — a `BackendUnavailable` under one `.context()`.
+    fn refusal_error() -> anyhow::Error {
+        anyhow::Error::new(crate::extensions::decorate::BackendUnavailable {
+            feature: "proxyOnce",
+            detail: "owner is isolated from the cluster".to_owned(),
+        })
+        .context("proxyOnce claim refused; request not forwarded")
+    }
+
+    #[tokio::test]
+    async fn proxy_leg_refusal_answers_503_naming_the_backend() {
+        let response = proxy_leg_error_response(
+            &refusal_error(),
+            "Proxy request failed",
+            "x-rift-proxy-error",
+            "Proxy error",
+        );
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a refused claim is a backend outage, not an upstream failure"
+        );
+        let body = body_of(response).await;
+        assert!(
+            body.contains(crate::response::ErrorKind::BackendUnavailable.slug()),
+            "the #318 envelope's type slug must survive: {body}"
+        );
+        assert!(
+            body.contains("proxyOnce"),
+            "the body must name which backend refused: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_leg_upstream_failure_still_answers_502() {
+        let response = proxy_leg_error_response(
+            &chained_error(),
+            "Proxy request failed",
+            "x-rift-proxy-error",
+            "Proxy error",
+        );
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_GATEWAY,
+            "a genuine upstream failure keeps the 502 it has always had"
+        );
+    }
+
+    /// The refusal must not be logged as an upstream failure: no upstream was called, so
+    /// "Proxy request failed" in the log would send an operator to the wrong system.
+    #[traced_test]
+    #[tokio::test]
+    async fn proxy_leg_refusal_is_not_logged_as_an_upstream_failure() {
+        let _ = proxy_leg_error_response(
+            &refusal_error(),
+            "Proxy request failed",
+            "x-rift-proxy-error",
+            "Proxy error",
+        );
+        assert!(
+            !logs_contain("Proxy request failed"),
+            "a refused claim never reached the upstream; blaming it misdirects the operator"
+        );
     }
 
     // Covers all four anyhow log sites at once: they share this function, so none of them can
