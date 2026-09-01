@@ -98,9 +98,16 @@ Warnings indicate potential issues that may cause unexpected behavior.
 | Code | Description | Example |
 |:-----|:------------|:--------|
 | W001 | Privileged port | Port 80 requires root access |
+| W002 | Stub has no responses defined | `{"predicates": [...], "responses": []}` |
+| W003 | Response has both `is` and `proxy` defined | `{"is": {...}, "proxy": {...}}` |
 | W004 | Invalid JSON body | Body isn't JSON but Content-Type is application/json |
+| W005 | Header value is null | `"X-Request-Id": null` |
 | W006 | Small Content-Length | `"Content-Length": "5"` with large body |
+| W007 | Unknown proxy mode | `"mode": "proxyEverything"` |
+| W008 | `shellTransform` contains a potentially dangerous command | `"shellTransform": "rm -rf /tmp/x"` |
 | W009 | Non-function behavior | `"wait": "return 100"` without function wrapper |
+| W010 | Protocol `tcp` is not yet implemented and will fail at runtime | `"protocol": "tcp"` |
+| W011 | Unknown TCP fault type — the fault will not fire at runtime | `{"type": "NONSENSE"}` |
 
 ### Info
 
@@ -110,6 +117,7 @@ Informational messages about configuration patterns.
 |:-----|:------------|
 | I001 | Mountebank slice notation detected (`[:0]`) |
 | I002 | Proxy targets localhost |
+| I003 | Response uses the Rift `_rift` extension (not Mountebank-compatible) |
 
 ---
 
