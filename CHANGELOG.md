@@ -245,6 +245,16 @@ record.
 
 ### Fixed
 
+- **A tuning env var that is set but unusable now says so** (#1009). `HttpTuning::from_env` and
+  `SocketTuning::from_env` fell back to their defaults on any value they could not use — a
+  suffixed `RIFT_HTTP_MAX_BUF=1MB`, a `RIFT_HTTP_HEADER_TIMEOUT=0`, a non-positive
+  `RIFT_TCP_BACKLOG` — with nothing logged, so the only symptom was behaviour that did not match
+  the configuration. Each now logs a `WARN` naming the variable, the value and the reason.
+  - `RIFT_TCP_NODELAY` was the sharpest case: every unrecognised spelling counted as "enabled",
+    so the typo `flase` silently left Nagle disabled, the opposite of what was written.
+  - Behaviour is unchanged for every input — the values produced are exactly what they were, and
+    `RIFT_MAX_CONNECTIONS=0` stays silent because "no cap" is what it asks for and what it gets.
+
 - **The redirect cap now names the URL it gave up on and the limit it hit** (#945). A config fetch
   that looped reported a bare `too many redirects`, so an operator running several sources could
   tell that one of them looped but not which hop it was bouncing on — nor that the 10-hop cap is

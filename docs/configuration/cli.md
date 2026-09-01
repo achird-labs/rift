@@ -394,7 +394,7 @@ Environment variables override CLI defaults:
 | `RIFT_INTERCEPT_CA_KEY_PEM` | Inline PEM CA private key for interception | |
 | `RIFT_DISABLE_HTTP2` | Force HTTP/1-only listeners, disabling HTTP/2 & h2c auto-negotiation (truthy: `1`/`true`/`yes`/`on`) | off |
 | `RIFT_TCP_BACKLOG` | Listen backlog for the accept loop (positive integer) | `1024` |
-| `RIFT_TCP_NODELAY` | `TCP_NODELAY` on accepted sockets; set `false`/`0`/`off` to disable | on |
+| `RIFT_TCP_NODELAY` | `TCP_NODELAY` on accepted sockets; `true`/`1`/`on` enables, `false`/`0`/`off` disables (case-insensitive) | on |
 | `RIFT_HTTP_MAX_BUF` | Per-connection HTTP read/write buffer cap, in bytes (positive integer; floored at hyper's 8 KB minimum). Bounds per-connection memory at high connection counts | `65536` |
 | `RIFT_HTTP_HEADER_TIMEOUT` | Seconds to wait for a client to finish sending request headers before closing the connection (slowloris hygiene; positive integer) | `30` |
 | `RIFT_MAX_CONNECTIONS` | Cap on concurrently-served connections per listener (positive integer). Unset means unlimited; at the cap the server stops accepting until a connection closes, so overload waits in the kernel backlog rather than piling up | unlimited |
@@ -406,6 +406,14 @@ Environment variables override CLI defaults:
 [HTTP/2 and h2c]({{ site.baseurl }}/mountebank/imposters/#http2-and-h2c). `RIFT_TCP_BACKLOG` and
 `RIFT_TCP_NODELAY` are socket-tuning knobs covered under
 [Performance → Runtime socket tuning]({{ site.baseurl }}/performance/#runtime-socket-tuning).
+
+The five tuning knobs above (`RIFT_TCP_BACKLOG`, `RIFT_TCP_NODELAY`, `RIFT_HTTP_MAX_BUF`,
+`RIFT_HTTP_HEADER_TIMEOUT`, `RIFT_MAX_CONNECTIONS`) fall back to their defaults when **unset**.
+A value that is *set* but cannot be used — not a number, out of range, or an unrecognised boolean
+spelling — also falls back, but logs a `WARN` naming the variable, the value and the reason, so a
+typo is visible in the log rather than only in behaviour that does not match the configuration.
+`RIFT_MAX_CONNECTIONS=0` is the one exception: it reads as "no cap", which is what it does, so it
+is accepted silently.
 
 `RIFT_STRICT_BEHAVIORS` and the per-imposter `strictBehaviors` field combine with **OR** — either
 being set enables strict mode. See
