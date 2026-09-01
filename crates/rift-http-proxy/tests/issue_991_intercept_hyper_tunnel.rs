@@ -1,14 +1,20 @@
 //! Issue #991: the decrypted CONNECT tunnel is served by hyper instead of hand-rolled HTTP/1.1.
 //!
 //! These pin the behaviour the swap must preserve (AC3) plus the edge cases the swap newly
-//! exposes — above all that the tunnel still closes after one request. Keep-alive is #993 and is
-//! explicitly out of scope here, so hyper's *default* keep-alive silently shipping it would be a
-//! regression these tests exist to catch.
+//! exposes.
 //!
 //! It also carries issue #995's body-cap battery. #991 is what *made* the cap a refusal rather
 //! than a silent truncation, so the two belong in one file and share its tunnel harness; #995
 //! then pins that refusal on every action path and both framings, which #991 only did for the
 //! forward path.
+//!
+//! And since #993 it carries keep-alive. That issue is the reason the other two are here: #991
+//! held keep-alive back with an explicit `.keep_alive(false)` so that #995 could remove the
+//! truncating reader first, because a reader that left an over-cap body's tail unread in the
+//! socket becomes a request-smuggling primitive the moment the connection is reused. All three
+//! now assert against each other in one place, which is the point —
+//! `a_413_does_not_leak_its_unread_body_into_the_next_request` is #995's clause tested under
+//! #993's connection semantics, and neither issue could have expressed it alone.
 
 use clap::Parser;
 use rift_http_proxy::server::{Cli, ServerBuilder};
@@ -62,30 +68,93 @@ fn proxy_client(intercept: SocketAddr, ca: &str) -> reqwest::Client {
         .expect("client")
 }
 
-/// Drive one request through the tunnel over a raw TLS stream and return the response bytes
-/// exactly as they went over the wire, plus whether the server closed the connection afterwards.
+/// Read exactly one HTTP/1.1 response — the head, then `content-length` body bytes — leaving the
+/// stream positioned at the start of the next one.
 ///
-/// A proxy-aware `reqwest` cannot answer either question: hyper's client strips `connection` from
-/// the headers it surfaces, and its pool hides whether the socket was reused. Both are precisely
-/// what AC3 and #993's out-of-scope-ness turn on, so this reads the socket directly.
-async fn raw_tunnel_request(
+/// Under keep-alive there is no EOF to read to, so this is what makes a second request on the same
+/// tunnel observable at all: it stops at the response boundary rather than blocking, and it cannot
+/// mistake the tail of one response for the head of the next. Returns `None` if the peer closed
+/// before a complete head arrived, which is how a caller distinguishes "connection was dropped"
+/// from "connection was reused".
+///
+/// Deliberately minimal: it understands `content-length` framing only, which is all the intercept
+/// listener emits — every response path builds a `Full<Bytes>` body with an explicit length.
+async fn read_one_response<S>(tls: &mut S) -> Option<String>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        match tokio::time::timeout(std::time::Duration::from_secs(10), tls.read(&mut byte)).await {
+            Ok(Ok(0)) | Err(_) => return None,
+            Ok(Ok(_)) => head.push(byte[0]),
+            Ok(Err(_)) => return None,
+        }
+    }
+
+    let head = String::from_utf8_lossy(&head).into_owned();
+    // Absent `content-length` means a bodyless response, which is a real shape here (`413`, `502`
+    // and the `405`/`407` refusals all carry none). A header that is PRESENT but unparseable is
+    // not the same thing and must not collapse into the same 0: that would leave the real body in
+    // the socket, where the next `read_one_response` would read it as a response head and quietly
+    // corrupt whatever the following test asserted.
+    let len: usize = match head.lines().find_map(|line| {
+        line.split_once(':')
+            .filter(|(n, _)| n.trim().eq_ignore_ascii_case("content-length"))
+    }) {
+        None => 0,
+        Some((_, value)) => value
+            .trim()
+            .parse()
+            .unwrap_or_else(|e| panic!("malformed content-length {value:?} in response head: {e}")),
+    };
+
+    // A `transfer-encoding: chunked` response would desynchronise this reader silently. No
+    // response path emits one today — every one builds a `Full<Bytes>` with an explicit length —
+    // so this is a tripwire for a future change, not a case to handle.
+    assert!(
+        !head.to_ascii_lowercase().contains("transfer-encoding:"),
+        "this reader only understands content-length framing: {head}"
+    );
+
+    let mut body = vec![0u8; len];
+    if len > 0 {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tls.read_exact(&mut body),
+        )
+        .await
+        {
+            // Elapsed, and a clean close before the body arrived, are both "the peer stopped" —
+            // the same signal the head loop reports as `None`.
+            Err(_) => return None,
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return None,
+            // Anything else is a real IO failure. Returning the zero-filled buffer here would hand
+            // the caller NUL padding that reads as a short body, so an assertion like
+            // `!response.contains("smuggled")` would pass on data that was never received.
+            Ok(Err(e)) => panic!("reading {len} body bytes failed: {e}"),
+            Ok(Ok(_)) => {}
+        }
+    }
+    Some(format!("{head}{}", String::from_utf8_lossy(&body)))
+}
+
+/// Drive one request through a fresh tunnel and read back exactly its response.
+///
+/// The keep-alive counterpart of [`raw_tunnel_request`], for the tests that care about what the
+/// server *said* rather than whether it hung up. Since #993 those are the majority.
+async fn raw_tunnel_one_response(
     intercept: SocketAddr,
     ca: &str,
     host: &str,
     request: &str,
-) -> (String, bool) {
+) -> String {
     let mut tls = open_tls_tunnel(intercept, ca, host).await;
     tls.write_all(request.as_bytes()).await.expect("write");
-
-    // Read to EOF. Reaching EOF at all is the evidence the server closed after one response.
-    let mut out = Vec::new();
-    let closed = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        tls.read_to_end(&mut out),
-    )
-    .await
-    .is_ok();
-    (String::from_utf8_lossy(&out).into_owned(), closed)
+    read_one_response(&mut tls)
+        .await
+        .expect("a complete response arrives")
 }
 
 /// Complete the `CONNECT` handshake and the TLS handshake, and hand back the decrypted stream so a
@@ -251,7 +320,7 @@ async fn a_chunked_request_body_is_decoded_and_matched() {
     )
     .await;
 
-    let (response, _) = raw_tunnel_request(
+    let response = raw_tunnel_one_response(
         intercept,
         &ca,
         "cdn.example.com",
@@ -268,38 +337,65 @@ async fn a_chunked_request_body_is_decoded_and_matched() {
     server.shutdown().await;
 }
 
-// ===== E3 / AC3: the tunnel still carries exactly one request =====
+// ===== #993 AC1 + AC2: one tunnel carries successive requests =====
 //
-// Keep-alive across the tunnel is #993 and out of scope. hyper defaults to keep-alive on
-// HTTP/1.1, so shipping this refactor without explicitly disabling it would deliver #993 by
-// accident — and #995's comment records why that ordering is dangerous, not merely premature.
+// This test is the inversion of #991's `every_response_still_closes_the_connection`, which pinned
+// the opposite while keep-alive was deliberately held back. It is flipped rather than deleted
+// because the property it guards did not go away — it reversed, and a deleted test would leave
+// nothing asserting which way round it is.
+//
+// AC2 ("the per-SNI leaf resolver is invoked once, not twice") is satisfied structurally here
+// rather than by counting mints: both requests travel over a single `TlsStream` produced by a
+// single `CONNECT` and a single handshake, and a second handshake on one stream is not
+// expressible. Counting invocations directly would mean adding a counter to `SniCertResolver`
+// purely for a test — production instrumentation for no production reason.
 #[tokio::test]
-async fn every_response_still_closes_the_connection() {
+async fn two_requests_share_one_tunnel_and_one_handshake() {
     let server = start_intercept().await;
     let admin = server.admin_addr();
     let intercept = server.intercept_addr().expect("intercept bound");
     let ca = ca_pem(admin).await;
+    // Two rules with distinct bodies: identical stubs could not tell a genuine second response
+    // apart from a replay or a mis-framed echo of the first.
     add_rule(
         admin,
-        r#"{"host":"cdn.example.com","action":{"serve":{"statusCode":200,"body":"ok"}}}"#,
+        r#"{"host":"cdn.example.com","predicates":[{"equals":{"path":"/a"}}],"action":{"serve":{"statusCode":200,"body":"first-response"}}}"#,
+    )
+    .await;
+    add_rule(
+        admin,
+        r#"{"host":"cdn.example.com","predicates":[{"equals":{"path":"/b"}}],"action":{"serve":{"statusCode":201,"body":"second-response"}}}"#,
     )
     .await;
 
-    let (response, closed) = raw_tunnel_request(
-        intercept,
-        &ca,
-        "cdn.example.com",
-        "GET /a HTTP/1.1\r\nHost: cdn.example.com\r\n\r\n",
-    )
-    .await;
+    let mut tls = open_tls_tunnel(intercept, &ca, "cdn.example.com").await;
 
+    tls.write_all(b"GET /a HTTP/1.1\r\nHost: cdn.example.com\r\n\r\n")
+        .await
+        .expect("write first");
+    let first = read_one_response(&mut tls)
+        .await
+        .expect("first response arrives");
     assert!(
-        response.to_ascii_lowercase().contains("connection: close"),
-        "every response still announces close: {response}"
+        first.starts_with("HTTP/1.1 200") && first.contains("first-response"),
+        "first request answered: {first}"
     );
     assert!(
-        closed,
-        "the server closes the tunnel after one response; keep-alive is #993: {response}"
+        !first.to_ascii_lowercase().contains("connection: close"),
+        "the response no longer announces close, which is what lets the client reuse it: {first}"
+    );
+
+    // The whole point: no new CONNECT, no new TLS handshake, no new leaf certificate.
+    tls.write_all(b"GET /b HTTP/1.1\r\nHost: cdn.example.com\r\n\r\n")
+        .await
+        .expect("write second");
+    let second = read_one_response(&mut tls)
+        .await
+        .expect("second response arrives on the SAME tunnel");
+    assert!(
+        second.starts_with("HTTP/1.1 201") && second.contains("second-response"),
+        "the second request is answered by its own rule on the reused tunnel — a 200 or \
+         `first-response` here would mean the connection was not really reused: {second}"
     );
     server.shutdown().await;
 }
@@ -468,6 +564,13 @@ async fn a_non_connect_head_is_still_405() {
         text.starts_with("HTTP/1.1 405 Method Not Allowed"),
         "a non-CONNECT head is still refused before any TLS: {text}"
     );
+    // #993 AC3: keep-alive stops at the tunnel. This refusal is written straight to the TcpStream
+    // before any tunnel exists, so there is no hyper connection to reuse and it must keep saying
+    // so — `read_to_end` returning above is the matching evidence that it really does hang up.
+    assert!(
+        text.to_ascii_lowercase().contains("connection: close"),
+        "the pre-TLS refusal still announces close even though the tunnel is now keep-alive: {text}"
+    );
     server.shutdown().await;
 }
 
@@ -507,34 +610,29 @@ async fn a_served_stub_still_renders_status_headers_and_body() {
 // no-rule-match paths never look at the body, so an implementation that checked the size only
 // before forwarding would answer 200 to a 2 MiB request and still pass. These close that gap.
 
-/// Like [`raw_tunnel_request`], but tolerates the write failing part-way.
+/// Like [`raw_tunnel_one_response`], but tolerates the write failing part-way.
 ///
-/// An over-cap request is precisely the case where the server answers and closes while the client
-/// is still sending, so `write_all` can return `BrokenPipe` for a request that was nonetheless
-/// answered correctly. Panicking on that (as `raw_tunnel_request` does) would turn the deliverable
-/// refusal the production code goes out of its way to guarantee into a spurious test failure.
+/// An over-cap request is precisely the case where the server answers while the client is still
+/// sending, so `write_all` can return `BrokenPipe` for a request that was nonetheless answered
+/// correctly. Panicking on that would turn the deliverable refusal the production code goes out of
+/// its way to guarantee into a spurious test failure.
+///
+/// It reads one response rather than to EOF. Before #993 those were the same thing; now the tunnel
+/// stays open after a `413`, so reading to EOF spent the full 10-second deadline on every call —
+/// the assertion still held, but it held via a timeout, which is neither fast nor precise.
 async fn raw_tunnel_request_oversize(
     intercept: SocketAddr,
     ca: &str,
     host: &str,
     request: &str,
-) -> (String, bool) {
+) -> String {
     let mut tls = open_tls_tunnel(intercept, ca, host).await;
     // Deliberately unchecked: a short write here is an expected outcome, not a failure. What the
     // caller asserts on is the response that comes back regardless.
     let _ = tls.write_all(request.as_bytes()).await;
-
-    let mut out = Vec::new();
-    // The read outcome is returned rather than discarded purely so a failing caller can tell the
-    // two ways an empty response happens apart: a server that hung to the deadline, and one that
-    // answered and closed. Both render as the same empty string otherwise.
-    let read_completed = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        tls.read_to_end(&mut out),
-    )
-    .await
-    .is_ok();
-    (String::from_utf8_lossy(&out).into_owned(), read_completed)
+    read_one_response(&mut tls)
+        .await
+        .expect("the refusal is delivered even though the client was still writing")
 }
 
 /// Build a chunked request body carrying exactly `decoded_len` bytes, in one chunk.
@@ -709,7 +807,7 @@ async fn an_oversize_chunked_body_is_refused_with_413() {
     )
     .await;
 
-    let (response, read_completed) = raw_tunnel_request_oversize(
+    let response = raw_tunnel_request_oversize(
         intercept,
         &ca,
         "cdn.example.com",
@@ -719,7 +817,7 @@ async fn an_oversize_chunked_body_is_refused_with_413() {
 
     assert!(
         response.starts_with("HTTP/1.1 413"),
-        "a chunked body over the cap is refused, not truncated (read to EOF: {read_completed}): {}",
+        "a chunked body over the cap is refused, not truncated: {}",
         response.chars().take(120).collect::<String>()
     );
     server.shutdown().await;
@@ -748,7 +846,7 @@ async fn a_chunked_body_at_the_cap_is_still_served() {
     )
     .await;
 
-    let (response, _) = raw_tunnel_request(
+    let response = raw_tunnel_one_response(
         intercept,
         &ca,
         "cdn.example.com",
@@ -802,6 +900,222 @@ async fn an_oversize_body_is_never_matched_against_a_body_predicate() {
         413,
         "the matcher is never reached for an over-cap body, so the rule that would have matched \
          its first MiB never fires"
+    );
+    server.shutdown().await;
+}
+
+// ===== #993 AC5 (inherited from #995): an over-cap body cannot smuggle a second request =====
+//
+// This is the security clause that made the #995-before-#993 ordering matter. The cap reads at
+// most 1 MiB and then refuses, so when a client sends more, the tail of that body is still
+// unread in the socket. While every response closed the connection that was inert. Under
+// keep-alive it is a request-smuggling primitive: if the connection were reused with those bytes
+// still buffered, the attacker chooses what the server parses as the *next* request.
+//
+// hyper is what makes this safe, not the refusal itself, and it has TWO branches — measured, not
+// assumed. `Conn::poll_drain_or_close_read` attempts one drain read when the body receiver is
+// dropped: if that consumes the remainder the tunnel is reused from a clean boundary; if it does
+// not, hyper calls `close_read()` and will never read another head. This test pins the REUSE
+// branch by leaving only a small remainder; `a_413_with_a_large_unread_remainder_closes_the_tunnel`
+// pins the close branch. Neither is "the" behaviour, which is why both are here.
+//
+// On the assertions: `!contains("smuggled")` is the obvious one but the weaker one, since a
+// misaligned parse yields a 400 rather than the forged response. The load-bearing assertion is
+// `contains("legit")` — any leftover byte shifts the framing, so the reply to the next request
+// stops being that request's reply. Both are kept; only their relative strength is worth knowing.
+// The oversize body is deliberately made of a repeated forgery of a complete HTTP request, so a
+// server that framed the tail as a request would answer with `smuggled` and nothing else would.
+#[tokio::test]
+async fn a_413_does_not_leak_its_unread_body_into_the_next_request() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    add_rule(
+        admin,
+        r#"{"host":"cdn.example.com","predicates":[{"equals":{"path":"/smuggled"}}],"action":{"serve":{"statusCode":200,"body":"smuggled"}}}"#,
+    )
+    .await;
+    add_rule(
+        admin,
+        r#"{"host":"cdn.example.com","predicates":[{"equals":{"path":"/legit"}}],"action":{"serve":{"statusCode":200,"body":"legit"}}}"#,
+    )
+    .await;
+
+    // Filler up to exactly the cap, then one well-formed forged request. Aligning it this way
+    // matters: `Limited` stops on a frame boundary rather than at byte 1048576, so a body made of
+    // *repeated* forgeries would almost never leave the remainder starting at a request boundary,
+    // and a vulnerable server would answer 400 to a half request rather than `smuggled`. With the
+    // forgery placed at the cap it is genuinely reachable, which is what the assertion below
+    // claims to test.
+    let smuggled = "GET /smuggled HTTP/1.1\r\nHost: cdn.example.com\r\n\r\n";
+    let body = format!("{}{smuggled}", "x".repeat(MAX_BODY_BYTES));
+    assert!(
+        body.len() > MAX_BODY_BYTES,
+        "the body must exceed the cap for this test to mean anything"
+    );
+
+    let mut tls = open_tls_tunnel(intercept, &ca, "cdn.example.com").await;
+    let request = format!(
+        "POST /upload HTTP/1.1\r\nHost: cdn.example.com\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    // Unchecked: the server refuses and may close while we are still sending, so a short write is
+    // an expected outcome here (the same reason `raw_tunnel_request_oversize` exists).
+    let _ = tls.write_all(request.as_bytes()).await;
+
+    let refusal = read_one_response(&mut tls)
+        .await
+        .expect("the refusal is delivered even though the client was still writing");
+    assert!(
+        refusal.starts_with("HTTP/1.1 413"),
+        "the over-cap body is refused: {}",
+        refusal.chars().take(120).collect::<String>()
+    );
+
+    // Now ask for something else entirely. Whatever comes back must not have been manufactured
+    // from the bytes the client left in the socket.
+    let _ = tls
+        .write_all(b"GET /legit HTTP/1.1\r\nHost: cdn.example.com\r\n\r\n")
+        .await;
+    let after = read_one_response(&mut tls).await;
+
+    let after = after.expect(
+        "hyper keeps the tunnel alive after a 413 — measured, 8/8 runs. If a future hyper closes \
+         here instead that is also safe (a closed connection can frame nothing), but it is a \
+         behaviour change that should be accepted deliberately rather than by relaxing this test",
+    );
+    assert!(
+        !after.contains("smuggled"),
+        "SECURITY: the unread tail of the over-cap body was framed as a request. This is the \
+         smuggling primitive #995 warned about, now reachable because the tunnel is keep-alive: {}",
+        after.chars().take(200).collect::<String>()
+    );
+    assert!(
+        after.contains("legit"),
+        "the reused tunnel answers the request the CLIENT actually sent: {}",
+        after.chars().take(200).collect::<String>()
+    );
+    server.shutdown().await;
+}
+
+// The chunked counterpart of the test above, and not redundant with it: chunked framing is where
+// the cap has no declared length to work from, so aborting the read leaves the decoder mid-frame
+// rather than merely short of a known total. If hyper's discard were correct for `content-length`
+// bodies but left a trailing chunk header (or the `0\r\n\r\n` terminator) in the socket, the same
+// smuggling bug would ship through this framing alone. This file already treats the two framings
+// as materially different everywhere else (E3/E4), so pinning only one of them would be an odd
+// place to stop.
+#[tokio::test]
+async fn a_chunked_413_does_not_leak_its_unread_body_into_the_next_request() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    add_rule(
+        admin,
+        r#"{"host":"cdn.example.com","predicates":[{"equals":{"path":"/smuggled"}}],"action":{"serve":{"statusCode":200,"body":"smuggled"}}}"#,
+    )
+    .await;
+    add_rule(
+        admin,
+        r#"{"host":"cdn.example.com","predicates":[{"equals":{"path":"/legit"}}],"action":{"serve":{"statusCode":200,"body":"legit"}}}"#,
+    )
+    .await;
+
+    let smuggled = "GET /smuggled HTTP/1.1\r\nHost: cdn.example.com\r\n\r\n";
+    let payload = smuggled.repeat(MAX_BODY_BYTES / smuggled.len() + 64);
+    assert!(
+        payload.len() > MAX_BODY_BYTES,
+        "the body must exceed the cap"
+    );
+    // One oversize chunk, so the abort lands mid-frame with the terminator never sent — the case a
+    // content-length pre-check cannot see and the one most likely to strand decoder state.
+    let request = format!(
+        "POST /upload HTTP/1.1\r\nHost: cdn.example.com\r\ntransfer-encoding: chunked\r\n\r\n\
+         {:x}\r\n{payload}\r\n0\r\n\r\n",
+        payload.len()
+    );
+
+    let mut tls = open_tls_tunnel(intercept, &ca, "cdn.example.com").await;
+    let _ = tls.write_all(request.as_bytes()).await;
+
+    let refusal = read_one_response(&mut tls)
+        .await
+        .expect("the refusal is delivered");
+    assert!(
+        refusal.starts_with("HTTP/1.1 413"),
+        "the over-cap chunked body is refused: {}",
+        refusal.chars().take(120).collect::<String>()
+    );
+
+    let _ = tls
+        .write_all(b"GET /legit HTTP/1.1\r\nHost: cdn.example.com\r\n\r\n")
+        .await;
+    match read_one_response(&mut tls).await {
+        // Unlike the content-length case this one is NOT pinned to a single outcome: closing after
+        // an aborted chunk decode is a legitimate thing for hyper to do, and asserting reuse here
+        // would pin an implementation detail rather than the safety property.
+        None => {}
+        Some(after) => assert!(
+            !after.contains("smuggled") && after.contains("legit"),
+            "SECURITY: the unread tail of the chunked over-cap body was framed as a request: {}",
+            after.chars().take(200).collect::<String>()
+        ),
+    }
+    server.shutdown().await;
+}
+
+// The other half of `poll_drain_or_close_read`, and the branch a real user is more likely to hit:
+// a 1 MiB cap is usually tripped by a genuinely large upload, not by one that overshoots by a few
+// kilobytes. hyper's single drain read cannot swallow megabytes, so it closes the read side
+// instead — which is equally safe and is why the guarantee is stated as "the tail is never framed
+// as a request" rather than as "the connection is reused".
+#[tokio::test]
+async fn a_413_with_a_large_unread_remainder_closes_the_tunnel() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    add_rule(
+        admin,
+        r#"{"host":"cdn.example.com","predicates":[{"equals":{"path":"/smuggled"}}],"action":{"serve":{"statusCode":200,"body":"smuggled"}}}"#,
+    )
+    .await;
+    add_rule(
+        admin,
+        r#"{"host":"cdn.example.com","predicates":[{"equals":{"path":"/legit"}}],"action":{"serve":{"statusCode":200,"body":"legit"}}}"#,
+    )
+    .await;
+
+    // 8x the cap, so ~7 MiB is still unread when the refusal is written — far past what one drain
+    // read can take.
+    let smuggled = "GET /smuggled HTTP/1.1\r\nHost: cdn.example.com\r\n\r\n";
+    let body = format!("{}{smuggled}", "x".repeat(MAX_BODY_BYTES * 8));
+
+    let mut tls = open_tls_tunnel(intercept, &ca, "cdn.example.com").await;
+    let request = format!(
+        "POST /upload HTTP/1.1\r\nHost: cdn.example.com\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = tls.write_all(request.as_bytes()).await;
+
+    let refusal = read_one_response(&mut tls)
+        .await
+        .expect("the refusal is delivered even though the client was still writing");
+    assert!(
+        refusal.starts_with("HTTP/1.1 413"),
+        "the over-cap body is refused: {}",
+        refusal.chars().take(120).collect::<String>()
+    );
+
+    let _ = tls
+        .write_all(b"GET /legit HTTP/1.1\r\nHost: cdn.example.com\r\n\r\n")
+        .await;
+    assert!(
+        read_one_response(&mut tls).await.is_none(),
+        "with megabytes still unread hyper closes the read side rather than draining, so no \
+         further request is answered on this tunnel — and the leftover bytes die with it"
     );
     server.shutdown().await;
 }

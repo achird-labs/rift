@@ -13,6 +13,20 @@ record.
 
 ### Changed
 
+- **A `CONNECT` tunnel now carries many requests** (#993). Every intercepted response used to set
+  `connection: close`, so a system under test paid a TCP connect, a `CONNECT` round-trip, a TLS
+  handshake and a per-SNI leaf certificate for *every single request* — connection pooling in the
+  SUT's HTTP client was defeated entirely. The tunnel is keep-alive now, which is hyper's HTTP/1.1
+  default and so is simply the removal of the explicit opt-out #991 carried.
+  - The pre-tunnel refusals still close: `405` for a non-`CONNECT` request and `407` for failed
+    proxy auth are answered before a tunnel exists, so there is nothing to reuse.
+  - The unread remainder of a body refused with `413` for exceeding the 1 MiB cap is never framed
+    as the following request. The server makes one attempt to discard it; if that does not consume
+    all of it, the connection's read side is closed instead, so a small overshoot usually leaves
+    the tunnel usable while a large upload ends it. That property is why the cap had to become a
+    refusal (#995) before keep-alive could be enabled, and both branches are pinned by tests that
+    place a well-formed forged request in the over-cap body and assert it is never answered.
+
 - **`rift-lint` reports the same meaning for `E001`/`E002` from every entry point** (#1008). The CLI
   and the published rules table agree that `E001` is an unreadable or unparsable file and `E002` is
   a port conflict. The library API (`lint_file`, `lint_json`) and the TUI's stub validator had the

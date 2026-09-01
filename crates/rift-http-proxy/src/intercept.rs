@@ -323,11 +323,20 @@ async fn serve_tunnel<I>(
         // serve_connection otherwise) — always paired with it.
         .timer(TokioTimer::new())
         .header_read_timeout(http_tuning.header_read_timeout)
-        .max_buf_size(http_tuning.max_buf_size)
-        // Keep-alive across the tunnel is issue #993 and deliberately NOT part of this change.
-        // hyper defaults to keep-alive on HTTP/1.1, so leaving this out would ship #993 by
-        // accident — and #995 records why that ordering is dangerous rather than merely early.
-        .keep_alive(false);
+        .max_buf_size(http_tuning.max_buf_size);
+    // Keep-alive is hyper's HTTP/1.1 default, so enabling it (issue #993) is the *absence* of the
+    // `.keep_alive(false)` #991 carried. What made that ordering matter was #995: a truncating
+    // reader left the tail of an over-cap body unread in the socket, which under keep-alive is the
+    // start of the next request — a smuggling primitive. That reader is gone: bodies are read
+    // through `Limited` and an over-cap one is refused with 413 before any rule sees it.
+    //
+    // What keeps the *tail* safe is hyper, via `Conn::poll_drain_or_close_read`. When the body
+    // receiver is dropped it attempts exactly one drain read; if that consumes the remainder the
+    // connection is reused from a clean framing boundary, and if it does not hyper calls
+    // `close_read()`, which disables keep-alive and stops it ever reading another head. Which
+    // branch you get depends on how much was left, so neither is "the" behaviour — but on both of
+    // them the leftover bytes are unreachable as a request. The two
+    // `*_does_not_leak_its_unread_body_into_the_next_request` tests pin one branch each.
 
     let conn = builder.serve_connection(io, service);
     tokio::pin!(conn);
