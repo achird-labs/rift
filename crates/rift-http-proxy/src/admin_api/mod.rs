@@ -20,6 +20,9 @@ mod server;
 pub mod types;
 
 pub use handlers::imposters::{filter_proxy_responses, filter_proxy_stubs};
+/// The space-stub shape guard (issue #336), for an embedder that terminates
+/// `POST /imposters/:port/spaces/:flowId/stubs` itself rather than proxying to the handler here.
+pub use handlers::scenarios::not_a_stub_reason;
 pub use server::{
     AdminApiServer, AdminExposurePolicy, RunningAdminApi, check_admin_exposure,
     check_intercept_exposure, validate_admin_api_key,

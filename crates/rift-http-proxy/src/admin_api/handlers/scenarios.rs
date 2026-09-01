@@ -283,6 +283,24 @@ const STUB_FIELD_NAMES: [&str; 12] = [
 /// routes keep `additionalProperties: true` and the bare-`{}`-inside-the-envelope allowance exactly
 /// as upstream Mountebank has them.
 fn reject_if_not_a_stub(payload: &serde_json::Value) -> Option<Response<Full<Bytes>>> {
+    let reason = not_a_stub_reason(payload)?;
+    Some(error_response(StatusCode::BAD_REQUEST, &reason))
+}
+
+/// Why `payload` is not shaped like a stub, or `None` if it is (or is not an object at all, which
+/// deserialization refuses on its own with a better message).
+///
+/// The decision half of [`reject_if_not_a_stub`], public because an embedder can *terminate* this
+/// route instead of proxying to the handler above — the clustered admin front answers it as a
+/// replicated write — and must then apply this rule itself. It returns the reason rather than a
+/// `Response` because such an embedder renders refusals in its own error envelope; the rule and
+/// its wording belong here, the rendering belongs to whoever answers.
+///
+/// This exists so there is exactly one [`STUB_FIELD_NAMES`]. A second copy in another crate goes
+/// stale the moment a stub field is added here, and that staleness is invisible and fails the
+/// wrong way: a legitimate stub using the new field is answered `400`.
+#[must_use]
+pub fn not_a_stub_reason(payload: &serde_json::Value) -> Option<String> {
     let object = payload.as_object()?;
     if object
         .keys()
@@ -303,7 +321,7 @@ fn reject_if_not_a_stub(payload: &serde_json::Value) -> Option<Response<Full<Byt
             STUB_FIELD_NAMES.join(", ")
         )
     };
-    Some(error_response(StatusCode::BAD_REQUEST, &message))
+    Some(message)
 }
 
 /// POST /imposters/:port/spaces/:flowId/stubs — register a stub scoped to that space.
@@ -423,5 +441,53 @@ pub async fn handle_teardown_space(
             &serde_json::json!({ "space": flow_id, "tornDown": true }),
         ),
         Err(e) => e.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::not_a_stub_reason;
+
+    #[test]
+    fn a_body_carrying_any_recognised_stub_field_is_a_stub() {
+        assert!(not_a_stub_reason(&serde_json::json!({ "predicates": [] })).is_none());
+        // Shape, not emptiness: an explicitly-authored space-wide default is legal.
+        assert!(not_a_stub_reason(&serde_json::json!({ "responses": [] })).is_none());
+        assert!(not_a_stub_reason(&serde_json::json!({ "_verify": {} })).is_none());
+    }
+
+    #[test]
+    fn the_imposter_level_envelope_is_named_rather_than_described() {
+        let reason = not_a_stub_reason(&serde_json::json!({
+            "stub": { "predicates": [], "responses": [] }
+        }))
+        .expect("the envelope mistake is not a stub");
+        assert!(
+            reason.contains("envelope"),
+            "a caller who sent the sibling route's documented shape has made a specific mistake \
+             and must be told which one: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_body_with_no_recognised_field_lists_the_fields_it_wanted() {
+        let reason = not_a_stub_reason(&serde_json::json!({ "complete": "nonsense", "zzz": 123 }))
+            .expect("no recognised stub field is present");
+        assert!(
+            reason.contains("no recognised stub field present"),
+            "{reason}"
+        );
+        // The message names the list so a caller can see whether it is stale, rather than being
+        // told only that their body was refused.
+        assert!(reason.contains("predicates"), "{reason}");
+    }
+
+    #[test]
+    fn a_payload_that_is_not_an_object_is_left_to_deserialization() {
+        // Not "no reason to refuse" — a different refusal, with a better message, one step later.
+        // The guard only classifies objects; anything else fails `from_value::<Stub>` on its own.
+        assert!(not_a_stub_reason(&serde_json::json!([])).is_none());
+        assert!(not_a_stub_reason(&serde_json::json!("a string")).is_none());
+        assert!(not_a_stub_reason(&serde_json::Value::Null).is_none());
     }
 }
