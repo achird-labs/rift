@@ -1047,6 +1047,52 @@ async fn http_source_caps_the_redirect_chain() {
     }
 }
 
+/// Issue #945: the cap's own message must name the URL it gave up on and the limit it hit.
+///
+/// Neither is redundant with the outer context. That context names the *configured source*; the
+/// URL here is the hop the chain was actually bouncing on, which is what a chain that wanders
+/// across hosts hides. And naming the limit is what tells an operator the cap is ours rather than
+/// reqwest's default — the distinction the whole custom policy exists to make.
+///
+/// Asserted against the literal message rather than "contains the URL somewhere": the outer
+/// context already puts that URL in the chain, so a looser check would pass against the very
+/// message this issue is replacing.
+#[tokio::test]
+async fn redirect_cap_error_names_the_url_and_the_cap() {
+    let origin = Origin::start(Reply::Redirect {
+        location: String::new(),
+    });
+    // The fetch is aimed at /start while every response redirects to /loop, so the hop the cap
+    // trips on is a *different* URL from the one the operator configured. That gap is the point:
+    // it separates "names the URL it gave up on" from "echoes the URL it was handed". A
+    // self-referential fixture, where the two strings coincide, cannot tell those apart.
+    let source_uri = format!("http://127.0.0.1:{}/start", origin.port);
+    let looping_hop = format!("http://127.0.0.1:{}/loop", origin.port);
+    origin.set(Reply::Redirect {
+        location: looping_hop.clone(),
+    });
+
+    let err = HttpSource::with_timeout(Duration::from_secs(5))
+        .unwrap()
+        .fetch(&SourceRef::new(source_uri.clone()))
+        .await
+        .map(|_| ())
+        .expect_err("a redirect loop must terminate as an error");
+
+    let rendered = format!("{err:#}");
+    let expected = format!("too many redirects (limit {REDIRECT_HOP_CAP}): {looping_hop}");
+    assert!(
+        rendered.contains(&expected),
+        "the cap message must name both the limit and the hop it gave up on.\n  expected to contain: {expected}\n  full chain: {rendered}"
+    );
+    // Both facts have to survive, and they come from different places: the hop from our own
+    // policy message, the configured source from the outer `fetching imposter source` context.
+    assert!(
+        rendered.contains(&source_uri),
+        "the chain must still name the configured source, got: {rendered}"
+    );
+}
+
 // ===== Issue #939: the cap assertion must not pass for the wrong reason =====
 
 /// Hops the origin must serve before the fetch gives up, mirroring the `attempt.previous().len()
@@ -1096,7 +1142,7 @@ fn redirect_chain_hit_the_cap(seen: usize, faults: &[String], error: &str) -> Re
 /// every case below that has to look like a genuine capped run, so those cases differ only in the
 /// one input each is about.
 const REDIRECT_FAILURE: &str = "fetching imposter source http://127.0.0.1:1/loop: error following redirect for url \
-     (http://127.0.0.1:1/loop): too many redirects";
+     (http://127.0.0.1:1/loop): too many redirects (limit 10): http://127.0.0.1:1/loop";
 
 #[test]
 fn redirect_cap_check_accepts_a_chain_stopped_by_the_hop_cap() {

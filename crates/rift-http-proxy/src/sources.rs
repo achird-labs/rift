@@ -38,6 +38,13 @@ pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 /// Whole-request budget for an `https:` fetch — connect, headers and body.
 pub const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How many redirects a config fetch may follow before it gives up.
+///
+/// Named rather than inline because the cap is reported to the operator as well as enforced
+/// (issue #945): a literal in both places is a message that silently starts lying the first time
+/// only one of them is edited.
+const MAX_REDIRECTS: usize = 10;
+
 /// A source URI as written on the command line: `file:mocks.json`, `https://host/imposters.json`,
 /// or a bare path (sugar for `file:`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,8 +235,10 @@ impl HttpSource {
                         "refusing to follow a redirect to a non-http(s) URL: {url}"
                     ));
                 }
-                if attempt.previous().len() >= 10 {
-                    return attempt.error(anyhow::anyhow!("too many redirects"));
+                if attempt.previous().len() >= MAX_REDIRECTS {
+                    return attempt.error(anyhow::anyhow!(
+                        "too many redirects (limit {MAX_REDIRECTS}): {url}"
+                    ));
                 }
                 attempt.follow()
             }))

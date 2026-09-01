@@ -225,6 +225,12 @@ record.
 
 ### Fixed
 
+- **The redirect cap now names the URL it gave up on and the limit it hit** (#945). A config fetch
+  that looped reported a bare `too many redirects`, so an operator running several sources could
+  tell that one of them looped but not which hop it was bouncing on — nor that the 10-hop cap is
+  Rift's own rather than reqwest's default, which the custom redirect policy replaces. The cap is
+  now a named constant shared by the check and the message, so the two cannot drift apart.
+
 - **A failing Redis backend's annotation now reaches the `ResponseDecorator`** (#987). Per-request
   operational metadata travels through a tokio **task-local** annotation scope (#318), and
   `spawn_blocking` runs its closure on a pool thread that carries no task-locals — so every
