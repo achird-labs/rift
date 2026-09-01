@@ -9,6 +9,7 @@
 
 use crate::admin_api::DEFAULT_ADMIN_PORT;
 use crate::server::Cli;
+use anyhow::Context;
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -17,11 +18,18 @@ use tracing::{info, warn};
 /// Only sets fields that are still at their clap defaults (i.e., not explicitly supplied
 /// on the command line). Only a subset of keys is supported; unrecognised keys are warned.
 pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow::Error> {
-    let raw = std::fs::read_to_string(rcfile)?;
-    let obj: serde_json::Value = serde_json::from_str(&raw)?;
+    // Every failure path out of this function names the file (issue #946). `--rcfile` is resolved
+    // from more than one place and a fleet can carry several, and neither `std::fs` nor
+    // `serde_json` puts the path in its own error — so an embedder calling this seam directly
+    // (the reason #807 made it public) otherwise gets "No such file or directory", or a line and
+    // column in a document that is never identified.
+    let raw = std::fs::read_to_string(rcfile)
+        .with_context(|| format!("reading rcfile {}", rcfile.display()))?;
+    let obj: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing rcfile {}", rcfile.display()))?;
     let map = obj
         .as_object()
-        .ok_or_else(|| anyhow::anyhow!("rcfile must be a JSON object"))?;
+        .ok_or_else(|| anyhow::anyhow!("rcfile {} must be a JSON object", rcfile.display()))?;
 
     for (key, val) in map {
         match key.as_str() {
@@ -67,8 +75,9 @@ pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow:
                     // because there `false` is the deny state; here it is not.
                     let Some(b) = val.as_bool() else {
                         anyhow::bail!(
-                            "--rcfile: '{key}' must be a JSON boolean, got {val}. Refusing rather \
-                             than silently leaving --require-admin-auth off."
+                            "rcfile {}: '{key}' must be a JSON boolean, got {val}. Refusing \
+                             rather than silently leaving --require-admin-auth off.",
+                            rcfile.display()
                         );
                     };
                     cli.require_admin_auth = b;

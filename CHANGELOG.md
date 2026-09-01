@@ -231,6 +231,17 @@ record.
   Rift's own rather than reqwest's default, which the custom redirect policy replaces. The cap is
   now a named constant shared by the check and the message, so the two cannot drift apart.
 
+- **rcfile failures now name the rcfile** (#946). `apply_rcfile_defaults` took the path and dropped
+  it from every one of its failure paths, and neither `std::fs` nor `serde_json` puts the path in
+  its own error — so an embedder calling this public seam directly (the reason it was promoted out
+  of `main.rs` in #807) saw a bare `No such file or directory`, or a line and column in a document
+  that was never identified. `--rcfile` is resolved from more than one place and a fleet can carry
+  several, which is exactly when that matters.
+  - The `rift` binary itself was already printing the path from the call site, so its warning now
+    renders the whole chain (`{e:#}`) instead of only the outermost context — otherwise the added
+    context would have displaced serde's `trailing comma at line 1 column 15`, which is the half
+    an operator acts on.
+
 - **A failing Redis backend's annotation now reaches the `ResponseDecorator`** (#987). Per-request
   operational metadata travels through a tokio **task-local** annotation scope (#318), and
   `spawn_blocking` runs its closure on a pool thread that carries no task-locals — so every

@@ -104,6 +104,12 @@ fn rcfile_non_boolean_require_admin_auth_is_rejected() {
             err.to_string().contains("requireAdminAuth"),
             "the error must name the offending key, got: {err}"
         );
+        // Issue #946: the key alone does not say which rcfile to go and edit, and this is the
+        // security-gate rejection — the one most worth tracing to a file in a fleet carrying several.
+        assert!(
+            err.to_string().contains(&rcfile.display().to_string()),
+            "the error must name the rcfile it rejected, got: {err}"
+        );
         assert!(
             !parsed.require_admin_auth,
             "a rejected rcfile must not leave the flag half-applied"
@@ -140,14 +146,51 @@ fn rcfile_non_object_is_an_error() {
         err.to_string().contains("object"),
         "the error should name the expected shape, got: {err}"
     );
+    // Issue #946: which rcfile. `--rcfile` is resolved from several places and a fleet can carry
+    // more than one, so the shape alone does not say which file to go and edit.
+    assert!(
+        format!("{err:#}").contains(&rcfile.display().to_string()),
+        "the error must name the rcfile it rejected, got: {err:#}"
+    );
 }
 
 #[test]
 fn rcfile_missing_file_is_an_error() {
     let mut parsed = cli(&[]);
-    let err = bootstrap::apply_rcfile_defaults(&mut parsed, std::path::Path::new("/nope/rift.rc"))
+    let missing = std::path::Path::new("/nope/rift.rc");
+    let err = bootstrap::apply_rcfile_defaults(&mut parsed, missing)
         .expect_err("a missing rcfile must be reported");
-    assert!(!err.to_string().is_empty());
+    // Issue #946: `std::fs` does not put the path in its io errors, so without context of our own
+    // this reads as a bare "No such file or directory" with nothing to act on.
+    assert!(
+        format!("{err:#}").contains(&missing.display().to_string()),
+        "the error must name the rcfile it could not read, got: {err:#}"
+    );
+}
+
+/// Issue #946: the third failure path. A hand-edited rcfile with a stray comma reports serde's
+/// "expected value at line 1 column N", which names a position in a file it never identifies.
+#[test]
+fn rcfile_malformed_json_names_the_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rcfile = write_rcfile(&dir, r#"{"port": 4321,}"#);
+
+    let mut parsed = cli(&[]);
+    let err = bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile)
+        .expect_err("a malformed rcfile must be rejected");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains(&rcfile.display().to_string()),
+        "the error must name the rcfile it could not parse, got: {rendered}"
+    );
+    // The path must be ADDED to serde's diagnosis, not substituted for it. Asserting only the
+    // path passes just as well against a flattening `anyhow!("parsing rcfile {}: {e}")` rewrite,
+    // or against one that drops the source entirely — the chain #951 established is what carries
+    // the line and column, and it is the half an operator actually acts on.
+    assert!(
+        rendered.contains("trailing comma"),
+        "serde's own diagnosis must survive as a link in the chain, got: {rendered}"
+    );
 }
 
 // AC5: stop_server reports a missing pidfile rather than exiting successfully.
