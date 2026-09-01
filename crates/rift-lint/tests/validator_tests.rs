@@ -850,12 +850,20 @@ fn underscore_behaviors_takes_priority_over_behaviors_array() {
 
 // ─── Public API tests ─────────────────────────────────────────────────────────
 
+/// Issue #1008: this asserted `E002`, encoding the collision rather than the contract — the
+/// published table and the CLI both use `E001` for unparsable JSON and reserve `E002` for the
+/// port conflict. The library now agrees with them, so the assertion moves with it.
 #[test]
-fn lint_json_invalid_json_gives_e002() {
+fn lint_json_invalid_json_gives_e001() {
     let result = lint_json("{not json}", "<test>", &opts());
     assert!(
-        has_code(&result, "E002"),
-        "expected E002, got {:?}",
+        has_code(&result, "E001"),
+        "expected E001, got {:?}",
+        codes(&result)
+    );
+    assert!(
+        !has_code(&result, "E002"),
+        "E002 is the port conflict and must not be reported for a syntax error: {:?}",
         codes(&result)
     );
 }
