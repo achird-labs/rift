@@ -4,6 +4,32 @@
 
 set -e
 
+usage() {
+    echo "Install git hooks for Rift development"
+    echo "This script copies the pre-push hook to .git/hooks/"
+    echo ""
+    echo "Usage: install-git-hooks.sh [options]"
+    echo ""
+    echo "Options:"
+    echo "  --help, -h    Show this help message"
+}
+
+# Parsed before anything touches .git/hooks, so --help explains the script instead of running it.
+# An `if` rather than the usual option loop: the script takes no non-flag arguments, so every
+# branch below is terminal and a loop could never reach a second iteration.
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1. Use --help for usage." >&2
+            exit 1
+            ;;
+    esac
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HOOKS_DIR="$REPO_ROOT/.git/hooks"

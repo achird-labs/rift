@@ -10,6 +10,8 @@ From the repository root, run:
 ./scripts/install-git-hooks.sh
 ```
 
+Pass `--help` (or `-h`) to see what the script does without installing anything.
+
 ## Available Hooks
 
 ### pre-push
