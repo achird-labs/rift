@@ -13,6 +13,18 @@ record.
 
 ### Changed
 
+- **`rift-lint` reports the same meaning for `E001`/`E002` from every entry point** (#1008). The CLI
+  and the published rules table agree that `E001` is an unreadable or unparsable file and `E002` is
+  a port conflict. The library API (`lint_file`, `lint_json`) and the TUI's stub validator had the
+  two the other way round, so a caller who got `E002` for a JSON syntax error and looked it up read
+  "port conflict". Both now emit `E001`, matching the CLI and the docs.
+  - **Library/TUI callers matching on `E002` for invalid JSON must match `E001` instead.** CLI
+    output is unchanged, so `rift-lint` invocations and anything parsing its JSON report are
+    unaffected.
+  - The error table now documents all 41 codes rather than 9, and the coverage test added in #942
+    was widened to error codes — scanning `lib.rs` and `main.rs` as well as `validator.rs`, since
+    `E001`/`E002` are emitted only by the entry points.
+
 - **The HTTPS intercept tunnel is served by hyper** (#991). After the `CONNECT` tunnel is
   TLS-terminated, the decrypted stream is now handed to `hyper::server::conn::http1` with a
   `service_fn`, the same way every imposter connection is served — replacing the hand-written

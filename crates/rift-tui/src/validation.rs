@@ -37,7 +37,9 @@ pub fn validate_stub_json(json: &str) -> ValidationReport {
             return ValidationReport {
                 issues: vec![ValidationIssue {
                     severity: IssueSeverity::Error,
-                    code: "E002".to_string(),
+                    // E001 is the documented code for unparsable JSON; E002 is the port
+                    // conflict (issue #1008).
+                    code: "E001".to_string(),
                     message: format!("Invalid JSON: {e}"),
                     location: None,
                     suggestion: Some("Fix the JSON syntax errors".to_string()),
