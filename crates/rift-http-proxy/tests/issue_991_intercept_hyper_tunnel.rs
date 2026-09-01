@@ -4,6 +4,11 @@
 //! exposes — above all that the tunnel still closes after one request. Keep-alive is #993 and is
 //! explicitly out of scope here, so hyper's *default* keep-alive silently shipping it would be a
 //! regression these tests exist to catch.
+//!
+//! It also carries issue #995's body-cap battery. #991 is what *made* the cap a refusal rather
+//! than a silent truncation, so the two belong in one file and share its tunnel harness; #995
+//! then pins that refusal on every action path and both framings, which #991 only did for the
+//! forward path.
 
 use clap::Parser;
 use rift_http_proxy::server::{Cli, ServerBuilder};
@@ -490,5 +495,313 @@ async fn a_served_stub_still_renders_status_headers_and_body() {
         Some("on")
     );
     assert_eq!(resp.text().await.expect("body"), r#"{"featureX":"ON"}"#);
+    server.shutdown().await;
+}
+
+// ===== Issue #995: the 1 MiB cap refuses on every path and both framings =====
+//
+// #991 shipped the refusal itself (`read_limited_body` reads through `http_body_util::Limited`
+// and maps `LengthLimitError` to 413), and pinned it on the *forward* path only — see
+// `an_oversize_request_body_is_refused_with_413` above. That single test cannot tell a cap
+// enforced in the reader from a cap enforced where the body happens to be *used*: the serve and
+// no-rule-match paths never look at the body, so an implementation that checked the size only
+// before forwarding would answer 200 to a 2 MiB request and still pass. These close that gap.
+
+/// Like [`raw_tunnel_request`], but tolerates the write failing part-way.
+///
+/// An over-cap request is precisely the case where the server answers and closes while the client
+/// is still sending, so `write_all` can return `BrokenPipe` for a request that was nonetheless
+/// answered correctly. Panicking on that (as `raw_tunnel_request` does) would turn the deliverable
+/// refusal the production code goes out of its way to guarantee into a spurious test failure.
+async fn raw_tunnel_request_oversize(
+    intercept: SocketAddr,
+    ca: &str,
+    host: &str,
+    request: &str,
+) -> (String, bool) {
+    let mut tls = open_tls_tunnel(intercept, ca, host).await;
+    // Deliberately unchecked: a short write here is an expected outcome, not a failure. What the
+    // caller asserts on is the response that comes back regardless.
+    let _ = tls.write_all(request.as_bytes()).await;
+
+    let mut out = Vec::new();
+    // The read outcome is returned rather than discarded purely so a failing caller can tell the
+    // two ways an empty response happens apart: a server that hung to the deadline, and one that
+    // answered and closed. Both render as the same empty string otherwise.
+    let read_completed = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tls.read_to_end(&mut out),
+    )
+    .await
+    .is_ok();
+    (String::from_utf8_lossy(&out).into_owned(), read_completed)
+}
+
+/// Build a chunked request body carrying exactly `decoded_len` bytes, in one chunk.
+///
+/// The cap applies to the *decoded* length, so the encoded frame is deliberately larger — that
+/// difference is what distinguishes a limit applied to the wire bytes from one applied to the
+/// body, and E4 below turns on it.
+fn chunked_request(host: &str, decoded_len: usize) -> String {
+    let body = "x".repeat(decoded_len);
+    format!(
+        "POST /upload HTTP/1.1\r\nHost: {host}\r\ntransfer-encoding: chunked\r\n\r\n\
+         {decoded_len:x}\r\n{body}\r\n0\r\n\r\n"
+    )
+}
+
+// AC1 (serve) / E1 / E6. The serve action never reads the request body, so this is the path a
+// use-site cap would leak on.
+#[tokio::test]
+async fn an_oversize_body_on_a_serve_rule_is_refused_with_413() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    add_rule(
+        admin,
+        r#"{"host":"cdn.example.com","action":{"serve":{"statusCode":200,"body":"served"}}}"#,
+    )
+    .await;
+
+    let resp = proxy_client(intercept, &ca)
+        .post("https://cdn.example.com/upload")
+        .body("x".repeat(MAX_BODY_BYTES + 1))
+        .send()
+        .await
+        .expect("intercepted");
+
+    assert_eq!(
+        resp.status(),
+        413,
+        "the cap is enforced in the reader, so a serve rule that never looks at the body is \
+         refused just the same"
+    );
+    // E6: the same framing discipline the 502 path is held to — declare an empty body rather than
+    // leaning on close-framing, so a client reading content-length is not left waiting.
+    assert_eq!(
+        resp.headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
+        Some("0"),
+        "413 declares an empty body"
+    );
+    assert_eq!(resp.text().await.expect("body"), "", "413 carries no body");
+    server.shutdown().await;
+}
+
+// AC1 (no-rule-match) / E2. With no rule at all the listener answers its default 200; the cap must
+// still bite first.
+#[tokio::test]
+async fn an_oversize_body_with_no_matching_rule_is_refused_with_413() {
+    let server = start_intercept().await;
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(server.admin_addr()).await;
+    // No rule added on purpose: this is the default path, which
+    // `no_rule_match_still_answers_the_slice3_200` pins at 200 for an ordinary request.
+
+    let resp = proxy_client(intercept, &ca)
+        .post("https://cdn.example.com/upload")
+        .body("x".repeat(MAX_BODY_BYTES + 1))
+        .send()
+        .await
+        .expect("intercepted");
+
+    assert_eq!(
+        resp.status(),
+        413,
+        "the default no-rule-match path refuses an oversize body rather than answering its 200"
+    );
+    server.shutdown().await;
+}
+
+// AC2. The forward-path test above uses a dead port, so it proves only that no *successful*
+// forward happened — a 502 and a refusal are distinguishable there, but "the imposter recorded
+// nothing" is not something a dead port can attest to. This forwards at a live recording imposter
+// and reads its request log back.
+#[tokio::test]
+async fn an_oversize_body_reaches_no_imposter() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    let http = reqwest::Client::new();
+
+    // Port omitted so the manager auto-assigns a free one — a hardcoded port makes this test
+    // collide with any other test binary running concurrently.
+    let created: serde_json::Value = http
+        .post(format!("http://{admin}/imposters"))
+        .json(&serde_json::json!({
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "from-imposter"}}]}]
+        }))
+        .send()
+        .await
+        .expect("create imposter")
+        .json()
+        .await
+        .expect("imposter json");
+    let imposter_port = created["port"].as_u64().expect("assigned port");
+
+    add_rule(
+        admin,
+        &format!(
+            r#"{{"host":"cdn.example.com","action":{{"forward":{{"port":{imposter_port}}}}}}}"#
+        ),
+    )
+    .await;
+
+    // Control: an ordinary request does reach the imposter, so a zero count below means the cap
+    // stopped this one — not that the rule never worked.
+    let ok = proxy_client(intercept, &ca)
+        .post("https://cdn.example.com/upload")
+        .body("small")
+        .send()
+        .await
+        .expect("intercepted");
+    assert_eq!(ok.status(), 200, "the forward rule reaches the imposter");
+    assert_eq!(ok.text().await.expect("body"), "from-imposter");
+
+    let oversize = proxy_client(intercept, &ca)
+        .post("https://cdn.example.com/upload")
+        .body("x".repeat(MAX_BODY_BYTES + 1))
+        .send()
+        .await
+        .expect("intercepted");
+    assert_eq!(oversize.status(), 413);
+
+    let recorded: serde_json::Value = http
+        .get(format!("http://{admin}/imposters/{imposter_port}"))
+        .send()
+        .await
+        .expect("read imposter")
+        .json()
+        .await
+        .expect("imposter json");
+    let requests = recorded["requests"]
+        .as_array()
+        .expect("recordRequests is on, so the log is present");
+    assert_eq!(
+        requests.len(),
+        1,
+        "only the small request was forwarded; the oversize one never reached the imposter, \
+         got {requests:?}"
+    );
+    assert_eq!(
+        requests[0]["body"], "small",
+        "and the one that did arrive is the small one, not a 1 MiB truncation of the other"
+    );
+    server.shutdown().await;
+}
+
+// AC3 / E3. Chunked framing declares no length up front, so a `content-length` pre-check cannot
+// catch this — only counting bytes as they decode can.
+#[tokio::test]
+async fn an_oversize_chunked_body_is_refused_with_413() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    add_rule(
+        admin,
+        r#"{"host":"cdn.example.com","action":{"serve":{"statusCode":200,"body":"served"}}}"#,
+    )
+    .await;
+
+    let (response, read_completed) = raw_tunnel_request_oversize(
+        intercept,
+        &ca,
+        "cdn.example.com",
+        &chunked_request("cdn.example.com", MAX_BODY_BYTES + 1),
+    )
+    .await;
+
+    assert!(
+        response.starts_with("HTTP/1.1 413"),
+        "a chunked body over the cap is refused, not truncated (read to EOF: {read_completed}): {}",
+        response.chars().take(120).collect::<String>()
+    );
+    server.shutdown().await;
+}
+
+// E4. The chunked counterpart of `a_body_at_the_cap_is_still_served`: the cap counts decoded
+// bytes, so a frame whose encoding pushes it over the limit must still be accepted. At the cap the
+// encoded frame is 1048589 bytes — over 1 MiB — so a limit applied to wire bytes really would
+// refuse this, which is what makes the test discriminating rather than a duplicate of the
+// content-length boundary test.
+//
+// This one drives the STRICT helper on purpose. `raw_tunnel_request_oversize` exists because an
+// over-cap request is answered while the client is still writing, so a short write is expected
+// there; at the cap the server consumes the whole body and the write must succeed. Tolerating a
+// write failure here would trade a real assertion for nothing — an early close would show up as a
+// read timeout rather than as the write error it is.
+#[tokio::test]
+async fn a_chunked_body_at_the_cap_is_still_served() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    add_rule(
+        admin,
+        r#"{"host":"cdn.example.com","action":{"serve":{"statusCode":200,"body":"accepted"}}}"#,
+    )
+    .await;
+
+    let (response, _) = raw_tunnel_request(
+        intercept,
+        &ca,
+        "cdn.example.com",
+        &chunked_request("cdn.example.com", MAX_BODY_BYTES),
+    )
+    .await;
+
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "a chunked body of exactly the cap is accepted — the limit counts decoded bytes, not the \
+         larger encoded frame: {}",
+        response.chars().take(120).collect::<String>()
+    );
+    assert!(
+        response.contains("accepted"),
+        "and the stub was served: {}",
+        response.chars().take(200).collect::<String>()
+    );
+    server.shutdown().await;
+}
+
+// E5. The direct anti-regression for "truncate, then match": a predicate that would match the
+// first MiB must not fire, because the request is refused before the matcher is reached.
+#[tokio::test]
+async fn an_oversize_body_is_never_matched_against_a_body_predicate() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    // `contains` over a run of 'x' is satisfied by any 1 MiB prefix of the oversize body below, so
+    // this rule fires for exactly the truncated-then-matched behaviour #995 was filed about.
+    add_rule(
+        admin,
+        r#"{"host":"cdn.example.com","predicates":[{"contains":{"body":"xxxxx"}}],"action":{"serve":{"statusCode":200,"body":"matched-a-truncated-body"}}}"#,
+    )
+    .await;
+
+    let resp = proxy_client(intercept, &ca)
+        .post("https://cdn.example.com/upload")
+        .body("x".repeat(MAX_BODY_BYTES + 1))
+        .send()
+        .await
+        .expect("intercepted");
+
+    // Status alone settles it: the stub answers 200 with its own marker body, so a 413 is only
+    // reachable if the refusal happened before the matcher ran. A second assertion on the body
+    // would read as an independent check but could never fail once this one holds — `413` is
+    // built by `status_response`, which always carries an empty body.
+    assert_eq!(
+        resp.status(),
+        413,
+        "the matcher is never reached for an over-cap body, so the rule that would have matched \
+         its first MiB never fires"
+    );
     server.shutdown().await;
 }
