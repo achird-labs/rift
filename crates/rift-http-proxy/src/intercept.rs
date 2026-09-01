@@ -91,11 +91,16 @@ enum BodyReadError {
     Incomplete(String),
 }
 
-/// A running intercept listener. Dropping the handle does not stop it; call
-/// [`InterceptListener::shutdown`] for a clean stop.
+/// A running intercept listener. Call [`InterceptListener::shutdown`] for a clean stop — that is
+/// the only way to *wait* for the accept loop to exit.
+///
+/// The stop signal is a broadcast rather than a watch (issue #1010) because it has two audiences:
+/// the accept loop, and every decrypted tunnel currently being served. Holding the only `Sender`
+/// here is what makes dropping the listener safe as well — every receiver observes the close and
+/// drains, instead of tunnels outliving the handle that owned them.
 pub struct InterceptListener {
     local_addr: SocketAddr,
-    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
     handle: JoinHandle<()>,
 }
 
@@ -129,20 +134,27 @@ impl InterceptListener {
         // Read once at bind rather than per connection: the knobs are process-wide env vars, and
         // this listener now shares them with every other one (issue #991).
         let http_tuning = HttpTuning::from_env();
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
 
         let handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = shutdown_rx.changed() => break,
+                    _ = shutdown_rx.recv() => break,
                     accepted = listener.accept() => match accepted {
                         Ok((stream, peer)) => {
                             let tls = tls.clone();
                             let rules = rules.clone();
                             let forward_client = forward_client.clone();
                             let auth = auth.clone();
+                            // Taken here, before the spawn: a broadcast receiver only sees sends
+                            // that happen after it exists, so subscribing inside the task would
+                            // race `shutdown()` and could miss the signal entirely. Derived from
+                            // the loop's own receiver rather than from a `Sender` clone — holding
+                            // a second sender in here would stop `recv()` ever reporting `Closed`,
+                            // and the drop path above depends on it doing so.
+                            let conn_shutdown_rx = shutdown_rx.resubscribe();
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(stream, tls, rules, forward_client, auth, http_tuning).await {
+                                if let Err(e) = handle_connection(stream, tls, rules, forward_client, auth, http_tuning, conn_shutdown_rx).await {
                                     tracing::debug!(%peer, error = %e, "intercept connection ended");
                                 }
                             });
@@ -169,8 +181,13 @@ impl InterceptListener {
     }
 
     /// Signal the accept loop to stop and wait for it to finish.
+    ///
+    /// The same signal reaches every tunnel in flight, which stops accepting new requests on its
+    /// connection and closes once the current one completes (issue #1010). Like the imposter path
+    /// it mirrors, this does not *await* those connections — an in-flight request finishes in the
+    /// background; an idle tunnel closes at once.
     pub async fn shutdown(self) {
-        let _ = self.shutdown_tx.send(true);
+        let _ = self.shutdown_tx.send(());
         log_accept_loop_exit(self.handle.await);
     }
 }
@@ -218,6 +235,7 @@ async fn handle_connection(
     forward_client: reqwest::Client,
     auth: Option<Arc<InterceptAuth>>,
     http_tuning: HttpTuning,
+    shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> anyhow::Result<()> {
     let head = timeout(IO_TIMEOUT, read_connect_head(&mut stream))
         .await
@@ -270,7 +288,7 @@ async fn handle_connection(
         rules,
         forward_client,
     });
-    serve_tunnel(TokioIo::new(tls_stream), ctx, http_tuning).await;
+    serve_tunnel(TokioIo::new(tls_stream), ctx, http_tuning, shutdown_rx).await;
     Ok(())
 }
 
@@ -278,13 +296,18 @@ async fn handle_connection(
 /// served (`rift_mock_core::imposter::manager::run_http1`). Request framing, header validation and
 /// response serialization are hyper's job from here down.
 ///
-/// One thing it does *not* borrow from `run_http1`: that function selects on a shutdown receiver
-/// and calls `graceful_shutdown()`, whereas this awaits the connection unconditionally. So
-/// [`InterceptListener::shutdown`] stops the accept loop without draining in-flight tunnels — the
-/// same as before #991, when connection tasks were likewise detached, but now a visible gap rather
-/// than an accident of the two being written differently.
-async fn serve_tunnel<I>(io: I, ctx: Arc<TunnelCtx>, http_tuning: HttpTuning)
-where
+/// Including the shutdown handling: like `run_http1`, this selects on a shutdown receiver and calls
+/// `graceful_shutdown()` (issue #1010), so [`InterceptListener::shutdown`] drains in-flight tunnels
+/// instead of abandoning them.
+///
+/// A connection still in its TLS handshake has not reached this function and so does not observe
+/// the signal — the same as the imposter path, and bounded by the handshake itself.
+async fn serve_tunnel<I>(
+    io: I,
+    ctx: Arc<TunnelCtx>,
+    http_tuning: HttpTuning,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin,
 {
     let service = service_fn(move |req: Request<Incoming>| {
@@ -306,8 +329,23 @@ where
         // accident — and #995 records why that ordering is dangerous rather than merely early.
         .keep_alive(false);
 
-    if let Err(e) = builder.serve_connection(io, service).await {
-        tracing::debug!(error = %e, "intercept tunnel connection ended");
+    let conn = builder.serve_connection(io, service);
+    tokio::pin!(conn);
+    tokio::select! {
+        res = conn.as_mut() => {
+            if let Err(e) = res {
+                tracing::debug!(error = %e, "intercept tunnel connection ended");
+            }
+        }
+        // Any `recv()` outcome means stop: `Ok` is an explicit shutdown, `Closed` is the listener
+        // being dropped without one. Matching only `Ok` would leave a dropped listener's tunnels
+        // running, which is the case the broadcast sender's ownership was arranged to cover.
+        _ = shutdown_rx.recv() => {
+            conn.as_mut().graceful_shutdown();
+            if let Err(e) = conn.as_mut().await {
+                tracing::debug!(error = %e, "intercept tunnel connection ended during shutdown");
+            }
+        }
     }
 }
 
@@ -1366,6 +1404,141 @@ mod tests {
         assert_eq!(resp.status(), 200);
 
         listener.shutdown().await;
+    }
+
+    /// A client-side TLS connector that trusts only the intercept CA (issue #1010).
+    ///
+    /// The provider is passed explicitly rather than relying on a process-wide default: these
+    /// tests can run before anything installs one, and the failure mode there is a panic inside
+    /// rustls rather than a readable assertion.
+    fn tls_client_connector(ca_pem: &str) -> tokio_rustls::TlsConnector {
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut ca_pem.as_bytes()) {
+            roots
+                .add(cert.expect("ca cert parses"))
+                .expect("ca trusted");
+        }
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("client config")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        tokio_rustls::TlsConnector::from(Arc::new(config))
+    }
+
+    /// Issue #1010: an established tunnel that has not yet sent a request must be closed by
+    /// `shutdown()`, not left to expire on its own.
+    ///
+    /// Before this change the shutdown signal reached only the accept loop, so such a socket
+    /// survived until `header_read_timeout` (30s by default) — `shutdown()` returned while the
+    /// listener still held it. The bound below is far under that timeout, so this fails on the
+    /// old behaviour rather than merely being slow.
+    #[tokio::test]
+    async fn shutdown_closes_a_tunnel_awaiting_its_first_request() {
+        let (listener, ca_pem) = start_listener(InterceptRules::new()).await;
+        let addr = listener.local_addr();
+
+        let mut sock = TcpStream::connect(addr).await.unwrap();
+        sock.write_all(b"CONNECT cdn.example.com:443 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut head = [0u8; 128];
+        let n = sock.read(&mut head).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&head[..n]).starts_with("HTTP/1.1 200"),
+            "CONNECT should be accepted before the tunnel exists"
+        );
+
+        // A completed handshake is what puts the connection inside `serve_tunnel`, which is the
+        // only place the drain can act. Stopping at CONNECT would test nothing.
+        let server_name = rustls::pki_types::ServerName::try_from("cdn.example.com")
+            .unwrap()
+            .to_owned();
+        let mut tls = tls_client_connector(&ca_pem)
+            .connect(server_name, sock)
+            .await
+            .expect("client handshake against the minted leaf");
+
+        listener.shutdown().await;
+
+        let mut byte = [0u8; 1];
+        match tokio::time::timeout(Duration::from_secs(5), tls.read(&mut byte)).await {
+            // EOF, or a transport-level close — either is the tunnel being closed.
+            Ok(Ok(0)) | Ok(Err(_)) => {}
+            Ok(Ok(_)) => panic!("an idle tunnel answered bytes after shutdown"),
+            Err(_) => {
+                panic!("shutdown() returned but the idle tunnel was still open five seconds later")
+            }
+        }
+    }
+
+    /// The other half, and the one that separates a graceful drain from an abort: a request that
+    /// is already in flight when `shutdown()` lands must still get its complete response.
+    ///
+    /// Without this, "close every tunnel on shutdown" would pass the test above while cutting
+    /// live requests off mid-response.
+    #[tokio::test]
+    async fn shutdown_lets_an_in_flight_request_complete() {
+        let (received_tx, received_rx) = tokio::sync::oneshot::channel();
+
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = upstream.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf).await;
+                // Tell the test the request is genuinely in flight, then stall long enough that
+                // `shutdown()` is guaranteed to land while it still is.
+                let _ = received_tx.send(());
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                let body = "drained";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+                let _ = s.shutdown().await;
+            }
+        });
+
+        let rules = InterceptRules::new();
+        rules
+            .add(InterceptRule {
+                host: None,
+                predicates: vec![],
+                action: InterceptAction::Forward(ForwardTarget {
+                    port: upstream_port,
+                }),
+            })
+            .unwrap();
+        let (listener, ca_pem) = start_listener(rules).await;
+        let proxy_url = format!("http://{}", listener.local_addr());
+        let client = trusting_client(&proxy_url, &ca_pem);
+
+        let request = tokio::spawn(async move {
+            client
+                .get("https://cdn.example.com/slow")
+                .send()
+                .await
+                .expect("in-flight request must survive shutdown")
+                .text()
+                .await
+                .expect("body must arrive complete")
+        });
+
+        received_rx.await.expect("upstream received the request");
+        listener.shutdown().await;
+
+        let body = tokio::time::timeout(Duration::from_secs(10), request)
+            .await
+            .expect("the in-flight request must not hang")
+            .expect("request task");
+        assert_eq!(
+            body, "drained",
+            "shutdown must drain the in-flight request, not abort it"
+        );
     }
 
     #[tokio::test]
