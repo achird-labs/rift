@@ -225,6 +225,12 @@ record.
 
 ### Fixed
 
+- **The redirect cap now names the URL it gave up on and the limit it hit** (#945). A config fetch
+  that looped reported a bare `too many redirects`, so an operator running several sources could
+  tell that one of them looped but not which hop it was bouncing on — nor that the 10-hop cap is
+  Rift's own rather than reqwest's default, which the custom redirect policy replaces. The cap is
+  now a named constant shared by the check and the message, so the two cannot drift apart.
+
 - **rcfile failures now name the rcfile** (#946). `apply_rcfile_defaults` took the path and dropped
   it from every one of its failure paths, and neither `std::fs` nor `serde_json` puts the path in
   its own error — so an embedder calling this public seam directly (the reason it was promoted out
