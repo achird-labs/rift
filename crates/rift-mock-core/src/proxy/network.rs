@@ -8,6 +8,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
+use tracing::warn;
 
 /// Default listen backlog; overridable via `RIFT_TCP_BACKLOG`.
 const DEFAULT_BACKLOG: i32 = 1024;
@@ -46,6 +47,106 @@ pub struct HttpTuning {
     pub max_connections: Option<usize>,
 }
 
+/// Why a tuning value that was *present* could not be used (issue #1009).
+///
+/// An enum rather than a string so each case is asserted exactly in tests, and so the rendered
+/// wording lives in one place — the operator reading the log needs the bound, not "unparsable".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackReason {
+    /// Not a number at all — a suffix (`1MB`), a typo, or an empty value.
+    NotANumber,
+    /// A number, but under the floor hyper requires.
+    BelowMinimum,
+    /// A number, but zero or negative where the knob needs a positive one.
+    NotPositive,
+    /// Not one of the accepted boolean spellings.
+    UnrecognizedBoolean,
+}
+
+impl std::fmt::Display for FallbackReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotANumber => f.write_str("not a number"),
+            Self::BelowMinimum => write!(
+                f,
+                "below the {HYPER_H1_MIN_MAX_BUF}-byte minimum hyper requires"
+            ),
+            Self::NotPositive => f.write_str("must be greater than zero"),
+            Self::UnrecognizedBoolean => {
+                f.write_str("not a recognized boolean (true/1/on or false/0/off)")
+            }
+        }
+    }
+}
+
+/// One environment value that was set but had to be ignored.
+///
+/// Returned from the pure parsers rather than logged by them: `parse` stays env-free and
+/// side-effect-free (its existing design goal), and the tests can assert on what *would* be
+/// warned without capturing a tracing subscriber.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuningFallback {
+    var: &'static str,
+    value: String,
+    reason: FallbackReason,
+}
+
+impl TuningFallback {
+    fn new(var: &'static str, value: &str, reason: FallbackReason) -> Self {
+        Self {
+            var,
+            value: value.to_string(),
+            reason,
+        }
+    }
+}
+
+/// Emit one `warn` per ignored value.
+///
+/// Deliberately not gated by a `Once`: this fires only when a value is actually unusable, and a
+/// line per listener start sits next to that listener's own startup output where an operator will
+/// connect it to the right process.
+fn warn_fallbacks(fallbacks: &[TuningFallback]) {
+    for f in fallbacks {
+        warn!(
+            var = f.var,
+            value = %f.value,
+            reason = %f.reason,
+            "ignoring unusable tuning value; using the default instead"
+        );
+    }
+}
+
+/// Parse a number, recording *why* it was unusable rather than collapsing every failure into a
+/// silent default. An unset value is the domain-optional case and reports nothing.
+fn parse_number<T>(
+    var: &'static str,
+    raw: Option<&str>,
+    accept: impl Fn(&T) -> bool,
+    rejected: FallbackReason,
+    out: &mut Vec<TuningFallback>,
+) -> Option<T>
+where
+    T: std::str::FromStr,
+{
+    let trimmed = raw?.trim();
+    match trimmed.parse::<T>() {
+        Ok(v) if accept(&v) => Some(v),
+        Ok(_) => {
+            out.push(TuningFallback::new(var, trimmed, rejected));
+            None
+        }
+        Err(_) => {
+            out.push(TuningFallback::new(
+                var,
+                trimmed,
+                FallbackReason::NotANumber,
+            ));
+            None
+        }
+    }
+}
+
 impl Default for HttpTuning {
     fn default() -> Self {
         Self {
@@ -58,44 +159,83 @@ impl Default for HttpTuning {
 
 impl HttpTuning {
     /// Read tuning from the environment: `RIFT_HTTP_MAX_BUF` (bytes), `RIFT_HTTP_HEADER_TIMEOUT`
-    /// (seconds), and `RIFT_MAX_CONNECTIONS` (connection count, opt-in). Unset or unparsable
-    /// values fall back to [`HttpTuning::default`].
+    /// (seconds), and `RIFT_MAX_CONNECTIONS` (connection count, opt-in).
+    ///
+    /// An **unset** variable falls back to [`HttpTuning::default`] silently — expressing no
+    /// preference is not a mistake. A variable that is **set but unusable** also falls back, but
+    /// warns first (issue #1009): the operator wrote something they expected to take effect, and
+    /// the old silence meant the only symptom was behaviour that did not match the config.
     #[must_use]
     pub fn from_env() -> Self {
-        Self::parse(
+        let (tuning, fallbacks) = Self::parse(
             std::env::var("RIFT_HTTP_MAX_BUF").ok().as_deref(),
             std::env::var("RIFT_HTTP_HEADER_TIMEOUT").ok().as_deref(),
             std::env::var("RIFT_MAX_CONNECTIONS").ok().as_deref(),
-        )
+        );
+        warn_fallbacks(&fallbacks);
+        tuning
     }
 
     /// Pure parser behind [`HttpTuning::from_env`] — kept env-free so it is testable without
-    /// mutating process-global state.
+    /// mutating process-global state, and returning its warnings rather than logging them so a
+    /// test can assert on them without a tracing subscriber.
+    ///
+    /// The resulting values are exactly what this function produced before #1009; only the second
+    /// element of the tuple is new.
     fn parse(
         max_buf: Option<&str>,
         header_timeout_secs: Option<&str>,
         max_conns: Option<&str>,
-    ) -> Self {
+    ) -> (Self, Vec<TuningFallback>) {
         let defaults = Self::default();
-        let max_buf_size = max_buf
-            .and_then(|s| s.trim().parse::<usize>().ok())
-            .filter(|&v| v >= HYPER_H1_MIN_MAX_BUF)
-            .unwrap_or(defaults.max_buf_size);
-        let header_read_timeout = header_timeout_secs
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .filter(|&secs| secs > 0)
-            .map(Duration::from_secs)
-            .unwrap_or(defaults.header_read_timeout);
-        // Opt-in: unset, zero, negative, or garbage all mean "unlimited" rather than an error —
-        // this knob defaults to today's behavior, so a malformed value should not fail closed.
-        let max_connections = max_conns
-            .and_then(|s| s.trim().parse::<usize>().ok())
-            .filter(|&n| n > 0);
-        Self {
-            max_buf_size,
-            header_read_timeout,
-            max_connections,
-        }
+        let mut fallbacks = Vec::new();
+
+        let max_buf_size = parse_number(
+            "RIFT_HTTP_MAX_BUF",
+            max_buf,
+            |&v: &usize| v >= HYPER_H1_MIN_MAX_BUF,
+            FallbackReason::BelowMinimum,
+            &mut fallbacks,
+        )
+        .unwrap_or(defaults.max_buf_size);
+
+        let header_read_timeout = parse_number(
+            "RIFT_HTTP_HEADER_TIMEOUT",
+            header_timeout_secs,
+            |&secs: &u64| secs > 0,
+            FallbackReason::NotPositive,
+            &mut fallbacks,
+        )
+        .map(Duration::from_secs)
+        .unwrap_or(defaults.header_read_timeout);
+
+        // Opt-in, and the one knob where `0` is an answer rather than a mistake: it reads as "no
+        // cap", which is exactly what it gets, so it stays silent. Garbage still warns — that is
+        // an operator who wanted a cap and has not got one.
+        let max_connections = match max_conns.map(str::trim) {
+            None => None,
+            Some(raw) => match raw.parse::<usize>() {
+                Ok(0) => None,
+                Ok(n) => Some(n),
+                Err(_) => {
+                    fallbacks.push(TuningFallback::new(
+                        "RIFT_MAX_CONNECTIONS",
+                        raw,
+                        FallbackReason::NotANumber,
+                    ));
+                    None
+                }
+            },
+        };
+
+        (
+            Self {
+                max_buf_size,
+                header_read_timeout,
+                max_connections,
+            },
+            fallbacks,
+        )
     }
 }
 
@@ -121,31 +261,63 @@ impl Default for SocketTuning {
 }
 
 impl SocketTuning {
-    /// Read tuning from the environment: `RIFT_TCP_BACKLOG` (positive integer)
-    /// and `RIFT_TCP_NODELAY` (`false`/`0`/`off` disables; anything else keeps
-    /// the default of enabled). Unset or unparsable values fall back to
-    /// [`SocketTuning::default`].
+    /// Read tuning from the environment: `RIFT_TCP_BACKLOG` (positive integer) and
+    /// `RIFT_TCP_NODELAY` (`true`/`1`/`on` enables, `false`/`0`/`off` disables).
+    ///
+    /// Unset falls back to [`SocketTuning::default`] silently; set-but-unusable falls back with a
+    /// warning (issue #1009). `RIFT_TCP_NODELAY` is the reason that distinction matters here: any
+    /// unrecognised spelling still keeps the default of *enabled*, so the typo `flase` used to
+    /// leave Nagle disabled — the opposite of what was written — with nothing logged.
     #[must_use]
     pub fn from_env() -> Self {
-        Self::parse(
+        let (tuning, fallbacks) = Self::parse(
             std::env::var("RIFT_TCP_BACKLOG").ok().as_deref(),
             std::env::var("RIFT_TCP_NODELAY").ok().as_deref(),
-        )
+        );
+        warn_fallbacks(&fallbacks);
+        tuning
     }
 
     /// Pure parser behind [`SocketTuning::from_env`] — kept env-free so it is
     /// testable without mutating process-global state.
-    fn parse(backlog: Option<&str>, nodelay: Option<&str>) -> Self {
+    fn parse(backlog: Option<&str>, nodelay: Option<&str>) -> (Self, Vec<TuningFallback>) {
         let defaults = Self::default();
-        let backlog = backlog
-            .and_then(|s| s.trim().parse::<i32>().ok())
-            .filter(|&b| b > 0)
-            .unwrap_or(defaults.backlog);
-        let nodelay = nodelay.map_or(defaults.nodelay, |s| {
-            let s = s.trim();
-            !(s.eq_ignore_ascii_case("false") || s == "0" || s.eq_ignore_ascii_case("off"))
-        });
-        Self { backlog, nodelay }
+        let mut fallbacks = Vec::new();
+
+        let backlog = parse_number(
+            "RIFT_TCP_BACKLOG",
+            backlog,
+            |&b: &i32| b > 0,
+            FallbackReason::NotPositive,
+            &mut fallbacks,
+        )
+        .unwrap_or(defaults.backlog);
+
+        // Acceptance is unchanged: the falsey set still disables, everything else still leaves the
+        // default in place. What is new is that "everything else" no longer passes for an opinion.
+        let nodelay = match nodelay.map(str::trim) {
+            None => defaults.nodelay,
+            Some(s)
+                if s.eq_ignore_ascii_case("false") || s == "0" || s.eq_ignore_ascii_case("off") =>
+            {
+                false
+            }
+            Some(s)
+                if s.eq_ignore_ascii_case("true") || s == "1" || s.eq_ignore_ascii_case("on") =>
+            {
+                true
+            }
+            Some(s) => {
+                fallbacks.push(TuningFallback::new(
+                    "RIFT_TCP_NODELAY",
+                    s,
+                    FallbackReason::UnrecognizedBoolean,
+                ));
+                defaults.nodelay
+            }
+        };
+
+        (Self { backlog, nodelay }, fallbacks)
     }
 }
 
@@ -416,24 +588,49 @@ mod tests {
         );
     }
 
+    /// Existing value-assertions go through these so they stay about the parsed values; the
+    /// fallback list has its own tests below.
+    fn http(a: Option<&str>, b: Option<&str>, c: Option<&str>) -> HttpTuning {
+        HttpTuning::parse(a, b, c).0
+    }
+    fn sock(a: Option<&str>, b: Option<&str>) -> SocketTuning {
+        SocketTuning::parse(a, b).0
+    }
+    /// The fallbacks a parse reported, as `(var, value, reason)` — compared against literals.
+    fn http_warns(
+        a: Option<&str>,
+        b: Option<&str>,
+        c: Option<&str>,
+    ) -> Vec<(&'static str, String, FallbackReason)> {
+        HttpTuning::parse(a, b, c)
+            .1
+            .into_iter()
+            .map(|f| (f.var, f.value, f.reason))
+            .collect()
+    }
+    fn sock_warns(a: Option<&str>, b: Option<&str>) -> Vec<(&'static str, String, FallbackReason)> {
+        SocketTuning::parse(a, b)
+            .1
+            .into_iter()
+            .map(|f| (f.var, f.value, f.reason))
+            .collect()
+    }
+
     #[test]
     fn http_tuning_parse_falls_back_to_defaults_when_unset() {
-        assert_eq!(HttpTuning::parse(None, None, None), HttpTuning::default());
+        assert_eq!(http(None, None, None), HttpTuning::default());
     }
 
     #[test]
     fn http_tuning_parse_reads_max_buf() {
-        assert_eq!(
-            HttpTuning::parse(Some(" 16384 "), None, None).max_buf_size,
-            16384
-        );
+        assert_eq!(http(Some(" 16384 "), None, None).max_buf_size, 16384);
     }
 
     #[test]
     fn http_tuning_parse_rejects_garbage_or_zero_max_buf() {
         for v in ["0", "-5", "nope", ""] {
             assert_eq!(
-                HttpTuning::parse(Some(v), None, None).max_buf_size,
+                http(Some(v), None, None).max_buf_size,
                 DEFAULT_HTTP_MAX_BUF,
                 "value {v} must fall back to the default"
             );
@@ -443,7 +640,7 @@ mod tests {
     #[test]
     fn http_tuning_parse_reads_header_timeout_seconds() {
         assert_eq!(
-            HttpTuning::parse(None, Some("10"), None).header_read_timeout,
+            http(None, Some("10"), None).header_read_timeout,
             std::time::Duration::from_secs(10)
         );
     }
@@ -452,7 +649,7 @@ mod tests {
     fn http_tuning_parse_rejects_garbage_header_timeout() {
         for v in ["nope", "-1", ""] {
             assert_eq!(
-                HttpTuning::parse(None, Some(v), None).header_read_timeout,
+                http(None, Some(v), None).header_read_timeout,
                 std::time::Duration::from_secs(30),
                 "value {v} must fall back to the default"
             );
@@ -462,19 +659,10 @@ mod tests {
     #[test]
     fn http_tuning_parse_max_connections_opt_in() {
         // Unset or non-positive => unlimited (None); a positive value => a cap.
-        assert_eq!(HttpTuning::parse(None, None, None).max_connections, None);
-        assert_eq!(
-            HttpTuning::parse(None, None, Some("0")).max_connections,
-            None
-        );
-        assert_eq!(
-            HttpTuning::parse(None, None, Some("nope")).max_connections,
-            None
-        );
-        assert_eq!(
-            HttpTuning::parse(None, None, Some(" 500 ")).max_connections,
-            Some(500)
-        );
+        assert_eq!(http(None, None, None).max_connections, None);
+        assert_eq!(http(None, None, Some("0")).max_connections, None);
+        assert_eq!(http(None, None, Some("nope")).max_connections, None);
+        assert_eq!(http(None, None, Some(" 500 ")).max_connections, Some(500));
     }
 
     #[test]
@@ -486,42 +674,189 @@ mod tests {
 
     #[test]
     fn parse_falls_back_to_defaults_when_unset() {
-        assert_eq!(SocketTuning::parse(None, None), SocketTuning::default());
+        assert_eq!(sock(None, None), SocketTuning::default());
     }
 
     #[test]
     fn parse_reads_a_positive_backlog() {
-        assert_eq!(SocketTuning::parse(Some(" 2048 "), None).backlog, 2048);
+        assert_eq!(sock(Some(" 2048 "), None).backlog, 2048);
     }
 
     #[test]
     fn parse_rejects_non_positive_or_garbage_backlog() {
-        assert_eq!(
-            SocketTuning::parse(Some("0"), None).backlog,
-            DEFAULT_BACKLOG
-        );
-        assert_eq!(
-            SocketTuning::parse(Some("-5"), None).backlog,
-            DEFAULT_BACKLOG
-        );
-        assert_eq!(
-            SocketTuning::parse(Some("nope"), None).backlog,
-            DEFAULT_BACKLOG
-        );
+        assert_eq!(sock(Some("0"), None).backlog, DEFAULT_BACKLOG);
+        assert_eq!(sock(Some("-5"), None).backlog, DEFAULT_BACKLOG);
+        assert_eq!(sock(Some("nope"), None).backlog, DEFAULT_BACKLOG);
     }
 
     #[test]
     fn parse_disables_nodelay_on_falsey_values() {
         for v in ["false", "FALSE", "0", "off", "Off"] {
-            assert!(!SocketTuning::parse(None, Some(v)).nodelay, "value {v}");
+            assert!(!sock(None, Some(v)).nodelay, "value {v}");
         }
     }
 
     #[test]
     fn parse_keeps_nodelay_enabled_otherwise() {
         for v in ["true", "1", "on", "yes", ""] {
-            assert!(SocketTuning::parse(None, Some(v)).nodelay, "value {v}");
+            assert!(sock(None, Some(v)).nodelay, "value {v}");
         }
+    }
+
+    // ─── Issue #1009: a present-but-unusable value must not vanish ────────────────
+
+    /// Unset is the domain-optional case: the operator expressed no intent, so there is nothing
+    /// to report. This is the half that must stay silent — a warning on every default start would
+    /// train operators to ignore the log line that matters.
+    #[test]
+    fn an_unset_or_valid_environment_reports_nothing() {
+        assert_eq!(http_warns(None, None, None), vec![]);
+        assert_eq!(sock_warns(None, None), vec![]);
+        assert_eq!(
+            http_warns(Some("16384"), Some("10"), Some("500")),
+            vec![],
+            "values that were honoured must not warn"
+        );
+        assert_eq!(sock_warns(Some("2048"), Some("false")), vec![]);
+    }
+
+    /// Two failure shapes, deliberately distinguished: `nope` never was a number, whereas `0` is a
+    /// number the knob cannot accept. An operator debugging the second needs the bound, not
+    /// "unparsable".
+    #[test]
+    fn max_buf_says_whether_it_was_unparsable_or_out_of_range() {
+        assert_eq!(
+            http_warns(Some("nope"), None, None),
+            vec![(
+                "RIFT_HTTP_MAX_BUF",
+                "nope".to_string(),
+                FallbackReason::NotANumber
+            )]
+        );
+        assert_eq!(
+            http_warns(Some("0"), None, None),
+            vec![(
+                "RIFT_HTTP_MAX_BUF",
+                "0".to_string(),
+                FallbackReason::BelowMinimum
+            )]
+        );
+        // `1MB` is the plausible hand-edit this exists for: a suffix hyper never accepted.
+        assert_eq!(
+            http_warns(Some("1MB"), None, None),
+            vec![(
+                "RIFT_HTTP_MAX_BUF",
+                "1MB".to_string(),
+                FallbackReason::NotANumber
+            )]
+        );
+    }
+
+    #[test]
+    fn a_zero_header_timeout_is_reported_as_non_positive() {
+        // Zero does not mean "no timeout" here — it is rejected — so silently treating it as a
+        // request for one would leave slowloris mitigation off with nothing said.
+        assert_eq!(
+            http_warns(None, Some("0"), None),
+            vec![(
+                "RIFT_HTTP_HEADER_TIMEOUT",
+                "0".to_string(),
+                FallbackReason::NotPositive
+            )]
+        );
+        assert_eq!(
+            http_warns(None, Some("nope"), None),
+            vec![(
+                "RIFT_HTTP_HEADER_TIMEOUT",
+                "nope".to_string(),
+                FallbackReason::NotANumber
+            )]
+        );
+    }
+
+    /// The one number that must stay quiet at zero. `RIFT_MAX_CONNECTIONS=0` reads as "no cap",
+    /// and no cap is exactly what it gets — the operator's intent was honoured, so there is
+    /// nothing to warn about. Garbage in the same slot still warns.
+    #[test]
+    fn max_connections_zero_is_honoured_silently_but_garbage_is_not() {
+        assert_eq!(http_warns(None, None, Some("0")), vec![]);
+        assert_eq!(http_warns(None, None, Some("nope")).len(), 1);
+        assert_eq!(
+            http_warns(None, None, Some("nope"))[0].2,
+            FallbackReason::NotANumber
+        );
+    }
+
+    #[test]
+    fn backlog_says_whether_it_was_unparsable_or_non_positive() {
+        for v in ["0", "-5"] {
+            assert_eq!(
+                sock_warns(Some(v), None),
+                vec![(
+                    "RIFT_TCP_BACKLOG",
+                    v.to_string(),
+                    FallbackReason::NotPositive
+                )],
+                "value {v}"
+            );
+        }
+        assert_eq!(
+            sock_warns(Some("nope"), None),
+            vec![(
+                "RIFT_TCP_BACKLOG",
+                "nope".to_string(),
+                FallbackReason::NotANumber
+            )]
+        );
+    }
+
+    /// The nastiest case in this issue, and the reason it is not only about *unparsable* values:
+    /// every unrecognised spelling counted as "enabled", so the typo `flase` silently kept Nagle
+    /// disabled — the exact opposite of what was written, with nothing logged. Behaviour is
+    /// deliberately unchanged (still the default); only the silence is.
+    #[test]
+    fn an_unrecognised_nodelay_spelling_warns_and_keeps_the_default() {
+        for v in ["flase", "yes", "", "disabled"] {
+            assert_eq!(
+                sock_warns(None, Some(v)),
+                vec![(
+                    "RIFT_TCP_NODELAY",
+                    v.to_string(),
+                    FallbackReason::UnrecognizedBoolean
+                )],
+                "value {v}"
+            );
+            assert!(
+                sock(None, Some(v)).nodelay,
+                "behaviour must be unchanged for {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_recognised_nodelay_spelling_is_silent() {
+        for v in [
+            "true", "TRUE", "1", "on", "On", "false", "FALSE", "0", "off",
+        ] {
+            assert_eq!(sock_warns(None, Some(v)), vec![], "value {v}");
+        }
+    }
+
+    /// Several bad values at once each get their own line, so a fleet-wide bad push names every
+    /// knob it broke rather than only the first.
+    #[test]
+    fn each_unusable_value_is_reported_separately() {
+        let warns = http_warns(Some("nope"), Some("0"), Some("bad"));
+        assert_eq!(warns.len(), 3, "got: {warns:?}");
+        let vars: Vec<&str> = warns.iter().map(|w| w.0).collect();
+        assert_eq!(
+            vars,
+            vec![
+                "RIFT_HTTP_MAX_BUF",
+                "RIFT_HTTP_HEADER_TIMEOUT",
+                "RIFT_MAX_CONNECTIONS"
+            ]
+        );
     }
 
     #[tokio::test]
