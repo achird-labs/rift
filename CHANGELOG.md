@@ -245,6 +245,18 @@ record.
 
 ### Fixed
 
+- **Stopping the intercept listener now drains in-flight tunnels** (#1010). `shutdown()` signalled
+  only the accept loop, so `DELETE /intercept` / `rift_stop_intercept` returned while decrypted
+  tunnels were still open — a request mid-flight finished unsupervised, and a tunnel that had
+  completed CONNECT and TLS but not yet sent a request lingered until its header-read timeout.
+  - The stop signal is now a broadcast reaching every tunnel, which selects on it and calls
+    hyper's `graceful_shutdown()` — the same shape the imposter path has used since #207. In-flight
+    requests complete; idle tunnels close at once.
+  - Dropping the listener without calling `shutdown()` drains the same way, because the listener
+    holds the only sender.
+  - This is a precondition for keep-alive across the tunnel (#993): with keep-alive and no signal,
+    an idle tunnel would have outlived `stop()` indefinitely and kept serving new requests.
+
 - **The redirect cap now names the URL it gave up on and the limit it hit** (#945). A config fetch
   that looped reported a bare `too many redirects`, so an operator running several sources could
   tell that one of them looped but not which hop it was bouncing on — nor that the 10-hop cap is

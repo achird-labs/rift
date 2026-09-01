@@ -206,6 +206,10 @@ DELETE /intercept   → 204 always (idempotent); stops the listener and drops it
 
 - The body is optional: absent, empty, or `{}` all mean defaults (`127.0.0.1:0`, a fresh in-memory
   CA). Port `0` is OS-assigned; read the real port back from the response.
+- **Stopping drains, it does not cut.** `DELETE /intercept` stops accepting new connections and
+  signals every tunnel already open: a request in flight runs to completion, and an idle tunnel
+  closes immediately rather than lingering until its header-read timeout. The call returns once the
+  accept loop has stopped; it does not block on the last in-flight request.
 - The default bind host is `127.0.0.1` — **not** the admin server's host. A containerized,
   connect-transport caller that needs the proxy reachable off-box must pass `"host": "0.0.0.0"`
   explicitly.
