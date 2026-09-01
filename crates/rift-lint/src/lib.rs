@@ -79,7 +79,11 @@ pub fn lint_file(path: &Path, options: &LintOptions) -> LintResult {
         Ok(v) => v,
         Err(e) => {
             result.add_issue(LintIssue::error(
-                "E002",
+                // E001, not E002 (issue #1008). E002 is the port conflict, which is what the CLI
+                // and the published table have always meant by it; this entry point had assigned
+                // the two codes the other way round, so a library caller who looked up E002 read
+                // "port conflict" for a JSON syntax error.
+                "E001",
                 format!("Invalid JSON: {e}"),
                 path.to_path_buf(),
             ));
@@ -133,7 +137,11 @@ pub fn lint_json(json: &str, source_name: &str, options: &LintOptions) -> LintRe
         Ok(v) => v,
         Err(e) => {
             result.add_issue(LintIssue::error(
-                "E002",
+                // E001, not E002 (issue #1008). E002 is the port conflict, which is what the CLI
+                // and the published table have always meant by it; this entry point had assigned
+                // the two codes the other way round, so a library caller who looked up E002 read
+                // "port conflict" for a JSON syntax error.
+                "E001",
                 format!("Invalid JSON: {e}"),
                 path.to_path_buf(),
             ));

@@ -81,7 +81,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 
 | Code | Description | Example |
 |:-----|:------------|:--------|
-| E001 | Invalid JSON syntax | Missing comma, unquoted string |
+| E001 | File could not be read, or is not valid JSON | Missing comma, unquoted string, unreadable path |
 | E002 | Port conflict | Two imposters on port 4545 |
 | E003 | Missing required field | No `port` or `stubs` field |
 | E004 | Invalid protocol | Protocol is "ftp" instead of "http" |
@@ -90,6 +90,38 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E013 | Invalid regex | `[invalid(` |
 | E018 | Header is array | `"Accept": ["text/html", "application/json"]` |
 | E019 | Header is number | `"Content-Length": 256` |
+| E006 | Stub missing `responses` field | A stub with `predicates` but no `responses` |
+| E007 | Predicate is not an object | `"predicates": ["equals"]` |
+| E008 | Predicate has no operator | `{"caseSensitive": true}` on its own |
+| E009 | Unknown predicate operator | `{"equalz": {"path": "/a"}}` |
+| E011 | JSONPath missing `selector` field | `"jsonpath": {}` |
+| E014 | Response has no response type | Neither `is`, `proxy`, `inject`, `fault` nor `_rift` |
+| E015 | Invalid HTTP status code | `"statusCode": 999` |
+| E016 | `statusCode` is not a number or numeric string | `"statusCode": true` |
+| E017 | Empty header name | `"headers": {"": "value"}` |
+| E020 | Header value is a boolean, must be a string | `"X-Debug": true` |
+| E021 | Headers is not an object | `"headers": []` |
+| E022 | Proxy `to` URL does not start with `http://` or `https://` | `"to": "ftp://host/x"` |
+| E023 | Proxy `to` is not a string URL | `"to": 8080` |
+| E024 | Proxy missing required `to` field | `"proxy": {"mode": "proxyOnce"}` |
+| E025 | Invalid `wait` behavior value | `"wait": []` |
+| E026 | Unbalanced braces in JavaScript | `function () { return 1;` |
+| E027 | Unbalanced parentheses in JavaScript | `function ( { return 1; }` |
+| E028 | JavaScript syntax error | A malformed `inject` function |
+| E029 | Copy behavior item missing `from` | `{"into": "${token}"}` |
+| E030 | Copy behavior item missing `into` | `{"from": "body"}` |
+| E031 | Lookup behavior missing `key` | Lookup with only `fromDataSource` |
+| E032 | Lookup behavior missing `fromDataSource` | Lookup with only `key` |
+| E033 | Lookup behavior missing `into` | Lookup with `key` and `fromDataSource` only |
+| E034 | More than one operator in a single predicate | `{"equals": {...}, "contains": {...}}` — split them under `and` |
+| E035 | `repeat` behavior is not a positive integer | `"repeat": 0` |
+| E036 | `script` must specify exactly one of `code`, `file` or `ref` | Both `code` and `file` given |
+| E037 | Unknown script `ref` — no such entry in `_rift.scripts` | `"ref": "missing"` |
+| E038 | Script `file` (via `ref`) could not be read | `"file": "no-such.js"` |
+| E039 | A `_rift.scripts` entry uses `ref` itself (ref chains are not allowed) | `{"a": {"ref": "b"}}` |
+| E040 | JavaScript syntax error in `_rift.script` | A malformed `_rift.script` body |
+| E041 | `_rift.fault.tcp` `probability` is outside 0.0–1.0 | `"probability": 1.5` |
+| E042 | Script uses `ctx.state` but no `_rift.flowState` is configured | `ctx.state.get(...)` without `flowState` |
 
 ### Warnings
 

@@ -13,6 +13,18 @@ record.
 
 ### Changed
 
+- **`rift-lint` reports the same meaning for `E001`/`E002` from every entry point** (#1008). The CLI
+  and the published rules table agree that `E001` is an unreadable or unparsable file and `E002` is
+  a port conflict. The library API (`lint_file`, `lint_json`) and the TUI's stub validator had the
+  two the other way round, so a caller who got `E002` for a JSON syntax error and looked it up read
+  "port conflict". Both now emit `E001`, matching the CLI and the docs.
+  - **Library/TUI callers matching on `E002` for invalid JSON must match `E001` instead.** CLI
+    output is unchanged, so `rift-lint` invocations and anything parsing its JSON report are
+    unaffected.
+  - The error table now documents all 41 codes rather than 9, and the coverage test added in #942
+    was widened to error codes — scanning `lib.rs` and `main.rs` as well as `validator.rs`, since
+    `E001`/`E002` are emitted only by the entry points.
+
 - **The HTTPS intercept tunnel is served by hyper** (#991). After the `CONNECT` tunnel is
   TLS-terminated, the decrypted stream is now handed to `hyper::server::conn::http1` with a
   `service_fn`, the same way every imposter connection is served — replacing the hand-written
@@ -244,6 +256,16 @@ record.
   `rift-mock-core`'s dependencies — `proxy/client.rs` was its only consumer.
 
 ### Fixed
+
+- **A tuning env var that is set but unusable now says so** (#1009). `HttpTuning::from_env` and
+  `SocketTuning::from_env` fell back to their defaults on any value they could not use — a
+  suffixed `RIFT_HTTP_MAX_BUF=1MB`, a `RIFT_HTTP_HEADER_TIMEOUT=0`, a non-positive
+  `RIFT_TCP_BACKLOG` — with nothing logged, so the only symptom was behaviour that did not match
+  the configuration. Each now logs a `WARN` naming the variable, the value and the reason.
+  - `RIFT_TCP_NODELAY` was the sharpest case: every unrecognised spelling counted as "enabled",
+    so the typo `flase` silently left Nagle disabled, the opposite of what was written.
+  - Behaviour is unchanged for every input — the values produced are exactly what they were, and
+    `RIFT_MAX_CONNECTIONS=0` stays silent because "no cap" is what it asks for and what it gets.
 
 - **Stopping the intercept listener now drains in-flight tunnels** (#1010). `shutdown()` signalled
   only the accept loop, so `DELETE /intercept` / `rift_stop_intercept` returned while decrypted
