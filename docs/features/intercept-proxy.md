@@ -345,8 +345,8 @@ The rule store is capped at 10,000 rules to bound both memory and the per-reques
 batch `POST` that would exceed the cap is rejected in full (no partial add).
 
 When no rule matches, the request falls through to a default `200` (so an unconfigured host is
-answered rather than hanging). Non-goals: HTTP/2, WebSockets, and chunked request bodies are not
-decoded (see [Limitations](#limitations)).
+answered rather than hanging). Non-goals: HTTP/2 and WebSockets (see
+[Limitations](#limitations)).
 
 ---
 
@@ -395,8 +395,12 @@ private keys**, and it works identically for the container and embedded adapters
 - **The SUT must trust the intercept CA** — this is inherent to HTTPS MITM; Rift only automates
   provisioning it.
 - **Not a general mitmproxy replacement** — no HTTP/2 / h2c, WebSocket proxying, or flow scripting.
-- **Request bodies are read only when `Content-Length`-framed** — chunked / streamed request bodies
-  are not decoded and are treated as empty for matching and forwarding (logged at `warn`).
+- **Request bodies are capped at 1 MiB** — a request whose body exceeds the cap is refused with
+  `413 Payload Too Large`, and is neither matched against rules nor forwarded. The cap bounds
+  memory use for a misbehaving or malicious upload. Both `Content-Length`-framed and
+  `chunked`/streamed request bodies are decoded.
+- **One request per tunnel** — every response closes the connection, so a client that wants to
+  send a second request opens a second `CONNECT`.
 - **Forward-proxy (`CONNECT`) only** — transparent interception is not implemented.
 - The listener is started by an **embedder** (or the zio-bdd adapter), from the standalone `rift`
   binary via `--intercept-port` (see [Standalone binary](#standalone-binary)), or at runtime over

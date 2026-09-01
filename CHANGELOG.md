@@ -13,6 +13,26 @@ record.
 
 ### Changed
 
+- **The HTTPS intercept tunnel is served by hyper** (#991). After the `CONNECT` tunnel is
+  TLS-terminated, the decrypted stream is now handed to `hyper::server::conn::http1` with a
+  `service_fn`, the same way every imposter connection is served — replacing the hand-written
+  HTTP/1.1 head parsing and response serialization the listener used to carry. The refactor
+  itself is invisible, but three things it removes are not:
+  - **Chunked request bodies are decoded.** A `transfer-encoding: chunked` request used to be
+    treated as bodyless for both rule matching and forwarding; its body now reaches both. A body
+    predicate that could never fire against a chunked upload will now fire.
+  - **An over-cap request body is refused with `413 Payload Too Large`.** Previously a body over
+    1 MiB was silently truncated at the cap and forwarded *as if complete*, so an imposter could
+    be handed a fragment and never know. It is now refused outright and neither matched nor
+    forwarded. A body that is exactly at the cap is still served.
+  - **Header values that are not UTF-8 are handled honestly.** Request header values that are not
+    valid UTF-8 are skipped rather than run through `from_utf8_lossy`, which used to evaluate
+    predicates against U+FFFD text the client never sent; response header values relay verbatim
+    instead of being dropped.
+
+  `connection: close` on every response, one request per tunnel, and last-wins for repeated
+  request headers are all unchanged.
+
 - **Flow-store work is offloaded only when it can reach the store** (#986). `run_flow_blocking`
   moves a closure to a blocking thread whenever the backend reports `is_blocking()`, without
   knowing whether that closure will touch the store — it cannot know, since it receives an opaque

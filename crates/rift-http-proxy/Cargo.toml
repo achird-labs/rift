@@ -29,6 +29,10 @@ hyper = { version = "1.5", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 # `channel` (issue #461 SSE body) pulls only tokio, already a dependency — no new crate in the tree.
 http-body-util = { version = "0.1", features = ["channel"] }
+# hyper's own head parser (issue #991). The CONNECT head is still read by hand — byte at a time,
+# so no TLS ClientHello bytes are over-read — and therefore still needs parsing. Already in the
+# tree via hyper, so this adds no crates to the build.
+httparse = "1.10"
 tower = { version = "0.5", features = ["full"] }
 # Pin the rustls crypto provider to `ring` everywhere. hyper-rustls/tokio-rustls
 # default to the `aws-lc-rs` provider, whose C build (aws-lc-sys) fails to compile
