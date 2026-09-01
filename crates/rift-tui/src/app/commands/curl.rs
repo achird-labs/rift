@@ -335,3 +335,138 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::api::Stub;
+    use serde_json::json;
+
+    /// Stubs are deserialized rather than struct-literal'd so the tests exercise the same shape the
+    /// admin API delivers, and do not have to track private fields.
+    fn stub(predicates: serde_json::Value) -> Stub {
+        serde_json::from_value(json!({ "predicates": predicates, "responses": [] }))
+            .expect("stub fixture deserializes")
+    }
+
+    const PORT: u16 = 2525;
+
+    #[test]
+    fn get_with_a_query_predicate_becomes_a_query_string() {
+        let app = crate::app::tests::make_test_app();
+        let cmd = app.generate_curl_command(
+            &stub(json!([{ "equals": { "method": "GET", "path": "/users", "query": { "page": "2" } } }])),
+            PORT,
+        );
+
+        // GET is the default, so no `-X` — asserting the whole command is what pins that.
+        assert_eq!(cmd, "curl -s \\\n  'http://localhost:2525/users?page=2'");
+    }
+
+    #[test]
+    fn a_post_with_a_json_body_gets_a_method_a_content_type_and_a_body() {
+        let app = crate::app::tests::make_test_app();
+        let cmd = app.generate_curl_command(
+            &stub(json!([{
+                "equals": { "method": "POST", "path": "/orders", "body": { "sku": "ABC-1" } }
+            }])),
+            PORT,
+        );
+
+        assert_eq!(
+            cmd,
+            "curl -s \\\n  -X POST \\\n  -H 'Content-Type: application/json' \\\n  \
+             -d '{\"sku\":\"ABC-1\"}' \\\n  'http://localhost:2525/orders'"
+        );
+    }
+
+    #[test]
+    fn a_header_predicate_is_emitted_as_a_dash_h_flag() {
+        let app = crate::app::tests::make_test_app();
+        let cmd = app.generate_curl_command(
+            &stub(json!([{
+                "equals": { "method": "GET", "path": "/p", "headers": { "X-Api-Key": "s3cret" } }
+            }])),
+            PORT,
+        );
+
+        assert_eq!(
+            cmd,
+            "curl -s \\\n  -H 'X-Api-Key: s3cret' \\\n  'http://localhost:2525/p'"
+        );
+    }
+
+    /// An explicit Content-Type must not be duplicated by the JSON auto-detection.
+    #[test]
+    fn an_explicit_content_type_suppresses_the_automatic_one() {
+        let app = crate::app::tests::make_test_app();
+        let cmd = app.generate_curl_command(
+            &stub(json!([{
+                "equals": {
+                    "method": "POST",
+                    "path": "/p",
+                    "headers": { "Content-Type": "application/vnd.api+json" },
+                    "body": { "a": 1 }
+                }
+            }])),
+            PORT,
+        );
+
+        assert_eq!(
+            cmd.matches("Content-Type").count(),
+            1,
+            "the automatic header must stand down when one is declared: {cmd}"
+        );
+        assert!(cmd.contains("-H 'Content-Type: application/vnd.api+json'"));
+    }
+
+    /// The body is wrapped in single quotes, so a single quote inside it has to be closed,
+    /// escaped and reopened — otherwise the emitted command is unrunnable shell.
+    #[test]
+    fn a_single_quote_in_the_body_is_escaped_for_the_shell() {
+        let app = crate::app::tests::make_test_app();
+        let cmd = app.generate_curl_command(
+            &stub(json!([{ "equals": { "method": "POST", "path": "/p", "body": "it's here" } }])),
+            PORT,
+        );
+
+        assert!(
+            cmd.contains(r"-d 'it'\''s here'"),
+            "the quote must be closed-escaped-reopened, got: {cmd}"
+        );
+        // A bare `it's` would terminate the quoted argument early; this is the regression that
+        // makes the difference visible rather than merely different.
+        assert!(
+            !cmd.contains("-d 'it's here'"),
+            "got unescaped quote: {cmd}"
+        );
+    }
+
+    #[test]
+    fn a_matches_predicate_becomes_a_sample_path_with_numbered_placeholders() {
+        let app = crate::app::tests::make_test_app();
+
+        assert_eq!(
+            app.regex_to_sample_path("^/auto/dealers/[^/]+/dealer-customers/[^/]+$"),
+            "/auto/dealers/{1}/dealer-customers/{2}"
+        );
+        // Anchors are stripped, `\d+` gets a sample value, and a pattern with no leading slash
+        // still produces a path.
+        assert_eq!(app.regex_to_sample_path(r"^/orders/\d+$"), "/orders/123");
+        assert_eq!(app.regex_to_sample_path("orders"), "/orders");
+    }
+
+    #[test]
+    fn jsonpath_parts_merge_into_one_nested_object() {
+        let app = crate::app::tests::make_test_app();
+        let merged = app.merge_jsonpath_bodies(&[
+            ("$.user.id".to_string(), json!("123")),
+            ("$.user.name".to_string(), json!("john")),
+        ]);
+
+        // Parsed rather than string-compared: key order is the serializer's business, the shape
+        // is what this function promises.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&merged).expect("merged body is valid JSON");
+        assert_eq!(parsed, json!({ "user": { "id": "123", "name": "john" } }));
+    }
+}
