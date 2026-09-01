@@ -82,7 +82,10 @@ fn main() -> Result<(), anyhow::Error> {
     if let Some(ref rcfile) = cli.rcfile.clone() {
         match apply_rcfile_defaults(&mut cli, rcfile) {
             Ok(()) => {}
-            Err(e) => eprintln!("Warning: failed to load --rcfile {rcfile:?}: {e}"),
+            // `{e:#}` renders the whole chain. Plain `{e}` stops at the outermost context, which
+            // since #946 is our own "parsing rcfile <path>" — so it would print the path twice and
+            // drop the only actionable half ("trailing comma at line 1 column 15").
+            Err(e) => eprintln!("Warning: failed to load --rcfile: {e:#}"),
         }
     }
 
