@@ -352,6 +352,30 @@ When no rule matches, the request falls through to a default `200` (so an unconf
 answered rather than hanging). Non-goals: HTTP/2 and WebSockets (see
 [Limitations](#limitations)).
 
+### Connection reuse
+
+A `CONNECT` tunnel is **keep-alive**: once it is established, a client may send any number of
+requests over it, and a pooling HTTP client will do so by default. Each request is matched against
+the rules independently — reuse changes nothing about which rule fires. This matters mostly for
+cost: the TCP connect, the `CONNECT` round-trip, the TLS handshake and the per-SNI leaf
+certificate are paid once per tunnel rather than once per request.
+
+The pre-tunnel refusals are the exception: `405` for a non-`CONNECT` request and `407` when proxy
+auth fails are answered before any tunnel exists, so there is nothing to reuse and they still close
+the connection.
+
+A request refused with `413` for exceeding the body cap is the interesting case, because the rest
+of its body was never read off the socket. Those leftover bytes are **never** framed as the
+following request, but which way that is achieved depends on how many of them there are: the
+server makes one attempt to discard the remainder, and if it does not all go at once it closes the
+connection's read side instead, so nothing further is served on that tunnel. A small overshoot
+therefore usually keeps the tunnel usable and a large upload usually ends it — either way the
+leftover bytes are unreachable.
+
+This is why the cap had to become a refusal (rather than a silent truncation) before keep-alive
+could be enabled: a truncating reader that left the tail in the socket would have handed the
+client control of what the server parsed next.
+
 ---
 
 ## Trusting the CA from the SUT
@@ -403,8 +427,6 @@ private keys**, and it works identically for the container and embedded adapters
   `413 Payload Too Large`, and is neither matched against rules nor forwarded. The cap bounds
   memory use for a misbehaving or malicious upload. Both `Content-Length`-framed and
   `chunked`/streamed request bodies are decoded.
-- **One request per tunnel** — every response closes the connection, so a client that wants to
-  send a second request opens a second `CONNECT`.
 - **Forward-proxy (`CONNECT`) only** — transparent interception is not implemented.
 - The listener is started by an **embedder** (or the zio-bdd adapter), from the standalone `rift`
   binary via `--intercept-port` (see [Standalone binary](#standalone-binary)), or at runtime over
