@@ -1,7 +1,7 @@
 # Build stage
 # Using Rust nightly for if-let-chains feature (required by regress 0.10.5, a boa_engine dependency)
 # Digest-pinned (issue #664); Dependabot reads the tag and bumps the digest.
-FROM rustlang/rust:nightly@sha256:9e64894d8a6e2dfa206f2cf4f7445a9ecf454a6d50c33e2150ee2daa8d8fd949 AS builder
+FROM rustlang/rust:nightly@sha256:2bc4153cb1b661793f4370de3aecf7973aec0f32014e2a0a2709b0258293bbf8 AS builder
 
 WORKDIR /build
 
@@ -47,8 +47,17 @@ RUN mkdir -p crates/rift-lint/src crates/rift-http-proxy/src/bin crates/rift-htt
 COPY . .
 
 # Build application (only this layer rebuilds when source changes)
-RUN find crates/rift-lint/src -name '*.rs' -exec touch {} \; && \
-    rm -rf target/release/.fingerprint/rift-lint* target/release/deps/*rift* && \
+#
+# The layer above compiled every workspace crate from a dummy source file. Those artifacts must be
+# dropped or cargo links them instead of the real code: `COPY . .` restores the sources with the
+# build context's mtimes, which are *older* than the dummy artifacts, so the fingerprint check calls
+# them fresh. Use `cargo clean -p`, not `rm -rf` on target paths — cargo 1.100 moved artifacts from
+# target/release/{deps,.fingerprint} to target/release/build/<pkg>/<hash>/, which silently turned
+# the old globs into no-ops and let empty dummy rlibs reach the link (`no `extensions` in the root`).
+# Third-party dependency artifacts are untouched, so the dependency cache layer still pays off.
+RUN cargo clean --release \
+      --package rift-types --package rift-mock-core --package rift-store-redis \
+      --package rift-ffi --package rift-http-proxy --package rift-lint && \
     cargo build --release --locked --package rift-lint
 
 # Runtime stage
