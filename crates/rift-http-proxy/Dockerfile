@@ -62,10 +62,17 @@ RUN mkdir -p crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches \
 COPY . .
 
 # Build application (only this layer rebuilds when source changes)
-# Touch all src files to force rebuild since we replaced dummy files
-# Also remove any cached target artifacts that might have old compilation
-RUN find crates/rift-http-proxy/src -name '*.rs' -exec touch {} \; && \
-    rm -rf target/release/.fingerprint/rift-http-proxy* target/release/deps/*rift* && \
+#
+# The layer above compiled every workspace crate from a dummy source file. Those artifacts must be
+# dropped or cargo links them instead of the real code: `COPY . .` restores the sources with the
+# build context's mtimes, which are *older* than the dummy artifacts, so the fingerprint check calls
+# them fresh. Use `cargo clean -p`, not `rm -rf` on target paths — cargo 1.100 moved artifacts from
+# target/release/{deps,.fingerprint} to target/release/build/<pkg>/<hash>/, which silently turned
+# the old globs into no-ops and let empty dummy rlibs reach the link (`no `extensions` in the root`).
+# Third-party dependency artifacts are untouched, so the dependency cache layer still pays off.
+RUN cargo clean --release \
+      --package rift-types --package rift-mock-core --package rift-store-redis \
+      --package rift-ffi --package rift-http-proxy && \
     cargo build --release --locked --package rift-http-proxy --features ${FEATURES}
 
 # Runtime stage
