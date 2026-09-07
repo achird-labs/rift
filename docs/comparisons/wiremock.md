@@ -291,12 +291,12 @@ parallel test shards without collisions (see [Spaces]({{ site.baseurl }}/feature
    faithful translation sorts by priority ascending and then *reverses* same-priority stubs —
    getting this backwards silently changes which stub answers. Put more specific stubs first.
 
-There is no automated importer today — translation is manual. One is planned:
-[#890](https://github.com/achird-labs/rift/issues/890) covers the mechanical translation
-(matchers, responses, faults, scenarios, delays, `priority` ordering) and
-[#891](https://github.com/achird-labs/rift/issues/891) covers response templating. If a large
-migration is blocking you, comment on #890 with the shape of your config — that is what decides
-priority and what the test corpus gets built from.
+There is no automated importer, and none is planned — translation is manual. The concept mapping
+and the three gotchas above are the whole of the guidance. An importer was scoped in
+[#890](https://github.com/achird-labs/rift/issues/890) (mechanical translation) and
+[#891](https://github.com/achird-labs/rift/issues/891) (response templating); both were closed as
+not planned, and their bodies remain the most complete description of what such a tool would have
+to get right if anyone revives the idea.
 
 ---
 
