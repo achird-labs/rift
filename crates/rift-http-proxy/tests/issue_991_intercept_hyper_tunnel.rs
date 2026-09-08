@@ -898,6 +898,173 @@ async fn a_chunked_body_reaches_the_imposter_complete() {
     server.shutdown().await;
 }
 
+// ===== Issue #994: a repeated request header keeps every value =====
+//
+// `collect_request_headers` used to build a `HashMap<String, String>` with `insert`, so a name
+// sent more than once kept only its LAST value — before the matcher or the forwarder ever saw it.
+// #936 fixed the same shape on the response side; these pin the request side.
+
+// #994 AC1. The rule predicates on the header value the client sent FIRST, which is precisely the
+// one last-wins destroyed. Serving a distinct body (rather than asserting a bare 200) keeps this
+// from passing on the no-rule-match default, which is also a 200.
+#[tokio::test]
+async fn a_rule_matches_the_first_of_two_repeated_header_values() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    add_rule(
+        admin,
+        r#"{"host":"cdn.example.com","predicates":[{"equals":{"headers":{"x-test":"first"}}}],"action":{"serve":{"statusCode":200,"body":"matched-first"}}}"#,
+    )
+    .await;
+
+    let response = raw_tunnel_one_response(
+        intercept,
+        &ca,
+        "cdn.example.com",
+        "GET /probe HTTP/1.1\r\nHost: cdn.example.com\r\nX-Test: first\r\nX-Test: second\r\n\r\n",
+    )
+    .await;
+
+    assert!(
+        response.contains("matched-first"),
+        "a predicate on the first of two X-Test values must match; last-wins hid it and the \
+         request fell through to the default 200: {}",
+        response.chars().take(160).collect::<String>()
+    );
+    server.shutdown().await;
+}
+
+// #994 AC1, the other half. The LAST value must keep matching too — a fix that merely swapped
+// which single value survives would pass the test above and still be wrong.
+#[tokio::test]
+async fn a_rule_matches_the_second_of_two_repeated_header_values() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    add_rule(
+        admin,
+        r#"{"host":"cdn.example.com","predicates":[{"equals":{"headers":{"x-test":"second"}}}],"action":{"serve":{"statusCode":200,"body":"matched-second"}}}"#,
+    )
+    .await;
+
+    let response = raw_tunnel_one_response(
+        intercept,
+        &ca,
+        "cdn.example.com",
+        "GET /probe HTTP/1.1\r\nHost: cdn.example.com\r\nX-Test: first\r\nX-Test: second\r\n\r\n",
+    )
+    .await;
+
+    assert!(
+        response.contains("matched-second"),
+        "a predicate on the second of two X-Test values must also match: {}",
+        response.chars().take(160).collect::<String>()
+    );
+    server.shutdown().await;
+}
+
+// #994 AC2 + AC3. Forwarding is the half a client can actually be harmed by: the imposter records
+// and matches against a request the client never sent. `RecordedRequest.headers` is already
+// `HashMap<String, Vec<String>>` (the #936 wire shape), so the journal can represent this — which
+// is what makes it assertable rather than merely plausible.
+#[tokio::test]
+async fn repeated_request_headers_reach_the_imposter_intact() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    let http = reqwest::Client::new();
+
+    let created: serde_json::Value = http
+        .post(format!("http://{admin}/imposters"))
+        .json(&serde_json::json!({
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "from-imposter"}}]}]
+        }))
+        .send()
+        .await
+        .expect("create imposter")
+        .json()
+        .await
+        .expect("imposter json");
+    let imposter_port = created["port"].as_u64().expect("assigned port");
+
+    add_rule(
+        admin,
+        &format!(
+            r#"{{"host":"cdn.example.com","action":{{"forward":{{"port":{imposter_port}}}}}}}"#
+        ),
+    )
+    .await;
+
+    let response = raw_tunnel_one_response(
+        intercept,
+        &ca,
+        "cdn.example.com",
+        "GET /probe HTTP/1.1\r\nHost: cdn.example.com\r\n\
+         Cookie: a=1\r\nCookie: b=2\r\nX-Test: first\r\nX-Test: second\r\n\r\n",
+    )
+    .await;
+    assert!(
+        response.contains("from-imposter"),
+        "the forward rule must reach the imposter: {}",
+        response.chars().take(160).collect::<String>()
+    );
+
+    let recorded: serde_json::Value = http
+        .get(format!("http://{admin}/imposters/{imposter_port}"))
+        .send()
+        .await
+        .expect("read imposter")
+        .json()
+        .await
+        .expect("imposter json");
+    let entry = &recorded["requests"]
+        .as_array()
+        .expect("recordRequests is on, so the log is present")[0];
+
+    // Two shapes to absorb, neither of which this test is about. The wire renders a single value
+    // as a bare string and several as an array (the #936 convention); and the journal Title-Cases
+    // header names (issue #238), which `admin_api_integration::records_both_values_of_a_request_
+    // header` already pins. Look the name up case-insensitively and normalise both renderings, so
+    // what is asserted below is multi-value preservation and nothing else.
+    let values = |name: &str| -> Vec<String> {
+        let headers = entry["headers"]
+            .as_object()
+            .expect("recorded headers are a JSON object");
+        let (_, found) = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .unwrap_or_else(|| panic!("no recorded header {name}: {:?}", entry["headers"]));
+        match found {
+            serde_json::Value::String(s) => vec![s.clone()],
+            serde_json::Value::Array(a) => a
+                .iter()
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .collect(),
+            other => panic!("unexpected header shape for {name}: {other}"),
+        }
+    };
+
+    assert_eq!(
+        values("cookie"),
+        vec!["a=1".to_string(), "b=2".to_string()],
+        "AC3: both Cookie headers must survive forwarding, in order; got {:?}",
+        entry["headers"]
+    );
+    assert_eq!(
+        values("x-test"),
+        vec!["first".to_string(), "second".to_string()],
+        "AC2: both X-Test values must reach the imposter; got {:?}",
+        entry["headers"]
+    );
+    server.shutdown().await;
+}
+
 // AC3 / E3. Chunked framing declares no length up front, so a `content-length` pre-check cannot
 // catch this — only counting bytes as they decode can.
 #[tokio::test]

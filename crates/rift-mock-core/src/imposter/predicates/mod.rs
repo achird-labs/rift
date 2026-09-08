@@ -11,6 +11,55 @@ use crate::util::FastMap;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
+/// A borrowed, multi-value view over request headers, so the one predicate engine can serve both
+/// the imposter hot path (one value per header name) and the intercept proxy (every value of a
+/// repeated header, issue #994) without either paying for the other's shape.
+pub trait RequestHeaders {
+    /// Every header name paired with all of its values, in receipt order. A name never yields an
+    /// empty slice — it wouldn't be iterated at all if it carried no values.
+    fn entries(&self) -> impl Iterator<Item = (&str, &[String])>;
+    /// Number of distinct header names.
+    fn len(&self) -> usize;
+    /// Whether there are no header names at all.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// The imposter hot path's shape: one value per header name. `std::slice::from_ref` turns the
+/// single `&String` into a one-element slice with no allocation, so this adapter costs nothing on
+/// the per-request hot path.
+impl<SH: BuildHasher> RequestHeaders for HashMap<String, String, SH> {
+    fn entries(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.iter()
+            .map(|(k, v)| (k.as_str(), std::slice::from_ref(v)))
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+}
+
+/// The intercept proxy's shape (issue #994): every value a repeated header carried, in the order
+/// the client sent them.
+impl<SH: BuildHasher> RequestHeaders for HashMap<String, Vec<String>, SH> {
+    fn entries(&self) -> impl Iterator<Item = (&str, &[String])> {
+        // Skipping empty vectors is what makes the trait's "never an empty slice" invariant hold
+        // by construction rather than by convention. This map is public API, so a caller can hand
+        // over `name -> []`; without this filter that name would read as *present* to `exists`,
+        // never-matching to `equals`, and absent to `inject` — three answers to one input.
+        self.iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+    }
+
+    fn len(&self) -> usize {
+        // Counted the same way `entries()` yields, or `deepEquals` — which compares this against
+        // the expected object's name count — would see a name that no other operator can observe.
+        self.values().filter(|v| !v.is_empty()).count()
+    }
+}
+
 /// Check if a stub matches a request based on its predicates.
 ///
 /// `Err` propagates a predicate-`inject` failure (issue #440: object-build failure or the
@@ -18,12 +67,12 @@ use std::hash::BuildHasher;
 /// predicate as non-matching, so callers must surface the error rather than swallow it into
 /// `false`. Every other predicate op is infallible.
 #[allow(clippy::too_many_arguments)]
-pub fn stub_matches<SH>(
+pub fn stub_matches<H>(
     predicates: &[Predicate],
     method: &str,
     path: &str,
     query: Option<&str>,
-    headers: &HashMap<String, String, SH>,
+    headers: &H,
     body: Option<&str>,
     request_from: Option<&str>,
     client_ip: Option<&str>,
@@ -35,7 +84,7 @@ pub fn stub_matches<SH>(
     imposter_port: u16,
 ) -> anyhow::Result<bool>
 where
-    SH: BuildHasher,
+    H: RequestHeaders,
 {
     // Parse the body and query once for standalone callers; the request hot path parses each once
     // per request (before the stub scan) and calls `stub_matches_inner` directly (issues #290, #480).
@@ -68,12 +117,12 @@ where
 ///
 /// See [`stub_matches`] for the `Err` contract (issue #440).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn stub_matches_inner<SH>(
+pub(crate) fn stub_matches_inner<H>(
     predicates: &[Predicate],
     method: &str,
     path: &str,
     query: Option<&str>,
-    headers: &HashMap<String, String, SH>,
+    headers: &H,
     body: Option<&str>,
     request_from: Option<&str>,
     client_ip: Option<&str>,
@@ -93,7 +142,7 @@ pub(crate) fn stub_matches_inner<SH>(
     query_map: Option<&FastMap<String, String>>,
 ) -> anyhow::Result<bool>
 where
-    SH: BuildHasher,
+    H: RequestHeaders,
 {
     Ok(stub_matches_explained(
         predicates,
@@ -128,12 +177,12 @@ where
 ///
 /// See [`stub_matches`] for the `Err` contract (issue #440).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn stub_matches_explained<SH>(
+pub(crate) fn stub_matches_explained<H>(
     predicates: &[Predicate],
     method: &str,
     path: &str,
     query: Option<&str>,
-    headers: &HashMap<String, String, SH>,
+    headers: &H,
     body: Option<&str>,
     request_from: Option<&str>,
     client_ip: Option<&str>,
@@ -144,7 +193,7 @@ pub(crate) fn stub_matches_explained<SH>(
     query_map: Option<&FastMap<String, String>>,
 ) -> anyhow::Result<Option<usize>>
 where
-    SH: BuildHasher,
+    H: RequestHeaders,
 {
     for (index, predicate) in predicates.iter().enumerate() {
         if !predicate_matches_inner(
@@ -206,12 +255,12 @@ fn ends_with_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
 /// `Err` propagates a predicate-`inject` failure (issue #440) — see [`stub_matches`] for the
 /// full contract. Every other predicate op is infallible.
 #[allow(clippy::too_many_arguments)]
-pub fn predicate_matches<SH>(
+pub fn predicate_matches<H>(
     predicate: &Predicate,
     method: &str,
     path: &str,
     query: Option<&str>,
-    headers: &HashMap<String, String, SH>,
+    headers: &H,
     body: Option<&str>,
     request_from: Option<&str>,
     client_ip: Option<&str>,
@@ -220,7 +269,7 @@ pub fn predicate_matches<SH>(
     imposter_port: u16,
 ) -> anyhow::Result<bool>
 where
-    SH: BuildHasher,
+    H: RequestHeaders,
 {
     // Standalone callers parse the body and query here; the request hot path parses each once per
     // request and calls `predicate_matches_inner` directly with the shared parses (issues #290, #480).
@@ -257,12 +306,12 @@ where
 // (issue #599); without that feature the arm doesn't use it, so it's only threaded through the
 // recursive And/Or descent — a false positive for this build only.
 #[cfg_attr(not(feature = "javascript"), allow(clippy::only_used_in_recursion))]
-pub(crate) fn predicate_matches_inner<SH>(
+pub(crate) fn predicate_matches_inner<H>(
     predicate: &Predicate,
     method: &str,
     path: &str,
     query: Option<&str>,
-    headers: &HashMap<String, String, SH>,
+    headers: &H,
     body: Option<&str>,
     request_from: Option<&str>,
     client_ip: Option<&str>,
@@ -276,7 +325,7 @@ pub(crate) fn predicate_matches_inner<SH>(
     query_map: Option<&FastMap<String, String>>,
 ) -> anyhow::Result<bool>
 where
-    SH: BuildHasher,
+    H: RequestHeaders,
 {
     // Get predicate options
     let case_sensitive = predicate.parameters.case_sensitive.unwrap_or(false);
@@ -576,9 +625,12 @@ where
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect(),
+                    // `MountebankRequest.headers` is the fixed single-value scripting boundary
+                    // (out of scope for #704/#994), so a repeated header exposes only its first
+                    // value to an inject script.
                     headers: headers
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .entries()
+                        .filter_map(|(k, v)| v.first().map(|first| (k.to_string(), first.clone())))
                         .collect(),
                     // `body` is already the classified string from the caller (base64 for a
                     // binary request body, issue #636); this predicate-inject path doesn't thread
@@ -2282,7 +2334,7 @@ mod tests {
         let pred = make_predicate(PredicateOperation::Inject(
             "function(request) { return request.method === 'POST'; }".to_string(),
         ));
-        let headers = HashMap::new();
+        let headers: HashMap<String, String> = HashMap::new();
         let post_result = predicate_matches(
             &pred, "POST", "/", None, &headers, None, None, None, None, 0,
         )

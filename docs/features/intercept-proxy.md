@@ -275,6 +275,25 @@ the predicate against the base64 string, e.g.
 `{ "equals": { "body": "H4sIAAAAAAAA/w==" } }`. A valid-UTF-8 (text or JSON) body is matched
 as-is, unchanged. Forwarding always relays the raw bytes regardless of classification.
 
+A header predicate matches by **name**, and a repeated request header (the client sent the same
+name more than once) is one name with several values: the predicate matches if **any** of those
+values satisfies it, not only the first or the last. Forwarding to an imposter (`action.forward`)
+carries every value of a repeated header along, in the order the client sent them — none are
+dropped or comma-joined. A header value that is not valid UTF-8 is dropped rather than matched or
+forwarded, the same as an invalid body byte sequence would be if it broke UTF-8 classification.
+
+Two consequences worth knowing:
+
+- `deepEquals` compares header **names** exactly but is permissive about a repeated name's values —
+  it matches if any one of them satisfies the expectation. There is currently no way to say
+  "exactly these two values and no others" for a single header name.
+- `not` follows from the above: `{"not":{"equals":{"headers":{"x-test":"first"}}}}` matches only
+  when *no* value for that name is `first`.
+
+One exception, because the scripting boundary is a fixed shape: the `request.headers` object handed
+to an `inject` predicate carries a single value per name, so a script sees only the **first** value
+of a repeated header. Declarative predicates (`equals`, `contains`, `matches`, …) see all of them.
+
 > **`inject` predicates require `--allowInjection`.** A rule's predicates are evaluated on every
 > intercepted request, so an `inject` predicate is executable JavaScript — the same surface
 > `--allowInjection` gates on imposter stubs. Without the flag, a rule carrying one (however deeply
