@@ -24,7 +24,7 @@
 /// Which entrypoint contract a script satisfies for the checked hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntrypointMatch {
-    /// A v2 function declared with exactly the hook's name (e.g. `respond`, `matches`).
+    /// A v2 function declared with exactly the hook's name (`respond`).
     Named,
     /// No functions declared at all — a legal v2 bare-expression script.
     Bare,
@@ -48,16 +48,33 @@ pub enum EntrypointCheckError {
          there is no bare expression to evaluate); did you mean `{hook}`?"
     )]
     Mismatch { hook: String, declared: String },
+    #[error(
+        "`{hook}` is not a dispatchable entrypoint: only `respond` is wired end-to-end across \
+         both engines. Predicate scripting uses Mountebank `inject`, and response rewriting uses \
+         the `decorate`/`shellTransform` behaviors."
+    )]
+    UnsupportedHook { hook: String },
 }
 
-/// Statically check whether `script` (for `engine_type`) defines a valid entrypoint for `hook`
-/// (`"respond"`, `"matches"`, `"transform"`, or `"delay"`). `Err` covers both a compile/syntax
-/// error and an entrypoint mismatch — see [`EntrypointCheckError`]'s variants.
+/// Statically check whether `script` (for `engine_type`) defines a valid entrypoint for `hook`.
+///
+/// `hook` must be `"respond"` — the only entrypoint either engine dispatches (issue #1001).
+/// This is a whitelist rather than a list of the three names #1001 removed, so a misspelled or
+/// future hook fails closed too: validating a hook the runtime will never call is the defect
+/// #1001 exists to remove, and a blacklist would let a narrower version of it back in.
+///
+/// `Err` covers an unsupported hook, a compile/syntax error, and an entrypoint mismatch — see
+/// [`EntrypointCheckError`]'s variants.
 pub fn check_entrypoint(
     engine_type: &str,
     script: &str,
     hook: &str,
 ) -> Result<EntrypointMatch, EntrypointCheckError> {
+    if hook != super::entrypoints::RESPOND {
+        return Err(EntrypointCheckError::UnsupportedHook {
+            hook: hook.to_string(),
+        });
+    }
     let declared = declared_functions(engine_type, script)?;
     decide(&declared, hook)
 }
@@ -167,14 +184,32 @@ mod tests {
         assert!(matches!(err, EntrypointCheckError::Syntax(_)));
     }
 
+    /// Flipped in #1001. This test used to assert that `matches` was a checkable hook; the
+    /// property reversed when #1001 established that `respond` is the only entrypoint the runtime
+    /// dispatches, so the assertion is inverted rather than deleted — otherwise nothing would
+    /// state which way round it is.
     #[test]
-    fn rhai_matches_hook_checks_matches_name() {
-        assert_eq!(
-            check_entrypoint("rhai", "fn matches(ctx) { true }", "matches"),
-            Ok(EntrypointMatch::Named)
+    fn rhai_matches_hook_is_rejected_as_undispatchable() {
+        for hook in ["matches", "transform", "delay"] {
+            let err = check_entrypoint("rhai", "fn matches(ctx) { true }", hook).unwrap_err();
+            assert!(
+                matches!(&err, EntrypointCheckError::UnsupportedHook { hook: h } if h == hook),
+                "hook `{hook}` must be refused as undispatchable, got {err:?}"
+            );
+        }
+    }
+
+    /// The guard is a whitelist, not a blacklist of the three names #1001 removed: an unknown or
+    /// misspelled hook must fail closed too. A blacklist would pass `bogus` through to `decide()`,
+    /// which would "validate" it and report a Mismatch as if the hook were real — reintroducing a
+    /// narrower version of the exact defect this issue removes.
+    #[test]
+    fn an_unknown_hook_is_rejected_rather_than_validated() {
+        let err = check_entrypoint("rhai", "fn bogus(ctx) { true }", "bogus").unwrap_err();
+        assert!(
+            matches!(&err, EntrypointCheckError::UnsupportedHook { hook } if hook == "bogus"),
+            "an unknown hook must be refused, not validated, got {err:?}"
         );
-        let err = check_entrypoint("rhai", "fn respond(ctx) { pass() }", "matches").unwrap_err();
-        assert!(matches!(err, EntrypointCheckError::Mismatch { .. }));
     }
 
     #[test]

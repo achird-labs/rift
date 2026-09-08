@@ -2,7 +2,7 @@ use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result};
 use crate::imposter::ResponseMode;
 use crate::scripting::{
     FaultDecision, PredicateGeneratorError, ScriptCtxExtras, ScriptCtxInput, ScriptRequest,
-    ScriptResponseContext, ScriptResult, ScriptResultBody, ScriptStubContext, entrypoints,
+    ScriptResult, ScriptResultBody, ScriptStubContext, entrypoints,
 };
 use anyhow::{Result, anyhow};
 use boa_engine::{
@@ -721,7 +721,7 @@ fn parse_json_or_null(context: &mut Context, raw: &str) -> Result<JsValue> {
     }
 }
 
-/// Captures for the `ctx.request`/`ctx.response` case-insensitive `header(name)` getter: the
+/// Captures for the `ctx.request` case-insensitive `header(name)` getter: the
 /// (non-lowercased) source headers, looked up case-insensitively at call time.
 type HeaderGetterCaptures = std::collections::HashMap<String, String>;
 
@@ -838,48 +838,6 @@ fn create_request_ctx_object(context: &mut Context, request: &ScriptRequest) -> 
         context,
     )
     .map_err(|e| anyhow!("Failed to set ctx.request.body: {e}"))?;
-
-    Ok(obj.into())
-}
-
-fn create_response_ctx_object(
-    context: &mut Context,
-    response: &ScriptResponseContext,
-) -> Result<JsValue> {
-    let obj = create_js_object(context);
-    obj.set(
-        js_string!("status"),
-        JsValue::from(f64::from(response.status)),
-        false,
-        context,
-    )
-    .map_err(|e| anyhow!("Failed to set ctx.response.status: {e}"))?;
-
-    let headers_obj = create_js_object(context);
-    for (k, v) in &response.headers {
-        headers_obj
-            .set(
-                js_string!(k.to_ascii_lowercase()),
-                JsValue::from(js_string!(v.clone())),
-                false,
-                context,
-            )
-            .map_err(|e| anyhow!("Failed to set ctx.response.headers.{k}: {e}"))?;
-    }
-    obj.set(js_string!("headers"), headers_obj, false, context)
-        .map_err(|e| anyhow!("Failed to set ctx.response.headers: {e}"))?;
-    set_header_getter(&obj, &response.headers, context)?;
-
-    let json_val = parse_json_or_null(context, &response.body)?;
-    obj.set(js_string!("json"), json_val, false, context)
-        .map_err(|e| anyhow!("Failed to set ctx.response.json: {e}"))?;
-    obj.set(
-        js_string!("body"),
-        JsValue::from(js_string!(response.body.clone())),
-        false,
-        context,
-    )
-    .map_err(|e| anyhow!("Failed to set ctx.response.body: {e}"))?;
 
     Ok(obj.into())
 }
@@ -1234,12 +1192,6 @@ fn create_ctx_object(context: &mut Context, input: &ScriptCtxInput) -> Result<Js
     let request_obj = create_request_ctx_object(context, input.request)?;
     obj.set(js_string!("request"), request_obj, false, context)
         .map_err(|e| anyhow!("Failed to set ctx.request: {e}"))?;
-
-    if let Some(resp) = &input.response {
-        let response_obj = create_response_ctx_object(context, resp)?;
-        obj.set(js_string!("response"), response_obj, false, context)
-            .map_err(|e| anyhow!("Failed to set ctx.response: {e}"))?;
-    }
 
     obj.set(
         js_string!("flowId"),

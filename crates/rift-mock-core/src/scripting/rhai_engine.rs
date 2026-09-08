@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{
-    FaultDecision, ScriptCtxExtras, ScriptCtxInput, ScriptFlowStore, ScriptRequest,
-    ScriptResponseContext, ScriptResult, ScriptResultBody, entrypoints,
+    FaultDecision, ScriptCtxExtras, ScriptCtxInput, ScriptFlowStore, ScriptRequest, ScriptResult,
+    ScriptResultBody, entrypoints,
 };
 
 /// Helper function to check if a year is a leap year
@@ -243,7 +243,7 @@ impl RhaiEngine {
 
 /// Register the v2 `ctx` API (issue #357 Items 1/3) on an [`Engine`]: `ctx.state`/`ctx.store`
 /// (flow-store handles), `ctx.logger`, the `http`/`delay`/`reset`/`pass` result constructors, and
-/// a case-insensitive `.header(name)` getter usable on `ctx.request`/`ctx.response`. Shared by
+/// a case-insensitive `.header(name)` getter usable on `ctx.request`. Shared by
 /// `RhaiEngine::create_engine` so every caller (pooled, bounded, direct) gets the same API.
 fn register_v2_api(engine: &mut Engine) {
     engine
@@ -290,7 +290,7 @@ fn register_v2_api(engine: &mut Engine) {
     engine.register_fn("reset", || RhaiScriptResult(ScriptResult::Reset));
     engine.register_fn("pass", || RhaiScriptResult(ScriptResult::Pass));
 
-    // `ctx.request.header("X-Flow-Id")` / `ctx.response.header(...)`: case-insensitive lookup
+    // `ctx.request.header("X-Flow-Id")`: case-insensitive lookup
     // into the receiver map's own `headers` field. Registered generically on `Map` (Rhai method
     // calls dispatch on the receiver's runtime type), so it's a harmless no-op on any other map
     // that doesn't happen to carry a `headers` key.
@@ -510,7 +510,8 @@ impl RhaiScriptResult {
     }
 }
 
-/// Run one v2 entrypoint (`respond`/`matches`/`transform`/`delay`, issue #357 Item 2): a function
+/// Run the v2 entrypoint (`respond`, issue #357 Item 2; the only one either engine dispatches,
+/// see `entrypoints`): a function
 /// named `entrypoint` → call it with `ctx`. Else (bare-expression form) → evaluate the whole
 /// script with `ctx` in scope and use the tail expression's value.
 fn run_entrypoint(
@@ -567,30 +568,6 @@ fn dynamic_to_fault_decision(result: Dynamic, rule_id: &str) -> Result<FaultDeci
     Ok(script_result.0.into_fault_decision(rule_id))
 }
 
-fn dynamic_to_matches_bool(result: Dynamic) -> bool {
-    result.as_bool().unwrap_or(false)
-}
-
-fn dynamic_to_delay_ms(result: Dynamic) -> Result<u64> {
-    if let Ok(n) = result.as_int() {
-        Ok(n.max(0) as u64)
-    } else if let Ok(f) = result.as_float() {
-        Ok(f.max(0.0) as u64)
-    } else {
-        Err(anyhow!("delay(ctx) must return a number of milliseconds"))
-    }
-}
-
-fn dynamic_to_transform_result(result: Dynamic) -> Result<Option<ScriptResult>> {
-    if result.is_unit() {
-        return Ok(None);
-    }
-    let script_result = result
-        .try_cast::<RhaiScriptResult>()
-        .ok_or_else(|| anyhow!("transform(ctx) must return http(...)/pass() or nothing"))?;
-    Ok(Some(script_result.0))
-}
-
 /// `respond(ctx)` (issue #357 Item 2): the response-script entrypoint.
 pub fn call_respond(
     engine: &Engine,
@@ -603,43 +580,6 @@ pub fn call_respond(
     dynamic_to_fault_decision(result, rule_id)
 }
 
-/// `matches(ctx)` (issue #357 Item 2): the predicate-script entrypoint, returns a bool.
-pub fn call_matches(
-    engine: &Engine,
-    ast: &AST,
-    ctx_input: &ScriptCtxInput,
-    flow_store: Arc<dyn FlowStore>,
-) -> Result<bool> {
-    let result = run_entrypoint(engine, ast, entrypoints::MATCHES, ctx_input, flow_store)?;
-    Ok(dynamic_to_matches_bool(result))
-}
-
-/// `transform(ctx)` (issue #357 Item 2): the decorate-behavior entrypoint. Returns `None` when
-/// the script returns nothing (no change to the response); `Some(result)` when it returns an
-/// `http(...)`/`pass()` result constructor describing the new response. NOTE: unlike a true
-/// in-place `ctx.response` mutation, this iteration requires the new response to be *returned* —
-/// see the module-level doc for why in-place sharing isn't guaranteed across engines yet.
-pub fn call_transform(
-    engine: &Engine,
-    ast: &AST,
-    ctx_input: &ScriptCtxInput,
-    flow_store: Arc<dyn FlowStore>,
-) -> Result<Option<ScriptResult>> {
-    let result = run_entrypoint(engine, ast, entrypoints::TRANSFORM, ctx_input, flow_store)?;
-    dynamic_to_transform_result(result)
-}
-
-/// `delay(ctx)` (issue #357 Item 2): the wait-behavior entrypoint, returns a millisecond count.
-pub fn call_delay(
-    engine: &Engine,
-    ast: &AST,
-    ctx_input: &ScriptCtxInput,
-    flow_store: Arc<dyn FlowStore>,
-) -> Result<u64> {
-    let result = run_entrypoint(engine, ast, entrypoints::DELAY, ctx_input, flow_store)?;
-    dynamic_to_delay_ms(result)
-}
-
 fn header_map_lowercased(headers: &std::collections::HashMap<String, String>) -> Map {
     let mut m = Map::new();
     for (k, v) in headers {
@@ -648,7 +588,7 @@ fn header_map_lowercased(headers: &std::collections::HashMap<String, String>) ->
     m
 }
 
-/// Parse `raw` as JSON for `ctx.request.json`/`ctx.response.json` (issue #357 Item 1): valid JSON
+/// Parse `raw` as JSON for `ctx.request.json` (issue #357 Item 1): valid JSON
 /// (including the literal `null`) or a parse failure both yield `Dynamic::UNIT` — Rhai's "nothing"
 /// — since a `null` body and a non-JSON body are indistinguishable at this field's use sites.
 fn parse_json_or_unit(raw: &str) -> Dynamic {
@@ -701,18 +641,6 @@ fn build_request_ctx_map(request: &ScriptRequest) -> Map {
     m
 }
 
-fn build_response_ctx_map(response: &ScriptResponseContext) -> Map {
-    let mut m = Map::new();
-    m.insert("status".into(), Dynamic::from(response.status as i64));
-    m.insert(
-        "headers".into(),
-        Dynamic::from(header_map_lowercased(&response.headers)),
-    );
-    m.insert("json".into(), parse_json_or_unit(&response.body));
-    m.insert("body".into(), Dynamic::from(response.body.clone()));
-    m
-}
-
 fn build_stub_ctx_map(stub: &super::ScriptStubContext) -> Map {
     let mut m = Map::new();
     m.insert(
@@ -742,12 +670,6 @@ fn build_ctx_map(input: &ScriptCtxInput, flow_store: Arc<dyn FlowStore>) -> Map 
         "request".into(),
         Dynamic::from(build_request_ctx_map(input.request)),
     );
-    if let Some(resp) = &input.response {
-        ctx.insert(
-            "response".into(),
-            Dynamic::from(build_response_ctx_map(resp)),
-        );
-    }
     ctx.insert("flowId".into(), Dynamic::from(input.flow_id.clone()));
     ctx.insert(
         "stub".into(),
@@ -1345,7 +1267,7 @@ mod tests {
             }
         }
 
-        // --- entrypoints: named wrapper + bare, respond/matches/transform/delay ---
+        // --- entrypoints: `respond`, named wrapper + bare ---
 
         #[test]
         fn respond_named_wrapper() {
@@ -1385,90 +1307,6 @@ mod tests {
             "#;
             let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
             assert!(matches!(decision, FaultDecision::Error { status: 503, .. }));
-        }
-
-        #[test]
-        fn matches_named_wrapper_true_and_false() {
-            let engine = RhaiEngine::create_engine();
-            let script = r#" fn matches(ctx) { ctx.request.method == "POST" } "#;
-            let ast = engine.compile(script).unwrap();
-
-            let post_req = req(HashMap::new(), None);
-            let ctx_input = ScriptCtxInput::new(&post_req, "flow-1");
-            let matched = call_matches(&engine, &ast, &ctx_input, store()).unwrap();
-            assert!(matched);
-
-            let mut get_req = req(HashMap::new(), None);
-            get_req.method = "GET".to_string();
-            let ctx_input2 = ScriptCtxInput::new(&get_req, "flow-1");
-            let matched2 = call_matches(&engine, &ast, &ctx_input2, store()).unwrap();
-            assert!(!matched2);
-        }
-
-        #[test]
-        fn matches_bare_expression() {
-            let engine = RhaiEngine::create_engine();
-            let script = r#" ctx.request.path == "/api/orders" "#;
-            let ast = engine.compile(script).unwrap();
-            let request = req(HashMap::new(), None);
-            let ctx_input = ScriptCtxInput::new(&request, "flow-1");
-            let matched = call_matches(&engine, &ast, &ctx_input, store()).unwrap();
-            assert!(matched);
-        }
-
-        #[test]
-        fn transform_named_wrapper_returns_new_response() {
-            let engine = RhaiEngine::create_engine();
-            let script = r#"
-                fn transform(ctx) {
-                    http(ctx.response.status, #{ wrapped: ctx.response.body })
-                }
-            "#;
-            let ast = engine.compile(script).unwrap();
-            let request = req(HashMap::new(), None);
-            let ctx_input =
-                ScriptCtxInput::new(&request, "flow-1").with_response(ScriptResponseContext {
-                    status: 201,
-                    headers: HashMap::new(),
-                    body: "original".to_string(),
-                });
-            let result = call_transform(&engine, &ast, &ctx_input, store())
-                .unwrap()
-                .expect("transform must return a result");
-            match result.into_fault_decision("rule") {
-                FaultDecision::Error { status, body, .. } => {
-                    assert_eq!(status, 201);
-                    assert!(body.contains("original"));
-                }
-                other => panic!("expected Error, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn transform_bare_returns_nothing_means_no_change() {
-            let engine = RhaiEngine::create_engine();
-            let script = "()"; // explicit no-op bare expression
-            let ast = engine.compile(script).unwrap();
-            let request = req(HashMap::new(), None);
-            let ctx_input = ScriptCtxInput::new(&request, "flow-1");
-            let result = call_transform(&engine, &ast, &ctx_input, store()).unwrap();
-            assert!(result.is_none());
-        }
-
-        #[test]
-        fn delay_named_wrapper_and_bare() {
-            let engine = RhaiEngine::create_engine();
-            let script = " fn delay(ctx) { 250 } ";
-            let ast = engine.compile(script).unwrap();
-            let request = req(HashMap::new(), None);
-            let ctx_input = ScriptCtxInput::new(&request, "flow-1");
-            let ms = call_delay(&engine, &ast, &ctx_input, store()).unwrap();
-            assert_eq!(ms, 250);
-
-            let bare_script = " 100 + 25 ";
-            let bare_ast = engine.compile(bare_script).unwrap();
-            let ms2 = call_delay(&engine, &bare_ast, &ctx_input, store()).unwrap();
-            assert_eq!(ms2, 125);
         }
 
         // --- result constructors ---

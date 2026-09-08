@@ -91,6 +91,28 @@ record.
 
 ### Removed
 
+- **`respond(ctx)` is the whole of the `ctx` scripting API** (#1001). The docs advertised four
+  entrypoints against a unified `ctx` — `respond`, `matches`, `transform` and `delay` — prefaced by
+  "`ctx` is built the same way ... at every hook placement". Only `respond` was ever dispatched.
+  #357 landed the vocabulary (the `entrypoints` constants, the static checker, three Rhai
+  dispatchers) but nothing wired the other three in either engine, so a script defining
+  `fn matches(ctx)` passed `rift script check --hook matches` with **zero errors and zero warnings**
+  and then silently never matched.
+  - **`rift script check --hook` now accepts only `respond`**, matching `rift script run --hook`,
+    which has rejected the others since #360. The `--hook` flag itself is unchanged; only its
+    accepted value set shrinks. This turns a silent no-op into a clean error at check time.
+  - The rejection is a **whitelist**: an unknown or misspelled hook is refused too, rather than
+    passed through and "validated" against a name the runtime will never call.
+  - **The capabilities themselves are not going anywhere** — they were simply documented under the
+    wrong shape. Predicate scripting is Mountebank `inject` (`request`/`state`/`logger`/`config`
+    scope); response rewriting is the `decorate`/`shellTransform` behaviors; waiting is
+    `_behaviors.wait`, which takes a value, not a script. The scripting page now says so, with links.
+  - **Embedders (0.x minor bump):** `rift_mock_core::scripting::ScriptResponseContext`,
+    `ScriptCtxInput::with_response` and its `response` field are removed, along with the Rhai
+    `call_matches`/`call_transform`/`call_delay` dispatchers and `entrypoints::{MATCHES, TRANSFORM,
+    DELAY}`. `ctx.response` was reachable only from a hook that never ran, so no serve path changes.
+    `check_entrypoint` keeps its signature and gains an `UnsupportedHook` error variant.
+
 - **The script decision cache is gone** (#998), discharging the follow-up #975 named. It memoised
   `FaultDecision`s for the reverse-proxy `script_rules` hook, and when that mode was removed in
   #975 nothing was left that could construct one — the module and its Criterion bench had no caller

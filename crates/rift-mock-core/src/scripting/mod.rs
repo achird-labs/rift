@@ -149,22 +149,12 @@ pub struct ScriptStubContext {
     pub stub_id: Option<String>,
 }
 
-/// The in-flight response, exposed as `ctx.response` on transform/decorate hooks only (issue
-/// #357 Item 1). Absent (`None` on `ScriptCtxInput`) for every other hook point.
-#[derive(Debug, Clone)]
-pub struct ScriptResponseContext {
-    pub status: u16,
-    pub headers: HashMap<String, String>,
-    pub body: String,
-}
-
 /// Everything the shared `ctx` builder (issue #357 Item 1) needs, engine-agnostic. Each engine
 /// (`rhai_engine`, `js_engine`) turns this into its own native `ctx` value; the
 /// field names/semantics are identical across engines by contract — keep them that way.
 #[derive(Debug, Clone)]
 pub struct ScriptCtxInput<'a> {
     pub request: &'a ScriptRequest,
-    pub response: Option<ScriptResponseContext>,
     pub flow_id: String,
     pub stub: ScriptStubContext,
     /// Imposter port, used only to tag `ctx.logger` output; 0 when not running under an imposter
@@ -176,17 +166,10 @@ impl<'a> ScriptCtxInput<'a> {
     pub fn new(request: &'a ScriptRequest, flow_id: impl Into<String>) -> Self {
         Self {
             request,
-            response: None,
             flow_id: flow_id.into(),
             stub: ScriptStubContext::default(),
             port: 0,
         }
-    }
-
-    #[must_use]
-    pub fn with_response(mut self, response: ScriptResponseContext) -> Self {
-        self.response = Some(response);
-        self
     }
 
     #[must_use]
@@ -324,13 +307,15 @@ impl ScriptResult {
     }
 }
 
-/// Names of the v2 named entrypoints (issue #357 Items 2/4). Placement determines which name a
-/// hook looks for (e.g. the `respond` hook calls a function named `respond`, if one is declared).
+/// Name of the v2 named entrypoint (issue #357 Items 2/4): a `respond` hook calls a function
+/// named `respond`, if one is declared, else evaluates the script as a bare expression.
+///
+/// `respond` is the only entrypoint either engine dispatches. #357 landed the vocabulary for
+/// `matches`/`transform`/`delay` too, but nothing ever wired them, so #1001 removed those names
+/// rather than keep advertising hooks the runtime ignores. Predicate scripting is Mountebank
+/// `inject`; response rewriting is the `decorate`/`shellTransform` behaviors.
 pub mod entrypoints {
     pub const RESPOND: &str = "respond";
-    pub const MATCHES: &str = "matches";
-    pub const TRANSFORM: &str = "transform";
-    pub const DELAY: &str = "delay";
 }
 
 /// Unified script engine that supports Rhai and JavaScript

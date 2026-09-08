@@ -351,19 +351,35 @@ unknown `ref:` or a `file:` that can't be read is a config-time validation error
 
 ## `ctx` API
 
-`ctx` is built the same way, with the same field names and semantics, in every engine and at every
-hook placement. Placement determines which entrypoint the engine looks for:
+`ctx` is built the same way, with the same field names and semantics, in every engine. It has one
+entrypoint:
 
 | Placement | Entrypoint | Returns |
 |:----------|:-----------|:--------|
 | Response script (`_rift.script`) | `respond(ctx)` | a result constructor, or nothing (pass through) |
-| Predicate script | `matches(ctx)` | `true`/`false` |
-| Decorate behavior | `transform(ctx)` | a result constructor describing the new response, or nothing (no change) |
-| Wait behavior | `delay(ctx)` | a number of milliseconds |
 
-For each placement, the script may either define the named function explicitly, or omit the
-wrapper entirely and write the function body directly at the top level (bare-expression form) —
-both are shown above for `respond`.
+The script may either define `respond` explicitly, or omit the wrapper entirely and write the
+function body directly at the top level (bare-expression form) — both are shown above.
+
+### What runs where
+
+`respond(ctx)` is the whole of the `ctx` API. Scripting at the other hook points is Mountebank-shaped
+rather than `ctx`-shaped, and each has its own documented mechanism:
+
+| To do this | Use | Documented at |
+|:-----------|:----|:--------------|
+| Decide whether a stub matches | a Mountebank `inject` predicate — a bare function over `request`, `state`, `logger`, `config` | [Predicates]({{ site.baseurl }}/mountebank/predicates/) |
+| Rewrite a response after it is built | the `decorate` / `shellTransform` behaviors | [Behaviors]({{ site.baseurl }}/mountebank/behaviors/) |
+| Wait before responding | `_behaviors.wait` — a number, a `{min, max}` range, or a Mountebank-style JS function (`"wait": "function() { ... }"`, or the object spelling `{"inject": "function() { ... }"}`) | [Behaviors]({{ site.baseurl }}/mountebank/behaviors/) |
+
+Each takes its own Mountebank-shaped inputs, **not** `ctx`: an `inject` predicate receives
+`request`/`state`/`logger`/`config`, a `decorate` function receives the request and the response,
+and a `wait` function takes no arguments and returns a millisecond count.
+Earlier versions of this page also listed `matches(ctx)`, `transform(ctx)` and `delay(ctx)` rows
+here. Those entrypoints were never dispatched by either engine — a script defining one would pass
+`rift script check` and then silently have no effect — so they were removed in #1001 rather than
+left as a promise nothing kept. `rift script check --hook` and `rift script run --hook` now both
+accept only `respond`.
 
 ### `ctx.request`
 
@@ -381,19 +397,6 @@ ctx.request.json          // the body lazily parsed as JSON; unit/nil/null if it
 `ctx.request.header(name)` exists so `X-Flow-Id`, `x-flow-id`, and `X-FLOW-ID` all resolve the same
 value — a common source of bugs when reading `request.headers[...]` directly against on-the-wire
 casing.
-
-### `ctx.response`
-
-Available **only** on the decorate/`transform(ctx)` hook — `undefined`/`nil`/absent everywhere
-else. Same shape as `ctx.request`, describing the in-flight response instead:
-
-```
-ctx.response.status        // number
-ctx.response.headers       // map, lowercased keys
-ctx.response.header(name)  // case-insensitive getter
-ctx.response.body          // raw string
-ctx.response.json          // lazily parsed JSON, or unit/nil/null
-```
 
 ### `ctx.state` and `ctx.store`
 
@@ -465,9 +468,8 @@ ctx.logger.info("handling request " + ctx.request.path);
 
 ### Result constructors
 
-How `respond(ctx)`/`transform(ctx)` describe what should happen — no hand-built
-`#{ inject:, fault: }` map. Available in `respond(ctx)`/`transform(ctx)` (and as the return value
-of a bare-expression script for those placements):
+How `respond(ctx)` describes what should happen — no hand-built `#{ inject:, fault: }` map.
+Available in `respond(ctx)` (and as the return value of a bare-expression script):
 
 | Constructor | Meaning |
 |:------------|:--------|

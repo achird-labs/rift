@@ -40,9 +40,25 @@ impl CheckReport {
 }
 
 /// Statically validate `target` — a raw script file (`.rhai`/`.js`) or a rift config file
-/// (`.json`/`.yaml`/`.yml`) — with no server running. `hook` is only used for a raw script file
-/// (a config's `_rift.script` entries are always response-position, i.e. `respond`).
+/// (`.json`/`.yaml`/`.yml`) — with no server running. `hook` selects the entrypoint for a raw
+/// script file; a config's `_rift.script` entries are always response-position, i.e. `respond`.
+///
+/// Only `hook == "respond"` is accepted, matching `run_run` (issue #1001). Until then `check`
+/// green-lit `matches`/`transform`/`delay`, so a user could pass the check and then get no error
+/// and no effect at request time, because nothing dispatches those entrypoints.
+///
+/// The check is deliberately ahead of the target-kind split, so an unsupported hook is rejected
+/// for a config target too. The flag is redundant there rather than meaningful, and silently
+/// ignoring a value that names a hook the runtime has never dispatched is a smaller version of
+/// the same defect this guard exists to remove.
 pub fn run_check(target: &Path, hook: &str) -> Result<CheckReport> {
+    if hook != crate::scripting::entrypoints::RESPOND {
+        bail!(
+            "`rift script check --hook {hook}` is not supported: only `respond` is wired \
+             end-to-end across both engines today. Predicate scripting uses Mountebank `inject`, \
+             and response rewriting uses the `decorate`/`shellTransform` behaviors."
+        );
+    }
     if !target.exists() {
         bail!("file not found: {}", target.display());
     }
@@ -253,10 +269,10 @@ fn parse_state_entry(entry: &str) -> Result<(String, serde_json::Value)> {
 }
 
 /// Execute `target` against a fixture request and seeded flow state, with no server running
-/// (issue #360 Item 2). Only `hook == "respond"` is supported today — `matches`/`transform`/
-/// `delay` are Rhai-only and not wired end-to-end outside the engine's own unit tests (see
-/// `ScriptEngine::should_inject_fault_with_ctx`, the only engine-agnostic entrypoint that
-/// exists); asking for another hook is a clean error, not a silent no-op.
+/// (issue #360 Item 2). Only `hook == "respond"` is supported: it is the sole entrypoint either
+/// engine dispatches (see `ScriptEngine::should_inject_fault_with_ctx`, the only engine-agnostic
+/// entrypoint that exists). #1001 removed the never-dispatched `matches`/`transform`/`delay`
+/// dispatchers entirely; asking for another hook is a clean error, not a silent no-op.
 #[allow(clippy::too_many_arguments)]
 pub fn run_run(
     target: &Path,
@@ -266,7 +282,7 @@ pub fn run_run(
     engine_override: Option<&str>,
     hook: &str,
 ) -> Result<RunReport> {
-    if hook != "respond" {
+    if hook != crate::scripting::entrypoints::RESPOND {
         bail!(
             "`rift script run --hook {hook}` is not supported: only `respond` is wired \
              end-to-end across both engines today"
@@ -806,6 +822,39 @@ mod tests {
         let path = write_temp(&dir, "s.rhai", "fn matches(ctx) { true }");
         let err = run_run(&path, None, &[], "cli", None, "matches").unwrap_err();
         assert!(err.to_string().contains("matches"));
+    }
+
+    /// The mirror of the test above, for `check` (issue #1001). `run` has refused a non-`respond`
+    /// hook since #360; `check` green-lit one, so a user could write `fn matches(ctx)`, have
+    /// `rift script check --hook matches` pass, wire it into a predicate, and get no error and no
+    /// effect. Both subcommands must now agree.
+    #[test]
+    fn check_unsupported_hook_is_a_clean_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(&dir, "s.rhai", "fn matches(ctx) { true }");
+        for hook in ["matches", "transform", "delay"] {
+            let err = run_check(&path, hook)
+                .unwrap_err()
+                .to_string()
+                .to_ascii_lowercase();
+            assert!(
+                err.contains(hook) && err.contains("respond"),
+                "`check --hook {hook}` must fail naming both the hook and `respond`, got: {err}"
+            );
+        }
+    }
+
+    /// Guard against over-correcting: the one supported hook must still check cleanly.
+    #[test]
+    fn check_respond_hook_still_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(&dir, "s.rhai", "fn respond(ctx) { pass() }");
+        let report = run_check(&path, "respond").expect("respond is still checkable");
+        assert!(
+            report.errors.is_empty(),
+            "a valid respond script must still pass, got {:?}",
+            report.errors
+        );
     }
 
     #[test]
