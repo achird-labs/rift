@@ -596,13 +596,13 @@ error — so a script whose entrypoint is misnamed fails here instead of at requ
 
 ```bash
 rift script check scripts/fail-twice.rhai
-rift script check scripts/decorate.js --hook respond
+rift script check scripts/rate-limit.js --hook respond
 rift script check imposters.yaml            # every _rift.script in the config
 ```
 
 | Flag | Description | Default |
 |:-----|:------------|:--------|
-| `--hook <HOOK>` | Entrypoint to check a raw script against: `respond`/`matches`/`transform`/`delay` (ignored for a config target, which is always `respond`) | `respond` |
+| `--hook <HOOK>` | Entrypoint to check a raw script against. Only `respond` is dispatched at request time, so any other value is rejected — for a config target too, where the flag is redundant because every `_rift.script` entry is `respond`-position | `respond` |
 
 **`rift script run <target>`** — execute a script against a fixture request and seeded flow state,
 printing the decision, the mutated flow state, captured `ctx.logger` output, and the execution
@@ -619,7 +619,7 @@ rift script run scripts/echo.js --request fixtures/get-resource.json --flow-id t
 | `--state <KEY=VALUE>` | Seed flow state before running (repeatable); the value is parsed as JSON when it parses, else stored as a string | |
 | `--flow-id <ID>` | Flow id the seeded state and the script's `ctx.state`/`ctx.store` calls use | `cli` |
 | `--engine <ENGINE>` | Script engine (`rhai`/`js`); inferred from the file extension when omitted | (from extension) |
-| `--hook <HOOK>` | Entrypoint to run; only `respond` is wired for both engines today | `respond` |
+| `--hook <HOOK>` | Entrypoint to run. Only `respond` is wired across both engines, so any other value is rejected | `respond` |
 
 ### healthcheck
 

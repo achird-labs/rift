@@ -314,9 +314,10 @@ pub enum ScriptAction {
         /// containing `_rift.script` entries.
         target: PathBuf,
 
-        /// Which entrypoint hook to check a raw script file against
-        /// (`respond`/`matches`/`transform`/`delay`). Ignored for a config file target — every
-        /// `_rift.script` there is a response-position script, i.e. always `respond`.
+        /// Which entrypoint hook to check a raw script file against. Only `respond` is
+        /// dispatched at request time, so any other value is a clean error. A config file
+        /// target is always `respond`-position — every `_rift.script` there is a
+        /// response-position script — so the flag is redundant rather than meaningful.
         #[arg(long, default_value = "respond")]
         hook: String,
     },
@@ -348,9 +349,8 @@ pub enum ScriptAction {
         #[arg(long)]
         engine: Option<String>,
 
-        /// Entrypoint hook to run. Only `respond` is wired end-to-end for both engines
-        /// today (`matches`/`transform`/`delay` are Rhai-only and not yet reachable outside the
-        /// engine's own unit tests) — any other value is a clean error, not a panic.
+        /// Entrypoint hook to run. `respond` is the only entrypoint either engine dispatches —
+        /// any other value is a clean error, not a panic.
         #[arg(long, default_value = "respond")]
         hook: String,
     },

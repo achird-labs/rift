@@ -343,7 +343,7 @@ evaluated. If you want the top-level transport fault, the response must be a bar
 ## Scripted Faults
 
 For dynamic fault injection based on request data or state, use the scripting feature. Full
-reference (the unified `ctx` object, result constructors, entrypoint placement) lives on the
+reference (the unified `ctx` object, result constructors, and what runs where) lives on the
 [Scripting](./scripting.md#ctx-api) page; this section just shows it applied to fault injection.
 
 ### Rhai Script - Retry Simulation
