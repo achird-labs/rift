@@ -15,9 +15,10 @@ readme = "../../README.md"
 workspace = true
 
 [dependencies]
-# Fast, non-cryptographic hashing for the script decision cache (issue #654). Already in the tree
-# via hashbrown; a direct dep costs nothing. See `scripting::decision_cache` for why the key has no
-# hash-stability requirement across processes.
+# Fast, non-cryptographic hashing for the request path (issue #654): `util::FastMap`/`FastSet`,
+# the predicate regex cache, and the JSON body index. Already in the tree via hashbrown; a direct
+# dep costs nothing. None of these hashes leaves the process, so none needs cross-process
+# stability — see `util`'s module docs for the seeding rules each one relies on.
 foldhash = "0.2"
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
@@ -114,10 +115,6 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "imposter_matcher_bench"
-harness = false
-
-[[bench]]
-name = "decision_cache_bench"
 harness = false
 
 [[bench]]

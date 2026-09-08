@@ -197,7 +197,6 @@ pub async fn should_inject_bounded_with_ctx_traced(
         decision,
         duration_ms,
         logs,
-        cache: None,
     };
     (result, entry)
 }
@@ -472,7 +471,6 @@ mod tests {
         assert_eq!(entry.hook, "respond");
         assert_eq!(entry.decision, "http(503) body=\"boom\"");
         assert_eq!(entry.logs, vec!["about to respond".to_string()]);
-        assert!(entry.cache.is_none());
     }
 
     // A timeout still produces a trace entry (best-effort: no logs, an error decision string),

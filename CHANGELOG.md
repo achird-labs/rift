@@ -82,6 +82,31 @@ record.
 
   Rendered output, FSM behaviour, and the default in-memory path are unchanged.
 
+### Removed
+
+- **The script decision cache is gone** (#998), discharging the follow-up #975 named. It memoised
+  `FaultDecision`s for the reverse-proxy `script_rules` hook, and when that mode was removed in
+  #975 nothing was left that could construct one — the module and its Criterion bench had no caller
+  on any serve path for the whole of the interim.
+  - It is removed rather than revived on the imposter path, even though the payoff was real and
+    measured: *memo hit ~2.4 µs vs ~171 µs Boa / ~27 µs Rhai execution (#665); removed because no
+    runtime path can use it — the imposter script hook is stateful by design and a purity opt-in
+    would be unverifiable.* Memoising a hook that writes `ctx.state` and emits `ctx.logger` lines
+    silently drops both from the second identical request onward, and an engine cannot check a
+    purity contract a user merely asserts.
+  - **Embedders:** `rift_mock_core::scripting::{CacheKey, CacheKeyBody, DecisionCache,
+    DecisionCacheConfig}` are removed — a public-API removal on 0.x, so a minor bump, same as #975.
+    `CacheMetrics` was never *nameable* outside the crate (it was `pub` inside a private module),
+    though its fields were reachable through `DecisionCache::metrics()`; any such caller is covered
+    by the removal of `DecisionCache` itself.
+  - `ScriptTraceEntry.cache` goes with it: after #975 it could only ever be `None`, and it was
+    `skip_serializing_if = "Option::is_none"`, so the `x-rift-script-trace` header never carried
+    the key. Removing it is **wire-invisible**, and a test now pins the trace payload's exact key
+    set so that stays true.
+  - The `lru` dependency stays (`proxy::intercept_ca` uses it); `foldhash` stays and its manifest
+    comment now names its actual consumers — `util::FastMap`/`FastSet`, the predicate regex cache
+    and the JSON body index — rather than the deleted module.
+
 ### Added
 
 - **A proxy-recording store can refuse a claim instead of being degraded around.**

@@ -16,18 +16,20 @@ pub use bounded::{
 };
 
 pub use rhai_engine::RhaiEngine;
-/// Exposed for the decision-cache payoff bench (issue #665): the worker-side execute with a
-/// reusable engine, i.e. the per-request cost a cache hit actually avoids. `should_inject_fault`
-/// is not a substitute there — it builds a fresh `Engine` per call, which the pool never pays.
+/// The worker-side execute with a reusable engine, i.e. the per-request cost the script pool
+/// actually pays. `should_inject_fault` is not a substitute — it builds a fresh `Engine` per call,
+/// which the pool never does.
+///
+/// This was made `pub` for the decision-cache payoff bench (#665), which #998 deleted along with
+/// the cache itself. The in-crate caller (`script_pool`) reaches it by its private module path, so
+/// nothing in this workspace needs the re-export any more; it is left in place as embedder surface
+/// rather than removed here, because deciding which unreferenced `pub` items survive — and naming
+/// the consumer that justifies each — is #1000's sweep, not this deletion's.
 pub use rhai_engine::execute_rhai_with_engine;
 
 // Script pool for optimized execution
 mod script_pool;
 pub use script_pool::{CompiledScript, ScriptPool, ScriptPoolConfig};
-
-// Decision cache for memoization
-mod decision_cache;
-pub use decision_cache::{CacheKey, CacheKeyBody, DecisionCache, DecisionCacheConfig};
 
 #[cfg(feature = "javascript")]
 mod js_engine;

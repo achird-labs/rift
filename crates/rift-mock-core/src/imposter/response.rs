@@ -222,7 +222,7 @@ impl PreparedResponse {
     /// aspect (templates, date tokens, `_behaviors`, a `_rift` serving effect, binary mode) or an
     /// invalid header/status forces the slow path. Called once at construction (`new_is`) with the
     /// already-computed `rendered_body` (#479) so body serialization is not repeated here. `pub` so
-    /// the serve-path bench (issue #703) can construct it, mirroring the `decision_cache` benches.
+    /// the serve-path bench (issue #703) can construct it.
     #[must_use]
     pub fn try_build(
         is: &IsResponse,
