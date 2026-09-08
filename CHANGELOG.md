@@ -11,6 +11,24 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **The intercept tunnel negotiates HTTP/2** (#996). ALPN was pinned to `http/1.1`, so a system
+  under test that speaks h2 to the real origin was silently downgraded the moment it was routed
+  through the intercept proxy — it stopped exercising the protocol it uses in production, and an
+  h2-only client got nothing at all. The listener now advertises `h2, http/1.1` and serves whichever
+  is negotiated, matching the imposter listeners (#295); an HTTP/1.1-only client is unaffected, and
+  rule matching is protocol-agnostic. `RIFT_DISABLE_HTTP2=1` forces HTTP/1.1 here too, so the
+  existing escape hatch now covers every listener rather than all but one. Prior-knowledge h2c
+  through the tunnel is still not supported.
+  - A tunnel serves at most **32 concurrent h2 streams**. HTTP/2 multiplexes where HTTP/1.1 does
+    not, so without a bound the documented 1 MiB request-body cap would have become 1 MiB *per
+    stream* — hyper's default of 200 streams turns a stated per-connection limit into 200× that.
+    32 keeps the worst case at 32 MiB per tunnel.
+  - A rule predicating on the `host` **header** fires over h2 as well as h1. HTTP/2 carries the
+    authority in `:authority` and hyper does not synthesize a `host` header from it, so such a
+    rule would otherwise have matched over h1 and silently stopped matching over h2.
+
 ### Changed
 
 - **`stub_matches` and `predicate_matches` are now generic over their `headers` argument** (#994),

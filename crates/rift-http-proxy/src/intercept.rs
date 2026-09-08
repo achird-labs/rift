@@ -41,6 +41,15 @@ const MAX_HEAD_BYTES: usize = 16 * 1024;
 /// Upper bound on an intercepted request body we will buffer before forwarding/matching. Bounds
 /// memory use for a misbehaving or malicious `content-length`.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+/// Concurrent HTTP/2 streams allowed per tunnel (issue #996).
+///
+/// This exists to keep [`MAX_BODY_BYTES`] meaning what it says. Under HTTP/1.1 a connection
+/// buffers at most one body at a time, so the cap *is* the per-connection bound. HTTP/2
+/// multiplexes, so the real bound becomes `MAX_BODY_BYTES * streams` — and hyper's default of 200
+/// would silently turn a documented 1 MiB into 200 MiB per tunnel, with no connection limit in
+/// front of it. 32 keeps multiplexing genuinely useful for a system under test while holding the
+/// worst case to 32 MiB, which is a number that can be written down.
+const MAX_CONCURRENT_STREAMS: u32 = 32;
 /// Per-stage deadline for the CONNECT read, TLS handshake, and request body read. Bounds a slow
 /// or silent client so its connection task cannot park indefinitely (slowloris).
 ///
@@ -220,8 +229,11 @@ fn build_tls_acceptor(resolver: Arc<SniCertResolver>) -> anyhow::Result<TlsAccep
             .map_err(|e| anyhow::anyhow!("intercept TLS config: {e}"))?
             .with_no_client_auth()
             .with_cert_resolver(resolver);
-    // Only HTTP/1.1 for now (non-goal: h2/websocket, see #394).
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    // Issue #996: offer h2 so an SUT that would negotiate it against the real origin still does
+    // through the proxy, matching the imposter listener (`proxy/tls.rs`, issue #295). Advertising
+    // is half the contract — `serve_tunnel` must be able to speak what is offered here, so both
+    // read the same flag.
+    config.alpn_protocols = alpn_protocols(rift_mock_core::util::http2_disabled());
     // Explicit TLS session resumption (issue #705): the intercept listener sees the same
     // handshake-storm reconnect pattern as the imposters, so it shares their resumption config.
     rift_mock_core::proxy::configure_session_resumption(&mut config)?;
@@ -302,13 +314,31 @@ async fn handle_connection(
 ///
 /// A connection still in its TLS handshake has not reached this function and so does not observe
 /// the signal — the same as the imposter path, and bounded by the handshake itself.
+/// The ALPN list to advertise, as a pure function of the h2 kill switch.
+///
+/// Split out from `build_tls_acceptor` for the same reason `http2_disabled_from` is split out from
+/// `http2_disabled` in rift-mock-core: the switch is read once per process into a `OnceLock`, so an
+/// end-to-end test of the env var would race every other test in the binary. This is the part
+/// worth pinning, and it can be pinned without touching the environment.
+fn alpn_protocols(http1_only: bool) -> Vec<Vec<u8>> {
+    if http1_only {
+        vec![b"http/1.1".to_vec()]
+    } else {
+        // h2 first: ALPN is server-preference-ordered, and the imposter listener orders it the
+        // same way (issue #295).
+        vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+    }
+}
+
 async fn serve_tunnel<I>(
     io: I,
     ctx: Arc<TunnelCtx>,
     http_tuning: HttpTuning,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) where
-    I: hyper::rt::Read + hyper::rt::Write + Unpin,
+    // `Send + 'static` are `auto::Builder`'s bounds (it may drive the connection on an executor);
+    // the h1-only path does not need them, but the caller's `TlsStream<TcpStream>` satisfies both.
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
     let service = service_fn(move |req: Request<Incoming>| {
         let ctx = Arc::clone(&ctx);
@@ -317,13 +347,6 @@ async fn serve_tunnel<I>(
         async move { Ok::<_, std::convert::Infallible>(handle_tunnel_request(req, ctx).await) }
     });
 
-    let mut builder = hyper::server::conn::http1::Builder::new();
-    builder
-        // A timer is required for `header_read_timeout` to take effect (hyper panics on
-        // serve_connection otherwise) — always paired with it.
-        .timer(TokioTimer::new())
-        .header_read_timeout(http_tuning.header_read_timeout)
-        .max_buf_size(http_tuning.max_buf_size);
     // Keep-alive is hyper's HTTP/1.1 default, so enabling it (issue #993) is the *absence* of the
     // `.keep_alive(false)` #991 carried. What made that ordering matter was #995: a truncating
     // reader left the tail of an over-cap body unread in the socket, which under keep-alive is the
@@ -338,23 +361,62 @@ async fn serve_tunnel<I>(
     // them the leftover bytes are unreachable as a request. The two
     // `*_does_not_leak_its_unread_body_into_the_next_request` tests pin one branch each.
 
-    let conn = builder.serve_connection(io, service);
-    tokio::pin!(conn);
-    tokio::select! {
-        res = conn.as_mut() => {
-            if let Err(e) = res {
-                tracing::debug!(error = %e, "intercept tunnel connection ended");
+    // The two builders are different types yielding a Connection with the same drive and
+    // graceful-shutdown shape, so the select is shared by macro rather than written twice — the
+    // same arrangement the imposter listener uses in `manager.rs`. Writing it twice is how the two
+    // legs drift, and #1015's shutdown draining is exactly the property that must not drift.
+    macro_rules! drive_conn {
+        ($conn:expr) => {{
+            let conn = $conn;
+            tokio::pin!(conn);
+            tokio::select! {
+                res = conn.as_mut() => {
+                    if let Err(e) = res {
+                        tracing::debug!(error = %e, "intercept tunnel connection ended");
+                    }
+                }
+                // Any `recv()` outcome means stop: `Ok` is an explicit shutdown, `Closed` is the
+                // listener being dropped without one. Matching only `Ok` would leave a dropped
+                // listener's tunnels running, which is the case the broadcast sender's ownership
+                // was arranged to cover.
+                _ = shutdown_rx.recv() => {
+                    conn.as_mut().graceful_shutdown();
+                    if let Err(e) = conn.as_mut().await {
+                        tracing::debug!(error = %e, "intercept tunnel connection ended during shutdown");
+                    }
+                }
             }
-        }
-        // Any `recv()` outcome means stop: `Ok` is an explicit shutdown, `Closed` is the listener
-        // being dropped without one. Matching only `Ok` would leave a dropped listener's tunnels
-        // running, which is the case the broadcast sender's ownership was arranged to cover.
-        _ = shutdown_rx.recv() => {
-            conn.as_mut().graceful_shutdown();
-            if let Err(e) = conn.as_mut().await {
-                tracing::debug!(error = %e, "intercept tunnel connection ended during shutdown");
-            }
-        }
+        }};
+    }
+
+    // Reads the same switch as `alpn_protocols` above: serving a protocol the handshake did not
+    // offer — or offering one this cannot serve — is the one combination that would break a
+    // client outright, so the two decisions are driven by one flag.
+    if rift_mock_core::util::http2_disabled() {
+        let mut builder = hyper::server::conn::http1::Builder::new();
+        builder
+            // A timer is required for `header_read_timeout` to take effect (hyper panics on
+            // serve_connection otherwise) — always paired with it.
+            .timer(TokioTimer::new())
+            .header_read_timeout(http_tuning.header_read_timeout)
+            .max_buf_size(http_tuning.max_buf_size);
+        drive_conn!(builder.serve_connection(io, service));
+    } else {
+        let mut builder =
+            hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+        // `header_read_timeout` and `max_buf_size` are HTTP/1 head-parsing concerns, so they go on
+        // the h1 leg as at every other listener. The one h2 knob set here is not inherited from
+        // that precedent: it bounds concurrency because this listener buffers a whole body per
+        // request, so streams multiply MAX_BODY_BYTES.
+        builder
+            .http1()
+            .timer(TokioTimer::new())
+            .header_read_timeout(http_tuning.header_read_timeout)
+            .max_buf_size(http_tuning.max_buf_size);
+        builder
+            .http2()
+            .max_concurrent_streams(MAX_CONCURRENT_STREAMS);
+        drive_conn!(builder.serve_connection(io, service));
     }
 }
 
@@ -372,7 +434,17 @@ async fn handle_tunnel_request(
     // what the hand-rolled reader keyed on. Preserving that distinction keeps `Some("")` and
     // `None` telling the same two stories to body predicates as before.
     let framed_body = parts.headers.contains_key(CONTENT_LENGTH);
-    let headers = collect_request_headers(&parts.headers);
+    let mut headers = collect_request_headers(&parts.headers);
+    // HTTP/2 carries the authority in the `:authority` pseudo-header and hyper does not synthesize
+    // a `host` header from it, so without this a rule predicating on the `host` HEADER fires over
+    // h1 and silently stops firing over h2 for the same client — which would make #996's
+    // "rule matching is protocol-agnostic" false in exactly the case it claims to cover. Only
+    // filled in when absent, so an h1 request's own `Host` line is never overwritten.
+    if !headers.contains_key("host")
+        && let Some(authority) = parts.uri.authority()
+    {
+        headers.insert("host".to_string(), vec![authority.as_str().to_string()]);
+    }
 
     // The cap is enforced by reading through `Limited`, deliberately NOT by pre-checking the
     // declared `content-length`. Refusing before the read looks cheaper, but it closes the socket
@@ -1002,6 +1074,28 @@ mod tests {
         assert!(
             !is_length_limit_error(disconnected.as_ref()),
             "a mid-body disconnect must not be reported as an oversize body"
+        );
+    }
+
+    // ===== Issue #996: what the handshake offers =====
+    //
+    // `RIFT_DISABLE_HTTP2` is read once per process into a `OnceLock`, so an end-to-end test of the
+    // env var would race every other test in this binary — the same reason rift-mock-core splits
+    // `http2_disabled_from` out from `http2_disabled` and unit-tests only the parse. So AC3 is
+    // pinned here, on the decision rather than on the environment.
+    #[test]
+    fn alpn_offers_h2_unless_http2_is_disabled() {
+        assert_eq!(
+            alpn_protocols(false),
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            "h2 must be offered first, matching the imposter listener's order (#295)"
+        );
+        assert_eq!(
+            alpn_protocols(true),
+            vec![b"http/1.1".to_vec()],
+            "RIFT_DISABLE_HTTP2 must stop h2 being ADVERTISED, not merely stop it being served: \
+             a client that negotiated h2 from ALPN and then met an HTTP/1-only server would break \
+             outright, which is worse than the downgrade the switch exists to force"
         );
     }
 

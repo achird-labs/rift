@@ -368,10 +368,16 @@ The rule store is capped at 10,000 rules to bound both memory and the per-reques
 batch `POST` that would exceed the cap is rejected in full (no partial add).
 
 When no rule matches, the request falls through to a default `200` (so an unconfigured host is
-answered rather than hanging). Non-goals: HTTP/2 and WebSockets (see
+answered rather than hanging). Non-goal: WebSockets (see
 [Limitations](#limitations)).
 
 ### Connection reuse
+
+> This section describes **HTTP/1.1**. Over HTTP/2 the equivalents are per-stream rather than
+> per-connection: a refused or reset request affects its own stream and leaves the others running,
+> so none of the leftover-body framing below applies. A tunnel serves at most 32 concurrent h2
+> streams, which is what keeps the 1 MiB body cap a per-tunnel bound of 32 MiB rather than an
+> unbounded multiple of it.
 
 A `CONNECT` tunnel is **keep-alive**: once it is established, a client may send any number of
 requests over it, and a pooling HTTP client will do so by default. Each request is matched against
@@ -441,7 +447,11 @@ private keys**, and it works identically for the container and embedded adapters
 
 - **The SUT must trust the intercept CA** — this is inherent to HTTPS MITM; Rift only automates
   provisioning it.
-- **Not a general mitmproxy replacement** — no HTTP/2 / h2c, WebSocket proxying, or flow scripting.
+- **Not a general mitmproxy replacement** — no WebSocket proxying or flow scripting.
+- **HTTP/2 is negotiated over TLS via ALPN**, the same as the imposter listeners, so a system under
+  test that would speak h2 to the real origin still does through the proxy. Set
+  `RIFT_DISABLE_HTTP2=1` to force HTTP/1.1 everywhere if a client misbehaves over h2. Prior-knowledge
+  h2c (cleartext, no ALPN) through the tunnel is not supported.
 - **Request bodies are capped at 1 MiB** — a request whose body exceeds the cap is refused with
   `413 Payload Too Large`, and is neither matched against rules nor forwarded. The cap bounds
   memory use for a misbehaving or malicious upload. Both `Content-Length`-framed and
