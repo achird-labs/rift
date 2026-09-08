@@ -648,6 +648,22 @@ fn chunked_request(host: &str, decoded_len: usize) -> String {
     )
 }
 
+/// Build a chunked request whose decoded body is `parts` concatenated, one chunk per part.
+///
+/// Several chunks on purpose: with a single chunk, "the body was decoded" is indistinguishable
+/// from "the one chunk happened to be the whole body". Split across three, a forwarder that
+/// stopped after the first chunk, or that relayed the raw frame instead of the decoded bytes,
+/// produces a recorded body that differs from the concatenation in a way the assertion can name.
+fn chunked_request_parts(host: &str, parts: &[&str]) -> String {
+    let mut request =
+        format!("POST /upload HTTP/1.1\r\nHost: {host}\r\ntransfer-encoding: chunked\r\n\r\n");
+    for part in parts {
+        request.push_str(&format!("{:x}\r\n{part}\r\n", part.len()));
+    }
+    request.push_str("0\r\n\r\n");
+    request
+}
+
 // AC1 (serve) / E1 / E6. The serve action never reads the request body, so this is the path a
 // use-site cap would leak on.
 #[tokio::test]
@@ -789,6 +805,95 @@ async fn an_oversize_body_reaches_no_imposter() {
     assert_eq!(
         requests[0]["body"], "small",
         "and the one that did arrive is the small one, not a 1 MiB truncation of the other"
+    );
+    server.shutdown().await;
+}
+
+// Issue #992, AC2 + the forward half of AC4.
+//
+// `a_chunked_request_body_is_decoded_and_matched` proves the MATCHER sees a decoded chunked body,
+// but it answers with a `serve` rule, so it says nothing about what a `forward` rule sends onward
+// — and #992's complaint was that both halves were broken. The forward-path tests cannot close
+// that gap either: two of them (`a_failed_forward_is_still_502`,
+// `an_oversize_request_body_is_refused_with_413`) point at a dead port, which can only attest
+// that nothing *succeeded*, and `an_oversize_body_reaches_no_imposter` sends a content-length
+// body. This is the missing corner: chunked in, a live recording imposter, and the body read back
+// off its journal.
+#[tokio::test]
+async fn a_chunked_body_reaches_the_imposter_complete() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    let http = reqwest::Client::new();
+
+    // Port omitted so the manager auto-assigns a free one — a hardcoded port makes this test
+    // collide with any other test binary running concurrently.
+    let created: serde_json::Value = http
+        .post(format!("http://{admin}/imposters"))
+        .json(&serde_json::json!({
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "from-imposter"}}]}]
+        }))
+        .send()
+        .await
+        .expect("create imposter")
+        .json()
+        .await
+        .expect("imposter json");
+    let imposter_port = created["port"].as_u64().expect("assigned port");
+
+    add_rule(
+        admin,
+        &format!(
+            r#"{{"host":"cdn.example.com","action":{{"forward":{{"port":{imposter_port}}}}}}}"#
+        ),
+    )
+    .await;
+
+    // Segment lengths differ so a truncation at any chunk boundary yields a distinct wrong answer
+    // rather than something that could be mistaken for the whole body.
+    let parts = ["alpha", "-beta-", "gamma!!"];
+    let expected: String = parts.concat();
+
+    let response = raw_tunnel_one_response(
+        intercept,
+        &ca,
+        "cdn.example.com",
+        &chunked_request_parts("cdn.example.com", &parts),
+    )
+    .await;
+
+    assert!(
+        response.contains("from-imposter"),
+        "the chunked request must reach the imposter and return its stub: {}",
+        response.chars().take(160).collect::<String>()
+    );
+
+    let recorded: serde_json::Value = http
+        .get(format!("http://{admin}/imposters/{imposter_port}"))
+        .send()
+        .await
+        .expect("read imposter")
+        .json()
+        .await
+        .expect("imposter json");
+    let requests = recorded["requests"]
+        .as_array()
+        .expect("recordRequests is on, so the log is present");
+    assert_eq!(
+        requests.len(),
+        1,
+        "exactly the one forwarded request should be recorded, got {requests:?}"
+    );
+
+    // The literal expectation is the decoded concatenation. Before #991 this arrived empty; a
+    // forwarder that relayed the raw frame would carry the `5\r\n`/`6\r\n` chunk headers, and one
+    // that stopped early would carry a prefix. All three read differently from this.
+    assert_eq!(
+        requests[0]["body"], expected,
+        "the imposter must receive the complete DECODED body, reassembled across all three chunks"
     );
     server.shutdown().await;
 }
