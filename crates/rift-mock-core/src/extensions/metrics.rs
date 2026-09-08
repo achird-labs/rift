@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Functions used in binary, not in lib tests
-
 //! Prometheus metrics for rift-http-proxy.
 //!
 //! Tracks fault injection activity, script execution, and proxy performance.
@@ -59,7 +57,7 @@ lazy_static! {
     pub static ref FAULTS_INJECTED_TOTAL: CounterVec = register_counter_vec!(
         "rift_faults_injected_total",
         "Total number of faults injected",
-        &["type", "rule_id", "source"]  // type: latency|error, source: v1|script
+        &["type", "rule_id", "source"]  // type: latency|error|tcp, source: rift|script
     )
     .unwrap();
 
@@ -84,7 +82,7 @@ lazy_static! {
     pub static ref SCRIPT_EXECUTION_DURATION_MS: HistogramVec = register_histogram_vec!(
         "rift_script_execution_duration_ms",
         "Histogram of script execution time in milliseconds",
-        &["rule_id", "result"],  // result: inject|pass|error
+        &["rule_id", "result"],  // result: pass|fault|error
         vec![0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0]
     )
     .unwrap();
@@ -93,24 +91,7 @@ lazy_static! {
     pub static ref FLOW_STATE_OPS_TOTAL: CounterVec = register_counter_vec!(
         "rift_flow_state_ops_total",
         "Total number of flow state operations",
-        &["operation", "result"]  // operation: get|set|increment|exists|delete, result: success|error
-    )
-    .unwrap();
-
-    /// Active flows being tracked
-    pub static ref ACTIVE_FLOWS: GaugeVec = register_gauge_vec!(
-        "rift_active_flows",
-        "Number of active flows being tracked in flow state",
-        &["backend"]  // backend: inmemory|redis
-    )
-    .unwrap();
-
-    /// Proxy request duration
-    pub static ref PROXY_REQUEST_DURATION_MS: HistogramVec = register_histogram_vec!(
-        "rift_proxy_request_duration_ms",
-        "Total request duration including faults and forwarding",
-        &["method", "fault_applied"],  // fault_applied: none|latency|error|script
-        vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0]
+        &["operation", "result"]  // operation: one per FlowStore method, result: success|error
     )
     .unwrap();
 
@@ -154,22 +135,28 @@ pub fn record_fault_injection(fault_type: &str, rule_id: &str, source: &str) {
         .inc();
 }
 
-/// Helper to record latency injection
-pub fn record_latency_injection(rule_id: &str, duration_ms: u64) {
+/// A latency fault fired: observe how long, and count it once.
+///
+/// `source` is the caller's — `"rift"` for `_rift.fault`, `"script"` for a script decision. It is a
+/// parameter rather than a constant because this helper *also* increments
+/// [`FAULTS_INJECTED_TOTAL`]: a caller that recorded the fault separately would double-count it,
+/// which is exactly what happened while the label was hardcoded. One call per fired fault.
+pub fn record_latency_injection(rule_id: &str, duration_ms: u64, source: &str) {
     LATENCY_INJECTED_MS
         .with_label_values(&[rule_id])
         .observe(duration_ms as f64);
 
-    record_fault_injection("latency", rule_id, "v1");
+    record_fault_injection("latency", rule_id, source);
 }
 
-/// Helper to record error injection
-pub fn record_error_injection(rule_id: &str, status: u16) {
+/// An error fault fired: count the status, and count the fault once. See
+/// [`record_latency_injection`] for why `source` is a parameter.
+pub fn record_error_injection(rule_id: &str, status: u16, source: &str) {
     ERROR_STATUS_TOTAL
         .with_label_values(&[&status.to_string(), rule_id])
         .inc();
 
-    record_fault_injection("error", rule_id, "v1");
+    record_fault_injection("error", rule_id, source);
 }
 
 /// Helper to record script execution
@@ -181,14 +168,12 @@ pub fn record_script_execution(rule_id: &str, duration_ms: f64, result: &str) {
 
 /// Helper to record script fault injection
 pub fn record_script_fault(fault_type: &str, rule_id: &str, duration_ms: Option<u64>) {
-    record_fault_injection(fault_type, rule_id, "script");
-
-    if fault_type == "latency"
-        && let Some(ms) = duration_ms
-    {
-        LATENCY_INJECTED_MS
-            .with_label_values(&[rule_id])
-            .observe(ms as f64);
+    // Delegating for the latency case keeps a script-decided delay in the same histogram as a
+    // `_rift.fault` one — otherwise `rift_latency_injected_ms` would quietly mean "rift-path
+    // latency only" while the counter beside it counted both.
+    match (fault_type, duration_ms) {
+        ("latency", Some(ms)) => record_latency_injection(rule_id, ms, "script"),
+        _ => record_fault_injection(fault_type, rule_id, "script"),
     }
 }
 
@@ -198,11 +183,6 @@ pub fn record_flow_state_op(operation: &str, success: bool) {
     FLOW_STATE_OPS_TOTAL
         .with_label_values(&[operation, result])
         .inc();
-}
-
-/// Helper to set active flows gauge
-pub fn set_active_flows(backend: &str, count: i64) {
-    ACTIVE_FLOWS.with_label_values(&[backend]).set(count as f64);
 }
 
 lazy_static! {
@@ -322,13 +302,6 @@ impl AcceptErrorCounters {
     }
 }
 
-/// Helper to record proxy request duration
-pub fn record_proxy_duration(method: &str, duration_ms: f64, fault_applied: &str) {
-    PROXY_REQUEST_DURATION_MS
-        .with_label_values(&[method, fault_applied])
-        .observe(duration_ms);
-}
-
 /// Helper to record upstream request duration
 pub fn record_upstream_duration(method: &str, status: u16, duration_ms: f64) {
     UPSTREAM_REQUEST_DURATION_MS
@@ -351,8 +324,7 @@ mod tests {
     fn test_metrics_collection() {
         // Record some metrics
         record_request("GET", 200);
-        record_fault_injection("latency", "test-rule", "v1");
-        record_latency_injection("test-rule", 100);
+        record_latency_injection("test-rule", 100, "rift");
 
         // Collect metrics
         let metrics = collect_metrics();
@@ -378,11 +350,9 @@ mod tests {
     fn test_flow_state_metrics() {
         record_flow_state_op("increment", true);
         record_flow_state_op("get", false);
-        set_active_flows("inmemory", 42);
 
         let metrics = collect_metrics();
         assert!(metrics.contains("rift_flow_state_ops_total"));
-        assert!(metrics.contains("rift_active_flows"));
     }
 
     // ============================================
@@ -428,12 +398,12 @@ mod tests {
 
     #[test]
     fn test_record_latency_injection_various_durations() {
-        record_latency_injection("slow-rule", 5);
-        record_latency_injection("slow-rule", 50);
-        record_latency_injection("slow-rule", 100);
-        record_latency_injection("slow-rule", 500);
-        record_latency_injection("slow-rule", 1000);
-        record_latency_injection("slow-rule", 5000);
+        record_latency_injection("slow-rule", 5, "rift");
+        record_latency_injection("slow-rule", 50, "rift");
+        record_latency_injection("slow-rule", 100, "rift");
+        record_latency_injection("slow-rule", 500, "rift");
+        record_latency_injection("slow-rule", 1000, "rift");
+        record_latency_injection("slow-rule", 5000, "rift");
 
         let metrics = collect_metrics();
         assert!(metrics.contains("rift_latency_injected_ms"));
@@ -441,13 +411,13 @@ mod tests {
 
     #[test]
     fn test_record_error_injection_status_codes() {
-        record_error_injection("error-rule", 400);
-        record_error_injection("error-rule", 401);
-        record_error_injection("error-rule", 403);
-        record_error_injection("error-rule", 404);
-        record_error_injection("error-rule", 500);
-        record_error_injection("error-rule", 502);
-        record_error_injection("error-rule", 503);
+        record_error_injection("error-rule", 400, "rift");
+        record_error_injection("error-rule", 401, "rift");
+        record_error_injection("error-rule", 403, "rift");
+        record_error_injection("error-rule", 404, "rift");
+        record_error_injection("error-rule", 500, "rift");
+        record_error_injection("error-rule", 502, "rift");
+        record_error_injection("error-rule", 503, "rift");
 
         let metrics = collect_metrics();
         assert!(metrics.contains("rift_error_status_total"));
@@ -490,35 +460,6 @@ mod tests {
 
         let metrics = collect_metrics();
         assert!(metrics.contains("rift_flow_state_ops_total"));
-    }
-
-    #[test]
-    fn test_set_active_flows_backends() {
-        set_active_flows("inmemory", 100);
-        set_active_flows("redis", 200);
-        set_active_flows("redis", 150);
-
-        let metrics = collect_metrics();
-        assert!(metrics.contains("rift_active_flows"));
-    }
-
-    #[test]
-    fn test_set_active_flows_zero() {
-        set_active_flows("inmemory", 0);
-
-        let metrics = collect_metrics();
-        assert!(metrics.contains("rift_active_flows"));
-    }
-
-    #[test]
-    fn test_record_proxy_duration_fault_types() {
-        record_proxy_duration("GET", 10.5, "none");
-        record_proxy_duration("POST", 100.0, "latency");
-        record_proxy_duration("PUT", 5.0, "error");
-        record_proxy_duration("DELETE", 50.0, "script");
-
-        let metrics = collect_metrics();
-        assert!(metrics.contains("rift_proxy_request_duration_ms"));
     }
 
     #[test]
@@ -676,12 +617,12 @@ mod tests {
     #[test]
     fn test_multiple_rules_same_metric() {
         // Multiple rules should create separate label combinations
-        record_latency_injection("rule-a", 100);
-        record_latency_injection("rule-b", 200);
-        record_latency_injection("rule-c", 300);
+        record_latency_injection("rule-a", 100, "rift");
+        record_latency_injection("rule-b", 200, "rift");
+        record_latency_injection("rule-c", 300, "rift");
 
-        record_error_injection("rule-a", 500);
-        record_error_injection("rule-b", 503);
+        record_error_injection("rule-a", 500, "rift");
+        record_error_injection("rule-b", 503, "rift");
 
         let metrics = collect_metrics();
         assert!(metrics.contains("rift_latency_injected_ms"));

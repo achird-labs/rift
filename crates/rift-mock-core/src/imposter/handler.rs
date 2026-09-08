@@ -1292,6 +1292,11 @@ async fn handle_request_inner(
             // capturing-subscriber/Instant path in the `_traced` variant is only ever built when
             // this flag is set, so the hot (non-debug) path calls the original, unchanged
             // `should_inject_bounded_with_ctx`.
+            // Issue #999: the duration is threaded out of both branches rather than measured
+            // around the whole `if`, so debug mode reports the same script time as the hot path —
+            // an outer timer would also count the trace's JSON serialization below.
+            let script_started = std::time::Instant::now();
+            let script_duration_ms: u64;
             let (script_result, trace_header): (Result<FaultDecision, anyhow::Error>, _) =
                 if crate::util::rift_debug_env() {
                     let (result, mut entry) = should_inject_bounded_with_ctx_traced(
@@ -1310,9 +1315,11 @@ async fn handle_request_inner(
                     // `ScriptTraceEntry` is plain strings/numbers, so this can't realistically
                     // fail — but on the off chance it does, trace the failure instead of
                     // silently dropping the header.
+                    let traced_ms = entry.duration_ms;
                     let header = serde_json::to_string(&[entry])
                         .inspect_err(|e| warn!("failed to serialize x-rift-script-trace: {}", e))
                         .ok();
+                    script_duration_ms = traced_ms;
                     (result, header)
                 } else {
                     let result = should_inject_bounded_with_ctx(
@@ -1325,8 +1332,58 @@ async fn handle_request_inner(
                         ctx_extra,
                     )
                     .await;
+                    script_duration_ms =
+                        u64::try_from(script_started.elapsed().as_millis()).unwrap_or(u64::MAX);
                     (result, None)
                 };
+
+            // Issue #999: `_rift.script` execution and any fault it decides are reported here.
+            // `source="script"` distinguishes these from `_rift.fault` decisions, which carry
+            // `source="rift"`; `rule_id` is the imposter port on both paths.
+            {
+                let rule_id = imposter.bound_port().to_string();
+                let outcome = match &script_result {
+                    Ok(FaultDecision::None) => "pass",
+                    Ok(_) => "fault",
+                    Err(_) => "error",
+                };
+                crate::extensions::metrics::record_script_execution(
+                    &rule_id,
+                    script_duration_ms as f64,
+                    outcome,
+                );
+                match &script_result {
+                    Ok(FaultDecision::Error { .. }) => {
+                        crate::extensions::metrics::record_script_fault("error", &rule_id, None);
+                    }
+                    Ok(FaultDecision::Latency { duration_ms, .. }) => {
+                        // Carries the delay so a script-decided latency lands in the same
+                        // histogram as a `_rift.fault` one.
+                        crate::extensions::metrics::record_script_fault(
+                            "latency",
+                            &rule_id,
+                            Some(*duration_ms),
+                        );
+                    }
+                    Ok(FaultDecision::Reset { .. }) => {
+                        crate::extensions::metrics::record_script_fault("tcp", &rule_id, None);
+                    }
+                    Ok(FaultDecision::None) => {}
+                    Err(e) => {
+                        // The only distinction the error channel actually carries: a deadline miss
+                        // is transient, anything else is a broken script. Coarse on purpose.
+                        let error_type = if e
+                            .downcast_ref::<crate::scripting::ScriptTimeoutError>()
+                            .is_some()
+                        {
+                            "timeout"
+                        } else {
+                            "runtime"
+                        };
+                        crate::extensions::metrics::record_script_error(&rule_id, error_type);
+                    }
+                }
+            }
 
             match script_result {
                 Ok(FaultDecision::Error {
@@ -1486,7 +1543,9 @@ async fn handle_request_inner(
             // Apply _rift.fault extensions (probabilistic faults)
             if let Some(rift) = rift_ext
                 && let Some(ref fault_config) = rift.fault
-                && let Some(response) = apply_rift_fault(fault_config, &mut status, &mut body).await
+                && let Some(response) =
+                    apply_rift_fault(fault_config, &mut status, &mut body, imposter.bound_port())
+                        .await
             {
                 return Ok(response);
             }
@@ -2160,11 +2219,15 @@ fn handle_fault_response(fault_type: &str) -> Result<Response<Full<Bytes>>, Infa
 }
 
 /// Apply Rift fault configuration (probabilistic faults)
+/// `port` is the imposter's port, used as the `rule_id` metric label (issue #999): the imposter
+/// path has no named rules, so the port is what identifies the source of an injected fault.
 async fn apply_rift_fault(
     fault_config: &super::types::RiftFaultConfig,
     _status: &mut u16,
     _body: &mut String,
+    port: u16,
 ) -> Option<Response<Full<Bytes>>> {
+    let rule_id = port.to_string();
     // Generate all random values before any await points (ThreadRng is not Send)
     let (apply_latency, latency_delay_ms) = {
         let mut rng = rand::thread_rng();
@@ -2210,6 +2273,10 @@ async fn apply_rift_fault(
     // Apply latency fault (this is async)
     if apply_latency && latency_delay_ms > 0 {
         debug!("Applying _rift.fault latency: {}ms", latency_delay_ms);
+        // Counted here, not where the probability roll succeeded: a roll that passes with a zero
+        // delay injects nothing, and `rift_faults_injected_total` promises faults injected.
+        // One call — the helper counts the fault itself, so a second call would double it.
+        crate::extensions::metrics::record_latency_injection(&rule_id, latency_delay_ms, "rift");
         tokio::time::sleep(Duration::from_millis(latency_delay_ms)).await;
     }
 
@@ -2232,6 +2299,9 @@ async fn apply_rift_fault(
                 Bytes::new(),
             );
             response.extensions_mut().insert(kind);
+            // Only counted on the branch that actually resets the connection — an unparsable
+            // kind falls through to the error fault below and must not count as a tcp fault.
+            crate::extensions::metrics::record_fault_injection("tcp", &rule_id, "rift");
             return Some(response);
         }
         warn!("Unknown TCP fault type: {}", tcp_fault.kind());
@@ -2250,6 +2320,8 @@ async fn apply_rift_fault(
 
         response = response.header("x-rift-imposter", "true");
         response = response.header("x-rift-fault", "error");
+
+        crate::extensions::metrics::record_error_injection(&rule_id, error.status, "rift");
 
         let error_body = error.body.clone().unwrap_or_default();
         return Some(
@@ -2814,7 +2886,7 @@ mod fault_precedence_tests {
     async fn apply(config: &RiftFaultConfig) -> Response<Full<Bytes>> {
         let mut status = 200;
         let mut body = String::new();
-        apply_rift_fault(config, &mut status, &mut body)
+        apply_rift_fault(config, &mut status, &mut body, 0)
             .await
             .expect("a fault response")
     }
@@ -2928,7 +3000,7 @@ mod fault_precedence_tests {
         };
         let (mut status, mut body) = (200, String::new());
         for _ in 0..200 {
-            let response = apply_rift_fault(&config, &mut status, &mut body).await;
+            let response = apply_rift_fault(&config, &mut status, &mut body, 0).await;
             assert!(
                 response.is_none(),
                 "probability 0.0 tcp fault must never fire"
@@ -2990,7 +3062,7 @@ mod fault_precedence_tests {
         let mut resets = 0;
         let (mut status, mut body) = (200, String::new());
         for _ in 0..iterations {
-            if apply_rift_fault(&config, &mut status, &mut body)
+            if apply_rift_fault(&config, &mut status, &mut body, 0)
                 .await
                 .and_then(|r| r.extensions().get::<TcpFaultKind>().copied())
                 .is_some()
