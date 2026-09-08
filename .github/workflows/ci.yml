@@ -15,6 +15,13 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Issue #1021: std's panic hook holds a process-global lock for the whole backtrace print, and
+  # `Backtrace::capture()` — which anyhow calls on every error construction while backtraces are
+  # enabled — takes that same lock. One deliberately-panicking test therefore stalls every other
+  # test in the binary that builds an anyhow::Error (measured: 3.77 s). std checks this variable
+  # first for `capture()`, so turning it off removes the anyhow contention while RUST_BACKTRACE
+  # above still gives panics their full backtraces.
+  RUST_LIB_BACKTRACE: 0
 
 jobs:
   test:
@@ -206,6 +213,17 @@ jobs:
         run: |
           ./scripts/verify-feature-propagation.sh --self-test
           ./scripts/verify-feature-propagation.sh
+
+      # Issue #1021: a test workflow that enables RUST_BACKTRACE without RUST_LIB_BACKTRACE: 0
+      # makes every anyhow::Error in a test binary block on the panic-hook lock behind a
+      # deliberately-panicking test's backtrace print. The symptom is a timing test failing on a
+      # diff that cannot affect it, which reads as a flake and gets re-run rather than fixed — so
+      # the regression is invisible without a gate. --self-test first proves the checker isn't a
+      # no-op.
+      - name: Verify test workflows do not pay the backtrace-lock cost
+        run: |
+          ./scripts/verify-backtrace-env.sh --self-test
+          ./scripts/verify-backtrace-env.sh
 
       # An install snippet names a release version, because a release asset URL and
       # `rift-fetch -version` have no "latest" spelling — so every one of them rots the moment a

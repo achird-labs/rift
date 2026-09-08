@@ -97,3 +97,10 @@ incremental = false  # For reproducible benchmarks
 [profile.dev]
 opt-level = 0
 debug = true
+
+# Issue #1021: std's panic hook symbolises the whole backtrace while holding a process-global
+# lock, so the DWARF a test binary carries is paid for by every other thread that touches that
+# lock — including every `anyhow::Error` construction. Line tables keep panic backtraces
+# readable (file:line survives; only variable/type info goes) at a fraction of the debug info.
+[profile.test]
+debug = "line-tables-only"
