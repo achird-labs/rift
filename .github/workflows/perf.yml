@@ -6,8 +6,7 @@ name: Performance
 # hard-fail threshold is deliberately generous (relative, per-benchmark); the full comparison is
 # always posted to the job summary for review.
 #
-# Gated benches (BENCH_TARGETS below): the imposter matcher, the scripting decision cache, and the
-# proxy rule scan.
+# Gated benches (BENCH_TARGETS below): the imposter matcher and the response serve path.
 
 # Label-gated side-job (issue #692). The bench run is the slowest check on shared runners, so it is
 # off the PR hot path: it triggers only on a PR that touches benched code AND carries the existing
@@ -49,14 +48,15 @@ env:
   # larger relative swing — watch those first if this gate starts crying wolf again.
   REGRESSION_THRESHOLD: "1.5"
   # How many independent bench runs to record per side; the gate compares the fastest (min) of each.
-  # Dropped 3 -> 2 when the decision-cache and proxy benches joined BENCH_TARGETS: the full set is
-  # ~5.5 min per run, and a third sample per side cost ~11 min of wall clock for a shrinking return
-  # (min-of-N's jitter cancellation is strongest going 1 -> 2). If the gate turns flaky again, this
-  # is the first knob to turn back up before touching REGRESSION_THRESHOLD.
+  # Dropped 3 -> 2 when BENCH_TARGETS grew past a single bench: a third sample per side cost ~11 min
+  # of wall clock for a shrinking return (min-of-N's jitter cancellation is strongest going 1 -> 2).
+  # The set has since lost the decision-cache bench (#998), so the per-run cost is lower than when
+  # this was tuned. If the gate turns flaky again, this is the first knob to turn back up before
+  # touching REGRESSION_THRESHOLD.
   BENCH_SAMPLES: "2"
   # Bench targets to gate, by workspace-unique target name (see run_benches.sh for why not `-p`).
   # A target missing from the PR base is skipped with a notice, so adding one here lands cleanly.
-  BENCH_TARGETS: "imposter_matcher_bench decision_cache_bench response_serve_bench"
+  BENCH_TARGETS: "imposter_matcher_bench response_serve_bench"
 
 jobs:
   bench-regression:

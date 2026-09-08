@@ -49,9 +49,7 @@ pub fn cap_trace_logs(mut logs: Vec<String>) -> Vec<String> {
 }
 
 /// One script hook invocation's trace record: which hook ran, its rendered decision, how long it
-/// took, and any `ctx.logger` lines it emitted. `cache` is `Some("hit"|"miss")` only on the
-/// proxy path's `DecisionCache`-backed hook; `None` elsewhere (e.g. every imposter-stub hook,
-/// which has no decision cache).
+/// took, and any `ctx.logger` lines it emitted.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ScriptTraceEntry {
     pub hook: String,
@@ -59,8 +57,6 @@ pub struct ScriptTraceEntry {
     #[serde(rename = "durationMs")]
     pub duration_ms: u64,
     pub logs: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache: Option<String>,
 }
 
 /// Render a [`FaultDecision`] the way `rift script run`/the debug trace print it: `pass()` /
@@ -255,5 +251,34 @@ mod tests {
     fn cap_trace_logs_leaves_small_logs_untouched() {
         let logs = vec!["a".to_string(), "b".to_string()];
         assert_eq!(cap_trace_logs(logs.clone()), logs);
+    }
+
+    /// Pins the `x-rift-script-trace` payload shape after #998 removed the `cache` field.
+    ///
+    /// The struct literal is the discriminating half: it names every field the type has, so it
+    /// stops compiling the moment one is added back or a new one is introduced without a decision.
+    /// The key-set assertion is a characterization pin — `cache` was `skip_serializing_if` and
+    /// permanently `None` after #975, so the wire never carried it, which is exactly why removing
+    /// it is observationally invisible to a trace consumer.
+    #[test]
+    fn script_trace_entry_serializes_exactly_four_keys() {
+        let entry = ScriptTraceEntry {
+            hook: "respond".to_string(),
+            decision: "pass()".to_string(),
+            duration_ms: 7,
+            logs: vec!["hello".to_string()],
+        };
+
+        let json = serde_json::to_value(&entry).expect("ScriptTraceEntry is Serialize");
+        let obj = json.as_object().expect("serializes to a JSON object");
+
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["decision", "durationMs", "hook", "logs"]);
+
+        assert_eq!(obj["hook"], "respond");
+        assert_eq!(obj["decision"], "pass()");
+        assert_eq!(obj["durationMs"], 7);
+        assert_eq!(obj["logs"], serde_json::json!(["hello"]));
     }
 }

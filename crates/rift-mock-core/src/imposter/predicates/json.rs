@@ -336,8 +336,8 @@ fn combine(a: u64, b: u64) -> u64 {
 /// Hash a string leaf under the comparator's default fold.
 ///
 /// `FixedState` (not `RandomState`): this `u64` is *stored* in the body-index map and computed at
-/// two different times (index build vs request), so it must be stable within the process — the same
-/// reason `decision_cache::hash_body` uses it.
+/// two different times (index build vs request), so it must be stable within the process. Stability
+/// *across* processes is not required and not provided.
 fn hash_folded(s: &str) -> u64 {
     // Default (non-`caseSensitive`) leaf comparison is `eq_ignore_ascii_case`, so folding with
     // `to_ascii_lowercase` before hashing makes case-equal leaves hash-equal — exactly and only
