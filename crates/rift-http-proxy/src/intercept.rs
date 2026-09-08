@@ -480,23 +480,40 @@ fn is_length_limit_error(err: &(dyn std::error::Error + 'static)) -> bool {
         .any(|e| e.is::<http_body_util::LengthLimitError>())
 }
 
-/// Flatten hyper's request headers into the `name -> value` map the rule matcher takes.
+/// Flatten hyper's request headers into the `name -> [values]` map the rule matcher takes.
 ///
-/// Two deliberate carry-overs: repeated headers still collapse to the last value (widening that is
-/// issue #994), and a value that is not UTF-8 is dropped rather than passed through
-/// `from_utf8_lossy` — predicates used to be evaluated against U+FFFD garbage the client never sent.
-fn collect_request_headers(headers: &hyper::HeaderMap) -> HashMap<String, String> {
-    let mut out = HashMap::with_capacity(headers.len());
+/// A repeated header keeps every value, in the order the client sent them (issue #994) — hyper's
+/// `HeaderMap` iterator yields one `(name, value)` pair per occurrence, so appending rather than
+/// `insert`-ing is what preserves them. A value that is not UTF-8 is dropped rather than passed
+/// through `from_utf8_lossy` — predicates used to be evaluated against U+FFFD garbage the client
+/// never sent.
+fn collect_request_headers(headers: &hyper::HeaderMap) -> HashMap<String, Vec<String>> {
+    // `keys_len` counts distinct names; `len()` counts values, which over-allocates for a request
+    // carrying any repeated header.
+    let mut out: HashMap<String, Vec<String>> = HashMap::with_capacity(headers.keys_len());
+    let mut dropped: Vec<&str> = Vec::new();
     for (name, value) in headers {
         // `HeaderName` is always lowercase, so matcher lookups stay case-insensitive for free.
         match value.to_str() {
             Ok(text) => {
-                out.insert(name.as_str().to_string(), text.to_string());
+                out.entry(name.as_str().to_string())
+                    .or_default()
+                    .push(text.to_string());
             }
-            Err(_) => {
-                tracing::debug!(header = %name, "skipping non-UTF-8 intercepted request header value")
-            }
+            // Dropped, not `from_utf8_lossy`-mangled (see above) — but that drop is a real
+            // data-path swallow (the value becomes invisible to both matching and forwarding), so
+            // it is warned rather than merely debug-logged. Collected and emitted once per request
+            // instead of once per header: which headers are non-UTF-8 is entirely client-
+            // controlled, and a per-value warn on this path is an unbounded log-volume lever for a
+            // hostile client (the shape #718 measured as a throughput cost).
+            Err(_) => dropped.push(name.as_str()),
         }
+    }
+    if !dropped.is_empty() {
+        tracing::warn!(
+            headers = %dropped.join(", "),
+            "dropping non-UTF-8 intercepted request header value(s); they are invisible to rule matching and forwarding"
+        );
     }
     out
 }
@@ -568,7 +585,7 @@ async fn forward_response(
     method: &str,
     path: &str,
     query: Option<&str>,
-    headers: &HashMap<String, String>,
+    headers: &HashMap<String, Vec<String>>,
     body: Option<&[u8]>,
     port: u16,
     client: &reqwest::Client,
@@ -581,11 +598,15 @@ async fn forward_response(
         .map_err(|e| anyhow::anyhow!("invalid method '{method}': {e}"))?;
 
     let mut builder = client.request(reqwest_method, &url);
-    for (name, value) in headers {
+    for (name, values) in headers {
         if is_hop_by_hop(name) {
             continue;
         }
-        builder = builder.header(name, value);
+        // One `.header()` call per value (issue #994) — `RequestBuilder::header` appends, so a
+        // repeated header reaches the imposter with every value it had, not just the last.
+        for value in values {
+            builder = builder.header(name, value);
+        }
     }
     if let Some(bytes) = body {
         builder = builder.body(bytes.to_vec());
@@ -984,9 +1005,13 @@ mod tests {
         );
     }
 
-    // ===== Issue #991: request headers reach the matcher with the same shape as before =====
+    // ===== Issue #991/#994: request headers reach the matcher with the right shape =====
+    //
+    // This pinned "last wins" until #994: a repeated header used to collapse to its last value.
+    // The property has reversed, not disappeared, so the test is flipped in place rather than
+    // deleted — same precedent #993 set.
     #[test]
-    fn collect_request_headers_keeps_last_wins_and_drops_non_utf8() {
+    fn collect_request_headers_keeps_every_repeated_value_and_drops_non_utf8() {
         let mut headers = hyper::HeaderMap::new();
         headers.append("x-repeat", HeaderValue::from_static("first"));
         headers.append("x-repeat", HeaderValue::from_static("second"));
@@ -999,13 +1024,13 @@ mod tests {
         let collected = collect_request_headers(&headers);
 
         assert_eq!(
-            collected.get("x-repeat").map(String::as_str),
-            Some("second"),
-            "repeated headers still collapse to the last value; widening that is issue #994"
+            collected.get("x-repeat").map(Vec::as_slice),
+            Some(["first".to_string(), "second".to_string()].as_slice()),
+            "a repeated header keeps every value, in send order (issue #994)"
         );
         assert_eq!(
-            collected.get("content-type").map(String::as_str),
-            Some("application/json"),
+            collected.get("content-type").map(Vec::as_slice),
+            Some(["application/json".to_string()].as_slice()),
             "lookups stay case-insensitive because hyper's header names are already lowercase"
         );
         assert!(

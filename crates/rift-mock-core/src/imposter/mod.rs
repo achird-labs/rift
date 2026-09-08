@@ -77,7 +77,7 @@ pub use reconcile::{ApplyReport, EventContext, ImposterEvent, ImposterEventListe
 
 // Re-export predicate utilities (used in tests and for external consumers)
 #[allow(unused_imports)]
-pub use predicates::{parse_query_string, predicate_matches, stub_matches};
+pub use predicates::{RequestHeaders, parse_query_string, predicate_matches, stub_matches};
 
 // Re-export response utilities
 pub use response::PreparedResponse;

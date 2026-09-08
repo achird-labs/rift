@@ -1,6 +1,7 @@
 //! JSON-shaped predicate helpers: value stringification, recursive `exists` checks,
 //! and recursive JSON comparison used by the `equals`/`deepEquals`/`matches` operators.
 
+use super::RequestHeaders;
 use crate::util::FastMap;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -77,13 +78,13 @@ fn check_exists_json_recursive(expected: &serde_json::Value, actual_str: &str) -
 /// When a field's value is an object (not a boolean), parse the actual value as JSON
 /// and recursively check field existence within it (Mountebank compatible).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn check_exists_predicate<SH>(
+pub(crate) fn check_exists_predicate<H>(
     obj: &HashMap<String, serde_json::Value>,
     method: &str,
     path: &str,
     // Concretely `FastMap` — always sourced from `parse_query`/`parse_query_string` (issue #704).
     query: &FastMap<String, String>,
-    headers: &HashMap<String, String, SH>,
+    headers: &H,
     body: &str,
     request_from: Option<&str>,
     client_ip: Option<&str>,
@@ -92,7 +93,7 @@ pub(crate) fn check_exists_predicate<SH>(
     key_case_sensitive: bool,
 ) -> bool
 where
-    SH: BuildHasher,
+    H: RequestHeaders,
 {
     // Helper for key comparison based on keyCaseSensitive
     let key_matches = |expected_key: &str, actual_key: &str| -> bool {
@@ -161,7 +162,7 @@ where
     if let Some(expected_headers) = obj.get("headers").and_then(|v| v.as_object()) {
         for (key, should_exist_val) in expected_headers {
             let should_exist = should_exist_val.as_bool().unwrap_or(true);
-            let exists = headers.iter().any(|(k, _)| key_matches(key, k));
+            let exists = headers.entries().any(|(k, _)| key_matches(key, k));
             if exists != should_exist {
                 return false;
             }

@@ -13,6 +13,13 @@ record.
 
 ### Changed
 
+- **`stub_matches` and `predicate_matches` are now generic over their `headers` argument** (#994),
+  so the one predicate engine can serve both the imposter's single-value header map and the
+  intercept listener's multi-value one without either paying for the other's shape. Passing a
+  `HashMap<String, String>` still compiles and behaves identically. The one source-level catch for
+  an embedder: a `HashMap::new()` whose type was previously inferred *from* the call now needs an
+  explicit annotation, because more than one map shape satisfies the bound.
+
 - **A `CONNECT` tunnel now carries many requests** (#993). Every intercepted response used to set
   `connection: close`, so a system under test paid a TCP connect, a `CONNECT` round-trip, a TLS
   handshake and a per-SNI leaf certificate for *every single request* — connection pooling in the
@@ -270,6 +277,25 @@ record.
   `rift-mock-core`'s dependencies — `proxy/client.rs` was its only consumer.
 
 ### Fixed
+
+- **A repeated intercept request header now matches and forwards every value, not just the last**
+  (#994). `collect_request_headers` built a plain `name -> value` map with `insert`, so a header
+  sent more than once (e.g. two `X-Test:` lines) silently collapsed to whichever value hyper handed
+  it last, before a rule predicate or the imposter forwarder ever saw the others. A predicate on
+  the first of two values could never match, and forwarding to an imposter dropped every value but
+  one. Both now see the full set: a header predicate matches if **any** value for that name
+  satisfies it, and every value of a repeated header is forwarded, in the order the client sent
+  them. A header value that is not valid UTF-8 is still dropped rather than passed through
+  `from_utf8_lossy`, but that drop is now logged at `WARN` (previously `DEBUG`) since it makes the
+  value invisible to both matching and forwarding. See
+  [Intercept proxy](docs/features/intercept-proxy.md#configuring-rules-admin-api).
+  - **A `not` predicate on a repeated header changes answer**, which follows from the fix rather
+    than being separate from it: `{"not":{"equals":{"headers":{"x-test":"first"}}}}` used to match
+    a request carrying both `first` and `second` (last-wins hid `first` from it) and now does not,
+    because `first` is visible. This affects intercept rules only.
+  - An `inject` predicate still sees one value per header name — the scripting request object is a
+    fixed single-value shape — so a script now reads a repeated header's **first** value where it
+    previously read its last.
 
 - **A tuning env var that is set but unusable now says so** (#1009). `HttpTuning::from_env` and
   `SocketTuning::from_env` fell back to their defaults on any value they could not use — a

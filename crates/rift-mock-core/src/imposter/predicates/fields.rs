@@ -1,22 +1,22 @@
 //! Field-oriented predicate checks (`equals`/`contains`/`startsWith`/`endsWith`/`matches`)
 //! that compare a request's extracted fields against predicate values.
 
+use super::RequestHeaders;
 use super::json::compare_json_recursive;
 use super::regex_cache::cached_regex;
 use crate::util::FastMap;
 use std::collections::HashMap;
-use std::hash::BuildHasher;
 
 /// Check predicate fields against request values
 /// Supports: method, path, body, query, headers, requestFrom, ip, form
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn check_predicate_fields<F, SH>(
+pub(crate) fn check_predicate_fields<F, H>(
     obj: &HashMap<String, serde_json::Value>,
     method: &str,
     path: &str,
     // Concretely `FastMap` — always sourced from `parse_query`/`parse_query_string` (issue #704).
     query: &FastMap<String, String>,
-    headers: &HashMap<String, String, SH>,
+    headers: &H,
     body: &str,
     apply_except: &impl for<'a> Fn(&'a str) -> std::borrow::Cow<'a, str>,
     compare: F,
@@ -32,7 +32,7 @@ pub(crate) fn check_predicate_fields<F, SH>(
 ) -> bool
 where
     F: Fn(&str, &str) -> bool,
-    SH: BuildHasher,
+    H: RequestHeaders,
 {
     // Helper for key comparison based on keyCaseSensitive
     let key_matches = |expected_key: &str, actual_key: &str| -> bool {
@@ -177,15 +177,20 @@ where
         }
 
         for (key, expected_val) in expected_obj {
-            // Headers use keyCaseSensitive option
-            let actual = headers
-                .iter()
+            // Headers use keyCaseSensitive option. A repeated header is one name with several
+            // values (issue #994): the predicate matches the NAME if ANY of its values satisfies
+            // it, not only the first or the last.
+            let actual_values = headers
+                .entries()
                 .find(|(k, _)| key_matches(key, k))
-                .map(|(_, v)| v.as_str());
+                .map(|(_, v)| v);
 
-            match actual {
-                Some(actual) => {
-                    if !check_string_field(expected_val, actual, None) {
+            match actual_values {
+                Some(values) => {
+                    if !values
+                        .iter()
+                        .any(|v| check_string_field(expected_val, v.as_str(), None))
+                    {
                         return false;
                     }
                 }
@@ -200,13 +205,13 @@ where
 /// Check predicate fields with regex matching
 /// Supports: method, path, body, query, headers, requestFrom, ip, form
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn check_predicate_fields_regex<SH>(
+pub(crate) fn check_predicate_fields_regex<H>(
     obj: &HashMap<String, serde_json::Value>,
     method: &str,
     path: &str,
     // Concretely `FastMap` — see `check_predicate_fields`.
     query: &FastMap<String, String>,
-    headers: &HashMap<String, String, SH>,
+    headers: &H,
     body: &str,
     apply_except: &impl for<'a> Fn(&'a str) -> std::borrow::Cow<'a, str>,
     case_sensitive: bool,
@@ -219,7 +224,7 @@ pub(crate) fn check_predicate_fields_regex<SH>(
     body_json: Option<&serde_json::Value>,
 ) -> bool
 where
-    SH: BuildHasher,
+    H: RequestHeaders,
 {
     // Compile-once, cached regex keyed on (pattern, case_insensitive). Returns `None` for an
     // unparseable pattern, which callers treat as "no match" — same as the previous per-request
@@ -355,14 +360,19 @@ where
     // Check headers
     if let Some(expected_headers) = obj.get("headers").and_then(|v| v.as_object()) {
         for (key, pattern_val) in expected_headers {
-            let actual = headers
-                .iter()
+            // A repeated header is one name with several values (issue #994): the pattern
+            // matches the NAME if ANY of its values satisfies it.
+            let actual_values = headers
+                .entries()
                 .find(|(k, _)| key_matches(key, k))
-                .map(|(_, v)| v.as_str());
+                .map(|(_, v)| v);
 
-            match actual {
-                Some(actual) => {
-                    if !check_regex_field(pattern_val, actual, None) {
+            match actual_values {
+                Some(values) => {
+                    if !values
+                        .iter()
+                        .any(|v| check_regex_field(pattern_val, v.as_str(), None))
+                    {
                         return false;
                     }
                 }

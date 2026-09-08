@@ -221,7 +221,7 @@ impl InterceptRules {
         method: &str,
         path: &str,
         query: Option<&str>,
-        headers: &HashMap<String, String>,
+        headers: &HashMap<String, Vec<String>>,
         body: Option<&str>,
     ) -> Option<InterceptAction> {
         let rules = self.read();

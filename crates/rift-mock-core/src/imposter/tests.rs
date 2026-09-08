@@ -65,7 +65,7 @@ fn test_predicate_matching() {
         verify: None,
     };
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // Should match
     assert!(
@@ -520,7 +520,7 @@ fn test_predicate_ends_with() {
     })];
     let predicates = predicates_from_jsons(predicates);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // Should match
     assert!(
@@ -594,7 +594,7 @@ fn test_predicate_deep_equals_method() {
     })];
     let predicates = predicates_from_jsons(predicates);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         stub_matches(
@@ -650,7 +650,7 @@ fn test_predicate_deep_equals_body() {
     })];
     let predicates = predicates_from_jsons(predicates);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // Empty body should match
     assert!(
@@ -709,7 +709,7 @@ fn test_predicate_contains_query() {
     })];
     let predicates = predicates_from_jsons(predicates);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // Should match - query contains "CofTest"
     assert!(
@@ -798,7 +798,7 @@ fn test_predicate_equals_headers() {
     })];
     let predicates = predicates_from_jsons(predicates);
 
-    let mut headers = HashMap::new();
+    let mut headers: HashMap<String, String> = HashMap::new();
     headers.insert("Content-Type".to_string(), "application/json".to_string());
 
     assert!(
@@ -818,7 +818,7 @@ fn test_predicate_equals_headers() {
     );
 
     // Header key lookup is case-insensitive
-    let mut headers_lower = HashMap::new();
+    let mut headers_lower: HashMap<String, String> = HashMap::new();
     headers_lower.insert("content-type".to_string(), "application/json".to_string());
     assert!(
         stub_matches(
@@ -837,7 +837,7 @@ fn test_predicate_equals_headers() {
     );
 
     // Wrong value
-    let mut wrong_headers = HashMap::new();
+    let mut wrong_headers: HashMap<String, String> = HashMap::new();
     wrong_headers.insert("Content-Type".to_string(), "text/html".to_string());
     assert!(
         !stub_matches(
@@ -856,7 +856,7 @@ fn test_predicate_equals_headers() {
     );
 
     // Missing header
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
     assert!(
         !stub_matches(
             &predicates,
@@ -885,7 +885,7 @@ fn test_predicate_exists() {
     })];
     let predicates = predicates_from_jsons(predicates);
 
-    let mut headers = HashMap::new();
+    let mut headers: HashMap<String, String> = HashMap::new();
     headers.insert("Authorization".to_string(), "Bearer xyz".to_string());
 
     // All exist
@@ -923,7 +923,7 @@ fn test_predicate_exists() {
     );
 
     // Missing header
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
     assert!(
         !stub_matches(
             &predicates,
@@ -965,7 +965,7 @@ fn test_predicate_logical_not() {
     })];
     let predicates = predicates_from_jsons(predicates);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // Should match anything except DELETE
     assert!(
@@ -1025,7 +1025,7 @@ fn test_predicate_logical_or() {
     })];
     let predicates = predicates_from_jsons(predicates);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         stub_matches(
@@ -1084,7 +1084,7 @@ fn test_predicate_logical_and() {
     })];
     let predicates = predicates_from_jsons(predicates);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         stub_matches(
@@ -1143,7 +1143,7 @@ fn test_predicate_matches_regex_all_fields() {
     })];
     let predicates = predicates_from_jsons(predicates);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         stub_matches(
@@ -1214,7 +1214,7 @@ fn test_predicate_matches_body_regex() {
     })];
     let predicates = predicates_from_jsons(predicates);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         stub_matches(
@@ -1263,7 +1263,7 @@ fn test_exists_predicate_body_object_field_present() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // Body has "blah" field → should match
     assert!(
@@ -1311,7 +1311,7 @@ fn test_exists_predicate_body_object_field_absent() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // Body has "blah" field → should NOT match (we want it absent)
     assert!(
@@ -1359,7 +1359,7 @@ fn test_exists_predicate_body_object_non_json_body() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         !stub_matches(
@@ -1387,7 +1387,7 @@ fn test_exists_predicate_body_boolean_still_works() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         stub_matches(
@@ -1435,7 +1435,7 @@ fn test_ends_with_object_value_does_not_always_match() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // Path is a plain string, not JSON → should NOT match (was incorrectly always matching)
     assert!(
@@ -1464,7 +1464,7 @@ fn test_ends_with_path_as_json_object() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // Path is a JSON string with a field whose value ends with "123"
     assert!(
@@ -1510,7 +1510,7 @@ fn test_starts_with_object_value_does_not_always_match() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         !stub_matches(
@@ -1540,7 +1540,7 @@ fn test_equals_body_as_json_object() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // Body with matching field (extra fields ignored for equals)
     assert!(
@@ -1603,7 +1603,7 @@ fn test_ends_with_body_object_with_numeric_value() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         stub_matches(
@@ -1653,7 +1653,7 @@ fn test_ends_with_query_object_value_does_not_always_match() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         !stub_matches(
@@ -1682,7 +1682,7 @@ fn test_ends_with_query_object_value_recursive_match() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // query param 'data' is a JSON string with a field ending in "123"
     assert!(
@@ -1729,7 +1729,7 @@ fn test_ends_with_header_object_value_does_not_always_match() {
         }
     })]);
 
-    let mut headers = HashMap::new();
+    let mut headers: HashMap<String, String> = HashMap::new();
     headers.insert("X-Custom".to_string(), "plaintext".to_string());
 
     assert!(
@@ -1759,7 +1759,7 @@ fn test_ends_with_header_object_value_recursive_match() {
         }
     })]);
 
-    let mut headers = HashMap::new();
+    let mut headers: HashMap<String, String> = HashMap::new();
     headers.insert(
         "X-Data".to_string(),
         r#"{"abc": "other123", "extra": "ignored"}"#.to_string(),
@@ -1810,7 +1810,7 @@ fn test_ends_with_form_object_value_does_not_always_match() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
     let mut form = HashMap::new();
     form.insert("field".to_string(), "plaintext".to_string());
 
@@ -1841,7 +1841,7 @@ fn test_ends_with_form_object_value_recursive_match() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
     let mut form = HashMap::new();
     form.insert(
         "payload".to_string(),
@@ -1892,7 +1892,7 @@ fn test_contains_query_object_value() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // query param 'data' is a JSON string with a field containing "ohn"
     assert!(
@@ -1938,7 +1938,7 @@ fn test_equals_header_object_value() {
         }
     })]);
 
-    let mut headers = HashMap::new();
+    let mut headers: HashMap<String, String> = HashMap::new();
     headers.insert(
         "X-Config".to_string(),
         r#"{"mode": "test", "extra": "ignored"}"#.to_string(),
@@ -1993,7 +1993,7 @@ fn test_matches_query_object_value_does_not_always_match() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         !stub_matches(
@@ -2022,7 +2022,7 @@ fn test_matches_query_object_value_recursive_regex() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // query param 'data' is JSON with a "name" field matching regex ^J.*n$
     assert!(
@@ -2067,7 +2067,7 @@ fn test_matches_header_object_value_recursive_regex() {
         }
     })]);
 
-    let mut headers = HashMap::new();
+    let mut headers: HashMap<String, String> = HashMap::new();
     headers.insert(
         "X-Data".to_string(),
         r#"{"id": "12345", "extra": "abc"}"#.to_string(),
@@ -2117,7 +2117,7 @@ fn test_matches_form_object_value_recursive_regex() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
     let mut form = HashMap::new();
     form.insert(
         "payload".to_string(),
@@ -2172,7 +2172,7 @@ fn test_deep_equals_body_extra_keys_rejected() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // Exact match should pass
     assert!(
@@ -2218,7 +2218,7 @@ fn test_equals_body_extra_keys_allowed() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         stub_matches(
@@ -2245,7 +2245,7 @@ fn test_deep_equals_body_nested_extra_keys_rejected() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // Exact nested match
     assert!(
@@ -2290,7 +2290,7 @@ fn test_deep_equals_body_array_comparison() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     // Exact array match
     assert!(
@@ -2356,7 +2356,7 @@ fn test_exists_predicate_query_key_case_insensitive() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         stub_matches(
@@ -2384,7 +2384,7 @@ fn test_exists_predicate_query_key_case_sensitive() {
         "caseSensitive": true
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         !stub_matches(
@@ -2427,7 +2427,7 @@ fn test_exists_predicate_form_key_case_insensitive() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
     let mut form = HashMap::new();
     form.insert("username".to_string(), "alice".to_string());
 
@@ -2457,7 +2457,7 @@ fn test_exists_predicate_headers_key_case_sensitive() {
         "caseSensitive": true
     })]);
 
-    let mut headers = HashMap::new();
+    let mut headers: HashMap<String, String> = HashMap::new();
     headers.insert("x-custom".to_string(), "value".to_string());
 
     assert!(
@@ -2476,7 +2476,7 @@ fn test_exists_predicate_headers_key_case_sensitive() {
         .unwrap()
     );
 
-    let mut headers_exact = HashMap::new();
+    let mut headers_exact: HashMap<String, String> = HashMap::new();
     headers_exact.insert("X-Custom".to_string(), "value".to_string());
 
     assert!(
@@ -2524,7 +2524,7 @@ fn test_header_predicate_matches_title_case() {
         }
     })]);
 
-    let mut headers = HashMap::new();
+    let mut headers: HashMap<String, String> = HashMap::new();
     headers.insert("Content-Type".to_string(), "application/json".to_string());
 
     assert!(
@@ -2569,7 +2569,7 @@ fn test_bare_query_param_exists_predicate() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         stub_matches(
@@ -2596,7 +2596,7 @@ fn test_bare_query_param_equals_empty_string() {
         }
     })]);
 
-    let empty_headers = HashMap::new();
+    let empty_headers: HashMap<String, String> = HashMap::new();
 
     assert!(
         stub_matches(
