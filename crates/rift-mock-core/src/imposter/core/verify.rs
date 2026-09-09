@@ -11,7 +11,6 @@ use crate::imposter::predicates::stub_matches_inner;
 use crate::imposter::types::{Predicate, PredicateOperation, RecordedRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
 
 /// Verification request — the body of `POST /imposters/{port}/verify`. `predicates` are AND'd
 /// (the same implicit-AND the request hot path applies to a stub's predicates).
@@ -101,16 +100,20 @@ impl Imposter {
     }
 
     /// Evaluate all `predicates` (implicit AND) against a recorded request, adapting the stored
-    /// shape back to the matcher's inputs: the multi-value header map collapses to the single-value
-    /// view live matching uses, and the already-parsed query map is threaded directly so no query
-    /// string is re-encoded.
+    /// shape back to the matcher's inputs: the multi-value header map is handed to the shared
+    /// predicate engine as-is (issue #1026), so a repeated header matches if *any* of its values
+    /// satisfies the predicate — the answer intercept rules and `savedRequests` filtering give —
+    /// and the already-parsed query map is threaded directly so no query string is re-encoded.
+    ///
+    /// Live stub matching is the one path that does not agree yet: it still collapses a repeated
+    /// header to its last value (issue #1025). Deliberate, and stated in the `/verify` API docs —
+    /// verify reports the target semantics rather than mirroring a bug for symmetry's sake.
     fn request_matches_predicates(
         &self,
         req: &RecordedRequest,
         predicates: &[Predicate],
     ) -> anyhow::Result<bool> {
-        let headers = collapse_headers(&req.headers);
-        let form = Self::parse_form_data(&headers, req.body.as_deref());
+        let form = Self::parse_form_data(&req.headers, req.body.as_deref());
         let body_json = req
             .body
             .as_deref()
@@ -134,7 +137,7 @@ impl Imposter {
             &req.method,
             &req.path,
             None,
-            &headers,
+            &req.headers,
             req.body.as_deref(),
             Some(&req.request_from),
             client_ip.as_deref(),
@@ -205,16 +208,6 @@ fn client_ip_of(req: &RecordedRequest) -> Option<String> {
         .map(|addr| addr.ip().to_string())
 }
 
-/// Collapse the recorded multi-value header map to the single-value view the matcher expects,
-/// taking the last value per header to mirror how live matching's single-value map is built (a
-/// `HashMap` collect over the request headers keeps the last of duplicate-named headers).
-fn collapse_headers(headers: &HashMap<String, Vec<String>>) -> HashMap<String, String> {
-    headers
-        .iter()
-        .filter_map(|(k, v)| v.last().map(|last| (k.clone(), last.clone())))
-        .collect()
-}
-
 /// The request's actual values for the fields a failed predicate references, as a JSON object —
 /// the raw material for a readable diff. For a field-based op (`equals`/`contains`/…) only the
 /// referenced fields are projected; for a compound (`and`/`or`/`not`), an `inject`, or a
@@ -272,12 +265,9 @@ fn request_field(req: &RecordedRequest, key: &str) -> Option<Value> {
         // The `ip` predicate matches against the bare IP (`client_ip_of`), so report that as the
         // actual — not the `ip:port` `request_from` the matcher never compares against.
         "ip" => Some(json!(client_ip_of(req).unwrap_or_default())),
-        "form" => {
-            let headers = collapse_headers(&req.headers);
-            Some(json!(
-                Imposter::parse_form_data(&headers, req.body.as_deref()).unwrap_or_default()
-            ))
-        }
+        "form" => Some(json!(
+            Imposter::parse_form_data(&req.headers, req.body.as_deref()).unwrap_or_default()
+        )),
         _ => None,
     }
 }
@@ -288,6 +278,7 @@ mod tests {
     use crate::imposter::ResponseMode;
     use crate::imposter::types::ImposterConfig;
     use serde_json::json;
+    use std::collections::HashMap;
 
     fn imposter(flow_id_source: Option<&str>) -> Imposter {
         let mut cfg = json!({ "port": 0, "protocol": "http", "recordRequests": true, "stubs": [] });
@@ -480,9 +471,11 @@ mod tests {
     }
 
     #[test]
-    fn multi_value_header_collapses_to_the_last_value() {
-        // A header recorded with two values collapses to its last, mirroring live matching's
-        // single-value view.
+    fn multi_value_header_matches_on_any_value() {
+        // Issue #1026, flipping the pre-#994 pin: verify shares the predicate engine with live
+        // matching and intercept rules, so a repeated header matches if ANY of its values does.
+        // The absent-value case is what discriminates this from a "take the first instead of the
+        // last" non-fix, which would satisfy the two positive cases on its own.
         let imp = imposter(None);
         imp.record_request(rec(
             "GET",
@@ -491,20 +484,163 @@ mod tests {
             None,
         ));
 
-        let last = VerifyOptions {
-            predicates: preds(json!([{ "equals": { "headers": { "X-Dup": "second" } } }])),
-            ..Default::default()
-        };
-        assert_eq!(imp.verify(&last).expect("verify").matched, 1);
+        for value in ["first", "second"] {
+            let opts = VerifyOptions {
+                predicates: preds(json!([{ "equals": { "headers": { "X-Dup": value } } }])),
+                ..Default::default()
+            };
+            assert_eq!(
+                imp.verify(&opts).expect("verify").matched,
+                1,
+                "{value} is one of the values the client sent, so it must match"
+            );
+        }
 
-        let first = VerifyOptions {
-            predicates: preds(json!([{ "equals": { "headers": { "X-Dup": "first" } } }])),
+        let absent = VerifyOptions {
+            predicates: preds(json!([{ "equals": { "headers": { "X-Dup": "third" } } }])),
             ..Default::default()
         };
         assert_eq!(
-            imp.verify(&first).expect("verify").matched,
+            imp.verify(&absent).expect("verify").matched,
             0,
-            "the shadowed first value must not match"
+            "a value the client never sent must not match"
+        );
+    }
+
+    #[test]
+    fn multi_value_header_not_predicate_sees_every_value() {
+        // Issue #1026: `not` inherits the flip. Under the old last-wins collapse this request
+        // satisfied `not(equals X-Dup: first)` because `first` was shadowed; now that `first` is
+        // visible, the negation must fail.
+        let imp = imposter(None);
+        imp.record_request(rec(
+            "GET",
+            "/a",
+            &[("X-Dup", "first"), ("X-Dup", "second")],
+            None,
+        ));
+
+        let opts = VerifyOptions {
+            predicates: preds(
+                json!([{ "not": { "equals": { "headers": { "X-Dup": "first" } } } }]),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            imp.verify(&opts).expect("verify").matched,
+            0,
+            "the shadowed value is no longer shadowed, so `not` must not match"
+        );
+
+        let unsent = VerifyOptions {
+            predicates: preds(
+                json!([{ "not": { "equals": { "headers": { "X-Dup": "third" } } } }]),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            imp.verify(&unsent).expect("verify").matched,
+            1,
+            "`not` on a value that was never sent still matches"
+        );
+    }
+
+    #[test]
+    fn deep_equals_on_a_repeated_header_matches_any_value_and_counts_the_name_once() {
+        // Issue #1026: `deepEquals` is the one header operator that also compares the expected
+        // object's key count against `RequestHeaders::len()`, and the multi-value impl counts
+        // *names*, not values. A repeated header must therefore stay one name — otherwise a
+        // request carrying two values of one header could never satisfy a one-key `deepEquals`.
+        let imp = imposter(None);
+        imp.record_request(rec(
+            "GET",
+            "/a",
+            &[("X-Dup", "first"), ("X-Dup", "second")],
+            None,
+        ));
+
+        for value in ["first", "second"] {
+            let opts = VerifyOptions {
+                predicates: preds(json!([{ "deepEquals": { "headers": { "X-Dup": value } } }])),
+                ..Default::default()
+            };
+            assert_eq!(
+                imp.verify(&opts).expect("verify").matched,
+                1,
+                "one repeated name counts once, and {value} is one of its values"
+            );
+        }
+
+        let unsent = VerifyOptions {
+            predicates: preds(json!([{ "deepEquals": { "headers": { "X-Dup": "third" } } }])),
+            ..Default::default()
+        };
+        assert_eq!(
+            imp.verify(&unsent).expect("verify").matched,
+            0,
+            "a value the client never sent must not match"
+        );
+
+        let extra_name = VerifyOptions {
+            predicates: preds(json!([
+                { "deepEquals": { "headers": { "X-Dup": "first", "X-Other": "x" } } }
+            ])),
+            ..Default::default()
+        };
+        assert_eq!(
+            imp.verify(&extra_name).expect("verify").matched,
+            0,
+            "deepEquals still requires the name counts to agree"
+        );
+    }
+
+    #[test]
+    fn closest_form_projection_parses_with_a_repeated_content_type() {
+        // Issue #1026: Content-Type is single-valued (RFC 9110), so a repeated one is a malformed
+        // request; the form projection takes the FIRST value rather than giving up on the parse.
+        let imp = imposter(None);
+        imp.record_request(rec(
+            "POST",
+            "/a",
+            &[
+                ("Content-Type", "application/x-www-form-urlencoded"),
+                ("Content-Type", "text/plain"),
+            ],
+            Some("a=1&b=2"),
+        ));
+
+        let opts = VerifyOptions {
+            predicates: preds(json!([{ "equals": { "form": { "a": "9" } } }])),
+            include_closest: true,
+            ..Default::default()
+        };
+        let closest = imp.verify(&opts).expect("verify").closest.expect("closest");
+        let actual = &closest.failed_predicates[0].actual;
+        assert_eq!(
+            actual.get("form").and_then(|f| f.get("a")),
+            Some(&json!("1")),
+            "the first Content-Type wins, so the body still parses as a form: {actual}"
+        );
+    }
+
+    #[test]
+    fn header_name_with_no_values_reads_as_absent() {
+        // Issue #1026: `RecordedRequest.headers` is public API, so a name mapped to an empty list
+        // is reachable. The multi-value `RequestHeaders` impl filters those, and verify must
+        // inherit that — the name reads as absent to `exists`, not as present-with-no-value.
+        let imp = imposter(None);
+        let mut req = rec("GET", "/a", &[], None);
+        req.headers.insert("X-Empty".to_string(), Vec::new());
+        imp.record_request(req);
+
+        let opts = VerifyOptions {
+            predicates: preds(json!([{ "exists": { "headers": { "X-Empty": true } } }])),
+            ..Default::default()
+        };
+        assert_eq!(
+            imp.verify(&opts).expect("verify").matched,
+            0,
+            "a header name carrying no values must not read as present"
         );
     }
 

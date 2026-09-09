@@ -109,6 +109,22 @@ record.
 
 ### Fixed
 
+- **`/verify` and rule matching disagreed about a repeated request header** (#1026). Since #994 the
+  predicate engine matches if *any* value of a repeated header satisfies the predicate, but
+  `POST /imposters/{port}/verify` still collapsed a recorded request's headers to one value per name
+  — the **last** — before handing them over. The same predicate against the same recorded request
+  therefore gave two answers depending on which path evaluated it: an intercept rule matched while
+  verify reported `matched: 0`. Verify now passes the multi-value map straight to the shared engine.
+  Two behaviour flips follow: a predicate on a shadowed value (the first of a repeated header) now
+  matches, and `not` on such a value now fails rather than succeeding. Repeated `Content-Type` on a
+  form body now takes the first value (single-valued per RFC 9110) instead of letting a stray second
+  one suppress the form parse.
+  - Until #1025 lands, the disagreement *moves* rather than disappears: verify and intercept rules
+    (and `savedRequests` filtering) now agree, while live imposter stub matching still takes the
+    last value. This is called out in the `/verify` API docs rather than left for a user to
+    discover. Note the repeated-`Content-Type` case swaps which way it disagrees — verify now reads
+    the first value where the live path reads the last — so the two are worth landing together.
+
 - **Test ports that collided across concurrently-run test binaries** (#1000, correcting #999).
   `cargo test` runs each `tests/*.rs` as its own binary in parallel, so a fixed port reused by two
   files is bound twice at once. `issue_999_metrics_wiring.rs` shared 19911-19916 with

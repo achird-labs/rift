@@ -489,7 +489,13 @@ the wire just to count it.
 }
 ```
 - `predicates` — standard Mountebank/Rift predicate objects, AND-ed together (same semantics as a
-  stub's `predicates`).
+  stub's `predicates`). A request header the client sent more than once matches if **any** of its
+  values satisfies the predicate — and `not` on such a header fails as soon as one value matches.
+  That agrees with intercept rule matching and with `savedRequests` filtering.
+
+  **Live stub matching does not agree yet.** An imposter still selects a stub on a repeated
+  header's **last** value only (#1025). Until that lands, a predicate on a shadowed value can be
+  counted here while no stub matched it at request time.
 - `flowId` *(optional)* — scope the count to one space, resolved via the imposter's
   `flow_id_source` (the same scoping as `match=flow_id=<Value>` on `savedRequests`).
 - `includeRequests` *(optional, default `false`)* — return the matching requests, not just the count.

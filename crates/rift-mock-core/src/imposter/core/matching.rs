@@ -6,6 +6,7 @@ use super::*;
 use crate::imposter::predicates::stub_matches_explained;
 // The differential oracle below is the ONLY remaining caller of the boolean scan here — the live
 // path asks for the failing predicate's index instead (and discards it when untraced).
+use crate::imposter::predicates::RequestHeaders;
 #[cfg(test)]
 use crate::imposter::predicates::stub_matches_inner;
 use crate::imposter::types::{MAX_TRIED_STUBS, MatchOutcome, TriedStub, TriedWhy};
@@ -674,16 +675,22 @@ impl Imposter {
     /// Parse form-urlencoded data from body if Content-Type matches. Request-scoped and rebuilt
     /// per request, so the return is `FastMap` (issue #704) regardless of the input header map's
     /// hasher.
-    pub(crate) fn parse_form_data<SH: BuildHasher>(
-        headers: &HashMap<String, String, SH>,
+    pub(crate) fn parse_form_data<H: RequestHeaders>(
+        headers: &H,
         body: Option<&str>,
     ) -> Option<FastMap<String, String>> {
         // Header keys are Title-Case in the pre-built map, so match Content-Type case-insensitively
-        // (HeaderMap lookups were case-insensitive; preserve that).
+        // (HeaderMap lookups were case-insensitive; preserve that). Generic over `RequestHeaders`
+        // (issue #1026) so the verify API can pass a recorded request's multi-value map straight
+        // through, rather than collapsing it to one value per name first.
+        //
+        // Content-Type is single-valued per RFC 9110, so a request carrying it twice is malformed:
+        // take the first value rather than let a stray second one decide whether the body parses.
         let content_type = headers
-            .iter()
+            .entries()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-            .map(|(_, v)| v.as_str())
+            .and_then(|(_, v)| v.first())
+            .map(String::as_str)
             .unwrap_or("");
 
         if content_type.contains("application/x-www-form-urlencoded")
@@ -763,6 +770,45 @@ mod bounded_matching_tests {
             Some(&"hello world".to_string()),
             "valid sequences must still decode"
         );
+    }
+
+    // Issue #1026: `parse_form_data` is generic over `RequestHeaders` so the verify API can hand it
+    // a recorded request's multi-value header map directly, instead of collapsing it last-wins
+    // first. Both impls must behave identically for a well-formed request.
+    #[test]
+    fn parse_form_data_accepts_the_multi_value_header_shape() {
+        fn header(name: &str, values: &[&str]) -> HashMap<String, Vec<String>> {
+            HashMap::from([(
+                name.to_string(),
+                values.iter().map(|v| (*v).to_string()).collect(),
+            )])
+        }
+
+        const FORM: &str = "application/x-www-form-urlencoded";
+
+        let form = Imposter::parse_form_data(&header("Content-Type", &[FORM]), Some("a=1&b=2"))
+            .expect("form parsed");
+        assert_eq!(form.get("a"), Some(&"1".to_string()));
+        assert_eq!(form.get("b"), Some(&"2".to_string()));
+
+        // Content-Type is single-valued (RFC 9110), so a repeated one is a malformed request:
+        // take the first value rather than let a stray second one suppress the parse.
+        assert_eq!(
+            Imposter::parse_form_data(&header("Content-Type", &[FORM, "text/plain"]), Some("a=1"))
+                .expect("first Content-Type wins")
+                .get("a"),
+            Some(&"1".to_string())
+        );
+
+        // The header NAME lookup stays case-insensitive on this shape too.
+        assert!(Imposter::parse_form_data(&header("content-type", &[FORM]), Some("a=1")).is_some());
+
+        // A non-form Content-Type, and a name carrying no values at all, both yield None.
+        assert!(
+            Imposter::parse_form_data(&header("Content-Type", &["application/json"]), Some("a=1"))
+                .is_none()
+        );
+        assert!(Imposter::parse_form_data(&header("Content-Type", &[]), Some("a=1")).is_none());
     }
 
     // Issue #475: run_flow_blocking must be transparent — on the default (non-blocking) backend it
