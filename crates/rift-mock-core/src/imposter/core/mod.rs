@@ -303,11 +303,37 @@ impl Imposter {
             .map(|stub| Arc::new(StubState::new(stub.clone())))
             .collect();
         // Extract proxy mode from stubs (use first proxy response's mode)
+        // Issue #999: `_rift.metrics` parses but has no reader — metrics are process-wide on
+        // `--metrics-port`. The field is KEPT rather than deleted: `RiftConfig` has no
+        // `deny_unknown_fields`, so removing it would turn a known-ignored key into an
+        // unknown-ignored one, which is strictly worse for the operator. Warn instead, so a
+        // config that silently did nothing now says so.
+        if config
+            .rift
+            .as_ref()
+            .and_then(|r| r.metrics.as_ref())
+            .is_some()
+        {
+            tracing::warn!(
+                "_rift.metrics is parsed but not implemented; metrics are process-wide on \
+                 --metrics-port (default 9090) and are not configurable per imposter"
+            );
+        }
+
         let proxy_mode = Self::extract_proxy_mode(&config.stubs);
 
         // Initialize flow store: a registered provider wins; otherwise the built-in
         // `_rift.flowState` selection.
-        let flow_store = Self::create_flow_store(&config, provider, backends)?;
+        //
+        // Metered here rather than inside `create_flow_store` (issue #999): this is the single
+        // point every selection path funnels through — provider, `inmemory`, the `failing` test
+        // backend, a registered backend such as `redis`, and the NoOp fallback — so one wrap
+        // counts `rift_flow_state_ops_total` for all of them. The decorator forwards every trait
+        // method, including `is_blocking`, so backend behaviour is unchanged.
+        let flow_store: Arc<dyn FlowStore> =
+            Arc::new(crate::extensions::flow_state::MeteredFlowStore::new(
+                Self::create_flow_store(&config, provider, backends)?,
+            ));
 
         let enabled = config.enabled;
         Ok(Self {
@@ -605,6 +631,18 @@ impl Imposter {
     /// total. Centralised here so the invariant has one greppable home rather than a scattered
     /// magic `config.port.unwrap_or(0)` at every script call site.
     pub(crate) fn script_state_key(&self) -> u16 {
+        self.bound_port()
+    }
+
+    /// This imposter's bound listener port, carrying the same invariant [`Self::script_state_key`]
+    /// documents: `Some(bound_port)` for the whole life of a live imposter, with `0` as the
+    /// documented "no live imposter" sentinel, unreachable in practice.
+    ///
+    /// Used as the `rule_id` metric label (issue #999): the imposter path has no named rules the
+    /// way the removed reverse proxy did, so the port is what identifies which imposter injected a
+    /// fault. Other sites still inline `config.port.unwrap_or(0)`; this is the home for the two
+    /// that need it by name, not yet a repo-wide consolidation.
+    pub(crate) fn bound_port(&self) -> u16 {
         self.config.port.unwrap_or(0)
     }
 

@@ -481,6 +481,9 @@ impl Imposter {
             let latency_ms = start.elapsed().as_millis() as u64;
 
             let status = response.status().as_u16();
+            // Issue #999: the upstream hop, observed off the timing the `addWaitBehavior` path
+            // already captures — so this measures the forward itself, not rift's own handling.
+            crate::extensions::metrics::record_upstream_duration(method, status, latency_ms as f64);
             let response_headers: Vec<(String, String)> = response
                 .headers()
                 .iter()

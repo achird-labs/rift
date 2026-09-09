@@ -323,6 +323,103 @@ impl FlowStore for NoOpFlowStore {
     }
 }
 
+/// Counts every flow-store operation into `rift_flow_state_ops_total` (issue #999), by delegating
+/// to an inner store.
+///
+/// Wrapped once around the store `create_flow_store` returns, so the provider path, `inmemory`,
+/// the `failing` test backend, every registered backend (`redis`) and the NoOp fallback are all
+/// covered without touching a single call site.
+///
+/// **Every trait method is forwarded, including the ones with default bodies — that is a
+/// correctness requirement, not tidiness.** `is_blocking` defaults to `false`, so failing to
+/// forward it would silently reclassify a *blocking* backend as non-blocking and break the
+/// `spawn_blocking` routing added in #985/#988/#989. The other defaults are written in terms of
+/// `get`/`set`, so inheriting them would discard the inner store's atomic implementations —
+/// turning an atomic Redis `INCRBY` (or `InMemoryFlowStore::increment_by`) into a racy
+/// get-then-set. Recording happens *after* the inner call and never alters the returned `Result`.
+pub struct MeteredFlowStore {
+    inner: Arc<dyn FlowStore>,
+}
+
+impl MeteredFlowStore {
+    #[must_use]
+    pub fn new(inner: Arc<dyn FlowStore>) -> Self {
+        Self { inner }
+    }
+}
+
+/// Record `op` against the outcome and hand the result straight back.
+fn metered<T>(op: &str, result: Result<T>) -> Result<T> {
+    crate::extensions::metrics::record_flow_state_op(op, result.is_ok());
+    result
+}
+
+impl FlowStore for MeteredFlowStore {
+    fn get(&self, flow_id: &str, key: &str) -> Result<Option<Value>> {
+        metered("get", self.inner.get(flow_id, key))
+    }
+
+    fn set(&self, flow_id: &str, key: &str, value: Value) -> Result<()> {
+        metered("set", self.inner.set(flow_id, key, value))
+    }
+
+    fn exists(&self, flow_id: &str, key: &str) -> Result<bool> {
+        metered("exists", self.inner.exists(flow_id, key))
+    }
+
+    fn delete(&self, flow_id: &str, key: &str) -> Result<()> {
+        metered("delete", self.inner.delete(flow_id, key))
+    }
+
+    fn is_blocking(&self) -> bool {
+        self.inner.is_blocking()
+    }
+
+    fn increment(&self, flow_id: &str, key: &str) -> Result<i64> {
+        metered("increment", self.inner.increment(flow_id, key))
+    }
+
+    fn increment_by(&self, flow_id: &str, key: &str, by: i64) -> Result<i64> {
+        metered("increment_by", self.inner.increment_by(flow_id, key, by))
+    }
+
+    fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> Result<()> {
+        metered("set_ttl", self.inner.set_ttl(flow_id, ttl_seconds))
+    }
+
+    fn set_key_ttl(&self, flow_id: &str, key: &str, ttl_seconds: i64) -> Result<bool> {
+        metered(
+            "set_key_ttl",
+            self.inner.set_key_ttl(flow_id, key, ttl_seconds),
+        )
+    }
+
+    fn clear_flow(&self, flow_id: &str) -> Result<()> {
+        metered("clear_flow", self.inner.clear_flow(flow_id))
+    }
+
+    fn compare_and_set(
+        &self,
+        flow_id: &str,
+        key: &str,
+        expected: Option<&Value>,
+        new: Value,
+    ) -> Result<CasOutcome> {
+        metered(
+            "compare_and_set",
+            self.inner.compare_and_set(flow_id, key, expected, new),
+        )
+    }
+
+    fn flow_ids(&self) -> Result<Option<Vec<String>>> {
+        metered("flow_ids", self.inner.flow_ids())
+    }
+
+    fn entry_count(&self, flow_id: &str) -> Result<Option<usize>> {
+        metered("entry_count", self.inner.entry_count(flow_id))
+    }
+}
+
 /// Create a server-level FlowStore from the `flowState` block of a proxy config file.
 ///
 /// `"inmemory"` is built in; every other name is resolved through `backends` (issue #853), so a
@@ -1165,5 +1262,78 @@ mod cas_tests {
         let store = MinimalStore::new();
         assert_eq!(store.increment_by("f", "k", 5).expect("incr"), 5);
         assert_eq!(store.increment_by("f", "k", 5).expect("incr"), 10);
+    }
+}
+
+/// Issue #999: the metering decorator must be *transparent*. These two tests exist because the
+/// dangerous failure of a delegating wrapper around a trait with default bodies is not a wrong
+/// metric — it is silently changing the store's behaviour.
+#[cfg(test)]
+mod metered_flow_store_tests {
+    use super::*;
+
+    struct FakeInner {
+        blocking: bool,
+    }
+
+    impl FlowStore for FakeInner {
+        fn get(&self, _: &str, _: &str) -> Result<Option<Value>> {
+            Ok(None)
+        }
+        fn set(&self, _: &str, _: &str, _: Value) -> Result<()> {
+            Ok(())
+        }
+        fn exists(&self, _: &str, _: &str) -> Result<bool> {
+            Ok(false)
+        }
+        fn delete(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn increment(&self, _: &str, _: &str) -> Result<i64> {
+            Ok(1)
+        }
+        fn set_ttl(&self, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+        fn is_blocking(&self) -> bool {
+            self.blocking
+        }
+        /// A sentinel the trait's default body could never produce: the default is defined in
+        /// terms of `get`/`set`, and this store's `get` returns `None`, so the default would
+        /// yield `by`. Observing 4242 proves the call actually reached the inner store.
+        fn increment_by(&self, _: &str, _: &str, _by: i64) -> Result<i64> {
+            Ok(4242)
+        }
+    }
+
+    /// `is_blocking()` defaults to `false`. A decorator that fails to forward it silently
+    /// reclassifies a blocking backend (Redis) as non-blocking, which breaks the `spawn_blocking`
+    /// routing added in #985/#988/#989 — a concurrency bug, not a metrics inaccuracy.
+    #[test]
+    fn metered_store_forwards_is_blocking_in_both_directions() {
+        let blocking = MeteredFlowStore::new(Arc::new(FakeInner { blocking: true }));
+        assert!(
+            blocking.is_blocking(),
+            "a blocking inner store must still report as blocking through the decorator"
+        );
+
+        let non_blocking = MeteredFlowStore::new(Arc::new(FakeInner { blocking: false }));
+        assert!(
+            !non_blocking.is_blocking(),
+            "a non-blocking inner store must not be reported as blocking"
+        );
+    }
+
+    /// Every defaulted method must be forwarded, not inherited. `increment_by`'s default body is
+    /// written in terms of `get`/`set`, so relying on it would discard the inner store's atomic
+    /// implementation — turning an atomic Redis INCRBY into a racy get-then-set.
+    #[test]
+    fn metered_store_forwards_defaulted_methods_to_inner() {
+        let store = MeteredFlowStore::new(Arc::new(FakeInner { blocking: false }));
+        assert_eq!(
+            store.increment_by("flow", "key", 7).expect("increment_by"),
+            4242,
+            "increment_by must reach the inner store's implementation, not the trait default"
+        );
     }
 }

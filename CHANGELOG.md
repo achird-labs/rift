@@ -107,6 +107,43 @@ record.
 
   Rendered output, FSM behaviour, and the default in-memory path are unchanged.
 
+### Fixed
+
+- **Nine documented Prometheus metrics are now actually written** (#999). `docs/features/metrics.md`
+  documented thirteen families on `:9090`; nine had no writer on any code path. Because the
+  `lazy_static!` families register on first *touch*, nothing touching them meant they were **absent
+  from the scrape entirely** rather than zero — so `absent()` alerts fired and `rate()` queries
+  returned nothing. The recorders lost their only callers when #975 removed the reverse-proxy mode;
+  the imposter path, which does inject faults, run scripts and drive the flow store, never reported
+  any of it.
+  - **Wired seven**: `rift_faults_injected_total`, `rift_latency_injected_ms`,
+    `rift_error_status_total`, `rift_script_execution_duration_ms`, `rift_script_errors_total`,
+    `rift_upstream_request_duration_ms` and `rift_flow_state_ops_total`. Faults are counted where
+    the fault *fires*, not where its probability roll succeeds — a roll that passes with a zero
+    delay injects nothing, and the metric's name promises faults injected.
+  - **Removed two**, rather than leave a documented series nothing can populate: `rift_active_flows`
+    (a gauge only the in-memory backend can maintain cheaply — a backend-partial gauge would be this
+    same defect reborn) and `rift_proxy_request_duration_ms` (it measured the removed reverse-proxy
+    hop; reusing the name for the imposter path would silently change its meaning). Both doc rows go
+    with them.
+  - **Label semantics, previously undocumented, are now stated**: `rule_id` is the imposter's port
+    as a string (the imposter path has no named rules), and `source` is `rift` for a `_rift.fault`
+    decision or `script` for one a `_rift.script` returned.
+  - Flow-store operations are counted by a delegating `MeteredFlowStore` wrapped once around the
+    store each imposter resolves, so the provider path, `inmemory`, registered backends such as
+    `redis`, and the NoOp fallback are all covered without touching a call site. It forwards *every*
+    trait method, including the defaulted ones: inheriting `is_blocking` would reclassify a blocking
+    backend as non-blocking and break the `spawn_blocking` routing from #985/#988/#989, and
+    inheriting `increment_by` would discard the backend's atomic implementation.
+  - **`_rift.metrics` now says it does nothing.** The per-imposter block parsed but had no reader,
+    while the docs claimed it "controls per-imposter metric emission". The field still parses —
+    `RiftConfig` has no `deny_unknown_fields`, so deleting it would turn a known-ignored key into an
+    unknown-ignored one — but an imposter carrying it now logs a warning, and the false claim is
+    gone from the docs.
+  - The regression guard that was missing: an integration test parses the family names out of the
+    published table and asserts each appears in a real scrape after real traffic. Adding a doc row
+    without wiring it now fails CI, which is what would have caught this nine months ago.
+
 ### Removed
 
 - **`respond(ctx)` is the whole of the `ctx` scripting API** (#1001). The docs advertised four
