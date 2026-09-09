@@ -233,6 +233,15 @@ curl http://localhost:2525/imposters/4545
 }
 ```
 
+Each header name maps to the **list** of values the client sent, in order, so a header sent twice
+is recorded as `{"X-Test": ["first", "second"]}` rather than collapsing to one value.
+
+A header value that is not valid UTF-8 is **dropped** rather than recorded: the journal never
+claims the client sent an empty string it did not send. A header name whose only value was
+undecodable is absent from `headers` entirely. Unlike a binary request *body* (below), a header has
+no `_mode` slot on the wire to carry an encoded form, so dropping — with a warning logged
+server-side — is the honest representation.
+
 ### Binary Request Bodies
 
 A request body that is not valid UTF-8 (protobuf, gzip, an image upload) cannot be recorded as text

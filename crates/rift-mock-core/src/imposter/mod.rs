@@ -20,6 +20,7 @@ mod core;
 pub mod events;
 pub mod fault_io;
 mod handler;
+pub mod headers;
 mod manager;
 pub(crate) mod predicates;
 mod reconcile;

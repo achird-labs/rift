@@ -552,42 +552,12 @@ fn is_length_limit_error(err: &(dyn std::error::Error + 'static)) -> bool {
         .any(|e| e.is::<http_body_util::LengthLimitError>())
 }
 
-/// Flatten hyper's request headers into the `name -> [values]` map the rule matcher takes.
-///
-/// A repeated header keeps every value, in the order the client sent them (issue #994) — hyper's
-/// `HeaderMap` iterator yields one `(name, value)` pair per occurrence, so appending rather than
-/// `insert`-ing is what preserves them. A value that is not UTF-8 is dropped rather than passed
-/// through `from_utf8_lossy` — predicates used to be evaluated against U+FFFD garbage the client
-/// never sent.
+/// Flatten hyper's request headers into the `name -> [values]` map the rule matcher takes — a
+/// thin wrapper over the collector both listeners share (issue #1025). Hyper's `HeaderName` is
+/// always lowercase, so `str::to_string` is the identity name function here and matcher lookups
+/// stay case-insensitive for free (the imposter listener's Title-Case shape is the other caller).
 fn collect_request_headers(headers: &hyper::HeaderMap) -> HashMap<String, Vec<String>> {
-    // `keys_len` counts distinct names; `len()` counts values, which over-allocates for a request
-    // carrying any repeated header.
-    let mut out: HashMap<String, Vec<String>> = HashMap::with_capacity(headers.keys_len());
-    let mut dropped: Vec<&str> = Vec::new();
-    for (name, value) in headers {
-        // `HeaderName` is always lowercase, so matcher lookups stay case-insensitive for free.
-        match value.to_str() {
-            Ok(text) => {
-                out.entry(name.as_str().to_string())
-                    .or_default()
-                    .push(text.to_string());
-            }
-            // Dropped, not `from_utf8_lossy`-mangled (see above) — but that drop is a real
-            // data-path swallow (the value becomes invisible to both matching and forwarding), so
-            // it is warned rather than merely debug-logged. Collected and emitted once per request
-            // instead of once per header: which headers are non-UTF-8 is entirely client-
-            // controlled, and a per-value warn on this path is an unbounded log-volume lever for a
-            // hostile client (the shape #718 measured as a throughput cost).
-            Err(_) => dropped.push(name.as_str()),
-        }
-    }
-    if !dropped.is_empty() {
-        tracing::warn!(
-            headers = %dropped.join(", "),
-            "dropping non-UTF-8 intercepted request header value(s); they are invisible to rule matching and forwarding"
-        );
-    }
-    out
+    rift_mock_core::imposter::headers::collect_request_headers(headers, str::to_string)
 }
 
 /// A bodyless response carrying only a status — the shape `502` has always had, reused for the
@@ -1099,11 +1069,19 @@ mod tests {
         );
     }
 
-    // ===== Issue #991/#994: request headers reach the matcher with the right shape =====
+    // ===== Issue #991/#994/#1025: request headers reach the matcher with the right shape =====
     //
     // This pinned "last wins" until #994: a repeated header used to collapse to its last value.
     // The property has reversed, not disappeared, so the test is flipped in place rather than
-    // deleted — same precedent #993 set.
+    // deleted — same precedent #993 set. It stayed here, asserting literal expected values, when
+    // the implementation moved to rift-mock-core's shared collector in #1025: a test that merely
+    // compared this wrapper against that collector would pass even if the shared collector were
+    // broken in both, which is precisely the agreement it must not assume.
+    // The drop's WARN is asserted where it is emitted, in rift-mock-core's `imposter::headers`
+    // tests: `tracing_test` filters captured events to the crate under test, so a warning raised
+    // inside rift-mock-core is invisible to a `traced_test` here. Same function, so asserting it
+    // once is enough — capturing it a second time would mean widening this crate's log capture for
+    // every other traced test just to re-check one line.
     #[test]
     fn collect_request_headers_keeps_every_repeated_value_and_drops_non_utf8() {
         let mut headers = hyper::HeaderMap::new();
@@ -1125,7 +1103,8 @@ mod tests {
         assert_eq!(
             collected.get("content-type").map(Vec::as_slice),
             Some(["application/json".to_string()].as_slice()),
-            "lookups stay case-insensitive because hyper's header names are already lowercase"
+            "this listener keeps hyper's lowercase names, so lookups stay case-insensitive for \
+             free — the imposter listener's Title-Case shape is the other name function"
         );
         assert!(
             !collected.contains_key("x-binary"),

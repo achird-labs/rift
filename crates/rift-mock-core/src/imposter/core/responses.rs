@@ -116,20 +116,6 @@ impl Imposter {
         })
     }
 
-    /// Convert hyper HeaderMap to HashMap<String, String>
-    /// Uses Title-Case for header keys to match Mountebank's convention.
-    pub(crate) fn header_map_to_hashmap(headers: &hyper::HeaderMap) -> HashMap<String, String> {
-        headers
-            .iter()
-            .map(|(k, v)| {
-                (
-                    crate::behaviors::header_to_title_case(k.as_str()),
-                    v.to_str().unwrap_or("").to_string(),
-                )
-            })
-            .collect()
-    }
-
     /// Execute a stub and get the response with behaviors and rift extensions
     /// Returns (status, headers, body, behaviors, rift_extension, response_mode, is_fault)
     #[allow(clippy::type_complexity)]

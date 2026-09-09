@@ -2501,7 +2501,7 @@ fn test_exists_predicate_headers_key_case_sensitive() {
 // =============================================================================
 
 #[test]
-fn test_header_map_to_hashmap_title_case() {
+fn test_collect_request_headers_title_case() {
     use hyper::HeaderMap;
     use hyper::header::HeaderValue;
 
@@ -2509,7 +2509,12 @@ fn test_header_map_to_hashmap_title_case() {
     headers.insert("content-type", HeaderValue::from_static("application/json"));
     headers.insert("x-custom-header", HeaderValue::from_static("value"));
 
-    let result = Imposter::header_map_to_hashmap(&headers);
+    // `header_map_to_hashmap` was deleted (issue #1025): the shared collector now builds the
+    // Title-Case view `find_matching_stub` uses.
+    let result: HashMap<String, Vec<String>> = crate::imposter::headers::collect_request_headers(
+        &headers,
+        crate::behaviors::header_to_title_case,
+    );
     assert!(result.contains_key("Content-Type"));
     assert!(result.contains_key("X-Custom-Header"));
     assert!(!result.contains_key("content-type"));
@@ -2921,6 +2926,53 @@ async fn test_script_header_access_is_case_insensitive() {
     );
 }
 
+// Issue #1025: the scripting boundaries are single-valued, so a repeated header must expose its
+// FIRST value to a script. This is a behaviour change worth pinning rather than only documenting:
+// the live path used to hand over whichever value survived the last-wins collapse — the LAST one —
+// so flipping `.first()` to `.last()` in any of the four single-value conversions (`_rift.script`,
+// response `inject`, `predicateGenerators`, the debug endpoint) would restore the old answer with
+// nothing failing.
+#[tokio::test]
+async fn test_script_sees_the_first_value_of_a_repeated_header() {
+    let script = "fn respond(ctx) { \
+         let f = ctx.request.header(\"x-flow-id\"); if f == () { f = \"MISS\"; }; \
+         http(200, f) }";
+
+    let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+        "port": 21530,
+        "protocol": "http",
+        "stubs": [{
+            "predicates": [{ "equals": { "path": "/whoami" } }],
+            "responses": [{ "_rift": { "script": { "engine": "rhai", "code": script } } }]
+        }]
+    }))
+    .expect("config");
+
+    let manager = ImposterManager::new();
+    manager
+        .create_imposter(config)
+        .await
+        .expect("create imposter");
+
+    let body = reqwest::Client::new()
+        .get("http://127.0.0.1:21530/whoami")
+        .header("X-Flow-Id", "first")
+        .header("X-Flow-Id", "second")
+        .send()
+        .await
+        .expect("GET failed")
+        .text()
+        .await
+        .expect("body");
+
+    let _ = manager.delete_imposter(21530).await;
+
+    assert_eq!(
+        body, "first",
+        "a script sees the first value of a repeated header, not the last, got: {body}"
+    );
+}
+
 // Issue #190: declarative stateful scenarios (whenState/thenState), flow_id-keyed.
 #[cfg(test)]
 mod scenario_fsm_tests {
@@ -3074,14 +3126,20 @@ mod scenario_fsm_tests {
     fn resolve_flow_id_modes() {
         // default flow_id_source = imposter_port
         let by_port = imposter_with_source(7000, None);
-        assert_eq!(by_port.resolve_flow_id(&HashMap::new()), "7000");
+        assert_eq!(
+            by_port.resolve_flow_id(&HashMap::<String, String>::new()),
+            "7000"
+        );
 
         // header source: present → header value; absent → port fallback
         let by_header = imposter_with_source(7000, Some("header:X-Mock-Space"));
         let mut h = HashMap::new();
         h.insert("X-Mock-Space".to_string(), "abc".to_string());
         assert_eq!(by_header.resolve_flow_id(&h), "abc");
-        assert_eq!(by_header.resolve_flow_id(&HashMap::new()), "7000");
+        assert_eq!(
+            by_header.resolve_flow_id(&HashMap::<String, String>::new()),
+            "7000"
+        );
     }
 
     #[test]

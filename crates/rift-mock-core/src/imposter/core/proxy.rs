@@ -22,7 +22,7 @@ impl Imposter {
         generators: &[serde_json::Value],
         method: &str,
         path: &str,
-        headers: &HashMap<String, String, SH>,
+        headers: &HashMap<String, Vec<String>, SH>,
         body: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, crate::scripting::PredicateGeneratorError> {
@@ -36,7 +36,7 @@ impl Imposter {
         generators: &[serde_json::Value],
         method: &str,
         path: &str,
-        headers: &HashMap<String, String, SH>,
+        headers: &HashMap<String, Vec<String>, SH>,
         body: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, crate::scripting::PredicateGeneratorError> {
@@ -60,11 +60,12 @@ impl Imposter {
                         method: method.to_string(),
                         path: path.to_string(),
                         query: query_map.into_iter().collect(),
-                        // `MountebankRequest.headers` is the fixed std-hasher scripting boundary
-                        // (out of scope for #704), so a hasher-changing map is copied across.
+                        // `MountebankRequest.headers` is the fixed single-value scripting boundary
+                        // (out of scope for #704/#1025), so a repeated header exposes only its
+                        // first value to a predicateGenerator inject script.
                         headers: headers
                             .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .filter_map(|(k, v)| v.first().map(|first| (k.clone(), first.clone())))
                             .collect(),
                         // `body` is already the classified string from the caller (base64 for a
                         // binary request body, issue #636); this path doesn't thread the mode
@@ -158,7 +159,10 @@ impl Imposter {
                 let mut header_preds = serde_json::Map::new();
                 for (header_name, should_match) in header_matches {
                     if should_match.as_bool().unwrap_or(false)
-                        && let Some(header_value) = headers.get(header_name)
+                        // A generated predicate is single-valued (issue #1025): the first value of
+                        // a repeated header is what gets baked into the generated stub.
+                        && let Some(header_value) =
+                            headers.get(header_name).and_then(|values| values.first())
                     {
                         header_preds.insert(
                             header_name.clone(),
@@ -346,7 +350,7 @@ impl Imposter {
         proxy_config: &ProxyResponse,
         method: &str,
         uri: &hyper::Uri,
-        headers: &HashMap<String, String, SH>,
+        headers: &HashMap<String, Vec<String>, SH>,
         body: Option<&str>,
     ) -> anyhow::Result<(u16, Vec<(String, String)>, Vec<u8>, Option<u64>)>
     where
@@ -445,11 +449,16 @@ impl Imposter {
                 _ => client.get(&target_url),
             };
 
-            // Copy headers (excluding host)
-            for (key, value) in headers {
+            // Copy headers (excluding host). One `.header()` call PER VALUE, in send order
+            // (issue #1025) — reqwest appends rather than replacing on a repeated call, so a
+            // repeated header is forwarded in full instead of collapsing to whichever value used
+            // to survive the old single-value map.
+            for (key, values) in headers {
                 let key_lower = key.to_lowercase();
                 if key_lower != "host" && key_lower != "content-length" {
-                    request = request.header(key, value);
+                    for value in values {
+                        request = request.header(key, value);
+                    }
                 }
             }
 

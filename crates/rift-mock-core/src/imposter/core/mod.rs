@@ -743,7 +743,7 @@ mod tests {
         }))
         .unwrap();
         let imp = Imposter::new(cfg).expect("test imposter");
-        let flow = imp.resolve_flow_id(&std::collections::HashMap::new());
+        let flow = imp.resolve_flow_id(&std::collections::HashMap::<String, String>::new());
 
         imp.set_scenario_state(&flow, "order", "paid")
             .expect("set scenario state");
@@ -821,7 +821,7 @@ mod tests {
         }))
         .unwrap();
         let imp = Imposter::new(cfg).expect("test imposter");
-        let headers = std::collections::HashMap::new();
+        let headers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let (matched, index) = imp
             .find_matching_stub_with_client("GET", "/shared", &headers, None, None, None, None)
             .expect("store is infallible")
@@ -1265,7 +1265,8 @@ mod tests {
             let imp = StdArc::clone(&imp);
             let stop = StdArc::clone(&stop);
             std::thread::spawn(move || {
-                let headers = std::collections::HashMap::new();
+                let headers: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
                 let mut hits = 0u64;
                 while !stop.load(Ordering::Relaxed) {
                     let r = imp

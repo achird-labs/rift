@@ -11,7 +11,6 @@ use crate::imposter::predicates::RequestHeaders;
 use crate::imposter::predicates::stub_matches_inner;
 use crate::imposter::types::{MAX_TRIED_STUBS, MatchOutcome, TriedStub, TriedWhy};
 use crate::util::FastMap;
-use std::hash::BuildHasher;
 
 /// The accumulating form of [`MatchOutcome`]'s `tried`/`triedOmitted`, built during the stub scan.
 ///
@@ -68,26 +67,31 @@ impl Imposter {
         body: Option<&str>,
     ) -> anyhow::Result<Option<(Arc<StubState>, usize)>> {
         // Call the extended version with no client info (backward compatible). This convenience
-        // wrapper still accepts a `HeaderMap` and converts once; the hot path (`handler.rs`)
-        // passes an already-built header map to `find_matching_stub_with_client` directly.
-        let headers_map = Self::header_map_to_hashmap(headers);
+        // wrapper still accepts a `HeaderMap` and converts once, via the shared collector (issue
+        // #1025) — the hot path (`handler.rs`) passes an already-built header map to
+        // `find_matching_stub_with_client` directly.
+        let headers_map: FastMap<String, Vec<String>> =
+            crate::imposter::headers::collect_request_headers(
+                headers,
+                crate::behaviors::header_to_title_case,
+            );
         self.find_matching_stub_with_client(method, path, &headers_map, query, body, None, None)
     }
 
     /// Find a matching stub with client address information (for requestFrom/ip predicates)
     #[allow(clippy::too_many_arguments)]
-    pub fn find_matching_stub_with_client<SH>(
+    pub fn find_matching_stub_with_client<H>(
         &self,
         method: &str,
         path: &str,
-        headers_map: &HashMap<String, String, SH>,
+        headers_map: &H,
         query: Option<&str>,
         body: Option<&str>,
         request_from: Option<&str>,
         client_ip: Option<&str>,
     ) -> anyhow::Result<Option<(Arc<StubState>, usize)>>
     where
-        SH: BuildHasher,
+        H: RequestHeaders,
     {
         Ok(self
             .find_matching_stub_with_client_inner(
@@ -110,11 +114,11 @@ impl Imposter {
     /// can never diverge on which stub wins: tracing observes the one scan, it does not repeat it.
     /// With `want_trace: false` nothing is allocated and the pass is the pre-existing one.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn find_matching_stub_with_client_inner<SH>(
+    pub(crate) fn find_matching_stub_with_client_inner<H>(
         &self,
         method: &str,
         path: &str,
-        headers_map: &HashMap<String, String, SH>,
+        headers_map: &H,
         query: Option<&str>,
         body: Option<&str>,
         request_from: Option<&str>,
@@ -122,7 +126,7 @@ impl Imposter {
         want_trace: bool,
     ) -> anyhow::Result<TracedMatch>
     where
-        SH: BuildHasher,
+        H: RequestHeaders,
     {
         let mut trace = want_trace.then(MatchTrace::default);
         // Stage 1 (issues #292, #707): one wait-free load yields the stubs and the index built over
@@ -134,8 +138,10 @@ impl Imposter {
         // request — correct, since a stub that provably can't match should not be consulted.
         let snapshot = self.snapshot();
         let stubs = snapshot.stubs();
-        // `headers_map` is the single-value, Title-Case header view already built once by the
-        // caller (#288) — no re-conversion from `HeaderMap` here.
+        // `headers_map` is the Title-Case, multi-value header view already built once by the
+        // caller (#288, #1025) — no re-conversion from `HeaderMap` here. Generic over
+        // `RequestHeaders` so both that shape and a single-value map (tests, the debug path)
+        // serve the same matcher.
         // Parse form data if Content-Type is application/x-www-form-urlencoded
         let form = Self::parse_form_data(headers_map, body);
 
@@ -226,11 +232,11 @@ impl Imposter {
     /// No abort flag: Boa has no per-instruction interrupt, so after a timeout the loop-iteration
     /// cap (issue #327) is what eventually frees the blocking thread.
     #[allow(clippy::too_many_arguments)]
-    pub async fn find_matching_stub_with_client_bounded<SH>(
+    pub async fn find_matching_stub_with_client_bounded<H>(
         self: &Arc<Self>,
         method: &str,
         path: &str,
-        headers_map: &HashMap<String, String, SH>,
+        headers_map: &H,
         query: Option<&str>,
         body: Option<&str>,
         request_from: Option<&str>,
@@ -240,7 +246,7 @@ impl Imposter {
     where
         // `Clone + Send + 'static`: the `spawn_blocking` offload below clones `headers_map` into a
         // `'static` worker closure when the snapshot needs offloading (inject/scenario-gate).
-        SH: BuildHasher + Clone + Send + 'static,
+        H: RequestHeaders + Clone + Send + 'static,
     {
         Ok(self
             .find_matching_stub_with_client_bounded_inner(
@@ -265,11 +271,11 @@ impl Imposter {
     /// offload, the same deadline — because the trace is produced BY the scan rather than beside
     /// it; it simply rides back out of the blocking task by value with the result.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn find_matching_stub_with_client_bounded_inner<SH>(
+    pub(crate) async fn find_matching_stub_with_client_bounded_inner<H>(
         self: &Arc<Self>,
         method: &str,
         path: &str,
-        headers_map: &HashMap<String, String, SH>,
+        headers_map: &H,
         query: Option<&str>,
         body: Option<&str>,
         request_from: Option<&str>,
@@ -278,7 +284,7 @@ impl Imposter {
         want_trace: bool,
     ) -> anyhow::Result<TracedMatch>
     where
-        SH: BuildHasher + Clone + Send + 'static,
+        H: RequestHeaders + Clone + Send + 'static,
     {
         let snapshot = self.snapshot();
         let has_inject = snapshot.has_inject();
@@ -364,11 +370,11 @@ impl Imposter {
     /// the differential test to prove the index preserves Mountebank first-match-wins exactly.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn find_matching_stub_linear(
+    pub(crate) fn find_matching_stub_linear<H: RequestHeaders>(
         &self,
         method: &str,
         path: &str,
-        headers_map: &HashMap<String, String>,
+        headers_map: &H,
         query: Option<&str>,
         body: Option<&str>,
         request_from: Option<&str>,
@@ -429,22 +435,15 @@ impl Imposter {
 
     /// Resolve the correlation `flow_id` for a request, partitioning scenario state.
     /// `"header:<Name>"` uses that (case-insensitive) header; `"imposter_port"` (the default,
-    /// and the fallback when the header is absent) uses the imposter port.
-    pub fn resolve_flow_id<SH: BuildHasher>(
-        &self,
-        headers: &HashMap<String, String, SH>,
-    ) -> String {
-        // Live path uses the single-value header view (`headers_clone`); kept separate from the
-        // multi-value `flow_id_for` (used over recorded requests) to avoid a per-request alloc.
-        let port = self.config.port.unwrap_or(0);
-        match self.flow_id_source().strip_prefix("header:") {
-            Some(name) => headers
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| port.to_string()),
-            None => port.to_string(),
-        }
+    /// and the fallback when the header is absent) uses the imposter port. A thin `&self` wrapper
+    /// over [`Self::flow_id_for`] (issue #1025) — now that the live path's header map is
+    /// multi-value too, the live and recorded resolutions share the exact same implementation.
+    pub fn resolve_flow_id<H: RequestHeaders>(&self, headers: &H) -> String {
+        Self::flow_id_for(
+            &self.flow_id_source(),
+            headers,
+            self.config.port.unwrap_or(0),
+        )
     }
 
     /// Resolve the correlation `flow_id` for an already-recorded request (multi-value headers).
@@ -458,10 +457,12 @@ impl Imposter {
 
     /// Pure flow_id resolution (no `&self`), so it can be reused over recorded requests.
     /// A flow id derives from a single header value; the first is taken if multi-valued (#238).
-    fn flow_id_for(source: &str, headers: &HashMap<String, Vec<String>>, port: u16) -> String {
+    /// Generic over [`RequestHeaders`] (issue #1025) so the live path's multi-value map and the
+    /// recorded/single-value shapes all resolve through the one implementation.
+    fn flow_id_for<H: RequestHeaders>(source: &str, headers: &H, port: u16) -> String {
         match source.strip_prefix("header:") {
             Some(name) => headers
-                .iter()
+                .entries()
                 .find(|(k, _)| k.eq_ignore_ascii_case(name))
                 .and_then(|(_, v)| v.first().cloned())
                 .unwrap_or_else(|| port.to_string()),
