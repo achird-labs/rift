@@ -1128,7 +1128,9 @@ impl StubIndex {
         }
     }
 
-    /// The number of stubs this index spans.
+    /// The number of stubs this index spans. Test-only: the serve path reads the bitsets
+    /// directly, so this exists for dimension-level assertions (issue #1000).
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.len
     }
@@ -1283,6 +1285,7 @@ impl StubSnapshot {
 
     /// Candidate stub ids for a request that carries no (or a non-JSON) body — see
     /// [`StubIndex::candidates`]. The body dimension then contributes only its `always` stubs.
+    #[cfg(test)]
     pub(crate) fn candidates(&self, method: &str, path: &str) -> CandidateBits {
         self.candidates_with_body(method, path, None)
     }

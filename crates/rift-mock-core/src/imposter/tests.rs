@@ -3117,20 +3117,6 @@ mod scenario_fsm_tests {
             .expect("match in paid");
         assert_eq!(idx, 1);
     }
-
-    async fn text(c: &reqwest::Client, url: String) -> String {
-        c.get(url)
-            .send()
-            .await
-            .expect("send")
-            .text()
-            .await
-            .expect("text")
-    }
-
-    async fn json(c: &reqwest::Client, url: String) -> serde_json::Value {
-        serde_json::from_str(&text(c, url).await).expect("json")
-    }
 }
 
 // Issue #223: Correlated isolation — space-scoped stubs + one-call per-space teardown.

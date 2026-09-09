@@ -1,7 +1,6 @@
 //! Rift core engine — CLI-free imposter lifecycle, matching, behaviors, scripting and
 //! flow-state. Usable in-process without the admin HTTP server or the `clap` CLI (issue #203);
 //! the `rift-http-proxy` server and the `rift-ffi` C-ABI are thin consumers.
-#![allow(dead_code)]
 
 /// Whether the quamina-backed body-field candidate dimension is compiled into this build.
 ///
@@ -28,7 +27,6 @@ pub mod extensions;
 pub mod response;
 
 // Re-export extension modules at top level for backward compatibility
-pub use extensions::fault;
 pub use extensions::flow_state;
 pub use extensions::stub_analysis;
 pub use extensions::template;

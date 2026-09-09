@@ -168,19 +168,6 @@ impl ClientCertVerifier for AcceptAnyClientCert {
     }
 }
 
-/// Create TLS acceptor from certificate and key files.
-pub fn create_tls_acceptor(
-    cert_path: &str,
-    key_path: &str,
-    client_auth: &ClientAuth,
-) -> Result<TlsAcceptor, anyhow::Error> {
-    let cert_pem = std::fs::read(cert_path)
-        .map_err(|e| anyhow::anyhow!("Failed to open certificate file '{cert_path}': {e}"))?;
-    let key_pem = std::fs::read(key_path)
-        .map_err(|e| anyhow::anyhow!("Failed to open private key file '{key_path}': {e}"))?;
-    tls_acceptor_from_pem(&cert_pem, &key_pem, client_auth)
-}
-
 /// Create a TLS acceptor from in-memory PEM bytes (per-imposter HTTPS, issue #206).
 pub fn tls_acceptor_from_pem(
     cert_pem: &[u8],

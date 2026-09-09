@@ -26,7 +26,6 @@
 pub mod authz;
 pub mod decorate;
 pub mod exchange_inspector;
-pub mod fault;
 pub mod flow_state;
 pub mod metrics;
 pub mod no_match;
@@ -41,8 +40,6 @@ pub mod template_fn;
 pub use exchange_inspector::{
     ExchangeInspector, ExchangeInspectorProvider, InspectRequest, InspectResponse, InspectVerdict,
 };
-#[allow(unused_imports)]
-pub use fault::{FaultDecision, create_error_response, decide_fault};
 #[allow(unused_imports)]
 pub use flow_state::{
     CasOutcome, FlowStore, FlowStoreBackendFactory, FlowStoreBackends, FlowStoreProvider,

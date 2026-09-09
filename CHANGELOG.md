@@ -109,6 +109,13 @@ record.
 
 ### Fixed
 
+- **Test ports that collided across concurrently-run test binaries** (#1000, correcting #999).
+  `cargo test` runs each `tests/*.rs` as its own binary in parallel, so a fixed port reused by two
+  files is bound twice at once. `issue_999_metrics_wiring.rs` shared 19911-19916 with
+  `front_door.rs` and 19921 with `issue_797_error_envelope_type.rs`; it now uses 21500-21507,
+  picked by enumerating every port literal in the repo. This never failed CI — it is exactly the
+  kind of flake that gets written off later.
+
 - **Nine documented Prometheus metrics are now actually written** (#999). `docs/features/metrics.md`
   documented thirteen families on `:9090`; nine had no writer on any code path. Because the
   `lazy_static!` families register on first *touch*, nothing touching them meant they were **absent
@@ -145,6 +152,31 @@ record.
     without wiring it now fails CI, which is what would have caught this nine months ago.
 
 ### Removed
+
+- **Neither library crate silences the dead-code detector any more** (#1000). A crate-wide
+  `#![allow(dead_code)]` is why #975 could leave thousands of unreachable lines for nine months
+  without a single warning. All four blanket allows are gone — the two crate-wide ones in
+  `rift-mock-core` and `rift-http-proxy`, **and two module-wide ones the issue did not list**, in
+  `behaviors/mod.rs` and `predicate/mod.rs`, whose stated reasons ("designed for future
+  integration", "while the predicate system is being fully integrated") stopped being true long
+  ago. Those two modules are where this issue's own evidence came from, so leaving them would have
+  made the headline claim false exactly where it was measured. `cargo clippy -- -D warnings` is now
+  a permanent tripwire, and a test fails if any blanket allow comes back.
+  - **Removed** (each verified to have no production reference): the whole `extensions::fault`
+    module, `config::rules` (`FaultConfig`, `TcpFault`, `LatencyFault`, `ErrorFault`),
+    `behaviors::ResponseCycler`, `util::merge_headers_to_map`,
+    `imposter::core::proxy::insert_generated_stub`, `admin_api::types::imposter_not_found`,
+    `proxy::tls::create_tls_acceptor`, and the `scripting::execute_rhai_with_engine` re-export.
+    Public-API removal on 0.x → minor bump, same as #975.
+  - **`extensions::fault` went entirely, including its `FaultDecision`.** Two enums share that
+    name; the live one is `scripting::FaultDecision`, which the imposter script hook uses and which
+    is untouched. The `extensions` one — the reverse proxy's, carrying a `TcpFault` variant nothing
+    constructed — had no consumer at all. `config::rules` existed only to feed it, and its own
+    module doc said it was "retained as public API pending its own decision". This is that decision.
+  - **Kept:** `behaviors::RuleCycler` and `HasRepeatBehavior` (live on the imposter path), and
+    `StubIndex::len` / `StubSnapshot::candidates`, which their own unit tests use and which are now
+    marked `#[cfg(test)]` rather than silenced — they are dead in the lib target only, which is what
+    `--all-targets` reports and what makes a blind delete tempting.
 
 - **`respond(ctx)` is the whole of the `ctx` scripting API** (#1001). The docs advertised four
   entrypoints against a unified `ctx` — `respond`, `matches`, `transform` and `delay` — prefaced by

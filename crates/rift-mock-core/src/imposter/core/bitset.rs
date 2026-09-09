@@ -65,6 +65,12 @@ impl CandidateBits {
     }
 
     /// Whether `id` is in the set.
+    ///
+    /// Gated to match its consumers (issue #1000): the only production caller is
+    /// `body_field_discriminates`, which is `quamina-matching`-gated, and the bitset's own unit
+    /// tests use it unconditionally. Without the `test` arm this is dead in a
+    /// `--no-default-features` *lib* build — which rustc now reports, since nothing silences it.
+    #[cfg(any(feature = "quamina-matching", test))]
     #[must_use]
     pub(crate) fn contains(&self, id: usize) -> bool {
         id < self.len && self.words[id / WORD] & (1u64 << (id % WORD)) != 0
@@ -94,6 +100,9 @@ impl CandidateBits {
     }
 
     /// How many ids are in the set.
+    ///
+    /// Gated for the same reason as [`Self::contains`], and on the same terms.
+    #[cfg(any(feature = "quamina-matching", test))]
     #[must_use]
     pub(crate) fn count(&self) -> usize {
         self.words.iter().map(|w| w.count_ones() as usize).sum()

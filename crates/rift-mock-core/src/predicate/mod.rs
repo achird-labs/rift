@@ -23,9 +23,6 @@
 //! - `deep_equals` - Deep equality for objects
 //! - `request` - Unified request predicate
 
-// Allow dead code while predicate system is being fully integrated
-#![allow(dead_code)]
-
 mod body_matcher;
 mod deep_equals;
 mod field_matcher;
