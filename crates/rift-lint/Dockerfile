@@ -1,7 +1,7 @@
 # Build stage
 # Using Rust nightly for if-let-chains feature (required by regress 0.10.5, a boa_engine dependency)
 # Digest-pinned (issue #664); Dependabot reads the tag and bumps the digest.
-FROM rustlang/rust:nightly@sha256:2bc4153cb1b661793f4370de3aecf7973aec0f32014e2a0a2709b0258293bbf8 AS builder
+FROM rustlang/rust:nightly@sha256:6300e8dd65f4c012d50c9422a44dac04227c3890ecb626bb73a9e1224c55acad AS builder
 
 WORKDIR /build
 
