@@ -12,9 +12,6 @@
 //! - `shellTransform` - External program transforms response
 //! - `decorate` - Rhai script to post-process response
 
-// Allow dead code for now as behaviors are designed for future integration
-#![allow(dead_code)]
-
 mod copy;
 mod cycler;
 mod extraction;
@@ -27,7 +24,7 @@ mod wait;
 // Re-export main types for library consumers
 #[allow(unused_imports)]
 pub use copy::{CopyBehavior, CopySource, apply_copy_behaviors};
-pub use cycler::{HasRepeatBehavior, ResponseCycler, RuleCycler};
+pub use cycler::{HasRepeatBehavior, RuleCycler};
 
 pub mod sequencer;
 #[cfg(test)]

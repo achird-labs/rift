@@ -214,16 +214,6 @@ impl Imposter {
         Ok(predicates)
     }
 
-    /// Insert a generated stub at the specified index
-    pub fn insert_generated_stub(&self, stub: Stub, before_index: usize) {
-        let new_stub_state = Arc::new(StubState::new(stub));
-        self.mutate_stubs(|stubs| {
-            let index = before_index.min(stubs.len());
-            stubs.insert(index, new_stub_state);
-            debug!("Inserted generated stub at index {}", index);
-        });
-    }
-
     /// Resolve a proxy mode string to the placement its recorded stubs take.
     ///
     /// The single source of truth for that mapping: the engine's own insertion and the

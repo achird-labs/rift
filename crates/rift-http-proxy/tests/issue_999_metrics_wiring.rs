@@ -89,7 +89,7 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     mk(
         &manager,
         serde_json::json!({
-            "port": 19911, "protocol": "http", "stubs": [{ "responses": [{
+            "port": 21500, "protocol": "http", "stubs": [{ "responses": [{
                 "is": { "statusCode": 200, "body": "ok" },
                 "_rift": { "fault": { "error": { "probability": 1.0, "status": 503, "body": "boom" } } }
             }] }]
@@ -101,7 +101,7 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     mk(
         &manager,
         serde_json::json!({
-            "port": 19912, "protocol": "http", "stubs": [{ "responses": [{
+            "port": 21501, "protocol": "http", "stubs": [{ "responses": [{
                 "is": { "statusCode": 200, "body": "ok" },
                 "_rift": { "fault": { "latency": { "probability": 1.0, "ms": 1 } } }
             }] }]
@@ -114,7 +114,7 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     mk(
         &manager,
         serde_json::json!({
-            "port": 19913, "protocol": "http", "stubs": [{ "responses": [{
+            "port": 21502, "protocol": "http", "stubs": [{ "responses": [{
                 "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { http(503, \"scripted\") }" } }
             }] }]
         }),
@@ -125,7 +125,7 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     mk(
         &manager,
         serde_json::json!({
-            "port": 19914, "protocol": "http", "stubs": [{ "responses": [{
+            "port": 21503, "protocol": "http", "stubs": [{ "responses": [{
                 "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { throw \"deliberate\" }" } }
             }] }]
         }),
@@ -136,7 +136,7 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     mk(
         &manager,
         serde_json::json!({
-            "port": 19915, "protocol": "http",
+            "port": 21504, "protocol": "http",
             "_rift": { "flowState": { "backend": "inmemory" } },
             "stubs": [{ "responses": [{
                 "_rift": { "script": { "engine": "rhai",
@@ -150,7 +150,7 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     mk(
         &manager,
         serde_json::json!({
-            "port": 19916, "protocol": "http", "stubs": [{ "responses": [{
+            "port": 21505, "protocol": "http", "stubs": [{ "responses": [{
                 "is": { "statusCode": 200, "body": "origin" } }] }]
         }),
     )
@@ -158,8 +158,8 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     mk(
         &manager,
         serde_json::json!({
-            "port": 19917, "protocol": "http", "stubs": [{ "responses": [{
-                "proxy": { "to": "http://127.0.0.1:19916", "mode": "proxyAlways" } }] }]
+            "port": 21506, "protocol": "http", "stubs": [{ "responses": [{
+                "proxy": { "to": "http://127.0.0.1:21505", "mode": "proxyAlways" } }] }]
         }),
     )
     .await;
@@ -167,7 +167,7 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let client = reqwest::Client::new();
-    for port in [19911u16, 19912, 19913, 19914, 19915, 19917] {
+    for port in [21500u16, 21501, 21502, 21503, 21504, 21506] {
         hit(&client, port, "/x").await;
     }
 
@@ -192,11 +192,11 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
     // NB: the Prometheus text encoder emits labels in ALPHABETICAL order, not the order they are
     // declared in the `CounterVec`. Write them sorted or these never match.
     for expected in [
-        r#"rift_faults_injected_total{rule_id="19911",source="rift",type="error"}"#,
-        r#"rift_faults_injected_total{rule_id="19912",source="rift",type="latency"}"#,
-        r#"rift_faults_injected_total{rule_id="19913",source="script",type="error"}"#,
-        r#"rift_error_status_total{rule_id="19911",status="503"}"#,
-        r#"rift_script_errors_total{error_type="runtime",rule_id="19914"}"#,
+        r#"rift_faults_injected_total{rule_id="21500",source="rift",type="error"}"#,
+        r#"rift_faults_injected_total{rule_id="21501",source="rift",type="latency"}"#,
+        r#"rift_faults_injected_total{rule_id="21502",source="script",type="error"}"#,
+        r#"rift_error_status_total{rule_id="21500",status="503"}"#,
+        r#"rift_script_errors_total{error_type="runtime",rule_id="21503"}"#,
         r#"rift_flow_state_ops_total{operation="increment",result="success"}"#,
     ] {
         assert!(
@@ -214,7 +214,7 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
         "`source=\"v1\"` is not a documented label value; a fault is being counted twice.\n{scrape}"
     );
 
-    for port in [19911u16, 19912, 19913, 19914, 19915, 19916, 19917] {
+    for port in [21500u16, 21501, 21502, 21503, 21504, 21505, 21506] {
         let _ = manager.delete_imposter(port).await;
     }
 }
@@ -229,7 +229,7 @@ async fn a_zero_millisecond_latency_roll_injects_nothing_and_is_not_counted() {
     mk(
         &manager,
         serde_json::json!({
-            "port": 19921, "protocol": "http", "stubs": [{ "responses": [{
+            "port": 21507, "protocol": "http", "stubs": [{ "responses": [{
                 "is": { "statusCode": 200, "body": "ok" },
                 "_rift": { "fault": { "latency": { "probability": 1.0, "ms": 0 } } }
             }] }]
@@ -239,16 +239,16 @@ async fn a_zero_millisecond_latency_roll_injects_nothing_and_is_not_counted() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let client = reqwest::Client::new();
-    hit(&client, 19921, "/x").await;
+    hit(&client, 21507, "/x").await;
 
     let scrape = rift_http_proxy::extensions::collect_metrics();
     assert!(
-        !scrape.contains(r#"rule_id="19921""#),
+        !scrape.contains(r#"rule_id="21507""#),
         "a latency fault whose delay is 0ms injects nothing and must not be counted as an \
          injected fault.\n{scrape}"
     );
 
-    let _ = manager.delete_imposter(19921).await;
+    let _ = manager.delete_imposter(21507).await;
 }
 
 /// The two families #999 deliberately removed must not come back by way of the docs table: a row

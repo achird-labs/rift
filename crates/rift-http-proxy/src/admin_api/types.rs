@@ -243,14 +243,6 @@ pub fn not_found() -> Response<Full<Bytes>> {
     error_response(StatusCode::NOT_FOUND, "Not Found")
 }
 
-/// Create an "imposter not found" response for the given port
-pub fn imposter_not_found(port: u16) -> Response<Full<Bytes>> {
-    error_response(
-        StatusCode::NOT_FOUND,
-        &format!("Imposter not found on port {port}"),
-    )
-}
-
 /// Maximum admin-API request body accepted before responding `413 Payload Too
 /// Large` (issue #546). The admin plane binds `0.0.0.0` and `--api-key` is
 /// optional, so an unbounded body is a trivial memory-exhaustion vector. The

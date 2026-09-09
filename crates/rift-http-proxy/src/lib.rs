@@ -1,7 +1,3 @@
-// Library exports for benchmarking and testing
-// Allow dead_code for library targets - functions are used by the binary but not by tests
-#![allow(dead_code)]
-
 // The CLI-free engine now lives in the `rift-mock-core` crate (issue #203). Re-export its modules at
 // the crate root so existing `crate::<module>` paths in the admin server, CLI and tests keep
 // resolving unchanged — the server is a thin consumer of the core.
@@ -10,8 +6,8 @@
 // re-exported by value so an embedder holding only `rift-http-proxy` names them at the root
 // exactly as it would on `rift-mock-core` (issue #965), not via `imposter::fault_io`.
 pub use rift_mock_core::{
-    TcpFaultKind, backends, behaviors, config, extensions, fault, flow_state, imposter, predicate,
-    proxy, recording, response, scripting, stub_analysis, tcp_fault_carrier, template, util,
+    TcpFaultKind, backends, behaviors, config, extensions, flow_state, imposter, predicate, proxy,
+    recording, response, scripting, stub_analysis, tcp_fault_carrier, template, util,
 };
 
 /// The named flow-state backends this build ships (issue #853).

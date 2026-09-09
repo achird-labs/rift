@@ -4,7 +4,6 @@
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
-use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Fast, non-cryptographic hash maps for the imposter hot path (issue #704).
@@ -132,21 +131,6 @@ pub fn build_response_with_headers(
     builder
         .body(Full::new(body.into()))
         .unwrap_or_else(|e| internal_error_fallback(&e))
-}
-
-/// Merge a slice of `(key, value)` header pairs into a `HashMap`,
-/// comma-joining values for duplicate keys per HTTP spec (RFC 9110 §5.3).
-pub fn merge_headers_to_map(headers: &[(String, String)]) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for (k, v) in headers {
-        map.entry(k.clone())
-            .and_modify(|existing: &mut String| {
-                existing.push_str(", ");
-                existing.push_str(v);
-            })
-            .or_insert_with(|| v.clone());
-    }
-    map
 }
 
 /// Returns `true` for hop-by-hop headers that should be stripped when
