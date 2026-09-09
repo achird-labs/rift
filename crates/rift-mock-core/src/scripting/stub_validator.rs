@@ -281,6 +281,9 @@ mod tests {
         }
     }
 
+    /// Both callers are `javascript`-gated, so this helper is too — it is otherwise dead in a
+    /// `--no-default-features` test build (issue #1000).
+    #[cfg(feature = "javascript")]
     fn make_inject_stub(code: &str) -> Stub {
         Stub {
             id: Some("inject-stub".to_string()),
