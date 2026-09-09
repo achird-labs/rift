@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 fn default_flow_id(imposter: &Imposter) -> String {
-    imposter.resolve_flow_id(&HashMap::new())
+    imposter.resolve_flow_id(&HashMap::<String, String>::new())
 }
 
 /// Collect and JSON-parse a request body, returning a `400` response on failure.

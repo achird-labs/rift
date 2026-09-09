@@ -1207,12 +1207,279 @@ mod multi_value_headers {
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
-        assert!(
-            values.contains(&"one".to_string()) && values.contains(&"two".to_string()),
-            "both request header values recorded, got {values:?}"
+        assert_eq!(
+            values,
+            vec!["one".to_string(), "two".to_string()],
+            "both request header values recorded, in the order the client sent them (#1025 \
+             tightened this from a presence check — order is what `first()` selects at the \
+             scripting and flow-id boundaries), got {values:?}"
         );
 
         let _ = manager.delete_imposter(19822).await;
+    }
+}
+
+// Issue #1025: the imposter listener collapsed a repeated REQUEST header to its last value before
+// matching, and turned a non-UTF-8 value into an empty string. These drive the real listener over
+// a socket, because the defect lives in how the listener builds its header map — a unit test on
+// the collector alone cannot show that the map actually reaches the matcher.
+mod repeated_request_headers_reach_matching {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    async fn serve(config: serde_json::Value) -> Arc<ImposterManager> {
+        let manager = Arc::new(ImposterManager::new());
+        manager
+            .create_imposter(serde_json::from_value(config).unwrap())
+            .await
+            .expect("create imposter");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        manager
+    }
+
+    /// An imposter whose only stub matches `X-Test: <value>` and answers "hit"; anything else
+    /// falls through to the 200 "miss" default.
+    fn matching_on(port: u16, predicate: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "port": port, "protocol": "http", "recordRequests": true,
+            "defaultResponse": {"statusCode": 200, "body": "miss"},
+            "stubs": [{
+                "predicates": [predicate],
+                "responses": [{"is": {"statusCode": 200, "body": "hit"}}]
+            }]
+        })
+    }
+
+    async fn send_repeated(port: u16) -> String {
+        let resp = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/x"))
+            .header("X-Test", "first")
+            .header("X-Test", "second")
+            .send()
+            .await
+            .expect("request sent");
+        resp.text().await.expect("body read")
+    }
+
+    #[tokio::test]
+    async fn a_repeated_header_matches_on_its_first_value() {
+        // THE BUG. Last-wins meant `first` was shadowed by `second` and could never match.
+        let manager = serve(matching_on(
+            21520,
+            serde_json::json!({"equals": {"headers": {"X-Test": "first"}}}),
+        ))
+        .await;
+        assert_eq!(
+            send_repeated(21520).await,
+            "hit",
+            "the first value of a repeated header must be matchable"
+        );
+        let _ = manager.delete_imposter(21520).await;
+    }
+
+    #[tokio::test]
+    async fn a_repeated_header_still_matches_on_its_last_value() {
+        // Passes before the fix too, and is here precisely for that reason: without it, an
+        // implementation that merely swapped which single value survives would satisfy the test
+        // above and still be wrong.
+        let manager = serve(matching_on(
+            21521,
+            serde_json::json!({"equals": {"headers": {"X-Test": "second"}}}),
+        ))
+        .await;
+        assert_eq!(
+            send_repeated(21521).await,
+            "hit",
+            "the last value must keep matching — this is a widening, not a swap"
+        );
+        let _ = manager.delete_imposter(21521).await;
+    }
+
+    #[tokio::test]
+    async fn a_value_the_client_never_sent_does_not_match() {
+        let manager = serve(matching_on(
+            21522,
+            serde_json::json!({"equals": {"headers": {"X-Test": "third"}}}),
+        ))
+        .await;
+        assert_eq!(
+            send_repeated(21522).await,
+            "miss",
+            "any-value matching must not degrade into matching anything"
+        );
+        let _ = manager.delete_imposter(21522).await;
+    }
+
+    #[tokio::test]
+    async fn not_no_longer_matches_a_request_carrying_the_shadowed_value() {
+        // The one behaviour change that can surprise a user, so it is pinned rather than left to
+        // the CHANGELOG: `first` used to be invisible, which made the negation true.
+        let manager = serve(matching_on(
+            21523,
+            serde_json::json!({"not": {"equals": {"headers": {"X-Test": "first"}}}}),
+        ))
+        .await;
+        assert_eq!(
+            send_repeated(21523).await,
+            "miss",
+            "`not` sees every value now, so a request carrying `first` fails the negation"
+        );
+        let _ = manager.delete_imposter(21523).await;
+    }
+
+    #[tokio::test]
+    async fn a_non_utf8_header_value_is_not_offered_to_predicates_as_an_empty_string() {
+        // `v.to_str().unwrap_or("")` made `{"equals":{"headers":{"x-bin":""}}}` match a request
+        // that sent raw bytes — a data-path swallow inventing a value the client never sent.
+        // Sent over a hand-written socket because reqwest will not build a non-UTF-8 header value.
+        let manager = serve(matching_on(
+            21524,
+            serde_json::json!({"equals": {"headers": {"X-Bin": ""}}}),
+        ))
+        .await;
+
+        let body = tokio::task::spawn_blocking(|| {
+            let mut sock = std::net::TcpStream::connect("127.0.0.1:21524").expect("connect");
+            let mut raw = b"GET /x HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Bin: ".to_vec();
+            raw.extend_from_slice(&[0xFF, 0xFE]);
+            raw.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+            sock.write_all(&raw).expect("write");
+            let mut out = String::new();
+            let _ = sock.read_to_string(&mut out);
+            out
+        })
+        .await
+        .expect("raw request");
+
+        assert!(
+            body.contains("miss"),
+            "a non-UTF-8 value must not be matchable as an empty string, got: {body}"
+        );
+
+        let admin = "127.0.0.1:12724";
+        let server = rift_http_proxy::admin_api::AdminApiServer::new(
+            admin.parse().unwrap(),
+            manager.clone(),
+            None,
+        );
+        tokio::spawn(server.run());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let recorded = json(
+            &reqwest::Client::new(),
+            format!("http://{admin}/imposters/21524/requests"),
+        )
+        .await;
+        assert_eq!(
+            recorded[0]["headers"]["X-Bin"],
+            serde_json::Value::Null,
+            "the journal must not claim the client sent an empty X-Bin either, got {}",
+            recorded[0]["headers"]
+        );
+
+        let _ = manager.delete_imposter(21524).await;
+    }
+
+    #[tokio::test]
+    async fn a_header_whose_only_value_is_non_utf8_does_not_exist_for_predicates() {
+        // The map-level assertion (`!contains_key`) lives in the collector's unit tests; this is
+        // the behavioural half — what `exists` actually answers at the predicate layer for a name
+        // the collector emptied. "Present but empty" and "absent" are different answers to
+        // `exists`, and only one of them is honest about what the client sent.
+        let manager = serve(matching_on(
+            21527,
+            serde_json::json!({"exists": {"headers": {"X-Bin": true}}}),
+        ))
+        .await;
+
+        let body = tokio::task::spawn_blocking(|| {
+            let mut sock = std::net::TcpStream::connect("127.0.0.1:21527").expect("connect");
+            let mut raw = b"GET /x HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Bin: ".to_vec();
+            raw.extend_from_slice(&[0xFF, 0xFE]);
+            raw.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+            sock.write_all(&raw).expect("write");
+            let mut out = String::new();
+            let _ = sock.read_to_string(&mut out);
+            out
+        })
+        .await
+        .expect("raw request");
+
+        assert!(
+            body.contains("miss"),
+            "a name left with no decodable value must not report as present, got: {body}"
+        );
+        let _ = manager.delete_imposter(21527).await;
+    }
+
+    #[tokio::test]
+    async fn a_proxied_request_forwards_both_values_of_a_repeated_header() {
+        // AC2's "forwarded" half. `handle_proxy_request` iterated the single-value map, so a
+        // proxied request reached the upstream carrying only whichever value used to survive the
+        // collapse. Upstream here is a second, recording imposter, so its journal is the evidence
+        // of what actually went over the wire.
+        let manager = Arc::new(ImposterManager::new());
+        manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({
+                    "port": 21526, "protocol": "http", "recordRequests": true,
+                    "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "upstream"}}]}]
+                }))
+                .unwrap(),
+            )
+            .await
+            .expect("upstream imposter");
+        manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({
+                    "port": 21525, "protocol": "http",
+                    "stubs": [{"responses": [{"proxy": {
+                        "to": "http://127.0.0.1:21526", "mode": "proxyTransparent"
+                    }}]}]
+                }))
+                .unwrap(),
+            )
+            .await
+            .expect("proxy imposter");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        reqwest::Client::new()
+            .get("http://127.0.0.1:21525/x")
+            .header("X-Test", "first")
+            .header("X-Test", "second")
+            .send()
+            .await
+            .expect("proxied request");
+
+        let admin = "127.0.0.1:12725";
+        let server = rift_http_proxy::admin_api::AdminApiServer::new(
+            admin.parse().unwrap(),
+            manager.clone(),
+            None,
+        );
+        tokio::spawn(server.run());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let recorded = json(
+            &reqwest::Client::new(),
+            format!("http://{admin}/imposters/21526/requests"),
+        )
+        .await;
+        let values: Vec<String> = recorded[0]["headers"]["X-Test"]
+            .as_array()
+            .expect("upstream recorded X-Test as an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            values,
+            vec!["first".to_string(), "second".to_string()],
+            "both values must reach the upstream, in send order, got {values:?}"
+        );
+
+        let _ = manager.delete_imposter(21525).await;
+        let _ = manager.delete_imposter(21526).await;
     }
 }
 

@@ -213,7 +213,9 @@ unsafe fn resolve_flow_arg(
 ) -> Option<String> {
     unsafe {
         if flow_id.is_null() {
-            return Some(imposter.resolve_flow_id(&std::collections::HashMap::new()));
+            return Some(
+                imposter.resolve_flow_id(&std::collections::HashMap::<String, String>::new()),
+            );
         }
         match c_str(flow_id) {
             Some(s) => Some(s.to_string()),
@@ -1083,7 +1085,9 @@ pub unsafe extern "C" fn rift_set_scenario_state(
             .get("flowId")
             .and_then(|v| v.as_str())
             .map(String::from)
-            .unwrap_or_else(|| imposter.resolve_flow_id(&std::collections::HashMap::new()));
+            .unwrap_or_else(|| {
+                imposter.resolve_flow_id(&std::collections::HashMap::<String, String>::new())
+            });
         match imposter.set_scenario_state(&flow, name, state) {
             Ok(()) => 0,
             Err(e) => {

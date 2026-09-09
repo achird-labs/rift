@@ -31,6 +31,38 @@ record.
 
 ### Changed
 
+- **A repeated request header now matches on any of its values at an imposter, and a non-UTF-8
+  header value is dropped instead of becoming `""`** (#1025). The imposter listener built a
+  single-value header map by `collect()`-ing, which is last-wins, so a client sending
+  `X-Test: first` and `X-Test: second` could never be matched on `first`. The same line did
+  `v.to_str().unwrap_or("")`, so a header value that is not valid UTF-8 was offered to predicates
+  as an empty string — `{"equals":{"headers":{"x-bin":""}}}` matched a request that sent raw
+  bytes, and `savedRequests` claimed the client had sent an empty header. Both listeners now build
+  their header map with one shared collector, so the imposter and intercept paths agree by
+  construction rather than by being kept in sync.
+  - **Three behaviour changes to know about.** A predicate on a previously-shadowed value now
+    matches. **`not` flips**: `{"not":{"equals":{"headers":{"x-test":"first"}}}}` no longer
+    matches a request carrying both values. And single-valued contexts — `inject`, `_rift.script`,
+    `predicateGenerators`, the debug endpoint, and the `flowIdSource` header — now take the
+    **first** value of a repeated header where the live path previously took the last (the recorded
+    path has taken the first since #238, so the two no longer disagree). `decorate` is deliberately
+    NOT in that list: it reads `RequestContext`, which this change does not touch.
+  - **On upgrade, with a persistent (Redis) flow store:** if your `flowIdSource` header is one a
+    client actually repeats, scenario state written by an older build lives under the last value's
+    key and will be read back under the first value's key. State keyed on a non-repeated header —
+    the normal case — is unaffected.
+  - A `proxy` response forwards every value of a repeated header, in order, rather than only the
+    one that survived the collapse.
+  - **Not covered:** the `copy`/`lookup`/`decorate`/`shellTransform` behaviors read a separate
+    request view (`RequestContext`) that still coerces a non-UTF-8 header value to `""`, which was
+    a deliberate choice in #480 so a header would not flip from present to absent for a behavior.
+    Reconciling that with this issue's drop-and-warn rule is a decision in its own right and is
+    tracked separately rather than reversed in passing here.
+  - Cost: one `Vec` per distinct header name per request. With `recordRequests` on this is net
+    zero — one map now replaces the two that were built before.
+  - Together with #1026 this closes the last of the header-matching disagreement: verify, intercept
+    rules, `savedRequests` filtering and live stub matching now give the same answer.
+
 - **`stub_matches` and `predicate_matches` are now generic over their `headers` argument** (#994),
   so the one predicate engine can serve both the imposter's single-value header map and the
   intercept listener's multi-value one without either paying for the other's shape. Passing a
@@ -119,11 +151,8 @@ record.
   matches, and `not` on such a value now fails rather than succeeding. Repeated `Content-Type` on a
   form body now takes the first value (single-valued per RFC 9110) instead of letting a stray second
   one suppress the form parse.
-  - Until #1025 lands, the disagreement *moves* rather than disappears: verify and intercept rules
-    (and `savedRequests` filtering) now agree, while live imposter stub matching still takes the
-    last value. This is called out in the `/verify` API docs rather than left for a user to
-    discover. Note the repeated-`Content-Type` case swaps which way it disagrees — verify now reads
-    the first value where the live path reads the last — so the two are worth landing together.
+  - Landed alongside #1025, which fixes the live imposter path the same way, so the two agree in
+    this release rather than the disagreement merely moving between them.
 
 - **Test ports that collided across concurrently-run test binaries** (#1000, correcting #999).
   `cargo test` runs each `tests/*.rs` as its own binary in parallel, so a fixed port reused by two

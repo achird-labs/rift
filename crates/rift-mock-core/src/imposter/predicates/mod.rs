@@ -1106,7 +1106,7 @@ mod tests {
 
         let pred = make_predicate_with_params(PredicateOperation::Equals(fields), params);
 
-        // After fix #87, header_map_to_hashmap() produces Title-Case keys
+        // After fix #87, the shared request-header collector (issue #1025) produces Title-Case keys
         let mut headers = HashMap::new();
         headers.insert("Content-Type".to_string(), "application/json".to_string());
 

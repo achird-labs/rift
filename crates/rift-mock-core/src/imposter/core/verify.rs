@@ -102,12 +102,9 @@ impl Imposter {
     /// Evaluate all `predicates` (implicit AND) against a recorded request, adapting the stored
     /// shape back to the matcher's inputs: the multi-value header map is handed to the shared
     /// predicate engine as-is (issue #1026), so a repeated header matches if *any* of its values
-    /// satisfies the predicate — the answer intercept rules and `savedRequests` filtering give —
-    /// and the already-parsed query map is threaded directly so no query string is re-encoded.
-    ///
-    /// Live stub matching is the one path that does not agree yet: it still collapses a repeated
-    /// header to its last value (issue #1025). Deliberate, and stated in the `/verify` API docs —
-    /// verify reports the target semantics rather than mirroring a bug for symmetry's sake.
+    /// satisfies the predicate — the same answer live stub matching, intercept rules and
+    /// `savedRequests` filtering all give (issues #1025, #1026) — and the already-parsed query map
+    /// is threaded directly so no query string is re-encoded.
     fn request_matches_predicates(
         &self,
         req: &RecordedRequest,

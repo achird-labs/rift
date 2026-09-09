@@ -23,6 +23,41 @@ Predicates can match on these request fields:
 | `headers` | Request headers | `{ "Authorization": "Bearer..." }` |
 | `body` | Request body | String or JSON object |
 
+### Repeated request headers
+
+A client may send the same header name more than once. Such a header matches if **any** of its
+values satisfies the predicate — so a request carrying
+
+```
+X-Test: first
+X-Test: second
+```
+
+matches `{"equals": {"headers": {"X-Test": "first"}}}` *and*
+`{"equals": {"headers": {"X-Test": "second"}}}`.
+
+Two consequences worth knowing:
+
+- **`not` sees every value.** `{"not": {"equals": {"headers": {"X-Test": "first"}}}}` does **not**
+  match the request above. Before Rift evaluated every value, `first` was shadowed by `second` and
+  the negation succeeded.
+- **Single-valued contexts take the first value.** `inject` functions, `_rift.script`,
+  `predicateGenerators` and the debug endpoint receive one value per header name — the first one
+  sent. (`decorate` is **not** in this list: it reads the separate request view described below,
+  which still takes the last value.)
+
+A header value that is not valid UTF-8 is **dropped** from predicate matching, from `proxy`
+forwarding, and from `savedRequests`. On those three paths it is never presented as an empty
+string, so `{"equals": {"headers": {"X-Bin": ""}}}` does not match a request that sent raw bytes,
+and a name whose only value was undecodable does not satisfy `exists`. Each request carrying one
+logs a single warning naming the affected headers.
+
+The `copy`, `lookup`, `decorate` and `shellTransform` **behaviors**, and `${request.headers.*}`
+template substitution, read a separate request view that is unchanged: it takes a repeated header's
+**last** value, and coerces a non-UTF-8 value to `""` rather than dropping it. Coercion there was a
+deliberate earlier choice (#480), so that a header does not flip from present-to-a-behavior to
+absent. So `copy` can still substitute an empty string for a value the client sent as raw bytes.
+
 ---
 
 ## Predicate Types
