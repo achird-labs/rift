@@ -1,11 +1,18 @@
-//! Deep equality matcher for objects (headers, query params).
+//! Deep equality matcher for query parameters.
 //!
 //! Unlike regular `equals`, `deepEquals` requires an EXACT match.
+//!
+//! This type does **not** serve the live `deepEquals` predicate — that is
+//! `PredicateOperation::DeepEquals`, matched by `imposter::predicates::fields` against the
+//! collected header map. Its header half was removed in issue #1048: it had no callers, and it
+//! decoded with `to_str().unwrap_or("")`, which handed any embedder calling it the exact
+//! blanking that #1025 removed from the live path (a request that sent bytes would have matched
+//! `{"deepEquals": {"headers": {"X-Bin": ""}}}`).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Deep equality matcher for objects (headers, query params).
+/// Deep equality matcher for query parameters.
 ///
 /// Unlike regular `equals`, `deepEquals` requires an EXACT match:
 /// - All specified key-value pairs must be present and equal
@@ -15,16 +22,12 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct DeepEquals {
     #[serde(default)]
-    pub headers: Option<HashMap<String, String>>,
-    #[serde(default)]
     pub query: Option<HashMap<String, String>>,
 }
 
 /// Compiled deep equality matcher.
 #[derive(Debug, Clone)]
 pub struct CompiledDeepEquals {
-    /// Expected headers (keys lowercased)
-    pub headers: Option<HashMap<String, String>>,
     /// Expected query parameters
     pub query: Option<HashMap<String, String>>,
     /// Case sensitive comparison
@@ -35,40 +38,9 @@ impl CompiledDeepEquals {
     /// Compile a DeepEquals configuration.
     pub fn compile(config: &DeepEquals, case_sensitive: bool) -> Self {
         CompiledDeepEquals {
-            headers: config.headers.as_ref().map(|h| {
-                h.iter()
-                    .map(|(k, v)| (k.to_lowercase(), v.clone()))
-                    .collect()
-            }),
             query: config.query.clone(),
             case_sensitive,
         }
-    }
-
-    /// Check if headers match the deep equality constraint (exact match, no extra headers).
-    ///
-    /// Note: For headers, we only check against the expected headers since HTTP headers
-    /// typically include many standard headers. Use `matches_headers_strict` for true deep equality.
-    pub fn matches_headers(&self, headers: &hyper::HeaderMap) -> bool {
-        if let Some(expected) = &self.headers {
-            for (name, expected_value) in expected {
-                match headers.get(name.as_str()) {
-                    Some(actual) => {
-                        let actual_str = actual.to_str().unwrap_or("");
-                        let matches = if self.case_sensitive {
-                            actual_str == expected_value
-                        } else {
-                            actual_str.to_lowercase() == expected_value.to_lowercase()
-                        };
-                        if !matches {
-                            return false;
-                        }
-                    }
-                    None => return false,
-                }
-            }
-        }
-        true
     }
 
     /// Check if query parameters match the deep equality constraint.
@@ -149,43 +121,10 @@ pub fn parse_query_string(query: Option<&str>) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::HeaderMap;
-    use hyper::header::{HeaderName, HeaderValue};
-
-    #[test]
-    fn test_deep_equals_headers() {
-        let config = DeepEquals {
-            headers: Some(
-                [("x-api-key".to_string(), "secret".to_string())]
-                    .into_iter()
-                    .collect(),
-            ),
-            query: None,
-        };
-        let compiled = CompiledDeepEquals::compile(&config, true);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static("x-api-key"),
-            HeaderValue::from_static("secret"),
-        );
-        assert!(compiled.matches_headers(&headers));
-
-        let mut wrong_headers = HeaderMap::new();
-        wrong_headers.insert(
-            HeaderName::from_static("x-api-key"),
-            HeaderValue::from_static("wrong"),
-        );
-        assert!(!compiled.matches_headers(&wrong_headers));
-
-        let empty_headers = HeaderMap::new();
-        assert!(!compiled.matches_headers(&empty_headers));
-    }
 
     #[test]
     fn test_deep_equals_query_strict() {
         let config = DeepEquals {
-            headers: None,
             query: Some(
                 [
                     ("page".to_string(), "1".to_string()),
@@ -226,7 +165,6 @@ mod tests {
     #[test]
     fn test_deep_equals_query_partial() {
         let config = DeepEquals {
-            headers: None,
             query: Some(
                 [("page".to_string(), "1".to_string())]
                     .into_iter()

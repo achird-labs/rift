@@ -266,6 +266,9 @@ has ever been valid already does. A document that spells each name once is unaff
 respect, and the spelling you wrote is the spelling Rift serves — nothing is lowercased or
 title-cased.
 
+The check is UTF-8 **validity**, not ASCII (#1048): a header carrying non-ASCII UTF-8 is recorded
+byte-exact, on both the request and the response side.
+
 A header value that is not valid UTF-8 is **dropped** rather than recorded: the journal never
 claims the client sent an empty string it did not send. A header name whose only value was
 undecodable is absent from `headers` entirely. Unlike a binary request *body* (below), a header has

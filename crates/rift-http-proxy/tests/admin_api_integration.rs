@@ -1085,6 +1085,154 @@ mod tcp_faults {
     }
 }
 
+// Issue #1048: a non-ASCII UTF-8 request header, end to end.
+mod non_ascii_request_headers {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    async fn serve(config: serde_json::Value) -> Arc<ImposterManager> {
+        let manager = Arc::new(ImposterManager::new());
+        manager
+            .create_imposter(serde_json::from_value(config).unwrap())
+            .await
+            .expect("create imposter");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        manager
+    }
+
+    // The collector is the one decode site every request-side consumer reads, so the unit test
+    // proves the decode. What this proves is the *claim a user cares about*: that such a header
+    // reaches matching and the journal at all. Before #1048 `to_str` rejected every byte above
+    // 0x7F, so this predicate could not match and the header was absent from `savedRequests` —
+    // while the server logged that a valid UTF-8 value was "non-UTF-8".
+    #[tokio::test]
+    async fn a_non_ascii_utf8_header_matches_a_predicate_and_is_recorded_byte_exact() {
+        let manager = serve(serde_json::json!({
+            "port": 22750, "protocol": "http", "recordRequests": true,
+            "stubs": [{
+                "predicates": [{"equals": {"headers": {"X-User-Name": "José"}}}],
+                "responses": [{"is": {"statusCode": 200, "body": "matched"}}]
+            }]
+        }))
+        .await;
+
+        let body = tokio::task::spawn_blocking(|| {
+            let mut sock = std::net::TcpStream::connect("127.0.0.1:22750").expect("connect");
+            // Written as raw bytes, not through a client that might re-encode: the point is that
+            // the UTF-8 bytes on the wire survive.
+            let mut raw = b"GET /x HTTP/1.1\r\nHost: 127.0.0.1\r\nX-User-Name: ".to_vec();
+            raw.extend_from_slice("José".as_bytes());
+            raw.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+            sock.write_all(&raw).expect("write");
+            let mut out = String::new();
+            let _ = sock.read_to_string(&mut out);
+            out
+        })
+        .await
+        .expect("raw request");
+
+        assert!(
+            body.contains("matched"),
+            "a predicate on a non-ASCII UTF-8 header must match; before #1048 the value was \
+             dropped before matching ever saw it. got: {body}"
+        );
+
+        let admin = "127.0.0.1:12760";
+        let server = rift_http_proxy::admin_api::AdminApiServer::new(
+            admin.parse().unwrap(),
+            manager.clone(),
+            None,
+        );
+        tokio::spawn(server.run());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let recorded = json(
+            &reqwest::Client::new(),
+            format!("http://{admin}/imposters/22750/requests"),
+        )
+        .await;
+        // A single-valued header serialises as a bare string, not a one-element array (#238), so
+        // this reads the value directly.
+        assert_eq!(
+            recorded[0]["headers"]["X-User-Name"].as_str(),
+            Some("José"),
+            "the journal must record it byte-exact, not drop it: {recorded}"
+        );
+
+        let _ = manager.delete_imposter(22750).await;
+    }
+
+    // The forwarding third of the claim. #1041 got a relay test for the response direction; this
+    // is its request-side mirror, and without it the CHANGELOG's "matched, forwarded and recorded
+    // consistently" would be prose with only two thirds of it under test. Upstream here is a
+    // second, recording imposter, so its own journal is the evidence of what actually arrived.
+    #[tokio::test]
+    async fn a_non_ascii_utf8_header_is_forwarded_upstream_byte_exact() {
+        let manager = Arc::new(ImposterManager::new());
+        manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({
+                    "port": 22752, "protocol": "http", "recordRequests": true,
+                    "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "upstream"}}]}]
+                }))
+                .unwrap(),
+            )
+            .await
+            .expect("upstream imposter");
+        manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({
+                    "port": 22751, "protocol": "http",
+                    "stubs": [{"responses": [{"proxy": {
+                        "to": "http://127.0.0.1:22752", "mode": "proxyAlways"
+                    }}]}]
+                }))
+                .unwrap(),
+            )
+            .await
+            .expect("proxy imposter");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        tokio::task::spawn_blocking(|| {
+            let mut sock = std::net::TcpStream::connect("127.0.0.1:22751").expect("connect");
+            let mut raw = b"GET /x HTTP/1.1\r\nHost: 127.0.0.1\r\nX-User-Name: ".to_vec();
+            raw.extend_from_slice("José".as_bytes());
+            raw.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+            sock.write_all(&raw).expect("write");
+            let mut out = String::new();
+            let _ = sock.read_to_string(&mut out);
+        })
+        .await
+        .expect("proxied request");
+
+        let admin = "127.0.0.1:12761";
+        let server = rift_http_proxy::admin_api::AdminApiServer::new(
+            admin.parse().unwrap(),
+            manager.clone(),
+            None,
+        );
+        tokio::spawn(server.run());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let upstream = json(
+            &reqwest::Client::new(),
+            format!("http://{admin}/imposters/22752/requests"),
+        )
+        .await;
+        assert_eq!(
+            upstream[0]["headers"]["X-User-Name"].as_str(),
+            Some("José"),
+            "the upstream must receive the header byte-exact; before #1048 the collector dropped \
+             it, so it never reached the forward at all: {upstream}"
+        );
+
+        let _ = manager.delete_imposter(22751).await;
+        let _ = manager.delete_imposter(22752).await;
+    }
+}
+
 // Issue #1041: the upstream proxy's response-header relay.
 mod proxy_relays_response_headers_honestly {
     use super::*;

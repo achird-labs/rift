@@ -174,6 +174,22 @@ record.
     key-sorted, so insertion order is not available to it. The real choice was between a
     nondeterministic winner and a loud refusal. (`_rift.fault.error.headers` is a Rift extension
     and carries no such constraint.)
+- **Valid non-ASCII header values were dropped and reported as "non-UTF-8"** (#1048). The request
+  collector decoded with `HeaderValue::to_str`, which accepts only *visible ASCII*
+  (`b >= 32 && b < 127 || b == b'\t'`). Every byte above `0x7F` therefore failed it, so a header a
+  client can legally send — `X-User-Name: José`, `Content-Disposition: attachment;
+  filename="résumé.pdf"` — was discarded before matching, forwarding, the journal, behaviors and
+  templating ever saw it, and the server logged that a perfectly valid UTF-8 value was not UTF-8.
+  The documentation promised that *invalid* UTF-8 is dropped; the code dropped a strict superset of
+  that, so the promise was false for every non-ASCII header.
+  - The check is now UTF-8 validity. Such values are kept byte-exact — the round trip was always
+    lossless, since `httparse` admits obs-text in a request header value and `HeaderValue::from_str`
+    accepts the same bytes back. Genuinely invalid UTF-8 is still dropped, with the same one warning
+    per request, which now says something true.
+  - This is the same rule #1041 applied to upstream *response* headers, so the two collectors no
+    longer disagree: a non-ASCII header is now matched, forwarded and recorded consistently rather
+    than relayed by the proxy but invisible to a predicate.
+  - The dead header half of `predicate::deep_equals` is removed with it — see **Removed** below.
 
 - **An HTTP/2 connection that went silent after the preface was pinned indefinitely** (#1044).
   #1030 bounded the protocol-detection window, and `RIFT_HTTP_HEADER_TIMEOUT` bounds an HTTP/1
@@ -208,10 +224,8 @@ record.
     such as `Content-Disposition: attachment; filename="résumé.pdf"`. Rift's serving side always
     accepted those bytes, so blanking them was never necessary; they now relay, record and replay
     byte-exact.
-  - Not covered here: the **request**-side collector applies the same over-strict `to_str` check, so
-    a valid non-ASCII UTF-8 value on an incoming request is still dropped from matching and the
-    journal. That is tracked separately (#1048) rather than changed in passing, since it moves what
-    predicates match on.
+  - The **request**-side collector had the same over-strict check; that is now fixed too, in #1048
+    below, so both directions decode identically.
 - **Behaviors and template substitution disagreed with predicates about the same request** (#1040).
   `copy`, `lookup`, `decorate`, `shellTransform` and `${request.headers.*}` built their own view of
   the request headers — a second pass over the raw header map, with a different rule from the one
@@ -355,6 +369,18 @@ record.
     without wiring it now fails CI, which is what would have caught this nine months ago.
 
 ### Removed
+
+- **The dead header half of `predicate::deep_equals`** (#1048). Three public items go, all
+  unreachable: `CompiledDeepEquals::matches_headers`, and the `headers` field on both `DeepEquals`
+  and `CompiledDeepEquals`. Nothing in the repo called or constructed them — the live `deepEquals`
+  predicate is `PredicateOperation::DeepEquals`, matched by `imposter::predicates::fields` against
+  the collected header map, and `{"deepEquals": {"headers": …}}` in a user config is unaffected.
+  They are removed rather than fixed because the function decoded with `to_str().unwrap_or("")`,
+  handing any embedder that called it directly the exact blanking #1025 removed from the served
+  path: a request that sent raw bytes would have matched
+  `{"deepEquals": {"headers": {"X-Bin": ""}}}`. The query half of both types is unchanged, as is
+  `parse_query_string`. An embedder constructing `DeepEquals { headers: …, query: … }` as a struct
+  literal will need to drop that field. Public-API removal on 0.x → minor bump, same as #975.
 
 - **Neither library crate silences the dead-code detector any more** (#1000). A crate-wide
   `#![allow(dead_code)]` is why #975 could leave thousands of unreachable lines for nine months

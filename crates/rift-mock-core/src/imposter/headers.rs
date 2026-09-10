@@ -28,7 +28,17 @@ pub fn collect_request_headers<SH: BuildHasher + Default>(
         HashMap::with_capacity_and_hasher(headers.keys_len(), SH::default());
     let mut dropped: Vec<String> = Vec::new();
     for (header_name, value) in headers {
-        match value.to_str() {
+        // `str::from_utf8`, deliberately NOT `HeaderValue::to_str` (issue #1048). `to_str` accepts
+        // only *visible ASCII* (`b >= 32 && b < 127 || b == b'\t'`), so it rejected every byte
+        // above 0x7F — dropping a perfectly valid UTF-8 value such as
+        // `Content-Disposition: attachment; filename="résumé.pdf"` and then warning that it was
+        // "non-UTF-8", which it was not. The round trip was always lossless: httparse admits
+        // obs-text (`0x80..=0xFF`) in a request header value, and `HeaderValue::from_str` accepts
+        // those same bytes back, so nothing was ever gained by dropping them. This is the rule
+        // `collect_response_headers` below already applies (issue #1041); the two collectors now
+        // decode identically, which is what makes "matched, forwarded and recorded agree" true for
+        // a non-ASCII header rather than only for an ASCII one.
+        match std::str::from_utf8(value.as_bytes()) {
             Ok(text) => {
                 out.entry(name(header_name.as_str()))
                     .or_default()
@@ -45,7 +55,14 @@ pub fn collect_request_headers<SH: BuildHasher + Default>(
             // reading this warning is going to go looking for the header in `savedRequests` or in
             // a predicate, and those show the caller's key shape (Title-Case for imposters). The
             // allocation is confined to the Err arm, so a request that drops nothing pays nothing.
-            Err(_) => dropped.push(name(header_name.as_str())),
+            // Named once even when several of a name's occurrences are undecodable — the operator
+            // needs the name, not a count (parity with `collect_response_headers`).
+            Err(_) => {
+                let dropped_name = name(header_name.as_str());
+                if !dropped.contains(&dropped_name) {
+                    dropped.push(dropped_name);
+                }
+            }
         }
     }
     if !dropped.is_empty() {
@@ -140,6 +157,81 @@ mod tests {
             Some(["application/json".to_string()].as_slice()),
             "a single-valued header is a one-element list, not a special case"
         );
+    }
+
+    // Issue #1048: the discriminating case. `HeaderValue::to_str` accepts only visible ASCII, so
+    // this value — valid UTF-8, just not ASCII — was dropped and then *warned about as non-UTF-8*,
+    // which it is not. The docs promised "not valid UTF-8 is dropped"; the code dropped a strict
+    // superset of that, so the promise was false for every non-ASCII header a client can legally
+    // send. Fails against the old `to_str` gate on both assertions.
+    #[test]
+    #[tracing_test::traced_test]
+    fn collector_keeps_valid_non_ascii_utf8_and_does_not_warn_about_it() {
+        let disposition = r#"attachment; filename="résumé.pdf""#;
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            "content-disposition",
+            HeaderValue::from_bytes(disposition.as_bytes()).expect("obs-text is a legal value"),
+        );
+        headers.insert(
+            "x-user-name",
+            HeaderValue::from_bytes("José".as_bytes()).unwrap(),
+        );
+
+        let collected: FastMap<String, Vec<String>> = collect_request_headers(&headers, title_case);
+
+        assert_eq!(
+            collected.get("Content-Disposition").map(Vec::as_slice),
+            Some([disposition.to_string()].as_slice()),
+            "valid UTF-8 beyond ASCII must survive byte-exact"
+        );
+        assert_eq!(
+            collected.get("X-User-Name").map(Vec::as_slice),
+            Some(["José".to_string()].as_slice())
+        );
+        assert!(
+            !logs_contain("dropping non-UTF-8 request header value"),
+            "nothing was dropped, so nothing may be warned about — the old code warned that a \
+             valid UTF-8 value was not UTF-8"
+        );
+
+        // Round-trip the COLLECTED value, not a literal: the reason dropping was never necessary
+        // is that whatever survives this collector can go straight back out as a header, and that
+        // claim is only worth anything if it is made about the collector's own output.
+        let collected_value = &collected["Content-Disposition"][0];
+        assert!(
+            HeaderValue::from_str(collected_value).is_ok(),
+            "the serving side must accept back exactly what the collector produced"
+        );
+    }
+
+    // Parity with `collect_response_headers`: a name whose occurrences are all undecodable is
+    // named ONCE. Before #1048 the request collector pushed per occurrence.
+    #[test]
+    #[tracing_test::traced_test]
+    fn collector_names_a_repeatedly_undecodable_header_once() {
+        let bad = HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap();
+        let mut headers = hyper::HeaderMap::new();
+        headers.append("x-bin", bad.clone());
+        headers.append("x-bin", bad);
+
+        let collected: FastMap<String, Vec<String>> = collect_request_headers(&headers, title_case);
+        assert!(!collected.contains_key("X-Bin"));
+
+        logs_assert(|lines: &[&str]| {
+            let named = lines
+                .iter()
+                .filter(|l| l.contains("dropping non-UTF-8 request header value"))
+                .map(|l| l.matches("X-Bin").count())
+                .sum::<usize>();
+            if named == 1 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "expected the name once in the warning, saw it {named} times"
+                ))
+            }
+        });
     }
 
     #[test]
