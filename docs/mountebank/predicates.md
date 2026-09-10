@@ -42,21 +42,22 @@ Two consequences worth knowing:
   match the request above. Before Rift evaluated every value, `first` was shadowed by `second` and
   the negation succeeded.
 - **Single-valued contexts take the first value.** `inject` functions, `_rift.script`,
-  `predicateGenerators` and the debug endpoint receive one value per header name — the first one
-  sent. (`decorate` is **not** in this list: it reads the separate request view described below,
-  which still takes the last value.)
+  `predicateGenerators`, the debug endpoint, the `copy` / `lookup` / `decorate` / `shellTransform`
+  behaviors and `${request.headers.*}` template substitution all receive one value per header
+  name — the first one sent.
 
-A header value that is not valid UTF-8 is **dropped** from predicate matching, from `proxy`
-forwarding, and from `savedRequests`. On those three paths it is never presented as an empty
-string, so `{"equals": {"headers": {"X-Bin": ""}}}` does not match a request that sent raw bytes,
-and a name whose only value was undecodable does not satisfy `exists`. Each request carrying one
-logs a single warning naming the affected headers.
+A header value that is not valid UTF-8 is **dropped**, everywhere: predicate matching, `proxy`
+forwarding, `savedRequests`, the behaviors and template substitution. It is never presented as an
+empty string, so `{"equals": {"headers": {"X-Bin": ""}}}` does not match a request that sent raw
+bytes, a name whose only value was undecodable does not satisfy `exists`, and a script sees no such
+key rather than a key holding `""`. Each request carrying one logs a single warning naming the
+affected headers.
 
-The `copy`, `lookup`, `decorate` and `shellTransform` **behaviors**, and `${request.headers.*}`
-template substitution, read a separate request view that is unchanged: it takes a repeated header's
-**last** value, and coerces a non-UTF-8 value to `""` rather than dropping it. Coercion there was a
-deliberate earlier choice (#480), so that a header does not flip from present-to-a-behavior to
-absent. So `copy` can still substitute an empty string for a value the client sent as raw bytes.
+Every one of those surfaces reads the **same** collected view of the request (#1040), so they
+cannot disagree about what the client sent. Before that, the behaviors and template substitution
+made their own second pass with a different rule — last value rather than first, and `""` rather
+than dropped — which meant a single request could answer one way to a predicate and another way to
+a `copy` reading the same header.
 
 ---
 

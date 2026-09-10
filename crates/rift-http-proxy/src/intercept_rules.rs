@@ -509,6 +509,46 @@ mod tests {
         );
     }
 
+    // Issue #1039: an intercept rule reaches the same shared deserializer as an imposter stub, so
+    // a POSTed rule that spells one header name two ways must serve — and list back — one header.
+    //
+    // `POST /intercept/rules` parses the body with `from_slice`, so the *wire* path folds under the
+    // first spelling the caller wrote. This test goes through `from_value` instead (that is what
+    // `serve_stub_from_action` does), where the `serde_json::Map` is key-sorted and `Set-Cookie`
+    // therefore arrives before `set-cookie`. Both orders are asserted deliberately: what the fix
+    // guarantees is one entry whose contents are a function of the document, not a particular
+    // spelling — see the invariant on `rift_types::wire::multi_value_headers`.
+    #[test]
+    fn serve_stub_folds_case_variant_header_keys_into_one_entry() {
+        let stub = serve_stub_from_action(serde_json::json!({
+            "headers": { "set-cookie": "a=1", "Set-Cookie": ["b=2", "c=3"] }
+        }));
+        assert_eq!(
+            stub.headers.len(),
+            1,
+            "two spellings of one name is one header"
+        );
+        assert_eq!(
+            stub.headers["Set-Cookie"],
+            vec!["b=2".to_string(), "c=3".to_string(), "a=1".to_string()],
+            "key-sorted `Map` order: `Set-Cookie` (0x53) precedes `set-cookie` (0x73)"
+        );
+
+        // The wire path a real caller takes — bytes, so document order decides.
+        let rule: InterceptRule = serde_json::from_slice(
+            br#"{"host":"cdn.example.com","predicates":[],
+                 "action":{"serve":{"headers":{
+                     "content-type":"text/plain","Content-Type":"application/json"}}}}"#,
+        )
+        .expect("case-variant keys are accepted, not rejected");
+        let listed = serde_json::to_value(&rule).expect("a rule serializes");
+        assert_eq!(
+            listed["action"]["serve"]["headers"],
+            serde_json::json!({ "content-type": ["text/plain", "application/json"] }),
+            "GET /intercept/rules lists one key, under the first spelling POSTed"
+        );
+    }
+
     // A string `statusCode` is normalised to the number form on the way out — the rule is stored
     // as `u16`, so listing it back as `"418"` would be inventing a shape the store does not hold.
     #[test]

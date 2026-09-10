@@ -553,8 +553,21 @@ mod tests {
     use crate::backends::InMemoryFlowStore;
     use std::collections::HashMap;
 
+    /// The shape `collect_request_headers` hands `RequestData::new` (issue #1040).
+    fn hdrs(pairs: &[(&str, &[&str])]) -> crate::util::FastMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(k, vs)| {
+                (
+                    (*k).to_string(),
+                    vs.iter().map(|v| (*v).to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
     fn request_data() -> RequestData {
-        let headers = hyper::HeaderMap::new();
+        let headers = hdrs(&[]);
         let mut data = RequestData::new(
             "POST",
             "/orders/11111111-1111-1111-1111-111111111111",
@@ -703,7 +716,7 @@ mod tests {
             store.set("flow-1", "hits", Value::from(1)).expect("seed");
             store.gets.store(0, Ordering::SeqCst);
 
-            let request = RequestData::new("GET", "/x", None, &hyper::HeaderMap::new(), None);
+            let request = RequestData::new("GET", "/x", None, &hdrs(&[]), None);
             let ctx = TemplateContext {
                 request: &request,
                 flow_id: "flow-1",
@@ -925,7 +938,7 @@ mod tests {
     fn headers_map_dotted_query_and_multiple_tokens_in_one_body() {
         let mut headers = HashMap::new();
         headers.insert("q".to_string(), "1".to_string());
-        let hm = hyper::HeaderMap::new();
+        let hm = hdrs(&[]);
         let data = RequestData::new("GET", "/x/abc", Some("q=1"), &hm, None);
         let s = store();
         let tctx = ctx(&data, "flow-1", &s);
@@ -976,8 +989,7 @@ mod tests {
     #[test]
     fn json_filter_escapes_for_string_literal() {
         // Issue #359 B3: `| json` escapes a value so it is safe inside a JSON string literal.
-        let mut headers = hyper::HeaderMap::new();
-        headers.insert("x-payload", r#"he said "hi"\ and left"#.parse().unwrap());
+        let headers = hdrs(&[("X-Payload", &[r#"he said "hi"\ and left"#])]);
         let data = RequestData::new("GET", "/x", None, &headers, None);
         let s = store();
         let tctx = ctx(&data, "flow-1", &s);

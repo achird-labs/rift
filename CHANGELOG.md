@@ -66,11 +66,8 @@ record.
     the normal case — is unaffected.
   - A `proxy` response forwards every value of a repeated header, in order, rather than only the
     one that survived the collapse.
-  - **Not covered:** the `copy`/`lookup`/`decorate`/`shellTransform` behaviors read a separate
-    request view (`RequestContext`) that still coerces a non-UTF-8 header value to `""`, which was
-    a deliberate choice in #480 so a header would not flip from present to absent for a behavior.
-    Reconciling that with this issue's drop-and-warn rule is a decision in its own right and is
-    tracked separately rather than reversed in passing here.
+  - The `copy`/`lookup`/`decorate`/`shellTransform` behaviors, left uncovered here because they read
+    a separate request view, were brought onto the same rule in **#1040** below.
   - Cost: one `Vec` per distinct header name per request. With `recordRequests` on this is net
     zero — one map now replaces the two that were built before.
   - Together with #1026 this closes the last of the header-matching disagreement: verify, intercept
@@ -172,6 +169,48 @@ record.
     `.http2().timer(...)` would surface only on real HTTP/2 traffic. A prior-knowledge h2 request
     test guards each site against exactly that.
 
+- **Behaviors and template substitution disagreed with predicates about the same request** (#1040).
+  `copy`, `lookup`, `decorate`, `shellTransform` and `${request.headers.*}` built their own view of
+  the request headers — a second pass over the raw header map, with a different rule from the one
+  everything else uses. A header the client sent twice exposed its **last** value to a behavior
+  while predicates, `proxy` forwarding, the journal and `inject` all took the first; a header value
+  that was not valid UTF-8 arrived at a behavior as `""` — an empty string the client never sent —
+  where every other surface had already dropped it with a warning. One request could therefore
+  answer two ways depending on which surface asked.
+  - Both now project the map the request was already collected into, so a repeated header
+    contributes its **first** value and an undecodable one is **absent**, in behaviors and
+    templating exactly as in predicates. `${request.headers.*}` also stops dropping undecodable
+    values *silently* — that drop is now covered by the collector's existing single warning per
+    request.
+  - Visible to a stub only when a request repeats a header (last → first) or sends a header value
+    that is not valid UTF-8 (`""` → absent). `MB_REQUEST.headers` and the JS/Rhai `request.headers`
+    object are unchanged in shape: still one string per name.
+  - `RequestContext::from_request` and `RequestData::new` take the collected map rather than a
+    `hyper::HeaderMap`. Both are `pub`, so an embedder calling them directly needs the new argument;
+    the C ABI and the language SDKs are unaffected.
+- **A header object that spelled one name two ways became two headers** (#1039). HTTP header names
+  are case-insensitive, but the shared wire deserializer keyed its map by the literal spelling, so
+  `{"content-type": …, "Content-Type": …}` in a recorded request, a stub, a flat response or an
+  intercept rule loaded as two separate entries. Every case-insensitive lookup downstream — form
+  parsing, predicate fields, `copy`, the JS and Rhai engines, the verify CLI — resolves such a name
+  by scanning for the first case-matching key, so with two entries present the answer depended on
+  hash iteration order: the same stored request could parse its form one way on one run and another
+  way on the next. `deepEquals` on headers was worse than nondeterministic, comparing the expected
+  object's name count against a map that held one name twice, so it failed consistently and
+  wrongly.
+  - Such entries are now merged as they are parsed into a single entry carrying every value. Which
+    spelling survives, and the resulting order of the values, is deterministic but **unspecified**:
+    it depends on how the document reached Rift, and a single `--configfile` document can go either
+    way depending only on whether it uses the `{"imposters": [...]}` wrapper or a bare array. Depend
+    on there being one entry, not on which spelling wins. The spelling you write is still the
+    spelling Rift serves — the fix does not lowercase or title-case anything — and a document that
+    spells each name once is byte-for-byte unaffected in every respect.
+  - A name repeated with **identical** spelling now keeps both values instead of silently keeping
+    only the last. This diverges from Mountebank, which is Node and inherits `JSON.parse`'s
+    last-wins rule for a duplicate key. It affects only documents already relying on duplicate keys
+    within one JSON object — no fixture in the SDK conformance corpus, the examples or the test
+    suite has one — but the divergence is real and intentional: silently discarding a value the
+    document contains is the behaviour that made this class of bug hard to see in the first place.
 - **HTTPS imposters advertised HTTP/2 they would not speak** (#1029). The TLS handshake offered
   `h2, http/1.1` unconditionally, while the server serves HTTP/1-only whenever the imposter can fire
   a TCP fault, carries a `_rift.script` response, or `RIFT_DISABLE_HTTP2` is set. Advertising a
