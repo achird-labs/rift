@@ -483,11 +483,12 @@ impl Imposter {
             // Issue #999: the upstream hop, observed off the timing the `addWaitBehavior` path
             // already captures — so this measures the forward itself, not rift's own handling.
             crate::extensions::metrics::record_upstream_duration(method, status, latency_ms as f64);
-            let response_headers: Vec<(String, String)> = response
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect();
+            // This one list feeds three destinations — the client response, the
+            // `RecordedResponse`, and the stub `proxyOnce`/`proxyAlways` generates — so a value
+            // mangled here is mangled in all three, and the stub persists it (issue #1041).
+            let response_headers = crate::imposter::headers::collect_response_headers(
+                response.headers(),
+            );
             // Check Content-Length before reading the full body to reject obviously oversized responses
             if let Some(content_length) = response.content_length()
                 && content_length as usize > MAX_PROXY_RESPONSE_BODY_SIZE
