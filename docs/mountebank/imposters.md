@@ -245,6 +245,26 @@ curl http://localhost:2525/imposters/4545
 Each header name maps to the **list** of values the client sent, in order, so a header sent twice
 is recorded as `{"X-Test": ["first", "second"]}` rather than collapsing to one value.
 
+Header names are case-insensitive, so a document that spells one name two ways describes **one**
+header, not two. Rift merges such entries when it parses any header object — a recorded request, a
+stub's `headers`, a flat response, an intercept rule's `serve` action. A document like
+
+```json
+{ "content-type": "text/plain", "Content-Type": "application/json" }
+```
+
+therefore loads, serves and lists back as a single header carrying both values. The same applies to
+a name repeated with identical spelling, which previously kept only its last value.
+
+**Which spelling survives, and the resulting order of the values, is deliberately unspecified.** It
+is deterministic — the same document always gives the same answer, which is the bug this fixed — but
+it depends on how the document reached Rift, and one `--configfile` document can go either way
+depending only on whether it uses the `{"imposters": [...]}` wrapper or a bare array. Write the name
+once and the question never arises; that is the supported shape, and it is what every document that
+has ever been valid already does. A document that spells each name once is unaffected in every
+respect, and the spelling you wrote is the spelling Rift serves — nothing is lowercased or
+title-cased.
+
 A header value that is not valid UTF-8 is **dropped** rather than recorded: the journal never
 claims the client sent an empty string it did not send. A header name whose only value was
 undecodable is absent from `headers` entirely. Unlike a binary request *body* (below), a header has

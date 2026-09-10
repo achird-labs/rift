@@ -493,6 +493,10 @@ the wire just to count it.
   values satisfies the predicate — and `not` on such a header fails as soon as one value matches.
   That is the same rule live stub matching, intercept rule matching and `savedRequests` filtering
   all apply (#1025, #1026), so a `verify` count and what actually matched at request time agree.
+  Header names are compared case-insensitively, and a recorded request's `headers` holds one entry
+  per name however the document spelled it (#1039). Note that this normalisation applies to the
+  *request* side only: a `deepEquals` object in your own predicate is compared as written, so
+  spelling one name twice there still counts as two names and will not match.
 - `flowId` *(optional)* — scope the count to one space, resolved via the imposter's
   `flow_id_source` (the same scoping as `match=flow_id=<Value>` on `savedRequests`).
 - `includeRequests` *(optional, default `false`)* — return the matching requests, not just the count.

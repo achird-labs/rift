@@ -2143,6 +2143,92 @@ mod tests {
         );
     }
 
+    // Issue #1039: the same fold-and-merge invariant, observed through the two types that
+    // actually reach a user — a recorded request and a stub response — rather than only through
+    // the deserializer's own test harness.
+    #[test]
+    fn recorded_request_folds_case_variant_header_keys_and_parses_forms_deterministically() {
+        const DOC: &str = r#"{
+            "requestFrom": "127.0.0.1:1",
+            "method": "POST",
+            "path": "/f",
+            "query": {},
+            "headers": {
+                "content-type": "application/x-www-form-urlencoded",
+                "Content-Type": "text/plain"
+            },
+            "body": "a=1&b=2",
+            "timestamp": "2024-01-15T10:30:00.000Z"
+        }"#;
+
+        // The symptom: two entries for one name made `parse_form_data`'s case-insensitive
+        // find-first visit them in unspecified `HashMap` order, so the same stored request
+        // answered `/verify` differently across runs. Reconstruct it many times: the surviving
+        // key, and therefore the form, must be the same every time.
+        for _ in 0..200 {
+            let req: RecordedRequest = serde_json::from_str(DOC).expect("valid recording");
+            assert_eq!(
+                req.headers.len(),
+                1,
+                "two spellings of Content-Type is one header"
+            );
+            assert_eq!(
+                req.headers["content-type"],
+                vec![
+                    "application/x-www-form-urlencoded".to_string(),
+                    "text/plain".to_string()
+                ],
+                "first spelling wins, values in document order"
+            );
+            let form =
+                crate::imposter::Imposter::parse_form_data(&req.headers, req.body.as_deref())
+                    .expect("the first Content-Type value is the form type, so the body parses");
+            assert_eq!(form.get("a").map(String::as_str), Some("1"));
+            assert_eq!(form.get("b").map(String::as_str), Some("2"));
+        }
+    }
+
+    // The fourth site wired to the shared deserializer, and the one the tests above do not reach:
+    // the flat/recorded response form (#304), where `headers` sits at the top level with no `is`
+    // wrapper. The algorithm is covered in `wire.rs`; what this pins is the `deserialize_with`
+    // attribute actually being on this field, which is the failure mode a per-site test exists for.
+    #[test]
+    fn flat_recorded_response_form_folds_case_variant_header_keys() {
+        let stub: StubResponse = serde_json::from_str(
+            r#"{"statusCode":200,"headers":{"x-trace":"a","X-Trace":"b"},"body":"ok"}"#,
+        )
+        .expect("the flat #304 form accepts case-variant keys");
+        let StubResponse::Is { is, .. } = stub else {
+            panic!("the flat form is normalised into the `is` variant");
+        };
+        assert_eq!(is.headers.len(), 1, "one name, however it was spelled");
+        assert_eq!(
+            is.headers["x-trace"],
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn is_response_folds_case_variant_header_keys_and_round_trips_one_key() {
+        let r: IsResponse = serde_json::from_str(
+            r#"{"statusCode":200,"headers":{"Set-Cookie":"a","set-cookie":["b","c"]}}"#,
+        )
+        .expect("case-variant response header keys are valid, not an error");
+        assert_eq!(r.headers.len(), 1);
+        assert_eq!(
+            r.headers["Set-Cookie"],
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            "values are served in document order under the first spelling"
+        );
+
+        let out = serde_json::to_value(&r).expect("serialize");
+        assert_eq!(out["headers"]["Set-Cookie"], json!(["a", "b", "c"]));
+        assert!(
+            out["headers"].get("set-cookie").is_none(),
+            "GET /imposters/{{port}} echoes one key, not two"
+        );
+    }
+
     #[test]
     fn multi_value_headers_serialize_single_as_string_many_as_array() {
         let mut headers = HashMap::new();
