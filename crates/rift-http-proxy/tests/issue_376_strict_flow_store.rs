@@ -55,7 +55,7 @@ async fn assert_fails_loud(port: u16, engine: &str, code: &str) {
 #[tokio::test]
 async fn rhai_flow_store_failure_raises() {
     assert_fails_loud(
-        19961,
+        22656,
         "rhai",
         r#"fn respond(ctx){ ctx.state.get("k"); pass() }"#,
     )
@@ -66,7 +66,7 @@ async fn rhai_flow_store_failure_raises() {
 #[tokio::test]
 async fn js_flow_store_failure_raises() {
     assert_fails_loud(
-        19963,
+        22659,
         "javascript",
         r#"function respond(ctx){ ctx.state.get("k"); return pass(); }"#,
     )

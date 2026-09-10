@@ -2068,13 +2068,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("imposters.json");
         // A clean imposter listed *before* the offender: if the gate ran per-imposter inside the
-        // create loop instead of up front, 19601 would already be bound and serving.
+        // create loop instead of up front, 22606 would already be bound and serving.
         write_json(
             &path,
             serde_json::json!({"imposters": [
-                {"port": 19601, "protocol": "http",
+                {"port": 22606, "protocol": "http",
                  "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]},
-                {"port": 19602, "protocol": "http",
+                {"port": 22607, "protocol": "http",
                  "stubs": [{"responses": [{"inject": "function (req) { return {body: 'x'}; }"}]}]},
             ]}),
         );
@@ -2087,11 +2087,11 @@ mod tests {
         assert!(err.to_string().contains("--allowInjection"), "got: {err}");
 
         assert!(
-            manager.get_imposter(19601).is_err(),
+            manager.get_imposter(22606).is_err(),
             "all-or-nothing: the clean imposter must not be half-loaded before the abort"
         );
         assert!(
-            manager.get_imposter(19602).is_err(),
+            manager.get_imposter(22607).is_err(),
             "the offender must not load"
         );
 
@@ -2120,8 +2120,8 @@ mod tests {
     async fn load_imposters_from_datadir_serves_the_clean_file_and_skips_the_scripted_one() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_json(
-            &dir.path().join("19603.json"),
-            serde_json::json!({"port": 19603, "protocol": "http",
+            &dir.path().join("22608.json"),
+            serde_json::json!({"port": 22608, "protocol": "http",
                 "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]}),
         );
         write_json(
@@ -2137,7 +2137,7 @@ mod tests {
             .expect("a gated datadir file is skipped, never fatal");
 
         assert!(
-            manager.get_imposter(19603).is_ok(),
+            manager.get_imposter(22608).is_ok(),
             "the clean file must still be served — one gated file cannot brick startup"
         );
         assert!(

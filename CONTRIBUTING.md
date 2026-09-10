@@ -69,6 +69,32 @@ parity, and all four SDKs replay it in their own CI — so a fixture that breaks
 downstream repos. Compatibility is the promise this project is built on, and it is tested rather
 than asserted.
 
+## Fixed test ports
+
+A test that binds a fixed port takes it from **15000-24999**, and **each port belongs to exactly
+one file**. `crates/rift-mock-core/tests/test_port_uniqueness.rs` enforces both, over
+`crates/*/tests/**` and `crates/*/src/**`, and names the offending `file:line` pairs when it fails.
+
+Two things make this worth a guard rather than a convention:
+
+- **Concurrent `cargo` runs on one machine** — two worktrees building side by side, or `--lib` and
+  `--tests` in two terminals, which is also how CI runs them, on separate runners. `cargo test`
+  does *not* run test binaries concurrently within one invocation, so this is the mechanism that
+  actually bites.
+- **Collisions are silent.** Imposter listeners bind with `SO_REUSEADDR` and `SO_REUSEPORT`, so
+  neither binder gets `AddrInUse` — the kernel load-balances, and the loser receives the *other*
+  imposter's responses. It surfaces as a decode or status-mismatch failure pointing nowhere near
+  the cause. **CI being green is not evidence a port is free.**
+
+**Prefer an auto-assigned port for a new in-process test.** `create_imposter` returns the port it
+bound (pass `port: 0`, or omit it), and the admin, front-door and intercept listeners all expose
+`local_addr()`. A fixed literal is only needed when a spawned binary has to be told where to
+connect.
+
+The guard checks *cross-file* uniqueness. Two tests in the **same** file sharing a port is a real
+collision too — those do run concurrently, on a thread pool — but a literal in a shared helper is
+legitimate, and nothing in the literal distinguishes the two. That one stays a review rule.
+
 ## What a good PR looks like
 
 - **One concern.** A PR that fixes a bug and reformats a module is two PRs.

@@ -99,11 +99,11 @@ async fn admin_responses_are_decorated() {
 async fn data_plane_scenario_gate_returns_structured_503() {
     let manager = Arc::new(ImposterManager::new());
     manager
-        .create_imposter(failing_backend_cfg(19493))
+        .create_imposter(failing_backend_cfg(22605))
         .await
         .expect("create");
 
-    let resp = reqwest::get("http://127.0.0.1:19493/gated")
+    let resp = reqwest::get("http://127.0.0.1:22605/gated")
         .await
         .expect("request");
     assert_eq!(resp.status(), 503);

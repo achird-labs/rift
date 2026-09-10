@@ -2481,7 +2481,7 @@ fn ffi_start_registers_the_shipped_flow_store_backends() {
         assert!(!h.is_null(), "rift_start returned null");
 
         let config = cstr(
-            r#"{"port": 19484, "protocol": "http", "stubs": [],
+            r#"{"port": 22602, "protocol": "http", "stubs": [],
                 "_rift": {"flowState": {"backend": "redis",
                                         "redis": {"url": "redis://127.0.0.1:1"}}}}"#,
         );

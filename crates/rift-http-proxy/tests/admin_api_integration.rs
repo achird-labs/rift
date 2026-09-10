@@ -255,7 +255,7 @@ async fn create_imposter_rejects_non_positive_ttl_seconds() {
         .header("content-type", "application/json")
         .body(
             serde_json::json!({
-                "port": 19781, "protocol": "http", "stubs": [],
+                "port": 22637, "protocol": "http", "stubs": [],
                 "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 0 } }
             })
             .to_string(),
@@ -1261,14 +1261,14 @@ mod multi_value_headers {
     async fn default_response_serves_both_values_of_a_header() {
         // No stub matches → the imposter's defaultResponse is served (a separate emission site).
         let manager = serve(serde_json::json!({
-            "port": 19823, "protocol": "http",
+            "port": 22643, "protocol": "http",
             "defaultResponse": {"statusCode": 200,
                 "headers": {"Set-Cookie": ["a=1", "b=2"]}, "body": "def"},
             "stubs": []
         }))
         .await;
 
-        let resp = reqwest::get("http://127.0.0.1:19823/nomatch")
+        let resp = reqwest::get("http://127.0.0.1:22643/nomatch")
             .await
             .unwrap();
         let cookies: Vec<String> = resp
@@ -1284,21 +1284,21 @@ mod multi_value_headers {
         );
         assert!(cookies.contains(&"a=1".to_string()) && cookies.contains(&"b=2".to_string()));
 
-        let _ = manager.delete_imposter(19823).await;
+        let _ = manager.delete_imposter(22643).await;
     }
 
     #[tokio::test]
     async fn single_value_response_header_still_works() {
         let manager = serve(serde_json::json!({
-            "port": 19821, "protocol": "http",
+            "port": 22641, "protocol": "http",
             "stubs": [{"responses": [{"is": {"statusCode": 200,
                 "headers": {"X-Custom": "v"}, "body": "ok"}}]}]
         }))
         .await;
 
-        let resp = reqwest::get("http://127.0.0.1:19821/x").await.unwrap();
+        let resp = reqwest::get("http://127.0.0.1:22641/x").await.unwrap();
         assert_eq!(resp.headers().get("x-custom").unwrap(), "v");
-        let _ = manager.delete_imposter(19821).await;
+        let _ = manager.delete_imposter(22641).await;
     }
 
     #[tokio::test]
@@ -2211,7 +2211,7 @@ async fn get_imposter_exposes_flowstate_redacted() {
     // inmemory backend ignores a stray `redis` block (no connection attempted) — include one with a
     // credentialed URL to prove the GET projection actually strips it end-to-end.
     let config = serde_json::from_value(serde_json::json!({
-        "port": 19771, "protocol": "http",
+        "port": 22626, "protocol": "http",
         "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300,
             "redis": { "url": "redis://user:topsecret@host:6379" },
             "flowIdSource": "header:X-Mock-Space" } },
@@ -2227,7 +2227,7 @@ async fn get_imposter_exposes_flowstate_redacted() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let c = reqwest::Client::new();
-    let v = json(&c, "http://127.0.0.1:12596/imposters/19771".to_string()).await;
+    let v = json(&c, "http://127.0.0.1:12596/imposters/22626".to_string()).await;
     assert_eq!(
         v.pointer("/_rift/flowState/flowIdSource")
             .and_then(|x| x.as_str()),
@@ -2529,7 +2529,7 @@ mod mutual_tls {
         let err = manager
             .create_imposter(
                 serde_json::from_value(cfg(
-                    19881,
+                    22645,
                     serde_json::json!({"mutualAuth": true, "ca": ca}),
                 ))
                 .expect("config"),
@@ -2548,7 +2548,7 @@ mod mutual_tls {
         let err = manager
             .create_imposter(
                 serde_json::from_value(cfg(
-                    19882,
+                    22647,
                     serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true, "ca": []}),
                 ))
                 .expect("config"),
@@ -2569,7 +2569,7 @@ mod mutual_tls {
         let err = manager
             .create_imposter(
                 serde_json::from_value(cfg(
-                    19883,
+                    22648,
                     serde_json::json!({
                         "mutualAuth": true, "rejectUnauthorized": true, "ca": key_only
                     }),
