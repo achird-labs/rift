@@ -688,22 +688,22 @@ async fn handle_request_inner(
     imposter.increment_request_count();
 
     // Extract parts we need before consuming the request body. `into_parts()` (issue #561) hands
-    // back owned `method`/`uri`/`headers` for free — no `.clone()` needed to get an owned
-    // `HeaderMap` for the request context, unlike the old `req.headers().clone()`.
+    // back owned `method`/`uri`/`headers` for free — no `.clone()` needed, unlike the old
+    // `req.headers().clone()`. The raw map is kept only for the exchange inspector, which reports
+    // the wire bytes; everything else reads `request_headers` below (issue #1040).
     let (parts, body) = req.into_parts();
     let method = parts.method.to_string();
     let uri = parts.uri;
-    let headers_for_context = parts.headers;
+    let raw_headers = parts.headers;
     // Request-scoped, built from a single request and dropped at response — a `FastMap` (issue
     // #704); see `crate::util::fastmap` for the HashDoS policy. One multi-value collector shared
     // with the intercept listener (issue #1025) now serves matching, proxy forwarding, flow id,
-    // debug, inject and scripts, AND the recorded request below — previously two separate maps
-    // disagreed on shape (single-value here, multi-value there) and both silently blanked a
-    // non-UTF-8 value to `""` instead of dropping it.
-    let headers: FastMap<String, Vec<String>> = crate::imposter::headers::collect_request_headers(
-        &headers_for_context,
-        header_to_title_case,
-    );
+    // debug, inject and scripts, the recorded request below, AND — since issue #1040 — the
+    // behaviors' request context and template substitution. Those last two used to make their own
+    // second pass over the raw `HeaderMap` with a worse rule, so one request could answer
+    // differently depending on which surface asked.
+    let request_headers: FastMap<String, Vec<String>> =
+        crate::imposter::headers::collect_request_headers(&raw_headers, header_to_title_case);
     let path = uri.path().to_string();
     let query_str = uri.query().unwrap_or("").to_string();
 
@@ -784,7 +784,7 @@ async fn handle_request_inner(
             // `RecordedRequest.headers` is the fixed std-hasher journal/serde boundary (out of
             // scope for #704) — the request-scoped `FastMap` is converted here, at the one place
             // recording is actually enabled, rather than built twice (issue #1025).
-            headers: headers
+            headers: request_headers
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
@@ -819,7 +819,7 @@ async fn handle_request_inner(
             method: &method,
             path: &path,
             query: &query_str,
-            headers: &headers_for_context,
+            headers: &raw_headers,
             body: body_string.as_deref(),
             mode: &body_mode,
         };
@@ -847,7 +847,7 @@ async fn handle_request_inner(
                     method: method.clone(),
                     path: path.clone(),
                     query: query_str.clone(),
-                    headers: headers_for_context.clone(),
+                    headers: raw_headers.clone(),
                     body: body_string.as_deref().map(str::to_string),
                     mode: body_mode.clone(),
                 });
@@ -866,9 +866,9 @@ async fn handle_request_inner(
 
     // Check for X-Rift-Debug header (Rift extension)
     // If present, return match information instead of processing the request
-    let is_debug_mode = headers
+    let is_debug_mode = request_headers
         .get("X-Rift-Debug")
-        .or_else(|| headers.get("x-rift-debug"))
+        .or_else(|| request_headers.get("x-rift-debug"))
         .and_then(|v| v.first())
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
         .unwrap_or(false);
@@ -886,7 +886,7 @@ async fn handle_request_inner(
         // (issue #476). Unconditional spawn_blocking: this is an opt-in diagnostic path.
         let debug_imposter = Arc::clone(&imposter);
         let (dbg_method, dbg_path, dbg_query) = (method.clone(), path.clone(), query_str.clone());
-        let dbg_headers = headers.clone();
+        let dbg_headers = request_headers.clone();
         // Materialize an owned copy here (issue #561): `body_string` borrows from `body_bytes`,
         // which does not outlive this `spawn_blocking` closure's `'static` bound.
         let dbg_body = body_string.as_deref().map(str::to_string);
@@ -934,7 +934,7 @@ async fn handle_request_inner(
         .find_matching_stub_with_client_bounded_inner(
             method_str,
             path_str,
-            &headers,
+            &request_headers,
             query_opt,
             body_string.as_deref(),
             Some(&request_from),
@@ -974,7 +974,7 @@ async fn handle_request_inner(
                 .find_matching_stub_with_client_bounded_inner(
                     method_str,
                     path_str,
-                    &headers,
+                    &request_headers,
                     query_opt,
                     body_string.as_deref(),
                     Some(&request_from),
@@ -1000,9 +1000,9 @@ async fn handle_request_inner(
 
     if let Some((stub_state, stub_index)) = matched {
         // Scenario FSM: apply the matched stub's newScenarioState transition (no-op unless set).
-        // Resolve flow_id from the same header map the matcher used (`headers`) so the
+        // Resolve flow_id from the same header map the matcher used (`request_headers`) so the
         // transition writes the exact key the gate read.
-        let scenario_flow_id = imposter.resolve_flow_id(&headers);
+        let scenario_flow_id = imposter.resolve_flow_id(&request_headers);
         // Offload the FSM transition to spawn_blocking on a blocking backend (Redis) so it can't
         // stall the tokio worker; inline on the in-memory backend (issue #475).
         //
@@ -1052,7 +1052,7 @@ async fn handle_request_inner(
                     proxy_config,
                     method_str,
                     &uri,
-                    &headers,
+                    &request_headers,
                     body_string.as_deref(),
                 )
                 .await
@@ -1108,7 +1108,7 @@ async fn handle_request_inner(
                 // `MountebankRequest.headers` is the fixed single-value scripting boundary (out
                 // of scope for #704/#1025), so a repeated header exposes only its first value to
                 // an inject function.
-                headers: headers
+                headers: request_headers
                     .iter()
                     .filter_map(|(k, v)| v.first().map(|first| (k.clone(), first.clone())))
                     .collect(),
@@ -1220,7 +1220,7 @@ async fn handle_request_inner(
                 path: path.clone(),
                 // Single-valued (issue #1025): a repeated header exposes only its first value to
                 // a script, matching the other scripting boundaries (inject, predicateGenerators).
-                headers: headers
+                headers: request_headers
                     .iter()
                     .filter_map(|(k, v)| {
                         v.first()
@@ -1569,7 +1569,7 @@ async fn handle_request_inner(
                     method_str,
                     path_str,
                     query_opt,
-                    &headers_for_context,
+                    &request_headers,
                     body_string.as_deref(),
                 )
                 .with_route_pattern(stub_state.stub.route_pattern.as_deref());
@@ -1625,7 +1625,7 @@ async fn handle_request_inner(
                         method_str,
                         path_str,
                         query_opt,
-                        &headers_for_context,
+                        &request_headers,
                         body_string.as_deref(),
                     )
                     .with_route_pattern(stub_state.stub.route_pattern.as_deref());
@@ -1655,9 +1655,9 @@ async fn handle_request_inner(
                 }
 
                 // Lazy request context (issue #561): only copy/lookup/decorate/shellTransform read
-                // it, and `RequestContext::from_request` re-parses the query, retitles every
-                // header, and copies the body — so a wait/repeat-only stub (or any non-`is`
-                // response) must not pay for it.
+                // it, and `RequestContext::from_request` re-parses the query, clones a key and
+                // one value per header, and copies the body — so a wait/repeat-only stub (or any
+                // non-`is` response) must not pay for it.
                 //
                 // Built on first read rather than behind a hand-maintained "does anything below
                 // need this?" predicate: such a predicate has to be kept in sync with consumers
@@ -1668,7 +1668,7 @@ async fn handle_request_inner(
                     RequestContext::from_request(
                         &method,
                         &uri,
-                        &headers_for_context,
+                        &request_headers,
                         body_string.as_deref(),
                     )
                 };
@@ -1917,7 +1917,7 @@ async fn handle_request_inner(
                     method_str,
                     path_str,
                     query_opt,
-                    &headers_for_context,
+                    &request_headers,
                     body_string.as_deref(),
                 )
                 .with_route_pattern(stub_state.stub.route_pattern.as_deref());
@@ -1975,7 +1975,7 @@ async fn handle_request_inner(
                 &proxy_config,
                 method_str,
                 &uri,
-                &headers,
+                &request_headers,
                 body_string.as_deref(),
             )
             .await
@@ -3383,7 +3383,7 @@ mod templated_offload_tests {
     }
 
     fn request() -> RequestData {
-        RequestData::new("GET", "/x", None, &hyper::HeaderMap::new(), None)
+        RequestData::new("GET", "/x", None, &headers(&[]), None)
     }
 
     fn headers(pairs: &[(&str, &str)]) -> HashMap<String, Vec<String>> {

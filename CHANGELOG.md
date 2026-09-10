@@ -53,11 +53,8 @@ record.
     the normal case — is unaffected.
   - A `proxy` response forwards every value of a repeated header, in order, rather than only the
     one that survived the collapse.
-  - **Not covered:** the `copy`/`lookup`/`decorate`/`shellTransform` behaviors read a separate
-    request view (`RequestContext`) that still coerces a non-UTF-8 header value to `""`, which was
-    a deliberate choice in #480 so a header would not flip from present to absent for a behavior.
-    Reconciling that with this issue's drop-and-warn rule is a decision in its own right and is
-    tracked separately rather than reversed in passing here.
+  - The `copy`/`lookup`/`decorate`/`shellTransform` behaviors, left uncovered here because they read
+    a separate request view, were brought onto the same rule in **#1040** below.
   - Cost: one `Vec` per distinct header name per request. With `recordRequests` on this is net
     zero — one map now replaces the two that were built before.
   - Together with #1026 this closes the last of the header-matching disagreement: verify, intercept
@@ -160,6 +157,25 @@ record.
     a valid non-ASCII UTF-8 value on an incoming request is still dropped from matching and the
     journal. That is tracked separately (#1048) rather than changed in passing, since it moves what
     predicates match on.
+- **Behaviors and template substitution disagreed with predicates about the same request** (#1040).
+  `copy`, `lookup`, `decorate`, `shellTransform` and `${request.headers.*}` built their own view of
+  the request headers — a second pass over the raw header map, with a different rule from the one
+  everything else uses. A header the client sent twice exposed its **last** value to a behavior
+  while predicates, `proxy` forwarding, the journal and `inject` all took the first; a header value
+  that was not valid UTF-8 arrived at a behavior as `""` — an empty string the client never sent —
+  where every other surface had already dropped it with a warning. One request could therefore
+  answer two ways depending on which surface asked.
+  - Both now project the map the request was already collected into, so a repeated header
+    contributes its **first** value and an undecodable one is **absent**, in behaviors and
+    templating exactly as in predicates. `${request.headers.*}` also stops dropping undecodable
+    values *silently* — that drop is now covered by the collector's existing single warning per
+    request.
+  - Visible to a stub only when a request repeats a header (last → first) or sends a header value
+    that is not valid UTF-8 (`""` → absent). `MB_REQUEST.headers` and the JS/Rhai `request.headers`
+    object are unchanged in shape: still one string per name.
+  - `RequestContext::from_request` and `RequestData::new` take the collected map rather than a
+    `hyper::HeaderMap`. Both are `pub`, so an embedder calling them directly needs the new argument;
+    the C ABI and the language SDKs are unaffected.
 - **A header object that spelled one name two ways became two headers** (#1039). HTTP header names
   are case-insensitive, but the shared wire deserializer keyed its map by the literal spelling, so
   `{"content-type": …, "Content-Type": …}` in a recorded request, a stub, a flat response or an

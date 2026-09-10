@@ -231,6 +231,12 @@ Each command runs via `sh -c "<command>"` and receives two environment variables
 | `MB_REQUEST` | `{ "method", "path", "query", "headers", "body" }` |
 | `MB_RESPONSE` | `{ "statusCode", "body" }` |
 
+`MB_REQUEST.headers` holds one string per header name: a header the client sent more than once
+contributes its **first** value, and a header whose value was not valid UTF-8 is absent from the
+object entirely rather than present as `""` (#1040). That is the same view `copy`, `lookup`,
+`decorate` and `${request.headers.*}` read, and the same one predicates match on — see
+[predicates](predicates.md).
+
 The command's **stdout becomes the new response body**. A non-zero exit is a failure: by default it
 is lenient (the original body is served and an `x-rift-shelltransform-error: true` header is added);
 with `strictBehaviors` / `RIFT_STRICT_BEHAVIORS` it returns `500` (see

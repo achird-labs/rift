@@ -58,22 +58,34 @@ pub struct RequestData {
 }
 
 impl RequestData {
-    /// Create RequestData from request components
-    pub fn new(
+    /// Create RequestData from request components.
+    ///
+    /// `headers` is `collect_request_headers`' map for this request, not the raw `HeaderMap`
+    /// (issue #1040). Templating used to re-derive its own view with `to_str().ok()` — an
+    /// unattributed drop, and last-wins on a repeated header. On the served path the collector had
+    /// already warned about that value, so the drop was not wholly undiagnosed; what it lacked was
+    /// any guarantee of it, since an embedder calling this `pub` constructor with a hand-built
+    /// `HeaderMap` bypassed the collector entirely. Taking the collected map closes that by
+    /// construction, and makes `${request.headers.x}` resolve to the same value a predicate on `x`
+    /// matched.
+    pub fn new<SH: std::hash::BuildHasher>(
         method: &str,
         path: &str,
         query_string: Option<&str>,
-        headers: &hyper::HeaderMap,
+        headers: &std::collections::HashMap<String, Vec<String>, SH>,
         body: Option<&str>,
     ) -> Self {
         // Zero-copy: the legacy parser already returns a std-hasher map (see the `query` field).
         let query = parse_query_string(query_string);
+        // Lowercased because that is this map's lookup contract (`${request.headers.x-id}` is
+        // matched case-insensitively by lowercasing the token). The collector hands over
+        // Title-Case names, which lowercase to exactly the names hyper produced before.
         let headers_map: FastMap<String, String> = headers
             .iter()
-            .filter_map(|(k, v)| {
-                v.to_str()
-                    .ok()
-                    .map(|val| (k.as_str().to_lowercase(), val.to_string()))
+            .filter_map(|(k, values)| {
+                values
+                    .first()
+                    .map(|first| (k.to_lowercase(), first.clone()))
             })
             .collect();
 
@@ -243,19 +255,26 @@ pub fn apply_date_templates(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::HeaderMap;
-    use hyper::header::{HeaderName, HeaderValue};
+
+    /// The shape `collect_request_headers` hands `RequestData::new` (issue #1040): Title-Case
+    /// names, every value the client sent.
+    fn hdrs(pairs: &[(&str, &[&str])]) -> FastMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(k, vs)| {
+                (
+                    (*k).to_string(),
+                    vs.iter().map(|v| (*v).to_string()).collect(),
+                )
+            })
+            .collect()
+    }
 
     fn create_test_request_data() -> RequestData {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static("content-type"),
-            HeaderValue::from_static("application/json"),
-        );
-        headers.insert(
-            HeaderName::from_static("x-request-id"),
-            HeaderValue::from_static("req-12345"),
-        );
+        let headers = hdrs(&[
+            ("Content-Type", &["application/json"]),
+            ("X-Request-Id", &["req-12345"]),
+        ]);
 
         let mut data = RequestData::new(
             "POST",
@@ -298,7 +317,7 @@ mod tests {
 
     #[test]
     fn test_with_route_pattern_builder() {
-        let headers = hyper::HeaderMap::new();
+        let headers = hdrs(&[]);
         // A matching pattern populates path_params from the request path.
         let data = RequestData::new("GET", "/users/42", None, &headers, None)
             .with_route_pattern(Some("/users/:id"));
@@ -310,6 +329,26 @@ mod tests {
         let mismatch = RequestData::new("GET", "/orders/42", None, &headers, None)
             .with_route_pattern(Some("/users/:id"));
         assert!(mismatch.path_params.is_empty());
+    }
+
+    // Issue #1040: the same first-value rule as `RequestContext`, pinned on this projection too.
+    // Only the integration test covered it before, so flipping `.first()` to `.last()` here alone
+    // would have left every unit test green.
+    #[test]
+    fn request_data_takes_the_first_value_of_a_repeated_header() {
+        let data = RequestData::new(
+            "GET",
+            "/x",
+            None,
+            &hdrs(&[("X-Id", &["a", "b"]), ("X-Empty", &[])]),
+            None,
+        );
+        assert_eq!(data.get("headers.x-id"), Some("a".to_string()));
+        assert_eq!(
+            data.get("headers.x-empty"),
+            None,
+            "a name with no values is absent, not present as an empty string"
+        );
     }
 
     #[test]
