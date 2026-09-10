@@ -11,6 +11,7 @@ use std::collections::HashMap;
 // `#[serde(with = "multi_value_headers")]` attribute path in this file resolves unchanged.
 pub(crate) use rift_types::wire::{
     deserialize_optional_status_code, deserialize_status_code, multi_value_headers,
+    single_value_headers,
 };
 
 // ============================================================================
@@ -888,7 +889,7 @@ pub struct ProxyResponse {
     pub predicate_generators: Vec<serde_json::Value>,
     #[serde(default)]
     pub add_wait_behavior: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "single_value_headers::deserialize")]
     pub inject_headers: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub add_decorate_behavior: Option<String>,
@@ -1516,7 +1517,11 @@ pub struct RiftErrorFault {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     /// Custom headers for error response
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        deserialize_with = "single_value_headers::deserialize"
+    )]
     pub headers: HashMap<String, String>,
 }
 
@@ -2103,6 +2108,40 @@ mod tests {
         assert_eq!(out["rejectUnauthorized"], serde_json::json!(true));
         // One anchor round-trips as the bare string it arrived as (issue #238's precedent).
         assert_eq!(out["ca"], serde_json::json!("PEM"));
+    }
+
+    // Issue #1050: the wiring half. The algorithm is covered in `wire.rs`; what these pin is that
+    // the `deserialize_with` attribute is actually ON these two fields — the failure mode a
+    // per-site test exists for, and the reason #1049's own review asked for one.
+    #[test]
+    fn proxy_inject_headers_rejects_a_name_given_twice() {
+        let err = serde_json::from_str::<ProxyResponse>(
+            r#"{"to":"http://x","injectHeaders":{"x-trace":"a","X-Trace":"b"}}"#,
+        )
+        .expect_err("injectHeaders names each header once");
+        assert!(
+            err.to_string().contains("names each header once"),
+            "unexpected error: {err}"
+        );
+
+        let ok: ProxyResponse =
+            serde_json::from_str(r#"{"to":"http://x","injectHeaders":{"x-trace":"a"}}"#)
+                .expect("a single spelling is unaffected");
+        assert_eq!(ok.inject_headers["x-trace"], "a");
+    }
+
+    #[test]
+    fn fault_error_headers_reject_a_name_given_twice() {
+        let err = serde_json::from_str::<RiftErrorFault>(
+            r#"{"status":503,"headers":{"retry-after":"1","Retry-After":"2"}}"#,
+        )
+        .expect_err("fault error headers name each header once");
+        assert!(err.to_string().contains("names each header once"), "{err}");
+
+        let ok: RiftErrorFault =
+            serde_json::from_str(r#"{"status":503,"headers":{"Retry-After":"1"}}"#)
+                .expect("a single spelling is unaffected");
+        assert_eq!(ok.headers["Retry-After"], "1");
     }
 
     #[test]

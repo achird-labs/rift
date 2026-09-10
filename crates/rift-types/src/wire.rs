@@ -156,6 +156,77 @@ pub mod multi_value_headers {
     }
 }
 
+/// Serde for header objects that hold **one** value per name (issue #1050) — `proxy.injectHeaders`
+/// and `_rift.fault.error.headers`.
+///
+/// Deserializing rejects a document that names one header twice, case-insensitively, instead of
+/// accepting it and picking a winner. That is deliberately the *opposite* of what
+/// [`multi_value_headers`] does, and the difference is not an inconsistency:
+///
+/// - A multi-value map has a lossless merge — keep both values — so folding costs nothing and
+///   #1039 folds.
+/// - A single-valued map has none *in general*. Two different values for one name have no correct
+///   combination, so a fold would have to pick a winner — and the tie-break cannot even be made
+///   deterministic, because which spelling the deserializer presents first depends on whether the
+///   document was streamed from text or routed through a `serde_json::Value` first, exactly as
+///   documented on [`multi_value_headers`].
+///
+/// The rule is therefore the simple one — *a single-valued header object names each header once* —
+/// and it is applied uniformly. Note that this refuses `{"x": "a", "X": "a"}` too, where a fold
+/// *would* be lossless: the case does not rest on the two values conflicting, and the code does not
+/// check whether they do. One rule that is always true beats two rules that need the reader to work
+/// out which applies.
+///
+/// Nothing that worked stops working. A document this rejects was previously emitting **two header
+/// lines** for that name, ordered by `HashMap` iteration and therefore differently per process:
+/// `RequestBuilder::header` and `http::response::Builder::header` both append rather than replace,
+/// so both spellings went out on the wire.
+///
+/// Values stay `String`-only. `multi_value_headers` also coerces JSON numbers and bools (issue
+/// #754); widening these two fields to match is a separate compatibility question, not a
+/// side effect of this one.
+pub mod single_value_headers {
+    use serde::de::{Deserializer, Error, MapAccess, Visitor};
+    use std::collections::HashMap;
+    use std::fmt;
+
+    struct OneEachVisitor;
+
+    impl<'de> Visitor<'de> for OneEachVisitor {
+        type Value = HashMap<String, String>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a map of header names to single string values, each name given once")
+        }
+
+        fn visit_map<M: MapAccess<'de>>(self, mut access: M) -> Result<Self::Value, M::Error> {
+            // A `Vec` so the scan sees the spelling actually written, and so the error can quote
+            // it. The order is only used for the diagnostic; the rejection itself does not depend
+            // on which of the two the deserializer happened to present first.
+            let mut seen: Vec<(String, String)> =
+                Vec::with_capacity(access.size_hint().unwrap_or(0).min(1024));
+            while let Some((name, value)) = access.next_entry::<String, String>()? {
+                if let Some((existing, _)) =
+                    seen.iter().find(|(k, _)| k.eq_ignore_ascii_case(&name))
+                {
+                    return Err(M::Error::custom(format!(
+                        "header `{name}` is already given as `{existing}`; a single-valued header \
+                         object names each header once"
+                    )));
+                }
+                seen.push((name, value));
+            }
+            Ok(seen.into_iter().collect())
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<String, String>, D::Error> {
+        deserializer.deserialize_map(OneEachVisitor)
+    }
+}
+
 use serde::Deserialize;
 
 /// Parse a JSON `statusCode` value that may be a number or a (numeric) string.
@@ -413,6 +484,78 @@ mod tests {
             v["headers"].get("X-Empty").is_none(),
             "a key with no values emits no header line, so it is omitted"
         );
+    }
+
+    /// Exercises `single_value_headers` through a serde attribute, the only way it is reached.
+    #[derive(Deserialize, Debug)]
+    struct SingleIn {
+        #[serde(default, deserialize_with = "single_value_headers::deserialize")]
+        headers: HashMap<String, String>,
+    }
+
+    // Issue #1050. Before this, both spellings survived as distinct keys and BOTH went out on the
+    // wire — `RequestBuilder::header` and `response::Builder::header` append rather than replace —
+    // so the peer received two lines for one header, ordered by `HashMap` iteration and therefore
+    // differently per process. Refusing costs nothing that was working.
+    #[test]
+    fn a_name_given_twice_in_different_case_is_rejected() {
+        let err = serde_json::from_str::<SingleIn>(
+            r#"{"headers":{"content-type":"a","Content-Type":"b"}}"#,
+        )
+        .expect_err("a single-valued header object names each header once");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("content-type") && msg.contains("Content-Type"),
+            "the error must name BOTH spellings so the author can find them: {msg}"
+        );
+    }
+
+    // The `Value`-mediated path must reject too. Case variants are distinct keys in a
+    // `serde_json::Map`, so they both survive to here — unlike a byte-identical duplicate, which
+    // the JSON parser has already collapsed by this point (the same two-path split documented on
+    // `multi_value_headers`).
+    #[test]
+    fn a_case_variant_name_is_rejected_through_a_value_too() {
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"headers":{"x-id":"a","X-Id":"b"}}"#).unwrap();
+        assert!(
+            serde_json::from_value::<SingleIn>(value).is_err(),
+            "routing through a Value must not launder a duplicate past the check"
+        );
+    }
+
+    #[test]
+    fn a_byte_identical_duplicate_is_rejected_on_the_text_path() {
+        assert!(
+            serde_json::from_str::<SingleIn>(r#"{"headers":{"X-Id":"a","X-Id":"b"}}"#).is_err(),
+            "serde's default map visitor would have silently kept the last one"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_single_valued_header_object_is_unchanged() {
+        let ok: SingleIn =
+            serde_json::from_str(r#"{"headers":{"X-Id":"a","Content-Type":"text/plain"}}"#)
+                .expect("every name given once");
+        assert_eq!(ok.headers["X-Id"], "a");
+        assert_eq!(ok.headers["Content-Type"], "text/plain");
+        assert_eq!(ok.headers.len(), 2);
+
+        let empty: SingleIn = serde_json::from_str(r#"{"headers":{}}"#).unwrap();
+        assert!(empty.headers.is_empty());
+
+        // Absent is not an error — both fields carry `#[serde(default)]`.
+        let missing: SingleIn = serde_json::from_str("{}").unwrap();
+        assert!(missing.headers.is_empty());
+    }
+
+    // `eq_ignore_ascii_case` is the HTTP rule, as in `multi_value_headers`: names differing outside
+    // ASCII are different names, and refusing them would reject a document that is fine.
+    #[test]
+    fn names_differing_outside_ascii_are_not_treated_as_duplicates() {
+        let ok: SingleIn =
+            serde_json::from_str(r#"{"headers":{"X-Kä":"1","X-KÄ":"2"}}"#).expect("distinct names");
+        assert_eq!(ok.headers.len(), 2);
     }
 
     #[test]
