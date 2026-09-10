@@ -1085,6 +1085,136 @@ mod tcp_faults {
     }
 }
 
+// Issue #1041: the upstream proxy's response-header relay.
+mod proxy_relays_response_headers_honestly {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    async fn serve(config: serde_json::Value) -> Arc<ImposterManager> {
+        let manager = Arc::new(ImposterManager::new());
+        manager
+            .create_imposter(serde_json::from_value(config).unwrap())
+            .await
+            .expect("create imposter");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        manager
+    }
+
+    /// A raw-socket origin, because no ordinary server will emit a header value that is not valid
+    /// UTF-8 — which is precisely the value the relay used to blank. Answers `count` connections
+    /// with one fixed response, then exits.
+    fn raw_origin(port: u16, count: usize) -> std::thread::JoinHandle<()> {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind origin");
+        std::thread::spawn(move || {
+            for _ in 0..count {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    return;
+                };
+                // Read the request head so the client is not answered before it finishes writing.
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf);
+
+                let mut raw = b"HTTP/1.1 200 OK\r\nX-Ok: 1\r\nX-Bin: ".to_vec();
+                raw.extend_from_slice(&[0xFF, 0xFE]);
+                raw.extend_from_slice(b"\r\nContent-Disposition: attachment; filename=\"");
+                raw.extend_from_slice("résumé".as_bytes());
+                raw.extend_from_slice(b".pdf\"\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\n");
+                raw.extend_from_slice(b"Content-Length: 2\r\nConnection: close\r\n\r\nhi");
+                let _ = sock.write_all(&raw);
+                let _ = sock.flush();
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn a_proxied_response_drops_undecodable_headers_and_keeps_valid_utf8_ones() {
+        let _origin = raw_origin(21534, 1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let manager = serve(serde_json::json!({
+            "port": 21535, "protocol": "http",
+            "stubs": [{"responses": [{"proxy": {
+                "to": "http://127.0.0.1:21534", "mode": "proxyOnce",
+                // `predicateGenerators` is what makes the replay come from the stub
+                // `create_stub_from_proxy_response` synthesises, rather than from the
+                // `RecordedResponse` lookup. Without it that branch never runs, and the durable
+                // half this test claims to cover would go untested.
+                "predicateGenerators": [{"matches": {"path": true}}]
+            }}]}]
+        }))
+        .await;
+
+        let first = reqwest::Client::new()
+            .get("http://127.0.0.1:21535/x")
+            .send()
+            .await
+            .expect("proxied request");
+
+        assert!(
+            first.headers().get("x-bin").is_none(),
+            "an undecodable upstream header must not reach the client at all; before #1041 it \
+             arrived as an empty string the origin never sent"
+        );
+        assert_eq!(
+            first.headers().get("x-ok").map(|v| v.as_bytes()),
+            Some(b"1".as_slice()),
+            "a decodable header alongside it is unaffected"
+        );
+        assert_eq!(
+            first
+                .headers()
+                .get("content-disposition")
+                .map(|v| v.as_bytes()),
+            Some(r#"attachment; filename="résumé.pdf""#.as_bytes()),
+            "valid UTF-8 beyond ASCII must relay byte-exact — `HeaderValue::to_str` rejected it, \
+             so the old code blanked a header the origin sent perfectly correctly"
+        );
+        let cookies: Vec<&[u8]> = first
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|v| v.as_bytes())
+            .collect();
+        assert_eq!(
+            cookies,
+            vec![b"a=1".as_slice(), b"b=2".as_slice()],
+            "multiplicity survives the relay (RFC 7230 §3.2.2 forbids folding Set-Cookie)"
+        );
+
+        // The durable half. The origin accepts exactly ONE connection, so a second request that
+        // succeeds can only have been answered from the stub `proxyOnce` generated — which is
+        // where a blanked value used to be persisted and then served forever after, long after the
+        // origin was out of the picture. Asserting it through the replay rather than through the
+        // admin JSON keeps the test on the behaviour instead of on a listing shape.
+        let replayed = reqwest::Client::new()
+            .get("http://127.0.0.1:21535/x")
+            .send()
+            .await
+            .expect("replayed request");
+        assert_eq!(
+            replayed.headers().get("x-ok").map(|v| v.as_bytes()),
+            Some(b"1".as_slice()),
+            "sanity: the replay was served from the generated stub, not the (now closed) origin"
+        );
+        assert!(
+            replayed.headers().get("x-bin").is_none(),
+            "the dropped header must not be resurrected from the recorded stub"
+        );
+        assert_eq!(
+            replayed
+                .headers()
+                .get("content-disposition")
+                .map(|v| v.as_bytes()),
+            Some(r#"attachment; filename="résumé.pdf""#.as_bytes()),
+            "and the valid UTF-8 value must survive into the stub, not just the live relay"
+        );
+
+        let _ = manager.delete_imposter(21535).await;
+    }
+}
+
 // Issue #238: multi-value header support on the served response and the recorded request.
 mod multi_value_headers {
     use super::*;
