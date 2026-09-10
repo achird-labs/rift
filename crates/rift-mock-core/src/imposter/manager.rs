@@ -69,7 +69,10 @@ async fn run_http1<I>(
     decorator: Option<Arc<dyn ResponseDecorator>>,
     http_tuning: crate::proxy::network::HttpTuning,
 ) where
-    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+    // Tokio-side, not `hyper::rt`'s: the `auto` branch below must sniff the H2 preface on the raw
+    // stream before `TokioIo::new` wraps it (issue #1030), so this takes the stream one layer
+    // earlier than it used to and does its own `TokioIo::new` per branch.
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     // A TCP fault (#239) aborts the whole socket, which is meaningless under HTTP/2 stream
     // multiplexing (one stream's fault would tear down every concurrent stream, and the raw
@@ -115,6 +118,8 @@ async fn run_http1<I>(
     }
 
     if http1_only {
+        // `http1::Builder`'s own timer arms immediately (issue #1030 is specific to `auto`'s
+        // preface sniff, which runs before any timer exists) — no sniffing needed here.
         let mut builder = hyper::server::conn::http1::Builder::new();
         builder
             // A timer is required for `header_read_timeout` to take effect (hyper panics on
@@ -122,8 +127,33 @@ async fn run_http1<I>(
             .timer(hyper_util::rt::TokioTimer::new())
             .header_read_timeout(http_tuning.header_read_timeout)
             .max_buf_size(http_tuning.max_buf_size);
-        drive_conn!(builder.serve_connection(io, service));
+        drive_conn!(builder.serve_connection(TokioIo::new(io), service));
     } else {
+        // Bound the HTTP/1-vs-HTTP/2 detection window itself (issue #1030): `auto::Builder`
+        // sniffs the preface before either protocol's `Connection` — and its
+        // `header_read_timeout` — exists, so a client that completes the handshake and then sends
+        // nothing (or a partial H2 preface) would otherwise pin this task, the fd and, over TLS,
+        // the `TlsStream` forever. Sniffed on the tokio-side stream, before `TokioIo::new`.
+        //
+        // Also raced against the shutdown signal: this runs before `drive_conn!` below, which is
+        // otherwise the only place a connection observes shutdown, so without this an imposter
+        // delete/rebind would have to wait out the full detection deadline for any connection
+        // still stuck sniffing (issue #207's drain).
+        let sniff = crate::proxy::preface::sniff_h2_preface(io, http_tuning.header_read_timeout);
+        tokio::pin!(sniff);
+        let sniffed = tokio::select! {
+            result = &mut sniff => match result {
+                Ok(sniffed) => sniffed,
+                Err(e) => {
+                    // Entirely client-controlled (a client choosing to stay silent), so this is
+                    // not worth more than a debug log — a per-connection `warn!` here would be an
+                    // unbounded log-volume lever for a hostile client (issue #718's rule).
+                    debug!("preface detection on port {}: {}", port, e);
+                    return;
+                }
+            },
+            _ = conn_shutdown_rx.recv() => return,
+        };
         let mut builder =
             hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
         builder
@@ -131,7 +161,7 @@ async fn run_http1<I>(
             .timer(hyper_util::rt::TokioTimer::new())
             .header_read_timeout(http_tuning.header_read_timeout)
             .max_buf_size(http_tuning.max_buf_size);
-        drive_conn!(builder.serve_connection(io, service));
+        drive_conn!(builder.serve_connection(TokioIo::new(sniffed), service));
     }
 }
 
@@ -1174,7 +1204,7 @@ impl ImposterManager {
                                     {
                                         Ok(Ok(tls)) => {
                                             run_http1(
-                                                TokioIo::new(tls),
+                                                tls,
                                                 imposter,
                                                 addr,
                                                 fault_cell,
@@ -1194,7 +1224,7 @@ impl ImposterManager {
                                     },
                                     None => {
                                         run_http1(
-                                            TokioIo::new(faulted),
+                                            faulted,
                                             imposter,
                                             addr,
                                             fault_cell,

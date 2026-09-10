@@ -401,6 +401,16 @@ This is why the cap had to become a refusal (rather than a silent truncation) be
 could be enabled: a truncating reader that left the tail in the socket would have handed the
 client control of what the server parsed next.
 
+### Connection limits and idle tunnels
+
+The listener honours `RIFT_MAX_CONNECTIONS`, the same per-listener cap every other Rift listener
+applies. At the cap it stops accepting, so excess connections wait in the kernel backlog rather
+than being accepted and then failed.
+
+A tunnel that completes its TLS handshake and then sends no request is closed after
+`RIFT_HTTP_HEADER_TIMEOUT` rather than being held open indefinitely — the protocol-detection window
+at the start of a connection is bounded, not just the request head that follows it.
+
 ---
 
 ## Trusting the CA from the SUT
