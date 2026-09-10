@@ -58,6 +58,12 @@ impl Default for TlsDefaults {
 /// completes or the imposter is torn down. Auto-negotiates HTTP/1 and HTTP/2 (issue #295), except
 /// for imposters that can fire a connection-level TCP fault, which are served HTTP/1-only. Shared
 /// by the plain and HTTPS serve paths (issue #206). (Name kept for history.)
+///
+/// `http1_only` is computed once by the caller, before the TLS handshake even starts (issue
+/// #1029), and reused here rather than recomputed: the same evaluation of the live stub set picks
+/// both the ALPN offer (over TLS) and the hyper builder used below, so the two can never disagree
+/// even though the underlying predicate (`Imposter::uses_tcp_faults`) can change between any two
+/// connections without this function or the acceptor being rebuilt.
 #[allow(clippy::too_many_arguments)]
 async fn run_http1<I>(
     io: I,
@@ -68,17 +74,13 @@ async fn run_http1<I>(
     port: u16,
     decorator: Option<Arc<dyn ResponseDecorator>>,
     http_tuning: crate::proxy::network::HttpTuning,
+    http1_only: bool,
 ) where
     // Tokio-side, not `hyper::rt`'s: the `auto` branch below must sniff the H2 preface on the raw
     // stream before `TokioIo::new` wraps it (issue #1030), so this takes the stream one layer
     // earlier than it used to and does its own `TokioIo::new` per branch.
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    // A TCP fault (#239) aborts the whole socket, which is meaningless under HTTP/2 stream
-    // multiplexing (one stream's fault would tear down every concurrent stream, and the raw
-    // HTTP/1 fault bytes are nonsense to an h2 client). So an imposter that can fire a TCP fault
-    // is served HTTP/1-only; everything else auto-negotiates HTTP/1 and HTTP/2 (issue #295).
-    let http1_only = imposter.uses_tcp_faults() || crate::util::http2_disabled();
     let service = service_fn(move |req| {
         let imposter = Arc::clone(&imposter);
         let fault_cell = Arc::clone(&fault_cell);
@@ -667,17 +669,22 @@ impl ImposterManager {
         Ok(ClientAuth::Verify { ca })
     }
 
-    /// Resolve the TLS acceptor for an HTTPS imposter by precedence: inline imposter cert/key →
-    /// server default → self-signed fallback → error (never silent cleartext, issue #206).
-    fn resolve_tls_acceptor(
+    /// Resolve the TLS acceptor pair for an HTTPS imposter by precedence: inline imposter cert/key
+    /// → server default → self-signed fallback → error (never silent cleartext, issue #206).
+    ///
+    /// Returns [`crate::proxy::tls::TlsAcceptors`], not a single acceptor (issue #1029): whether an
+    /// HTTPS imposter is served HTTP/1-only can change per-connection, live, through the admin API
+    /// (a stub mutation) without this being re-resolved, so the ALPN offer cannot be decided once
+    /// here — the caller picks between the two acceptors per connection instead.
+    fn resolve_tls_acceptors(
         &self,
         config: &ImposterConfig,
-    ) -> Result<tokio_rustls::TlsAcceptor, ImposterError> {
+    ) -> Result<crate::proxy::tls::TlsAcceptors, ImposterError> {
         // Derived BEFORE the cert/key precedence below, so the two creation errors fire whatever
         // the cert turns out to come from — inline, `TlsDefaults`, or the self-signed fallback.
         let client_auth = Self::client_auth_for(config)?;
         let from_pem = |cert: &str, key: &str| {
-            crate::proxy::tls::tls_acceptor_from_pem(cert.as_bytes(), key.as_bytes(), &client_auth)
+            crate::proxy::tls::tls_acceptors_from_pem(cert.as_bytes(), key.as_bytes(), &client_auth)
                 .map_err(|e| ImposterError::Tls(e.to_string()))
         };
         match (&config.cert, &config.key) {
@@ -704,7 +711,7 @@ impl ImposterManager {
             }
         }
         if self.tls_defaults.allow_self_signed {
-            return crate::proxy::tls::generate_self_signed_acceptor(&client_auth)
+            return crate::proxy::tls::generate_self_signed_acceptors(&client_auth)
                 .map_err(|e| ImposterError::Tls(e.to_string()));
         }
         Err(ImposterError::Tls(
@@ -750,18 +757,18 @@ impl ImposterManager {
         }
 
         // Client-auth settings are validated for EVERY protocol, not just https (issue #977).
-        // `resolve_tls_acceptor` derives this again on the https branch; that is fine and
+        // `resolve_tls_acceptors` derives this again on the https branch; that is fine and
         // deliberate — `client_auth_for` is pure, and having it self-contained is what lets the
         // reload path (`rebind_imposter`) re-derive rather than cache a stale decision.
-        // `resolve_tls_acceptor` below runs only on the https branch, so leaving the check there
+        // `resolve_tls_acceptors` below runs only on the https branch, so leaving the check there
         // would let `mutualAuth: true` on an http imposter through silently — the exact
         // accepted-and-ignored failure this issue exists to remove.
         Self::client_auth_for(&config)?;
 
-        // For HTTPS, resolve the per-imposter TLS acceptor up front so a missing/invalid cert
+        // For HTTPS, resolve the per-imposter TLS acceptor pair up front so a missing/invalid cert
         // fails loudly at creation rather than silently serving cleartext (issue #206).
-        let tls_acceptor = if config.protocol.eq_ignore_ascii_case("https") {
-            Some(self.resolve_tls_acceptor(&config)?)
+        let tls_acceptors = if config.protocol.eq_ignore_ascii_case("https") {
+            Some(self.resolve_tls_acceptors(&config)?)
         } else {
             None
         };
@@ -854,7 +861,7 @@ impl ImposterManager {
                 &imposter,
                 listeners,
                 &shutdown_tx,
-                tls_acceptor.as_ref(),
+                tls_acceptors.as_ref(),
                 port,
             );
         }
@@ -994,7 +1001,7 @@ impl ImposterManager {
         imposter: &Arc<Imposter>,
         listeners: Vec<TcpListener>,
         shutdown_tx: &broadcast::Sender<()>,
-        tls_acceptor: Option<&tokio_rustls::TlsAcceptor>,
+        tls_acceptors: Option<&crate::proxy::tls::TlsAcceptors>,
         port: u16,
     ) -> Vec<tokio::task::JoinHandle<()>> {
         let response_decorator = self.response_decorator.clone();
@@ -1023,7 +1030,7 @@ impl ImposterManager {
                 shutdown_tx.clone(),
                 shutdown_tx.subscribe(),
                 connection_semaphore.clone(),
-                tls_acceptor.cloned(),
+                tls_acceptors.cloned(),
                 response_decorator.clone(),
                 socket_tuning,
                 http_tuning,
@@ -1056,8 +1063,8 @@ impl ImposterManager {
             .unwrap_or_else(|| "0.0.0.0".to_string());
         // Re-resolved rather than cached: an https imposter must not silently start serving
         // cleartext on rebind if its cert has since become unreadable.
-        let tls_acceptor = if imposter.config.protocol.eq_ignore_ascii_case("https") {
-            Some(self.resolve_tls_acceptor(&imposter.config)?)
+        let tls_acceptors = if imposter.config.protocol.eq_ignore_ascii_case("https") {
+            Some(self.resolve_tls_acceptors(&imposter.config)?)
         } else {
             None
         };
@@ -1073,7 +1080,7 @@ impl ImposterManager {
             imposter,
             listeners,
             &shutdown_tx,
-            tls_acceptor.as_ref(),
+            tls_acceptors.as_ref(),
             port,
         );
 
@@ -1115,7 +1122,7 @@ impl ImposterManager {
         conn_shutdown_tx: broadcast::Sender<()>,
         mut shutdown_rx: broadcast::Receiver<()>,
         connection_semaphore: Option<Arc<tokio::sync::Semaphore>>,
-        tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+        tls_acceptors: Option<crate::proxy::tls::TlsAcceptors>,
         response_decorator: Option<Arc<dyn ResponseDecorator>>,
         socket_tuning: crate::proxy::network::SocketTuning,
         http_tuning: crate::proxy::network::HttpTuning,
@@ -1179,8 +1186,17 @@ impl ImposterManager {
                             // keep-alive connections are gracefully closed on delete,
                             // not just new connections (issue #207).
                             let conn_shutdown_rx = conn_shutdown_tx.subscribe();
-                            // Per-imposter TLS acceptor is cheap to clone (Arc-backed).
-                            let tls_acceptor = tls_acceptor.clone();
+                            // One evaluation drives both the ALPN offer (which acceptor is picked
+                            // below) and the hyper builder inside `run_http1` (issue #1029) — this
+                            // closes the TOCTOU a re-evaluation after the handshake would leave: the
+                            // live stub set (`uses_tcp_faults`) can change between any two
+                            // connections without the acceptor pair being rebuilt.
+                            let http1_only =
+                                imposter.uses_tcp_faults() || crate::util::http2_disabled();
+                            // Per-imposter TLS acceptors are cheap to clone (Arc-backed).
+                            let tls_acceptor = tls_acceptors
+                                .as_ref()
+                                .map(|acceptors| acceptors.for_connection(http1_only).clone());
                             let decorator = response_decorator.clone();
                             // Track the connection task so `delete` can drain it (issue #596).
                             imposter_clone.conn_tracker.spawn(async move {
@@ -1212,6 +1228,7 @@ impl ImposterManager {
                                                 port,
                                                 decorator,
                                                 http_tuning,
+                                                http1_only,
                                             )
                                             .await
                                         }
@@ -1232,6 +1249,7 @@ impl ImposterManager {
                                             port,
                                             decorator,
                                             http_tuning,
+                                            http1_only,
                                         )
                                         .await
                                     }

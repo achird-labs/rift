@@ -141,6 +141,26 @@ record.
 
 ### Fixed
 
+- **HTTPS imposters advertised HTTP/2 they would not speak** (#1029). The TLS handshake offered
+  `h2, http/1.1` unconditionally, while the server serves HTTP/1-only whenever the imposter can fire
+  a TCP fault, carries a `_rift.script` response, or `RIFT_DISABLE_HTTP2` is set. Advertising a
+  protocol the server will not speak is worse than not advertising it: ALPN is negotiated during the
+  handshake, so a client that selects `h2` has already committed by the time the server answers in
+  HTTP/1, and has no way back. `RIFT_DISABLE_HTTP2` — a kill switch whose whole purpose is to force
+  HTTP/1.1 — produced exactly this mismatch.
+  - The offer now follows the same per-connection decision as the server. That matters more than it
+    sounds: the TLS acceptor is built once per imposter, but whether the server is HTTP/1-only
+    depends on the *live* stub set, which changes through the admin API without rebuilding the
+    acceptor. Deciding once at construction would have been correct only until the first stub
+    mutation. Each HTTPS imposter now holds two acceptors built from one `ServerConfig` — sharing a
+    single session cache and ticketer, so resumption survives a stub change — and picks between them
+    per connection.
+  - This also closes a latent TOCTOU: the handshake used to complete and only *then* have the
+    protocol decision re-evaluated, so a stub mutation in between flipped it after the client had
+    already committed. One evaluation now drives both the advertisement and the server.
+  - Plaintext imposters are unaffected: they have no ALPN, and h2c prior-knowledge negotiation is
+    unchanged.
+
 - **A connection that completed the handshake and then said nothing was never timed out**
   (#1030). Every listener that serves with `hyper_util`'s `auto::Builder` sniffs the connection
   preface to choose HTTP/1 or HTTP/2 *before* it builds either protocol's connection — and

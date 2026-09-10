@@ -79,12 +79,21 @@ Rift auto-negotiates the HTTP version — you don't configure it per imposter:
 - **Plain HTTP imposters** accept **h2c** (cleartext HTTP/2 via prior-knowledge) alongside HTTP/1 —
   the listener detects the HTTP/2 preface and upgrades automatically.
 
-This is on by default and backward-compatible with HTTP/1 clients. Two things force HTTP/1-only:
+This is on by default and backward-compatible with HTTP/1 clients. Three things force HTTP/1-only:
 
 - an imposter that uses any **TCP fault** (`_rift.fault.tcp` or a top-level `fault`), because a
-  connection-level abort is incompatible with HTTP/2 multiplexing; and
+  connection-level abort is incompatible with HTTP/2 multiplexing;
+- an imposter with a **`_rift.script`** response, since a script may call `reset()` at runtime; and
 - setting the **`RIFT_DISABLE_HTTP2`** environment variable (truthy: `1`/`true`/`yes`/`on`), which
   forces every listener — HTTP and HTTPS, imposter, admin, and metrics — down to HTTP/1.
+
+On an **HTTPS** imposter this decision governs the ALPN offer as well as what is served: such an
+imposter advertises only `http/1.1` during the TLS handshake rather than offering `h2` it would not
+speak. A client offering both protocols therefore settles on `http/1.1`; a client that offers
+**only** `h2` (a gRPC-style client, say) is refused at the handshake with `no_application_protocol`
+rather than being allowed to commit to a protocol the imposter cannot serve. The decision is made per connection against the imposter's current stubs, so adding or
+removing a fault or script stub through the admin API changes what the *next* connection is offered
+— an existing connection is unaffected.
 
 ### Auto-Port Assignment
 

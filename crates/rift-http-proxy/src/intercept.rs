@@ -262,7 +262,8 @@ fn build_tls_acceptor(resolver: Arc<SniCertResolver>) -> anyhow::Result<TlsAccep
     // through the proxy, matching the imposter listener (`proxy/tls.rs`, issue #295). Advertising
     // is half the contract — `serve_tunnel` must be able to speak what is offered here, so both
     // read the same flag.
-    config.alpn_protocols = alpn_protocols(rift_mock_core::util::http2_disabled());
+    config.alpn_protocols =
+        rift_mock_core::proxy::alpn_protocols(rift_mock_core::util::http2_disabled());
     // Explicit TLS session resumption (issue #705): the intercept listener sees the same
     // handshake-storm reconnect pattern as the imposters, so it shares their resumption config.
     rift_mock_core::proxy::configure_session_resumption(&mut config)?;
@@ -343,22 +344,6 @@ async fn handle_connection(
 ///
 /// A connection still in its TLS handshake has not reached this function and so does not observe
 /// the signal — the same as the imposter path, and bounded by the handshake itself.
-/// The ALPN list to advertise, as a pure function of the h2 kill switch.
-///
-/// Split out from `build_tls_acceptor` for the same reason `http2_disabled_from` is split out from
-/// `http2_disabled` in rift-mock-core: the switch is read once per process into a `OnceLock`, so an
-/// end-to-end test of the env var would race every other test in the binary. This is the part
-/// worth pinning, and it can be pinned without touching the environment.
-fn alpn_protocols(http1_only: bool) -> Vec<Vec<u8>> {
-    if http1_only {
-        vec![b"http/1.1".to_vec()]
-    } else {
-        // h2 first: ALPN is server-preference-ordered, and the imposter listener orders it the
-        // same way (issue #295).
-        vec![b"h2".to_vec(), b"http/1.1".to_vec()]
-    }
-}
-
 async fn serve_tunnel<I>(
     io: I,
     ctx: Arc<TunnelCtx>,
@@ -1105,25 +1090,20 @@ mod tests {
         );
     }
 
-    // ===== Issue #996: what the handshake offers =====
+    // ===== Issue #996 / #1029: what the handshake offers =====
     //
-    // `RIFT_DISABLE_HTTP2` is read once per process into a `OnceLock`, so an end-to-end test of the
-    // env var would race every other test in this binary — the same reason rift-mock-core splits
-    // `http2_disabled_from` out from `http2_disabled` and unit-tests only the parse. So AC3 is
-    // pinned here, on the decision rather than on the environment.
+    // The decision itself now lives in `rift_mock_core::proxy::alpn_protocols` and is pinned there
+    // (shared with the imposter listener, issue #1029) — this just proves the intercept listener
+    // routes through that shared function rather than a local copy that could drift.
     #[test]
-    fn alpn_offers_h2_unless_http2_is_disabled() {
+    fn alpn_offers_come_from_the_shared_function() {
         assert_eq!(
-            alpn_protocols(false),
-            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
-            "h2 must be offered first, matching the imposter listener's order (#295)"
+            rift_mock_core::proxy::alpn_protocols(false),
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
         );
         assert_eq!(
-            alpn_protocols(true),
-            vec![b"http/1.1".to_vec()],
-            "RIFT_DISABLE_HTTP2 must stop h2 being ADVERTISED, not merely stop it being served: \
-             a client that negotiated h2 from ALPN and then met an HTTP/1-only server would break \
-             outright, which is worse than the downgrade the switch exists to force"
+            rift_mock_core::proxy::alpn_protocols(true),
+            vec![b"http/1.1".to_vec()]
         );
     }
 

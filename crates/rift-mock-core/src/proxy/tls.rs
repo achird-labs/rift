@@ -168,12 +168,69 @@ impl ClientCertVerifier for AcceptAnyClientCert {
     }
 }
 
-/// Create a TLS acceptor from in-memory PEM bytes (per-imposter HTTPS, issue #206).
-pub fn tls_acceptor_from_pem(
+/// The ALPN list to advertise, as a pure function of the h2 kill switch (issue #996, #1029).
+///
+/// Shared by the imposter listener (here) and the intercept listener
+/// (`rift_http_proxy::intercept`), which read the same flag for the same reason: advertising a
+/// protocol the handshake did not offer — or offering one the server cannot serve — is the one
+/// ALPN combination that breaks a client outright, so both call sites route through one function
+/// rather than risk the list drifting apart.
+#[must_use]
+pub fn alpn_protocols(http1_only: bool) -> Vec<Vec<u8>> {
+    if http1_only {
+        vec![b"http/1.1".to_vec()]
+    } else {
+        // h2 first: ALPN is server-preference-ordered.
+        vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+    }
+}
+
+/// A pair of TLS acceptors for one imposter, differing only in what they advertise via ALPN
+/// (issue #1029).
+///
+/// Built from a single [`rustls::ServerConfig`] cloned once *after* certs, client-auth and session
+/// resumption are configured, so the two acceptors share one session cache and one ticketer
+/// (`session_storage`/`ticketer` are `Arc`s under `Clone`) — a session resumed under one ALPN
+/// offer stays valid under the other. Certs and key are parsed exactly once.
+///
+/// Two acceptors rather than one rebuilt per connection: whether an imposter is HTTP/1-only
+/// depends on the *live* stub set, which can change between any two connections without the
+/// acceptor being rebuilt (stub replace / hot reload). Picking one of two pre-built acceptors per
+/// connection, with the same predicate that picks the hyper builder, is cheap and keeps the ALPN
+/// offer and the actual protocol decision from ever disagreeing.
+#[derive(Clone)]
+pub struct TlsAcceptors {
+    /// Offers h2 and http/1.1; used when the connection will be auto-negotiated.
+    pub negotiated: TlsAcceptor,
+    /// Offers http/1.1 only; used when the connection will be served HTTP/1-only.
+    pub http1_only: TlsAcceptor,
+}
+
+impl TlsAcceptors {
+    /// The acceptor whose ALPN offer matches how this connection will actually be served.
+    ///
+    /// The mapping lives here rather than at the call site because the two fields have the same
+    /// type: transposing them would compile, and would reintroduce exactly the mismatch this issue
+    /// fixed — advertising h2 to a client the server then answers in HTTP/1.
+    #[must_use]
+    pub fn for_connection(&self, http1_only: bool) -> &TlsAcceptor {
+        if http1_only {
+            &self.http1_only
+        } else {
+            &self.negotiated
+        }
+    }
+}
+
+/// Build a [`rustls::ServerConfig`] from in-memory PEM bytes (per-imposter HTTPS, issue #206).
+///
+/// Does not set `alpn_protocols` — callers decide that, per issue #1029 — but does configure
+/// session resumption, since that is independent of ALPN and every caller wants it.
+pub fn tls_server_config_from_pem(
     cert_pem: &[u8],
     key_pem: &[u8],
     client_auth: &ClientAuth,
-) -> Result<TlsAcceptor, anyhow::Error> {
+) -> Result<rustls::ServerConfig, anyhow::Error> {
     let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut &cert_pem[..])
         .collect::<Result<_, _>>()
         .map_err(|e| anyhow::anyhow!("Failed to parse certificate PEM: {e}"))?;
@@ -223,11 +280,54 @@ pub fn tls_acceptor_from_pem(
     let mut config = builder.with_single_cert(certs, key).map_err(|e| {
         anyhow::anyhow!("Failed to build TLS configuration (cert/key mismatch?): {e}")
     })?;
-    // Advertise HTTP/2 and HTTP/1.1 via ALPN so TLS clients can negotiate h2 (issue #295).
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     configure_session_resumption(&mut config)?;
 
-    Ok(TlsAcceptor::from(Arc::new(config)))
+    Ok(config)
+}
+
+/// Build the [`TlsAcceptors`] pair for one imposter from in-memory PEM bytes (issue #1029).
+///
+/// When [`crate::util::http2_disabled`] is set, both fields hold the http1-only acceptor: the kill
+/// switch is process-wide and read once, so it can be folded in at construction rather than
+/// re-checked per connection.
+pub fn tls_acceptors_from_pem(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    client_auth: &ClientAuth,
+) -> Result<TlsAcceptors, anyhow::Error> {
+    let config = tls_server_config_from_pem(cert_pem, key_pem, client_auth)?;
+    Ok(tls_acceptors_from_config(
+        config,
+        crate::util::http2_disabled(),
+    ))
+}
+
+/// Split one configured [`rustls::ServerConfig`] into the acceptor pair.
+///
+/// Takes `process_http1_only` as a parameter rather than reading
+/// [`crate::util::http2_disabled`] itself, so the collapse branch is reachable from a test: that
+/// function is a process-wide `OnceLock`, and a test that set the environment could neither
+/// un-set it nor avoid racing every other test in the binary.
+fn tls_acceptors_from_config(
+    config: rustls::ServerConfig,
+    process_http1_only: bool,
+) -> TlsAcceptors {
+    let mut http1_only_config = config.clone();
+    http1_only_config.alpn_protocols = alpn_protocols(true);
+    let http1_only = TlsAcceptor::from(Arc::new(http1_only_config));
+
+    let negotiated = if process_http1_only {
+        http1_only.clone()
+    } else {
+        let mut negotiated_config = config;
+        negotiated_config.alpn_protocols = alpn_protocols(false);
+        TlsAcceptor::from(Arc::new(negotiated_config))
+    };
+
+    TlsAcceptors {
+        negotiated,
+        http1_only,
+    }
 }
 
 /// In-memory server session-cache capacity for TLS resumption (issue #705). Sized well above a
@@ -261,15 +361,15 @@ pub fn configure_session_resumption(
     Ok(())
 }
 
-/// Generate an in-memory self-signed acceptor for zero-config HTTPS imposters (issue #206),
-/// matching Mountebank's built-in self-signed default. Valid for `localhost`/`127.0.0.1`.
-pub fn generate_self_signed_acceptor(
+/// Generate an in-memory self-signed [`TlsAcceptors`] pair for zero-config HTTPS imposters (issue
+/// #206), matching Mountebank's built-in self-signed default. Valid for `localhost`/`127.0.0.1`.
+pub fn generate_self_signed_acceptors(
     client_auth: &ClientAuth,
-) -> Result<TlsAcceptor, anyhow::Error> {
+) -> Result<TlsAcceptors, anyhow::Error> {
     let cert =
         rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
             .map_err(|e| anyhow::anyhow!("Failed to generate self-signed certificate: {e}"))?;
-    tls_acceptor_from_pem(
+    tls_acceptors_from_pem(
         cert.cert.pem().as_bytes(),
         cert.key_pair.serialize_pem().as_bytes(),
         client_auth,
@@ -329,6 +429,93 @@ mod tests {
     #[test]
     fn https_acceptor_builds_with_resumption() {
         // The real imposter-HTTPS path (self-signed) must still build once resumption is wired in.
-        assert!(generate_self_signed_acceptor(&ClientAuth::Off).is_ok());
+        assert!(generate_self_signed_acceptors(&ClientAuth::Off).is_ok());
+    }
+
+    /// A configured `ServerConfig` off the real self-signed path, so these tests exercise the same
+    /// construction an imposter does rather than a hand-rolled config.
+    fn self_signed_config() -> rustls::ServerConfig {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("self-signed cert");
+        tls_server_config_from_pem(
+            cert.cert.pem().as_bytes(),
+            cert.key_pair.serialize_pem().as_bytes(),
+            &ClientAuth::Off,
+        )
+        .expect("server config")
+    }
+
+    #[test]
+    fn the_two_acceptors_share_one_session_cache_and_ticketer() {
+        // Issue #1029: the pair exists so the ALPN offer can follow a stub mutation. If each half
+        // carried its own session cache, a mutation would silently move a client to the other
+        // acceptor and its session would no longer resume — turning a correctness fix into a
+        // handshake-storm regression (#705 is why resumption matters here at all). Cloning the
+        // config AFTER `configure_session_resumption` is what keeps the `Arc`s shared, so this
+        // pins the ordering, not just the outcome.
+        let acceptors = tls_acceptors_from_config(self_signed_config(), false);
+        let negotiated = acceptors.negotiated.config();
+        let http1_only = acceptors.http1_only.config();
+
+        assert!(
+            Arc::ptr_eq(&negotiated.session_storage, &http1_only.session_storage),
+            "both acceptors must share ONE session cache, or resumption breaks across a stub change"
+        );
+        assert!(
+            Arc::ptr_eq(&negotiated.ticketer, &http1_only.ticketer),
+            "and one ticketer, for the same reason"
+        );
+    }
+
+    #[test]
+    fn the_pair_differs_only_in_its_alpn_offer() {
+        let acceptors = tls_acceptors_from_config(self_signed_config(), false);
+        assert_eq!(
+            acceptors.negotiated.config().alpn_protocols,
+            alpn_protocols(false),
+            "the negotiated half offers h2 first"
+        );
+        assert_eq!(
+            acceptors.http1_only.config().alpn_protocols,
+            alpn_protocols(true),
+            "the http1-only half offers http/1.1 alone"
+        );
+    }
+
+    #[test]
+    fn the_kill_switch_collapses_both_halves_to_http1_only() {
+        // The `RIFT_DISABLE_HTTP2` branch. It is folded in at construction because the switch is a
+        // process-wide `OnceLock` — constant for the life of the process, unlike the per-connection
+        // fault/script half. Reachable here only because the fold takes a parameter rather than
+        // reading the env itself: a test cannot un-set a `OnceLock`.
+        let acceptors = tls_acceptors_from_config(self_signed_config(), true);
+
+        assert_eq!(
+            acceptors.negotiated.config().alpn_protocols,
+            alpn_protocols(true),
+            "with the kill switch on, even the `negotiated` half must not offer h2 — otherwise the \
+             switch removes h2 from what is SERVED while still advertising it, which is the exact \
+             mismatch this issue is about"
+        );
+        assert_eq!(
+            acceptors.http1_only.config().alpn_protocols,
+            alpn_protocols(true)
+        );
+    }
+
+    #[test]
+    fn alpn_offers_h2_unless_http1_only() {
+        assert_eq!(
+            alpn_protocols(false),
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            "h2 must be offered first, matching the intercept listener's order (#996)"
+        );
+        assert_eq!(
+            alpn_protocols(true),
+            vec![b"http/1.1".to_vec()],
+            "an HTTP/1-only decision must stop h2 being ADVERTISED, not merely stop it being \
+             served: a client that negotiated h2 from ALPN and then met an HTTP/1-only server \
+             would break outright, which is worse than the downgrade this exists to force"
+        );
     }
 }

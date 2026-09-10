@@ -392,7 +392,7 @@ Environment variables override CLI defaults:
 | `RIFT_INTERCEPT_CA_KEY` | PEM CA private key **file** for interception | |
 | `RIFT_INTERCEPT_CA_CERT_PEM` | Inline PEM CA certificate (the bytes, not a path; with `RIFT_INTERCEPT_CA_KEY_PEM`) — mutually exclusive with the `_CA_CERT`/`_CA_KEY` file pair | |
 | `RIFT_INTERCEPT_CA_KEY_PEM` | Inline PEM CA private key for interception | |
-| `RIFT_DISABLE_HTTP2` | Force HTTP/1-only listeners, disabling HTTP/2 & h2c auto-negotiation (truthy: `1`/`true`/`yes`/`on`) | off |
+| `RIFT_DISABLE_HTTP2` | Force HTTP/1-only listeners, disabling HTTP/2 & h2c auto-negotiation (truthy: `1`/`true`/`yes`/`on`). On HTTPS listeners it also removes `h2` from the ALPN offer, so a client offering both protocols negotiates `http/1.1` instead of being handed an `h2` the server will not speak. A client offering **only** `h2` is refused at the handshake with `no_application_protocol` — a loud failure rather than a protocol mismatch | off |
 | `RIFT_TCP_BACKLOG` | Listen backlog for the accept loop (positive integer) | `1024` |
 | `RIFT_TCP_NODELAY` | `TCP_NODELAY` on accepted sockets; `true`/`1`/`on` enables, `false`/`0`/`off` disables (case-insensitive) | on |
 | `RIFT_HTTP_MAX_BUF` | Per-connection HTTP read/write buffer cap, in bytes (positive integer; floored at hyper's 8 KB minimum). Bounds per-connection memory at high connection counts | `65536` |
