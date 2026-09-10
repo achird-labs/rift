@@ -46,6 +46,11 @@ Two consequences worth knowing:
   behaviors and `${request.headers.*}` template substitution all receive one value per header
   name — the first one sent.
 
+Only a value that is **not valid UTF-8** is affected — the check is UTF-8 validity, not ASCII
+(#1048). A header carrying non-ASCII UTF-8, such as `X-User-Name: José` or
+`Content-Disposition: attachment; filename="résumé.pdf"`, is matched, forwarded and recorded
+byte-exact.
+
 A header value that is not valid UTF-8 is **dropped**, everywhere: predicate matching, `proxy`
 forwarding, `savedRequests`, the behaviors and template substitution. It is never presented as an
 empty string, so `{"equals": {"headers": {"X-Bin": ""}}}` does not match a request that sent raw
