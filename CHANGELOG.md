@@ -151,6 +151,30 @@ record.
 
 ### Fixed
 
+- **A single-valued header object that named one header twice sent two header lines** (#1050).
+  `proxy.injectHeaders` and `_rift.fault.error.headers` hold one value per name, but nothing
+  enforced that: `injectHeaders: {"x-trace": "a", "X-Trace": "b"}` deserialized into two distinct
+  keys, and because `RequestBuilder::header` and `http::response::Builder::header` **append**
+  rather than replace, both lines were emitted — ordered by `HashMap` iteration, so differently
+  from one process to the next. #1039 fixed the equivalent for multi-valued header objects by
+  merging; these two were missed, and merging is not available to them.
+  - Such a document is now **rejected** at parse time — a `400` from `POST /imposters`, a startup
+    error from `--configfile` — with a message naming both spellings. Rejecting rather than folding
+    is deliberate: two different values for one slot have no correct combination, so any fold
+    silently discards one, which is the swallow rather than the fix for it. Nor could a tie-break
+    be made deterministic, since which spelling the deserializer sees first depends on whether the
+    document was streamed from text or routed through a `serde_json::Value`.
+  - A document that spelled one of these names twice loaded before and is refused now. Nothing that
+    worked stops working: what it was doing was emitting two nondeterministically ordered header
+    lines. Every fixture in the SDK conformance corpus spells each name once and is unaffected.
+  - **A deliberate Mountebank divergence, on `injectHeaders` only.** Node applies an options
+    `headers` object through case-insensitive `setHeader`, so Mountebank emits one header,
+    deterministically last-in-insertion-order, for a document Rift now refuses. Rift cannot
+    reproduce that: its `--configfile` wrapper form parses to a `serde_json::Value`, which is
+    key-sorted, so insertion order is not available to it. The real choice was between a
+    nondeterministic winner and a loud refusal. (`_rift.fault.error.headers` is a Rift extension
+    and carries no such constraint.)
+
 - **An HTTP/2 connection that went silent after the preface was pinned indefinitely** (#1044).
   #1030 bounded the protocol-detection window, and `RIFT_HTTP_HEADER_TIMEOUT` bounds an HTTP/1
   request head — but a client that sent the full 24-byte HTTP/2 preface *completed* detection, and

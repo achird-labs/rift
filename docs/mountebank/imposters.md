@@ -246,8 +246,9 @@ Each header name maps to the **list** of values the client sent, in order, so a 
 is recorded as `{"X-Test": ["first", "second"]}` rather than collapsing to one value.
 
 Header names are case-insensitive, so a document that spells one name two ways describes **one**
-header, not two. Rift merges such entries when it parses any header object — a recorded request, a
-stub's `headers`, a flat response, an intercept rule's `serve` action. A document like
+header, not two. Rift merges such entries when it parses a **multi-valued** header object — a
+recorded request, a stub's `headers`, a flat response, an intercept rule's `serve` action. A
+document like
 
 ```json
 { "content-type": "text/plain", "Content-Type": "application/json" }
@@ -278,6 +279,25 @@ rather than relayed as an empty string. It reaches neither the client nor the st
 would be served on every later request, long after the upstream was out of the picture. Note that
 this check is on **UTF-8 validity**, not on ASCII: an upstream header such as
 `Content-Disposition: attachment; filename="résumé.pdf"` relays, records and replays byte-exact.
+
+### Single-valued header objects reject a repeated name
+
+Two header objects hold **one** value per name rather than a list: `proxy.injectHeaders` and
+`_rift.fault.error.headers`. They do the opposite of the merge above — a name given twice, in any
+casing, is **rejected**, with a message naming both spellings (#1050):
+
+- `POST /imposters` answers `400`
+- `--configfile` fails at startup rather than booting with the imposter silently missing
+- the FFI's `rift_apply_config` returns the same message through `rift_last_error`
+
+There is no lossless merge for one slot and two different values, and silently picking a winner is
+exactly what the merge above exists to avoid. Before this, both spellings survived and *both header
+lines went out*, ordered differently from one process to the next. Write the name once.
+
+One wrinkle worth knowing: a name repeated with **identical** spelling (`{"x": "a", "x": "a"}`) is
+caught only when the document is read as text. Through `--configfile`'s `{"imposters": [...]}`
+wrapper the JSON parser has already collapsed it before Rift sees it, so it loads. A name repeated
+in *different* casing is caught on every path.
 
 ### Binary Request Bodies
 
