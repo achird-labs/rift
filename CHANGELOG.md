@@ -160,6 +160,29 @@ record.
     a valid non-ASCII UTF-8 value on an incoming request is still dropped from matching and the
     journal. That is tracked separately (#1048) rather than changed in passing, since it moves what
     predicates match on.
+- **A header object that spelled one name two ways became two headers** (#1039). HTTP header names
+  are case-insensitive, but the shared wire deserializer keyed its map by the literal spelling, so
+  `{"content-type": …, "Content-Type": …}` in a recorded request, a stub, a flat response or an
+  intercept rule loaded as two separate entries. Every case-insensitive lookup downstream — form
+  parsing, predicate fields, `copy`, the JS and Rhai engines, the verify CLI — resolves such a name
+  by scanning for the first case-matching key, so with two entries present the answer depended on
+  hash iteration order: the same stored request could parse its form one way on one run and another
+  way on the next. `deepEquals` on headers was worse than nondeterministic, comparing the expected
+  object's name count against a map that held one name twice, so it failed consistently and
+  wrongly.
+  - Such entries are now merged as they are parsed into a single entry carrying every value. Which
+    spelling survives, and the resulting order of the values, is deterministic but **unspecified**:
+    it depends on how the document reached Rift, and a single `--configfile` document can go either
+    way depending only on whether it uses the `{"imposters": [...]}` wrapper or a bare array. Depend
+    on there being one entry, not on which spelling wins. The spelling you write is still the
+    spelling Rift serves — the fix does not lowercase or title-case anything — and a document that
+    spells each name once is byte-for-byte unaffected in every respect.
+  - A name repeated with **identical** spelling now keeps both values instead of silently keeping
+    only the last. This diverges from Mountebank, which is Node and inherits `JSON.parse`'s
+    last-wins rule for a duplicate key. It affects only documents already relying on duplicate keys
+    within one JSON object — no fixture in the SDK conformance corpus, the examples or the test
+    suite has one — but the divergence is real and intentional: silently discarding a value the
+    document contains is the behaviour that made this class of bug hard to see in the first place.
 - **HTTPS imposters advertised HTTP/2 they would not speak** (#1029). The TLS handshake offered
   `h2, http/1.1` unconditionally, while the server serves HTTP/1-only whenever the imposter can fire
   a TCP fault, carries a `_rift.script` response, or `RIFT_DISABLE_HTTP2` is set. Advertising a
