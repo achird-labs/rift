@@ -169,6 +169,25 @@ record.
     `.http2().timer(...)` would surface only on real HTTP/2 traffic. A prior-knowledge h2 request
     test guards each site against exactly that.
 
+- **The upstream proxy blanked response header values it could not decode** (#1041). Relaying a
+  `proxy` response ran `v.to_str().unwrap_or("")` over the upstream's headers, so a value that did
+  not decode was replaced by an empty string the origin never sent — a data-path swallow, which the
+  repo's own error-handling rules classify as never acceptable. That one list feeds three places, so
+  the blank went to all of them: the client's response, the `RecordedResponse`, and the stub
+  `proxyOnce`/`proxyAlways` generates. The stub is the one that lasts — it kept serving the empty
+  header on every later request, long after the upstream was out of the picture.
+  - Such values are now **dropped**, with one warning per response naming the affected headers, so
+    the header is simply absent rather than present-and-wrong. Repeated headers keep their
+    multiplicity, `Set-Cookie` included.
+  - **More upstream headers now relay than before.** The check is UTF-8 validity, not
+    `HeaderValue::to_str`, which accepts only *visible ASCII* and therefore rejected valid UTF-8
+    such as `Content-Disposition: attachment; filename="résumé.pdf"`. Rift's serving side always
+    accepted those bytes, so blanking them was never necessary; they now relay, record and replay
+    byte-exact.
+  - Not covered here: the **request**-side collector applies the same over-strict `to_str` check, so
+    a valid non-ASCII UTF-8 value on an incoming request is still dropped from matching and the
+    journal. That is tracked separately (#1048) rather than changed in passing, since it moves what
+    predicates match on.
 - **Behaviors and template substitution disagreed with predicates about the same request** (#1040).
   `copy`, `lookup`, `decorate`, `shellTransform` and `${request.headers.*}` built their own view of
   the request headers — a second pass over the raw header map, with a different rule from the one

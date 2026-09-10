@@ -271,6 +271,14 @@ undecodable is absent from `headers` entirely. Unlike a binary request *body* (b
 no `_mode` slot on the wire to carry an encoded form, so dropping — with a warning logged
 server-side — is the honest representation.
 
+The same rule applies in the other direction, to a `proxy` response relayed from a real upstream
+(#1041): an upstream header value that is not valid UTF-8 is dropped, with a server-side warning,
+rather than relayed as an empty string. It reaches neither the client nor the stub that
+`proxyOnce`/`proxyAlways` records — which matters most for the stub, since a blanked value there
+would be served on every later request, long after the upstream was out of the picture. Note that
+this check is on **UTF-8 validity**, not on ASCII: an upstream header such as
+`Content-Disposition: attachment; filename="résumé.pdf"` relays, records and replays byte-exact.
+
 ### Binary Request Bodies
 
 A request body that is not valid UTF-8 (protobuf, gzip, an image upload) cannot be recorded as text
