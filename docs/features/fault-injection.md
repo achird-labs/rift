@@ -239,8 +239,9 @@ stays an object).
 
 These are real transport-level events applied beneath TLS, so HTTPS imposters get a genuine socket
 fault too. Because a connection-level fault aborts the whole socket, an imposter that uses any TCP
-fault is served over **HTTP/1 only** (HTTP/2 multiplexing is incompatible with mid-stream connection
-aborts).
+fault is **advertised and served** over HTTP/1 only (HTTP/2 multiplexing is incompatible with
+mid-stream connection aborts). On HTTPS that means the TLS handshake offers only `http/1.1`, so an
+h2-capable client is never led to commit to a protocol the imposter will not speak.
 
 ---
 
