@@ -554,6 +554,7 @@ async fn the_intercept_listener_closes_a_tunnel_that_sends_no_request() {
         resolver,
         rift_http_proxy::intercept_rules::InterceptRules::new(),
         None,
+        rift_mock_core::proxy::OutboundTls::default(),
     )
     .await
     .expect("bind intercept listener");

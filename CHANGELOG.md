@@ -13,6 +13,26 @@ record.
 
 ### Added
 
+- **WebSocket traffic passes through the intercept tunnel** (#997). A `Connection: Upgrade` /
+  `Upgrade: websocket` request used to get an ordinary HTTP response, so the handshake failed — any
+  system under test whose traffic includes a WebSocket (socket.io, GraphQL subscriptions, a
+  dev-server's live reload) had that connection silently broken simply by being routed through the
+  proxy. The tunnel's contract is that traffic no rule claims reaches the origin unchanged, and this
+  was the one case where it did not.
+  - A handshake no rule matches is now relayed to the real origin and the upgraded connection is
+    pumped both ways until either side closes or the listener shuts down. A rule that *does* match
+    the handshake still serves its response and no upgrade happens — which is how you simulate the
+    endpoint being down or refusing.
+  - **Frames are never inspected, matched or recorded.** WebSocket *mocking* — terminating the
+    upgrade and scripting frames — remains out of scope: it would be a new imposter protocol with
+    its own grammar.
+  - Only `websocket` takes this path; any other `Upgrade` value, `h2c` included, is unchanged.
+  - This is the first outbound connection the intercept listener makes, so it uses the process-wide
+    outbound TLS trust (`--upstream-ca-file` and friends) rather than deriving its own — an origin
+    behind a private CA works, and trust does not diverge per client the way #974 was filed to
+    prevent. `InterceptListener::bind` therefore takes an `OutboundTls`; embedders calling it
+    directly need the new argument.
+
 - **`rift_preface_failures_total`, so preface drops can be told apart** (#1045). A connection that
   never resolves to HTTP/1 or HTTP/2 is dropped and logged at `debug!` — deliberately, since the
   trigger is entirely client-controlled and a per-connection warning would hand a hostile client an

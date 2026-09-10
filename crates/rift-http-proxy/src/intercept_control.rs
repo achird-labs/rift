@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use crate::admin_api::{AdminExposurePolicy, check_intercept_exposure};
 use crate::intercept::InterceptListener;
 use crate::intercept_rules::{InterceptRule, InterceptRules, InterceptState, RulesAtCapacity};
+use rift_mock_core::proxy::OutboundTls;
 use rift_mock_core::proxy::intercept_ca::{CaSource, CertificateAuthority, SniCertResolver};
 use serde::Serialize;
 
@@ -48,6 +49,13 @@ pub struct InterceptControl {
     /// is the operator's call, not the caller's, and putting it in the request body would let the
     /// very caller being judged turn the judgement off.
     exposure: AdminExposurePolicy,
+    /// Trust policy for connections this listener makes *outbound*, to a real origin (issue #997).
+    ///
+    /// Same reasoning as `exposure`: it is the operator's configuration, not the caller's, so it
+    /// travels with the control rather than with `InterceptStartOptions`. Defaulting to the
+    /// untouched `OutboundTls` means system roots only, which is what a listener started before
+    /// this field existed effectively had.
+    outbound_tls: OutboundTls,
 }
 
 /// Start options — the exact shape (and serde attributes) of the FFI's former `InterceptOptions`,
@@ -246,6 +254,21 @@ impl InterceptControl {
         self
     }
 
+    /// Set the outbound TLS trust every listener started through this control uses when it relays
+    /// to a real origin (issue #997 — WebSocket passthrough is the first thing that does).
+    ///
+    /// Threaded from the process-wide policy so an intercept relay trusts exactly what an imposter
+    /// `proxy` stub trusts. Divergent per-client trust is what #974 was filed to remove, and a
+    /// private-CA origin — the common case for the systems an intercept proxy is pointed at —
+    /// works only if this is shared rather than re-derived.
+    ///
+    /// Same clone-before-configure caveat as [`with_exposure_policy`](Self::with_exposure_policy).
+    #[must_use]
+    pub fn with_outbound_tls(mut self, outbound_tls: OutboundTls) -> Self {
+        self.outbound_tls = outbound_tls;
+        self
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<InterceptPlane>> {
         self.plane.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -345,12 +368,18 @@ impl InterceptControl {
         })?;
 
         let resolver = Arc::new(SniCertResolver::new(ca.clone()));
-        let listener = InterceptListener::bind(addr, resolver, rules.clone(), auth)
-            .await
-            .map_err(|e| {
-                warn_intercept_start_failure(&e, "bind failed");
-                InterceptStartError::Bind(e)
-            })?;
+        let listener = InterceptListener::bind(
+            addr,
+            resolver,
+            rules.clone(),
+            auth,
+            self.outbound_tls.clone(),
+        )
+        .await
+        .map_err(|e| {
+            warn_intercept_start_failure(&e, "bind failed");
+            InterceptStartError::Bind(e)
+        })?;
         let bound = listener.local_addr();
 
         match self.install(InterceptPlane {

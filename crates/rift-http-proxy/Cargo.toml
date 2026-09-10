@@ -119,6 +119,12 @@ path = "."
 features = ["test-util"]
 
 [dev-dependencies]
+# Test-only: drives a real WebSocket handshake and real frames through the intercept tunnel
+# (issue #997). `handshake` only — the TLS legs are built from the repo's own rustls config, so
+# none of this crate's TLS features are wanted.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+# `WebSocketStream` is a `Stream`/`Sink`; the combinators come from here.
+futures-util = "0.3"
 # Turn on the failing flow-store backend for backend-outage tests (issue #318)
 rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-features = false, features = ["test-backend"] }
 # Corpus lint gate (issue #460): lint every vendored fixture via the library API.

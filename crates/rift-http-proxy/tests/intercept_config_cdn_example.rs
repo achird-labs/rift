@@ -48,9 +48,15 @@ async fn intercepts_external_config_cdn_without_mitmproxy() {
     // 3. Start the intercept listener. An embedder would also expose the admin API by building the
     //    admin server `with_intercept(...)`; here we drive the rule store directly.
     let resolver = Arc::new(SniCertResolver::new(ca));
-    let listener = InterceptListener::bind("127.0.0.1:0".parse().unwrap(), resolver, rules, None)
-        .await
-        .expect("bind intercept listener");
+    let listener = InterceptListener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        resolver,
+        rules,
+        None,
+        rift_mock_core::proxy::OutboundTls::default(),
+    )
+    .await
+    .expect("bind intercept listener");
 
     // 4. The SUT: an HTTP client that trusts ONLY the intercept CA and routes HTTPS through the
     //    listener. The JVM equivalent is:
