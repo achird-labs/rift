@@ -1481,6 +1481,76 @@ mod repeated_request_headers_reach_matching {
         let _ = manager.delete_imposter(21525).await;
         let _ = manager.delete_imposter(21526).await;
     }
+
+    // Issue #1040: the behaviours' and templating's view of the request headers used to be a
+    // SECOND pass over the raw `HeaderMap` — coercing an undecodable value to `""` and keeping a
+    // repeated header's LAST value, while predicates, forwarding, the journal and inject all read
+    // the collected map and took the first. One request, two answers, depending on which surface
+    // asked.
+    //
+    // This is the wiring half of the fix, and it is the half a unit test cannot reach: the request
+    // map is shadowed inside the handler by the response header map of the same name, so passing
+    // the wrong one compiles cleanly and yields a plausible wrong answer. `copy` and
+    // `${request.headers.*}` are asserted together because they are the two independent consumers
+    // of that wiring.
+    #[tokio::test]
+    async fn behaviors_and_templates_see_the_first_value_and_never_an_emptied_header() {
+        let manager = serve(serde_json::json!({
+            "port": 21528, "protocol": "http",
+            "stubs": [{"responses": [{
+                "is": {"statusCode": 200,
+                       "body": "copied=${ID}|bin=[${BIN}]|tmpl=${request.headers.x-id}"},
+                "_rift": {"templated": true},
+                "_behaviors": {"copy": [
+                    {"from": {"headers": "X-Id"}, "into": "${ID}",
+                     "using": {"method": "regex", "selector": ".+"}},
+                    {"from": {"headers": "X-Bin"}, "into": "${BIN}",
+                     "using": {"method": "regex", "selector": ".+"}}
+                ]}
+            }]}]
+        }))
+        .await;
+
+        let body = tokio::task::spawn_blocking(|| {
+            let mut sock = std::net::TcpStream::connect("127.0.0.1:21528").expect("connect");
+            let mut raw =
+                b"GET /x HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Id: a\r\nX-Id: b\r\nX-Bin: ".to_vec();
+            raw.extend_from_slice(&[0xFF, 0xFE]);
+            raw.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+            sock.write_all(&raw).expect("write");
+            let mut out = String::new();
+            let _ = sock.read_to_string(&mut out);
+            out
+        })
+        .await
+        .expect("raw request");
+
+        assert!(
+            body.contains("copied=a"),
+            "`copy` must take the FIRST value of a repeated header, matching predicates and \
+             inject; before #1040 it took the last (`b`). got: {body}"
+        );
+        // Deliberately NOT asserted here: that the undecodable `X-Bin` is *absent* rather than
+        // present-as-empty. `copy` maps both to the same output by design — its `else` branch
+        // substitutes `""` for a source it cannot find (copy.rs), and a present-but-empty value
+        // fails the `.+` selector and substitutes `""` too. Template substitution collapses them
+        // the same way (`get` returns `None`, then `unwrap_or_default`). The absence is real and is
+        // pinned where it is observable: `from_request_omits_a_header_whose_only_value_was_
+        // undecodable` at the map level, and `a_header_whose_only_value_is_non_utf8_does_not_exist_
+        // for_predicates` above at the `exists` level. Asserting it here would only have looked
+        // like coverage.
+        assert!(
+            body.contains("bin=[]"),
+            "sanity: the undecodable header contributes nothing, however it is represented. \
+             got: {body}"
+        );
+        assert!(
+            body.contains("tmpl=a"),
+            "template substitution reads the same collected view, so it agrees with `copy`; \
+             before #1040 it made its own last-wins pass. got: {body}"
+        );
+        let _ = manager.delete_imposter(21528).await;
+    }
 }
 
 // Issue #197: POST /admin/reload re-reads the config source and replaces imposters.
