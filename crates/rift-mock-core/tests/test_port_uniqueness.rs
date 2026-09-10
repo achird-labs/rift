@@ -124,14 +124,16 @@ fn port_literals(text: &str) -> Vec<(u16, usize)> {
             }
             // Reject a digit run that is part of a longer word (`x19500`, `19500u16`, `1_9500`):
             // `\b`-equivalent on both sides, so a suffixed or prefixed number is not a port.
-            let before_ok = start == 0 || !(lb[start - 1].is_ascii_alphanumeric() || lb[start - 1] == b'_');
+            let before_ok =
+                start == 0 || !(lb[start - 1].is_ascii_alphanumeric() || lb[start - 1] == b'_');
             let after_ok = i == lb.len() || !(lb[i].is_ascii_alphanumeric() || lb[i] == b'_');
-            if before_ok && after_ok && i - start == 5 {
-                if let Ok(n) = line[start..i].parse::<u16>() {
-                    if (PORT_LO..=PORT_HI).contains(&n) {
-                        out.push((n, lineno + 1));
-                    }
-                }
+            if before_ok
+                && after_ok
+                && i - start == 5
+                && let Ok(n) = line[start..i].parse::<u16>()
+                && (PORT_LO..=PORT_HI).contains(&n)
+            {
+                out.push((n, lineno + 1));
             }
         }
     }
@@ -237,15 +239,36 @@ fn the_port_matcher_accepts_ports_and_rejects_look_alikes() {
     assert_eq!(found(r#""http://127.0.0.1:21500/x""#), vec![21500]);
     assert_eq!(found("(15000, 24999)"), vec![15000, 24999]);
 
-    assert_eq!(found("Duration::from_millis(20000)"), vec![20000],
+    assert_eq!(
+        found("Duration::from_millis(20000)"),
+        vec![20000],
         "a duration that happens to look like a port IS matched — the matcher cannot tell, which \
-         is why the exception list exists rather than a cleverer regex");
+         is why the exception list exists rather than a cleverer regex"
+    );
 
-    assert!(found("let x = 14999;").is_empty(), "below the sanctioned block");
-    assert!(found("let x = 25000;").is_empty(), "above the sanctioned block");
-    assert!(found("let x = 49152;").is_empty(), "the auto-assign floor is out of range");
-    assert!(found("let x = 195000;").is_empty(), "six digits is not a port literal");
+    assert!(
+        found("let x = 14999;").is_empty(),
+        "below the sanctioned block"
+    );
+    assert!(
+        found("let x = 25000;").is_empty(),
+        "above the sanctioned block"
+    );
+    assert!(
+        found("let x = 49152;").is_empty(),
+        "the auto-assign floor is out of range"
+    );
+    assert!(
+        found("let x = 195000;").is_empty(),
+        "six digits is not a port literal"
+    );
     assert!(found("let x = x19500;").is_empty(), "part of an identifier");
-    assert!(found("let x = 19500u16;").is_empty(), "a suffixed literal is not a bare port");
-    assert!(found("let x = 1_9500;").is_empty(), "an underscore-separated literal is not matched");
+    assert!(
+        found("let x = 19500u16;").is_empty(),
+        "a suffixed literal is not a bare port"
+    );
+    assert!(
+        found("let x = 1_9500;").is_empty(),
+        "an underscore-separated literal is not matched"
+    );
 }

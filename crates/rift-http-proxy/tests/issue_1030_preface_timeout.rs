@@ -231,18 +231,18 @@ const EMPTY_SETTINGS: &[u8] = &[0, 0, 0, 4, 0, 0, 0, 0, 0];
 #[serial_test::serial]
 async fn a_plaintext_imposter_closes_a_connection_that_sends_only_the_h2_preface() {
     let manager = serve(serde_json::json!({
-        "port": 21550, "protocol": "http",
+        "port": 22700, "protocol": "http",
         "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]
     }))
     .await;
 
-    let closed = tokio::task::spawn_blocking(|| time_until_close_draining(21550, H2_PREFACE))
+    let closed = tokio::task::spawn_blocking(|| time_until_close_draining(22700, H2_PREFACE))
         .await
         .expect("probe task");
 
     assert_closed_by_the_deadline(closed, "a client that sent only the h2 preface");
 
-    let _ = manager.delete_imposter(21550).await;
+    let _ = manager.delete_imposter(22700).await;
 }
 
 // The post-SETTINGS hole, which the issue does not mention and which `header_read_timeout` has no
@@ -252,14 +252,14 @@ async fn a_plaintext_imposter_closes_a_connection_that_sends_only_the_h2_preface
 #[serial_test::serial]
 async fn a_plaintext_imposter_closes_an_h2_connection_that_never_sends_a_request() {
     let manager = serve(serde_json::json!({
-        "port": 21551, "protocol": "http",
+        "port": 22701, "protocol": "http",
         "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]
     }))
     .await;
 
     let mut probe = H2_PREFACE.to_vec();
     probe.extend_from_slice(EMPTY_SETTINGS);
-    let closed = tokio::task::spawn_blocking(move || time_until_close_draining(21551, &probe))
+    let closed = tokio::task::spawn_blocking(move || time_until_close_draining(22701, &probe))
         .await
         .expect("probe task");
 
@@ -268,7 +268,7 @@ async fn a_plaintext_imposter_closes_an_h2_connection_that_never_sends_a_request
         "an h2 peer that completed the handshake then went quiet",
     );
 
-    let _ = manager.delete_imposter(21551).await;
+    let _ = manager.delete_imposter(22701).await;
 }
 
 // The panic guard. `Time::Empty` panics with "timeout set, but no timer set" the first time an h2
@@ -279,7 +279,7 @@ async fn a_plaintext_imposter_closes_an_h2_connection_that_never_sends_a_request
 #[serial_test::serial]
 async fn a_prior_knowledge_h2_request_is_served_rather_than_panicking() {
     let manager = serve(serde_json::json!({
-        "port": 21552, "protocol": "http",
+        "port": 22702, "protocol": "http",
         "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "h2-ok"}}]}]
     }))
     .await;
@@ -289,7 +289,7 @@ async fn a_prior_knowledge_h2_request_is_served_rather_than_panicking() {
         .build()
         .expect("h2 client");
     let body = client
-        .get("http://127.0.0.1:21552/x")
+        .get("http://127.0.0.1:22702/x")
         .send()
         .await
         .expect("an h2 request must be served, not panic the connection task")
@@ -299,7 +299,7 @@ async fn a_prior_knowledge_h2_request_is_served_rather_than_panicking() {
 
     assert_eq!(body, "h2-ok");
 
-    let _ = manager.delete_imposter(21552).await;
+    let _ = manager.delete_imposter(22702).await;
 }
 
 #[tokio::test]
