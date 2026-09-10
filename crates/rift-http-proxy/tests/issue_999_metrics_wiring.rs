@@ -73,12 +73,13 @@ async fn hit(client: &reqwest::Client, port: u16, path: &str) {
 #[tokio::test]
 async fn documented_metric_families_all_appear_in_the_scrape() {
     let families = documented_families();
-    // The `:9090` table has 11 rows. A parser that silently dropped a few would leave exactly
-    // those families unchecked, which is the failure this guard is supposed to make impossible —
-    // so the floor is the real count, not a loose lower bound.
+    // The `:9090` table has 12 rows (11 before `rift_preface_failures_total`, issue #1045). A
+    // parser that silently dropped a few would leave exactly those families unchecked, which is
+    // the failure this guard is supposed to make impossible — so the floor is the real count, not
+    // a loose lower bound.
     assert_eq!(
         families.len(),
-        11,
+        12,
         "expected 11 documented `:9090` families; the table shape or contents changed. If a row \
          was deliberately added or removed, update this count deliberately too: {families:?}"
     );
@@ -198,6 +199,12 @@ async fn documented_metric_families_all_appear_in_the_scrape() {
         r#"rift_error_status_total{rule_id="21500",status="503"}"#,
         r#"rift_script_errors_total{error_type="runtime",rule_id="21503"}"#,
         r#"rift_flow_state_ops_total{operation="increment",result="success"}"#,
+        // Materialised at listener start, so it is present at 0 without provoking a failure —
+        // which is the property the docs promise and the reason the row-count guard above does
+        // not have to be taught about a family that only appears under fault.
+        r#"rift_preface_failures_total{kind="eof",listener="imposter"}"#,
+        r#"rift_preface_failures_total{kind="io",listener="imposter"}"#,
+        r#"rift_preface_failures_total{kind="timeout",listener="imposter"}"#,
     ] {
         assert!(
             scrape.contains(expected),

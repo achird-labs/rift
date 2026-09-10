@@ -150,6 +150,7 @@ async fn run_http1<I>(
                     // Entirely client-controlled (a client choosing to stay silent), so this is
                     // not worth more than a debug log — a per-connection `warn!` here would be an
                     // unbounded log-volume lever for a hostile client (issue #718's rule).
+                    crate::extensions::metrics::record_preface_failure("imposter", &e);
                     debug!("preface detection on port {}: {}", port, e);
                     return;
                 }
@@ -1138,6 +1139,7 @@ impl ImposterManager {
         let mut outage = crate::extensions::AcceptOutageGuard::new("imposter");
         // Resolved once per loop, not per error (#840).
         let accept_errors = crate::extensions::AcceptErrorCounters::new("imposter");
+        crate::extensions::metrics::materialize_preface_failure_counters("imposter");
         loop {
             // Acquire a permit *before* accepting so a cap holds connections back in the
             // listener backlog/kernel SYN queue rather than accepting them and then failing

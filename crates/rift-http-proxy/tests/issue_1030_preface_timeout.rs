@@ -118,6 +118,61 @@ async fn a_plaintext_imposter_closes_a_connection_that_sends_nothing() {
     let _ = manager.delete_imposter(21540).await;
 }
 
+// Issue #1045: the counter must actually be wired to the listener, and must discriminate the
+// cause. A unit test on `record_preface_failure` proves the mapping but not that any listener
+// calls it — which is the half that would silently regress, exactly as the sniffer's own unit
+// tests could not show that a listener wired detection to its timer (#1030, above).
+//
+// Counters are process-global and this binary is `#[serial]`, so both assertions are deltas.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_dropped_connection_is_counted_under_the_kind_that_caused_it() {
+    let manager = serve(serde_json::json!({
+        "port": 21549, "protocol": "http",
+        "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]
+    }))
+    .await;
+
+    let timeouts_before = preface_failures("imposter", "timeout");
+    let eofs_before = preface_failures("imposter", "eof");
+
+    // Connect and stay silent -> the sniffer's deadline expires -> `Timeout`.
+    let _ = tokio::task::spawn_blocking(|| time_until_close(21549, b""))
+        .await
+        .expect("silent probe");
+    // Connect and hang up immediately -> the read returns 0 bytes -> `Eof`.
+    tokio::task::spawn_blocking(|| {
+        drop(TcpStream::connect(("127.0.0.1", 21549)).expect("connect"));
+    })
+    .await
+    .expect("eof probe");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(
+        preface_failures("imposter", "timeout") > timeouts_before,
+        "a client that connected and went quiet must land on kind=timeout"
+    );
+    assert!(
+        preface_failures("imposter", "eof") > eofs_before,
+        "a client that hung up must land on kind=eof, NOT on timeout — telling those two apart \
+         from a systemic `io` rate is the entire reason this metric exists"
+    );
+
+    let _ = manager.delete_imposter(21549).await;
+}
+
+/// Read one child of `rift_preface_failures_total` out of the scrape.
+fn preface_failures(listener: &str, kind: &str) -> f64 {
+    let needle = format!(r#"rift_preface_failures_total{{kind="{kind}",listener="{listener}"}} "#);
+    rift_mock_core::extensions::metrics::collect_metrics()
+        .lines()
+        .find_map(|l| l.strip_prefix(needle.as_str()))
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .unwrap_or_else(|| {
+            panic!("series {needle}not found — it must be materialised at 0 from listener start")
+        })
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn a_plaintext_imposter_closes_a_connection_stuck_mid_preface() {
