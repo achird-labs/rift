@@ -151,6 +151,24 @@ record.
 
 ### Fixed
 
+- **An HTTP/2 connection that went silent after the preface was pinned indefinitely** (#1044).
+  #1030 bounded the protocol-detection window, and `RIFT_HTTP_HEADER_TIMEOUT` bounds an HTTP/1
+  request head — but a client that sent the full 24-byte HTTP/2 preface *completed* detection, and
+  HTTP/2 has no equivalent of HTTP/1's header timer. Such a peer held a task, a file descriptor and
+  (over TLS) a `TlsStream` for as long as it cared to stay quiet, unauthenticated. So did one that
+  completed the whole handshake and then never opened a stream, which the issue did not mention.
+  - hyper's HTTP/2 keep-alive ping is the only mechanism that reaches this, and it was simply never
+    configured — it does not arm unless an interval is set. All five listeners now set it, reusing
+    `RIFT_HTTP_HEADER_TIMEOUT` rather than adding a knob: that variable already means "how long a
+    client may hold a connection without producing a request head". A silent peer is closed within
+    two intervals.
+  - **Idle HTTP/2 connections are now pinged** every `RIFT_HTTP_HEADER_TIMEOUT` (30s by default). A
+    live client answers and is unaffected.
+  - Note for anyone extending this: hyper panics (`Time::Empty`) if an HTTP/2 timeout is set without
+    an HTTP/2 timer, and every listener previously set a timer on the HTTP/1 leg only — so a missed
+    `.http2().timer(...)` would surface only on real HTTP/2 traffic. A prior-knowledge h2 request
+    test guards each site against exactly that.
+
 - **The upstream proxy blanked response header values it could not decode** (#1041). Relaying a
   `proxy` response ran `v.to_str().unwrap_or("")` over the upstream's headers, so a value that did
   not decode was replaced by an empty string the origin never sent — a data-path swallow, which the

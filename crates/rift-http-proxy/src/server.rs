@@ -1171,6 +1171,25 @@ async fn metrics_accept_loop(
                     .timer(hyper_util::rt::TokioTimer::new())
                     .header_read_timeout(http_tuning.header_read_timeout)
                     .max_buf_size(http_tuning.max_buf_size);
+                // Issue #1044: the h2 leg needs its own bound. `header_read_timeout` covers HTTP/1 and
+                // the preface sniff covers the detection window (#1030), but neither reaches an h2
+                // connection that has finished its handshake and then goes silent — hyper has no "first
+                // request head" timer for h2 at all. Its keep-alive ping is the only knob that closes such
+                // a peer, and it was simply never configured: `is_enabled()` is false unless an interval
+                // is set, so no ping ever armed.
+                //
+                // The timer is not optional decoration. Setting an h2 timeout with no h2 timer makes
+                // hyper panic (`Time::Empty`) on the first h2 connection, and every site here set a timer
+                // on the h1 leg only.
+                //
+                // Reuses RIFT_HTTP_HEADER_TIMEOUT rather than adding a knob: it already means "how long a
+                // client may hold a connection without producing a request head", which is exactly this.
+                // Worst case for a silent peer is interval + timeout = 2x the value.
+                builder
+                    .http2()
+                    .timer(hyper_util::rt::TokioTimer::new())
+                    .keep_alive_interval(http_tuning.header_read_timeout)
+                    .keep_alive_timeout(http_tuning.header_read_timeout);
                 drive_conn!(builder.serve_connection(TokioIo::new(sniffed), service));
             }
         });

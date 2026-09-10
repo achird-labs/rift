@@ -82,6 +82,47 @@ fn time_until_close(port: u16, probe: &[u8]) -> Option<Duration> {
     }
 }
 
+/// Like [`time_until_close`], but keeps reading until the peer actually closes.
+///
+/// The single-read version is right for an HTTP/1 probe, where a server that has not been given a
+/// request head says nothing at all — so the first read returning data means it answered, which
+/// such a probe never warrants. An **h2** server is the opposite: it writes its own SETTINGS frame
+/// the moment the handshake completes, and then PING frames while it waits. Those are protocol
+/// chatter, not an answer, so a single read would report "never closed" for a connection that is
+/// about to be closed correctly — the failure this helper exists to avoid mistaking for the bug.
+fn time_until_close_draining(port: u16, probe: &[u8]) -> Option<Duration> {
+    let stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(CLOSE_BUDGET))
+        .expect("set read timeout");
+    let started = Instant::now();
+    let mut s = &stream;
+    s.write_all(probe).expect("write probe");
+    s.flush().ok();
+
+    let mut sink = [0u8; 1024];
+    loop {
+        match s.read(&mut sink) {
+            // The peer closed: this is the outcome under test.
+            Ok(0) => return Some(started.elapsed()),
+            // SETTINGS, PING, GOAWAY — read past it and keep waiting for the close.
+            Ok(_) => {
+                if started.elapsed() >= CLOSE_BUDGET {
+                    return None;
+                }
+            }
+            Err(_) => {
+                let elapsed = started.elapsed();
+                return if elapsed >= CLOSE_BUDGET {
+                    None
+                } else {
+                    Some(elapsed)
+                };
+            }
+        }
+    }
+}
+
 /// Assert the connection was closed *by the deadline*, not merely closed.
 ///
 /// Without a lower bound, a server that dropped every new connection instantly — a panicking
@@ -171,6 +212,94 @@ fn preface_failures(listener: &str, kind: &str) -> f64 {
         .unwrap_or_else(|| {
             panic!("series {needle}not found — it must be materialised at 0 from listener start")
         })
+}
+
+/// The 24-byte HTTP/2 connection preface. A client that sends this in full has *completed* the
+/// detection window — `sniff_h2_preface` returns `Ok` — so #1030's deadline is already spent by
+/// the time the connection goes quiet. That is the gap #1044 closes.
+const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// A minimal, valid, empty SETTINGS frame: length 0, type 0x4, flags 0, stream 0.
+const EMPTY_SETTINGS: &[u8] = &[0, 0, 0, 4, 0, 0, 0, 0, 0];
+
+// Issue #1044. Note what the issue itself got wrong, and why the distinction matters here: h2's
+// handshake does NOT wait for the client's SETTINGS — it writes the server's own and reads the
+// 24-byte preface, both of which are already satisfied. The unbounded wait is one state later, in
+// hyper's `Serving` loop, which has no timer of its own. So a fix aimed at "the handshake" would
+// bound nothing; only the keep-alive ping reaches this.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_plaintext_imposter_closes_a_connection_that_sends_only_the_h2_preface() {
+    let manager = serve(serde_json::json!({
+        "port": 21550, "protocol": "http",
+        "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]
+    }))
+    .await;
+
+    let closed = tokio::task::spawn_blocking(|| time_until_close_draining(21550, H2_PREFACE))
+        .await
+        .expect("probe task");
+
+    assert_closed_by_the_deadline(closed, "a client that sent only the h2 preface");
+
+    let _ = manager.delete_imposter(21550).await;
+}
+
+// The post-SETTINGS hole, which the issue does not mention and which `header_read_timeout` has no
+// h2 analogue for: a peer that completes the whole handshake and then never opens a stream was
+// pinned indefinitely too. Keep-alive closes it, so this bounds strictly more than was asked for.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_plaintext_imposter_closes_an_h2_connection_that_never_sends_a_request() {
+    let manager = serve(serde_json::json!({
+        "port": 21551, "protocol": "http",
+        "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]
+    }))
+    .await;
+
+    let mut probe = H2_PREFACE.to_vec();
+    probe.extend_from_slice(EMPTY_SETTINGS);
+    let closed = tokio::task::spawn_blocking(move || time_until_close_draining(21551, &probe))
+        .await
+        .expect("probe task");
+
+    assert_closed_by_the_deadline(
+        closed,
+        "an h2 peer that completed the handshake then went quiet",
+    );
+
+    let _ = manager.delete_imposter(21551).await;
+}
+
+// The panic guard. `Time::Empty` panics with "timeout set, but no timer set" the first time an h2
+// connection is served by a builder that got `keep_alive_interval` without `.http2().timer(...)`.
+// Every site here previously set a timer on the h1 leg ONLY, so forgetting one is the single most
+// likely way to get this change wrong — and it would not show up on any HTTP/1 traffic at all.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_prior_knowledge_h2_request_is_served_rather_than_panicking() {
+    let manager = serve(serde_json::json!({
+        "port": 21552, "protocol": "http",
+        "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "h2-ok"}}]}]
+    }))
+    .await;
+
+    let client = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .build()
+        .expect("h2 client");
+    let body = client
+        .get("http://127.0.0.1:21552/x")
+        .send()
+        .await
+        .expect("an h2 request must be served, not panic the connection task")
+        .text()
+        .await
+        .expect("body");
+
+    assert_eq!(body, "h2-ok");
+
+    let _ = manager.delete_imposter(21552).await;
 }
 
 #[tokio::test]
