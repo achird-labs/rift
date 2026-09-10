@@ -141,6 +141,31 @@ record.
 
 ### Fixed
 
+- **A connection that completed the handshake and then said nothing was never timed out**
+  (#1030). Every listener that serves with `hyper_util`'s `auto::Builder` sniffs the connection
+  preface to choose HTTP/1 or HTTP/2 *before* it builds either protocol's connection — and
+  `header_read_timeout` lives on that connection, so it could not arm until the sniff resolved.
+  A client that finished the TCP (and TLS) handshake and then sent nothing held a task, a file
+  descriptor and, over TLS, a whole `TlsStream`, for as long as it cared to, unauthenticated.
+  Each listener now runs that detection itself under `RIFT_HTTP_HEADER_TIMEOUT` and replays the
+  sniffed bytes, so the detection window is bounded like every other phase of a request.
+  - Two things the issue's own framing understated. It is **not** "until the first byte": the
+    detection loop only exits on a complete 24-byte preface or a byte that diverges from it, so a
+    client sending `P` and stopping was equally stuck — a fix keyed on "has the client sent
+    anything?" would have left that open. And it is **not** TLS-specific: the three plaintext
+    listeners had the identical hole; TLS only makes the parked connection more expensive.
+  - Keep-alive and HTTP/2 connections are deliberately untouched. Bounding the whole connection
+    (rather than just its detection window) would have closed every long-lived connection at the
+    deadline, which is why the obvious `timeout(serve_connection)` was not the fix.
+  - Worst-case silence before a close is now up to **2×** `RIFT_HTTP_HEADER_TIMEOUT` — once for
+    detection, then once for HTTP/1's own header timer, which can only start afterwards. Documented
+    rather than netted: subtracting elapsed time makes a very small timeout behave erratically.
+
+- **The intercept listener ignored `RIFT_MAX_CONNECTIONS`** (#1030). It read the tuning at bind
+  time but never applied the cap, so it was the one listener with no bound on concurrently-accepted
+  connections. It now takes a permit before accepting, exactly as the imposter and front-door
+  listeners do, holding excess in the kernel backlog instead of accepting and then failing.
+
 - **`/verify` and rule matching disagreed about a repeated request header** (#1026). Since #994 the
   predicate engine matches if *any* value of a repeated header satisfies the predicate, but
   `POST /imposters/{port}/verify` still collapsed a recorded request's headers to one value per name

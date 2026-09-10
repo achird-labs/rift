@@ -1083,7 +1083,6 @@ async fn metrics_accept_loop(
                 }
             },
         };
-        let io = TokioIo::new(stream);
         let conn_cancel = cancel.clone();
 
         tracker.spawn(async move {
@@ -1125,6 +1124,9 @@ async fn metrics_accept_loop(
             }
 
             if rift_mock_core::util::http2_disabled() {
+                // `http1::Builder`'s own timer arms immediately (issue #1030 is specific to
+                // `auto`'s preface sniff, which runs before any timer exists) — no sniffing
+                // needed here.
                 let mut builder = hyper::server::conn::http1::Builder::new();
                 // A timer is required for `header_read_timeout` to take effect (hyper panics on
                 // serve_connection otherwise) — always paired with it below.
@@ -1132,8 +1134,31 @@ async fn metrics_accept_loop(
                     .timer(hyper_util::rt::TokioTimer::new())
                     .header_read_timeout(http_tuning.header_read_timeout)
                     .max_buf_size(http_tuning.max_buf_size);
-                drive_conn!(builder.serve_connection(io, service));
+                drive_conn!(builder.serve_connection(TokioIo::new(stream), service));
             } else {
+                // Bound the HTTP/1-vs-HTTP/2 detection window itself (issue #1030): sniffed on
+                // the tokio-side `TcpStream`, before `TokioIo::new`. Also raced against
+                // cancellation: this runs before `drive_conn!` below, which is otherwise the only
+                // place a connection observes it, so without this a shutdown would have to wait
+                // out the full detection deadline for any connection still stuck sniffing.
+                let sniff = rift_mock_core::proxy::preface::sniff_h2_preface(
+                    stream,
+                    http_tuning.header_read_timeout,
+                );
+                tokio::pin!(sniff);
+                let sniffed = tokio::select! {
+                    result = &mut sniff => match result {
+                        Ok(sniffed) => sniffed,
+                        Err(e) => {
+                            // Entirely client-controlled, so this is not worth more than a debug
+                            // log — a per-connection `error!` here would be an unbounded
+                            // log-volume lever for a hostile client (issue #718's rule).
+                            debug!("Metrics server preface detection: {}", e);
+                            return;
+                        }
+                    },
+                    _ = conn_cancel.cancelled() => return,
+                };
                 let mut builder = hyper_util::server::conn::auto::Builder::new(
                     hyper_util::rt::TokioExecutor::new(),
                 );
@@ -1142,7 +1167,7 @@ async fn metrics_accept_loop(
                     .timer(hyper_util::rt::TokioTimer::new())
                     .header_read_timeout(http_tuning.header_read_timeout)
                     .max_buf_size(http_tuning.max_buf_size);
-                drive_conn!(builder.serve_connection(io, service));
+                drive_conn!(builder.serve_connection(TokioIo::new(sniffed), service));
             }
         });
     }

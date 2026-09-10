@@ -143,10 +143,36 @@ impl InterceptListener {
         // Read once at bind rather than per connection: the knobs are process-wide env vars, and
         // this listener now shares them with every other one (issue #991).
         let http_tuning = HttpTuning::from_env();
+        // `None` (the default) preserves today's behavior exactly: no semaphore, no permit,
+        // accept as fast as the kernel hands connections over — mirrors every other listener's
+        // `RIFT_MAX_CONNECTIONS` handling (issue #716), which this one had never wired up.
+        let connection_semaphore = http_tuning
+            .max_connections
+            .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
 
         let handle = tokio::spawn(async move {
             loop {
+                // Acquire a permit *before* accepting so a cap holds connections back in the
+                // listener backlog/kernel SYN queue rather than accepting them and then failing
+                // downstream (issue #716) — the same ordering as
+                // `rift_mock_core::imposter::manager::run_accept_loop`. Raced against shutdown so
+                // a saturated cap never delays `shutdown()`.
+                let permit = match &connection_semaphore {
+                    Some(sem) => {
+                        let acquire = sem.clone().acquire_owned();
+                        tokio::select! {
+                            acquired = acquire => match acquired {
+                                Ok(permit) => Some(permit),
+                                // Only closes on Drop, which never happens here — but if it ever
+                                // does, stop accepting rather than panic.
+                                Err(_) => break,
+                            },
+                            _ = shutdown_rx.recv() => break,
+                        }
+                    }
+                    None => None,
+                };
                 tokio::select! {
                     _ = shutdown_rx.recv() => break,
                     accepted = listener.accept() => match accepted {
@@ -163,6 +189,9 @@ impl InterceptListener {
                             // and the drop path above depends on it doing so.
                             let conn_shutdown_rx = shutdown_rx.resubscribe();
                             tokio::spawn(async move {
+                                // Held for the connection's lifetime; released back to the
+                                // semaphore when this task ends (issue #716).
+                                let _permit = permit;
                                 if let Err(e) = handle_connection(stream, tls, rules, forward_client, auth, http_tuning, conn_shutdown_rx).await {
                                     tracing::debug!(%peer, error = %e, "intercept connection ended");
                                 }
@@ -300,7 +329,7 @@ async fn handle_connection(
         rules,
         forward_client,
     });
-    serve_tunnel(TokioIo::new(tls_stream), ctx, http_tuning, shutdown_rx).await;
+    serve_tunnel(tls_stream, ctx, http_tuning, shutdown_rx).await;
     Ok(())
 }
 
@@ -336,9 +365,11 @@ async fn serve_tunnel<I>(
     http_tuning: HttpTuning,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) where
-    // `Send + 'static` are `auto::Builder`'s bounds (it may drive the connection on an executor);
-    // the h1-only path does not need them, but the caller's `TlsStream<TcpStream>` satisfies both.
-    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+    // Tokio-side, not `hyper::rt`'s: the `auto` branch below must sniff the H2 preface on the raw
+    // `TlsStream` before `TokioIo::new` wraps it (issue #1030). `Send + 'static` are still
+    // `auto::Builder`'s own bounds (it may drive the connection on an executor); the h1-only path
+    // does not need them, but the caller's `TlsStream<TcpStream>` satisfies both.
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let service = service_fn(move |req: Request<Incoming>| {
         let ctx = Arc::clone(&ctx);
@@ -393,6 +424,8 @@ async fn serve_tunnel<I>(
     // offer — or offering one this cannot serve — is the one combination that would break a
     // client outright, so the two decisions are driven by one flag.
     if rift_mock_core::util::http2_disabled() {
+        // `http1::Builder`'s own timer arms immediately (issue #1030 is specific to `auto`'s
+        // preface sniff, which runs before any timer exists) — no sniffing needed here.
         let mut builder = hyper::server::conn::http1::Builder::new();
         builder
             // A timer is required for `header_read_timeout` to take effect (hyper panics on
@@ -400,8 +433,33 @@ async fn serve_tunnel<I>(
             .timer(TokioTimer::new())
             .header_read_timeout(http_tuning.header_read_timeout)
             .max_buf_size(http_tuning.max_buf_size);
-        drive_conn!(builder.serve_connection(io, service));
+        drive_conn!(builder.serve_connection(TokioIo::new(io), service));
     } else {
+        // Bound the HTTP/1-vs-HTTP/2 detection window itself (issue #1030), the same as every
+        // other `auto::Builder` listener: sniffed on the tokio-side `TlsStream`, before
+        // `TokioIo::new`.
+        //
+        // Also raced against the shutdown signal: this runs before `drive_conn!` below, which is
+        // otherwise the only place a tunnel observes shutdown, so without this
+        // `InterceptListener::shutdown` would have to wait out the full detection deadline for
+        // any tunnel still stuck sniffing — exactly the idle-tunnel case issue #1010 closes
+        // promptly for a tunnel that has already resolved its version.
+        let sniff =
+            rift_mock_core::proxy::preface::sniff_h2_preface(io, http_tuning.header_read_timeout);
+        tokio::pin!(sniff);
+        let sniffed = tokio::select! {
+            result = &mut sniff => match result {
+                Ok(sniffed) => sniffed,
+                Err(e) => {
+                    // Entirely client-controlled, so this is not worth more than a debug log — a
+                    // per-connection `warn!` here would be an unbounded log-volume lever for a
+                    // hostile client (issue #718's rule).
+                    tracing::debug!(error = %e, "intercept tunnel preface detection");
+                    return;
+                }
+            },
+            _ = shutdown_rx.recv() => return,
+        };
         let mut builder =
             hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
         // `header_read_timeout` and `max_buf_size` are HTTP/1 head-parsing concerns, so they go on
@@ -416,7 +474,7 @@ async fn serve_tunnel<I>(
         builder
             .http2()
             .max_concurrent_streams(MAX_CONCURRENT_STREAMS);
-        drive_conn!(builder.serve_connection(io, service));
+        drive_conn!(builder.serve_connection(TokioIo::new(sniffed), service));
     }
 }
 

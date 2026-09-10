@@ -396,8 +396,8 @@ Environment variables override CLI defaults:
 | `RIFT_TCP_BACKLOG` | Listen backlog for the accept loop (positive integer) | `1024` |
 | `RIFT_TCP_NODELAY` | `TCP_NODELAY` on accepted sockets; `true`/`1`/`on` enables, `false`/`0`/`off` disables (case-insensitive) | on |
 | `RIFT_HTTP_MAX_BUF` | Per-connection HTTP read/write buffer cap, in bytes (positive integer; floored at hyper's 8 KB minimum). Bounds per-connection memory at high connection counts | `65536` |
-| `RIFT_HTTP_HEADER_TIMEOUT` | Seconds to wait for a client to finish sending request headers before closing the connection (slowloris hygiene; positive integer) | `30` |
-| `RIFT_MAX_CONNECTIONS` | Cap on concurrently-served connections per listener (positive integer). Unset means unlimited; at the cap the server stops accepting until a connection closes, so overload waits in the kernel backlog rather than piling up | unlimited |
+| `RIFT_HTTP_HEADER_TIMEOUT` | Seconds to wait for a client to finish sending request headers before closing the connection (slowloris hygiene; positive integer). Also bounds the HTTP/1-vs-HTTP/2 detection window at the start of a connection, so a client that completes the handshake and then sends nothing is closed rather than parked | `30` |
+| `RIFT_MAX_CONNECTIONS` | Cap on concurrently-served connections per listener (positive integer). Unset means unlimited; at the cap the server stops accepting until a connection closes, so overload waits in the kernel backlog rather than piling up. Applies to the intercept listener too, as of #1030 | unlimited |
 | `RIFT_STRICT_BEHAVIORS` | Force strict mode process-wide (truthy: `1`/`true`/`yes`/`on`): a `decorate`/`shellTransform`/binary-base64-decode failure returns `500` instead of the lenient fallback body | off |
 | `NO_COLOR` | Suppress ANSI color and the decorative banner in `rift-verify` / `rift-lint` output | |
 | `RUST_LOG` | Detailed log configuration | `info` |
@@ -414,6 +414,14 @@ spelling — also falls back, but logs a `WARN` naming the variable, the value a
 typo is visible in the log rather than only in behaviour that does not match the configuration.
 `RIFT_MAX_CONNECTIONS=0` is the one exception: it reads as "no cap", which is what it does, so it
 is accepted silently.
+
+`RIFT_HTTP_HEADER_TIMEOUT` is applied twice on a new connection: once to the HTTP/1-vs-HTTP/2
+detection window, and then again by HTTP/1's own header timer, which can only start once that
+detection has resolved. So the worst case for a client that goes silent at exactly the wrong moment
+is **up to two** header timeouts before the connection is closed, not one. The two phases are not
+netted against each other deliberately — subtracting elapsed time would make a very small
+`RIFT_HTTP_HEADER_TIMEOUT` behave erratically, and bounding each phase separately is easier to
+reason about than a shared budget.
 
 `RIFT_STRICT_BEHAVIORS` and the per-imposter `strictBehaviors` field combine with **OR** — either
 being set enables strict mode. See

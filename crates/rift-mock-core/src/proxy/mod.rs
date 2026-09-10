@@ -11,12 +11,14 @@
 //! - `intercept_ca` - the TLS-MITM certificate authority and per-SNI resolver
 //! - `truststore` - PKCS#12 / JKS export of that CA
 //! - `network` - listener utilities (SO_REUSEPORT) and accept-error classification
+//! - `preface` - bounded HTTP/1-vs-HTTP/2 detection for the `auto::Builder` listeners (#1030)
 
 pub(crate) mod network;
 pub(crate) mod tls;
 
 pub mod intercept_ca;
 pub mod outbound_tls;
+pub mod preface;
 pub mod truststore;
 
 // Re-export public API types
