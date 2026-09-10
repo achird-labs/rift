@@ -458,11 +458,35 @@ private keys**, and it works identically for the container and embedded adapters
 
 ---
 
+## WebSocket passthrough
+
+A `Connection: Upgrade` / `Upgrade: websocket` request through the tunnel is **relayed to the real
+origin**, and the upgraded connection is then pumped in both directions until either side closes
+(#997). This is a transparency property, not a mocking feature: the tunnel's contract is that
+traffic no rule claims reaches the origin unchanged, and a system under test whose traffic includes
+a WebSocket — socket.io, GraphQL subscriptions, a dev-server's live reload — would otherwise have
+that connection silently broken by being routed through the proxy.
+
+- **A matching rule still wins.** Rules are matched against the handshake as the ordinary HTTP
+  request it is (method, path, headers). If one matches, its response is served and **no upgrade
+  happens** — which is how you simulate the WebSocket endpoint being down, refusing, or returning a
+  `403`. Only when no rule matches is the handshake relayed.
+- **Frames are never inspected, matched or recorded.** Rules apply to the handshake only; there is
+  no frame grammar and no frame capture.
+- **The origin connection uses the same outbound TLS trust as everything else** — the process-wide
+  policy, so `--upstream-ca-file` covers an origin behind a private CA. This is the only outbound
+  connection the intercept listener makes; if it fails, the client gets a `502` rather than a hang.
+- **Only `websocket` takes this path.** Any other `Upgrade` value, `h2c` included, behaves exactly
+  as before.
+
 ## Limitations
 
 - **The SUT must trust the intercept CA** — this is inherent to HTTPS MITM; Rift only automates
   provisioning it.
-- **Not a general mitmproxy replacement** — no WebSocket proxying or flow scripting.
+- **Not a general mitmproxy replacement** — no WebSocket *mocking* or flow scripting. WebSocket
+  traffic does pass through (see [WebSocket passthrough](#websocket-passthrough)); what is out of
+  scope is terminating an upgrade and scripting the frames, which would be a new imposter protocol
+  with its own frame grammar.
 - **HTTP/2 is negotiated over TLS via ALPN**, the same as the imposter listeners, so a system under
   test that would speak h2 to the real origin still does through the proxy. Set
   `RIFT_DISABLE_HTTP2=1` to force HTTP/1.1 everywhere if a client misbehaves over h2. Prior-knowledge
@@ -472,6 +496,16 @@ private keys**, and it works identically for the container and embedded adapters
   memory use for a misbehaving or malicious upload. Both `Content-Length`-framed and
   `chunked`/streamed request bodies are decoded.
 - **Forward-proxy (`CONNECT`) only** — transparent interception is not implemented.
+- **The listener now makes outbound connections.** WebSocket passthrough is the first and only
+  feature that does: relaying a handshake means rift TCP-connects and TLS-handshakes to the
+  `host:port` the client named in its `CONNECT`. That is inherent to a forward proxy, but it is a
+  change in posture — before it, every request was answered locally. In a shared environment bind
+  the listener to loopback and/or set `Proxy-Authorization` (see
+  [Authentication](#authentication)), or a caller that can reach the proxy can use it to probe
+  rift's network position.
+- **RFC 8441 extended CONNECT (WebSocket over HTTP/2) is not detected.** HTTP/2 forbids the
+  `Connection` header, so an h2 client using `:protocol = websocket` falls through to the ordinary
+  response rather than being relayed. Passthrough covers the HTTP/1.1 upgrade only.
 - The listener is started by an **embedder** (or the zio-bdd adapter), from the standalone `rift`
   binary via `--intercept-port` (see [Standalone binary](#standalone-binary)), or at runtime over
   the admin API (see [Runtime lifecycle](#runtime-lifecycle-admin-api)) — one listener at a time

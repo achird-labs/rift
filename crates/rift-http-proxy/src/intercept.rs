@@ -81,8 +81,26 @@ impl std::fmt::Display for ConnectTarget {
 /// the rule store, the forward client and the host separately.
 struct TunnelCtx {
     host: String,
+    /// The port from the client's `CONNECT`, kept because a WebSocket relay has to dial the real
+    /// origin (issue #997). Before that, nothing here ever contacted the origin and this was
+    /// dropped on the floor.
+    port: u16,
     rules: InterceptRules,
     forward_client: reqwest::Client,
+    /// Trust for the outbound leg of a relay. Built once at bind: a rustls config is expensive to
+    /// assemble (it parses the OS trust store) and nothing about it varies per connection.
+    origin_tls: Arc<rustls::ClientConfig>,
+    /// The `RIFT_MAX_CONNECTIONS` permit for this connection, parked here so it lives exactly as
+    /// long as the last thing using the connection does (issue #997).
+    ///
+    /// It used to be held by the accept loop's task, which was correct while every connection's
+    /// work finished before that task did. A WebSocket relay breaks that: hyper's
+    /// `UpgradeableConnection` resolves the moment it hands the upgraded IO over, so the serving
+    /// task ends while the relay is still holding two sockets. Dropping the permit there would let
+    /// a client hold N upgraded connections and then open N more — the cap would stop capping.
+    /// Carrying it on the `Arc<TunnelCtx>` instead means it is released when the connection AND
+    /// any relay it started are both done.
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// Why reading an intercepted request body did not produce bytes. The distinctions are the point:
@@ -127,6 +145,7 @@ impl InterceptListener {
         resolver: Arc<SniCertResolver>,
         rules: InterceptRules,
         auth: Option<InterceptAuth>,
+        outbound_tls: rift_mock_core::proxy::OutboundTls,
     ) -> anyhow::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
@@ -139,6 +158,19 @@ impl InterceptListener {
         // multi-instance use keeps pools independent; building here also surfaces a failure as a
         // start error instead of a lazy-init panic.
         let forward_client = build_forward_client()?;
+        // Built here rather than per connection for the same reason as `forward_client`: assembling
+        // it parses the OS trust store, and nothing about it varies per connection. Building it at
+        // bind also surfaces a bad `--upstream-ca-file` as a start error rather than as a failed
+        // relay much later (issue #997).
+        //
+        // ALPN is `http/1.1` only. `OutboundTls::client_config` deliberately leaves it empty for
+        // the caller, and a WebSocket upgrade is an HTTP/1.1 mechanism — offering `h2` here would
+        // invite an origin to negotiate a protocol the relay cannot carry an upgrade over.
+        let mut origin_tls = outbound_tls.client_config().map_err(|e| {
+            e.context("building the intercept listener's outbound TLS configuration")
+        })?;
+        origin_tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let origin_tls = Arc::new(origin_tls);
         let auth = auth.map(Arc::new);
         // Read once at bind rather than per connection: the knobs are process-wide env vars, and
         // this listener now shares them with every other one (issue #991).
@@ -183,6 +215,7 @@ impl InterceptListener {
                             let tls = tls.clone();
                             let rules = rules.clone();
                             let forward_client = forward_client.clone();
+                            let origin_tls = Arc::clone(&origin_tls);
                             let auth = auth.clone();
                             // Taken here, before the spawn: a broadcast receiver only sees sends
                             // that happen after it exists, so subscribing inside the task would
@@ -192,10 +225,10 @@ impl InterceptListener {
                             // and the drop path above depends on it doing so.
                             let conn_shutdown_rx = shutdown_rx.resubscribe();
                             tokio::spawn(async move {
-                                // Held for the connection's lifetime; released back to the
-                                // semaphore when this task ends (issue #716).
-                                let _permit = permit;
-                                if let Err(e) = handle_connection(stream, tls, rules, forward_client, auth, http_tuning, conn_shutdown_rx).await {
+                                // Moved into the tunnel context rather than held here (issue
+                                // #997): a WebSocket relay outlives this task, and releasing the
+                                // permit at its end would uncap `RIFT_MAX_CONNECTIONS`.
+                                if let Err(e) = handle_connection(stream, tls, rules, forward_client, origin_tls, auth, http_tuning, permit, conn_shutdown_rx).await {
                                     tracing::debug!(%peer, error = %e, "intercept connection ended");
                                 }
                             });
@@ -273,13 +306,19 @@ fn build_tls_acceptor(resolver: Arc<SniCertResolver>) -> anyhow::Result<TlsAccep
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
+// One more parameter than clippy's default (issue #997 added the outbound trust). Bundling them
+// into a struct would only move the same per-connection values behind a name that means nothing on
+// its own — the repo takes the same view at `stub_matches`.
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     mut stream: TcpStream,
     tls: TlsAcceptor,
     rules: InterceptRules,
     forward_client: reqwest::Client,
+    origin_tls: Arc<rustls::ClientConfig>,
     auth: Option<Arc<InterceptAuth>>,
     http_tuning: HttpTuning,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
     shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> anyhow::Result<()> {
     let head = timeout(IO_TIMEOUT, read_connect_head(&mut stream))
@@ -330,8 +369,11 @@ async fn handle_connection(
 
     let ctx = Arc::new(TunnelCtx {
         host: target.host,
+        port: target.port,
         rules,
         forward_client,
+        origin_tls,
+        _permit: permit,
     });
     serve_tunnel(tls_stream, ctx, http_tuning, shutdown_rx).await;
     Ok(())
@@ -359,11 +401,17 @@ async fn serve_tunnel<I>(
     // does not need them, but the caller's `TlsStream<TcpStream>` satisfies both.
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    // Cloned per request so a live WebSocket relay can observe shutdown after the request that
+    // started it has returned (issue #997) — the relay outlives its own response by design.
+    let relay_shutdown = shutdown_rx.resubscribe();
     let service = service_fn(move |req: Request<Incoming>| {
         let ctx = Arc::clone(&ctx);
+        let relay_shutdown = relay_shutdown.resubscribe();
         // Infallible: every failure below becomes a *response*, so a bad request never collapses
         // into a bare connection reset the client cannot interpret.
-        async move { Ok::<_, std::convert::Infallible>(handle_tunnel_request(req, ctx).await) }
+        async move {
+            Ok::<_, std::convert::Infallible>(handle_tunnel_request(req, ctx, relay_shutdown).await)
+        }
     });
 
     // Keep-alive is hyper's HTTP/1.1 default, so enabling it (issue #993) is the *absence* of the
@@ -421,7 +469,15 @@ async fn serve_tunnel<I>(
             .timer(TokioTimer::new())
             .header_read_timeout(http_tuning.header_read_timeout)
             .max_buf_size(http_tuning.max_buf_size);
-        drive_conn!(builder.serve_connection(TokioIo::new(io), service));
+        // `http1::Builder`'s form of upgrade support is a combinator on the connection, not a
+        // separate method — the `auto` leg below spells the same thing differently. Without it
+        // `hyper::upgrade::on` never resolves and a relay hangs with no error, which nothing about
+        // the change would fail to compile (issue #997).
+        drive_conn!(
+            builder
+                .serve_connection(TokioIo::new(io), service)
+                .with_upgrades()
+        );
     } else {
         // Bound the HTTP/1-vs-HTTP/2 detection window itself (issue #1030), the same as every
         // other `auto::Builder` listener: sniffed on the tokio-side `TlsStream`, before
@@ -482,7 +538,7 @@ async fn serve_tunnel<I>(
             .keep_alive_interval(http_tuning.header_read_timeout)
             .keep_alive_timeout(http_tuning.header_read_timeout)
             .max_concurrent_streams(MAX_CONCURRENT_STREAMS);
-        drive_conn!(builder.serve_connection(TokioIo::new(sniffed), service));
+        drive_conn!(builder.serve_connection_with_upgrades(TokioIo::new(sniffed), service));
     }
 }
 
@@ -491,8 +547,12 @@ async fn serve_tunnel<I>(
 async fn handle_tunnel_request(
     req: Request<Incoming>,
     ctx: Arc<TunnelCtx>,
+    relay_shutdown: tokio::sync::broadcast::Receiver<()>,
 ) -> Response<Full<Bytes>> {
-    let (parts, incoming) = req.into_parts();
+    let (mut parts, incoming) = req.into_parts();
+    // `into_parts` discards the `Request`, and `OnUpgrade` rides in its extensions — so it has to
+    // be taken here or the upgrade is unreachable for the rest of this function.
+    let on_upgrade = parts.extensions.remove::<hyper::upgrade::OnUpgrade>();
     let method = parts.method.as_str().to_string();
     let path = parts.uri.path().to_string();
     let query = parts.uri.query().map(str::to_string);
@@ -500,6 +560,7 @@ async fn handle_tunnel_request(
     // what the hand-rolled reader keyed on. Preserving that distinction keeps `Some("")` and
     // `None` telling the same two stories to body predicates as before.
     let framed_body = parts.headers.contains_key(CONTENT_LENGTH);
+    let websocket_upgrade = is_websocket_upgrade(&parts.headers);
     let mut headers = collect_request_headers(&parts.headers);
     // HTTP/2 carries the authority in the `:authority` pseudo-header and hyper does not synthesize
     // a `host` header from it, so without this a rule predicating on the `host` HEADER fires over
@@ -579,8 +640,229 @@ async fn handle_tunnel_request(
                 }
             }
         }
+        // No rule claimed it. For an ordinary request that is the fixed fall-through below; for a
+        // WebSocket handshake it is the whole point of this feature — the tunnel's contract is that
+        // traffic no rule claims reaches the origin unchanged, and answering a handshake with a
+        // `200` breaks the connection instead of carrying it.
+        None if websocket_upgrade => match on_upgrade {
+            Some(on_upgrade) => relay_websocket(parts, on_upgrade, ctx, relay_shutdown).await,
+            // `serve_connection_with_upgrades` is what puts `OnUpgrade` in the extensions. If it is
+            // missing the connection cannot be upgraded at all, so relaying would hang rather than
+            // fail — answer instead.
+            None => {
+                tracing::warn!(
+                    host = %ctx.host,
+                    "websocket upgrade requested but this connection cannot be upgraded"
+                );
+                status_response(StatusCode::BAD_GATEWAY)
+            }
+        },
         None => no_rule_response(&method, &path, &ctx.host),
     }
+}
+
+/// Does this request head ask to upgrade to WebSocket?
+///
+/// Token-wise and case-insensitive on both headers, which is the part that is easy to get wrong:
+/// `Connection` is a comma-separated list and a real client commonly sends
+/// `Connection: keep-alive, Upgrade`, so a whole-value comparison misses it.
+///
+/// Deliberately narrow. Only `websocket` takes the relay path; any other `Upgrade` value — `h2c`
+/// especially — keeps today's behaviour exactly, because this issue's remit is WebSocket
+/// transparency and nothing else.
+fn is_websocket_upgrade(headers: &hyper::HeaderMap) -> bool {
+    fn has_token(headers: &hyper::HeaderMap, name: hyper::header::HeaderName, token: &str) -> bool {
+        headers.get_all(name).iter().any(|value| {
+            value
+                .to_str()
+                .is_ok_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case(token)))
+        })
+    }
+    has_token(headers, hyper::header::CONNECTION, "upgrade")
+        && has_token(headers, hyper::header::UPGRADE, "websocket")
+}
+
+/// Relay a WebSocket handshake to the real origin, and on success pump bytes both ways until either
+/// side closes or the listener shuts down (issue #997).
+///
+/// This is the only place the intercept listener contacts the origin. Everything else it does is
+/// answered locally — a matched rule, a forward to a local imposter, or the fixed fall-through —
+/// so the trust policy for this leg is threaded in from the process-wide `OutboundTls` rather than
+/// re-derived here (see `InterceptListener::bind`).
+///
+/// hyper drives both sides. Hand-rolling the origin's response head would be a step back to what
+/// #991 removed from this file, and it is exactly the parsing that is easy to get subtly wrong.
+async fn relay_websocket(
+    parts: hyper::http::request::Parts,
+    on_upgrade: hyper::upgrade::OnUpgrade,
+    ctx: Arc<TunnelCtx>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) -> Response<Full<Bytes>> {
+    let origin = match connect_origin(&ctx).await {
+        Ok(io) => io,
+        Err(e) => {
+            tracing::warn!(
+                host = %ctx.host, port = ctx.port,
+                error = %format_args!("{e:#}"),
+                "intercept websocket relay could not reach the origin"
+            );
+            return status_response(StatusCode::BAD_GATEWAY);
+        }
+    };
+
+    let (mut sender, conn) = match hyper::client::conn::http1::handshake(TokioIo::new(origin)).await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(host = %ctx.host, error = %e, "intercept websocket handshake failed");
+            return status_response(StatusCode::BAD_GATEWAY);
+        }
+    };
+    // `with_upgrades` is what keeps the connection's IO recoverable after the 101. Without it the
+    // origin half of the relay would never materialise.
+    let conn = conn.with_upgrades();
+    let conn_task = tokio::spawn(conn);
+
+    let mut upstream = Request::builder().method(parts.method.clone()).uri(
+        parts
+            .uri
+            .path_and_query()
+            .map_or_else(|| "/".to_string(), ToString::to_string),
+    );
+    for (name, value) in &parts.headers {
+        // `is_hop_by_hop` is shared with the *reqwest* forward path, where reqwest re-derives
+        // `Host` from the URL it is given. Here the URI is origin-form, so nothing would put a
+        // `Host` back — and hyper's low-level client documents that as the caller's job rather
+        // than filling it in. An HTTP/1.1 request without `Host` MUST be rejected (RFC 9112 §3.2),
+        // so any name-based virtual host would answer `400` and the handshake would fail one hop
+        // further upstream than it used to. `Connection` and `Upgrade` are likewise forwarded:
+        // they are what makes this a handshake at all.
+        let forwarded_anyway = name == hyper::header::HOST
+            || name == hyper::header::CONNECTION
+            || name == hyper::header::UPGRADE;
+        if is_hop_by_hop(name.as_str()) && !forwarded_anyway {
+            continue;
+        }
+        // The tunnel's own credential (issue #878) is checked on the `CONNECT` head and has no
+        // business leaving this machine. This is the first path on which an inner request header
+        // reaches a third party, so a client that also attaches it to tunnelled requests would
+        // otherwise hand rift's proxy password to whatever origin it named.
+        if name == hyper::header::PROXY_AUTHORIZATION || name.as_str() == "proxy-connection" {
+            continue;
+        }
+        upstream = upstream.header(name, value);
+    }
+    // A client that sent no `Host` still gets a well-formed request: the authority is exactly what
+    // it named in `CONNECT`.
+    if !parts.headers.contains_key(hyper::header::HOST) {
+        upstream = upstream.header(hyper::header::HOST, format!("{}:{}", ctx.host, ctx.port));
+    }
+    let upstream = match upstream.body(Full::<Bytes>::new(Bytes::new())) {
+        Ok(req) => req,
+        Err(e) => {
+            tracing::warn!(host = %ctx.host, error = %e, "intercept websocket request rebuild failed");
+            conn_task.abort();
+            return status_response(StatusCode::BAD_GATEWAY);
+        }
+    };
+
+    let response = match sender.send_request(upstream).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::warn!(host = %ctx.host, error = %e, "intercept websocket forward failed");
+            conn_task.abort();
+            return status_response(StatusCode::BAD_GATEWAY);
+        }
+    };
+
+    let status = response.status();
+    let headers = response.headers().clone();
+
+    if status != StatusCode::SWITCHING_PROTOCOLS {
+        // The origin declined the upgrade. That is an ordinary answer, not an error — relay it,
+        // body included, and leave the connection un-upgraded. Dropping the body would be a
+        // data-path swallow: a `401 {"error": …}` or a `426 Upgrade Required` explanation is
+        // exactly what tells the author why their handshake was refused, and arriving as a
+        // bodyless status makes the origin look silent when it was not.
+        let body = match read_limited_body(response.into_body()).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::debug!(
+                    host = %ctx.host, error = ?e,
+                    "could not read the origin's non-101 handshake response body"
+                );
+                Bytes::new()
+            }
+        };
+        conn_task.abort();
+        let mut out = Response::builder().status(status);
+        for (name, value) in &headers {
+            if !is_hop_by_hop(name.as_str()) {
+                out = out.header(name, value);
+            }
+        }
+        return out
+            .body(Full::new(body))
+            .unwrap_or_else(|_| status_response(StatusCode::BAD_GATEWAY));
+    }
+
+    let origin_upgrade = hyper::upgrade::on(response);
+    let host = ctx.host.clone();
+    // `ctx` is moved in deliberately: it carries this connection's `RIFT_MAX_CONNECTIONS` permit,
+    // which must not be released while the relay still holds two sockets.
+    tokio::spawn(async move {
+        let _ctx = ctx;
+        let (client_io, origin_io) = match tokio::try_join!(on_upgrade, origin_upgrade) {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::debug!(%host, error = %e, "intercept websocket upgrade did not complete");
+                return;
+            }
+        };
+        let mut client_io = TokioIo::new(client_io);
+        let mut origin_io = TokioIo::new(origin_io);
+        tokio::select! {
+            result = tokio::io::copy_bidirectional(&mut client_io, &mut origin_io) => {
+                if let Err(e) = result {
+                    tracing::debug!(%host, error = %e, "intercept websocket relay ended");
+                }
+            }
+            // Any `recv()` outcome means stop, for the same reason `drive_conn!` treats it that
+            // way. Note what this receiver does and does not give you: a `broadcast::Receiver`
+            // never sees a value sent before it existed, and `InterceptListener` holds the sender,
+            // so `Closed` only arrives when the listener is dropped. What actually bounds a relay
+            // established mid-shutdown is `drive_conn!`'s own receiver, taken before the send —
+            // this one covers the ordinary case and the listener-dropped case.
+            _ = shutdown_rx.recv() => {
+                tracing::debug!(%host, "intercept websocket relay stopped by listener shutdown");
+            }
+        }
+    });
+
+    let mut out = Response::builder().status(StatusCode::SWITCHING_PROTOCOLS);
+    for (name, value) in &headers {
+        out = out.header(name, value);
+    }
+    out.body(Full::new(Bytes::new()))
+        .unwrap_or_else(|_| status_response(StatusCode::BAD_GATEWAY))
+}
+
+/// TCP + TLS to the origin named in the client's `CONNECT`.
+async fn connect_origin(
+    ctx: &TunnelCtx,
+) -> anyhow::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    let tcp = tokio::time::timeout(
+        IO_TIMEOUT,
+        TcpStream::connect((ctx.host.as_str(), ctx.port)),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("timed out connecting to {}:{}", ctx.host, ctx.port))??;
+    let server_name = rustls::pki_types::ServerName::try_from(ctx.host.clone())
+        .map_err(|e| anyhow::anyhow!("invalid origin name {}: {e}", ctx.host))?;
+    let stream = tokio_rustls::TlsConnector::from(Arc::clone(&ctx.origin_tls))
+        .connect(server_name, tcp)
+        .await?;
+    Ok(stream)
 }
 
 /// The fixed `200` an unconfigured host falls through to (slice 3), so a SUT pointed at the proxy
@@ -1485,10 +1767,15 @@ mod tests {
         let ca = CertificateAuthority::generate().expect("ca");
         let ca_pem = ca.ca_cert_pem().to_string();
         let resolver = Arc::new(SniCertResolver::new(Arc::new(ca)));
-        let listener =
-            InterceptListener::bind("127.0.0.1:0".parse().unwrap(), resolver, rules, None)
-                .await
-                .expect("bind");
+        let listener = InterceptListener::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            resolver,
+            rules,
+            None,
+            rift_mock_core::proxy::OutboundTls::default(),
+        )
+        .await
+        .expect("bind");
         (listener, ca_pem)
     }
 

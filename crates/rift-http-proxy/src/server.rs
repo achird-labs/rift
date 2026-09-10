@@ -692,8 +692,9 @@ impl ServerBuilder {
         // The policy is set on the control, not passed per start, so every door through it — the
         // flag, the config block, and a runtime `POST /intercept` — is judged the same. Set before
         // the clone handed to the admin server, or the runtime door would inherit the default.
-        let intercept =
-            InterceptControl::default().with_exposure_policy(cli.require_admin_auth.into());
+        let intercept = InterceptControl::default()
+            .with_exposure_policy(cli.require_admin_auth.into())
+            .with_outbound_tls(outbound_tls.clone());
         let start_options = intercept_block.or_else(|| {
             cli.intercept_port
                 .map(|intercept_port| InterceptStartOptions {

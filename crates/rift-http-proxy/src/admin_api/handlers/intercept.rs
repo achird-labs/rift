@@ -590,6 +590,7 @@ mod tests {
             resolver,
             state.rules.clone(),
             None,
+            rift_mock_core::proxy::OutboundTls::default(),
         )
         .await
         .expect("bind");
