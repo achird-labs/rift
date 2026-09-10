@@ -13,6 +13,19 @@ record.
 
 ### Added
 
+- **`rift_preface_failures_total`, so preface drops can be told apart** (#1045). A connection that
+  never resolves to HTTP/1 or HTTP/2 is dropped and logged at `debug!` — deliberately, since the
+  trigger is entirely client-controlled and a per-connection warning would hand a hostile client an
+  unbounded log-volume lever (#718). That left no way to distinguish ordinary client behaviour from
+  a systemic fault without raising verbosity, which the same rule forbids.
+  - The new counter carries `listener` (`imposter`, `admin`, `metrics`, `front-door`, `intercept`)
+    and `kind`: `timeout` (the client completed the transport handshake and then sent nothing in
+    time), `eof` (it hung up first), or `io` (the read itself failed). `timeout` and `eof` are
+    expected; a rising `io` rate is the systemic signal — a bad certificate, a resolver rollout —
+    and is what to alert on.
+  - Present at `0` from every running listener's start, so an alert reads "no failures" rather than
+    "no data" on a healthy fresh instance.
+
 - **The intercept tunnel negotiates HTTP/2** (#996). ALPN was pinned to `http/1.1`, so a system
   under test that speaks h2 to the real origin was silently downgraded the moment it was routed
   through the intercept proxy — it stopped exercising the protocol it uses in production, and an

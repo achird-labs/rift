@@ -45,6 +45,26 @@ lazy_static! {
     )
     .expect("metric can be created");
 
+    /// Connections dropped before an HTTP/1-or-HTTP/2 decision could be made, by listener and
+    /// cause (issue #1045). The `kind` label is the whole point: `timeout` and `eof` are ordinary
+    /// client behaviour — a connection went quiet, a client hung up — while `io` can mean a
+    /// systemic fault, e.g. every read erroring after a bad cert or a resolver rollout. The call
+    /// sites log any of them at `debug!` and must keep doing so: the trigger is entirely
+    /// client-controlled, so a per-connection `warn!` would hand a hostile client an unbounded
+    /// log-volume lever (#718). A counter is the only way to tell those two situations apart
+    /// without raising verbosity, which is exactly what this issue is for.
+    ///
+    /// Failures only. Successes are already countable as
+    /// `rift_accepted_connections_total` minus these; counting them again would double the
+    /// per-connection label lookup for nothing. No `port` label, for the same unbounded-cardinality
+    /// reason as `ACCEPT_ERRORS_TOTAL`.
+    pub static ref PREFACE_FAILURES_TOTAL: CounterVec = register_counter_vec!(
+        "rift_preface_failures_total",
+        "Connections dropped before an HTTP/1-or-HTTP/2 decision, by listener and cause",
+        &["listener", "kind"]
+    )
+    .expect("metric can be created");
+
     /// Whether a listener is currently in a systemic accept-error outage (1) or not (0),
     /// issue #838 — the gauge to alert on.
     pub static ref ACCEPT_ERROR_OUTAGE: GaugeVec = register_gauge_vec!(
@@ -302,6 +322,45 @@ impl AcceptErrorCounters {
     }
 }
 
+/// The `kind` label values of [`PREFACE_FAILURES_TOTAL`], in one place so the recorder and the
+/// startup materialiser cannot drift apart.
+const PREFACE_FAILURE_KINDS: [&str; 3] = ["timeout", "eof", "io"];
+
+fn preface_failure_kind(err: &crate::proxy::preface::PrefaceError) -> &'static str {
+    use crate::proxy::preface::PrefaceError;
+    // Exhaustive here rather than at the call sites: `PrefaceError` is `#[non_exhaustive]`, so the
+    // four call sites in `rift-http-proxy` *cannot* match it exhaustively and would need a
+    // wildcard — which is how a new variant would silently start counting as something it is not.
+    // In its defining crate the compiler makes adding a variant a build error instead.
+    match err {
+        PrefaceError::Timeout(_) => "timeout",
+        PrefaceError::Eof => "eof",
+        PrefaceError::Io(_) => "io",
+    }
+}
+
+/// Count one connection dropped before a protocol decision, discriminated by cause.
+///
+/// `listener` reuses the exact strings the accept loops pass to [`AcceptErrorCounters::new`]
+/// (`imposter`, `front-door`, `metrics`, `admin`), plus `intercept` for the tunnel listener, which
+/// has no accept counters of its own.
+pub fn record_preface_failure(listener: &'static str, err: &crate::proxy::preface::PrefaceError) {
+    PREFACE_FAILURES_TOTAL
+        .with_label_values(&[listener, preface_failure_kind(err)])
+        .inc();
+}
+
+/// Touch all three `kind` children so the family is present at `0` from listener start.
+///
+/// Without this a fresh instance exports no `rift_preface_failures_total` at all, so an alert on
+/// it reads as "no data" rather than "no failures" — the same reason `rift_accept_errors_total` is
+/// documented as present at `0` for every running listener.
+pub fn materialize_preface_failure_counters(listener: &'static str) {
+    for kind in PREFACE_FAILURE_KINDS {
+        PREFACE_FAILURES_TOTAL.with_label_values(&[listener, kind]);
+    }
+}
+
 /// Helper to record upstream request duration
 pub fn record_upstream_duration(method: &str, status: u16, duration_ms: f64) {
     UPSTREAM_REQUEST_DURATION_MS
@@ -319,6 +378,60 @@ pub fn record_script_error(rule_id: &str, error_type: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Issue #1045. The counters are process-global and other tests touch the same registry, so
+    // every assertion here is a before/after delta on a listener label owned by this test alone —
+    // never an absolute value.
+    fn preface_count(listener: &str, kind: &str) -> f64 {
+        PREFACE_FAILURES_TOTAL
+            .with_label_values(&[listener, kind])
+            .get()
+    }
+
+    #[test]
+    fn preface_failures_are_counted_under_the_variant_that_caused_them() {
+        use crate::proxy::preface::PrefaceError;
+        use std::time::Duration;
+
+        let l = "test-variants";
+        let before = ["timeout", "eof", "io"].map(|k| preface_count(l, k));
+
+        record_preface_failure(l, &PrefaceError::Timeout(Duration::from_secs(1)));
+        record_preface_failure(l, &PrefaceError::Eof);
+        record_preface_failure(
+            l,
+            &PrefaceError::Io(std::io::Error::other("upstream read failed")),
+        );
+
+        // The whole point of the issue: an operator must be able to tell "clients are going quiet"
+        // (timeout/eof, ordinary) from "every connection is Io-erroring" (systemic) without
+        // raising verbosity, which #718 forbids on this path.
+        for (i, kind) in ["timeout", "eof", "io"].iter().enumerate() {
+            assert_eq!(
+                preface_count(l, kind) - before[i],
+                1.0,
+                "one `{kind}` failure must land on the `{kind}` child and nowhere else"
+            );
+        }
+    }
+
+    #[test]
+    fn materializing_makes_all_three_kinds_present_at_zero() {
+        // A family that only appears on first failure reads as "no data" to an alert, not "no
+        // failures" — so `rate()` and `absent()` both misbehave on a healthy fresh instance.
+        let l = "test-materialize";
+        materialize_preface_failure_counters(l);
+
+        let scrape = collect_metrics();
+        for kind in ["timeout", "eof", "io"] {
+            let series =
+                format!(r#"rift_preface_failures_total{{kind="{kind}",listener="{l}"}} 0"#);
+            assert!(
+                scrape.contains(&series),
+                "expected `{series}` at zero in the scrape;\n{scrape}"
+            );
+        }
+    }
 
     #[test]
     fn test_metrics_collection() {

@@ -143,6 +143,9 @@ impl InterceptListener {
         // Read once at bind rather than per connection: the knobs are process-wide env vars, and
         // this listener now shares them with every other one (issue #991).
         let http_tuning = HttpTuning::from_env();
+        // The intercept listener has no `AcceptErrorCounters`, so it materialises its own preface
+        // children here rather than gaining an accept-counter set it does not otherwise need.
+        rift_mock_core::extensions::metrics::materialize_preface_failure_counters("intercept");
         // `None` (the default) preserves today's behavior exactly: no semaphore, no permit,
         // accept as fast as the kernel hands connections over — mirrors every other listener's
         // `RIFT_MAX_CONNECTIONS` handling (issue #716), which this one had never wired up.
@@ -439,6 +442,9 @@ async fn serve_tunnel<I>(
                     // Entirely client-controlled, so this is not worth more than a debug log — a
                     // per-connection `warn!` here would be an unbounded log-volume lever for a
                     // hostile client (issue #718's rule).
+                    rift_mock_core::extensions::metrics::record_preface_failure(
+                        "intercept", &e,
+                    );
                     tracing::debug!(error = %e, "intercept tunnel preface detection");
                     return;
                 }

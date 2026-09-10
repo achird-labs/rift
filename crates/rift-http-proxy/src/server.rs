@@ -1003,6 +1003,7 @@ async fn metrics_accept_loop(
     let mut outage = rift_mock_core::extensions::AcceptOutageGuard::new("metrics");
     // Resolved once per loop, not per error (#840).
     let accept_errors = rift_mock_core::extensions::AcceptErrorCounters::new("metrics");
+    rift_mock_core::extensions::metrics::materialize_preface_failure_counters("metrics");
 
     loop {
         // Acquire a permit *before* accepting so a cap holds connections back in the listener
@@ -1153,6 +1154,9 @@ async fn metrics_accept_loop(
                             // Entirely client-controlled, so this is not worth more than a debug
                             // log — a per-connection `error!` here would be an unbounded
                             // log-volume lever for a hostile client (issue #718's rule).
+                            rift_mock_core::extensions::metrics::record_preface_failure(
+                                "metrics", &e,
+                            );
                             debug!("Metrics server preface detection: {}", e);
                             return;
                         }
