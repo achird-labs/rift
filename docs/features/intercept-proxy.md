@@ -411,6 +411,11 @@ A tunnel that completes its TLS handshake and then sends no request is closed af
 `RIFT_HTTP_HEADER_TIMEOUT` rather than being held open indefinitely — the protocol-detection window
 at the start of a connection is bounded, not just the request head that follows it.
 
+That holds for an HTTP/2 tunnel too. A peer that sends the HTTP/2 preface — completing detection —
+and then goes quiet has no request head for a timer to bound, so the tunnel is closed by an HTTP/2
+keep-alive ping instead, within two `RIFT_HTTP_HEADER_TIMEOUT` intervals. Idle h2 tunnels are
+therefore pinged at that interval; a live client answers and is unaffected.
+
 ---
 
 ## Trusting the CA from the SUT
