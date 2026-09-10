@@ -11,11 +11,43 @@
 /// Serde for multi-value headers (issue #238). Accepts the Mountebank-style `"k": "v"` *and*
 /// `"k": ["v1", "v2"]` on the wire; serializes a single value back as a plain string and multiple
 /// values as an array, so existing single-value consumers are unaffected.
+///
+/// **Invariant on every map this module produces (issue #1039): one entry per case-folded header
+/// name.** No two keys `eq_ignore_ascii_case`-match each other; the surviving key is the *first*
+/// spelling the deserializer presents, and its values are every case-matching entry's values in
+/// that same order. HTTP header names are case-insensitive, so a document that spells one name two
+/// ways describes one header — but a `HashMap` keyed by the literal spelling would hold it as two.
+/// That split is what the eleven case-insensitive find-first lookups downstream (form parsing,
+/// predicate fields, `copy`, the JS/Rhai engines, the verify CLI) resolve nondeterministically, and
+/// what makes `deepEquals` on headers compare against the wrong name count. Holding the invariant
+/// here — at the single deserializer all five header fields that parse through it share — makes
+/// those sites correct by construction rather than by eleven separate case-folding patches. (Two
+/// further fields name this module for `serialize_with` only and never reach the deserializer.)
+///
+/// "First the deserializer presents" is deliberately not "first in the document". Which one you get
+/// depends on how the caller reached this function, and **both shapes are live in production**:
+///
+/// - Deserializing **straight from JSON text or bytes** into the target type streams entries in
+///   document order, so the first spelling written wins. (`POST /imposters` and
+///   `POST /intercept/rules` take this path, as does `--configfile`'s bare-array form.)
+/// - Deserializing from an **already-parsed `serde_json::Value`** walks a `serde_json::Map`, which
+///   is a `BTreeMap` unless the `preserve_order` feature is on — it is not enabled in this
+///   workspace — so entries arrive sorted by key bytes and the lexicographically smallest spelling
+///   wins. (`--configfile`'s `{"imposters": […]}` wrapper and single-object forms both parse to a
+///   `Value` first, as do `rift_apply_config` and the scenarios stub path.)
+///
+/// Note how little those two lists correlate with the user-facing feature: one CLI flag spans both,
+/// depending only on the document's outermost punctuation. That is precisely why **nothing outside
+/// this module should depend on which spelling wins** — and why the user-facing documentation of
+/// this behaviour promises one entry and stops there. What the fix guarantees, and all it needs to
+/// guarantee, is that the result is a *function of the document*: the defect was never the choice
+/// of spelling but that the choice varied between runs of the same input.
 pub mod multi_value_headers {
     use serde::Deserialize;
-    use serde::de::Deserializer;
+    use serde::de::{Deserializer, MapAccess, Visitor};
     use serde::ser::{SerializeMap, Serializer};
     use std::collections::HashMap;
+    use std::fmt;
 
     pub fn serialize<S: Serializer>(
         headers: &HashMap<String, Vec<String>>,
@@ -55,25 +87,72 @@ pub mod multi_value_headers {
         }
     }
 
+    /// Order matters for `#[serde(untagged)]`: a scalar can never match `Many` and an array can
+    /// never match `One`, so either order is sound — `One` first keeps the common case first.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(Scalar),
+        Many(Vec<Scalar>),
+    }
+
+    impl OneOrMany {
+        /// An empty array yields no values rather than being rejected, which keeps the map
+        /// byte-identical to what the pre-#1039 code produced. It is not load-bearing beyond that:
+        /// `serialize` omits such an entry, and `RequestHeaders` filters it out of both `entries()`
+        /// and `len()`, so a name with no values already reads as absent everywhere downstream.
+        fn into_strings(self) -> Vec<String> {
+            match self {
+                OneOrMany::One(s) => vec![s.into_string()],
+                OneOrMany::Many(v) => v.into_iter().map(Scalar::into_string).collect(),
+            }
+        }
+    }
+
+    struct FoldingVisitor;
+
+    impl<'de> Visitor<'de> for FoldingVisitor {
+        type Value = HashMap<String, Vec<String>>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a map of header names to a scalar or an array of scalars")
+        }
+
+        fn visit_map<M: MapAccess<'de>>(self, mut access: M) -> Result<Self::Value, M::Error> {
+            // Accumulated in a `Vec` rather than a `HashMap` so the fold preserves the order the
+            // deserializer presents: which spelling survives and what order the values end up in
+            // are then properties of the document, not of a hash iteration order that varies per
+            // process. Deserializing straight into a `HashMap` also loses a repeated key silently,
+            // since serde's map impl is last-wins.
+            //
+            // `size_hint` is attacker-influenced in the general case — serde's own map impl clamps
+            // it for exactly this reason — so cap the preallocation rather than trusting it. Real
+            // header maps are far below the cap, so this never costs a realistic document a
+            // reallocation.
+            let mut folded: Vec<(String, Vec<String>)> =
+                Vec::with_capacity(access.size_hint().unwrap_or(0).min(1024));
+            while let Some((name, value)) = access.next_entry::<String, OneOrMany>()? {
+                let values = value.into_strings();
+                match folded
+                    .iter_mut()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(&name))
+                {
+                    // `eq_ignore_ascii_case` is exactly the HTTP rule: names differing outside
+                    // ASCII are different names and must not be folded together.
+                    Some((_, existing)) => existing.extend(values),
+                    None => folded.push((name, values)),
+                }
+            }
+            Ok(folded.into_iter().collect())
+        }
+    }
+
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<HashMap<String, Vec<String>>, D::Error> {
-        // Order matters for `#[serde(untagged)]`: a scalar can never match `Many` and an array can
-        // never match `One`, so either order is sound — `One` first keeps the common case first.
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum OneOrMany {
-            One(Scalar),
-            Many(Vec<Scalar>),
-        }
-        let raw = HashMap::<String, OneOrMany>::deserialize(deserializer)?;
-        Ok(raw
-            .into_iter()
-            .map(|(k, v)| match v {
-                OneOrMany::One(s) => (k, vec![s.into_string()]),
-                OneOrMany::Many(v) => (k, v.into_iter().map(Scalar::into_string).collect()),
-            })
-            .collect())
+        // The linear scan is O(k²) in the number of distinct names. Header maps are small and this
+        // runs on config load / the admin API, never on the request path.
+        deserializer.deserialize_map(FoldingVisitor)
     }
 }
 
@@ -173,6 +252,146 @@ mod tests {
             r.headers["X-Multi"],
             vec!["200".to_string(), "x".to_string(), "false".to_string()]
         );
+    }
+
+    // Issue #1039: one key per case-folded name. Before this, the deserializer built a
+    // `HashMap<String, OneOrMany>`, which both split `content-type` from `Content-Type` into two
+    // entries and silently last-wins on a repeated key. Two entries for one header name make every
+    // case-insensitive find-first lookup downstream (form parsing, predicates, `copy`, the
+    // scripting engines) answer nondeterministically, and make `deepEquals` on headers compare the
+    // wrong count.
+    #[test]
+    fn headers_merge_case_variant_keys_under_the_first_spelling() {
+        let r: HeadersIn =
+            serde_json::from_str(r#"{"headers":{"content-type":"a","Content-Type":"b"}}"#)
+                .expect("case-variant keys are a valid document, not an error");
+        assert_eq!(
+            r.headers.len(),
+            1,
+            "two spellings of one name is one header"
+        );
+        assert_eq!(
+            r.headers["content-type"],
+            vec!["a".to_string(), "b".to_string()],
+            "first spelling survives; values follow document order"
+        );
+        assert!(
+            !r.headers.contains_key("Content-Type"),
+            "the later spelling must not survive as a second key"
+        );
+    }
+
+    #[test]
+    fn headers_merge_byte_identical_duplicate_keys() {
+        let r: HeadersIn = serde_json::from_str(r#"{"headers":{"X-Dup":"a","X-Dup":"b"}}"#)
+            .expect("a repeated key is accepted");
+        assert_eq!(
+            r.headers["X-Dup"],
+            vec!["a".to_string(), "b".to_string()],
+            "a repeated key keeps both values instead of serde's silent last-wins"
+        );
+    }
+
+    #[test]
+    fn headers_preserve_a_lone_keys_spelling_byte_exact() {
+        // The served header spelling is a contract (`oddly_cased_content_type_not_duplicated`,
+        // and the `Content-type` fixture in the SDK corpus whose replay must deep-equal).
+        let r: HeadersIn = serde_json::from_str(r#"{"headers":{"Content-type":"x"}}"#).unwrap();
+        assert_eq!(r.headers["Content-type"], vec!["x".to_string()]);
+        assert!(!r.headers.contains_key("Content-Type"));
+        assert!(!r.headers.contains_key("content-type"));
+
+        let shouty: HeadersIn =
+            serde_json::from_str(r#"{"headers":{"CONTENT-TYPE":"y"}}"#).unwrap();
+        assert_eq!(shouty.headers["CONTENT-TYPE"], vec!["y".to_string()]);
+
+        // The contract is parse *and serve*, so go the whole way back out to the wire — it is the
+        // served spelling those guards pin, and asserting only the parsed key leaves that half of
+        // the round trip untested.
+        let served = serde_json::to_value(HeadersOut { headers: r.headers }).expect("serialize");
+        assert_eq!(served["headers"], serde_json::json!({"Content-type": "x"}));
+    }
+
+    #[test]
+    fn headers_merge_three_way_variants_with_mixed_scalars_and_arrays() {
+        let r: HeadersIn =
+            serde_json::from_str(r#"{"headers":{"X-A":1,"x-a":[true,"z"],"X-a":2.5}}"#)
+                .expect("#754 scalar coercion still applies to every merged entry");
+        assert_eq!(r.headers.len(), 1);
+        assert_eq!(
+            r.headers["X-A"],
+            vec![
+                "1".to_string(),
+                "true".to_string(),
+                "z".to_string(),
+                "2.5".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn headers_merge_is_deterministic_across_repeated_parses() {
+        // The issue's actual symptom: with a `HashMap` intermediate the surviving key depended on
+        // iteration order, so the same stored document answered differently across runs.
+        for _ in 0..200 {
+            let r: HeadersIn = serde_json::from_str(
+                r#"{"headers":{"content-type":"a","Content-Type":"b","CONTENT-TYPE":"c"}}"#,
+            )
+            .unwrap();
+            assert_eq!(r.headers.len(), 1);
+            assert_eq!(
+                r.headers["content-type"],
+                vec!["a".to_string(), "b".to_string(), "c".to_string()]
+            );
+        }
+    }
+
+    // The two deserializer inputs present entries in different orders, and both reach production:
+    // streaming from text or bytes gives document order, while going through a `serde_json::Value`
+    // first walks a `Map` and gives byte order. See the module doc for which callers take which —
+    // `--configfile` alone takes both, depending on the document's outermost punctuation, which is
+    // why nothing outside this module may depend on the answer.
+    //
+    // The byte-order half asserts that `preserve_order` is OFF workspace-wide. If a future
+    // dependency turns it on, this is the test that should fail — deliberately, and first.
+    #[test]
+    fn headers_fold_deterministically_from_a_value_too_even_though_the_order_differs() {
+        const TEXT: &str = r#"{"headers":{"set-cookie":"a","Set-Cookie":"b"}}"#;
+
+        let from_text: HeadersIn = serde_json::from_str(TEXT).unwrap();
+        assert_eq!(
+            from_text.headers["set-cookie"],
+            vec!["a".to_string(), "b".to_string()],
+            "streaming from text keeps document order, so the first spelling written wins"
+        );
+
+        let value: serde_json::Value = serde_json::from_str(TEXT).unwrap();
+        let from_value: HeadersIn = serde_json::from_value(value).unwrap();
+        assert_eq!(from_value.headers.len(), 1, "still one header either way");
+        assert_eq!(
+            from_value.headers["Set-Cookie"],
+            vec!["b".to_string(), "a".to_string()],
+            "a `Map` is key-sorted, so `Set-Cookie` (0x53) precedes `set-cookie` (0x73)"
+        );
+    }
+
+    #[test]
+    fn headers_fold_only_ascii_case_and_keep_empty_shapes() {
+        let empty: HeadersIn = serde_json::from_str(r#"{"headers":{}}"#).unwrap();
+        assert!(empty.headers.is_empty());
+
+        // A key present with an empty array stays present with no values — the pre-#1039 map shape,
+        // preserved so the fold changes nothing it does not have to. Downstream it is invisible
+        // either way: `serialize` omits it and `RequestHeaders` filters it out of `entries()` and
+        // `len()`, so such a name already reads as absent (`header_name_with_no_values_reads_as_absent`).
+        let no_values: HeadersIn = serde_json::from_str(r#"{"headers":{"X-None":[]}}"#).unwrap();
+        assert_eq!(no_values.headers["X-None"], Vec::<String>::new());
+
+        // `eq_ignore_ascii_case` is exactly the HTTP rule: names differing outside ASCII are
+        // different names and must not be folded together.
+        let non_ascii: HeadersIn =
+            serde_json::from_str(r#"{"headers":{"X-Kä":"1","X-KÄ":"2"}}"#).unwrap();
+        assert_eq!(non_ascii.headers.len(), 2);
     }
 
     #[test]
