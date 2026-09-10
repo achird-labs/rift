@@ -415,13 +415,21 @@ typo is visible in the log rather than only in behaviour that does not match the
 `RIFT_MAX_CONNECTIONS=0` is the one exception: it reads as "no cap", which is what it does, so it
 is accepted silently.
 
-`RIFT_HTTP_HEADER_TIMEOUT` is applied twice on a new connection: once to the HTTP/1-vs-HTTP/2
-detection window, and then again by HTTP/1's own header timer, which can only start once that
-detection has resolved. So the worst case for a client that goes silent at exactly the wrong moment
-is **up to two** header timeouts before the connection is closed, not one. The two phases are not
-netted against each other deliberately — subtracting elapsed time would make a very small
-`RIFT_HTTP_HEADER_TIMEOUT` behave erratically, and bounding each phase separately is easier to
-reason about than a shared budget.
+`RIFT_HTTP_HEADER_TIMEOUT` is applied in **three** places on a new connection: to the
+HTTP/1-vs-HTTP/2 detection window; then, if the connection resolves to HTTP/1, by HTTP/1's own
+header timer, which can only start once detection has resolved; and, if it resolves to HTTP/2, as
+both the keep-alive ping interval and the pong timeout. So the worst case for a client that goes
+silent at exactly the wrong moment is **up to two** header timeouts before the connection is
+closed, not one — on either protocol. The phases are not netted against each other deliberately:
+subtracting elapsed time would make a very small `RIFT_HTTP_HEADER_TIMEOUT` behave erratically, and
+bounding each phase separately is easier to reason about than a shared budget.
+
+The HTTP/2 leg needs its own bound because HTTP/2 has no equivalent of HTTP/1's header timer: once
+the preface is read, a peer that never opens a stream is not waiting on a request head that a timer
+could bound. The keep-alive ping is the only mechanism that reaches it. A consequence worth knowing
+about: **idle HTTP/2 connections are now pinged** every `RIFT_HTTP_HEADER_TIMEOUT` (30s by default).
+A live client answers and is unaffected; the traffic is two frames per interval per idle
+connection.
 
 `RIFT_STRICT_BEHAVIORS` and the per-imposter `strictBehaviors` field combine with **OR** — either
 being set enables strict mode. See
