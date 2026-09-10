@@ -43,7 +43,7 @@ async fn verify_dynamic_asserts_proxy_verify_and_fault() {
     create(
         &manager,
         serde_json::json!({
-            "port": 19861, "protocol": "http",
+            "port": 22644, "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/r" } }],
                 "responses": [
@@ -158,7 +158,7 @@ async fn dynamic_skipped_without_flag() {
     create(
         &manager,
         serde_json::json!({
-            "port": 19881, "protocol": "http",
+            "port": 22646, "protocol": "http",
             "stubs": [{ "responses": [{ "proxy": {
                 "to": "http://127.0.0.1:1", "mode": "proxyOnce",
                 "predicateGenerators": [{ "matches": { "path": true } }]
@@ -195,7 +195,7 @@ async fn verify_dynamic_asserts_tcp_fault() {
     create(
         &manager,
         serde_json::json!({
-            "port": 19891, "protocol": "http",
+            "port": 22649, "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/reset" } }],
                 "responses": [{ "is": { "statusCode": 200 },
@@ -232,7 +232,7 @@ async fn verify_normal_pass_asserts_tcp_fault() {
     create(
         &manager,
         serde_json::json!({
-            "port": 19901, "protocol": "http",
+            "port": 22651, "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/reset" } }],
                 "responses": [{ "is": { "statusCode": 200 },
@@ -269,7 +269,7 @@ async fn verify_normal_pass_accepts_date_template_body() {
     create(
         &manager,
         serde_json::json!({
-            "port": 19911, "protocol": "http",
+            "port": 22652, "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/token" } }],
                 "responses": [{ "is": { "statusCode": 200,
@@ -307,7 +307,7 @@ async fn verify_normal_pass_accepts_plaintext_template_body() {
     create(
         &manager,
         serde_json::json!({
-            "port": 19921, "protocol": "http",
+            "port": 22653, "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "path": "/snapshot" } }],
                 "responses": [{ "is": { "statusCode": 200, "body": "snapshot taken at {{NOW}}" } }]
@@ -383,7 +383,7 @@ async fn verify_flow_id_header_does_not_clobber_detection() {
     create(
         &manager,
         serde_json::json!({
-            "port": 19951, "protocol": "http",
+            "port": 22654, "protocol": "http",
             "_rift": { "flowState": { "backend": "inmemory",
                 "flowIdSource": "header:X-Mock-Space" } },
             "stubs": [
@@ -425,7 +425,7 @@ async fn verify_skips_space_stub_when_flow_id_unresolvable() {
     create(
         &manager,
         serde_json::json!({
-            "port": 19961, "protocol": "http",
+            "port": 22657, "protocol": "http",
             "stubs": [{ "space": "alice", "predicates": [{ "equals": { "path": "/d" } }],
                 "responses": [{ "is": { "statusCode": 200, "body": "A" } }] }]
         }),
@@ -458,7 +458,7 @@ async fn verify_normal_pass_drives_xpath_attribute_stub() {
     create(
         &manager,
         serde_json::json!({
-            "port": 19971, "protocol": "http",
+            "port": 22660, "protocol": "http",
             "stubs": [{
                 "predicates": [{ "equals": { "body": "admin" },
                     "xpath": { "selector": "string(//user/@role)" } }],

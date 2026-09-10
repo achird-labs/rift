@@ -2062,9 +2062,9 @@ mod replace_all_tests {
     // set is replaced by the new one.
     #[tokio::test]
     async fn put_success_replaces_set_with_imposter_list() {
-        let manager = manager_with_http(19762).await;
+        let manager = manager_with_http(22617).await;
         let body =
-            serde_json::json!({"imposters": [{"port": 19763, "protocol": "http", "stubs": []}]})
+            serde_json::json!({"imposters": [{"port": 22619, "protocol": "http", "stubs": []}]})
                 .to_string();
         let resp =
             replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
@@ -2077,9 +2077,9 @@ mod replace_all_tests {
             .iter()
             .filter_map(|i| i["port"].as_u64())
             .collect();
-        assert_eq!(ports, vec![19763]);
-        assert!(manager.get_imposter(19762).is_err(), "old set replaced");
-        assert!(manager.get_imposter(19763).is_ok());
+        assert_eq!(ports, vec![22619]);
+        assert!(manager.get_imposter(22617).is_err(), "old set replaced");
+        assert!(manager.get_imposter(22619).is_ok());
         manager.delete_all().await;
     }
 
@@ -2132,10 +2132,10 @@ mod replace_all_tests {
     // were already gone by the time the creates started failing.
     #[tokio::test]
     async fn put_invalid_set_rejected_with_imposters_untouched() {
-        let manager = manager_with_http(19764).await;
+        let manager = manager_with_http(22621).await;
         let body = serde_json::json!({"imposters": [
-            {"port": 19765, "protocol": "http", "stubs": []},
-            {"port": 19765, "protocol": "http", "stubs": []}
+            {"port": 22623, "protocol": "http", "stubs": []},
+            {"port": 22623, "protocol": "http", "stubs": []}
         ]})
         .to_string();
         let resp =
@@ -2147,10 +2147,10 @@ mod replace_all_tests {
             "a duplicate-port set is a client error"
         );
         assert!(
-            manager.get_imposter(19764).is_ok(),
+            manager.get_imposter(22621).is_ok(),
             "a rejected set must leave the running imposters untouched"
         );
-        assert!(manager.get_imposter(19765).is_err());
+        assert!(manager.get_imposter(22623).is_err());
         manager.delete_all().await;
     }
 }
@@ -2167,7 +2167,7 @@ mod list_tests {
     async fn list_response_includes_stub_count_and_enabled() {
         let manager = Arc::new(ImposterManager::new());
         let config = serde_json::from_value(serde_json::json!({
-            "port": 19770, "protocol": "http",
+            "port": 22624, "protocol": "http",
             "stubs": [
                 {"predicates": [], "responses": [{"is": {"statusCode": 200}}]},
                 {"predicates": [], "responses": [{"is": {"statusCode": 201}}]}
@@ -2189,7 +2189,7 @@ mod list_tests {
 
         // Boundary: a stubless imposter reports 0, not a missing field.
         let empty = serde_json::from_value(serde_json::json!({
-            "port": 19771, "protocol": "http", "stubs": []
+            "port": 22625, "protocol": "http", "stubs": []
         }))
         .expect("config");
         manager.create_imposter(empty).await.expect("create");
@@ -2200,7 +2200,7 @@ mod list_tests {
             .as_array()
             .expect("array")
             .iter()
-            .find(|i| i["port"] == 19771)
+            .find(|i| i["port"] == 22625)
             .expect("stubless imposter listed");
         assert_eq!(stubless["stubCount"], 0);
         manager.delete_all().await;
@@ -2212,12 +2212,12 @@ mod list_tests {
     async fn list_response_includes_record_requests() {
         let manager = Arc::new(ImposterManager::new());
         let recording = serde_json::from_value(serde_json::json!({
-            "port": 19772, "protocol": "http", "recordRequests": true, "stubs": []
+            "port": 22628, "protocol": "http", "recordRequests": true, "stubs": []
         }))
         .expect("config");
         manager.create_imposter(recording).await.expect("create");
         let plain = serde_json::from_value(serde_json::json!({
-            "port": 19773, "protocol": "http", "stubs": []
+            "port": 22630, "protocol": "http", "stubs": []
         }))
         .expect("config");
         manager.create_imposter(plain).await.expect("create");
@@ -2236,12 +2236,12 @@ mod list_tests {
                 .clone()
         };
         assert_eq!(
-            by_port(19772)["recordRequests"],
+            by_port(22628)["recordRequests"],
             true,
             "a recording imposter must report recordRequests: true in the list"
         );
         assert_eq!(
-            by_port(19773)["recordRequests"],
+            by_port(22630)["recordRequests"],
             false,
             "a non-recording imposter must report recordRequests: false, not a missing field"
         );

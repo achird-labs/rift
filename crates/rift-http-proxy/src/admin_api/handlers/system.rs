@@ -634,7 +634,7 @@ mod tests {
         let path = dir.path().join("imposters.json");
         std::fs::write(
             &path,
-            r#"{"imposters":[{"port":19482,"protocol":"http","stubs":[
+            r#"{"imposters":[{"port":22601,"protocol":"http","stubs":[
                 {"responses":[{"is":{"statusCode":200,"body":"decorated"},
                  "_behaviors":{"decorate":"function (req, res) { res.body = 'ok'; }"}}]}
             ]}]}"#,
@@ -654,7 +654,7 @@ mod tests {
             StatusCode::OK,
             "--allowInjection must permit a decorate behavior on reload"
         );
-        assert!(manager.get_imposter(19482).is_ok());
+        assert!(manager.get_imposter(22601).is_ok());
 
         manager.delete_all().await;
     }

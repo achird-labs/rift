@@ -3045,45 +3045,45 @@ mod scenario_fsm_tests {
     #[tokio::test]
     async fn scenario_transition_advances_state() {
         let manager = ImposterManager::new();
-        let config = serde_json::from_value(order_fsm(19760, None)).unwrap();
+        let config = serde_json::from_value(order_fsm(22615, None)).unwrap();
         manager.create_imposter(config).await.expect("create");
         let c = reqwest::Client::new();
 
         assert_eq!(
-            get(&c, 19760, "/status", None).await,
+            get(&c, 22615, "/status", None).await,
             "unpaid",
             "initial state"
         );
         assert_eq!(
-            get(&c, 19760, "/pay", None).await,
+            get(&c, 22615, "/pay", None).await,
             "ok",
             "pay transitions to paid"
         );
         assert_eq!(
-            get(&c, 19760, "/status", None).await,
+            get(&c, 22615, "/status", None).await,
             "paid",
             "state advanced after pay"
         );
 
-        let _ = manager.delete_imposter(19760).await;
+        let _ = manager.delete_imposter(22615).await;
     }
 
     #[tokio::test]
     async fn scenario_unmatched_in_state_keeps_state() {
         let manager = ImposterManager::new();
-        let config = serde_json::from_value(order_fsm(19761, None)).unwrap();
+        let config = serde_json::from_value(order_fsm(22616, None)).unwrap();
         manager.create_imposter(config).await.expect("create");
         let c = reqwest::Client::new();
 
         // /status only reads; it never carries newScenarioState, so it must not advance.
-        assert_eq!(get(&c, 19761, "/status", None).await, "unpaid");
+        assert_eq!(get(&c, 22616, "/status", None).await, "unpaid");
         assert_eq!(
-            get(&c, 19761, "/status", None).await,
+            get(&c, 22616, "/status", None).await,
             "unpaid",
             "read-only stub keeps state"
         );
 
-        let _ = manager.delete_imposter(19761).await;
+        let _ = manager.delete_imposter(22616).await;
     }
 
     #[tokio::test]
@@ -3381,10 +3381,10 @@ mod default_forward_tests {
     #[tokio::test]
     async fn default_forward_proxies_unmatched() {
         let manager = ImposterManager::new();
-        upstream(&manager, 19780).await;
+        upstream(&manager, 22635).await;
         let config = serde_json::from_value(serde_json::json!({
             "port": 19781, "protocol": "http",
-            "defaultForward": "http://127.0.0.1:19780", "stubs": []
+            "defaultForward": "http://127.0.0.1:22635", "stubs": []
         }))
         .unwrap();
         manager.create_imposter(config).await.expect("create");
@@ -3403,17 +3403,17 @@ mod default_forward_tests {
             "unmatched request forwarded upstream"
         );
 
-        let _ = manager.delete_imposter(19780).await;
+        let _ = manager.delete_imposter(22635).await;
         let _ = manager.delete_imposter(19781).await;
     }
 
     #[tokio::test]
     async fn default_forward_preserves_path() {
         let manager = ImposterManager::new();
-        upstream(&manager, 19782).await;
+        upstream(&manager, 22639).await;
         let config = serde_json::from_value(serde_json::json!({
             "port": 19783, "protocol": "http",
-            "defaultForward": "http://127.0.0.1:19782", "stubs": []
+            "defaultForward": "http://127.0.0.1:22639", "stubs": []
         }))
         .unwrap();
         manager.create_imposter(config).await.expect("create");
@@ -3424,7 +3424,7 @@ mod default_forward_tests {
             "USERS"
         );
 
-        let _ = manager.delete_imposter(19782).await;
+        let _ = manager.delete_imposter(22639).await;
         let _ = manager.delete_imposter(19783).await;
     }
 
@@ -3744,7 +3744,7 @@ mod backend_errors {
 
     fn gated_imposter() -> Arc<Imposter> {
         let config: ImposterConfig = serde_json::from_value(json!({
-            "protocol": "http", "port": 19490,
+            "protocol": "http", "port": 22603,
             "stubs": [{
                 "scenarioName": "order",
                 "requiredScenarioState": "Started",
@@ -4171,7 +4171,7 @@ mod backend_errors {
                                 req,
                                 imp,
                                 addr,
-                                19490,
+                                22603,
                                 Some(rec as Arc<dyn ResponseDecorator>),
                             )
                             .await
@@ -4213,7 +4213,7 @@ mod backend_errors {
         assert_eq!(calls.len(), 1);
         let (phase, port, annotations) = &calls[0];
         assert_eq!(*phase, ResponsePhase::DataPlane);
-        assert_eq!(*port, Some(19490));
+        assert_eq!(*port, Some(22603));
         assert!(
             annotations
                 .iter()
@@ -4435,7 +4435,7 @@ mod cas_transitions {
 #[tokio::test]
 async fn test_path_params_template_end_to_end() {
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": 19741,
+        "port": 22609,
         "protocol": "http",
         "stubs": [{
             "routePattern": "/users/:id",
@@ -4451,14 +4451,14 @@ async fn test_path_params_template_end_to_end() {
         .await
         .expect("create imposter");
     let body = reqwest::Client::new()
-        .get("http://127.0.0.1:19741/users/123")
+        .get("http://127.0.0.1:22609/users/123")
         .send()
         .await
         .expect("GET failed")
         .text()
         .await
         .expect("body");
-    let _ = manager.delete_imposter(19741).await;
+    let _ = manager.delete_imposter(22609).await;
 
     assert_eq!(
         body, "123",
@@ -4472,7 +4472,7 @@ async fn test_path_params_script_rhai() {
          let id = ctx.request.pathParams[\"id\"]; if id == () { id = \"MISS\"; } \
          http(200, id) }";
     let config: ImposterConfig = serde_json::from_value(serde_json::json!({
-        "port": 19742,
+        "port": 22610,
         "protocol": "http",
         "stubs": [{
             "routePattern": "/users/:id",
@@ -4488,14 +4488,14 @@ async fn test_path_params_script_rhai() {
         .await
         .expect("create imposter");
     let body = reqwest::Client::new()
-        .get("http://127.0.0.1:19742/users/123")
+        .get("http://127.0.0.1:22610/users/123")
         .send()
         .await
         .expect("GET failed")
         .text()
         .await
         .expect("body");
-    let _ = manager.delete_imposter(19742).await;
+    let _ = manager.delete_imposter(22610).await;
 
     assert_eq!(
         body, "123",
@@ -4699,10 +4699,10 @@ mod proxy_generator_failure_tests {
     #[tokio::test]
     async fn proxy_generator_failure_skips_stub_and_tags_response() {
         let manager = ImposterManager::new();
-        upstream(&manager, 19820).await;
+        upstream(&manager, 22640).await;
         // A throwing generator: predicates cannot be produced.
         let throwing = r#"function(config, logger, predicates) { throw new Error("boom"); }"#;
-        proxy_with_generator(&manager, 19821, 19820, throwing).await;
+        proxy_with_generator(&manager, 19821, 22640, throwing).await;
 
         let resp = get(19821, "/gen").await;
         assert_eq!(
@@ -4728,19 +4728,19 @@ mod proxy_generator_failure_tests {
             "no auto-stub may be recorded when predicate generation fails (issue #498)"
         );
 
-        let _ = manager.delete_imposter(19820).await;
+        let _ = manager.delete_imposter(22640).await;
         let _ = manager.delete_imposter(19821).await;
     }
 
     #[tokio::test]
     async fn proxy_generator_success_records_stub() {
         let manager = ImposterManager::new();
-        upstream(&manager, 19822).await;
+        upstream(&manager, 22642).await;
         // Control: a valid generator produces a real predicate → stub IS recorded, no error header.
         let ok_fn = r#"function(config, logger, predicates) {
             return [{ equals: { path: config.request.path } }];
         }"#;
-        proxy_with_generator(&manager, 19823, 19822, ok_fn).await;
+        proxy_with_generator(&manager, 19823, 22642, ok_fn).await;
 
         let resp = get(19823, "/gen").await;
         assert_eq!(resp.status(), 200);
@@ -4764,7 +4764,7 @@ mod proxy_generator_failure_tests {
             "recorded stub matches the generated predicate, not everything"
         );
 
-        let _ = manager.delete_imposter(19822).await;
+        let _ = manager.delete_imposter(22642).await;
         let _ = manager.delete_imposter(19823).await;
     }
 }

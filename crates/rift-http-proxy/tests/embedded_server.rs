@@ -50,7 +50,7 @@ async fn server_builder_with_injected_manager_serves_admin_api() {
         "--port",
         "12610",
         "--metrics-port",
-        "19481",
+        "22600",
     ])
     .expect("cli parse");
 
@@ -899,7 +899,7 @@ async fn server_builder_still_accepts_and_enforces_a_real_api_key() {
         "--port",
         "12614",
         "--metrics-port",
-        "19491",
+        "22604",
         "--api-key",
         "s3cret-token",
     ])

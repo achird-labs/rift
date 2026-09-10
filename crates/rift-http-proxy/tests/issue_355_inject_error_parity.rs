@@ -12,7 +12,7 @@ use std::time::Duration;
 async fn throwing_inject_returns_mountebank_400() {
     let manager = ImposterManager::new();
     let config = serde_json::from_value(serde_json::json!({
-        "port": 19895, "protocol": "http", "stubs": [
+        "port": 22650, "protocol": "http", "stubs": [
             { "responses": [{ "inject": "function (config) { throw new Error('boom-inject'); }" }] }
         ]
     }))
@@ -21,7 +21,7 @@ async fn throwing_inject_returns_mountebank_400() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let resp = reqwest::Client::new()
-        .get("http://127.0.0.1:19895/x")
+        .get("http://127.0.0.1:22650/x")
         .send()
         .await
         .expect("send");
@@ -52,5 +52,5 @@ async fn throwing_inject_returns_mountebank_400() {
         "the error message must surface the script failure, got: {body}"
     );
 
-    let _ = manager.delete_imposter(19895).await;
+    let _ = manager.delete_imposter(22650).await;
 }

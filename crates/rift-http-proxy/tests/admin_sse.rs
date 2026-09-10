@@ -507,7 +507,7 @@ async fn lagged_event_on_backpressure() {
     for _ in 0..2000u32 {
         mgr.event_bus().publish_lifecycle(
             rift_mock_core::imposter::ImposterAction::StubsChanged,
-            Some(19999),
+            Some(22661),
         );
     }
     // Now drain: a `lagged` frame must appear, and the stream keeps going (not closed).
