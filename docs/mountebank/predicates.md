@@ -188,6 +188,9 @@ Regular expression match:
 }
 ```
 
+Unlike the other operators, `matches` folds case per **Unicode**, not ASCII — see
+[caseSensitive](#casesensitive).
+
 ### exists
 
 Check field existence:
@@ -357,8 +360,28 @@ Enable case-sensitive matching (default: false):
 ```
 
 Case-insensitive matching (the default) folds **ASCII** letters only (`A`–`Z` ↔ `a`–`z`) across
-`equals`, `contains`, `startsWith`, and `endsWith`. Non-ASCII characters (e.g. `É` vs `é`) are
-compared exactly.
+`equals`, `deepEquals`, `contains`, `startsWith`, and `endsWith`. Non-ASCII characters (e.g. `É` vs
+`é`) are compared exactly.
+
+[`matches`](#matches) is the exception: its case-insensitive mode is the regex engine's, which
+applies full Unicode case folding. So `{"matches": {"path": "^/josé$"}}` matches a request for
+`/JOSÉ`, while `{"equals": {"path": "/josé"}}` does not.
+
+**Migrating from Mountebank:** Mountebank folds Unicode for *all* of these operators, so it has no
+such split. Rift's string operators deviate deliberately (see below); `matches` is the one that
+behaves identically in both. If your paths, headers or bodies are all ASCII — as most are — nothing
+changes. If they are not, the string operators are stricter here than you may expect.
+
+The split is deliberate, not an oversight. The string operators fold ASCII so that a comparison
+allocates nothing per request, and so the stub index's prefix/substring pruning stays sound —
+Unicode folding is length-changing and context-sensitive (`startsWith "/ΟΣ"` against a request for
+`/ΟΣΑ` folds to a final sigma), which would make the index prune a stub that in fact still matches.
+`matches` keeps the regex engine's own folding because narrowing it would mean disabling Unicode
+mode entirely, which would also change `\w`, `\d`, `\s`, `\b` and `.`.
+
+If you need one rule across both, set `caseSensitive: true` and normalise case yourself. Note that
+an inline `(?i)` in a `matches` pattern overrides the flag for that pattern, and still folds per
+Unicode.
 
 ### except
 

@@ -2768,4 +2768,165 @@ mod tests {
             );
         }
     }
+
+    // =========================================================================
+    // Issue #1059: `matches` and the four string operators fold case differently
+    // on non-ASCII, deliberately.
+    // =========================================================================
+
+    /// Pins **both halves** of a divergence that looks like a bug and is not, so that a future
+    /// "fix" has to argue with the record rather than silently flip one of them.
+    ///
+    /// `equals`/`deepEquals`/`contains`/`startsWith`/`endsWith` fold ASCII only. That is not a
+    /// shortcut: the stub index prunes on a prefix/substring relation and folds with
+    /// `to_ascii_lowercase` to stay exactly equivalent to the evaluator — see `core::stub_index::fold`,
+    /// whose doc comment is the record. Unicode folding is length-changing and context-sensitive —
+    /// `startsWith "/ΟΣ"` against `/ΟΣΑ` folds to a final sigma — so adopting it would make the index
+    /// prune stubs that still match. #480 is the other half of the reason: the ASCII fold compares
+    /// without allocating per request.
+    ///
+    /// `matches` keeps the regex engine's Unicode folding (`predicates::regex_cache::compile`), which
+    /// is also what Mountebank does for it — note Mountebank folds Unicode for the string operators
+    /// too, so the divergence is Rift's, taken knowingly. Narrowing `matches` would mean
+    /// `unicode(false)`, which changes `\w`, `\d`, `\s`, `\b` and `.` as well.
+    #[test]
+    fn matches_folds_non_ascii_case_but_equals_does_not() {
+        let equals_pred = make_predicate(PredicateOperation::Equals(
+            [("path".to_string(), json!("/josé"))].into_iter().collect(),
+        ));
+        let matches_pred = make_predicate(PredicateOperation::Matches(
+            [("path".to_string(), json!("^/josé$"))]
+                .into_iter()
+                .collect(),
+        ));
+
+        let eval = |pred: &Predicate| {
+            predicate_matches(
+                pred,
+                "GET",
+                "/JOSÉ",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        };
+
+        assert!(
+            !eval(&equals_pred),
+            "`equals` folds ASCII only, so É and é are compared exactly"
+        );
+        assert!(
+            eval(&matches_pred),
+            "`matches` folds per Unicode, so É and é are the same letter"
+        );
+    }
+
+    #[test]
+    fn case_sensitive_true_makes_both_operators_agree_again() {
+        // Each operator is probed with the case difference it *would* otherwise fold, and each
+        // negative is paired with the baseline positive. Otherwise the assertions pass vacuously:
+        // probing `equals` with `É`/`é` asserts a negative that already holds when `caseSensitive`
+        // is ignored entirely, since the ASCII fold never folded `É` in the first place.
+        let sensitive = PredicateParameters {
+            case_sensitive: Some(true),
+            ..Default::default()
+        };
+
+        let eval = |pred: &Predicate, path: &str| {
+            predicate_matches(
+                pred,
+                "GET",
+                path,
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        };
+
+        let equals_fields: HashMap<String, serde_json::Value> =
+            [("path".to_string(), json!("/users"))]
+                .into_iter()
+                .collect();
+        assert!(
+            eval(
+                &make_predicate(PredicateOperation::Equals(equals_fields.clone())),
+                "/USERS"
+            ),
+            "baseline: `equals` folds ASCII case by default"
+        );
+        assert!(
+            !eval(
+                &make_predicate_with_params(
+                    PredicateOperation::Equals(equals_fields),
+                    sensitive.clone()
+                ),
+                "/USERS"
+            ),
+            "caseSensitive: true stops `equals` folding ASCII case"
+        );
+
+        let matches_fields: HashMap<String, serde_json::Value> =
+            [("path".to_string(), json!("^/josé$"))]
+                .into_iter()
+                .collect();
+        assert!(
+            eval(
+                &make_predicate(PredicateOperation::Matches(matches_fields.clone())),
+                "/JOSÉ"
+            ),
+            "baseline: `matches` folds non-ASCII case by default"
+        );
+        assert!(
+            !eval(
+                &make_predicate_with_params(PredicateOperation::Matches(matches_fields), sensitive),
+                "/JOSÉ"
+            ),
+            "caseSensitive: true stops `matches` folding non-ASCII case"
+        );
+    }
+
+    #[test]
+    fn ascii_case_folding_is_unaffected_by_the_divergence() {
+        // The divergence is non-ASCII only; both operators must still agree on ASCII, which is
+        // what the overwhelming majority of stubs actually rely on.
+        let equals_pred = make_predicate(PredicateOperation::Equals(
+            [("path".to_string(), json!("/users"))]
+                .into_iter()
+                .collect(),
+        ));
+        let matches_pred = make_predicate(PredicateOperation::Matches(
+            [("path".to_string(), json!("^/users$"))]
+                .into_iter()
+                .collect(),
+        ));
+
+        for pred in [&equals_pred, &matches_pred] {
+            assert!(
+                predicate_matches(
+                    pred,
+                    "GET",
+                    "/USERS",
+                    None,
+                    &empty_headers(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
+                )
+                .unwrap(),
+                "both operators fold ASCII case by default"
+            );
+        }
+    }
 }
