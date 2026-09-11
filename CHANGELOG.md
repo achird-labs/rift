@@ -13,6 +13,20 @@ record.
 
 ### Added
 
+- **`rift-lint` E043 — a single-valued header object that names one header twice** (#1062). #1050
+  made the engine *reject* such a document in `proxy.injectHeaders` and `_rift.fault.error.headers`
+  (a `400` from `POST /imposters`, a startup error from `--configfile`), but lint never inspected
+  either field. Lint passed and deployment failed — the worst possible ordering for a documented
+  pre-flight check, and the one `rift-conformance` drives as Plane A.
+  - The rule reports the **case-variant** shape (`X-Id` beside `x-id`). A *byte-identical* duplicate
+    key is not reported, because lint parses to a `serde_json::Value` first and `serde_json::Map` is
+    last-wins — the second spelling is gone before validation runs. The engine still rejects that one
+    on every text path (`POST /imposters`, `--configfile`'s bare-array form, YAML, `--datadir`), so a
+    narrower version of the same lint-passes-deploy-fails gap remains; closing it needs lint to read
+    the raw text rather than the parsed value.
+  - `is.headers` is deliberately **not** flagged: it is multi-valued, and the engine folds a
+    case-variant pair there (#1039) rather than rejecting it.
+
 - **WebSocket traffic passes through the intercept tunnel** (#997). A `Connection: Upgrade` /
   `Upgrade: websocket` request used to get an ordinary HTTP response, so the handshake failed — any
   system under test whose traffic includes a WebSocket (socket.io, GraphQL subscriptions, a

@@ -122,6 +122,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E040 | JavaScript syntax error in `_rift.script` | A malformed `_rift.script` body |
 | E041 | `_rift.fault.tcp` `probability` is outside 0.0–1.0 | `"probability": 1.5` |
 | E042 | Script uses `ctx.state` but no `_rift.flowState` is configured | `ctx.state.get(...)` without `flowState` |
+| E043 | Single-valued header object names one header twice, in different case (`proxy.injectHeaders`, `_rift.fault.error.headers`) | `{"X-Id": "a", "x-id": "b"}` |
 
 ### Warnings
 

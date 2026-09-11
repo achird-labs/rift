@@ -832,6 +832,20 @@ pub fn validate_response(
         validate_tcp_fault(file, tcp, &format!("{location}._rift.fault.tcp"), result);
     }
 
+    if let Some(headers) = response
+        .get("_rift")
+        .and_then(|rift| rift.get("fault"))
+        .and_then(|fault| fault.get("error"))
+        .and_then(|error| error.get("headers"))
+    {
+        validate_single_valued_headers(
+            file,
+            headers,
+            &format!("{location}._rift.fault.error.headers"),
+            result,
+        );
+    }
+
     let response_types = [has_is, has_proxy, has_inject, has_fault, has_rift];
     let active_types = response_types.iter().filter(|&&t| t).count();
 
@@ -962,6 +976,66 @@ pub fn validate_is_response(
     }
 }
 
+/// Validate a header object that holds **one value per name** — `proxy.injectHeaders` and
+/// `_rift.fault.error.headers` (issue #1062).
+///
+/// Since #1050 the engine rejects a document that names one header twice in either field: a `400`
+/// from `POST /imposters`, a startup error from `--configfile`. Without this rule lint passes and
+/// deployment fails, which is the worst possible ordering for a tool whose job is pre-flight.
+///
+/// This rule catches the **case-variant** shape only (`X-Id` beside `x-id`), because rift-lint
+/// parses every document to a `serde_json::Value` first and `serde_json::Map` is last-wins on a
+/// byte-identical duplicate key — that shape is gone before any validation runs.
+///
+/// **The engine does not share that blind spot**, so a gap remains and this comment must not claim
+/// otherwise. The engine is blind to a byte-identical duplicate only on the paths that reach it
+/// through a `Value` (`--configfile`'s `{…}` / `{"imposters":[…]}` wrapper forms); it rejects one on
+/// every text path — `POST /imposters` (`from_slice`), `--configfile`'s bare-array form, YAML, and
+/// `--datadir` — which `rift_types::wire`'s `a_byte_identical_duplicate_is_rejected_on_the_text_path`
+/// pins. So `{"X-Id": "a", "X-Id": "b"}` still lints clean and still `400`s. Closing that needs lint
+/// to read the raw text rather than the collapsed `Value`; tracked separately.
+///
+/// Value *types* are likewise not checked here — engine-side these are `HashMap<String, String>`, so
+/// a number, array or null is a `400` that lint passes. Deliberately out of scope per this issue's
+/// triage: it is a different rule, tracked with the gap above.
+///
+/// Deliberately **not** [`validate_headers`]: that one accepts string arrays (E018 multi-value
+/// semantics), which these two fields reject.
+fn validate_single_valued_headers(
+    file: &Path,
+    headers: &Value,
+    location: &str,
+    result: &mut LintResult,
+) {
+    let Some(headers_obj) = headers.as_object() else {
+        result.add_issue(
+            LintIssue::error("E021", "Headers must be an object", file.to_path_buf())
+                .with_location(location),
+        );
+        return;
+    };
+
+    let mut seen: Vec<&str> = Vec::with_capacity(headers_obj.len());
+    for name in headers_obj.keys() {
+        if let Some(first) = seen.iter().find(|s| s.eq_ignore_ascii_case(name)) {
+            result.add_issue(
+                LintIssue::error(
+                    "E043",
+                    format!(
+                        "Header '{name}' is also given as '{first}'; {location} names each \
+                         header once (the engine rejects this document)"
+                    ),
+                    file.to_path_buf(),
+                )
+                .with_location(location)
+                .with_suggestion("Keep one spelling of the header name"),
+            );
+        } else {
+            seen.push(name);
+        }
+    }
+}
+
 /// Validate response headers.
 pub fn validate_headers(file: &Path, headers: &Value, location: &str, result: &mut LintResult) {
     let Some(headers_obj) = headers.as_object() else {
@@ -1054,6 +1128,10 @@ pub fn validate_proxy_response(
     location: &str,
     result: &mut LintResult,
 ) {
+    if let Some(headers) = proxy.get("injectHeaders") {
+        validate_single_valued_headers(file, headers, &format!("{location}.injectHeaders"), result);
+    }
+
     if let Some(to) = proxy.get("to") {
         if let Some(url) = to.as_str() {
             if !url.starts_with("http://") && !url.starts_with("https://") {
