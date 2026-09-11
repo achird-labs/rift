@@ -248,6 +248,12 @@ with `strictBehaviors` / `RIFT_STRICT_BEHAVIORS` it returns `500` (see
 
 Copy values from the request to the response. Useful for echoing request data.
 
+When a `copy` token sits in a **header** value, the substituted text comes from the request, so
+Rift removes any character a header value cannot carry (CR, LF, NUL and the other ASCII controls)
+and logs a `rift::template` warning naming what it removed. A tab and any non-ASCII character are
+legal and are kept. Only the substituted text is repaired — a control character you wrote literally
+into the header is left alone, and still fails that response with a `500`.
+
 ### Copy from Path
 
 ```json
@@ -348,6 +354,11 @@ Request to `/users/123` returns `{ "id": "123" }`.
 ## lookup
 
 Look up data from external sources (CSV files, etc.).
+
+As with [`copy`](#copy), a `lookup` token in a **header** value is repaired after substitution: the
+request chooses which row is read, so a CSV cell holding a character a header value cannot carry
+would otherwise fail the whole response. Those characters are removed from the substituted cell and
+a `rift::template` warning names them. Literal text you wrote around the token is left alone.
 
 ### CSV Lookup
 

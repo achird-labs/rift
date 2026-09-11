@@ -160,10 +160,27 @@ pub(crate) fn extract_path_params(pattern: &str, path: &str) -> FastMap<String, 
 /// # Returns
 /// The processed string with all variables substituted
 pub fn process_template(template: &str, request_data: &RequestData) -> String {
+    process_template_mapped(template, request_data, |value| value)
+}
+
+/// [`process_template`], with every substituted value passed through `map` before it is spliced in.
+///
+/// Header values need the *substituted* text repaired and the literal text around it left alone
+/// (issue #1067): the substitution carries request data, which can hold a byte a header value
+/// cannot, while a control character the author typed into the header itself is an authoring bug
+/// that must still fail the response. Bodies use [`process_template`] and substitute verbatim.
+pub(crate) fn process_template_mapped<F>(
+    template: &str,
+    request_data: &RequestData,
+    map: F,
+) -> String
+where
+    F: Fn(String) -> String,
+{
     get_template_regex()
         .replace_all(template, |caps: &regex::Captures| {
             let var_path = &caps[1];
-            request_data.get(var_path).unwrap_or_default()
+            map(request_data.get(var_path).unwrap_or_default())
         })
         .to_string()
 }

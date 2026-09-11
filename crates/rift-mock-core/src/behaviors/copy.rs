@@ -77,8 +77,24 @@ pub fn apply_copy_behaviors(
 
             // Also replace in headers — per value, so multi-value headers (e.g. multiple
             // Set-Cookie) keep their multiplicity (RFC 7230 §3.2.2 forbids folding Set-Cookie).
-            for value in headers.values_mut().flatten() {
-                *value = value.replace(&behavior.into, &replacement);
+            //
+            // `replacement` is request-derived, so it can carry a byte a header value cannot
+            // hold; repair it like the templating passes do (issue #1067). Only the substituted
+            // text is repaired — a control character the author typed into the header itself is
+            // an authoring bug that must still reach the builder and fail the response.
+            //
+            // Skipped outright when no header uses this token: the repair warns when it removes
+            // something, so running it for a body-only stub would log a header warning, once per
+            // request, about a header that does not exist.
+            if headers
+                .values()
+                .flatten()
+                .any(|v| v.contains(&behavior.into))
+            {
+                let repaired = crate::imposter::headers::sanitize_header_value(&replacement);
+                for value in headers.values_mut().flatten() {
+                    *value = value.replace(&behavior.into, &repaired);
+                }
             }
         } else {
             // Source not found, replace with empty string
@@ -187,6 +203,200 @@ mod tests {
 
         let result = apply_copy_behaviors(body, &mut headers, &behaviors, &request);
         assert_eq!(result, r#"{"userId": "123", "greeting": "Hello, Alice!"}"#);
+    }
+
+    /// Issue #1067: what `copy` writes into a header comes from the request, so it can carry a
+    /// byte a header value cannot hold. Repair it rather than letting it 500 the stub.
+    #[test]
+    fn copy_repairs_a_header_value_it_rewrote_from_request_data() {
+        let mut query = HashMap::new();
+        query.insert("q".to_string(), "one\rtwo".to_string());
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            query,
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let behaviors = vec![CopyBehavior {
+            from: {
+                let mut map = HashMap::new();
+                map.insert("query".to_string(), "q".to_string());
+                CopySource::Nested(map)
+            },
+            into: "${q}".to_string(),
+            extraction: ExtractionMethod::Regex {
+                selector: ".*".to_string(),
+                options: None,
+            },
+        }];
+
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert("X-Echo".to_string(), vec!["v=${q}".to_string()]);
+
+        apply_copy_behaviors("", &mut headers, &behaviors, &request);
+
+        assert_eq!(
+            headers["X-Echo"],
+            vec!["v=onetwo".to_string()],
+            "the CR the client supplied is removed; without the repair this value is unrepresentable"
+        );
+    }
+
+    /// A body-only stub must stay silent (issue #1067). The repair logs whenever it removes
+    /// something, so running it for a `copy` whose token appears in no header would warn about a
+    /// header value that does not exist — once per request, on client-controlled input.
+    #[test]
+    #[tracing_test::traced_test]
+    fn copy_into_a_body_only_stub_does_not_warn_about_headers() {
+        let request = RequestContext {
+            method: "POST".to_string(),
+            path: "/x".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Some("one\r\ntwo".to_string()),
+        };
+
+        let behaviors = vec![CopyBehavior {
+            from: CopySource::Simple("body".to_string()),
+            into: "${b}".to_string(),
+            extraction: ExtractionMethod::Regex {
+                selector: "(?s).*".to_string(),
+                options: None,
+            },
+        }];
+
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert("X-Plain".to_string(), vec!["no token here".to_string()]);
+
+        let body = apply_copy_behaviors("x=${b}", &mut headers, &behaviors, &request);
+
+        assert_eq!(
+            body, "x=one\r\ntwo",
+            "the body keeps the bytes the client sent"
+        );
+        assert_eq!(headers["X-Plain"], vec!["no token here".to_string()]);
+        assert!(
+            !logs_contain("removed characters a header value cannot carry"),
+            "no header used this token, so the header repair must not have run"
+        );
+    }
+
+    /// Only the substituted text is repaired. A literal control character the author typed beside
+    /// the token survives, so the response still fails loudly (issue #1067).
+    #[test]
+    fn copy_repairs_the_substituted_text_but_not_a_literal_control_char_beside_it() {
+        let mut query = HashMap::new();
+        query.insert("q".to_string(), "one\rtwo".to_string());
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            query,
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let behaviors = vec![CopyBehavior {
+            from: {
+                let mut map = HashMap::new();
+                map.insert("query".to_string(), "q".to_string());
+                CopySource::Nested(map)
+            },
+            into: "${q}".to_string(),
+            extraction: ExtractionMethod::Regex {
+                selector: ".*".to_string(),
+                options: None,
+            },
+        }];
+
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert("X-Echo".to_string(), vec!["bad\nvalue=${q}".to_string()]);
+
+        apply_copy_behaviors("", &mut headers, &behaviors, &request);
+
+        assert_eq!(
+            headers["X-Echo"],
+            vec!["bad\nvalue=onetwo".to_string()],
+            "the CR from the request is gone; the author's literal newline is not"
+        );
+    }
+
+    /// The boundary (issue #1067). A header value this behavior never rewrote is a literal from
+    /// the config; repairing it would hide an authoring bug that the response builder is supposed
+    /// to surface as a 500. Only a value that actually contained the token is touched.
+    #[test]
+    fn copy_leaves_a_header_value_without_the_token_untouched() {
+        let mut query = HashMap::new();
+        query.insert("q".to_string(), "hi".to_string());
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            query,
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let behaviors = vec![CopyBehavior {
+            from: {
+                let mut map = HashMap::new();
+                map.insert("query".to_string(), "q".to_string());
+                CopySource::Nested(map)
+            },
+            into: "${q}".to_string(),
+            extraction: ExtractionMethod::Regex {
+                selector: ".*".to_string(),
+                options: None,
+            },
+        }];
+
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert("X-Literal".to_string(), vec!["bad\nvalue".to_string()]);
+
+        apply_copy_behaviors("", &mut headers, &behaviors, &request);
+
+        assert_eq!(
+            headers["X-Literal"],
+            vec!["bad\nvalue".to_string()],
+            "a literal config value must reach the builder unrepaired and fail loudly"
+        );
+    }
+
+    /// Same boundary on the source-missing branch, which substitutes the empty string. That can
+    /// only remove characters, never introduce one, so it must not repair either.
+    #[test]
+    fn copy_with_a_missing_source_does_not_repair_a_literal_config_value() {
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let behaviors = vec![CopyBehavior {
+            from: {
+                let mut map = HashMap::new();
+                map.insert("query".to_string(), "q".to_string());
+                CopySource::Nested(map)
+            },
+            into: "${q}".to_string(),
+            extraction: ExtractionMethod::Regex {
+                selector: ".*".to_string(),
+                options: None,
+            },
+        }];
+
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert("X-Echo".to_string(), vec!["bad\nvalue=${q}".to_string()]);
+
+        apply_copy_behaviors("", &mut headers, &behaviors, &request);
+
+        assert_eq!(
+            headers["X-Echo"],
+            vec!["bad\nvalue=".to_string()],
+            "the token is cleared; the literal newline beside it is left to fail loudly"
+        );
     }
 
     #[test]
