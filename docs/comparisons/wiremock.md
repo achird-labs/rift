@@ -240,7 +240,7 @@ work, not a drop-in. (If you are coming from **Mountebank**, it *is* a drop-in â
 | `matchesJsonPath` | `jsonpath` |
 | `matchesXPath` | `xpath` |
 | `containing` / `equalTo` / `matching` | `contains` / `equals` / `matches` |
-| `equalToIgnoreCase` | `equals` with `caseSensitive: false` |
+| `equalToIgnoreCase` | `equals` with `caseSensitive: false` (ASCII folding only â€” WireMock's `equalsIgnoreCase` folds Unicode) |
 | `absent` | `not` + `exists` |
 | `notContaining` / `notMatching` | `not` + `contains` / `matches` |
 | `matchesJsonSchema` | **No equivalent** |
