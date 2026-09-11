@@ -62,6 +62,7 @@ pub fn apply_copy_behaviors(
     headers: &mut HashMap<String, Vec<String>>,
     behaviors: &[CopyBehavior],
     request: &RequestContext,
+    stub: crate::imposter::headers::StubRef<'_>,
 ) -> String {
     let mut result = body.to_string();
 
@@ -91,7 +92,7 @@ pub fn apply_copy_behaviors(
                 .flatten()
                 .any(|v| v.contains(&behavior.into))
             {
-                let repaired = crate::imposter::headers::sanitize_header_value(&replacement);
+                let repaired = crate::imposter::headers::sanitize_header_value(&replacement, stub);
                 for value in headers.values_mut().flatten() {
                     *value = value.replace(&behavior.into, &repaired);
                 }
@@ -111,6 +112,15 @@ pub fn apply_copy_behaviors(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fixture identity for tests that only care about the repair itself, not which stub
+    /// triggered it — the gate test below (issue #1075) asserts on deliberately chosen values.
+    const FIXTURE_STUB: crate::imposter::headers::StubRef<'static> =
+        crate::imposter::headers::StubRef {
+            port: 0,
+            index: 0,
+            id: None,
+        };
 
     #[test]
     fn test_copy_source_simple() {
@@ -201,7 +211,7 @@ mod tests {
         let body = r#"{"userId": "${PATH}", "greeting": "Hello, ${NAME}!"}"#;
         let mut headers = HashMap::new();
 
-        let result = apply_copy_behaviors(body, &mut headers, &behaviors, &request);
+        let result = apply_copy_behaviors(body, &mut headers, &behaviors, &request, FIXTURE_STUB);
         assert_eq!(result, r#"{"userId": "123", "greeting": "Hello, Alice!"}"#);
     }
 
@@ -235,7 +245,7 @@ mod tests {
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         headers.insert("X-Echo".to_string(), vec!["v=${q}".to_string()]);
 
-        apply_copy_behaviors("", &mut headers, &behaviors, &request);
+        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB);
 
         assert_eq!(
             headers["X-Echo"],
@@ -270,7 +280,7 @@ mod tests {
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         headers.insert("X-Plain".to_string(), vec!["no token here".to_string()]);
 
-        let body = apply_copy_behaviors("x=${b}", &mut headers, &behaviors, &request);
+        let body = apply_copy_behaviors("x=${b}", &mut headers, &behaviors, &request, FIXTURE_STUB);
 
         assert_eq!(
             body, "x=one\r\ntwo",
@@ -281,6 +291,128 @@ mod tests {
             !logs_contain("removed characters a header value cannot carry"),
             "no header used this token, so the header repair must not have run"
         );
+    }
+
+    /// A repeated header keeps its multiplicity through the repair, and the one warning it does
+    /// raise names the stub (issue #1075).
+    ///
+    /// One warning, not one per value: `copy` repairs the *replacement* once and splices the
+    /// repaired text into every value, so a bad byte in the substitution is reported once however
+    /// many header lines it lands in. That is deliberate — the warning is client-triggerable, and
+    /// N copies of it per request would be N times the log volume for one defect.
+    #[test]
+    fn every_repaired_value_of_a_multi_value_header_names_the_same_stub() {
+        let mut query = HashMap::new();
+        query.insert("q".to_string(), "one\rtwo".to_string());
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            query,
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let behaviors = vec![CopyBehavior {
+            from: {
+                let mut map = HashMap::new();
+                map.insert("query".to_string(), "q".to_string());
+                CopySource::Nested(map)
+            },
+            into: "${q}".to_string(),
+            extraction: ExtractionMethod::Regex {
+                selector: ".*".to_string(),
+                options: None,
+            },
+        }];
+
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert(
+            "Set-Cookie".to_string(),
+            vec!["a=${q}".to_string(), "b=${q}".to_string()],
+        );
+
+        let events = crate::test_support::captured_logs(|| {
+            apply_copy_behaviors(
+                "",
+                &mut headers,
+                &behaviors,
+                &request,
+                crate::imposter::headers::StubRef {
+                    port: 4545,
+                    index: 2,
+                    id: Some("echo"),
+                },
+            );
+        });
+
+        assert_eq!(
+            headers["Set-Cookie"],
+            vec!["a=onetwo".to_string(), "b=onetwo".to_string()],
+            "both cookie lines survive and are both repaired"
+        );
+        assert_eq!(
+            events.len(),
+            1,
+            "the replacement is repaired once, not once per header line"
+        );
+        assert_eq!(events[0].field("port"), Some("4545"));
+        assert_eq!(events[0].field("stub"), Some("2"));
+        assert_eq!(events[0].field("stub_id"), Some("echo"));
+    }
+
+    /// Issue #1075: the repair `copy` triggers must name the stub too, or an operator sees a
+    /// mangled header with no way back to which behavior produced it.
+    #[test]
+    fn copy_repair_warning_names_the_stub() {
+        let mut query = HashMap::new();
+        query.insert("q".to_string(), "one\rtwo".to_string());
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            query,
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let behaviors = vec![CopyBehavior {
+            from: {
+                let mut map = HashMap::new();
+                map.insert("query".to_string(), "q".to_string());
+                CopySource::Nested(map)
+            },
+            into: "${q}".to_string(),
+            extraction: ExtractionMethod::Regex {
+                selector: ".*".to_string(),
+                options: None,
+            },
+        }];
+
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert("X-Echo".to_string(), vec!["v=${q}".to_string()]);
+
+        // `crate::test_support::captured_logs`, not `tracing_test::traced_test`: that macro
+        // installs an `EnvFilter` of `"<crate_name>=trace"`, which drops an event raised on the
+        // `rift::template` target, so a `logs_contain` assertion there passes against an
+        // implementation that logs nothing at all.
+        let events = crate::test_support::captured_logs(|| {
+            apply_copy_behaviors(
+                "",
+                &mut headers,
+                &behaviors,
+                &request,
+                crate::imposter::headers::StubRef {
+                    port: 4545,
+                    index: 2,
+                    id: Some("echo"),
+                },
+            );
+        });
+
+        assert_eq!(headers["X-Echo"], vec!["v=onetwo".to_string()]);
+        assert_eq!(events.len(), 1, "one repair, one warning");
+        assert_eq!(events[0].field("port"), Some("4545"));
+        assert_eq!(events[0].field("stub"), Some("2"));
+        assert_eq!(events[0].field("stub_id"), Some("echo"));
     }
 
     /// Only the substituted text is repaired. A literal control character the author typed beside
@@ -313,7 +445,7 @@ mod tests {
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         headers.insert("X-Echo".to_string(), vec!["bad\nvalue=${q}".to_string()]);
 
-        apply_copy_behaviors("", &mut headers, &behaviors, &request);
+        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB);
 
         assert_eq!(
             headers["X-Echo"],
@@ -353,7 +485,7 @@ mod tests {
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         headers.insert("X-Literal".to_string(), vec!["bad\nvalue".to_string()]);
 
-        apply_copy_behaviors("", &mut headers, &behaviors, &request);
+        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB);
 
         assert_eq!(
             headers["X-Literal"],
@@ -390,7 +522,7 @@ mod tests {
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         headers.insert("X-Echo".to_string(), vec!["bad\nvalue=${q}".to_string()]);
 
-        apply_copy_behaviors("", &mut headers, &behaviors, &request);
+        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB);
 
         assert_eq!(
             headers["X-Echo"],
@@ -430,7 +562,7 @@ mod tests {
             vec!["a=1".to_string(), "b=${q}".to_string()],
         );
 
-        apply_copy_behaviors("", &mut headers, &behaviors, &request);
+        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB);
 
         // Both cookie lines survive (no fold) and the token is substituted in place.
         assert_eq!(
@@ -470,7 +602,7 @@ mod tests {
             vec!["a=1".to_string(), "b=${q}".to_string()],
         );
 
-        apply_copy_behaviors("", &mut headers, &behaviors, &request);
+        apply_copy_behaviors("", &mut headers, &behaviors, &request, FIXTURE_STUB);
 
         assert_eq!(
             headers["Set-Cookie"],

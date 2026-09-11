@@ -189,7 +189,9 @@ A request `GET /search?q=rust` returns `You called GET /search with q=rust` and 
 A header value can only carry certain bytes, and an interpolated one is built from data the client
 sent. When a `${request.…}` token appears in a **header** value, Rift removes the characters a
 header value cannot hold — CR, LF, NUL and the other ASCII control characters — from *the
-substituted text*, and logs a `rift::template` warning naming what it removed. A horizontal tab and
+substituted text*, and logs a `rift::template` warning naming what it removed. The warning
+carries `port`, `stub` (the stub's index) and `stub_id` alongside `removed`, so on a server
+running many imposters you can grep straight back to the stub that produced it. A horizontal tab and
 any non-ASCII character are legal in a header value and are kept byte-exact. The same repair covers
 every other way substituted text reaches a header: the `{{ }}` templating grammar and the text the
 `copy` and `lookup` behaviors splice in.

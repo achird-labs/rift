@@ -141,8 +141,26 @@ pub(crate) fn collect_response_headers(headers: &hyper::HeaderMap) -> Vec<(Strin
 /// Do **not** reach for `char::is_control` here (issue #1058). That is Unicode category Cc, which
 /// also spans U+0080–U+009F — legal obs-text a header value may carry — and it rejects HTAB, which
 /// is explicitly legal. Both were being stripped and reported as an injection attempt.
+///
+/// Which stub a serve-time log line is about (issue #1075). `port` is the bound port, `index` the
+/// stub's position, `id` its optional `id`. Uses the same field names and rendering as the
+/// `port`/`stub_id` on a `rift::script` event, so one grep finds a stub's lines on both targets.
+///
+/// Explicit fields, not a tracing span: `render_template_parts` can run on a `spawn_blocking` pool
+/// thread (the Redis flow-store path), and a span's thread-local context does not follow a closure
+/// across that hop — a span-based identity would silently go missing on exactly that path.
+#[derive(Debug, Clone, Copy)]
+pub struct StubRef<'a> {
+    /// The imposter's bound port.
+    pub port: u16,
+    /// The matched stub's position in its imposter's stub list.
+    pub index: usize,
+    /// The matched stub's optional `id`, if it has one.
+    pub id: Option<&'a str>,
+}
+
 #[must_use]
-pub(crate) fn sanitize_header_value(value: &str) -> String {
+pub(crate) fn sanitize_header_value(value: &str, stub: StubRef<'_>) -> String {
     let mut sanitized = String::with_capacity(value.len());
     let mut removed: Vec<char> = Vec::new();
     for c in value.chars() {
@@ -165,6 +183,13 @@ pub(crate) fn sanitize_header_value(value: &str) -> String {
         // control character. An unbounded per-request log line is the lever #718 exists to deny.
         tracing::warn!(
             target: "rift::template",
+            port = stub.port,
+            stub = stub.index,
+            // Bare, like every other string field in the crate: `&str` records through
+            // `record_str`, so this renders byte-identically to the `stub_id` on a `rift::script`
+            // event and one grep finds both. It is also escaped like any other string field, so a
+            // stub `id` containing a newline cannot forge a second log line.
+            stub_id = stub.id.unwrap_or(""),
             value = ?crate::imposter::response::truncate_with_ellipsis(value, 256),
             removed = ?removed,
             "removed characters a header value cannot carry from a templated header value; a CR or LF here would have terminated the header line (header injection)"
@@ -558,85 +583,22 @@ mod tests {
 
 #[cfg(test)]
 mod sanitize_header_value_tests {
-    use super::sanitize_header_value;
+    use super::{StubRef, sanitize_header_value};
     use hyper::header::HeaderValue;
-    use std::sync::{Arc, Mutex};
-    use tracing::field::{Field, Visit};
-    use tracing::{Event, Metadata, Subscriber, span};
 
-    /// One captured `rift::template` event, as name → `Debug`-rendered value.
-    #[derive(Default, Clone)]
-    struct CapturedEvent {
-        fields: Vec<(String, String)>,
-    }
-
-    impl CapturedEvent {
-        fn field(&self, name: &str) -> Option<&str> {
-            self.fields
-                .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, v)| v.as_str())
-        }
-    }
-
-    /// Run `f` with a subscriber that captures every `"rift::template"` event, field by field.
-    ///
-    /// Hand-written rather than a `tracing-subscriber` layer for the reason the sibling capture in
-    /// `scripting/trace.rs` gives: `rift-mock-core` does not otherwise depend on
-    /// `tracing-subscriber`, and this is a handful of trait methods. `tracing_test::traced_test`
-    /// is not an option either — it installs an `EnvFilter` of `"<crate_name>=trace"`
-    /// (tracing-test-macro-0.2.5/src/lib.rs:73-78), which drops an event raised on a
-    /// `rift::template` target, so a `logs_contain` assertion there would pass against an
-    /// implementation that logs nothing at all.
-    fn captured_logs(f: impl FnOnce()) -> Vec<CapturedEvent> {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let capture = TemplateLogCapture {
-            events: Arc::clone(&events),
-        };
-        tracing::subscriber::with_default(capture, f);
-        let collected = events.lock().expect("capture buffer");
-        collected.clone()
-    }
-
-    struct TemplateLogCapture {
-        events: Arc<Mutex<Vec<CapturedEvent>>>,
-    }
-
-    impl Subscriber for TemplateLogCapture {
-        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-            metadata.target() == "rift::template"
-        }
-
-        fn new_span(&self, _span: &span::Attributes<'_>) -> span::Id {
-            span::Id::from_u64(1)
-        }
-
-        fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
-
-        fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
-
-        fn event(&self, event: &Event<'_>) {
-            let mut captured = CapturedEvent::default();
-            event.record(&mut captured);
-            self.events.lock().expect("capture buffer").push(captured);
-        }
-
-        fn enter(&self, _span: &span::Id) {}
-
-        fn exit(&self, _span: &span::Id) {}
-    }
-
-    impl Visit for CapturedEvent {
-        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            self.fields
-                .push((field.name().to_string(), format!("{value:?}")));
-        }
-    }
+    /// Fixture identity for tests that only care about the repair itself, not which stub
+    /// triggered it — the gate tests below (issue #1075) assert on deliberately chosen values.
+    const FIXTURE_STUB: StubRef<'static> = StubRef {
+        port: 0,
+        index: 0,
+        id: None,
+    };
+    use crate::test_support::{CapturedEvent, captured_logs};
 
     fn one_event(value: &str) -> CapturedEvent {
         let events = captured_logs(|| {
             // Only the warning is under test here; the repaired value is asserted elsewhere.
-            let _ = sanitize_header_value(value);
+            let _ = sanitize_header_value(value, FIXTURE_STUB);
         });
         assert_eq!(
             events.len(),
@@ -649,7 +611,8 @@ mod sanitize_header_value_tests {
 
     #[test]
     fn a_horizontal_tab_is_a_legal_header_value_character_and_is_kept() {
-        let events = captured_logs(|| assert_eq!(sanitize_header_value("a\tb"), "a\tb"));
+        let events =
+            captured_logs(|| assert_eq!(sanitize_header_value("a\tb", FIXTURE_STUB), "a\tb"));
         assert!(
             events.is_empty(),
             "a legal value must not be reported as sanitized"
@@ -661,9 +624,9 @@ mod sanitize_header_value_tests {
         // U+0080-U+009F encode as two bytes that are both >= 0x80, so `HeaderValue` accepts them.
         // Only `char::is_control` (Unicode category Cc) ever called them control characters.
         let events = captured_logs(|| {
-            assert_eq!(sanitize_header_value("a\u{85}b"), "a\u{85}b");
-            assert_eq!(sanitize_header_value("a\u{80}b"), "a\u{80}b");
-            assert_eq!(sanitize_header_value("a\u{9f}b"), "a\u{9f}b");
+            assert_eq!(sanitize_header_value("a\u{85}b", FIXTURE_STUB), "a\u{85}b");
+            assert_eq!(sanitize_header_value("a\u{80}b", FIXTURE_STUB), "a\u{80}b");
+            assert_eq!(sanitize_header_value("a\u{9f}b", FIXTURE_STUB), "a\u{9f}b");
         });
         assert!(
             events.is_empty(),
@@ -673,13 +636,14 @@ mod sanitize_header_value_tests {
 
     #[test]
     fn ordinary_non_ascii_passes_through_byte_exact() {
-        let events = captured_logs(|| assert_eq!(sanitize_header_value("José"), "José"));
+        let events =
+            captured_logs(|| assert_eq!(sanitize_header_value("José", FIXTURE_STUB), "José"));
         assert!(events.is_empty());
     }
 
     #[test]
     fn an_empty_value_is_unchanged() {
-        let events = captured_logs(|| assert_eq!(sanitize_header_value(""), ""));
+        let events = captured_logs(|| assert_eq!(sanitize_header_value("", FIXTURE_STUB), ""));
         assert!(events.is_empty());
     }
 
@@ -689,12 +653,12 @@ mod sanitize_header_value_tests {
     /// with nothing left to remove must be silent.
     #[test]
     fn repairing_an_already_repaired_value_changes_nothing_and_does_not_warn_again() {
-        let once = sanitize_header_value("safe\r\nInjected: yes");
+        let once = sanitize_header_value("safe\r\nInjected: yes", FIXTURE_STUB);
         assert_eq!(once, "safeInjected: yes");
 
         let events = captured_logs(|| {
             assert_eq!(
-                sanitize_header_value(&once),
+                sanitize_header_value(&once, FIXTURE_STUB),
                 "safeInjected: yes",
                 "a repaired value is a fixed point of the repair"
             );
@@ -706,11 +670,109 @@ mod sanitize_header_value_tests {
         );
     }
 
+    /// Issue #1075: the warning must say which stub produced it. Without this an operator on a
+    /// server running many imposters sees a mangled header and a `removed` list, and has no way
+    /// back to the config that caused it. Field names match the `rift::script` events
+    /// (`port`, `stub_id`) so both targets grep alike; `stub` is the index, because a stub with no
+    /// `id` — the common case — is otherwise unnameable.
+    #[test]
+    fn the_warning_names_the_port_and_the_stub() {
+        let events = captured_logs(|| {
+            let _ = sanitize_header_value(
+                "safe\r\nInjected: yes",
+                StubRef {
+                    port: 4545,
+                    index: 3,
+                    id: Some("checkout"),
+                },
+            );
+        });
+
+        assert_eq!(events.len(), 1, "one removal, one warning");
+        assert_eq!(events[0].field("port"), Some("4545"));
+        assert_eq!(events[0].field("stub"), Some("3"));
+        assert_eq!(events[0].field("stub_id"), Some("checkout"));
+    }
+
+    /// A stub without an `id` is the common case, and it must still be locatable: `stub_id` is the
+    /// empty string rather than absent, matching what `rift::script` emits.
+    #[test]
+    fn a_stub_without_an_id_still_logs_an_empty_stub_id() {
+        let events = captured_logs(|| {
+            let _ = sanitize_header_value(
+                "a\0b",
+                StubRef {
+                    port: 4545,
+                    index: 0,
+                    id: None,
+                },
+            );
+        });
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].field("port"), Some("4545"));
+        assert_eq!(events[0].field("stub"), Some("0"));
+        assert_eq!(events[0].field("stub_id"), Some(""));
+    }
+
+    /// The identity fields ride with the value, so nothing about them depends on where the repair
+    /// runs — which is the whole reason this is explicit fields and not a tracing span. A span's
+    /// thread-local is empty on the `spawn_blocking` pool thread `run_flow_blocking` uses for a
+    /// blocking flow store, so a span-based fix would be silently lossy on exactly that path.
+    #[test]
+    fn the_identity_does_not_depend_on_the_thread_the_repair_runs_on() {
+        let stub = StubRef {
+            port: 9090,
+            index: 7,
+            id: None,
+        };
+
+        // The capture is installed *inside* the spawned thread on purpose:
+        // `tracing::subscriber::with_default` is thread-local, so a subscriber installed on the
+        // parent would never see this event. That is precisely why the identity is passed as an
+        // argument rather than carried in a span — a span would be just as thread-local, and
+        // `run_flow_blocking` really does hop to a `spawn_blocking` pool thread.
+        let events = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    captured_logs(|| {
+                        let _ = sanitize_header_value("a\rb", stub);
+                    })
+                })
+                .join()
+                .expect("capture thread")
+        });
+
+        assert_eq!(events.len(), 1, "the warning still fires off-thread");
+        assert_eq!(events[0].field("port"), Some("9090"));
+        assert_eq!(events[0].field("stub"), Some("7"));
+    }
+
+    /// The request path and query are deliberately absent: both are client-controlled, and `value`
+    /// already shows the operator the offending client data. Port and stub locate the *config*.
+    #[test]
+    fn the_warning_carries_no_client_controlled_location() {
+        let events = captured_logs(|| {
+            let _ = sanitize_header_value(
+                "a\rb",
+                StubRef {
+                    port: 1,
+                    index: 0,
+                    id: None,
+                },
+            );
+        });
+
+        assert_eq!(events.len(), 1);
+        assert!(events[0].field("path").is_none(), "no request path field");
+        assert!(events[0].field("query").is_none(), "no query field");
+    }
+
     #[test]
     fn crlf_is_still_stripped_and_still_warned() {
         let events = captured_logs(|| {
             assert_eq!(
-                sanitize_header_value("safe\r\nInjected: yes"),
+                sanitize_header_value("safe\r\nInjected: yes", FIXTURE_STUB),
                 "safeInjected: yes"
             );
         });
@@ -782,10 +844,10 @@ mod sanitize_header_value_tests {
 
     #[test]
     fn bytes_a_header_value_cannot_hold_are_stripped() {
-        assert_eq!(sanitize_header_value("a\u{0}b"), "ab");
-        assert_eq!(sanitize_header_value("a\u{7f}b"), "ab");
-        assert_eq!(sanitize_header_value("a\u{1b}b"), "ab");
-        assert_eq!(sanitize_header_value("\r\n\0"), "");
+        assert_eq!(sanitize_header_value("a\u{0}b", FIXTURE_STUB), "ab");
+        assert_eq!(sanitize_header_value("a\u{7f}b", FIXTURE_STUB), "ab");
+        assert_eq!(sanitize_header_value("a\u{1b}b", FIXTURE_STUB), "ab");
+        assert_eq!(sanitize_header_value("\r\n\0", FIXTURE_STUB), "");
     }
 
     #[test]
@@ -797,7 +859,7 @@ mod sanitize_header_value_tests {
             let Some(c) = char::from_u32(cp) else {
                 continue;
             };
-            let kept = sanitize_header_value(&c.to_string()) == c.to_string();
+            let kept = sanitize_header_value(&c.to_string(), FIXTURE_STUB) == c.to_string();
             let representable = HeaderValue::from_str(&c.to_string()).is_ok();
             assert_eq!(
                 kept, representable,
@@ -818,7 +880,7 @@ mod sanitize_header_value_tests {
             "",
             "\r\n\0",
         ] {
-            let out = sanitize_header_value(raw);
+            let out = sanitize_header_value(raw, FIXTURE_STUB);
             assert!(
                 HeaderValue::from_str(&out).is_ok(),
                 "sanitized {raw:?} -> {out:?} must be a representable header value"

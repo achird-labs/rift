@@ -230,6 +230,7 @@ pub fn apply_lookup_behaviors(
     behaviors: &[LookupBehavior],
     request: &RequestContext,
     csv_cache: &CsvCache,
+    stub: crate::imposter::headers::StubRef<'_>,
 ) -> String {
     let mut result = body.to_string();
 
@@ -267,7 +268,8 @@ pub fn apply_lookup_behaviors(
                     // of the matched row would run the repair, and warn, on every request even for
                     // a body-only stub.
                     if headers.values().flatten().any(|v| v.contains(&full_token)) {
-                        let repaired = crate::imposter::headers::sanitize_header_value(&value);
+                        let repaired =
+                            crate::imposter::headers::sanitize_header_value(&value, stub);
                         for header_value in headers.values_mut().flatten() {
                             *header_value = header_value.replace(&full_token, &repaired);
                         }
@@ -283,6 +285,15 @@ pub fn apply_lookup_behaviors(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fixture identity for tests that only care about the repair itself, not which stub
+    /// triggered it — the gate test below (issue #1075) asserts on deliberately chosen values.
+    const FIXTURE_STUB: crate::imposter::headers::StubRef<'static> =
+        crate::imposter::headers::StubRef {
+            port: 0,
+            index: 0,
+            id: None,
+        };
 
     /// Issue #1067: the client picks the row, so a CSV cell holding a byte a header value cannot
     /// carry is a client-selectable 500. Repair it instead.
@@ -327,12 +338,90 @@ mod tests {
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         headers.insert("X-Echo".to_string(), vec!["n=${row}[name]".to_string()]);
 
-        apply_lookup_behaviors("", &mut headers, &behaviors, &request, &CsvCache::default());
+        apply_lookup_behaviors(
+            "",
+            &mut headers,
+            &behaviors,
+            &request,
+            &CsvCache::default(),
+            FIXTURE_STUB,
+        );
 
         assert_eq!(
             headers["X-Echo"],
             vec!["n=World".to_string()],
             "the ESC in the CSV cell is removed; without the repair this value is unrepresentable"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Issue #1075: the repair `lookup` triggers must name the stub too.
+    #[test]
+    fn lookup_repair_warning_names_the_stub() {
+        let path =
+            std::env::temp_dir().join(format!("rift_lookup_1075_{}.csv", std::process::id()));
+        std::fs::write(&path, "id,name\nhi,Wor\u{1b}ld\n").expect("write csv");
+
+        let mut query = HashMap::new();
+        query.insert("q".to_string(), "hi".to_string());
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            query,
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let behaviors = vec![LookupBehavior {
+            key: LookupKey {
+                from: {
+                    let mut map = HashMap::new();
+                    map.insert("query".to_string(), "q".to_string());
+                    CopySource::Nested(map)
+                },
+                extraction: ExtractionMethod::Regex {
+                    selector: ".*".to_string(),
+                    options: None,
+                },
+            },
+            from_data_source: DataSource {
+                csv: CsvDataSource {
+                    path: path.to_string_lossy().into_owned(),
+                    key_column: "id".to_string(),
+                    delimiter: ',',
+                },
+            },
+            into: "${row}".to_string(),
+        }];
+
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert("X-Echo".to_string(), vec!["n=${row}[name]".to_string()]);
+
+        // See the note in `copy.rs`'s sibling test for why this is `captured_logs` and not
+        // `tracing_test::traced_test`.
+        let events = crate::test_support::captured_logs(|| {
+            apply_lookup_behaviors(
+                "",
+                &mut headers,
+                &behaviors,
+                &request,
+                &CsvCache::default(),
+                crate::imposter::headers::StubRef {
+                    port: 4646,
+                    index: 5,
+                    id: None,
+                },
+            );
+        });
+
+        assert_eq!(headers["X-Echo"], vec!["n=World".to_string()]);
+        assert_eq!(events.len(), 1, "one repair, one warning");
+        assert_eq!(events[0].field("port"), Some("4646"));
+        assert_eq!(events[0].field("stub"), Some("5"));
+        assert_eq!(
+            events[0].field("stub_id"),
+            Some(""),
+            "no id -> empty, not absent"
         );
         let _ = std::fs::remove_file(&path);
     }
@@ -383,7 +472,14 @@ mod tests {
             vec!["bad\nvalue=${row}[name]".to_string()],
         );
 
-        apply_lookup_behaviors("", &mut headers, &behaviors, &request, &CsvCache::default());
+        apply_lookup_behaviors(
+            "",
+            &mut headers,
+            &behaviors,
+            &request,
+            &CsvCache::default(),
+            FIXTURE_STUB,
+        );
 
         assert_eq!(
             headers["X-Echo"],
@@ -436,7 +532,14 @@ mod tests {
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         headers.insert("X-Literal".to_string(), vec!["bad\nvalue".to_string()]);
 
-        apply_lookup_behaviors("", &mut headers, &behaviors, &request, &CsvCache::default());
+        apply_lookup_behaviors(
+            "",
+            &mut headers,
+            &behaviors,
+            &request,
+            &CsvCache::default(),
+            FIXTURE_STUB,
+        );
 
         assert_eq!(
             headers["X-Literal"],
@@ -489,7 +592,14 @@ mod tests {
             vec!["a=1".to_string(), "n=${row}[name]".to_string()],
         );
 
-        apply_lookup_behaviors("", &mut headers, &behaviors, &request, &CsvCache::default());
+        apply_lookup_behaviors(
+            "",
+            &mut headers,
+            &behaviors,
+            &request,
+            &CsvCache::default(),
+            FIXTURE_STUB,
+        );
 
         assert_eq!(
             headers["Set-Cookie"],
