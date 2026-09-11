@@ -11,6 +11,21 @@ record.
 
 ## [Unreleased]
 
+### Changed
+
+- **A `_rift.templated` response with a control character written literally into a header now fails
+  with a `500` instead of being silently repaired** (#1073). The `{{ }}` renderer had repaired every
+  header value *whole* since #359 B3, so a stray byte the author typed was stripped and the warning
+  blamed the client for it ("a CR or LF here would have terminated the header line"). #1067 drew the
+  opposite boundary for the `${request.*}` pass and the `copy`/`lookup` behaviors — repair the
+  substituted text, leave the author's literal text to fail loudly — and the two disagreed.
+  - The `{{ }}` pass now repairs per substitution too, so all four paths agree. A control character
+    arriving *through* a token is removed exactly as before, and the injection defence is unchanged;
+    tabs and non-ASCII still survive byte-exact (#1058).
+  - Only a stub that writes a control character literally into a header of a templated response is
+    affected, and only that response. Bodies are still never filtered, and `_rift.stateOps` values
+    are unchanged — a stored value read back into a header is repaired at that read.
+
 ### Fixed
 
 - **A `${request.*}`, `copy` or `lookup` header value carrying a client-supplied control character
@@ -31,9 +46,6 @@ record.
     around it. A control character written literally into a header stays an authoring bug and still
     fails that response with a `500`, even when the same header value also contains a token.
     Response bodies are never filtered. `decorate` and script-authored headers are unchanged.
-  - Unchanged and worth knowing: a response with `_rift.templated: true` runs the `{{ }}` renderer
-    over every header value and repairs each result whole, so on those responses a literal control
-    character has been stripped rather than surfaced since #359 B3.
 
 ### Added
 

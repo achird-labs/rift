@@ -77,8 +77,40 @@ pub fn render_templated(
     ctx: &TemplateContext<'_>,
     debug: bool,
 ) -> Result<String, String> {
+    render_templated_mapped(input, ctx, debug, |value| value)
+}
+
+/// [`render_templated`], with every successfully evaluated token's text passed through `map`
+/// before it is spliced in.
+///
+/// Header values need the *substituted* text repaired and the literal text around it left alone
+/// (issue #1073), the same boundary `${request.*}`, `copy` and `lookup` already draw
+/// ([`crate::extensions::template::process_template_mapped`], issue #1067): a substitution carries
+/// request or flow-state data that can hold a byte a header value cannot, while a control
+/// character the author typed into the header itself is an authoring bug that must still fail the
+/// response. Bodies use [`render_templated`] and substitute verbatim.
+///
+/// Only *successful* tokens are mapped. A token that fails evaluation substitutes an empty string
+/// under the non-debug policy and is left alone — there is nothing to repair, and mapping it would
+/// put text where the engine reported a failure.
+///
+/// The legacy date tokens (`{{NOW}}`/`{{DAYS+N}}`) are expanded by
+/// [`crate::extensions::template::apply_date_templates`] *before* this runs, so they are outside
+/// the map. That is safe rather than merely tolerated: that pass emits an RFC3339 timestamp, or on
+/// offset overflow the untouched token text, and neither can contain a byte a header value cannot
+/// carry — so mapping them would be a no-op. The v1 `{{ now format='...' }}` function is a
+/// different thing and *is* mapped, like every other substitution.
+pub(crate) fn render_templated_mapped<F>(
+    input: &str,
+    ctx: &TemplateContext<'_>,
+    debug: bool,
+    map: F,
+) -> Result<String, String>
+where
+    F: Fn(String) -> String,
+{
     let expanded = crate::extensions::template::apply_date_templates(input);
-    render(&expanded, ctx, debug)
+    render(&expanded, ctx, debug, map)
 }
 
 /// The head word of every `{{ ... }}` expression in `input`, in order — `state.hits` for
@@ -129,7 +161,15 @@ pub fn reads_flow_state(input: &str) -> bool {
 /// Evaluate every `{{ ... }}` expression in `input` against `ctx`. In debug mode the first
 /// failing token aborts the whole render with an error describing it; otherwise each failing
 /// token is replaced with an empty string and logged via `tracing::warn!`.
-fn render(input: &str, ctx: &TemplateContext<'_>, debug: bool) -> Result<String, String> {
+///
+/// `map` is applied to each token's successfully evaluated text before it is spliced in, and to
+/// nothing else — not the literal text between tokens, and not a failed token's empty replacement.
+/// That is what lets a caller repair a substitution without touching what the author wrote around
+/// it (issue #1073).
+fn render<F>(input: &str, ctx: &TemplateContext<'_>, debug: bool, map: F) -> Result<String, String>
+where
+    F: Fn(String) -> String,
+{
     let re = expr_regex();
     let mut first_error: Option<String> = None;
     let rendered = re
@@ -142,7 +182,7 @@ fn render(input: &str, ctx: &TemplateContext<'_>, debug: bool) -> Result<String,
             let raw = &caps[0];
             let inner = caps[1].trim();
             match evaluate(inner, ctx) {
-                Ok(value) => value,
+                Ok(value) => map(value),
                 Err(reason) => {
                     if debug {
                         first_error = Some(format!("template error in `{raw}`: {reason}"));
@@ -582,6 +622,132 @@ mod tests {
 
     fn store() -> InMemoryFlowStore {
         InMemoryFlowStore::new(60)
+    }
+
+    /// Issue #1073: the map sees each *substituted* value and nothing else. The literal text the
+    /// author wrote — including a control character they should be told about — is passed through
+    /// untouched, which is what lets a header value fail loudly while its substitutions are
+    /// repaired.
+    #[test]
+    fn the_map_is_applied_to_substitutions_only() {
+        let request = request_data();
+        let store = store();
+        let ctx = ctx(&request, "flow", &store);
+
+        // A bracketing map shows *where* the map ran, independent of the literal text's content:
+        // whole-value mapping would yield "[a\u{1}bPOST]", so this fails against the old behaviour.
+        let out = render_templated_mapped("a\u{1}b{{ request.method }}", &ctx, false, |v| {
+            format!("[{v}]")
+        })
+        .expect("renders");
+
+        assert_eq!(
+            out, "a\u{1}b[POST]",
+            "only the substitution was mapped; the author's literal text was passed through"
+        );
+    }
+
+    /// Guards the delegation itself: `render_templated` must stay a thin identity-mapped call and
+    /// not grow a second copy of the render logic that could drift from the mapped variant. It does
+    /// not verify `render` — the tests above and below do that.
+    #[test]
+    fn render_templated_is_the_identity_mapped_case() {
+        let request = request_data();
+        let store = store();
+        let ctx = ctx(&request, "flow", &store);
+
+        let input = "a\u{1}b{{ request.method }}";
+        assert_eq!(
+            render_templated(input, &ctx, false).expect("renders"),
+            render_templated_mapped(input, &ctx, false, |v| v).expect("renders"),
+        );
+    }
+
+    /// What the map is *handed* is the substituted text alone — which is what makes the repair's
+    /// warning name the offending fragment instead of echoing the author's literal text back inside
+    /// a header-injection accusation (issue #1073). Asserted on the map's input rather than on a log
+    /// line: the imposter serves on its own spawned task, so a test subscriber never sees it.
+    #[test]
+    fn the_map_receives_only_the_substituted_text() {
+        let request = request_data();
+        let store = store();
+        let ctx = ctx(&request, "flow", &store);
+
+        let seen = std::cell::RefCell::new(Vec::new());
+        let out = render_templated_mapped(
+            "zzmarker-{{ request.method }}-{{ request.path }}",
+            &ctx,
+            false,
+            |v| {
+                seen.borrow_mut().push(v.clone());
+                v
+            },
+        )
+        .expect("renders");
+
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                "POST".to_string(),
+                "/orders/11111111-1111-1111-1111-111111111111".to_string()
+            ],
+            "the map sees each substitution and never the literal text around it"
+        );
+        assert!(out.starts_with("zzmarker-"), "got {out:?}");
+    }
+
+    /// The legacy date tokens are expanded by `apply_date_templates` *before* the `{{ }}` grammar
+    /// is scanned, so they are outside the map by construction. Pinned because the doc comment
+    /// claims it and an identity map could never reveal it.
+    #[test]
+    fn date_tokens_expand_before_the_map_and_are_not_mapped() {
+        let request = request_data();
+        let store = store();
+        let ctx = ctx(&request, "flow", &store);
+
+        let out =
+            render_templated_mapped("{{NOW}}", &ctx, false, |v| format!("[{v}]")).expect("renders");
+
+        assert!(
+            !out.contains('['),
+            "a date token is expanded before the map and must not pass through it, got {out:?}"
+        );
+    }
+
+    /// Debug mode aborts the whole render on the first failing token, and the map never sees it —
+    /// the failure path must not be able to splice mapped text where the engine reported an error.
+    #[test]
+    fn a_failed_token_in_debug_mode_aborts_before_the_map() {
+        let request = request_data();
+        let store = store();
+        let ctx = ctx(&request, "flow", &store);
+
+        let err = render_templated_mapped("[{{ nosuchfunction }}]", &ctx, true, |_| {
+            "MAPPED".to_string()
+        })
+        .expect_err("debug mode fails the render");
+
+        assert!(
+            err.contains("nosuchfunction"),
+            "the error names the offending token, got {err:?}"
+        );
+    }
+
+    /// A token that fails evaluation substitutes an empty string (non-debug policy) and must not be
+    /// handed to the map — there is nothing to repair, and mapping it would let a caller inject
+    /// text where the engine reported a failure.
+    #[test]
+    fn a_failed_token_is_not_mapped() {
+        let request = request_data();
+        let store = store();
+        let ctx = ctx(&request, "flow", &store);
+
+        let out = render_templated_mapped("[{{ nosuchfunction }}]", &ctx, false, |_| {
+            "MAPPED".to_string()
+        })
+        .expect("non-debug substitutes rather than failing");
+
+        assert_eq!(out, "[]", "the failed token is empty, not mapped");
     }
 
     fn ctx<'a>(
