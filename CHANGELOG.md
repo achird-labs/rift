@@ -28,6 +28,18 @@ record.
 
 ### Fixed
 
+- **`rift-lint --fix` no longer rewrites a file whose parse dropped a repeated key** (#1076).
+  `--fix` re-serializes the whole document from its parsed form, where a byte-identical repeated key
+  is already gone (`serde_json::Map` is last-wins), so repairing an unrelated numeric header could
+  silently write that loss to disk. It now skips such a file and names the key it would have
+  dropped.
+  - The case that mattered is the one the linter reports **nothing** about: a repeated name in
+    `is.headers` is how a stub sends two `Set-Cookie` lines, and the engine merges it deliberately
+    (`E044` does not fire there). Running `--fix` to quote a `Content-Length` in the same file would
+    have halved the cookies with no finding anywhere.
+  - `Document::duplicate_keys()` exposes the list the check reads. It is document-wide rather than
+    limited to `E044`'s two fields, because a whole-file rewrite loses all of them.
+
 - **A `${request.*}`, `copy` or `lookup` header value carrying a client-supplied control character
   failed the whole response instead of being repaired** (#1067). Response header values pass through
   two templating stages: the `{{ }}` stage has stripped characters a header value cannot carry since
