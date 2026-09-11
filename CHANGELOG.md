@@ -187,6 +187,20 @@ record.
     an operator can tell a real CR/LF injection attempt from a stray NUL, which is what the single
     "possible header-injection attempt" wording could not express.
 
+- **The dev/CI tools took a single-valued header map that #1050 missed** (#1061). `rift-verify`'s
+  `_verify` request block and `rift script run --request` both parse `headers` into a one-value-per-name
+  map from a user-written document, which #1050 fixed everywhere else but not here.
+  - A `_verify` request spelling one name twice put **two** case-variant lines on the wire, ordered by
+    `HashMap` iteration. Stub *selection* survived that, since the engine folds both spellings into one
+    name with two values — but every first-value consumer downstream (flow-id resolution, `copy`/`lookup`,
+    scripts, `${request.headers.*}`) read whichever happened to land first, so a `_verify` sequence that
+    keyed state on the header changed outcome between runs of the same document.
+  - A `--request` fixture doing the same never reached the wire, but scripts read headers by
+    case-insensitive find-first, so `request.header('x-trace')` returned a different value per run.
+  - Both are now **rejected** at parse time with a message naming both spellings — a malformed `_verify`
+    for the first, a fixture-parse error for the second. As in #1050, rejecting beats folding: picking a
+    winner silently is the behaviour that made this hard to see in the first place.
+
 - **A single-valued header object that named one header twice sent two header lines** (#1050).
   `proxy.injectHeaders` and `_rift.fault.error.headers` hold one value per name, but nothing
   enforced that: `injectHeaders: {"x-trace": "a", "X-Trace": "b"}` deserialized into two distinct

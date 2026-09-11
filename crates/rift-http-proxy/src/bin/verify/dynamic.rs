@@ -100,7 +100,19 @@ pub struct VerifyRequest {
     pub path: String,
     #[serde(default)]
     pub body: Option<String>,
-    #[serde(default)]
+    /// One entry per header name (issue #1061, the sweep #1050 missed).
+    ///
+    /// These values are sent through `reqwest::RequestBuilder::header`, which **appends** rather
+    /// than replaces. A `_verify` block spelling one name twice (`{"X-Trace": "a", "x-trace": "b"}`)
+    /// would therefore put two case-variant lines on the wire in `HashMap` iteration order. Stub
+    /// *selection* survives that — the engine folds both spellings into one name with two values —
+    /// but every first-value consumer downstream (flow-id resolution, `copy`/`lookup`, scripts,
+    /// `${request.headers.*}`) reads whichever landed first, so a sequence that keys state on the
+    /// header flips between runs of the same document.
+    #[serde(
+        default,
+        deserialize_with = "rift_types::wire::single_value_headers::deserialize"
+    )]
     pub headers: HashMap<String, String>,
 }
 
@@ -825,5 +837,58 @@ mod tests {
         assert!(!proxy_records_stub(&without));
         let empty = json!({ "to": "http://x", "mode": "proxyAlways", "predicateGenerators": [] });
         assert!(!proxy_records_stub(&empty));
+    }
+
+    // ── Issue #1061: `_verify` request headers name each header once ───────
+    //
+    // `VerifyRequest.headers` is sent through `reqwest::RequestBuilder::header`, which appends. A
+    // case-variant pair therefore put two lines on the wire in `HashMap` order, and every
+    // first-value consumer downstream read whichever landed first — a `_verify` sequence that keys
+    // state on the header flipped between runs of the same document. #1050 fixed the identical
+    // shape for `proxy.injectHeaders` and `_rift.fault.error.headers`; this field was missed.
+
+    #[test]
+    fn verify_request_rejects_a_case_variant_duplicate_header_naming_both_spellings() {
+        let stub = json!({ "_verify": { "sequence": [
+            { "request": { "path": "/", "headers": { "X-Trace": "a", "x-trace": "b" } }, "expect": {} }
+        ]}});
+        let err = parse_verify_spec(&stub)
+            .expect("annotation present")
+            .expect_err("a name spelled twice is a malformed _verify");
+        assert!(
+            err.contains("X-Trace") && err.contains("x-trace"),
+            "the error must quote both spellings so the author can find them, got: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_request_accepts_a_single_spelling_and_keeps_its_value() {
+        let stub = json!({ "_verify": { "sequence": [
+            { "request": { "path": "/", "headers": { "X-Trace": "a" } }, "expect": {} }
+        ]}});
+        let spec = parse_verify_spec(&stub).expect("present").expect("valid");
+        assert_eq!(
+            spec.sequence[0].request.headers.get("X-Trace"),
+            Some(&"a".to_string())
+        );
+    }
+
+    #[test]
+    fn verify_request_headers_may_be_omitted_entirely() {
+        // `deserialize_with` does not imply `default`; without both, every existing `_verify`
+        // block that omits `headers` would stop parsing.
+        let stub =
+            json!({ "_verify": { "sequence": [{ "request": { "path": "/" }, "expect": {} }] }});
+        let spec = parse_verify_spec(&stub).expect("present").expect("valid");
+        assert!(spec.sequence[0].request.headers.is_empty());
+    }
+
+    #[test]
+    fn verify_request_allows_two_genuinely_different_header_names() {
+        let stub = json!({ "_verify": { "sequence": [
+            { "request": { "path": "/", "headers": { "X-Trace": "a", "X-Other": "b" } }, "expect": {} }
+        ]}});
+        let spec = parse_verify_spec(&stub).expect("present").expect("valid");
+        assert_eq!(spec.sequence[0].request.headers.len(), 2);
     }
 }
