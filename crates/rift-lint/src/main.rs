@@ -7,7 +7,9 @@
 //!   rift-lint <directory_or_file> [OPTIONS]
 
 use clap::Parser;
-use rift_lint::{LintIssue, LintOptions, LintResult, Severity, lint_value};
+use rift_lint::{
+    Document, LintIssue, LintOptions, LintResult, Severity, lint_document, parse_document,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -157,12 +159,12 @@ fn main() {
 
     // First pass: Load all files and check for port conflicts
     let mut port_map: HashMap<u16, Vec<PathBuf>> = HashMap::new();
-    let mut imposters: Vec<(PathBuf, Value)> = Vec::new();
+    let mut imposters: Vec<(PathBuf, Document)> = Vec::new();
 
     for file in &files {
         match load_imposter_file(file) {
             Ok(imposter) => {
-                if let Some(port) = imposter.get("port").and_then(|v| v.as_u64()) {
+                if let Some(port) = imposter.value.get("port").and_then(|v| v.as_u64()) {
                     port_map.entry(port as u16).or_default().push(file.clone());
                 }
                 imposters.push((file.clone(), imposter));
@@ -180,8 +182,10 @@ fn main() {
     check_port_conflicts(&port_map, &mut result);
 
     // Second pass: Validate each parsed imposter using the library
-    for (file, value) in &imposters {
-        let file_result = lint_value(value, &file.to_string_lossy(), &options);
+    for (file, doc) in &imposters {
+        // `lint_document`, not `lint_value`: the binary is the path that used to drop the raw text
+        // and with it every duplicate key in the document (issue #1069).
+        let file_result = lint_document(doc, &file.to_string_lossy(), &options);
         // Merge without double-counting files_checked (we already counted)
         result.issues.extend(file_result.issues);
         result.errors += file_result.errors;
@@ -237,9 +241,9 @@ enum LoadError {
     Json(#[from] serde_json::Error),
 }
 
-fn load_imposter_file(path: &Path) -> Result<Value, LoadError> {
+fn load_imposter_file(path: &Path) -> Result<Document, LoadError> {
     let content = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&content)?)
+    Ok(parse_document(&content)?)
 }
 
 fn check_port_conflicts(port_map: &HashMap<u16, Vec<PathBuf>>, result: &mut LintResult) {
@@ -477,14 +481,14 @@ fn fix_header_value(value: &mut Value) -> Option<&'static str> {
     }
 }
 
-fn apply_fixes(imposters: &[(PathBuf, Value)], json_mode: bool) {
+fn apply_fixes(imposters: &[(PathBuf, Document)], json_mode: bool) {
     let Palette {
         green, red, reset, ..
     } = palette();
     let mut fixes_applied = 0;
 
     for (file, imposter) in imposters {
-        let mut modified = imposter.clone();
+        let mut modified = imposter.value.clone();
         let mut file_fixed = false;
 
         // Fix header values

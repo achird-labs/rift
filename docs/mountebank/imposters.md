@@ -298,9 +298,14 @@ exactly what the merge above exists to avoid. Before this, both spellings surviv
 lines went out*, ordered differently from one process to the next. Write the name once.
 
 One wrinkle worth knowing: a name repeated with **identical** spelling (`{"x": "a", "x": "a"}`) is
-caught only when the document is read as text. Through `--configfile`'s `{"imposters": [...]}`
-wrapper the JSON parser has already collapsed it before Rift sees it, so it loads. A name repeated
-in *different* casing is caught on every path.
+caught by the engine only when the document is read as text. Through `--configfile`'s
+`{"imposters": [...]}` wrapper the JSON parser has already collapsed it before Rift sees it, so it
+loads. A name repeated in *different* casing is caught on every path.
+
+`rift-lint` closes that asymmetry ahead of time: **E044** reads the raw document text, so it reports
+a byte-identical repeated name in these two fields before the document reaches any ingestion path.
+It is scoped to them deliberately — in `is.headers` a repeated name is *merged* into two header
+lines rather than rejected, which is how a stub sends two `Set-Cookie`s.
 
 ### Binary Request Bodies
 

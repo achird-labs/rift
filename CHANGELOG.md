@@ -37,17 +37,40 @@ record.
 
 ### Added
 
+- **`rift-lint` E044 and E045 — the two shapes the engine rejects that lint still passed** (#1069).
+  #1062 closed the case-variant half of the "lint passes, deploy fails with 400" ordering for
+  `proxy.injectHeaders` and `_rift.fault.error.headers`. These close the rest.
+  - **E044 — a single-valued header object names one header twice, byte-identically.** No rule
+    could see this before: every entry point parsed to a `serde_json::Value` first, and
+    `serde_json::Map` is last-wins, so the second key was gone before validation ran. `rift-lint`
+    now scans the raw document text for repeated keys.
+  - The rule is confined to `proxy.injectHeaders` and `_rift.fault.error.headers`, the two fields
+    the engine actually rejects a repeat in. **`is.headers` is excluded on purpose**: it is
+    multi-valued, and a repeated name there is *merged* into two header lines — that is how a stub
+    sends two `Set-Cookie`s, not a defect. Free-form regions such as `is.body` are excluded for the
+    same reason: the engine accepts them last-wins. A repeated *known struct field*
+    (`{"port": 3000, "port": 3001}`) is rejected by the engine but needs the schema to recognise,
+    and is not covered.
+  - The CLI was the path that mattered: it parsed each file to a `Value` and linted that, so a
+    text-reading rule added to the library alone would never have fired for anyone running
+    `rift-lint`. It now uses the new `parse_document` / `lint_document` API.
+  - **New public API:** `Document`, `parse_document` and `lint_document`. `lint_json` and
+    `lint_file` route through them and report E044 too. `lint_value` is unchanged and **cannot**
+    report E044 — it is handed an already-collapsed value — which its documentation now says.
+  - **E045 — a non-string value in a single-valued header object.** Engine-side both fields are
+    `HashMap<String, String>`, so `{"X-Id": 1}` is a hard `400`; a recorded document carrying a
+    numeric `Content-Length` in `proxy.injectHeaders` linted green and failed to deploy. Numbers,
+    booleans, nulls, arrays and objects are all reported, each named in the message. `is.headers`
+    is untouched: it is multi-valued, where a string array is legal (#238) and a number is E019.
+
 - **`rift-lint` E043 — a single-valued header object that names one header twice** (#1062). #1050
   made the engine *reject* such a document in `proxy.injectHeaders` and `_rift.fault.error.headers`
   (a `400` from `POST /imposters`, a startup error from `--configfile`), but lint never inspected
   either field. Lint passed and deployment failed — the worst possible ordering for a documented
   pre-flight check, and the one `rift-conformance` drives as Plane A.
-  - The rule reports the **case-variant** shape (`X-Id` beside `x-id`). A *byte-identical* duplicate
-    key is not reported, because lint parses to a `serde_json::Value` first and `serde_json::Map` is
-    last-wins — the second spelling is gone before validation runs. The engine still rejects that one
-    on every text path (`POST /imposters`, `--configfile`'s bare-array form, YAML, `--datadir`), so a
-    narrower version of the same lint-passes-deploy-fails gap remains; closing it needs lint to read
-    the raw text rather than the parsed value.
+  - The rule reports the **case-variant** shape (`X-Id` beside `x-id`), which is the shape that
+    survives into a parsed `serde_json::Value`. The byte-identical shape is reported by E045's
+    sibling E044 below, which reads the raw text.
   - `is.headers` is deliberately **not** flagged: it is multi-valued, and the engine folds a
     case-variant pair there (#1039) rather than rejecting it.
 
