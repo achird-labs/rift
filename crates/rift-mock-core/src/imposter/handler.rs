@@ -516,26 +516,52 @@ fn inject_cors_headers(headers: &mut hyper::HeaderMap) {
 
 /// Make a `{{ }}`-templated header value safe to emit (issue #359 B3, header injection).
 ///
-/// A templated header value can resolve to attacker-controlled request data (a header/query/json
-/// value) containing CR, LF, or other control characters — a classic HTTP header-injection vector.
-/// Strip every control character so the value can never terminate the header line early or smuggle
-/// a second header. If anything was removed (or the sanitized value still isn't a valid header
-/// value), emit a `tracing::warn!` so the rejection is visible rather than silent.
+/// A templated header value can resolve to attacker-controlled request data: `request.query` is
+/// percent-decoded and `request.json` is an arbitrary JSON string, so either can carry CR/LF and
+/// terminate the header line early to smuggle a second header. Remove every character a header
+/// value cannot hold, and say so — never silently.
+///
+/// The filter is the `http` crate's own validity rule expressed on `char`s. That rule is
+/// `is_valid(b) = b >= 32 && b != 127 || b == b'\t'` (http-1.3.1/src/header/value.rs:584-587), and
+/// `c == '\t' || !c.is_ascii_control()` is equivalent: an ASCII char is its own byte, and every
+/// byte of a non-ASCII char is >= 0x80 and therefore always valid.
+///
+/// Do **not** reach for `char::is_control` here (issue #1058). That is Unicode category Cc, which
+/// also spans U+0080–U+009F — legal obs-text a header value may carry — and it rejects HTAB, which
+/// is explicitly legal. Both were being stripped and reported as an injection attempt.
 fn sanitize_header_value(value: &str) -> String {
-    let sanitized: String = value.chars().filter(|c| !c.is_control()).collect();
-    if sanitized.len() != value.len() {
+    let mut sanitized = String::with_capacity(value.len());
+    let mut removed: Vec<char> = Vec::new();
+    for c in value.chars() {
+        if c == '\t' || !c.is_ascii_control() {
+            sanitized.push(c);
+        } else if !removed.contains(&c) {
+            // Distinct characters only: the filter's alphabet is 33 values wide, so `removed` is
+            // bounded by construction however long the input is.
+            removed.push(c);
+        }
+    }
+    if !removed.is_empty() {
+        // `?`, never `%`: this is the attacker-controlled string we just found CR/LF in, and the
+        // default subscriber is a plain `fmt` layer, so `Display` would write a real line break
+        // into the log and forge a second log entry. `Debug` escapes it.
+        //
+        // Truncated first, because escaping *expands* — one ESC byte becomes `\u{1b}`, six
+        // characters — and `value` is client-sized (a templated `request.json` value is bounded
+        // only by the 10 MiB body cap) while this warning is client-triggerable by a single stray
+        // control character. An unbounded per-request log line is the lever #718 exists to deny.
         tracing::warn!(
             target: "rift::template",
-            original = %value,
-            "stripped control characters from a templated header value (possible header-injection attempt)"
-        );
-    } else if hyper::header::HeaderValue::from_str(&sanitized).is_err() {
-        tracing::warn!(
-            target: "rift::template",
-            value = %value,
-            "templated header value is not a representable header value"
+            value = ?crate::imposter::response::truncate_with_ellipsis(value, 256),
+            removed = ?removed,
+            "removed characters a header value cannot carry from a templated header value; a CR or LF here would have terminated the header line (header injection)"
         );
     }
+    debug_assert!(
+        hyper::header::HeaderValue::from_str(&sanitized).is_ok(),
+        "the filter above *is* the `HeaderValue` validity rule, so what survives it is always \
+         representable; a failure here means the two have drifted apart"
+    );
     sanitized
 }
 
@@ -586,10 +612,10 @@ fn render_template_parts(
         for v in values.iter_mut() {
             match crate::extensions::template_fn::render_templated(v, &template_ctx, debug) {
                 // Issue #359 B3 (header injection): a templated value can resolve to
-                // attacker-controlled request data containing CR/LF/control chars. Strip
-                // control characters before the value ever reaches the header map so it
-                // cannot inject an extra header line; warn (never silently) if anything
-                // had to be removed.
+                // attacker-controlled request data containing CR/LF. Strip what a header
+                // value cannot carry before it ever reaches the header map, so it cannot
+                // inject an extra header line; warn (never silently) if anything had to
+                // be removed.
                 Ok(rendered) => *v = sanitize_header_value(&rendered),
                 Err(e) => return TemplateRender::Failed(e),
             }
@@ -2456,6 +2482,253 @@ mod matcher_error_response_tests {
             resp.headers().contains_key("x-rift-inject-error"),
             "a predicate-inject timeout keeps the inject-error marker"
         );
+    }
+}
+
+#[cfg(test)]
+mod sanitize_header_value_tests {
+    use super::sanitize_header_value;
+    use hyper::header::HeaderValue;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Metadata, Subscriber, span};
+
+    /// One captured `rift::template` event, as name → `Debug`-rendered value.
+    #[derive(Default, Clone)]
+    struct CapturedEvent {
+        fields: Vec<(String, String)>,
+    }
+
+    impl CapturedEvent {
+        fn field(&self, name: &str) -> Option<&str> {
+            self.fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.as_str())
+        }
+    }
+
+    /// Run `f` with a subscriber that captures every `"rift::template"` event, field by field.
+    ///
+    /// Hand-written rather than a `tracing-subscriber` layer for the reason the sibling capture in
+    /// `scripting/trace.rs` gives: `rift-mock-core` does not otherwise depend on
+    /// `tracing-subscriber`, and this is a handful of trait methods. `tracing_test::traced_test`
+    /// is not an option either — it installs an `EnvFilter` of `"<crate_name>=trace"`
+    /// (tracing-test-macro-0.2.5/src/lib.rs:73-78), which drops an event raised on a
+    /// `rift::template` target, so a `logs_contain` assertion there would pass against an
+    /// implementation that logs nothing at all.
+    fn captured_logs(f: impl FnOnce()) -> Vec<CapturedEvent> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let capture = TemplateLogCapture {
+            events: Arc::clone(&events),
+        };
+        tracing::subscriber::with_default(capture, f);
+        let collected = events.lock().expect("capture buffer");
+        collected.clone()
+    }
+
+    struct TemplateLogCapture {
+        events: Arc<Mutex<Vec<CapturedEvent>>>,
+    }
+
+    impl Subscriber for TemplateLogCapture {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            metadata.target() == "rift::template"
+        }
+
+        fn new_span(&self, _span: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut captured = CapturedEvent::default();
+            event.record(&mut captured);
+            self.events.lock().expect("capture buffer").push(captured);
+        }
+
+        fn enter(&self, _span: &span::Id) {}
+
+        fn exit(&self, _span: &span::Id) {}
+    }
+
+    impl Visit for CapturedEvent {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+    }
+
+    fn one_event(value: &str) -> CapturedEvent {
+        let events = captured_logs(|| {
+            sanitize_header_value(value);
+        });
+        assert_eq!(
+            events.len(),
+            1,
+            "a sanitized value warns exactly once, got {} events",
+            events.len()
+        );
+        events[0].clone()
+    }
+
+    #[test]
+    fn a_horizontal_tab_is_a_legal_header_value_character_and_is_kept() {
+        let events = captured_logs(|| assert_eq!(sanitize_header_value("a\tb"), "a\tb"));
+        assert!(
+            events.is_empty(),
+            "a legal value must not be reported as sanitized"
+        );
+    }
+
+    #[test]
+    fn unicode_c1_controls_are_legal_obs_text_and_are_kept() {
+        // U+0080-U+009F encode as two bytes that are both >= 0x80, so `HeaderValue` accepts them.
+        // Only `char::is_control` (Unicode category Cc) ever called them control characters.
+        let events = captured_logs(|| {
+            assert_eq!(sanitize_header_value("a\u{85}b"), "a\u{85}b");
+            assert_eq!(sanitize_header_value("a\u{80}b"), "a\u{80}b");
+            assert_eq!(sanitize_header_value("a\u{9f}b"), "a\u{9f}b");
+        });
+        assert!(
+            events.is_empty(),
+            "C1 obs-text must not be reported as sanitized"
+        );
+    }
+
+    #[test]
+    fn ordinary_non_ascii_passes_through_byte_exact() {
+        let events = captured_logs(|| assert_eq!(sanitize_header_value("José"), "José"));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn an_empty_value_is_unchanged() {
+        let events = captured_logs(|| assert_eq!(sanitize_header_value(""), ""));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn crlf_is_still_stripped_and_still_warned() {
+        let events = captured_logs(|| {
+            assert_eq!(
+                sanitize_header_value("safe\r\nInjected: yes"),
+                "safeInjected: yes"
+            );
+        });
+        assert_eq!(events.len(), 1, "CR/LF removal must stay loud");
+        assert!(
+            events[0]
+                .field("message")
+                .is_some_and(|m| m.contains("header injection")),
+            "CR/LF removal is the #359 B3 injection defence and must still name it, got: {:?}",
+            events[0].field("message")
+        );
+    }
+
+    #[test]
+    fn the_warning_does_not_echo_a_raw_control_character_into_the_log() {
+        let event = one_event("safe\r\nInjected: yes");
+        for (name, rendered) in &event.fields {
+            assert!(
+                !rendered.contains('\r') && !rendered.contains('\n'),
+                "field `{name}` carries a raw CR/LF, which forges a second log line: {rendered:?}"
+            );
+        }
+        assert_eq!(
+            event.field("value"),
+            Some(r#""safe\r\nInjected: yes""#),
+            "the offending value stays legible, escaped"
+        );
+    }
+
+    #[test]
+    fn the_warning_names_the_characters_it_removed() {
+        assert_eq!(
+            one_event("safe\r\nInjected: yes").field("removed"),
+            Some(r"['\r', '\n']"),
+            "an operator must be able to tell CR/LF from a stray NUL"
+        );
+        assert_eq!(one_event("a\u{0}b").field("removed"), Some(r"['\0']"));
+    }
+
+    #[test]
+    fn a_repeated_control_character_is_reported_once() {
+        // The diagnostic is derived from client-controlled data, so the set of characters it names
+        // must stay bounded by the filter's own alphabet, not by the length of the input (#718).
+        assert_eq!(
+            one_event("a\0\0\0\0\0b").field("removed"),
+            Some(r"['\0']"),
+            "the removed set names each character once"
+        );
+    }
+
+    #[test]
+    fn the_logged_value_is_capped_however_long_the_input_is() {
+        // The warning is client-triggerable by one stray control character, and `Debug` escaping
+        // expands each of them; without a cap a 10 MiB templated body becomes a 10 MiB log line
+        // per request (#718).
+        let value = format!("{}\u{1b}", "x".repeat(100_000));
+        let event = one_event(&value);
+        let logged = event.field("value").expect("value field present");
+        assert!(
+            logged.len() < 1_000,
+            "the logged value must be capped, got {} chars",
+            logged.len()
+        );
+        assert!(
+            logged.contains("..."),
+            "a truncated value must say so, got: {logged}"
+        );
+    }
+
+    #[test]
+    fn bytes_a_header_value_cannot_hold_are_stripped() {
+        assert_eq!(sanitize_header_value("a\u{0}b"), "ab");
+        assert_eq!(sanitize_header_value("a\u{7f}b"), "ab");
+        assert_eq!(sanitize_header_value("a\u{1b}b"), "ab");
+        assert_eq!(sanitize_header_value("\r\n\0"), "");
+    }
+
+    #[test]
+    fn every_byte_agrees_with_the_http_crate_on_what_a_header_value_may_hold() {
+        // The whole fix is that the filter *is* `http`'s `is_valid` rule. Cross-check it against
+        // the crate itself over every code point that can differ, rather than trusting the
+        // derivation in the doc comment: ASCII, plus the C1 range the old `is_control` removed.
+        for cp in (0u32..=0xFF).chain([0x100, 0x2028, 0x10FFFF]) {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            let kept = sanitize_header_value(&c.to_string()) == c.to_string();
+            let representable = HeaderValue::from_str(&c.to_string()).is_ok();
+            assert_eq!(
+                kept, representable,
+                "U+{cp:04X} ({c:?}): sanitizer kept={kept}, HeaderValue accepts={representable}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_sanitized_value_is_accepted_by_header_value() {
+        for raw in [
+            "a\tb",
+            "a\u{85}b",
+            "José",
+            "safe\r\nInjected: yes",
+            "a\u{0}b",
+            "a\u{7f}b",
+            "",
+            "\r\n\0",
+        ] {
+            let out = sanitize_header_value(raw);
+            assert!(
+                HeaderValue::from_str(&out).is_ok(),
+                "sanitized {raw:?} -> {out:?} must be a representable header value"
+            );
+        }
     }
 }
 

@@ -508,6 +508,52 @@ async fn header_injection_via_templated_value_is_stripped() {
     let _ = manager.delete_imposter(20074).await;
 }
 
+/// Issue #1058: the injection filter is the `HeaderValue` validity rule, not `char::is_control`, so
+/// a templated header value carrying legal non-ASCII comes back byte-exact. Before the fix the
+/// sanitizer stripped every Unicode Cc character — which includes U+0080–U+009F, legal obs-text —
+/// and reported it as a possible injection attempt.
+#[tokio::test]
+async fn legal_non_ascii_in_a_templated_header_value_survives_byte_exact() {
+    let manager = ImposterManager::new();
+    spawn(
+        &manager,
+        serde_json::json!({
+            "port": 20075, "protocol": "http",
+            "stubs": [{
+                "predicates": [{ "equals": { "method": "GET", "path": "/echo" } }],
+                "responses": [{
+                    "is": {
+                        "statusCode": 200,
+                        "headers": { "X-Echo": "{{request.header 'X-Name'}}" },
+                        "body": "ok"
+                    },
+                    "_rift": { "templated": true }
+                }]
+            }]
+        }),
+    )
+    .await;
+
+    // `José` is ordinary obs-text; `\u{85}` (NEL) is in the C1 range the old filter also removed.
+    let resp = reqwest::Client::new()
+        .get("http://127.0.0.1:20075/echo")
+        .header("X-Name", "Jos\u{e9}\u{85}")
+        .send()
+        .await
+        .expect("request");
+    let echo = resp
+        .headers()
+        .get("x-echo")
+        .expect("x-echo header present")
+        .as_bytes();
+    assert_eq!(
+        echo,
+        "Jos\u{e9}\u{85}".as_bytes(),
+        "a legal header value must round-trip through templating unchanged"
+    );
+    let _ = manager.delete_imposter(20075).await;
+}
+
 /// `state.<key>` reads flow state (read-only) for the request's resolved flow id: present key
 /// renders the value, a missing key substitutes empty (non-debug policy).
 #[tokio::test]
