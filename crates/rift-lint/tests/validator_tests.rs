@@ -1307,3 +1307,126 @@ fn e042_is_a_warning_not_an_error() {
         "E042 must be a hint, not a hard error"
     );
 }
+
+// ─── E043: single-valued header objects name each header once (issue #1062) ──
+//
+// Since #1050 the engine rejects these documents (400 from POST /imposters, a startup error from
+// --configfile). Before this rule, lint passed and deployment failed — the worst ordering for a
+// pre-flight tool.
+
+#[test]
+fn e043_inject_headers_case_variant_duplicate() {
+    let proxy = json!({ "to": "http://x", "injectHeaders": { "X-Id": "a", "x-id": "b" } });
+    let mut r = LintResult::new();
+    validate_proxy_response(path(), &proxy, "loc", &mut r);
+    assert!(has_code(&r, "E043"), "got {:?}", codes(&r));
+
+    let issue = r.issues.iter().find(|i| i.code == "E043").expect("E043");
+    assert!(
+        issue.message.contains("X-Id") && issue.message.contains("x-id"),
+        "the message must name both spellings so the author can find them: {}",
+        issue.message
+    );
+    assert_eq!(
+        issue.location.as_deref(),
+        Some("loc.injectHeaders"),
+        "the location must point at the offending field"
+    );
+    assert_eq!(issue.severity, Severity::Error, "the engine rejects this");
+}
+
+#[test]
+fn e043_fault_error_headers_case_variant_duplicate() {
+    let response = json!({
+        "is": { "statusCode": 200 },
+        "_rift": { "fault": { "error": { "headers": { "X-Id": "a", "x-id": "b" } } } }
+    });
+    let mut r = LintResult::new();
+    validate_response(
+        path(),
+        &response,
+        "loc",
+        &mut r,
+        &opts(),
+        &serde_json::Value::Null,
+    );
+    assert!(has_code(&r, "E043"), "got {:?}", codes(&r));
+    let issue = r.issues.iter().find(|i| i.code == "E043").expect("E043");
+    assert_eq!(
+        issue.location.as_deref(),
+        Some("loc._rift.fault.error.headers")
+    );
+}
+
+#[test]
+fn e043_not_fired_for_a_single_spelling() {
+    let proxy = json!({ "to": "http://x", "injectHeaders": { "X-Id": "a", "X-Other": "b" } });
+    let mut r = LintResult::new();
+    validate_proxy_response(path(), &proxy, "loc", &mut r);
+    assert!(!has_code(&r, "E043"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e043_not_fired_for_is_headers() {
+    // `is.headers` is multi-valued and the engine *folds* a case-variant pair there (#1039)
+    // rather than rejecting it, so flagging it would be a false positive.
+    let is_resp = json!({ "headers": { "X-Id": "a", "x-id": "b" } });
+    let mut r = LintResult::new();
+    validate_is_response(path(), &is_resp, "loc", &mut r);
+    assert!(!has_code(&r, "E043"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e043_reports_a_non_object_inject_headers_as_e021() {
+    let proxy = json!({ "to": "http://x", "injectHeaders": "not-an-object" });
+    let mut r = LintResult::new();
+    validate_proxy_response(path(), &proxy, "loc", &mut r);
+    assert!(has_code(&r, "E021"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e043_fires_once_per_duplicate_not_once_per_key() {
+    let proxy = json!({
+        "to": "http://x",
+        "injectHeaders": { "X-Id": "a", "x-id": "b", "X-ID": "c" }
+    });
+    let mut r = LintResult::new();
+    validate_proxy_response(path(), &proxy, "loc", &mut r);
+    assert_eq!(
+        r.issues.iter().filter(|i| i.code == "E043").count(),
+        2,
+        "three spellings of one name are two duplicates, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn e043_does_not_yet_catch_a_byte_identical_duplicate() {
+    // Pins a KNOWN GAP rather than desired behaviour. `serde_json::Map` is last-wins without the
+    // `preserve_order` feature, so by the time lint sees a `Value` the second `X-Id` is gone. The
+    // engine is NOT blind to this — it rejects it on every text path (`POST /imposters`,
+    // `--configfile` bare-array, YAML, `--datadir`), which `rift_types::wire`'s
+    // `a_byte_identical_duplicate_is_rejected_on_the_text_path` pins. Closing the gap needs lint to
+    // read the raw text. If this test starts failing, the gap was closed — update it, don't relax it.
+    let raw = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"proxy":{"to":"http://x","injectHeaders":{"X-Id":"a","X-Id":"b"}}}]}
+    ]}"#;
+    let value: Value = serde_json::from_str(raw).expect("parses; the duplicate is collapsed");
+    let r = lint_value(&value, "<test>", &opts());
+    assert!(
+        !has_code(&r, "E043"),
+        "documents the gap: lint cannot see a collapsed duplicate, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn e043_surfaces_through_a_whole_imposter_document() {
+    // The unit hooks above prove the helper is called; this proves the wiring survives the real
+    // entry point a user actually runs `rift-lint` through.
+    let imposter = make_imposter(json!([{
+        "responses": [{ "proxy": { "to": "http://x", "injectHeaders": { "X-Id": "a", "x-id": "b" } } }]
+    }]));
+    let r = lint_value(&imposter, "<test>", &opts());
+    assert!(has_code(&r, "E043"), "got {:?}", codes(&r));
+}
