@@ -497,3 +497,199 @@ fn an_unparseable_file_is_not_reported_as_skipped() {
         "an unparseable file is an E001, not a refusal, got: {stdout}"
     );
 }
+
+// ─── Issue #1071: the CLI lints YAML, and `--fix` refuses to rewrite it ────────────────────────
+
+const YAML_WITH_NUMERIC_HEADER: &str = "\
+- port: 3000
+  protocol: http
+  stubs:
+    - responses:
+        - is:
+            statusCode: 200
+            headers:
+              Content-Length: 256
+";
+
+/// The headline symptom: `rift-lint config.yaml` used to print "No JSON files found" and exit 0,
+/// having checked nothing — on a file `--configfile` will happily load.
+#[test]
+fn cli_lints_a_yaml_file_instead_of_skipping_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("config.yaml");
+    std::fs::write(&f, YAML_WITH_NUMERIC_HEADER).expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap(), "-o", "json"])
+        .output()
+        .expect("run rift-lint");
+
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    let codes: Vec<&str> = parsed["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .filter_map(|i| i["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"E019"),
+        "the YAML file was linted, got {codes:?}"
+    );
+    assert!(
+        !out.status.success(),
+        "an error-severity finding still exits non-zero"
+    );
+}
+
+/// `--fix` re-serializes with `serde_json::to_string_pretty`. Applied to a `.yaml` file that would
+/// write JSON text under a YAML name — and the engine would then silently reparse it as JSON,
+/// because it begins with `[`. So `--fix` must refuse, and say so.
+#[test]
+fn fix_refuses_to_rewrite_a_yaml_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("config.yaml");
+    std::fs::write(&f, YAML_WITH_NUMERIC_HEADER).expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap(), "--fix"])
+        .output()
+        .expect("run rift-lint");
+
+    assert_eq!(
+        std::fs::read_to_string(&f).expect("read back"),
+        YAML_WITH_NUMERIC_HEADER,
+        "the YAML file must be byte-identical; --fix writes JSON"
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    // "Skipped" alone is shared with the duplicate-key refusal, so a file skipped for the wrong
+    // reason would satisfy it. The word YAML is what distinguishes this path.
+    assert!(
+        stdout.contains("Skipped") && stdout.contains("YAML"),
+        "refused *because it is YAML*, got: {stdout}"
+    );
+}
+
+/// A JSON file in the same run is still repaired, so the YAML refusal is not a blanket stop.
+#[test]
+fn fix_still_repairs_json_when_a_yaml_file_is_present() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let y = dir.path().join("config.yaml");
+    let j = dir.path().join("imposter.json");
+    std::fs::write(&y, YAML_WITH_NUMERIC_HEADER).expect("write");
+    std::fs::write(
+        &j,
+        r#"{"port":3001,"protocol":"http","stubs":[
+            {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256}}}]}
+        ]}"#,
+    )
+    .expect("write");
+
+    Command::new(BIN)
+        .args([dir.path().to_str().unwrap(), "--fix"])
+        .output()
+        .expect("run rift-lint");
+
+    assert_eq!(
+        std::fs::read_to_string(&y).expect("read back"),
+        YAML_WITH_NUMERIC_HEADER,
+        "YAML untouched"
+    );
+    assert!(
+        std::fs::read_to_string(&j)
+            .expect("read back")
+            .contains(r#""Content-Length": "256""#),
+        "the JSON sibling is still repaired"
+    );
+}
+
+/// The no-files warning must stop saying "JSON" now that YAML counts.
+#[test]
+fn the_no_files_warning_names_both_formats() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("readme.txt"), "hello").expect("write");
+
+    let out = Command::new(BIN)
+        .arg(dir.path().to_str().unwrap())
+        .output()
+        .expect("run rift-lint");
+
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert!(
+        stdout.contains("YAML") && stdout.contains("JSON"),
+        "the warning names both formats, not just the new one, got: {stdout}"
+    );
+}
+
+/// Blocker this file exists to prevent: every other E046 test drives the library, and the CLI takes
+/// a different route into it (`lint_document`). A rule raised on the library path only would be
+/// invisible to almost every user — the same shape of gap #1069 was about.
+#[test]
+fn cli_reports_e046_for_a_yaml_mapping_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("config.yaml");
+    std::fs::write(&f, "port: 3000\nprotocol: http\nstubs: []\n").expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap(), "-o", "json"])
+        .output()
+        .expect("run rift-lint");
+
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    let codes: Vec<&str> = parsed["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .filter_map(|i| i["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"E046"),
+        "the binary reports it, got {codes:?}"
+    );
+    assert!(!out.status.success(), "and exits non-zero");
+}
+
+/// The engine sniffs the first non-whitespace byte, not the extension: `{` and `[` go to
+/// `serde_json`. So a `.yaml` file holding a JSON document loads fine, and flagging it would be a
+/// false positive on a working config.
+#[test]
+fn a_yaml_file_holding_json_is_not_e046() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (name, text) in [
+        (
+            "wrapper.yaml",
+            r#"{"imposters":[{"port":3000,"protocol":"http","stubs":[]}]}"#,
+        ),
+        (
+            "single.yaml",
+            r#"{"port":3001,"protocol":"http","stubs":[]}"#,
+        ),
+        (
+            "array.yaml",
+            r#"[{"port":3002,"protocol":"http","stubs":[]}]"#,
+        ),
+    ] {
+        let f = dir.path().join(name);
+        std::fs::write(&f, text).expect("write");
+
+        let out = Command::new(BIN)
+            .args([f.to_str().unwrap(), "-o", "json"])
+            .output()
+            .expect("run rift-lint");
+
+        let stdout = String::from_utf8(out.stdout).expect("utf8");
+        let parsed: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+        let codes: Vec<&str> = parsed["issues"]
+            .as_array()
+            .expect("issues")
+            .iter()
+            .filter_map(|i| i["code"].as_str())
+            .collect();
+        assert!(
+            !codes.contains(&"E046"),
+            "{name} is loaded by the engine's JSON branch, got {codes:?}"
+        );
+    }
+}

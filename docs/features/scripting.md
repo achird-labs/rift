@@ -252,7 +252,8 @@ separate file) and `ref:` (resolve from a named entry under `_rift.scripts`) ins
 `code:` — exactly one of `code`, `file`, or `ref` must be set. This is most useful in a YAML
 configfile, where a block scalar (`|`) lets you write the same script as normal multi-line Rhai.
 `rift --configfile config.yaml` expects a YAML *sequence* of imposters at the document root (a
-single imposter is still a one-element sequence):
+single imposter is still a one-element sequence). `rift-lint config.yaml` checks one before you run
+it — the linter reads YAML as well as JSON, and reports any other root shape as `E046`:
 
 ```yaml
 - port: 4545

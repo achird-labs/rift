@@ -18,6 +18,10 @@
 //! reaching `visit_f64` and arrives as a one-key map instead, which this scanner would read as a
 //! real object. It is off, and `numbers_of_every_shape_scan_as_scalars` below is what fails first
 //! if it is ever turned on.
+//!
+//! [`find_yaml`] reuses the same `Scan`/`ScanVisitor` over a `serde_yaml::Deserializer` (issue
+//! #1071). A YAML alias (`*ok`) is walked as its expanded anchor content, not as a second
+//! occurrence of the anchor's keys, so aliasing a clean mapping is never reported as a duplicate.
 
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use std::collections::HashSet;
@@ -44,6 +48,16 @@ pub(crate) fn find(text: &str) -> Result<Vec<Duplicate>, serde_json::Error> {
     let scan = Scan::deserialize(&mut de)?;
     // Matches `from_str`'s strictness: trailing content after the value is an error there too.
     de.end()?;
+    Ok(scan.0)
+}
+
+/// Every byte-identical repeated key in `text`, read as YAML.
+///
+/// Fails only when `text` is not valid YAML for this scan (including a multi-document stream,
+/// which `serde_yaml::Deserializer` itself refuses). Unlike [`find`], there is no `end()` call to
+/// make: `serde_yaml::Deserializer::from_str` already rejects more than one document.
+pub(crate) fn find_yaml(text: &str) -> Result<Vec<Duplicate>, serde_yaml::Error> {
+    let scan = Scan::deserialize(serde_yaml::Deserializer::from_str(text))?;
     Ok(scan.0)
 }
 
@@ -154,7 +168,7 @@ impl<'de> Visitor<'de> for ScanVisitor {
 
 #[cfg(test)]
 mod tests {
-    use super::find;
+    use super::{find, find_yaml};
 
     fn found(text: &str) -> Vec<(Option<String>, String)> {
         find(text)
@@ -237,6 +251,49 @@ mod tests {
     #[test]
     fn a_case_variant_pair_is_not_a_byte_identical_duplicate() {
         assert!(found(r#"{"X-Id":"a","x-id":"b"}"#).is_empty());
+    }
+
+    fn found_yaml(text: &str) -> Vec<(Option<String>, String)> {
+        find_yaml(text)
+            .expect("valid yaml")
+            .into_iter()
+            .map(|d| (d.location, d.key))
+            .collect()
+    }
+
+    /// The YAML scan builds the same paths as the JSON one — it is the same visitor, and this is
+    /// what proves the two agree rather than merely both working.
+    #[test]
+    fn find_yaml_names_a_nested_repeat_by_its_path() {
+        let yaml = "\
+a:
+  b:
+    x: 1
+    x: 2
+";
+        assert_eq!(
+            found_yaml(yaml),
+            vec![(Some("a.b".to_string()), "x".to_string())]
+        );
+    }
+
+    #[test]
+    fn find_yaml_scopes_each_object_separately() {
+        let yaml = "\
+- a: 1
+- a: 2
+";
+        assert!(found_yaml(yaml).is_empty());
+    }
+
+    #[test]
+    fn find_yaml_reports_a_root_repeat_with_no_location() {
+        assert_eq!(found_yaml("a: 1\na: 2\n"), vec![(None, "a".to_string())]);
+    }
+
+    #[test]
+    fn malformed_yaml_is_an_error_not_a_panic() {
+        assert!(find_yaml("a: [unclosed").is_err());
     }
 
     #[test]

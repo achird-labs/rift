@@ -112,7 +112,7 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 
 | Code | Description |
 |------|-------------|
-| E001 | Invalid JSON / file read error |
+| E001 | Invalid JSON or YAML / file read error |
 | E002 | Port conflict |
 | E003 | Missing required field |
 | E004 | Invalid protocol |

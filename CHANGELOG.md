@@ -79,6 +79,22 @@ record.
 
 ### Added
 
+- **`rift-lint` reads YAML, not just JSON** (#1071). `rift-lint config.yaml` printed
+  `No JSON files found` and exited **0** having checked nothing — on a file `--configfile` loads
+  happily, and which the scripting docs ship as the recommended way to author a config. Both the
+  file argument and the directory walk now accept `.yaml` and `.yml`, and every existing rule
+  applies to them.
+  - **New rule `E046` — a YAML document root that is not a sequence of imposters.** The engine's
+    YAML path is `serde_yaml::from_str::<Vec<ImposterConfig>>`, so only a top-level sequence loads;
+    the single-imposter and `{"imposters": [...]}` forms are JSON-only. Without this they linted
+    clean and failed at startup, which is the ordering this crate exists to prevent.
+  - **New public API:** `parse_yaml_document` and `lint_yaml`, mirroring `parse_document` and
+    `lint_json`. `parse_document`'s signature is unchanged — it returns a `serde_json::Error`, which
+    cannot carry a YAML failure. `E001` now names the format it failed to parse.
+  - **`--fix` never rewrites a YAML file** and says so. It re-serializes with
+    `serde_json::to_string_pretty`, so rewriting one would leave JSON text under a `.yaml` name —
+    which the engine would then silently read back as JSON, because it begins with `[`.
+
 - **`rift-lint` E044 and E045 — the two shapes the engine rejects that lint still passed** (#1069).
   #1062 closed the case-variant half of the "lint passes, deploy fails with 400" ordering for
   `proxy.injectHeaders` and `_rift.fault.error.headers`. These close the rest.
