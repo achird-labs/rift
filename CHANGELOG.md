@@ -11,6 +11,30 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `${request.*}`, `copy` or `lookup` header value carrying a client-supplied control character
+  failed the whole response instead of being repaired** (#1067). Response header values pass through
+  two templating stages: the `{{ }}` stage has stripped characters a header value cannot carry since
+  #359 B3, and the `${request.*}` stage — which runs *after* it, on the same values — stripped
+  nothing. `request.query` is percent-decoded and `request.body` is the raw body, so
+  `GET /x?x=a%0Db` against a stub with `"X-Echo": "${request.query.x}"` put a CR into the header,
+  which `Builder::header` rejected and the response surfaced as a `500`. The same stub written with
+  `{{ }}` answered `200`. A client could therefore fail an otherwise-valid stub with a query string,
+  and the author could neither see it nor fix it.
+  - The repair now also runs on the `${request.*}` substitution and on the text the `copy` and
+    `lookup` behaviors splice into a header — the other two places request-derived data reaches a
+    header value. It is the same filter, so tabs and non-ASCII obs-text are still kept byte-exact
+    (#1058), and it is idempotent: a value the `{{ }}` stage already repaired passes through
+    unchanged and is not warned about twice.
+  - On these three paths the repair covers **only the substituted text**, never the literal text
+    around it. A control character written literally into a header stays an authoring bug and still
+    fails that response with a `500`, even when the same header value also contains a token.
+    Response bodies are never filtered. `decorate` and script-authored headers are unchanged.
+  - Unchanged and worth knowing: a response with `_rift.templated: true` runs the `{{ }}` renderer
+    over every header value and repairs each result whole, so on those responses a literal control
+    character has been stripped rather than surfaced since #359 B3.
+
 ### Added
 
 - **`rift-lint` E043 — a single-valued header object that names one header twice** (#1062). #1050

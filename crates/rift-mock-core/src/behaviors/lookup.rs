@@ -256,8 +256,21 @@ pub fn apply_lookup_behaviors(
                     result = result.replace(&full_token, &value);
                     // Per value, so multi-value headers keep their multiplicity (RFC 7230 §3.2.2
                     // forbids folding Set-Cookie).
-                    for header_value in headers.values_mut().flatten() {
-                        *header_value = header_value.replace(&full_token, &value);
+                    //
+                    // Which CSV cell lands here is chosen by a client-controlled key, so a cell
+                    // holding a byte a header value cannot carry is a client-selectable 500;
+                    // repair it like the templating passes do (issue #1067). Only the substituted
+                    // cell is repaired, so a control character the author typed into the header
+                    // itself still reaches the builder and fails the response.
+                    //
+                    // Skipped outright when no header uses this token — otherwise every CSV column
+                    // of the matched row would run the repair, and warn, on every request even for
+                    // a body-only stub.
+                    if headers.values().flatten().any(|v| v.contains(&full_token)) {
+                        let repaired = crate::imposter::headers::sanitize_header_value(&value);
+                        for header_value in headers.values_mut().flatten() {
+                            *header_value = header_value.replace(&full_token, &repaired);
+                        }
                     }
                 }
             }
@@ -270,6 +283,168 @@ pub fn apply_lookup_behaviors(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #1067: the client picks the row, so a CSV cell holding a byte a header value cannot
+    /// carry is a client-selectable 500. Repair it instead.
+    #[test]
+    fn lookup_repairs_a_header_value_it_rewrote() {
+        let path =
+            std::env::temp_dir().join(format!("rift_lookup_1067_{}.csv", std::process::id()));
+        std::fs::write(&path, "id,name\nhi,Wor\u{1b}ld\n").expect("write csv");
+
+        let mut query = HashMap::new();
+        query.insert("q".to_string(), "hi".to_string());
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            query,
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let behaviors = vec![LookupBehavior {
+            key: LookupKey {
+                from: {
+                    let mut map = HashMap::new();
+                    map.insert("query".to_string(), "q".to_string());
+                    CopySource::Nested(map)
+                },
+                extraction: ExtractionMethod::Regex {
+                    selector: ".*".to_string(),
+                    options: None,
+                },
+            },
+            from_data_source: DataSource {
+                csv: CsvDataSource {
+                    path: path.to_string_lossy().into_owned(),
+                    key_column: "id".to_string(),
+                    delimiter: ',',
+                },
+            },
+            into: "${row}".to_string(),
+        }];
+
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert("X-Echo".to_string(), vec!["n=${row}[name]".to_string()]);
+
+        apply_lookup_behaviors("", &mut headers, &behaviors, &request, &CsvCache::default());
+
+        assert_eq!(
+            headers["X-Echo"],
+            vec!["n=World".to_string()],
+            "the ESC in the CSV cell is removed; without the repair this value is unrepresentable"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Only the substituted cell is repaired; a literal control character the author typed beside
+    /// the token survives so the response still fails loudly (issue #1067).
+    #[test]
+    fn lookup_repairs_the_cell_but_not_a_literal_control_char_beside_the_token() {
+        let path =
+            std::env::temp_dir().join(format!("rift_lookup_1067c_{}.csv", std::process::id()));
+        std::fs::write(&path, "id,name\nhi,Wor\u{1b}ld\n").expect("write csv");
+
+        let mut query = HashMap::new();
+        query.insert("q".to_string(), "hi".to_string());
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            query,
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let behaviors = vec![LookupBehavior {
+            key: LookupKey {
+                from: {
+                    let mut map = HashMap::new();
+                    map.insert("query".to_string(), "q".to_string());
+                    CopySource::Nested(map)
+                },
+                extraction: ExtractionMethod::Regex {
+                    selector: ".*".to_string(),
+                    options: None,
+                },
+            },
+            from_data_source: DataSource {
+                csv: CsvDataSource {
+                    path: path.to_string_lossy().into_owned(),
+                    key_column: "id".to_string(),
+                    delimiter: ',',
+                },
+            },
+            into: "${row}".to_string(),
+        }];
+
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert(
+            "X-Echo".to_string(),
+            vec!["bad\nvalue=${row}[name]".to_string()],
+        );
+
+        apply_lookup_behaviors("", &mut headers, &behaviors, &request, &CsvCache::default());
+
+        assert_eq!(
+            headers["X-Echo"],
+            vec!["bad\nvalue=World".to_string()],
+            "the ESC from the CSV cell is gone; the author's literal newline is not"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The boundary (issue #1067): a header value this behavior never rewrote is a literal from
+    /// the config and must reach the builder unrepaired.
+    #[test]
+    fn lookup_leaves_a_header_value_without_the_token_untouched() {
+        let path =
+            std::env::temp_dir().join(format!("rift_lookup_1067b_{}.csv", std::process::id()));
+        std::fs::write(&path, "id,name\nhi,World\n").expect("write csv");
+
+        let mut query = HashMap::new();
+        query.insert("q".to_string(), "hi".to_string());
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            query,
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let behaviors = vec![LookupBehavior {
+            key: LookupKey {
+                from: {
+                    let mut map = HashMap::new();
+                    map.insert("query".to_string(), "q".to_string());
+                    CopySource::Nested(map)
+                },
+                extraction: ExtractionMethod::Regex {
+                    selector: ".*".to_string(),
+                    options: None,
+                },
+            },
+            from_data_source: DataSource {
+                csv: CsvDataSource {
+                    path: path.to_string_lossy().into_owned(),
+                    key_column: "id".to_string(),
+                    delimiter: ',',
+                },
+            },
+            into: "${row}".to_string(),
+        }];
+
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert("X-Literal".to_string(), vec!["bad\nvalue".to_string()]);
+
+        apply_lookup_behaviors("", &mut headers, &behaviors, &request, &CsvCache::default());
+
+        assert_eq!(
+            headers["X-Literal"],
+            vec!["bad\nvalue".to_string()],
+            "a literal config value must reach the builder unrepaired and fail loudly"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn lookup_preserves_multi_value_headers_and_substitutes_each() {
