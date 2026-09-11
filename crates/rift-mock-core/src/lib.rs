@@ -38,6 +38,9 @@ pub use imposter::fault_io::{TcpFaultKind, tcp_fault_carrier};
 
 // Shared utilities
 pub mod util;
+
+#[cfg(test)]
+mod test_support;
 // Embedded-Rust consumers name the aliases as `rift_mock_core::FastMap` (issue #704).
 pub use util::{FastMap, FastSet};
 

@@ -13,6 +13,10 @@ record.
 
 ### Changed
 
+- `rift_mock_core::behaviors::apply_copy_behaviors` and `apply_lookup_behaviors` take one additional
+  argument, a `StubRef` identifying the stub for log attribution (#1075). Source-breaking for a
+  direct caller of those two functions; no wire, admin-API or SDK surface changes.
+
 - **A `_rift.templated` response with a control character written literally into a header now fails
   with a `500` instead of being silently repaired** (#1073). The `{{ }}` renderer had repaired every
   header value *whole* since #359 B3, so a stray byte the author typed was stripped and the warning
@@ -24,6 +28,20 @@ record.
     tabs and non-ASCII still survive byte-exact (#1058).
   - Only a stub that writes a control character literally into a header of a templated response is
     affected, and only that response. Bodies are still never filtered, and `_rift.stateOps` values
+- **The templated-header repair warning now says which stub produced it** (#1075). When a repair
+  removed characters from a header value it logged the value and the removed characters and nothing
+  else, so on a server running many imposters an operator could see a mangled header and have no way
+  back to the config that caused it. The `rift::template` warning now also carries `port`, `stub`
+  (the stub's index) and `stub_id`, with the same names and rendering as the fields a `rift::script`
+  event already uses, so one grep finds a stub's lines on both targets. A stub with no `id` logs
+  `stub_id=` empty rather than omitting the field.
+  - Deliberately **not** a `tracing` span. `render_template_parts` can run on a `spawn_blocking`
+    pool thread when the flow store blocks, and a span's thread-local is empty there — so a span
+    would have gone missing on exactly the Redis + `{{ state.* }}`-in-a-header path. The identity
+    travels as a plain argument instead, which cannot be lost that way.
+  - The request path and query are deliberately **not** logged: both are client-controlled, and the
+    existing `value` field already shows the operator the offending client data.
+
     are unchanged — a stored value read back into a header is repaired at that read.
 
 ### Fixed

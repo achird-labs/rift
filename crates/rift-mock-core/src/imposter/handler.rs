@@ -548,6 +548,7 @@ fn render_template_parts(
     body: String,
     mut headers: HashMap<String, Vec<String>>,
     debug: bool,
+    stub: super::headers::StubRef<'_>,
 ) -> TemplateRender {
     let template_ctx = crate::extensions::template_fn::TemplateContext {
         request: request_data,
@@ -576,7 +577,7 @@ fn render_template_parts(
                 v,
                 &template_ctx,
                 debug,
-                |substituted| sanitize_header_value(&substituted),
+                |substituted| sanitize_header_value(&substituted, stub),
             ) {
                 Ok(rendered) => *v = rendered,
                 Err(e) => return TemplateRender::Failed(e),
@@ -610,6 +611,7 @@ async fn render_templated_response(
     body: String,
     headers: HashMap<String, Vec<String>>,
     debug: bool,
+    stub: super::headers::StubRef<'_>,
 ) -> anyhow::Result<TemplateRender> {
     // `{{ state.<key> }}` is the only head that reaches the flow store, so a template without one
     // has nothing to offload — and on a blocking backend that hop is pure cost (issue #986). The
@@ -629,11 +631,24 @@ async fn render_templated_response(
             body,
             headers,
             debug,
+            stub,
         ));
     }
 
+    // `stub` borrows `id` from the caller's stub, but `run_flow_blocking`'s closure must be
+    // `'static` (it can hop to a `spawn_blocking` pool thread). Take the identity apart into
+    // owned pieces here — once per offloaded request, not once per header value — and rebuild the
+    // borrowed `StubRef` on the far side.
+    let port = stub.port;
+    let index = stub.index;
+    let id = stub.id.map(str::to_string);
     imposter
         .run_flow_blocking(move |imp| {
+            let stub = super::headers::StubRef {
+                port,
+                index,
+                id: id.as_deref(),
+            };
             Ok(render_template_parts(
                 imp,
                 &request_data,
@@ -641,9 +656,27 @@ async fn render_templated_response(
                 body,
                 headers,
                 debug,
+                stub,
             ))
         })
         .await
+}
+
+/// The identity a serve-time repair log line is attributed to (issue #1075).
+///
+/// One function rather than the same struct literal at four call sites: the whole value of the
+/// fields is that they name the *real* stub, so a field transposed at one site would point an
+/// operator at the wrong config and nothing would catch it.
+fn stub_ref<'a>(
+    imposter: &Imposter,
+    stub_index: usize,
+    stub: &'a super::types::Stub,
+) -> super::headers::StubRef<'a> {
+    super::headers::StubRef {
+        port: imposter.bound_port(),
+        index: stub_index,
+        id: stub.id.as_deref(),
+    }
 }
 
 /// `journal_index` is an out-parameter: the index of the entry this request was recorded under, so
@@ -1574,6 +1607,7 @@ async fn handle_request_inner(
                     std::mem::take(&mut body),
                     std::mem::take(&mut headers),
                     template_debug,
+                    stub_ref(&imposter, stub_index, &stub_state.stub),
                 )
                 .await
                 {
@@ -1620,6 +1654,7 @@ async fn handle_request_inner(
                     if need_body {
                         body = process_template(&body, &request_data);
                     }
+                    let stub_ref = stub_ref(&imposter, stub_index, &stub_state.stub);
                     for values in headers.values_mut() {
                         for v in values.iter_mut() {
                             if has_template_variables(v) {
@@ -1630,7 +1665,7 @@ async fn handle_request_inner(
                                 // Only the substituted text is repaired; a control character the
                                 // author typed into the header itself is left to fail loudly.
                                 *v = process_template_mapped(v, &request_data, |substituted| {
-                                    sanitize_header_value(&substituted)
+                                    sanitize_header_value(&substituted, stub_ref)
                                 });
                             }
                         }
@@ -1680,6 +1715,7 @@ async fn handle_request_inner(
                         &mut headers,
                         &parsed_behaviors.copy,
                         request_context.get_or_init(build_request_context),
+                        stub_ref(&imposter, stub_index, &stub_state.stub),
                     );
                 }
                 if !parsed_behaviors.lookup.is_empty() {
@@ -1689,6 +1725,7 @@ async fn handle_request_inner(
                         &parsed_behaviors.lookup,
                         request_context.get_or_init(build_request_context),
                         csv_cache(),
+                        stub_ref(&imposter, stub_index, &stub_state.stub),
                     );
                 }
                 if let Some(ref decorate_script) = parsed_behaviors.decorate {
@@ -3291,14 +3328,23 @@ mod upstream_error_tests {
 // =========================================================================
 #[cfg(test)]
 mod templated_offload_tests {
-    use super::{TemplateRender, render_templated_response};
+    use super::{TemplateRender, render_templated_response, stub_ref};
     use crate::extensions::flow_state::{CasOutcome, FlowStore};
     use crate::extensions::template::RequestData;
     use crate::imposter::core::Imposter;
+    use crate::imposter::headers::StubRef;
     use crate::imposter::types::ImposterConfig;
     use parking_lot::Mutex;
     use serde_json::{Value, json};
     use std::collections::HashMap;
+
+    /// Fixture identity for tests that only care about the render itself, not which stub
+    /// triggered it.
+    const FIXTURE_STUB: StubRef<'static> = StubRef {
+        port: 0,
+        index: 0,
+        id: None,
+    };
     use std::sync::Arc;
     use std::thread::ThreadId;
 
@@ -3378,6 +3424,31 @@ mod templated_offload_tests {
         Arc::new(imp)
     }
 
+    /// Issue #1075: the four call sites all build their `StubRef` through `stub_ref`, so this is
+    /// the one place a transposed field could hide. Asserted against an imposter and stub built
+    /// here, not against literals also written into the struct.
+    #[test]
+    fn stub_ref_reads_the_port_index_and_id_from_the_right_places() {
+        let imp = imposter_with(Arc::new(ThreadProbeStore::new(false)), None);
+        let stub: crate::imposter::types::Stub =
+            serde_json::from_value(json!({ "id": "checkout", "responses": [] }))
+                .expect("valid stub");
+
+        let r = stub_ref(&imp, 7, &stub);
+
+        assert_eq!(
+            r.port,
+            imp.bound_port(),
+            "port is the imposter's bound port"
+        );
+        assert_eq!(r.index, 7, "index is the matched stub's index");
+        assert_eq!(r.id, Some("checkout"), "id is the matched stub's id");
+
+        let anonymous: crate::imposter::types::Stub =
+            serde_json::from_value(json!({ "responses": [] })).expect("valid stub");
+        assert_eq!(stub_ref(&imp, 0, &anonymous).id, None);
+    }
+
     fn request() -> RequestData {
         RequestData::new("GET", "/x", None, &headers(&[]), None)
     }
@@ -3402,6 +3473,7 @@ mod templated_offload_tests {
             body.to_string(),
             hdrs,
             debug,
+            FIXTURE_STUB,
         )
         .await
     }
@@ -3490,6 +3562,7 @@ mod templated_offload_tests {
                 "path={{ request.path }}".to_string(),
                 headers(&[("x-when", "{{ now }}")]),
                 false,
+                FIXTURE_STUB,
             )
             .await
             .expect("no transport failure"),
@@ -3521,6 +3594,7 @@ mod templated_offload_tests {
                 "no state here".to_string(),
                 headers(&[("x-hits", "{{ state.hits }}")]),
                 false,
+                FIXTURE_STUB,
             )
             .await
             .expect("no transport failure"),
@@ -3550,6 +3624,7 @@ mod templated_offload_tests {
                 "n={{ state.hits }}".to_string(),
                 HashMap::new(),
                 false,
+                FIXTURE_STUB,
             )
             .await
             .expect("no transport failure"),
