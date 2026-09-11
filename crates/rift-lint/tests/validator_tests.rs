@@ -1400,24 +1400,314 @@ fn e043_fires_once_per_duplicate_not_once_per_key() {
     );
 }
 
+// ─── E044 — byte-identical duplicate key (issue #1069) ──────────────────────
+//
+// The gap the old `e043_does_not_yet_catch_a_byte_identical_duplicate` pinned is closed. That test
+// said "if this starts failing, the gap was closed — update it, don't relax it", so it is replaced
+// here by the two tests that state the new contract: the text path reports it, and `lint_value`
+// still cannot (it is handed an already-collapsed `Value`).
+
+const DUP_INJECT_HEADERS: &str = r#"{"port":3000,"protocol":"http","stubs":[
+    {"responses":[{"proxy":{"to":"http://x","injectHeaders":{"X-Id":"a","X-Id":"b"}}}]}
+]}"#;
+
 #[test]
-fn e043_does_not_yet_catch_a_byte_identical_duplicate() {
-    // Pins a KNOWN GAP rather than desired behaviour. `serde_json::Map` is last-wins without the
-    // `preserve_order` feature, so by the time lint sees a `Value` the second `X-Id` is gone. The
-    // engine is NOT blind to this — it rejects it on every text path (`POST /imposters`,
-    // `--configfile` bare-array, YAML, `--datadir`), which `rift_types::wire`'s
-    // `a_byte_identical_duplicate_is_rejected_on_the_text_path` pins. Closing the gap needs lint to
-    // read the raw text. If this test starts failing, the gap was closed — update it, don't relax it.
-    let raw = r#"{"port":3000,"protocol":"http","stubs":[
-        {"responses":[{"proxy":{"to":"http://x","injectHeaders":{"X-Id":"a","X-Id":"b"}}}]}
-    ]}"#;
-    let value: Value = serde_json::from_str(raw).expect("parses; the duplicate is collapsed");
-    let r = lint_value(&value, "<test>", &opts());
+fn e044_reports_a_byte_identical_duplicate_from_the_text() {
+    let r = lint_json(DUP_INJECT_HEADERS, "<test>", &opts());
+    let hits: Vec<_> = r.issues.iter().filter(|i| i.code == "E044").collect();
+    assert_eq!(hits.len(), 1, "expected one E044, got {:?}", codes(&r));
+    assert_eq!(
+        hits[0].location.as_deref(),
+        Some("stubs[0].responses[0].proxy.injectHeaders"),
+        "E044 names the object that holds the duplicate"
+    );
+    assert!(
+        hits[0].message.contains("X-Id"),
+        "the message names the repeated key, got {:?}",
+        hits[0].message
+    );
     assert!(
         !has_code(&r, "E043"),
-        "documents the gap: lint cannot see a collapsed duplicate, got {:?}",
+        "a byte-identical duplicate is E044, not E043, got {:?}",
         codes(&r)
     );
+}
+
+#[test]
+fn lint_value_cannot_see_a_byte_identical_duplicate() {
+    // The documented limitation of the `Value`-only entry point: `serde_json::Map` is last-wins, so
+    // by the time a caller has a `Value` the second `X-Id` is already gone. Callers that need E044
+    // must use `parse_document`/`lint_document` (or `lint_json`/`lint_file`, which do).
+    let value: Value =
+        serde_json::from_str(DUP_INJECT_HEADERS).expect("parses; duplicate collapsed");
+    let r = lint_value(&value, "<test>", &opts());
+    assert!(
+        !has_code(&r, "E044") && !has_code(&r, "E043"),
+        "lint_value sees a collapsed map and must report neither, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn e044_finds_the_field_through_every_document_shape() {
+    // E044 matches a duplicate's path against the single-valued header objects it finds in the
+    // parsed value, so the wrapper forms have to agree on the prefix. A mismatch here would make
+    // the rule silently report nothing for `{"imposters": [...]}` and bare-array documents.
+    let stub =
+        r#"{"responses":[{"proxy":{"to":"http://x","injectHeaders":{"X-Id":"a","X-Id":"b"}}}]}"#;
+    let single = format!(r#"{{"port":3000,"protocol":"http","stubs":[{stub}]}}"#);
+    let wrapped =
+        format!(r#"{{"imposters":[{{"port":3000,"protocol":"http","stubs":[{stub}]}}]}}"#);
+    let bare = format!(r#"[{{"port":3000,"protocol":"http","stubs":[{stub}]}}]"#);
+
+    for (shape, raw) in [
+        ("single imposter", &single),
+        ("imposters wrapper", &wrapped),
+        ("bare array", &bare),
+    ] {
+        let r = lint_json(raw, "<test>", &opts());
+        assert!(
+            has_code(&r, "E044"),
+            "{shape}: expected E044, got {:?}",
+            codes(&r)
+        );
+    }
+}
+
+#[test]
+fn e044_does_not_report_a_repeated_struct_field() {
+    // The engine *does* reject `{"port":3000,"port":3001}` on a text path (serde's derive errors
+    // with `duplicate field`), but recognising a known struct field needs the schema. Deliberately
+    // out of scope: a false negative here, never a false positive.
+    let raw = r#"{"port":3000,"port":3001,"protocol":"http","stubs":[]}"#;
+    let r = lint_json(raw, "<test>", &opts());
+    assert!(!has_code(&r, "E044"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e044_reports_one_finding_per_repeated_occurrence() {
+    // Three copies of one header are two duplicates — E043's three-spelling convention.
+    let raw = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"proxy":{"to":"http://x",
+          "injectHeaders":{"X-Id":"a","X-Id":"b","X-Id":"c"}}}]}
+    ]}"#;
+    let r = lint_json(raw, "<test>", &opts());
+    assert_eq!(
+        r.issues.iter().filter(|i| i.code == "E044").count(),
+        2,
+        "got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn e044_is_scoped_to_a_single_object() {
+    // The same key in two sibling objects is not a duplicate.
+    let raw = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200}}]},
+        {"responses":[{"is":{"statusCode":201}}]}
+    ]}"#;
+    let r = lint_json(raw, "<test>", &opts());
+    assert!(!has_code(&r, "E044"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e044_reports_a_duplicate_under_fault_error_headers() {
+    let raw = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200},
+          "_rift":{"fault":{"error":{"headers":{"X-Id":"a","X-Id":"b"}}}}}]}
+    ]}"#;
+    let r = lint_json(raw, "<test>", &opts());
+    let hits: Vec<_> = r.issues.iter().filter(|i| i.code == "E044").collect();
+    assert_eq!(hits.len(), 1, "got {:?}", codes(&r));
+    assert_eq!(
+        hits[0].location.as_deref(),
+        Some("stubs[0].responses[0]._rift.fault.error.headers")
+    );
+}
+
+#[test]
+fn e044_does_not_fire_on_is_headers_where_a_repeat_is_deliberate() {
+    // `is.headers` is MULTI-valued: a repeated key is merged into two header lines, which is how a
+    // stub sends two `Set-Cookie`s. `rift_types::wire`'s
+    // `headers_merge_byte_identical_duplicate_keys` pins that the engine ACCEPTS it. Flagging this
+    // would report a working, documented idiom as an error.
+    let raw = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200,
+          "headers":{"Set-Cookie":"a=1","Set-Cookie":"b=2"}}}]}
+    ]}"#;
+    let r = lint_json(raw, "<test>", &opts());
+    assert!(!has_code(&r, "E044"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e044_does_not_fire_inside_a_free_form_body() {
+    // `is.body` is an arbitrary `serde_json::Value`; last-wins applies and the engine accepts the
+    // document, so a repeat there is not a deploy failure waiting to happen.
+    let raw = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200,"body":{"a":1,"a":2}}}]}
+    ]}"#;
+    let r = lint_json(raw, "<test>", &opts());
+    assert!(!has_code(&r, "E044"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e044_does_not_fire_on_a_case_variant_pair() {
+    // That shape survives into the `Value` and is E043's job; reporting both would double-count.
+    let raw = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"proxy":{"to":"http://x","injectHeaders":{"X-Id":"a","x-id":"b"}}}]}
+    ]}"#;
+    let r = lint_json(raw, "<test>", &opts());
+    assert!(!has_code(&r, "E044"), "got {:?}", codes(&r));
+    assert!(
+        has_code(&r, "E043"),
+        "E043 still owns the case-variant shape, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn malformed_json_is_still_e001_not_a_panic() {
+    let r = lint_json("{not json}", "<test>", &opts());
+    assert!(has_code(&r, "E001"), "got {:?}", codes(&r));
+    assert!(!has_code(&r, "E044"));
+}
+
+#[test]
+fn documents_with_nothing_repeated_report_no_e044() {
+    for raw in [
+        r#"{}"#,
+        r#"[]"#,
+        r#"{"port":3000,"protocol":"http","stubs":[]}"#,
+    ] {
+        let r = lint_json(raw, "<test>", &opts());
+        assert!(!has_code(&r, "E044"), "{raw} produced {:?}", codes(&r));
+    }
+}
+
+// ─── E045 — non-string value in a single-valued header object (issue #1069) ──
+
+fn inject_headers(headers: Value) -> Value {
+    make_imposter(json!([{
+        "responses": [{ "proxy": { "to": "http://x", "injectHeaders": headers } }]
+    }]))
+}
+
+#[test]
+fn e045_flags_every_non_string_kind_and_names_it() {
+    // Engine-side these fields are `HashMap<String, String>`, so each of these is a hard 400.
+    for (value, kind) in [
+        (json!(1), "number"),
+        (json!(true), "boolean"),
+        (json!(null), "null"),
+        (json!(["a", "b"]), "array"),
+        (json!({"a": "b"}), "object"),
+    ] {
+        let r = lint_value(&inject_headers(json!({ "X-Id": value })), "<test>", &opts());
+        let hits: Vec<_> = r.issues.iter().filter(|i| i.code == "E045").collect();
+        assert_eq!(hits.len(), 1, "{kind}: got {:?}", codes(&r));
+        assert!(
+            hits[0].message.contains(kind) && hits[0].message.contains("X-Id"),
+            "{kind}: message must name the header and the kind, got {:?}",
+            hits[0].message
+        );
+    }
+}
+
+#[test]
+fn e045_suggests_the_right_fix_for_each_kind() {
+    // Three branches of guidance text that no other test reads; a swap between them would
+    // otherwise ship silently.
+    let cases = [
+        (json!(1), "Change to: \"X-Id\": \"1\""),
+        (json!(true), "Change to: \"X-Id\": \"true\""),
+        (
+            json!(["a"]),
+            "Give one string; a header with several values belongs in is.headers",
+        ),
+        (json!(null), "Remove the header or give it a string value"),
+        (
+            json!({"a": "b"}),
+            "Remove the header or give it a string value",
+        ),
+    ];
+    for (value, expected) in cases {
+        let r = lint_value(&inject_headers(json!({ "X-Id": value })), "<test>", &opts());
+        let hit = r
+            .issues
+            .iter()
+            .find(|i| i.code == "E045")
+            .expect("E045 present");
+        assert_eq!(hit.suggestion.as_deref(), Some(expected));
+    }
+}
+
+#[test]
+fn e045_does_not_fire_on_an_all_string_map() {
+    let r = lint_value(
+        &inject_headers(json!({ "X-Id": "a", "X-Other": "b" })),
+        "<test>",
+        &opts(),
+    );
+    assert!(!has_code(&r, "E045"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e045_covers_fault_error_headers_too() {
+    let imposter = make_imposter(json!([{
+        "responses": [{
+            "is": { "statusCode": 200 },
+            "_rift": { "fault": { "error": { "headers": { "X-Id": 1 } } } }
+        }]
+    }]));
+    let r = lint_value(&imposter, "<test>", &opts());
+    let hits: Vec<_> = r.issues.iter().filter(|i| i.code == "E045").collect();
+    assert_eq!(hits.len(), 1, "got {:?}", codes(&r));
+    assert_eq!(
+        hits[0].location.as_deref(),
+        Some("stubs[0].responses[0]._rift.fault.error.headers")
+    );
+}
+
+#[test]
+fn e045_does_not_touch_is_headers() {
+    // `is.headers` is multi-valued: a number there is E019 and a string array is legal (#238).
+    // Reusing E045 for it would contradict both.
+    let numeric = make_imposter(json!([{
+        "responses": [{ "is": { "statusCode": 200, "headers": { "Content-Length": 256 } } }]
+    }]));
+    let r = lint_value(&numeric, "<test>", &opts());
+    assert!(has_code(&r, "E019"), "got {:?}", codes(&r));
+    assert!(!has_code(&r, "E045"), "got {:?}", codes(&r));
+
+    let array = make_imposter(json!([{
+        "responses": [{ "is": { "statusCode": 200, "headers": { "Accept": ["a", "b"] } } }]
+    }]));
+    let r = lint_value(&array, "<test>", &opts());
+    assert!(!has_code(&r, "E045"), "got {:?}", codes(&r));
+    assert!(
+        !has_code(&r, "E018"),
+        "a string array is legal in is.headers, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn e045_and_e043_can_both_fire_on_one_map() {
+    let r = lint_value(
+        &inject_headers(json!({ "X-Id": "a", "x-id": 1 })),
+        "<test>",
+        &opts(),
+    );
+    assert!(has_code(&r, "E043"), "got {:?}", codes(&r));
+    assert!(has_code(&r, "E045"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn a_non_object_single_valued_header_field_is_still_e021() {
+    let r = lint_value(&inject_headers(json!("nope")), "<test>", &opts());
+    assert!(has_code(&r, "E021"), "got {:?}", codes(&r));
+    assert!(!has_code(&r, "E045"), "got {:?}", codes(&r));
 }
 
 #[test]

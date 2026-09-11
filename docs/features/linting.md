@@ -88,7 +88,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E005 | Port out of range | Port 70000 (max is 65535) |
 | E010 | Unbalanced brackets in JSONPath | `$.user[0` missing `]` |
 | E013 | Invalid regex | `[invalid(` |
-| E018 | Header is array | `"Accept": ["text/html", "application/json"]` |
+| E018 | `is.headers` array contains a non-string element (a string array is legal, #238) | `"Accept": ["text/html", 1]` |
 | E019 | Header is number | `"Content-Length": 256` |
 | E006 | Stub missing `responses` field | A stub with `predicates` but no `responses` |
 | E007 | Predicate is not an object | `"predicates": ["equals"]` |
@@ -123,6 +123,8 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E041 | `_rift.fault.tcp` `probability` is outside 0.0–1.0 | `"probability": 1.5` |
 | E042 | Script uses `ctx.state` but no `_rift.flowState` is configured | `ctx.state.get(...)` without `flowState` |
 | E043 | Single-valued header object names one header twice, in different case (`proxy.injectHeaders`, `_rift.fault.error.headers`) | `{"X-Id": "a", "x-id": "b"}` |
+| E044 | Single-valued header object names one header twice, byte-identically (`proxy.injectHeaders`, `_rift.fault.error.headers`). `is.headers` is excluded: a repeat there is merged into two header lines on purpose | `{"X-Id": "a", "X-Id": "b"}` |
+| E045 | Single-valued header object has a non-string value (`proxy.injectHeaders`, `_rift.fault.error.headers`) | `{"X-Id": 1}` |
 
 ### Warnings
 

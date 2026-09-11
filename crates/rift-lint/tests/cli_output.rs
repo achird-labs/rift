@@ -147,3 +147,45 @@ fn lint_no_color_env_disables_ansi() {
     );
     let _ = std::fs::remove_file(f);
 }
+
+// Issue #1069: the binary is the path that bypassed the raw text entirely — it parsed to a `Value`
+// in `load_imposter_file` and linted that, so no rule reading the document text could ever fire for
+// someone actually running `rift-lint`. This is the regression that matters.
+#[test]
+fn cli_reports_a_byte_identical_duplicate_key() {
+    let f = std::env::temp_dir().join(format!(
+        "rift_lint_1069_{}_{}.json",
+        std::process::id(),
+        line!()
+    ));
+    std::fs::write(
+        &f,
+        r#"{"port":8001,"protocol":"http","stubs":[
+            {"responses":[{"proxy":{"to":"http://x","injectHeaders":{"X-Id":"a","X-Id":"b"}}}]}
+        ]}"#,
+    )
+    .expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap(), "-o", "json"])
+        .output()
+        .expect("run rift-lint");
+
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    let codes: Vec<&str> = parsed["issues"]
+        .as_array()
+        .expect("issues array")
+        .iter()
+        .filter_map(|i| i["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"E044"),
+        "the binary must report the duplicate it used to be blind to, got {codes:?}"
+    );
+    assert!(
+        !out.status.success(),
+        "an error-severity finding must make the binary exit non-zero"
+    );
+    let _ = std::fs::remove_file(f);
+}

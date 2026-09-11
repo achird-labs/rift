@@ -983,21 +983,12 @@ pub fn validate_is_response(
 /// from `POST /imposters`, a startup error from `--configfile`. Without this rule lint passes and
 /// deployment fails, which is the worst possible ordering for a tool whose job is pre-flight.
 ///
-/// This rule catches the **case-variant** shape only (`X-Id` beside `x-id`), because rift-lint
-/// parses every document to a `serde_json::Value` first and `serde_json::Map` is last-wins on a
-/// byte-identical duplicate key — that shape is gone before any validation runs.
+/// This rule catches the **case-variant** shape (`X-Id` beside `x-id`) — the shape that survives
+/// into a `serde_json::Value`, since `serde_json::Map` is last-wins on a byte-identical duplicate
+/// key. The byte-identical shape belongs to E044, which reads the raw document text (issue #1069).
 ///
-/// **The engine does not share that blind spot**, so a gap remains and this comment must not claim
-/// otherwise. The engine is blind to a byte-identical duplicate only on the paths that reach it
-/// through a `Value` (`--configfile`'s `{…}` / `{"imposters":[…]}` wrapper forms); it rejects one on
-/// every text path — `POST /imposters` (`from_slice`), `--configfile`'s bare-array form, YAML, and
-/// `--datadir` — which `rift_types::wire`'s `a_byte_identical_duplicate_is_rejected_on_the_text_path`
-/// pins. So `{"X-Id": "a", "X-Id": "b"}` still lints clean and still `400`s. Closing that needs lint
-/// to read the raw text rather than the collapsed `Value`; tracked separately.
-///
-/// Value *types* are likewise not checked here — engine-side these are `HashMap<String, String>`, so
-/// a number, array or null is a `400` that lint passes. Deliberately out of scope per this issue's
-/// triage: it is a different rule, tracked with the gap above.
+/// Value *types* are checked here too, as E045: engine-side these fields are
+/// `HashMap<String, String>`, so a number, boolean, null, array or object is a `400`.
 ///
 /// Deliberately **not** [`validate_headers`]: that one accepts string arrays (E018 multi-value
 /// semantics), which these two fields reject.
@@ -1016,7 +1007,7 @@ fn validate_single_valued_headers(
     };
 
     let mut seen: Vec<&str> = Vec::with_capacity(headers_obj.len());
-    for name in headers_obj.keys() {
+    for (name, value) in headers_obj {
         if let Some(first) = seen.iter().find(|s| s.eq_ignore_ascii_case(name)) {
             result.add_issue(
                 LintIssue::error(
@@ -1033,6 +1024,47 @@ fn validate_single_valued_headers(
         } else {
             seen.push(name);
         }
+
+        if let Some(kind) = non_string_kind(value) {
+            result.add_issue(
+                LintIssue::error(
+                    "E045",
+                    format!(
+                        "Header '{name}' value is a {kind}; {location} takes one string per \
+                         header (the engine rejects this document)"
+                    ),
+                    file.to_path_buf(),
+                )
+                .with_location(location)
+                .with_suggestion(single_valued_header_suggestion(name, value)),
+            );
+        }
+    }
+}
+
+/// The JSON kind of a value that is not a string, for E045's message. `None` for a string.
+fn non_string_kind(value: &Value) -> Option<&'static str> {
+    match value {
+        Value::String(_) => None,
+        Value::Number(_) => Some("number"),
+        Value::Bool(_) => Some("boolean"),
+        Value::Null => Some("null"),
+        Value::Array(_) => Some("array"),
+        Value::Object(_) => Some("object"),
+    }
+}
+
+/// What to tell the author to write instead.
+///
+/// A number or boolean has an obvious quoted form, so show it. An array is the shape that belongs
+/// in `is.headers` instead, which is worth naming because that is where the habit comes from.
+fn single_valued_header_suggestion(name: &str, value: &Value) -> String {
+    match value {
+        Value::Number(_) | Value::Bool(_) => format!("Change to: \"{name}\": \"{value}\""),
+        Value::Array(_) => {
+            "Give one string; a header with several values belongs in is.headers".to_string()
+        }
+        _ => "Remove the header or give it a string value".to_string(),
     }
 }
 
