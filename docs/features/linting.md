@@ -9,6 +9,8 @@ nav_order: 7
 
 Rift includes a powerful configuration linter (`rift-lint`) that validates imposter configuration files before loading them. This helps catch common issues early and ensures your configurations will work correctly.
 
+It reads the same formats `--configfile` does: JSON (`.json`) and YAML (`.yaml`, `.yml`). A YAML config must be a **sequence of imposters** at the document root, which is the only shape `--configfile` loads — the single-imposter and `{"imposters": [...]}` forms are JSON-only, and using one in YAML is reported as [E046](#errors).
+
 ---
 
 ## Installation
@@ -59,7 +61,7 @@ The linter catches issues that would otherwise cause problems at runtime:
 rift-lint [OPTIONS] <PATH>
 
 Arguments:
-  <PATH>  Path to imposter file or directory
+  <PATH>  Path to an imposter file (.json, .yaml, .yml) or a directory of them
 
 Options:
   -f, --fix          Auto-fix issues where possible
@@ -125,6 +127,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E043 | Single-valued header object names one header twice, in different case (`proxy.injectHeaders`, `_rift.fault.error.headers`) | `{"X-Id": "a", "x-id": "b"}` |
 | E044 | Single-valued header object names one header twice, byte-identically (`proxy.injectHeaders`, `_rift.fault.error.headers`). `is.headers` is excluded: a repeat there is merged into two header lines on purpose | `{"X-Id": "a", "X-Id": "b"}` |
 | E045 | Single-valued header object has a non-string value (`proxy.injectHeaders`, `_rift.fault.error.headers`) | `{"X-Id": 1}` |
+| E046 | A YAML document's root is not a sequence of imposters — the engine's YAML loader accepts only a top-level list, unlike `--configfile`'s JSON, which also accepts a single imposter object or an `{"imposters": [...]}` wrapper | `port: 3000` at the document root |
 
 ### Warnings
 
@@ -159,6 +162,10 @@ Informational messages about configuration patterns.
 ## Auto-Fix
 
 The `--fix` flag automatically corrects certain value shapes in `is.headers`:
+
+`--fix` rewrites JSON only. A `.yaml`/`.yml` file is reported and never rewritten:
+re-serializing it would put JSON text under a YAML name, which the engine would then silently
+read back as JSON.
 
 - A number → the same number as a string
 - A boolean → the same boolean as a string

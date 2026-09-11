@@ -9,6 +9,7 @@
 use clap::Parser;
 use rift_lint::{
     Document, LintIssue, LintOptions, LintResult, Severity, lint_document, parse_document,
+    parse_yaml_document,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -138,7 +139,7 @@ fn main() {
         emit(
             json_mode,
             &format!(
-                "{yellow}Warning:{reset} No JSON files found in {:?}",
+                "{yellow}Warning:{reset} No JSON or YAML files found in {:?}",
                 args.path
             ),
         );
@@ -170,9 +171,17 @@ fn main() {
                 imposters.push((file.clone(), imposter));
             }
             Err(e) => {
+                let format_name = match format_of(file) {
+                    Format::Json => "JSON",
+                    Format::Yaml => "YAML",
+                };
                 result.add_issue(
-                    LintIssue::error("E001", format!("Failed to parse JSON: {e}"), file.clone())
-                        .with_suggestion("Check for JSON syntax errors"),
+                    LintIssue::error(
+                        "E001",
+                        format!("Failed to parse {format_name}: {e}"),
+                        file.clone(),
+                    )
+                    .with_suggestion(format!("Check for {format_name} syntax errors")),
                 );
             }
         }
@@ -210,11 +219,41 @@ fn main() {
     std::process::exit(if has_errors { 1 } else { 0 });
 }
 
+/// Document formats this binary loads and lints (issue #1071). `rift_lint::Format` plays the same
+/// role inside the library, but it is private there, and this binary's dispatch (parsing, `--fix`'s
+/// YAML skip check, and the extension filters below) needs the same answer here.
+#[derive(Debug, Clone, Copy)]
+enum Format {
+    Json,
+    Yaml,
+}
+
+/// `path`'s format, by extension: `.yaml`/`.yml` (case-insensitive) is [`Format::Yaml`], everything
+/// else is [`Format::Json`].
+fn format_of(path: &Path) -> Format {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") => {
+            Format::Yaml
+        }
+        _ => Format::Json,
+    }
+}
+
+fn is_imposter_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("json")
+                || ext.eq_ignore_ascii_case("yaml")
+                || ext.eq_ignore_ascii_case("yml")
+        })
+}
+
 fn collect_imposter_files(path: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
     if path.is_file() {
-        if path.extension().is_some_and(|ext| ext == "json") {
+        if is_imposter_file(path) {
             files.push(path.to_path_buf());
         }
     } else if path.is_dir()
@@ -222,7 +261,7 @@ fn collect_imposter_files(path: &Path) -> Vec<PathBuf> {
     {
         for entry in entries.flatten() {
             let entry_path = entry.path();
-            if entry_path.is_file() && entry_path.extension().is_some_and(|ext| ext == "json") {
+            if entry_path.is_file() && is_imposter_file(&entry_path) {
                 files.push(entry_path);
             }
         }
@@ -239,11 +278,16 @@ enum LoadError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Yaml(#[from] serde_yaml::Error),
 }
 
 fn load_imposter_file(path: &Path) -> Result<Document, LoadError> {
     let content = std::fs::read_to_string(path)?;
-    Ok(parse_document(&content)?)
+    match format_of(path) {
+        Format::Json => Ok(parse_document(&content)?),
+        Format::Yaml => Ok(parse_yaml_document(&content)?),
+    }
 }
 
 fn check_port_conflicts(port_map: &HashMap<u16, Vec<PathBuf>>, result: &mut LintResult) {
@@ -481,6 +525,32 @@ fn fix_header_value(value: &mut Value) -> Option<&'static str> {
     }
 }
 
+/// Whether `--fix` would change anything in this document.
+///
+/// Walks both document shapes, unlike the fixer itself, which only mutates a root-level `stubs`
+/// object: this is used to decide whether a YAML file (always a sequence) was at risk, and a
+/// shape-blind answer there would be no answer at all.
+fn has_fixable_header(value: &serde_json::Value) -> bool {
+    fn imposter_has(imposter: &serde_json::Value) -> bool {
+        imposter
+            .get("stubs")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|stub| stub.get("responses").and_then(|v| v.as_array()))
+            .flatten()
+            .filter_map(|response| response.get("is").and_then(|is| is.get("headers")))
+            .filter_map(|headers| headers.as_object())
+            .flat_map(|headers| headers.values())
+            .any(|v| !v.is_string())
+    }
+
+    match value.as_array() {
+        Some(imposters) => imposters.iter().any(imposter_has),
+        None => imposter_has(value),
+    }
+}
+
 fn apply_fixes(imposters: &[(PathBuf, Document)], json_mode: bool) {
     let Palette {
         green, red, reset, ..
@@ -489,6 +559,31 @@ fn apply_fixes(imposters: &[(PathBuf, Document)], json_mode: bool) {
     let mut files_skipped = 0;
 
     for (file, imposter) in imposters {
+        // `--fix` re-serializes with `serde_json::to_string_pretty`. Writing that under a
+        // `.yaml`/`.yml` name would leave JSON text under a YAML extension — and the engine would
+        // then silently reparse it as JSON, because a linted document always begins with `[`. So a
+        // YAML file is never rewritten, unconditionally and before any scan: the mutation below
+        // also assumes a single imposter object at the root, which a valid YAML document (a
+        // sequence, per `E046`) never is, so it could never detect a fix here regardless.
+        if matches!(format_of(file), Format::Yaml) {
+            // Only when the file actually had something to repair. `--fix` would never have
+            // rewritten a YAML file anyway, so announcing every one of them turns a directory of
+            // clean configs into a wall of red — the same rule #1076 applies to duplicate keys:
+            // a file that was not at risk needs no warning.
+            if !has_fixable_header(&imposter.value) {
+                continue;
+            }
+            files_skipped += 1;
+            emit(
+                json_mode,
+                &format!(
+                    "{red}Skipped: {} — is YAML; --fix rewrites JSON only, and rewriting it would put JSON text under a YAML name{reset}",
+                    file.display()
+                ),
+            );
+            continue;
+        }
+
         let mut modified = imposter.value.clone();
         let mut file_fixed = false;
         // Held until the file is known to be writable. A file this refuses to rewrite fixed

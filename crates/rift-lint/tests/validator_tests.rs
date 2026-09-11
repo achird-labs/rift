@@ -1760,3 +1760,245 @@ fn duplicate_keys_is_empty_for_a_clean_document() {
     .expect("parses");
     assert_eq!(doc.duplicate_keys().count(), 0);
 }
+
+// ─── Issue #1071: YAML documents are linted, and the one shape the engine rejects is reported ──
+
+const YAML_SEQUENCE: &str = "\
+- port: 3000
+  protocol: http
+  stubs:
+    - responses:
+        - is:
+            statusCode: 200
+            headers:
+              Content-Length: 256
+";
+
+/// A YAML imposter sequence is linted like any other document: ordinary rules fire. Before this,
+/// `rift-lint config.yaml` exited 0 having checked nothing.
+#[test]
+fn a_yaml_sequence_is_linted_like_json() {
+    let r = rift_lint::lint_yaml(YAML_SEQUENCE, "<test>.yaml", &opts());
+    assert!(
+        has_code(&r, "E019"),
+        "the numeric header is reported in YAML too, got {:?}",
+        codes(&r)
+    );
+}
+
+/// E046: the engine's YAML path is `from_str::<Vec<ImposterConfig>>`, so only a top-level sequence
+/// loads. The linter accepts three document shapes in JSON, and without this rule two of them would
+/// lint clean and then fail at startup — the exact ordering this crate exists to prevent.
+#[test]
+fn e046_reports_a_yaml_mapping_root() {
+    let single = "\
+port: 3000
+protocol: http
+stubs: []
+";
+    let r = rift_lint::lint_yaml(single, "<test>.yaml", &opts());
+    let hits: Vec<_> = r.issues.iter().filter(|i| i.code == "E046").collect();
+    assert_eq!(hits.len(), 1, "a bare mapping root, got {:?}", codes(&r));
+    // The message is the rule's whole payload: it has to say what the engine requires and what to
+    // write instead, or an author learns only that something is wrong.
+    assert!(
+        hits[0].message.contains("sequence of imposters"),
+        "names what the engine requires, got {:?}",
+        hits[0].message
+    );
+    assert!(
+        hits[0]
+            .suggestion
+            .as_deref()
+            .is_some_and(|s| s.contains("- port")),
+        "shows the shape to write, got {:?}",
+        hits[0].suggestion
+    );
+}
+
+/// The `{"imposters": [...]}` wrapper is legal JSON for `--configfile` but unreachable from YAML.
+#[test]
+fn e046_reports_a_yaml_imposters_wrapper() {
+    let wrapper = "\
+imposters:
+  - port: 3000
+    protocol: http
+    stubs: []
+";
+    let r = rift_lint::lint_yaml(wrapper, "<test>.yaml", &opts());
+    assert!(
+        has_code(&r, "E046"),
+        "the wrapper form, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn e046_does_not_fire_on_a_sequence_root() {
+    let r = rift_lint::lint_yaml(YAML_SEQUENCE, "<test>.yaml", &opts());
+    assert!(!has_code(&r, "E046"), "got {:?}", codes(&r));
+}
+
+/// E046 is about YAML only: all three shapes remain valid for a JSON `--configfile`.
+#[test]
+fn e046_never_fires_on_json() {
+    for raw in [
+        r#"{"port":3000,"protocol":"http","stubs":[]}"#,
+        r#"{"imposters":[{"port":3000,"protocol":"http","stubs":[]}]}"#,
+        r#"[{"port":3000,"protocol":"http","stubs":[]}]"#,
+    ] {
+        let r = lint_json(raw, "<test>", &opts());
+        assert!(!has_code(&r, "E046"), "{raw} produced {:?}", codes(&r));
+    }
+}
+
+/// A YAML parse failure must not be reported as invalid JSON.
+#[test]
+fn malformed_yaml_is_e001_naming_yaml() {
+    let r = rift_lint::lint_yaml("port: [unclosed", "<test>.yaml", &opts());
+    let e001: Vec<_> = r.issues.iter().filter(|i| i.code == "E001").collect();
+    assert_eq!(e001.len(), 1, "got {:?}", codes(&r));
+    assert!(
+        e001[0].message.contains("YAML"),
+        "the message names the format, got {:?}",
+        e001[0].message
+    );
+}
+
+/// `serde_yaml` refuses a multi-document stream, which is the same answer `--configfile` gives.
+#[test]
+fn a_multi_document_yaml_stream_is_e001() {
+    let two = "\
+- port: 3000
+  protocol: http
+  stubs: []
+---
+- port: 3001
+  protocol: http
+  stubs: []
+";
+    let r = rift_lint::lint_yaml(two, "<test>.yaml", &opts());
+    assert!(has_code(&r, "E001"), "got {:?}", codes(&r));
+}
+
+/// E044 works on YAML too: the engine's YAML path is a text path, so a repeated single-valued
+/// header name is a startup error there exactly as it is for JSON.
+#[test]
+fn e044_is_reported_from_yaml_text() {
+    let dup = "\
+- port: 3000
+  protocol: http
+  stubs:
+    - responses:
+        - proxy:
+            to: http://x
+            injectHeaders:
+              X-Id: a
+              X-Id: b
+";
+    let r = rift_lint::lint_yaml(dup, "<test>.yaml", &opts());
+    let hits: Vec<_> = r.issues.iter().filter(|i| i.code == "E044").collect();
+    assert_eq!(hits.len(), 1, "got {:?}", codes(&r));
+    assert_eq!(
+        hits[0].location.as_deref(),
+        Some("[0].stubs[0].responses[0].proxy.injectHeaders")
+    );
+}
+
+/// An alias expands to its anchor before the scan, so reusing a clean mapping is not a duplicate.
+#[test]
+fn a_yaml_alias_is_not_a_duplicate_key() {
+    let aliased = "\
+- port: 3000
+  protocol: http
+  stubs:
+    - responses:
+        - is: &ok
+            statusCode: 200
+    - responses:
+        - is: *ok
+";
+    let r = rift_lint::lint_yaml(aliased, "<test>.yaml", &opts());
+    assert!(!has_code(&r, "E044"), "got {:?}", codes(&r));
+}
+
+/// `lint_directory` walks YAML as well as JSON, and still ignores everything else.
+#[test]
+fn lint_directory_reads_yaml_and_yml_too() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.json"),
+        r#"{"port":3000,"protocol":"http","stubs":[]}"#,
+    )
+    .expect("write");
+    std::fs::write(dir.path().join("b.yaml"), YAML_SEQUENCE).expect("write");
+    std::fs::write(dir.path().join("c.yml"), YAML_SEQUENCE).expect("write");
+    std::fs::write(dir.path().join("readme.txt"), "hello").expect("write");
+
+    let result = lint_directory(dir.path(), &opts());
+    assert_eq!(
+        result.files_checked, 3,
+        "the two YAML files and the JSON one, not the .txt"
+    );
+    // Counting is not linting: a `.yml` routed through the JSON parser would fail with E001 and
+    // still be counted. The E019s are what prove both YAML files were read as YAML.
+    assert_eq!(
+        result.issues.iter().filter(|i| i.code == "E019").count(),
+        2,
+        "one from the .yaml and one from the .yml, got {:?}",
+        codes(&result)
+    );
+    assert!(
+        !result.issues.iter().any(|i| i.code == "E001"),
+        "nothing was mis-parsed, got {:?}",
+        codes(&result)
+    );
+}
+
+/// A bad root shape must not mask the rest: E046 is appended alongside every other finding, not
+/// instead of them. Nothing short-circuits today, and this is what keeps it that way.
+#[test]
+fn e046_does_not_suppress_the_other_findings() {
+    let mapping_root_missing_protocol = "\
+port: 3000
+stubs: []
+";
+    let r = rift_lint::lint_yaml(mapping_root_missing_protocol, "<test>.yaml", &opts());
+    assert!(
+        has_code(&r, "E046"),
+        "the root shape is reported, got {:?}",
+        codes(&r)
+    );
+    assert!(
+        r.issues.iter().any(|i| i.code != "E046"),
+        "and so is the rest of the document, got {:?}",
+        codes(&r)
+    );
+}
+
+/// `lint_value` has neither raw text nor a format, so it cannot report E046 any more than it can
+/// report E044.
+#[test]
+fn lint_value_cannot_report_e046() {
+    let mapping_root = json!({ "port": 3000, "protocol": "http", "stubs": [] });
+    let r = lint_value(&mapping_root, "<test>", &opts());
+    assert!(!has_code(&r, "E046"), "got {:?}", codes(&r));
+}
+
+/// The engine keys off content, not the extension, so a `.yaml` file holding JSON is loaded by its
+/// JSON branch and E046 must stay quiet. Keying E046 off the extension would flag a working config.
+#[test]
+fn e046_does_not_fire_for_yaml_text_that_is_actually_json() {
+    for text in [
+        r#"{"imposters":[{"port":3000,"protocol":"http","stubs":[]}]}"#,
+        r#"{"port":3000,"protocol":"http","stubs":[]}"#,
+        r#"  [{"port":3000,"protocol":"http","stubs":[]}]"#,
+    ] {
+        let r = rift_lint::lint_yaml(text, "<test>.yaml", &opts());
+        assert!(
+            !has_code(&r, "E046"),
+            "{text} is read by the engine's JSON branch, got {:?}",
+            codes(&r)
+        );
+    }
+}

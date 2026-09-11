@@ -34,6 +34,27 @@ pub use validator::{
     validate_predicate, validate_proxy_response, validate_response, validate_stub,
 };
 
+/// The two document formats `rift-lint` understands (issue #1071).
+///
+/// The only place the extension-to-format mapping lives; everything else asks [`format_of`].
+#[derive(Debug, Clone, Copy)]
+enum Format {
+    Json,
+    Yaml,
+}
+
+/// `path`'s format, by extension: `.yaml`/`.yml` (case-insensitive) is [`Format::Yaml`], and
+/// everything else — including no extension at all — is [`Format::Json`], preserving today's
+/// behavior for every existing caller.
+fn format_of(path: &Path) -> Format {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") => {
+            Format::Yaml
+        }
+        _ => Format::Json,
+    }
+}
+
 /// Validate a parsed config value, accepting the same shapes `rift --configfile` accepts:
 /// a single imposter object, a `{"imposters": [...]}` wrapper, or a bare `[...]` array.
 /// Each imposter is validated individually so the wrapper itself isn't mistaken for one.
@@ -69,6 +90,14 @@ pub struct Document {
     /// The parsed document. Byte-identical duplicate keys have already been collapsed here.
     pub value: serde_json::Value,
     duplicates: Vec<duplicate_keys::Duplicate>,
+    /// Whether `--configfile` will read this text through its YAML branch, where the only shape
+    /// that loads is a top-level sequence of imposters (`E046`).
+    ///
+    /// Keyed off the **content**, not the file extension, because that is what the engine keys off:
+    /// `config_loader::parse_document` sniffs the first non-whitespace byte and sends `{` and `[`
+    /// to `serde_json`, everything else to `serde_yaml`. A `.yaml` file holding a JSON object is
+    /// therefore loaded happily by the engine, and must not be reported.
+    yaml_sequence_required: bool,
 }
 
 impl Document {
@@ -97,7 +126,34 @@ impl Document {
 pub fn parse_document(text: &str) -> Result<Document, serde_json::Error> {
     let duplicates = duplicate_keys::find(text)?;
     let value = serde_json::from_str(text)?;
-    Ok(Document { value, duplicates })
+    Ok(Document {
+        value,
+        duplicates,
+        yaml_sequence_required: false,
+    })
+}
+
+/// Parse `text` as YAML into a [`Document`], recording byte-identical duplicate keys before they
+/// collapse. The YAML sibling of [`parse_document`] — kept separate rather than folded into it
+/// because the two fail with different error types (`serde_json::Error` is public API on
+/// `parse_document` and cannot carry a YAML error).
+///
+/// # Errors
+///
+/// Returns the `serde_yaml::Error` for text that is not valid YAML, including a multi-document
+/// stream (`serde_yaml` refuses those itself — the same answer `rift --configfile` gives).
+pub fn parse_yaml_document(text: &str) -> Result<Document, serde_yaml::Error> {
+    let duplicates = duplicate_keys::find_yaml(text)?;
+    let value = serde_yaml::from_str::<serde_json::Value>(text)?;
+    // The engine sniffs the first non-whitespace byte, not the extension: `{` and `[` go to
+    // `serde_json`, everything else to `serde_yaml` (`config_loader::parse_document`). A `.yaml`
+    // file holding a JSON document is loaded fine, so `E046` must not fire for it.
+    let trimmed = text.trim_start();
+    Ok(Document {
+        value,
+        duplicates,
+        yaml_sequence_required: !trimmed.starts_with('{') && !trimmed.starts_with('['),
+    })
 }
 
 /// Lint a [`Document`], reporting everything [`lint_value`] does plus `E044`.
@@ -116,6 +172,26 @@ pub fn lint_document(doc: &Document, source_name: &str, options: &LintOptions) -
 fn lint_document_at(doc: &Document, path: &Path, options: &LintOptions) -> LintResult {
     let mut result = LintResult::new();
     result.files_checked = 1;
+
+    // E046. Emitted here rather than in `lint_text` because this is the one function every entry
+    // point funnels through: the CLI calls `lint_document`, so a rule raised in `lint_text` would
+    // be invisible on the path almost every user takes — which is the same shape of gap #1069 was
+    // about.
+    if doc.yaml_sequence_required && !doc.value.is_array() {
+        result.add_issue(
+            LintIssue::error(
+                "E046",
+                "A YAML config must be a sequence of imposters at the document root; \
+                 rift --configfile reads a mapping root through its YAML branch, which only \
+                 accepts a sequence (the {\"imposters\": [...]} wrapper, intercept and routes are \
+                 JSON-only)",
+                path.to_path_buf(),
+            )
+            .with_suggestion(
+                "Start the file with \"- port: ...\"; a single imposter is a one-element sequence",
+            ),
+        );
+    }
 
     let single_valued = single_valued_header_locations(&doc.value);
     for duplicate in &doc.duplicates {
@@ -230,7 +306,7 @@ pub fn lint_file(path: &Path, options: &LintOptions) -> LintResult {
 
     // Through the text path rather than parsing here, so a file gets E044 too — and with the real
     // `&Path`, so a non-UTF-8 filename still names itself exactly in every finding.
-    lint_text(&content, path, options)
+    lint_text(&content, path, format_of(path), options)
 }
 
 /// Lint all JSON files in a directory (non-recursive).
@@ -253,7 +329,15 @@ pub fn lint_directory(path: &Path, options: &LintOptions) -> LintResult {
 
     for entry in entries.flatten() {
         let file_path = entry.path();
-        if file_path.extension().map(|e| e == "json").unwrap_or(false) {
+        let is_imposter_file = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("json")
+                    || ext.eq_ignore_ascii_case("yaml")
+                    || ext.eq_ignore_ascii_case("yml")
+            });
+        if is_imposter_file {
             let file_result = lint_file(&file_path, options);
             result.merge(file_result);
         }
@@ -266,27 +350,53 @@ pub fn lint_directory(path: &Path, options: &LintOptions) -> LintResult {
 ///
 /// Returns a `LintResult` containing all issues found.
 pub fn lint_json(json: &str, source_name: &str, options: &LintOptions) -> LintResult {
-    lint_text(json, Path::new(source_name), options)
+    lint_text(json, Path::new(source_name), Format::Json, options)
 }
 
-/// The `&Path`-taking core of [`lint_json`]; see [`lint_document_at`] for why the path stays a path.
-fn lint_text(text: &str, path: &Path, options: &LintOptions) -> LintResult {
-    match parse_document(text) {
-        Ok(doc) => lint_document_at(&doc, path, options),
-        Err(e) => {
-            let mut result = LintResult::new();
-            result.files_checked = 1;
-            result.add_issue(LintIssue::error(
-                // E001, not E002 (issue #1008). E002 is the port conflict, which is what the CLI
-                // and the published table have always meant by it; this entry point had assigned
-                // the two codes the other way round, so a library caller who looked up E002 read
-                // "port conflict" for a JSON syntax error.
-                "E001",
-                format!("Invalid JSON: {e}"),
-                path.to_path_buf(),
-            ));
-            result
-        }
+/// Lint a YAML string directly (useful for in-memory validation) (issue #1071).
+///
+/// Returns a `LintResult` containing all issues found, including `E046` when the document's root
+/// is not the sequence-of-imposters shape the engine's YAML path requires.
+pub fn lint_yaml(yaml: &str, source_name: &str, options: &LintOptions) -> LintResult {
+    lint_text(yaml, Path::new(source_name), Format::Yaml, options)
+}
+
+/// The `&Path`-taking core of [`lint_json`] and [`lint_yaml`]; see [`lint_document_at`] for why
+/// the path stays a path.
+fn lint_text(text: &str, path: &Path, format: Format, options: &LintOptions) -> LintResult {
+    match format {
+        Format::Json => match parse_document(text) {
+            Ok(doc) => lint_document_at(&doc, path, options),
+            Err(e) => {
+                let mut result = LintResult::new();
+                result.files_checked = 1;
+                result.add_issue(LintIssue::error(
+                    // E001, not E002 (issue #1008). E002 is the port conflict, which is what the
+                    // CLI and the published table have always meant by it; this entry point had
+                    // assigned the two codes the other way round, so a library caller who looked
+                    // up E002 read "port conflict" for a JSON syntax error.
+                    "E001",
+                    format!("Invalid JSON: {e}"),
+                    path.to_path_buf(),
+                ));
+                result
+            }
+        },
+        Format::Yaml => match parse_yaml_document(text) {
+            Ok(doc) => lint_document_at(&doc, path, options),
+            Err(e) => {
+                let mut result = LintResult::new();
+                result.files_checked = 1;
+                result.add_issue(LintIssue::error(
+                    // Same E001 as the JSON branch (issue #1008's reasoning applies equally
+                    // here): a syntax error is not the port-conflict code.
+                    "E001",
+                    format!("Invalid YAML: {e}"),
+                    path.to_path_buf(),
+                ));
+                result
+            }
+        },
     }
 }
 
