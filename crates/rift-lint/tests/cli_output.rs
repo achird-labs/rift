@@ -189,3 +189,311 @@ fn cli_reports_a_byte_identical_duplicate_key() {
     );
     let _ = std::fs::remove_file(f);
 }
+
+// ─── Issue #1076: `--fix` must not rewrite a file whose parse dropped a repeated key ───────────
+//
+// `--fix` rewrites the whole file from the collapsed `serde_json::Value`, so any byte-identical
+// repeated key is already gone by the time it runs. Writing that back silently discards a value
+// the author wrote — and in the `is.headers` case below, one the engine deliberately honours.
+
+/// A numeric header is an E019 error, which both opens the `--fix` gate and is the thing `--fix`
+/// repairs. Pins the baseline the refusals below are measured against.
+#[test]
+fn fix_quotes_a_numeric_header_and_rewrites_the_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("imposter.json");
+    std::fs::write(
+        &f,
+        r#"{"port":3000,"protocol":"http","stubs":[
+            {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256}}}]}
+        ]}"#,
+    )
+    .expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap(), "--fix"])
+        .output()
+        .expect("run rift-lint");
+
+    let after = std::fs::read_to_string(&f).expect("read back");
+    assert!(
+        after.contains(r#""Content-Length": "256""#),
+        "the numeric header was quoted, got: {after}"
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert!(stdout.contains("Applied 1 fixes"), "got: {stdout}");
+    assert!(
+        !stdout.contains("skipped"),
+        "with nothing skipped the summary keeps its old wording exactly, got: {stdout}"
+    );
+}
+
+/// The worst case, and the reason this is a bug rather than a nit: a repeated key in `is.headers`
+/// is how a stub sends two `Set-Cookie` lines. The engine merges it and the linter deliberately
+/// reports nothing for it, so rewriting the file would halve the cookies with no finding anywhere.
+#[test]
+fn fix_refuses_a_file_whose_parse_dropped_a_deliberate_is_headers_duplicate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("imposter.json");
+    let original = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200,"headers":{
+            "Content-Length":256,
+            "Set-Cookie":"a=1",
+            "Set-Cookie":"b=2"
+        }}}]}
+    ]}"#;
+    std::fs::write(&f, original).expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap(), "--fix"])
+        .output()
+        .expect("run rift-lint");
+
+    assert_eq!(
+        std::fs::read_to_string(&f).expect("read back"),
+        original,
+        "the file must be byte-identical; rewriting it would drop the first Set-Cookie"
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert!(
+        stdout.contains("Skipped"),
+        "the refusal is stated, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Set-Cookie"),
+        "it names the key, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("stubs[0].responses[0].is.headers"),
+        "it names where, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Applied 0 fixes"),
+        "nothing was fixed in this file, got: {stdout}"
+    );
+}
+
+/// The E044 case the issue described: a duplicate the linter *does* report. Same refusal.
+#[test]
+fn fix_refuses_a_file_carrying_e044() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("imposter.json");
+    let original = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[
+            {"is":{"statusCode":200,"headers":{"Content-Length":256}}},
+            {"proxy":{"to":"http://x","injectHeaders":{"X-Id":"a","X-Id":"b"}}}
+        ]}
+    ]}"#;
+    std::fs::write(&f, original).expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap(), "--fix"])
+        .output()
+        .expect("run rift-lint");
+
+    assert_eq!(
+        std::fs::read_to_string(&f).expect("read back"),
+        original,
+        "a file carrying an E044 must not be rewritten"
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert!(
+        stdout.contains("Skipped") && stdout.contains("X-Id"),
+        "got: {stdout}"
+    );
+}
+
+/// One bad file must not stop a good one from being repaired, and the summary must report both.
+#[test]
+fn fix_still_repairs_a_clean_file_when_another_is_skipped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let clean = dir.path().join("clean.json");
+    let dup = dir.path().join("dup.json");
+    std::fs::write(
+        &clean,
+        r#"{"port":3001,"protocol":"http","stubs":[
+            {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256}}}]}
+        ]}"#,
+    )
+    .expect("write");
+    let dup_original = r#"{"port":3002,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200,"headers":{
+            "Content-Length":512,"Set-Cookie":"a=1","Set-Cookie":"b=2"
+        }}}]}
+    ]}"#;
+    std::fs::write(&dup, dup_original).expect("write");
+
+    let out = Command::new(BIN)
+        .args([dir.path().to_str().unwrap(), "--fix"])
+        .output()
+        .expect("run rift-lint");
+
+    assert!(
+        std::fs::read_to_string(&clean)
+            .expect("read back")
+            .contains(r#""Content-Length": "256""#),
+        "the clean file is still repaired"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&dup).expect("read back"),
+        dup_original,
+        "the duplicate-carrying file is left alone"
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert!(stdout.contains("Applied 1 fixes"), "got: {stdout}");
+    assert!(
+        stdout.contains("skipped 1 file"),
+        "the summary counts the skip, got: {stdout}"
+    );
+}
+
+/// A duplicate with nothing fixable alongside it: the file was never going to be written, so there
+/// is nothing at risk and no skip line to print.
+#[test]
+fn fix_says_nothing_about_a_duplicate_in_a_file_it_would_not_have_written() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("imposter.json");
+    let original = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"proxy":{"to":"http://x","injectHeaders":{"X-Id":"a","X-Id":"b"}}}]}
+    ]}"#;
+    std::fs::write(&f, original).expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap(), "--fix"])
+        .output()
+        .expect("run rift-lint");
+
+    assert_eq!(std::fs::read_to_string(&f).expect("read back"), original);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert!(
+        !stdout.contains("Skipped"),
+        "nothing was at risk, so no refusal is reported, got: {stdout}"
+    );
+}
+
+/// A repeat in the document's root object has no path to name, so the message says so rather than
+/// printing an empty location. Only reachable end-to-end, since the wording lives in `apply_fixes`.
+#[test]
+fn fix_names_the_document_root_when_the_duplicate_is_top_level() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("imposter.json");
+    let original = r#"{"port":3000,"port":3001,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256}}}]}
+    ]}"#;
+    std::fs::write(&f, original).expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap(), "--fix"])
+        .output()
+        .expect("run rift-lint");
+
+    assert_eq!(std::fs::read_to_string(&f).expect("read back"), original);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert!(
+        stdout.contains("at the document root"),
+        "a root-level repeat names the root, got: {stdout}"
+    );
+    assert!(stdout.contains("'port'"), "it names the key, got: {stdout}");
+}
+
+/// Several duplicates in one file are one refusal, not several: a line each so the author can fix
+/// them all, but the file is counted once. A counter moved inside the inner loop would say
+/// "skipped 2 files" for one file, and nothing else would catch that.
+#[test]
+fn several_duplicates_in_one_file_are_reported_each_but_counted_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("imposter.json");
+    let original = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[
+            {"is":{"statusCode":200,"headers":{
+                "Content-Length":256,"Set-Cookie":"a=1","Set-Cookie":"b=2"
+            }}},
+            {"proxy":{"to":"http://x","injectHeaders":{"X-Id":"a","X-Id":"b"}}}
+        ]}
+    ]}"#;
+    std::fs::write(&f, original).expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap(), "--fix"])
+        .output()
+        .expect("run rift-lint");
+
+    assert_eq!(std::fs::read_to_string(&f).expect("read back"), original);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert_eq!(
+        stdout.matches("Skipped:").count(),
+        2,
+        "one line per duplicate, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("skipped 1 file"),
+        "one file, however many duplicates it holds, got: {stdout}"
+    );
+}
+
+/// Issue #347's contract: with `-o json`, stdout is nothing but JSON. The refusal lines are new
+/// output on that path, so they must go to stderr like every other `--fix` line.
+#[test]
+fn json_mode_keeps_refusals_off_stdout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("imposter.json");
+    let original = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200,"headers":{
+            "Content-Length":256,"Set-Cookie":"a=1","Set-Cookie":"b=2"
+        }}}]}
+    ]}"#;
+    std::fs::write(&f, original).expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap(), "--fix", "-o", "json"])
+        .output()
+        .expect("run rift-lint");
+
+    assert_eq!(std::fs::read_to_string(&f).expect("read back"), original);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    serde_json::from_str::<serde_json::Value>(stdout.trim()).expect("stdout is pure JSON");
+    let stderr = String::from_utf8(out.stderr).expect("utf8");
+    assert!(
+        stderr.contains("Skipped"),
+        "the refusal is still reported, on stderr, got: {stderr}"
+    );
+}
+
+/// A file that cannot be parsed never reaches the fixer, so it must not be reported as skipped —
+/// and it must not stop a sibling file from being repaired.
+#[test]
+fn an_unparseable_file_is_not_reported_as_skipped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let broken = dir.path().join("broken.json");
+    let good = dir.path().join("good.json");
+    std::fs::write(&broken, "{not json}").expect("write");
+    std::fs::write(
+        &good,
+        r#"{"port":3003,"protocol":"http","stubs":[
+            {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256}}}]}
+        ]}"#,
+    )
+    .expect("write");
+
+    let out = Command::new(BIN)
+        .args([dir.path().to_str().unwrap(), "--fix"])
+        .output()
+        .expect("run rift-lint");
+
+    assert_eq!(
+        std::fs::read_to_string(&broken).expect("read back"),
+        "{not json}",
+        "the unparseable file is left alone"
+    );
+    assert!(
+        std::fs::read_to_string(&good)
+            .expect("read back")
+            .contains(r#""Content-Length": "256""#),
+        "its sibling is still repaired"
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert!(
+        !stdout.contains("Skipped"),
+        "an unparseable file is an E001, not a refusal, got: {stdout}"
+    );
+}

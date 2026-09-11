@@ -486,10 +486,14 @@ fn apply_fixes(imposters: &[(PathBuf, Document)], json_mode: bool) {
         green, red, reset, ..
     } = palette();
     let mut fixes_applied = 0;
+    let mut files_skipped = 0;
 
     for (file, imposter) in imposters {
         let mut modified = imposter.value.clone();
         let mut file_fixed = false;
+        // Held until the file is known to be writable. A file this refuses to rewrite fixed
+        // nothing, so printing "Fixed header ..." for it would be a lie.
+        let mut fixed_here: Vec<String> = Vec::new();
 
         // Fix header values
         if let Some(stubs) = modified.get_mut("stubs").and_then(|v| v.as_array_mut()) {
@@ -504,14 +508,51 @@ fn apply_fixes(imposters: &[(PathBuf, Document)], json_mode: bool) {
                             for (name, value) in headers.iter_mut() {
                                 if let Some(kind) = fix_header_value(value) {
                                     file_fixed = true;
-                                    fixes_applied += 1;
-                                    emit(json_mode, &format!("  Fixed header '{name}' {kind}"));
+                                    fixed_here.push(format!("  Fixed header '{name}' {kind}"));
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+
+        // `--fix` rewrites the whole file from the collapsed parse, and a byte-identical repeated
+        // key is already gone by then (issue #1076) — `serde_json::Map` is last-wins. Nothing is
+        // left to preserve, so the only safe action is not to write. Checked only when the file
+        // was going to be written: a duplicate in a file nothing would have touched is not at risk.
+        //
+        // The case this exists for is the one the linter reports *nothing* about: a repeated name
+        // in `is.headers` is how a stub sends two `Set-Cookie` lines, and the engine merges it on
+        // purpose. Rewriting such a file to quote an unrelated numeric header would halve the
+        // cookies, silently.
+        if file_fixed {
+            // One line per distinct (place, key): `duplicate_keys` yields an entry per repeated
+            // *occurrence*, so a key given three times would otherwise print the same line twice.
+            let mut duplicates: Vec<(Option<&str>, &str)> = imposter.duplicate_keys().collect();
+            duplicates.dedup();
+            if !duplicates.is_empty() {
+                files_skipped += 1;
+                for (location, key) in duplicates {
+                    let place = match location {
+                        Some(loc) => format!("at {loc}"),
+                        None => "at the document root".to_string(),
+                    };
+                    emit(
+                        json_mode,
+                        &format!(
+                            "{red}Skipped: {} — rewriting it would drop a repeated key: '{key}' {place}; resolve it in the file first (see Auto-Fix in the linting docs){reset}",
+                            file.display()
+                        ),
+                    );
+                }
+                continue;
+            }
+        }
+
+        for line in fixed_here {
+            fixes_applied += 1;
+            emit(json_mode, &line);
         }
 
         // Write fixed file
@@ -542,7 +583,14 @@ fn apply_fixes(imposters: &[(PathBuf, Document)], json_mode: bool) {
 
     emit(
         json_mode,
-        &format!("\n{green}Applied {fixes_applied} fixes{reset}"),
+        &if files_skipped == 0 {
+            format!("\n{green}Applied {fixes_applied} fixes{reset}")
+        } else {
+            let files = if files_skipped == 1 { "file" } else { "files" };
+            format!(
+                "\n{green}Applied {fixes_applied} fixes; skipped {files_skipped} {files} that cannot be rewritten safely{reset}"
+            )
+        },
     );
 }
 

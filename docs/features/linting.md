@@ -158,15 +158,37 @@ Informational messages about configuration patterns.
 
 ## Auto-Fix
 
-The `--fix` flag automatically corrects certain issues:
+The `--fix` flag automatically corrects certain value shapes in `is.headers`:
 
-- Header arrays → comma-separated strings
-- Header numbers → strings
-- Header booleans → strings
+- A number → the same number as a string
+- A boolean → the same boolean as a string
+- An array containing a non-string element → each element quoted in place (a string-only array is
+  already legal and is left alone)
 
 ```bash
 rift-lint ./imposters/ --fix
 ```
+
+**A file that gives the same key twice anywhere is never rewritten.** `--fix` re-serializes the
+whole document from its parsed form, and a repeated key does not survive parsing — the first value
+is already gone. Rather than write that loss to disk, `--fix` skips the file and names the key it
+would have dropped.
+
+How to resolve it depends on where the repeat is:
+
+- In **`is.headers`**, a repeated name is how a stub sends the same header twice, and the engine
+  merges it on purpose — so the fix is *not* to delete one of them. Write the values as an array
+  instead, which means the same thing and survives a rewrite:
+  `"Set-Cookie": ["a=1", "b=2"]`.
+- Anywhere else — `proxy.injectHeaders`, `_rift.fault.error.headers`, or an ordinary field such as
+  `port` — a repeat is a mistake and only one of the values was ever going to be used. Keep the one
+  you meant. In the two single-valued header objects this is also reported as
+  [E044](#errors); an array is **not** a valid alternative there.
+
+Two more things `--fix` does that are easy to miss: it rewrites the entire file, so object keys come
+back in sorted order and the original formatting is not preserved; and it only repairs headers under
+a top-level `stubs` array, so a config written in the `{"imposters": [...]}` wrapper or bare-array
+form is reported but never rewritten.
 
 ---
 

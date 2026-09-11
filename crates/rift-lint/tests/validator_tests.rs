@@ -1720,3 +1720,43 @@ fn e043_surfaces_through_a_whole_imposter_document() {
     let r = lint_value(&imposter, "<test>", &opts());
     assert!(has_code(&r, "E043"), "got {:?}", codes(&r));
 }
+
+/// Issue #1076: the accessor `--fix` consults is deliberately **document-wide**, not E044's two
+/// fields. Anything that rewrites a file from the collapsed value loses every repeated key, not
+/// only the ones the engine rejects — and the `is.headers` one, which E044 pointedly does not
+/// report, is the one whose loss is otherwise completely silent.
+#[test]
+fn duplicate_keys_lists_every_repeat_document_wide() {
+    let raw = r#"{"port":3000,"port":3001,"protocol":"http","stubs":[
+        {"responses":[
+            {"is":{"statusCode":200,"headers":{"Set-Cookie":"a=1","Set-Cookie":"b=2"}}},
+            {"proxy":{"to":"http://x","injectHeaders":{"X-Id":"a","X-Id":"b"}}}
+        ]}
+    ]}"#;
+    let doc = rift_lint::parse_document(raw).expect("parses");
+    let found: Vec<(Option<&str>, &str)> = doc.duplicate_keys().collect();
+
+    assert!(
+        found.contains(&(None, "port")),
+        "the root repeat is listed, got {found:?}"
+    );
+    assert!(
+        found.contains(&(Some("stubs[0].responses[0].is.headers"), "Set-Cookie")),
+        "the deliberate is.headers repeat is listed even though E044 ignores it, got {found:?}"
+    );
+    assert!(
+        found.contains(&(Some("stubs[0].responses[1].proxy.injectHeaders"), "X-Id")),
+        "the E044 repeat is listed, got {found:?}"
+    );
+    assert_eq!(found.len(), 3, "exactly those three, got {found:?}");
+}
+
+/// A clean document yields nothing, so `--fix` is never refused for a file with no duplicates.
+#[test]
+fn duplicate_keys_is_empty_for_a_clean_document() {
+    let doc = rift_lint::parse_document(
+        r#"{"port":3000,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200}}]}]}"#,
+    )
+    .expect("parses");
+    assert_eq!(doc.duplicate_keys().count(), 0);
+}

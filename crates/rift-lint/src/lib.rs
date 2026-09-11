@@ -71,6 +71,23 @@ pub struct Document {
     duplicates: Vec<duplicate_keys::Duplicate>,
 }
 
+impl Document {
+    /// Every byte-identical repeated key the raw text carried, as `(containing object, key)`.
+    ///
+    /// Document-wide, and deliberately broader than `E044`'s two header fields: anything that
+    /// rewrites the file from [`Document::value`] loses **all** of them, not only the ones the
+    /// engine rejects. The repeat that matters most here is the one `E044` pointedly does *not*
+    /// report — a repeated name in `is.headers`, which the engine merges into two header lines on
+    /// purpose, so nothing else would report its loss.
+    ///
+    /// The location is `None` for the document's root object, which has no path to name.
+    pub fn duplicate_keys(&self) -> impl Iterator<Item = (Option<&str>, &str)> + '_ {
+        self.duplicates
+            .iter()
+            .map(|d| (d.location.as_deref(), d.key.as_str()))
+    }
+}
+
 /// Parse `text` into a [`Document`], recording byte-identical duplicate keys before they collapse.
 ///
 /// # Errors
