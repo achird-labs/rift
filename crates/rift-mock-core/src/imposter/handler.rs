@@ -537,9 +537,10 @@ enum TemplateRender {
 /// [`render_templated_response`] call this, so the fast path and the offloaded path are the same
 /// code rather than two copies that have to be kept in step.
 ///
-/// Renders the body first, then every header value, sanitizing each rendered header value; the
-/// first failure wins and is returned as [`TemplateRender::Failed`]. Pure over its inputs, which
-/// is what lets it run either on the request task or on a blocking thread.
+/// Renders the body first, then every header value, repairing what each header token *substituted*
+/// and leaving the author's literal text alone; the first failure wins and is returned as
+/// [`TemplateRender::Failed`]. Pure over its inputs, which is what lets it run either on the
+/// request task or on a blocking thread.
 fn render_template_parts(
     imposter: &Imposter,
     request_data: &RequestData,
@@ -562,13 +563,22 @@ fn render_template_parts(
 
     for values in headers.values_mut() {
         for v in values.iter_mut() {
-            match crate::extensions::template_fn::render_templated(v, &template_ctx, debug) {
-                // Issue #359 B3 (header injection): a templated value can resolve to
-                // attacker-controlled request data containing CR/LF. Strip what a header
-                // value cannot carry before it ever reaches the header map, so it cannot
-                // inject an extra header line; warn (never silently) if anything had to
-                // be removed.
-                Ok(rendered) => *v = sanitize_header_value(&rendered),
+            // Issue #359 B3 (header injection): a token can resolve to attacker-controlled request
+            // data containing CR/LF, so what it substitutes is repaired before it ever reaches the
+            // header map and a warning names what was removed.
+            //
+            // Repaired per substitution, not over the whole value (issue #1073): the literal text
+            // the author wrote around a token is theirs, and a control character in it is an
+            // authoring bug that must still fail the response — the same boundary `${request.*}`,
+            // `copy` and `lookup` draw. Repairing it here would silently fix their typo and blame
+            // the client for it in the log.
+            match crate::extensions::template_fn::render_templated_mapped(
+                v,
+                &template_ctx,
+                debug,
+                |substituted| sanitize_header_value(&substituted),
+            ) {
+                Ok(rendered) => *v = rendered,
                 Err(e) => return TemplateRender::Failed(e),
             }
         }

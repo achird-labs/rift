@@ -191,16 +191,13 @@ sent. When a `${request.…}` token appears in a **header** value, Rift removes 
 header value cannot hold — CR, LF, NUL and the other ASCII control characters — from *the
 substituted text*, and logs a `rift::template` warning naming what it removed. A horizontal tab and
 any non-ASCII character are legal in a header value and are kept byte-exact. The same repair covers
-the text the `copy` and `lookup` behaviors substitute into a header.
+every other way substituted text reaches a header: the `{{ }}` templating grammar and the text the
+`copy` and `lookup` behaviors splice in.
 
 The repair is deliberately narrow: it covers only the substituted value, never the literal text you
 wrote around it. A control character written *literally* into a header in your config is an
 authoring error rather than client data, so it still fails that response with a `500` — even when
 the same header also contains a token. Response **bodies** are never filtered this way.
-
-One exception predates this: a response with `_rift.templated: true` runs the `{{ }}` renderer over
-**every** header value and repairs each result whole, so on those responses a literal control
-character is stripped rather than surfaced.
 
 These `${request.…}` tokens are distinct from the free-form `${name}` placeholders that the
 [`copy` and `lookup` behaviors]({{ site.baseurl }}/mountebank/behaviors/#copy) fill in — the two do
