@@ -398,7 +398,7 @@ Fields:
 | `request.method` | `"GET"` | HTTP method for the step. |
 | `request.path` | required | Request path. |
 | `request.body` | — | Optional request body. |
-| `request.headers` | `{}` | Optional request headers. |
+| `request.headers` | `{}` | Optional request headers. One entry per name — under `--verify-dynamic`, a name spelled twice (`X-Trace` and `x-trace`) is rejected as a malformed `_verify`. |
 | `expect.status` | — | Expected status code; omit to ignore status. |
 | `expect.bodyContains` | — | Substring the response body must contain. |
 | `expect.bodyEquals` | — | Exact response body match. |

@@ -221,6 +221,12 @@ pub struct RunReport {
 struct RequestFixture {
     method: Option<String>,
     path: Option<String>,
+    /// One entry per header name (issue #1061). Scripts read headers by case-insensitive
+    /// find-first (`rift-mock-core/src/scripting/rhai_engine.rs`, `.../js_engine.rs`), so a fixture
+    /// spelling one name twice makes `request.header('x-trace')` return a different value between
+    /// runs — the #1039 shape. This never reaches the wire, so only the nondeterminism applies, not
+    /// the double-header-line half of #1050.
+    #[serde(deserialize_with = "rift_types::wire::single_value_headers::deserialize")]
     headers: HashMap<String, String>,
     query: HashMap<String, String>,
     path_params: HashMap<String, String>,
@@ -903,5 +909,46 @@ mod tests {
         )
         .expect("run succeeds");
         assert_eq!(report.decision, "pass()");
+    }
+
+    // ----- issue #1061: a --request fixture names each header once -----
+    //
+    // Scripts read headers by case-insensitive find-first, so a fixture spelling one name twice
+    // made `request.header('x-trace')` return a different value between runs of the same file.
+
+    fn parse_fixture(contents: &str) -> Result<RequestFixture, serde_json::Error> {
+        serde_json::from_str(contents)
+    }
+
+    #[test]
+    fn request_fixture_rejects_a_case_variant_duplicate_header_naming_both_spellings() {
+        let err = parse_fixture(r#"{"path":"/r","headers":{"X-Trace":"a","x-trace":"b"}}"#)
+            .expect_err("a name spelled twice is a malformed fixture");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("X-Trace") && msg.contains("x-trace"),
+            "the error must quote both spellings, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn request_fixture_accepts_a_single_spelling_and_keeps_its_value() {
+        let fixture = parse_fixture(r#"{"path":"/r","headers":{"X-Trace":"a"}}"#).expect("valid");
+        assert_eq!(fixture.headers.get("X-Trace"), Some(&"a".to_string()));
+    }
+
+    #[test]
+    fn request_fixture_headers_may_be_omitted_entirely() {
+        let fixture = parse_fixture(r#"{"path":"/r"}"#).expect("valid");
+        assert!(fixture.headers.is_empty());
+    }
+
+    #[test]
+    fn request_fixture_reaches_the_script_with_its_header_intact() {
+        // The rejection must not have cost the working case: a single-spelled fixture still
+        // arrives on the `ScriptRequest` the engines read.
+        let fixture = parse_fixture(r#"{"path":"/r","headers":{"X-Trace":"a"}}"#).expect("valid");
+        let request = fixture_to_script_request(fixture);
+        assert_eq!(request.headers.get("X-Trace"), Some(&"a".to_string()));
     }
 }
