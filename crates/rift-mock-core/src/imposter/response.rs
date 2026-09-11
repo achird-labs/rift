@@ -22,7 +22,7 @@ use std::collections::HashMap;
 ///
 /// This function is unicode-safe and will not panic on multi-byte characters.
 /// It finds the nearest valid UTF-8 character boundary at or before `max_len`.
-fn truncate_with_ellipsis(text: &str, max_len: usize) -> String {
+pub(crate) fn truncate_with_ellipsis(text: &str, max_len: usize) -> String {
     if text.len() <= max_len {
         return text.to_string();
     }

@@ -171,6 +171,22 @@ record.
 
 ### Fixed
 
+- **A templated header value carrying a tab or legal non-ASCII was silently truncated and reported
+  as an injection attempt** (#1058). The header-injection filter for `{{ }}`-templated response
+  headers (#359 B3) tested `char::is_control`, which is Unicode category Cc — so it also removed
+  HTAB and everything in U+0080–U+009F, all of which a header value may legally carry. A templated
+  `X-Name` echoing `José` came back mangled, and the log accused the client of attempting header
+  injection. #1048 made this newly reachable through `request.header`; `request.query` and
+  `request.json` could always carry it.
+  - The filter is now the `http` crate's own validity rule (`b >= 32 && b != 127 || b == b'\t'`),
+    so exactly the characters a header value cannot hold are removed and nothing else. **CR, LF and
+    NUL are still stripped** — the injection defence is unchanged.
+  - The warning no longer writes the offending value through `Display`. It was the one place a
+    client-supplied CR/LF reached a log line unescaped, which let it forge a second log entry. The
+    value is now escaped and length-capped, and the warning names which characters it removed — so
+    an operator can tell a real CR/LF injection attempt from a stray NUL, which is what the single
+    "possible header-injection attempt" wording could not express.
+
 - **A single-valued header object that named one header twice sent two header lines** (#1050).
   `proxy.injectHeaders` and `_rift.fault.error.headers` hold one value per name, but nothing
   enforced that: `injectHeaders: {"x-trace": "a", "X-Trace": "b"}` deserialized into two distinct
