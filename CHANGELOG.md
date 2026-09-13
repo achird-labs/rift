@@ -71,6 +71,13 @@ record.
   - Only a number wider than a 64-bit integer, or with more significant digits than a double can
     hold, is still served rounded.
 
+- **`rift-lint` reported a port conflict between files that do not share a port, and suggested a
+  port that does not exist for a real conflict at 65535** (#1091). The E002 check narrowed each port with an unchecked cast, so an
+  out-of-range `70000` was read as `4464` and conflicted with a file on `4464`, and `0` conflicted
+  with `65536`. Ports outside 1-65535 are now left to `E005` alone. A conflict on port `65535` also
+  overflowed while suggesting the next free port: a panic in a debug build, "Consider using ports
+  0+" in a release build. It now reports E002 without that suggestion.
+
 - **`rift-lint --fix` no longer rewrites a file whose parse dropped a repeated key** (#1076).
   `--fix` re-serializes the whole document from its parsed form, where a byte-identical repeated key
   is already gone (`serde_json::Map` is last-wins), so repairing an unrelated numeric header could

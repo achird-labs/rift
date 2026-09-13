@@ -165,8 +165,16 @@ fn main() {
     for file in &files {
         match load_imposter_file(file) {
             Ok(imposter) => {
-                if let Some(port) = imposter.value.get("port").and_then(|v| v.as_u64()) {
-                    port_map.entry(port as u16).or_default().push(file.clone());
+                // Only the ports E005 accepts: an unchecked `as u16` wrapped 70000 onto 4464 and
+                // reported a conflict with a file that never used that port (issue #1091).
+                if let Some(port) = imposter
+                    .value
+                    .get("port")
+                    .and_then(Value::as_u64)
+                    .and_then(|p| u16::try_from(p).ok())
+                    .filter(|p| *p != 0)
+                {
+                    port_map.entry(port).or_default().push(file.clone());
                 }
                 imposters.push((file.clone(), imposter));
             }
@@ -314,10 +322,14 @@ fn check_port_conflicts(port_map: &HashMap<u16, Vec<PathBuf>>, result: &mut Lint
                     files[0].clone(),
                 )
                 .with_location("port")
-                .with_suggestion(format!(
-                    "Assign unique ports to each imposter. Consider using ports {}+",
-                    port + 1
-                )),
+                .with_suggestion(match port.checked_add(1) {
+                    Some(next) => {
+                        format!(
+                            "Assign unique ports to each imposter. Consider using ports {next}+"
+                        )
+                    }
+                    None => "Assign unique ports to each imposter".to_string(),
+                }),
             );
         }
     }
