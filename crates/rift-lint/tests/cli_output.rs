@@ -131,6 +131,96 @@ fn lint_json_directory_attributes_parse_and_validation_errors() {
     );
 }
 
+/// Issue #1091: run the binary over a directory of single-imposter files, one per `(name, port)`.
+fn lint_ports_dir(ports: &[(&str, &str)]) -> (serde_json::Value, Option<i32>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (name, port) in ports {
+        std::fs::write(
+            dir.path().join(name),
+            format!(r#"{{"port":{port},"protocol":"http","stubs":[]}}"#),
+        )
+        .expect("write");
+    }
+    let out = Command::new(BIN)
+        .args([dir.path().to_str().unwrap(), "-o", "json"])
+        .output()
+        .expect("run rift-lint");
+    let report = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout is not JSON ({e}); exit {:?}, stderr: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    (report, out.status.code())
+}
+
+fn issues_with_code<'a>(report: &'a serde_json::Value, code: &str) -> Vec<&'a serde_json::Value> {
+    report["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .filter(|i| i["code"] == code)
+        .collect()
+}
+
+#[test]
+fn cli_reports_e002_once_for_two_files_on_one_port() {
+    let (report, code) = lint_ports_dir(&[("a.json", "4545"), ("b.json", "4545")]);
+    let e002 = issues_with_code(&report, "E002");
+    assert_eq!(e002.len(), 1, "got {report}");
+    assert_eq!(e002[0]["location"], "port");
+    let message = e002[0]["message"].as_str().expect("message");
+    assert!(
+        message.starts_with("Port 4545 is used by 2 files:")
+            && message.contains("a.json")
+            && message.contains("b.json"),
+        "got {message}"
+    );
+    assert_eq!(code, Some(1));
+}
+
+/// `70000 as u16` is 4464: the out-of-range port used to collide with a real one.
+#[test]
+fn cli_does_not_report_e002_for_a_wrapped_out_of_range_port() {
+    let (report, code) = lint_ports_dir(&[("high.json", "70000"), ("real.json", "4464")]);
+    assert_eq!(issues_with_code(&report, "E002").len(), 0, "got {report}");
+    let e005 = issues_with_code(&report, "E005");
+    assert_eq!(e005.len(), 1, "got {report}");
+    assert!(
+        e005[0]["file"]
+            .as_str()
+            .expect("file")
+            .ends_with("high.json"),
+        "got {report}"
+    );
+    assert_eq!(report["errors"], 1, "got {report}");
+    assert_eq!(code, Some(1));
+}
+
+/// `65536 as u16` is 0, and port 0 is E005's too, so neither may reach the conflict map.
+#[test]
+fn cli_does_not_report_e002_between_two_out_of_range_ports() {
+    let (report, _) = lint_ports_dir(&[("zero.json", "0"), ("wraps.json", "65536")]);
+    assert_eq!(issues_with_code(&report, "E002").len(), 0, "got {report}");
+    assert_eq!(issues_with_code(&report, "E005").len(), 2, "got {report}");
+
+    let (report, _) = lint_ports_dir(&[("a.json", "0"), ("b.json", "0")]);
+    assert_eq!(issues_with_code(&report, "E002").len(), 0, "got {report}");
+    assert_eq!(issues_with_code(&report, "E005").len(), 2, "got {report}");
+}
+
+/// A conflict on the last port computed its suggestion as `port + 1`, which overflows a `u16`.
+#[test]
+fn cli_reports_e002_on_the_last_port_without_panicking() {
+    let (report, code) = lint_ports_dir(&[("a.json", "65535"), ("b.json", "65535")]);
+    let e002 = issues_with_code(&report, "E002");
+    assert_eq!(e002.len(), 1, "got {report}");
+    let suggestion = e002[0]["suggestion"].as_str().expect("suggestion");
+    assert_eq!(suggestion, "Assign unique ports to each imposter");
+    assert_eq!(code, Some(1), "a panic exits 101");
+}
+
 // AC1: NO_COLOR is honored regardless of TTY.
 #[test]
 fn lint_no_color_env_disables_ansi() {
