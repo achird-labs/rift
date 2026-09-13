@@ -559,17 +559,17 @@ function(request, state, logger) {
 
 ## Response Templates
 
-Use EJS templates for dynamic content:
+EJS tags in a config file are expanded once, when the file loads, and never see a request. To put
+request values into a response, use the `${request.…}` tokens in
+[Request Interpolation](#request-interpolation). For the current date or a date offset from it, use
+[date templates]({{ site.baseurl }}/features/date-templates/).
 
 ```json
 {
   "is": {
     "statusCode": 200,
     "headers": { "Content-Type": "application/json" },
-    "body": "{ \"path\": \"<%- request.path %>\", \"timestamp\": \"<%- new Date().toISOString() %>\" }"
-  },
-  "_behaviors": {
-    "decorate": "function(request, response) { return response; }"
+    "body": "{ \"path\": \"${request.path}\", \"method\": \"${request.method}\" }"
   }
 }
 ```

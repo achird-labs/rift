@@ -66,11 +66,17 @@ Rift generates a self-signed certificate automatically.
 {
   "port": 4545,
   "protocol": "https",
-  "key": "<%- include('/path/to/server.key') %>",
-  "cert": "<%- include('/path/to/server.crt') %>",
+  "key": "<%- stringify('/path/to/server.key') %>",
+  "cert": "<%- stringify('/path/to/server.crt') %>",
   "stubs": [...]
 }
 ```
+
+`stringify` escapes the file for use inside a JSON string, so the PEM's line breaks survive.
+`<% include %>` inlines the file as raw text, which breaks the string. A relative path is resolved
+against the config file's directory. Both tags work only in a local file, `--configfile` or a
+`file:` source. A document from any other source is refused with an error naming the tag, and
+`--datadir` files are not preprocessed at all.
 
 ### Mutual TLS (mTLS)
 
@@ -303,8 +309,8 @@ services:
   "imposters": [{
     "port": 4545,
     "protocol": "https",
-    "key": "<%- include('/certs/server.key') %>",
-    "cert": "<%- include('/certs/server.crt') %>",
+    "key": "<%- stringify('/certs/server.key') %>",
+    "cert": "<%- stringify('/certs/server.crt') %>",
     "stubs": [...]
   }]
 }

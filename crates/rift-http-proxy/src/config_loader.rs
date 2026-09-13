@@ -798,20 +798,69 @@ mod tests {
     #[test]
     fn test_ejs_env_var_with_default() {
         unsafe { std::env::remove_var("RIFT_TEST_UNSET_VAR") };
-        let content = r#"{"port": "<%= process.env.RIFT_TEST_UNSET_VAR || '4545' %>"}"#;
+        let content = r#"{"port": <%= process.env.RIFT_TEST_UNSET_VAR || '4545' %>}"#;
         let path = PathBuf::from("config.json");
         let result = preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap();
-        assert_eq!(result, r#"{"port": "4545"}"#);
+        assert_eq!(result, r#"{"port": 4545}"#);
     }
 
     #[test]
     fn test_ejs_env_var_present_overrides_default() {
         unsafe { std::env::set_var("RIFT_TEST_PORT", "8080") };
-        let content = r#"{"port": "<%= process.env.RIFT_TEST_PORT || '4545' %>"}"#;
+        let content = r#"{"port": <%= process.env.RIFT_TEST_PORT || '4545' %>}"#;
         let path = PathBuf::from("config.json");
         let result = preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap();
-        assert_eq!(result, r#"{"port": "8080"}"#);
+        assert_eq!(result, r#"{"port": 8080}"#);
         unsafe { std::env::remove_var("RIFT_TEST_PORT") };
+    }
+
+    /// Issue #1092: the env-var port example in `docs/mountebank/imposters.md`, loaded for real.
+    /// The preprocessor tests above only compare text, which is how a quoted port that could never
+    /// boot sat in the docs.
+    #[test]
+    fn the_documented_env_var_port_form_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "imposters.json",
+            r#"{"imposters": [{"port": <%= process.env.RIFT_TEST_DOC_PORT || '4545' %>, "protocol": "http", "stubs": []}]}"#,
+        );
+        let source = ConfigSource::File {
+            path,
+            no_parse: false,
+        };
+
+        unsafe { std::env::remove_var("RIFT_TEST_DOC_PORT") };
+        assert_eq!(load_configs(&source).unwrap()[0].port, Some(4545));
+
+        unsafe { std::env::set_var("RIFT_TEST_DOC_PORT", "8080") };
+        let with_var = load_configs(&source);
+        unsafe { std::env::remove_var("RIFT_TEST_DOC_PORT") };
+        assert_eq!(with_var.unwrap()[0].port, Some(8080));
+    }
+
+    /// Issue #1092: the tag the TLS docs used before. It matches neither `include` nor `stringify`,
+    /// so the catch-all strips it and the key is silently empty. #1095 asks whether an unsupported
+    /// tag should fail the load instead; if it does, the first assertion here is expected to flip.
+    #[test]
+    fn a_call_style_include_tag_is_stripped_not_inlined() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "server.key",
+            "-----BEGIN KEY-----\nabc\n-----END KEY-----\n",
+        );
+        let path = dir.path().join("cfg.json");
+        let content = r#"{"key": "<%- include('server.key') %>"}"#;
+        assert_eq!(
+            preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap(),
+            r#"{"key": ""}"#
+        );
+        let content = r#"{"key": "<%- stringify('server.key') %>"}"#;
+        assert_eq!(
+            preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap(),
+            r#"{"key": "-----BEGIN KEY-----\nabc\n-----END KEY-----\n"}"#
+        );
     }
 
     #[test]

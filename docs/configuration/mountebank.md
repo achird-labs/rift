@@ -294,8 +294,8 @@ Each predicate object can contain:
 {
   "port": 4545,
   "protocol": "https",
-  "key": "<%- include('/path/to/key.pem') %>",
-  "cert": "<%- include('/path/to/cert.pem') %>",
+  "key": "<%- stringify('/path/to/key.pem') %>",
+  "cert": "<%- stringify('/path/to/cert.pem') %>",
   "stubs": [...]
 }
 ```

@@ -407,19 +407,30 @@ docker run -v $(pwd)/imposters.json:/imposters.json \
 
 ### EJS Templates
 
-Use EJS for dynamic configuration:
+A `--configfile` or `file:` source is preprocessed once, when it loads, and can read the process
+environment. `--datadir` files are not preprocessed.
 
 ```json
 {
   "imposters": [
     {
-      "port": "<%= port || 4545 %>",
+      "port": <%= process.env.PORT || '4545' %>,
       "protocol": "http",
       "stubs": [...]
     }
   ]
 }
 ```
+
+Only two expression forms are evaluated: `<%= process.env.VAR %>` and
+`<%= process.env.VAR || 'default' %>`, with the default in quotes. The value is pasted in as text,
+so leave the tag outside the JSON quotes for a number such as `port`; inside quotes it becomes a
+string, which the engine refuses for a port. Any other expression is replaced with an empty string,
+and there are no template variables, so a Mountebank template that uses them will not work.
+
+`<% include 'path' %>` inlines another file, and `<%- stringify('path') %>` inlines a file's contents
+escaped for use inside a JSON string. `--no-parse` turns preprocessing off; see the
+[CLI reference]({{ site.baseurl }}/configuration/cli/).
 
 ---
 
