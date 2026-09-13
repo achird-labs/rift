@@ -212,6 +212,28 @@ copy:
         assert_eq!(array.lookup.len(), 2, "array should yield two behaviors");
     }
 
+    // Issue #1088 pins this: rift-lint's E025 accepts a bare `wait` only when it is a non-negative
+    // integer, because anything else parses into no variant and the parsed block is ignored.
+    #[test]
+    fn a_fractional_or_negative_wait_does_not_parse() {
+        for wait in [
+            serde_json::json!(500.5),
+            serde_json::json!(500.0),
+            serde_json::json!(-1),
+        ] {
+            let err =
+                serde_json::from_value::<ResponseBehaviors>(serde_json::json!({ "wait": wait }))
+                    .expect_err("a non-u64 wait must not parse");
+            assert!(
+                err.to_string().contains("untagged enum WaitBehavior"),
+                "wait {wait}: {err}"
+            );
+        }
+        let zero: ResponseBehaviors =
+            serde_json::from_value(serde_json::json!({ "wait": 0 })).unwrap();
+        assert!(matches!(zero.wait, Some(WaitBehavior::Fixed(0))));
+    }
+
     #[test]
     fn test_shell_transform_config_serde() {
         let yaml = r#"

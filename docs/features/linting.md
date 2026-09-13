@@ -85,7 +85,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 |:-----|:------------|:--------|
 | E001 | File could not be read, or is not valid JSON | Missing comma, unquoted string, unreadable path |
 | E002 | Port conflict | Two imposters on port 4545 |
-| E003 | Missing required field | No `port` or `stubs` field |
+| E003 | Missing required field, or set to `null` | No `port` or `stubs` field |
 | E004 | Invalid protocol | Protocol is "ftp" instead of "http" |
 | E005 | Port out of range | Port 70000 (max is 65535) |
 | E010 | Unbalanced brackets in JSONPath | `$.user[0` missing `]` |
@@ -106,7 +106,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E022 | Proxy `to` URL does not start with `http://` or `https://` | `"to": "ftp://host/x"` |
 | E023 | Proxy `to` is not a string URL | `"to": 8080` |
 | E024 | Proxy missing required `to` field | `"proxy": {"mode": "proxyOnce"}` |
-| E025 | Invalid `wait` behavior value | `"wait": []` |
+| E025 | Invalid `wait` behavior value — a bare number must be a non-negative integer of milliseconds; anything else makes the engine ignore the block's behaviors (all but `repeat`) with only a log line | `"wait": []`, `"wait": 500.5` |
 | E026 | Unbalanced braces in JavaScript | `function () { return 1;` |
 | E027 | Unbalanced parentheses in JavaScript | `function ( { return 1; }` |
 | E028 | JavaScript syntax error | A malformed `inject` function |
@@ -128,6 +128,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E044 | Single-valued header object names one header twice, byte-identically (`proxy.injectHeaders`, `_rift.fault.error.headers`). `is.headers` is excluded: a repeat there is merged into two header lines on purpose | `{"X-Id": "a", "X-Id": "b"}` |
 | E045 | Single-valued header object has a non-string value (`proxy.injectHeaders`, `_rift.fault.error.headers`) | `{"X-Id": 1}` |
 | E046 | A YAML document's root is not a sequence of imposters — the engine's YAML loader accepts only a top-level list, unlike `--configfile`'s JSON, which also accepts a single imposter object or an `{"imposters": [...]}` wrapper | `port: 3000` at the document root |
+| E047 | `port` is present but not a non-negative integer — the engine refuses the file at load (`expected u16`), and an integral float such as `3000.0` is no exception. `null` is reported as E003 instead, because the engine reads it as absent and auto-assigns a port | `"port": "3000"`, `"port": 3000.5` |
 
 ### Warnings
 
