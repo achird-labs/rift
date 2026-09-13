@@ -1783,6 +1783,24 @@ mod tests {
         }
     }
 
+    // Issue #1085: a float in a stub body is served with the digits it was written with. Parsed
+    // from text on purpose — `json!` would turn `7e23` into a Rust `f64` literal at compile time,
+    // which is correctly rounded and so never exercised serde_json's parser.
+    #[test]
+    fn a_float_in_an_is_body_is_rendered_with_the_digits_written() {
+        let resp: StubResponse = serde_json::from_str(
+            r#"{"is": {"statusCode": 200, "body": {"n": 7e23, "m": 0.10018513143495411, "s": 1.23e-30}}}"#,
+        )
+        .unwrap();
+        match resp {
+            StubResponse::Is { rendered_body, .. } => assert_eq!(
+                rendered_body.as_deref(),
+                Some(r#"{"m":0.10018513143495411,"n":7e23,"s":1.23e-30}"#),
+            ),
+            other => panic!("expected Is, got {other:?}"),
+        }
+    }
+
     // A provider's own options survive under `flowState`, verbatim, instead of
     // being dropped on the floor as unknown keys.
     #[test]
