@@ -446,6 +446,24 @@ mod tests {
         );
     }
 
+    // Asserts that `float_roundtrip` is ON workspace-wide (issue #1085). Without it serde_json's
+    // float parse is not correctly rounded: each literal below comes back one representable double
+    // away, and is written with different digits (`7e23` as `6.999999999999999e23`). Every JSON
+    // number rift parses — stub bodies, request bodies, lint input — goes through this parser.
+    #[test]
+    fn serde_json_parses_floats_correctly_rounded() {
+        for literal in [
+            "7e23",
+            "1e-23",
+            "1.23e-30",
+            "1.2299999999999999e-30",
+            "0.10018513143495411",
+        ] {
+            let value: serde_json::Value = serde_json::from_str(literal).unwrap();
+            assert_eq!(value.to_string(), literal);
+        }
+    }
+
     #[test]
     fn headers_fold_only_ascii_case_and_keep_empty_shapes() {
         let empty: HeadersIn = serde_json::from_str(r#"{"headers":{}}"#).unwrap();

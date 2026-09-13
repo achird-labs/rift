@@ -46,6 +46,18 @@ record.
 
 ### Fixed
 
+- **A float in a stub body was served with different digits than it was written with** (#1085).
+  `serde_json`'s default float parser is not correctly rounded: outside a narrow fast path it can
+  land one representable double away, so a body written as `{"n": 7e23}` was served as
+  `{"n":6.999999999999999e23}`, and `1e-23` as `1.0000000000000001e-23`. Ordinary 17-digit doubles —
+  the form JavaScript, Python and recorded proxy bodies use — were affected too
+  (`0.10018513143495411` came back as `0.10018513143495412`), as was every other place rift parses
+  JSON: request bodies matched by predicates, `rift-verify`, and `rift-lint`.
+  - `serde_json`'s `float_roundtrip` feature is now on workspace-wide, which makes the parse exact.
+    It costs roughly 2x on parsing a float; integers and strings are unaffected.
+  - Only a number wider than a 64-bit integer, or with more significant digits than a double can
+    hold, is still served rounded.
+
 - **`rift-lint --fix` no longer rewrites a file whose parse dropped a repeated key** (#1076).
   `--fix` re-serializes the whole document from its parsed form, where a byte-identical repeated key
   is already gone (`serde_json::Map` is last-wins), so repairing an unrelated numeric header could

@@ -43,7 +43,11 @@ tokio-util = "0.7"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# `float_roundtrip`: without it serde_json's float parse is not correctly rounded, so a literal can
+# come back one double away and be served with different digits — `7e23` as `6.999999999999999e23`
+# (issue #1085). Costs ~2x on float parsing only. Pinned by rift-types'
+# `serde_json_parses_floats_correctly_rounded`. `arbitrary_precision` and `preserve_order` stay off.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_yaml = "0.9"
 
 # Scripting — pinned to =1.21.0 to match rift-mock-core's deliberate exact pin
