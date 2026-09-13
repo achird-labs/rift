@@ -398,7 +398,9 @@ fn check_required_fields(file: &Path, imposter: &Value, result: &mut LintResult)
     let required = ["port", "protocol", "stubs"];
 
     for field in required {
-        if imposter.get(field).is_none() {
+        // `null` is missing to the engine too: `port` is `Option<u16>` (auto-assigned), and
+        // `protocol`/`stubs` refuse it, since `#[serde(default)]` only covers an absent key.
+        if imposter.get(field).is_none_or(Value::is_null) {
             result.add_issue(
                 LintIssue::error(
                     "E003",
@@ -438,29 +440,44 @@ fn check_protocol(file: &Path, imposter: &Value, result: &mut LintResult) {
     }
 }
 
-/// Check that the port is in a valid range.
+/// Check that the port is an integer in a valid range. Absence and `null` are E003's: the engine
+/// reads `port` as `Option<u16>`, so `null` is absent to it, while any other non-integer —
+/// `3000.0` included, since serde's `u16` visitor has no float arm — refuses the file at load.
 fn check_port_range(file: &Path, imposter: &Value, result: &mut LintResult) {
-    if let Some(port) = imposter.get("port").and_then(|v| v.as_u64()) {
-        if !(1..=65535).contains(&port) {
-            result.add_issue(
-                LintIssue::error(
-                    "E005",
-                    format!("Port {port} is out of valid range (1-65535)"),
-                    file.to_path_buf(),
-                )
-                .with_location("port"),
-            );
-        } else if port < 1024 {
-            result.add_issue(
-                LintIssue::warning(
-                    "W001",
-                    format!("Port {port} is a privileged port (requires root)"),
-                    file.to_path_buf(),
-                )
-                .with_location("port")
-                .with_suggestion("Consider using a port >= 1024"),
-            );
-        }
+    let Some(value) = imposter.get("port").filter(|v| !v.is_null()) else {
+        return;
+    };
+    let Some(port) = value.as_u64() else {
+        result.add_issue(
+            LintIssue::error(
+                "E047",
+                format!("Port must be an integer from 1 to 65535, got {value}"),
+                file.to_path_buf(),
+            )
+            .with_location("port")
+            .with_suggestion("Write the port as a bare integer, e.g. \"port\": 3000"),
+        );
+        return;
+    };
+    if !(1..=65535).contains(&port) {
+        result.add_issue(
+            LintIssue::error(
+                "E005",
+                format!("Port {port} is out of valid range (1-65535)"),
+                file.to_path_buf(),
+            )
+            .with_location("port"),
+        );
+    } else if port < 1024 {
+        result.add_issue(
+            LintIssue::warning(
+                "W001",
+                format!("Port {port} is a privileged port (requires root)"),
+                file.to_path_buf(),
+            )
+            .with_location("port")
+            .with_suggestion("Consider using a port >= 1024"),
+        );
     }
 }
 
@@ -1251,8 +1268,9 @@ pub fn validate_behavior(
                 options,
                 false,
             );
-        } else if wait.is_number() {
-            // fixed millisecond delay — valid
+        } else if wait.is_u64() {
+            // fixed millisecond delay — valid. Only a non-negative integer: the engine's `u64`
+            // rejects `500.5` and `-1`, and then ignores the block's parsed behaviors.
         } else if is_valid_wait_range(wait) {
             // {min, max} range object — valid Rift extension
         } else if let Some(script) = wait_inject_script(wait) {
@@ -1270,11 +1288,11 @@ pub fn validate_behavior(
             result.add_issue(
                 LintIssue::error(
                     "E025",
-                    "Wait behavior must be a number, JavaScript function string, {min, max} object, or {inject: \"function(){...}\"}",
+                    "Wait behavior must be a non-negative integer of milliseconds, JavaScript function string, {min, max} object, or {inject: \"function(){...}\"}",
                     file.to_path_buf(),
                 )
                 .with_location(format!("{location}.wait"))
-                .with_suggestion("Use a millisecond number, a JS function string, {\"min\": N, \"max\": M}, or {\"inject\": \"function() { ... }\"}"),
+                .with_suggestion("Use a whole number of milliseconds, a JS function string, {\"min\": N, \"max\": M}, or {\"inject\": \"function() { ... }\"}"),
             );
         }
     }

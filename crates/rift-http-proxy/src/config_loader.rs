@@ -376,6 +376,48 @@ mod tests {
         p
     }
 
+    /// Issue #1088 pins this: rift-lint's E047 says a non-integer `port` is refused at load. An
+    /// integral float is no exception — serde's `u16` visitor has no float arm.
+    #[test]
+    fn a_non_integer_port_is_refused_at_load() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in [
+            ("float.json", r#"{"port": 3000.0, "protocol": "http"}"#),
+            ("string.json", r#"{"port": "3000", "protocol": "http"}"#),
+            ("float.yaml", "- port: 3000.5\n  protocol: http\n"),
+        ] {
+            let path = write(dir.path(), name, body);
+            let err = load_configs(&ConfigSource::File {
+                path,
+                no_parse: false,
+            })
+            .expect_err("a non-integer port must not load");
+            assert!(
+                format!("{err:#}").contains("expected u16"),
+                "{name}: {err:#}"
+            );
+        }
+    }
+
+    /// ...while an explicit `null` loads as an absent port (auto-assigned), which is why the lint
+    /// reports it as E003 rather than E047.
+    #[test]
+    fn a_null_port_loads_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "null.json",
+            r#"{"port": null, "protocol": "http"}"#,
+        );
+        let configs = load_configs(&ConfigSource::File {
+            path,
+            no_parse: false,
+        })
+        .unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].port, None);
+    }
+
     #[test]
     fn parses_single_wrapper_and_array_files() {
         let dir = tempfile::tempdir().unwrap();

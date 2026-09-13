@@ -117,6 +117,109 @@ fn e005_port_zero() {
     assert!(has_code(&r, "E005"));
 }
 
+fn port_issue_codes(port: Value) -> Vec<String> {
+    let v = json!({ "port": port, "protocol": "http", "stubs": [] });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    r.issues.into_iter().map(|i| i.code).collect()
+}
+
+// Issue #1088: the engine reads `port` as `Option<u16>`, and serde's `u16` visitor has no float
+// arm, so every one of these is refused at load (`invalid type`/`invalid value` `…, expected u16`). An integral
+// float (`3000.0`, `3e3`) is refused exactly like a fractional one.
+#[test]
+fn e047_port_not_an_integer() {
+    for bad in [
+        json!(3000.5),
+        json!(3000.0),
+        json!(3e3),
+        json!("3000"),
+        json!(-1),
+        json!(true),
+        json!([3000]),
+        json!({}),
+    ] {
+        assert_eq!(
+            port_issue_codes(bad.clone()),
+            vec!["E047".to_string()],
+            "port {bad} must report exactly E047"
+        );
+    }
+}
+
+#[test]
+fn e047_message_and_location_name_the_value_as_written() {
+    let v = json!({ "port": "3000", "protocol": "http", "stubs": [] });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    let issue = r
+        .issues
+        .iter()
+        .find(|i| i.code == "E047")
+        .expect("E047 reported");
+    assert_eq!(issue.severity, Severity::Error);
+    assert_eq!(issue.location.as_deref(), Some("port"));
+    assert_eq!(
+        issue.message,
+        "Port must be an integer from 1 to 65535, got \"3000\""
+    );
+}
+
+#[test]
+fn e047_leaves_integer_ports_to_the_range_checks() {
+    assert_eq!(port_issue_codes(json!(3000)), Vec::<String>::new());
+    assert_eq!(port_issue_codes(json!(65535)), Vec::<String>::new());
+    assert_eq!(port_issue_codes(json!(65536)), vec!["E005".to_string()]);
+    assert_eq!(port_issue_codes(json!(70000)), vec!["E005".to_string()]);
+    assert_eq!(port_issue_codes(json!(0)), vec!["E005".to_string()]);
+    assert_eq!(port_issue_codes(json!(80)), vec!["W001".to_string()]);
+}
+
+// Each imposter in a wrapper is checked on its own: one bad port is one E047, not one per imposter.
+#[test]
+fn e047_fires_once_for_the_one_bad_port_in_a_wrapper() {
+    let doc = json!({ "imposters": [
+        { "port": 3000, "protocol": "http", "stubs": [] },
+        { "port": "3001", "protocol": "http", "stubs": [] },
+        { "port": 3002, "protocol": "http", "stubs": [] }
+    ]});
+    let r = lint_value(&doc, "<test>", &opts());
+    assert_eq!(codes(&r), vec!["E047"], "got {:?}", codes(&r));
+    assert!(r.issues[0].message.ends_with("got \"3001\""));
+}
+
+// `"port": null` loads: `Option<u16>` reads it as absent and the engine auto-assigns. It is
+// reported as the missing field it is to the engine, never as a type error.
+#[test]
+fn e003_fires_for_null_required_fields() {
+    assert_eq!(port_issue_codes(Value::Null), vec!["E003".to_string()]);
+    let mut r = LintResult::new();
+    validate_imposter(
+        path(),
+        &json!({ "port": null, "protocol": "http", "stubs": [] }),
+        &mut r,
+        &opts(),
+    );
+    assert_eq!(r.issues[0].message, "Missing required field: port");
+
+    for field in ["protocol", "stubs"] {
+        let mut v = json!({ "port": 3000, "protocol": "http", "stubs": [] });
+        v[field] = Value::Null;
+        let mut r = LintResult::new();
+        validate_imposter(path(), &v, &mut r, &opts());
+        assert_eq!(
+            codes(&r),
+            vec!["E003"],
+            "{field}: null must report E003, got {:?}",
+            codes(&r)
+        );
+        assert_eq!(
+            r.issues[0].message,
+            format!("Missing required field: {field}")
+        );
+    }
+}
+
 #[test]
 fn w001_privileged_port() {
     let v = json!({ "port": 80, "protocol": "http", "stubs": [] });
@@ -597,6 +700,27 @@ fn e025_still_fires_for_malformed_wait_objects() {
         validate_behavior(path(), &bad, "loc", &mut r, &opts());
         assert!(has_code(&r, "E025"), "E025 must still fire for {bad}");
     }
+}
+
+// Issue #1088: `WaitBehavior::Fixed` is a `u64`, so a fractional or negative number matches no
+// variant of the untagged enum. The engine then ignores every parsed behavior in the block (all but
+// `repeat`, which it reads separately) with only a log line, so the lint must not pass it as "a number".
+#[test]
+fn e025_fires_for_a_fractional_or_negative_wait() {
+    for bad in [json!(500.5), json!(500.0), json!(-1)] {
+        let behavior = json!({ "wait": bad });
+        let mut r = LintResult::new();
+        validate_behavior(path(), &behavior, "loc", &mut r, &opts());
+        assert!(has_code(&r, "E025"), "E025 must fire for wait {bad}");
+    }
+}
+
+#[test]
+fn e025_not_fired_for_a_zero_wait() {
+    let behavior = json!({ "wait": 0 });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &behavior, "loc", &mut r, &opts());
+    assert!(!has_code(&r, "E025"), "unexpected E025: {:?}", codes(&r));
 }
 
 #[test]

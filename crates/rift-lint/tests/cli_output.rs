@@ -1,6 +1,6 @@
 //! Issue #347: rift-lint honors NO_COLOR / non-TTY stdout and emits pure JSON with `-o json`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_rift-lint");
@@ -904,4 +904,48 @@ fn cli_reports_w012_as_a_warning_that_does_not_fail_the_run() {
         .output()
         .expect("run rift-lint");
     assert!(!strict.status.success(), "--strict fails on the warning");
+}
+
+/// Issue #1088, through the binary: emitting from a function the CLI never reaches has shipped
+/// twice in this crate with every library test green.
+fn e047_issues(path: &Path) -> (Vec<serde_json::Value>, bool) {
+    let out = Command::new(BIN)
+        .args([path.to_str().unwrap(), "-o", "json"])
+        .output()
+        .expect("run rift-lint");
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    let issues = parsed["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .filter(|i| i["code"] == "E047")
+        .cloned()
+        .collect();
+    (issues, out.status.success())
+}
+
+#[test]
+fn cli_reports_e047_for_a_string_port() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("imposter.json");
+    std::fs::write(&f, r#"{"port":"3000","protocol":"http","stubs":[]}"#).expect("write");
+
+    let (issues, success) = e047_issues(&f);
+    assert_eq!(issues.len(), 1, "got {issues:?}");
+    assert_eq!(issues[0]["severity"], "error");
+    assert_eq!(issues[0]["location"], "port");
+    assert!(!success, "an error exits non-zero");
+}
+
+#[test]
+fn cli_reports_e047_for_a_yaml_float_port() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("config.yaml");
+    std::fs::write(&f, "- port: 3000.5\n  protocol: http\n  stubs: []\n").expect("write");
+
+    let (issues, success) = e047_issues(&f);
+    assert_eq!(issues.len(), 1, "got {issues:?}");
+    assert_eq!(issues[0]["severity"], "error");
+    assert_eq!(issues[0]["location"], "port");
+    assert!(!success, "an error exits non-zero");
 }

@@ -46,6 +46,19 @@ record.
 
 ### Fixed
 
+- **`rift-lint` passed a `port` the engine refuses to load** (#1088). The port check only ran when
+  the value was an unsigned integer, so `"port": "3000"`, `3000.5`, `-1` or `true` linted clean and
+  then failed at startup with `invalid type` (or, for `-1`, `invalid value`) `…, expected u16`.
+  `3000.0` is refused too: serde reads any literal with a decimal point or exponent as a float, and
+  a `u16` accepts no float.
+  - A present `port` that is not a non-negative integer is now error `E047`. This also covers the `3000.00000000000000001`
+    case where `W012` (#1083) was the only issue reported.
+  - `null` for `port`, `protocol` or `stubs` is now `E003`, as if the field were missing. The engine
+    treats a `null` port as absent and auto-assigns one, and it refuses a `null` protocol or stubs.
+  - A `wait` of `500.5` or `-1` is now `E025`. The engine does not refuse the file for it. The block
+    fails to parse, and with an error log line the response loses its `wait`, `copy`, `lookup`,
+    `decorate` and `shellTransform`. Only `repeat`, which is read separately, still applies.
+
 - **A float in a stub body was served with different digits than it was written with** (#1085).
   `serde_json`'s default float parser is not correctly rounded: outside a narrow fast path it can
   land one representable double away, so a body written as `{"n": 7e23}` was served as
