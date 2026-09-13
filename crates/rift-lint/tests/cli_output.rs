@@ -949,3 +949,25 @@ fn cli_reports_e047_for_a_yaml_float_port() {
     assert_eq!(issues[0]["location"], "port");
     assert!(!success, "an error exits non-zero");
 }
+
+/// Issue #1093, through the binary.
+#[test]
+fn cli_is_clean_for_a_null_wait() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("imposter.json");
+    std::fs::write(
+        &f,
+        r#"{"port":3000,"protocol":"http","stubs":[
+            {"responses":[{"is":{"statusCode":200},"_behaviors":{"wait":null,"repeat":null}}]}
+        ]}"#,
+    )
+    .expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap(), "-o", "json"])
+        .output()
+        .expect("run rift-lint");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    assert_eq!(report["issues"], serde_json::json!([]), "got {report}");
+    assert!(out.status.success());
+}

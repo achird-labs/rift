@@ -106,7 +106,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E022 | Proxy `to` URL does not start with `http://` or `https://` | `"to": "ftp://host/x"` |
 | E023 | Proxy `to` is not a string URL | `"to": 8080` |
 | E024 | Proxy missing required `to` field | `"proxy": {"mode": "proxyOnce"}` |
-| E025 | Invalid `wait` behavior value — a bare number must be a non-negative integer of milliseconds; anything else makes the engine ignore the block's behaviors (all but `repeat`) with only a log line | `"wait": []`, `"wait": 500.5` |
+| E025 | Invalid `wait` behavior value — a bare number must be a non-negative integer of milliseconds; anything else makes the engine ignore the block's behaviors (all but `repeat`) with only a log line. `null` counts as absent | `"wait": []`, `"wait": 500.5` |
 | E026 | Unbalanced braces in JavaScript | `function () { return 1;` |
 | E027 | Unbalanced parentheses in JavaScript | `function ( { return 1; }` |
 | E028 | JavaScript syntax error | A malformed `inject` function |
@@ -116,7 +116,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E032 | Lookup behavior missing `fromDataSource` | Lookup with only `key` |
 | E033 | Lookup behavior missing `into` | Lookup with `key` and `fromDataSource` only |
 | E034 | More than one operator in a single predicate | `{"equals": {...}, "contains": {...}}` — split them under `and` |
-| E035 | `repeat` behavior is not a positive integer | `"repeat": 0` |
+| E035 | `repeat` behavior is not a positive integer (`null` counts as absent) | `"repeat": 0` |
 | E036 | `script` must specify exactly one of `code`, `file` or `ref` | Both `code` and `file` given |
 | E037 | Unknown script `ref` — no such entry in `_rift.scripts` | `"ref": "missing"` |
 | E038 | Script `file` (via `ref`) could not be read | `"file": "no-such.js"` |

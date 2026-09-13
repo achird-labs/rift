@@ -46,6 +46,19 @@ record.
 
 ### Fixed
 
+- **An explicit `null` for a `_behaviors` key was treated three different ways** (#1093). Writing
+  `"wait": null` (or `null` for `decorate`, `shellTransform`, `copy`, `lookup` or `repeat`) now means
+  the key is absent everywhere, the way `null` already works for `port` and `statusCode`.
+  - Without `--allowInjection`, `wait`, `decorate` or `shellTransform` set to `null` was refused as a
+    scripting surface: `--configfile` aborted, `--datadir` skipped the file and `POST /imposters`
+    returned 400. A `null` runs nothing, so these are now admitted.
+  - `copy` or `lookup` set to `null` (or `shellTransform`, with `--allowInjection`) failed to parse,
+    and the response lost every behavior in the block except `repeat`, with only an error log line.
+  - A stub-level `delayRange` did not fill a response's `"wait": null`, so the delay was dropped.
+  - `rift-verify` skipped a stub as dynamic when a `copy`, `lookup`, `decorate`, `shellTransform` or
+    `repeat` key was present but `null`.
+  - `rift-lint` reported `E025` for `"wait": null` and `E035` for `"repeat": null`.
+
 - **`rift-lint` passed a `port` the engine refuses to load** (#1088). The port check only ran when
   the value was an unsigned integer, so `"port": "3000"`, `3000.5`, `-1` or `true` linted clean and
   then failed at startup with `invalid type` (or, for `-1`, `invalid value`) `…, expected u16`.

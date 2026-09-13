@@ -66,6 +66,12 @@ where
             formatter.write_str("a shell command string or array of shell command strings")
         }
 
+        /// An explicit `null` is the key absent (issue #1093), as it already is for the `Option`
+        /// behaviors; without this the whole block failed to parse and every behavior was dropped.
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+
         fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
             Ok(vec![v.to_string()])
         }
@@ -100,6 +106,12 @@ where
 
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
             formatter.write_str("a copy behavior object or array of copy behaviors")
+        }
+
+        /// An explicit `null` is the key absent (issue #1093), as it already is for the `Option`
+        /// behaviors; without this the whole block failed to parse and every behavior was dropped.
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
         }
 
         fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -141,6 +153,12 @@ where
 
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
             formatter.write_str("a lookup behavior object or array of lookup behaviors")
+        }
+
+        /// An explicit `null` is the key absent (issue #1093), as it already is for the `Option`
+        /// behaviors; without this the whole block failed to parse and every behavior was dropped.
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
         }
 
         fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -232,6 +250,39 @@ copy:
         let zero: ResponseBehaviors =
             serde_json::from_value(serde_json::json!({ "wait": 0 })).unwrap();
         assert!(matches!(zero.wait, Some(WaitBehavior::Fixed(0))));
+    }
+
+    /// Issue #1093: an explicit `null` for any behavior key is that key absent. `wait`, `repeat`
+    /// and `decorate` got this from `Option`; the three list keys used to fail the whole block.
+    #[test]
+    fn an_explicit_null_behavior_key_is_absent() {
+        let json: ResponseBehaviors = serde_json::from_value(serde_json::json!({
+            "wait": null, "repeat": null, "decorate": null,
+            "shellTransform": null, "copy": null, "lookup": null
+        }))
+        .expect("every null key parses");
+        let yaml: ResponseBehaviors = serde_yaml::from_str(
+            "wait: ~\nrepeat: ~\ndecorate: ~\nshellTransform: ~\ncopy: ~\nlookup: ~\n",
+        )
+        .expect("every null key parses from YAML");
+        for parsed in [json, yaml] {
+            assert!(parsed.wait.is_none());
+            assert_eq!(parsed.repeat, None);
+            assert_eq!(parsed.decorate, None);
+            assert!(parsed.shell_transform.is_empty());
+            assert!(parsed.copy.is_empty());
+            assert!(parsed.lookup.is_empty());
+        }
+
+        // The original failure: a null list key dropped the live behaviors beside it.
+        let siblings: ResponseBehaviors = serde_json::from_value(serde_json::json!({
+            "shellTransform": null, "copy": null, "lookup": null,
+            "wait": 5, "repeat": 2, "decorate": "response.body = 'x';"
+        }))
+        .expect("null list keys leave their siblings parseable");
+        assert!(matches!(siblings.wait, Some(WaitBehavior::Fixed(5))));
+        assert_eq!(siblings.repeat, Some(2));
+        assert_eq!(siblings.decorate.as_deref(), Some("response.body = 'x';"));
     }
 
     #[test]
