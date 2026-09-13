@@ -192,10 +192,37 @@ How to resolve it depends on where the repeat is:
   you meant. In the two single-valued header objects this is also reported as
   [E044](#errors); an array is **not** a valid alternative there.
 
+**A file with a number `--fix` cannot write back digit-for-digit is never rewritten either.** A
+number wider than a 64-bit integer, or with more significant digits than a double can distinguish, is
+held as the nearest double once parsed — so rewriting the file would change it:
+
+| Written in the file | What a rewrite would write |
+|---|---|
+| `123456789012345678901234567890` | `1.2345678901234568e29` |
+| `0.1000000000000000055511151231257827` | `0.1` |
+| `0.30000000000000001` | `0.3` |
+
+An ordinary float is not affected: any number a double holds in its shortest form — `7e23`,
+`1.23e-30`, `0.10018513143495411` — is written back exactly.
+
+`--fix` skips the file and names each such number with its line and column. The engine reads the
+file the same way, so it **already serves** the right-hand value for that number — the rewrite
+would only have made the file agree with it, silently. Resolve it by writing the value you mean: the
+rounded number if that is what you want served, or, if a response body must carry the exact digits,
+give the body as a string, which the engine sends verbatim:
+`"body": "{\"big\": 123456789012345678901234567890}"`. Set `Content-Type: application/json` in
+`headers` yourself when you do — the engine adds it only for a body written as a JSON object or
+array.
+
+A number that only changes spelling — `0.10` → `0.1`, `1e2` → `100.0` — is formatting, not loss,
+and does not stop the rewrite.
+
 Two more things `--fix` does that are easy to miss: it rewrites the entire file, so object keys come
 back in sorted order and the original formatting is not preserved; and it only repairs headers under
 a top-level `stubs` array, so a config written in the `{"imposters": [...]}` wrapper or bare-array
-form is reported but never rewritten.
+form is reported but never rewritten. Formatting is all a rewrite changes beyond the headers it
+reports: a file it would change in any other way — a repeated key, or one of the numbers above — is
+skipped instead.
 
 ---
 
