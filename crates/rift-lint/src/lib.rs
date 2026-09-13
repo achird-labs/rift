@@ -126,7 +126,9 @@ impl Document {
     /// is `1.2345678901234568e29` there — so anything that rewrites the file from it changes the
     /// number. A literal that only changes spelling (`0.10` → `0.1`, `1e2` → `100.0`) is not listed.
     ///
-    /// Always empty for a document read by [`parse_yaml_document`]: nothing rewrites YAML.
+    /// Always empty for a document read by [`parse_yaml_document`] — even a `.yaml` file holding JSON
+    /// text, which the engine reads through `serde_json` and rounds the same way. The scan is a JSON
+    /// lexer, and `W012` documents the gap.
     pub fn lossy_numbers(&self) -> impl Iterator<Item = &LossyNumber> + '_ {
         self.lossy_numbers.iter()
     }
@@ -173,7 +175,7 @@ pub fn parse_yaml_document(text: &str) -> Result<Document, serde_yaml::Error> {
     })
 }
 
-/// Lint a [`Document`], reporting everything [`lint_value`] does plus `E044`.
+/// Lint a [`Document`], reporting everything [`lint_value`] does plus `E044`, `E046` and `W012`.
 ///
 /// Prefer this over [`lint_value`] wherever the raw text is available: it is the only entry point
 /// that can see a byte-identical duplicate key.
@@ -231,6 +233,28 @@ fn lint_document_at(doc: &Document, path: &Path, options: &LintOptions) -> LintR
             )
             .with_location(location)
             .with_suggestion("Remove the duplicate header"),
+        );
+    }
+
+    // W012 (issue #1083). Here for the same reason as E046, and because only the raw text still has
+    // the digits: `doc.value` already holds the rounded number.
+    for number in &doc.lossy_numbers {
+        result.add_issue(
+            LintIssue::warning(
+                "W012",
+                format!(
+                    "Number literal '{}' cannot be kept as written; the engine reads it as the \
+                     nearest double, {}",
+                    number.literal, number.written_as
+                ),
+                path.to_path_buf(),
+            )
+            .with_location(format!("line {}, column {}", number.line, number.column))
+            .with_suggestion(format!(
+                "Write {} if that is the value you mean; if a response body must carry the exact \
+                 digits, give the body as a JSON string, which is sent verbatim",
+                number.written_as
+            )),
         );
     }
 
@@ -421,8 +445,9 @@ fn lint_text(text: &str, path: &Path, format: Format, options: &LintOptions) -> 
 ///
 /// Returns a `LintResult` containing all issues found.
 ///
-/// **Cannot report `E044`.** A byte-identical duplicate key is already collapsed by the time a
-/// `Value` exists, so this entry point is structurally blind to it. Use [`parse_document`] +
+/// **Cannot report `E044` or `W012`.** A byte-identical duplicate key is already collapsed, and a
+/// number too wide or too precise for a double already rounded, by the time a `Value` exists, so
+/// this entry point is structurally blind to both. Use [`parse_document`] +
 /// [`lint_document`] (or [`lint_json`] / [`lint_file`], which do) when the raw text is available.
 pub fn lint_value(
     value: &serde_json::Value,

@@ -101,6 +101,14 @@ record.
 
 ### Added
 
+- **`rift-lint` warns about a number the engine cannot keep as written: `W012`** (#1083). The engine
+  holds a JSON number as a 64-bit integer when it fits exactly and as the nearest double otherwise,
+  so a literal wider than that, or with more significant digits than a double distinguishes, is read
+  rounded — in a response body `123456789012345678901234567890` goes out as `1.2345678901234568e29`,
+  and in a predicate it is compared as that value — with nothing reporting it. `W012` names each
+  such literal with its line and column and the value the engine reads. It is a warning, so it does
+  not fail a run without `--strict`. A `.yaml`/`.yml` file is not checked, even one holding JSON text.
+
 - **`rift-lint` reads YAML, not just JSON** (#1071). `rift-lint config.yaml` printed
   `No JSON files found` and exited **0** having checked nothing — on a file `--configfile` loads
   happily, and which the scripting docs ship as the recommended way to author a config. Both the
