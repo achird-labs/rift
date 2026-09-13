@@ -2002,3 +2002,108 @@ fn e046_does_not_fire_for_yaml_text_that_is_actually_json() {
         );
     }
 }
+
+// ─── Issue #1083: W012, a number the engine cannot serve as written ─────────────────────────────
+
+const LOSSY_BODY: &str = r#"{"port":3000,"protocol":"http","stubs":[
+    {"responses":[{"is":{"statusCode":200,
+        "body":{"big":123456789012345678901234567890,"precise":0.1000000000000000055511151231257827}}}]}
+]}"#;
+
+/// The engine holds a JSON number as the nearest `u64`/`i64`/`f64`, so these two are served as
+/// `1.2345678901234568e29` and `0.1` — and nothing said so.
+#[test]
+fn w012_reports_each_number_the_engine_cannot_serve_as_written() {
+    let r = rift_lint::lint_json(LOSSY_BODY, "<test>.json", &opts());
+    let hits: Vec<_> = r.issues.iter().filter(|i| i.code == "W012").collect();
+    assert_eq!(hits.len(), 2, "got {:?}", codes(&r));
+    assert!(hits.iter().all(|i| i.severity == Severity::Warning));
+
+    assert!(
+        hits[0].message.contains("'123456789012345678901234567890'")
+            && hits[0].message.contains("1.2345678901234568e29"),
+        "names the literal and what is served, got: {}",
+        hits[0].message
+    );
+    assert_eq!(hits[0].location.as_deref(), Some("line 3, column 23"));
+    assert!(
+        hits[1]
+            .message
+            .contains("'0.1000000000000000055511151231257827'")
+            && hits[1].message.ends_with("nearest double, 0.1"),
+        "got: {}",
+        hits[1].message
+    );
+    assert!(
+        hits[0]
+            .suggestion
+            .as_deref()
+            .is_some_and(|s| s.contains("string")),
+        "says how to keep the digits, got {:?}",
+        hits[0].suggestion
+    );
+    assert!(
+        !r.has_errors(),
+        "a warning, never an error: {:?}",
+        codes(&r)
+    );
+}
+
+/// Formatting is not loss, and neither is an ordinary float a double holds exactly — which relies
+/// on `float_roundtrip` (#1085); without it `7e23` and `0.10018513143495411` would be reported.
+#[test]
+fn w012_is_silent_for_numbers_served_with_the_same_value() {
+    let raw = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200,
+            "body":{"a":0.10,"b":1e2,"c":18446744073709551615,"d":7e23,"e":0.10018513143495411,"f":-0}}}]}
+    ]}"#;
+    let r = rift_lint::lint_json(raw, "<test>.json", &opts());
+    assert!(!has_code(&r, "W012"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn w012_ignores_digits_inside_a_string() {
+    let raw = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200,"body":"{\"big\": 123456789012345678901234567890}"}}]}
+    ]}"#;
+    let r = rift_lint::lint_json(raw, "<test>.json", &opts());
+    assert!(!has_code(&r, "W012"), "got {:?}", codes(&r));
+}
+
+/// Documented gap: the scan is a JSON lexer, so a document read as YAML is not checked.
+#[test]
+fn w012_does_not_check_a_yaml_document() {
+    let yaml = "\
+- port: 3000
+  protocol: http
+  stubs:
+    - responses:
+        - is:
+            statusCode: 200
+            body:
+              big: 123456789012345678901234567890
+";
+    let r = rift_lint::lint_yaml(yaml, "<test>.yaml", &opts());
+    assert!(!has_code(&r, "W012"), "got {:?}", codes(&r));
+}
+
+/// Not only bodies: a predicate compares against the rounded value too, so the message says what the
+/// engine *reads*, not what it serves.
+#[test]
+fn w012_reports_a_number_outside_a_response_body_in_neutral_terms() {
+    let raw = r#"{"port":3000,"protocol":"http","stubs":[
+        {"predicates":[{"equals":{"body":{"id":123456789012345678901234567890}}}],
+         "responses":[{"is":{"statusCode":200}}]}
+    ]}"#;
+    let r = rift_lint::lint_json(raw, "<test>.json", &opts());
+    let hits: Vec<_> = r.issues.iter().filter(|i| i.code == "W012").collect();
+    assert_eq!(hits.len(), 1, "got {:?}", codes(&r));
+    assert!(
+        hits[0]
+            .message
+            .contains("the engine reads it as the nearest double, 1.2345678901234568e29")
+            && !hits[0].message.contains("served"),
+        "got: {}",
+        hits[0].message
+    );
+}

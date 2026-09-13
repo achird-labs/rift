@@ -146,6 +146,7 @@ Warnings indicate potential issues that may cause unexpected behavior.
 | W009 | Non-function behavior | `"wait": "return 100"` without function wrapper |
 | W010 | Protocol `tcp` is not yet implemented and will fail at runtime | `"protocol": "tcp"` |
 | W011 | Unknown TCP fault type — the fault will not fire at runtime | `{"type": "NONSENSE"}` |
+| W012 | Number literal cannot be kept as written — the engine reads it as the nearest double (a `.yaml`/`.yml` file is not checked, even one holding JSON text) | `"body": {"big": 123456789012345678901234567890}` is served as `1.2345678901234568e29` |
 
 ### Info
 
@@ -205,7 +206,8 @@ held as the nearest double once parsed — so rewriting the file would change it
 An ordinary float is not affected: any number a double holds in its shortest form — `7e23`,
 `1.23e-30`, `0.10018513143495411` — is written back exactly.
 
-`--fix` skips the file and names each such number with its line and column. The engine reads the
+`--fix` skips the file and names each such number with its line and column; every lint run, `--fix`
+or not, also reports each one as [W012](#warnings). The engine reads the
 file the same way, so it **already serves** the right-hand value for that number — the rewrite
 would only have made the file agree with it, silently. Resolve it by writing the value you mean: the
 rounded number if that is what you want served, or, if a response body must carry the exact digits,

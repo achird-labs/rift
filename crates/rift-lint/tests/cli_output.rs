@@ -776,8 +776,8 @@ fn fix_refuses_to_quote_a_header_whose_own_number_it_cannot_write_back() {
 
     assert_eq!(after, original);
     assert!(
-        stdout.contains("Skipped") && stdout.contains("123456789012345678901234567890"),
-        "got: {stdout}"
+        stdout.contains("Skipped:") && stdout.contains("would be written as 1.2345678901234568e29"),
+        "the refusal itself names the number (W012 also prints the literal), got: {stdout}"
     );
 }
 
@@ -861,9 +861,47 @@ fn a_file_with_a_repeated_key_and_a_lossy_number_reports_both_and_counts_once() 
     assert_eq!(after, original);
     assert!(stdout.contains("Set-Cookie"), "got: {stdout}");
     assert!(
-        stdout.contains("123456789012345678901234567890"),
-        "got: {stdout}"
+        stdout.contains("rewriting it would change a number: '123456789012345678901234567890'"),
+        "the refusal itself names the number (W012 also prints the literal), got: {stdout}"
     );
     assert_eq!(stdout.matches("Skipped:").count(), 2, "got: {stdout}");
     assert!(stdout.contains("skipped 1 file "), "got: {stdout}");
+}
+
+// ─── Issue #1083: W012 through the binary ────────────────────────────────────────────────────────
+
+/// The binary reaches W012 (it lints through `lint_document`), and a warning alone does not fail the
+/// run — only `--strict` turns it into a failing exit.
+#[test]
+fn cli_reports_w012_as_a_warning_that_does_not_fail_the_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("imposter.json");
+    std::fs::write(
+        &f,
+        r#"{"port":3000,"protocol":"http","stubs":[
+            {"responses":[{"is":{"statusCode":200,"body":{"big":123456789012345678901234567890}}}]}
+        ]}"#,
+    )
+    .expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap(), "-o", "json"])
+        .output()
+        .expect("run rift-lint");
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    let w012: Vec<&serde_json::Value> = parsed["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .filter(|i| i["code"] == "W012")
+        .collect();
+    assert_eq!(w012.len(), 1, "got {parsed}");
+    assert_eq!(w012[0]["severity"], "warning");
+    assert!(out.status.success(), "a warning alone exits 0");
+
+    let strict = Command::new(BIN)
+        .args([f.to_str().unwrap(), "--strict"])
+        .output()
+        .expect("run rift-lint");
+    assert!(!strict.status.success(), "--strict fails on the warning");
 }
