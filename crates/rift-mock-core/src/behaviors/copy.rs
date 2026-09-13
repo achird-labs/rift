@@ -258,7 +258,6 @@ mod tests {
     /// something, so running it for a `copy` whose token appears in no header would warn about a
     /// header value that does not exist — once per request, on client-controlled input.
     #[test]
-    #[tracing_test::traced_test]
     fn copy_into_a_body_only_stub_does_not_warn_about_headers() {
         let request = RequestContext {
             method: "POST".to_string(),
@@ -280,7 +279,12 @@ mod tests {
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
         headers.insert("X-Plain".to_string(), vec!["no token here".to_string()]);
 
-        let body = apply_copy_behaviors("x=${b}", &mut headers, &behaviors, &request, FIXTURE_STUB);
+        // `captured_logs`, not `traced_test`: see `copy_repair_warning_names_the_stub`. Under
+        // `traced_test` this assertion passed even when the repair ran and warned (issue #1079).
+        let mut body = String::new();
+        let events = crate::test_support::captured_logs(|| {
+            body = apply_copy_behaviors("x=${b}", &mut headers, &behaviors, &request, FIXTURE_STUB);
+        });
 
         assert_eq!(
             body, "x=one\r\ntwo",
@@ -288,8 +292,9 @@ mod tests {
         );
         assert_eq!(headers["X-Plain"], vec!["no token here".to_string()]);
         assert!(
-            !logs_contain("removed characters a header value cannot carry"),
-            "no header used this token, so the header repair must not have run"
+            events.is_empty(),
+            "no header used this token, so the header repair must not have run, but it logged {} event(s)",
+            events.len()
         );
     }
 
