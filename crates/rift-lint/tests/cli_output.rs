@@ -693,3 +693,177 @@ fn a_yaml_file_holding_json_is_not_e046() {
         );
     }
 }
+
+// ─── Issue #1080: `--fix` must not rewrite a file whose number literal it cannot write back ────
+//
+// `--fix` re-serializes the whole file from the parsed `Value`, where a literal wider than `u64` or
+// more precise than `f64` is already the nearest `f64`. Writing that back replaces digits the
+// author wrote with different ones.
+
+/// Runs `--fix` over one JSON file and returns (file after, stdout, stderr).
+fn fix_one(original: &str, extra: &[&str]) -> (String, String, String) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("imposter.json");
+    std::fs::write(&f, original).expect("write");
+    let mut args = vec![f.to_str().unwrap(), "--fix"];
+    args.extend_from_slice(extra);
+    let out = Command::new(BIN)
+        .args(&args)
+        .output()
+        .expect("run rift-lint");
+    (
+        std::fs::read_to_string(&f).expect("read back"),
+        String::from_utf8(out.stdout).expect("utf8"),
+        String::from_utf8(out.stderr).expect("utf8"),
+    )
+}
+
+#[test]
+fn fix_refuses_a_file_whose_integer_literal_would_be_rewritten() {
+    let original = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256},
+            "body":{"big":123456789012345678901234567890}}}]}
+    ]}"#;
+
+    let (after, stdout, _) = fix_one(original, &[]);
+
+    assert_eq!(
+        after, original,
+        "the file must be byte-identical; rewriting it would change the number"
+    );
+    assert!(stdout.contains("Skipped"), "got: {stdout}");
+    assert!(
+        stdout.contains("'123456789012345678901234567890' at line 3 column 27"),
+        "it names the literal and where it is, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("1.2345678901234568e29"),
+        "it says what the literal would become, got: {stdout}"
+    );
+    assert!(stdout.contains("Applied 0 fixes"), "got: {stdout}");
+    assert!(
+        !stdout.contains("Fixed header"),
+        "a file that is not written fixed nothing, got: {stdout}"
+    );
+}
+
+#[test]
+fn fix_refuses_a_file_whose_decimal_literal_would_be_rewritten() {
+    let original = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256},
+            "body":{"precise":0.1000000000000000055511151231257827}}}]}
+    ]}"#;
+
+    let (after, stdout, _) = fix_one(original, &[]);
+
+    assert_eq!(after, original);
+    assert!(
+        stdout.contains("'0.1000000000000000055511151231257827'")
+            && stdout.contains("would be written as 0.1,"),
+        "got: {stdout}"
+    );
+}
+
+/// The header `--fix` repairs is itself the literal it would corrupt: quoting it turns
+/// `123456789012345678901234567890` into the string `"1.2345678901234568e29"`.
+#[test]
+fn fix_refuses_to_quote_a_header_whose_own_number_it_cannot_write_back() {
+    let original = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200,"headers":{"X-Trace":123456789012345678901234567890}}}]}
+    ]}"#;
+
+    let (after, stdout, _) = fix_one(original, &[]);
+
+    assert_eq!(after, original);
+    assert!(
+        stdout.contains("Skipped") && stdout.contains("123456789012345678901234567890"),
+        "got: {stdout}"
+    );
+}
+
+/// A number that only changes spelling is formatting, which the Auto-Fix docs already say is not
+/// preserved. Refusing these would refuse ordinary files.
+#[test]
+fn fix_still_rewrites_a_file_whose_numbers_only_change_spelling() {
+    let original = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256},
+            "body":{"a":0.10,"b":1e2,"c":18446744073709551615,"d":-9223372036854775808}}}]}
+    ]}"#;
+
+    let (after, stdout, _) = fix_one(original, &[]);
+
+    assert!(stdout.contains("Applied 1 fixes"), "got: {stdout}");
+    assert!(!stdout.contains("Skipped"), "got: {stdout}");
+    for expected in [
+        r#""a": 0.1"#,
+        r#""b": 100.0"#,
+        r#""c": 18446744073709551615"#,
+        r#""d": -9223372036854775808"#,
+        r#""Content-Length": "256""#,
+    ] {
+        assert!(after.contains(expected), "missing {expected} in: {after}");
+    }
+}
+
+/// `--fix` only runs when the lint found an error, so the fixture carries one it cannot repair
+/// (`E044`) — otherwise this would pass without ever reaching the check.
+#[test]
+fn fix_says_nothing_about_a_lossy_number_in_a_file_it_would_not_have_written() {
+    let original = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[
+            {"is":{"statusCode":200,"body":{"big":123456789012345678901234567890}}},
+            {"proxy":{"to":"http://x","injectHeaders":{"X-Id":"a","X-Id":"b"}}}
+        ]}
+    ]}"#;
+
+    let (after, stdout, _) = fix_one(original, &[]);
+
+    assert_eq!(after, original);
+    assert!(
+        stdout.contains("Applied 0 fixes"),
+        "the fix pass ran, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Skipped"),
+        "nothing was at risk, so no refusal is reported, got: {stdout}"
+    );
+}
+
+#[test]
+fn json_mode_keeps_number_refusals_off_stdout() {
+    let original = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200,"headers":{"Content-Length":256},
+            "body":{"big":123456789012345678901234567890}}}]}
+    ]}"#;
+
+    let (after, stdout, stderr) = fix_one(original, &["-o", "json"]);
+
+    assert_eq!(after, original);
+    serde_json::from_str::<serde_json::Value>(stdout.trim()).expect("stdout is pure JSON");
+    assert!(
+        stderr.contains("Skipped") && stderr.contains("123456789012345678901234567890"),
+        "the refusal is still reported, on stderr, got: {stderr}"
+    );
+}
+
+/// Both reasons are reported, so resolving one does not reveal the other on the next run; the file
+/// is still counted once.
+#[test]
+fn a_file_with_a_repeated_key_and_a_lossy_number_reports_both_and_counts_once() {
+    let original = r#"{"port":3000,"protocol":"http","stubs":[
+        {"responses":[{"is":{"statusCode":200,"headers":{
+            "Content-Length":256,"Set-Cookie":"a=1","Set-Cookie":"b=2"},
+            "body":{"big":123456789012345678901234567890}}}]}
+    ]}"#;
+
+    let (after, stdout, _) = fix_one(original, &[]);
+
+    assert_eq!(after, original);
+    assert!(stdout.contains("Set-Cookie"), "got: {stdout}");
+    assert!(
+        stdout.contains("123456789012345678901234567890"),
+        "got: {stdout}"
+    );
+    assert_eq!(stdout.matches("Skipped:").count(), 2, "got: {stdout}");
+    assert!(stdout.contains("skipped 1 file "), "got: {stdout}");
+}

@@ -70,6 +70,16 @@ record.
   - `Document::duplicate_keys()` exposes the list the check reads. It is document-wide rather than
     limited to `E044`'s two fields, because a whole-file rewrite loses all of them.
 
+- **`rift-lint --fix` no longer rewrites a file whose number literal it cannot write back** (#1080).
+  A literal wider than `u64` or with more digits than `f64` carries is held as the nearest `f64`
+  once parsed, so `--fix` wrote `123456789012345678901234567890` back as `1.2345678901234568e29` and
+  `0.1000000000000000055511151231257827` as `0.1` while repairing an unrelated header. It now skips
+  such a file and names each literal, its line and column, and what it would have become.
+  - The engine parses a config file the same way, so it already serves the rounded value for such a
+    literal; `--fix` was destroying the only place the original digits still existed.
+  - A number that only changes spelling (`0.10` → `0.1`, `1e2` → `100.0`) is formatting, not loss,
+    and does not stop the rewrite. `Document::lossy_numbers()` exposes the list the check reads.
+
 - **A `${request.*}`, `copy` or `lookup` header value carrying a client-supplied control character
   failed the whole response instead of being repaired** (#1067). Response header values pass through
   two templating stages: the `{{ }}` stage has stripped characters a header value cannot carry since

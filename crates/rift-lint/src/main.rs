@@ -612,31 +612,51 @@ fn apply_fixes(imposters: &[(PathBuf, Document)], json_mode: bool) {
             }
         }
 
-        // `--fix` rewrites the whole file from the collapsed parse, and a byte-identical repeated
-        // key is already gone by then (issue #1076) — `serde_json::Map` is last-wins. Nothing is
-        // left to preserve, so the only safe action is not to write. Checked only when the file
-        // was going to be written: a duplicate in a file nothing would have touched is not at risk.
+        // `--fix` rewrites the whole file from the collapsed parse, so anything the parse already
+        // lost is written away for good. Two things are lost there, and the only safe action for
+        // either is not to write. Checked only when the file was going to be written: a file
+        // nothing would have touched is not at risk.
         //
-        // The case this exists for is the one the linter reports *nothing* about: a repeated name
-        // in `is.headers` is how a stub sends two `Set-Cookie` lines, and the engine merges it on
+        // A byte-identical repeated key (issue #1076) — `serde_json::Map` is last-wins. The case
+        // this exists for is the one the linter reports *nothing* about: a repeated name in
+        // `is.headers` is how a stub sends two `Set-Cookie` lines, and the engine merges it on
         // purpose. Rewriting such a file to quote an unrelated numeric header would halve the
         // cookies, silently.
+        //
+        // A number literal `serde_json` holds as the nearest `f64` (issue #1080) — a literal wider
+        // than `u64` or more precise than `f64`. Rewriting would replace the author's digits.
+        //
+        // Every reason is reported, so fixing one does not reveal the next on the following run.
         if file_fixed {
             // One line per distinct (place, key): `duplicate_keys` yields an entry per repeated
             // *occurrence*, so a key given three times would otherwise print the same line twice.
             let mut duplicates: Vec<(Option<&str>, &str)> = imposter.duplicate_keys().collect();
             duplicates.dedup();
-            if !duplicates.is_empty() {
-                files_skipped += 1;
-                for (location, key) in duplicates {
+            let mut refusals: Vec<String> = duplicates
+                .into_iter()
+                .map(|(location, key)| {
                     let place = match location {
                         Some(loc) => format!("at {loc}"),
                         None => "at the document root".to_string(),
                     };
+                    format!(
+                        "rewriting it would drop a repeated key: '{key}' {place}; resolve it in the file first"
+                    )
+                })
+                .collect();
+            refusals.extend(imposter.lossy_numbers().map(|n| {
+                format!(
+                    "rewriting it would change a number: '{}' at line {} column {} would be written as {}, which is also what the engine serves for it; write the value you mean",
+                    n.literal, n.line, n.column, n.written_as
+                )
+            }));
+            if !refusals.is_empty() {
+                files_skipped += 1;
+                for reason in refusals {
                     emit(
                         json_mode,
                         &format!(
-                            "{red}Skipped: {} — rewriting it would drop a repeated key: '{key}' {place}; resolve it in the file first (see Auto-Fix in the linting docs){reset}",
+                            "{red}Skipped: {} — {reason} (see Auto-Fix in the linting docs){reset}",
                             file.display()
                         ),
                     );

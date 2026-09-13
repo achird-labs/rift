@@ -20,12 +20,14 @@
 //! ```
 
 mod duplicate_keys;
+mod number_fidelity;
 mod types;
 mod validator;
 
 use std::path::Path;
 
 // Re-export public types
+pub use number_fidelity::LossyNumber;
 pub use types::{LintIssue, LintOptions, LintResult, Severity};
 
 // Re-export validation functions for advanced usage
@@ -90,6 +92,7 @@ pub struct Document {
     /// The parsed document. Byte-identical duplicate keys have already been collapsed here.
     pub value: serde_json::Value,
     duplicates: Vec<duplicate_keys::Duplicate>,
+    lossy_numbers: Vec<LossyNumber>,
     /// Whether `--configfile` will read this text through its YAML branch, where the only shape
     /// that loads is a top-level sequence of imposters (`E046`).
     ///
@@ -115,6 +118,18 @@ impl Document {
             .iter()
             .map(|d| (d.location.as_deref(), d.key.as_str()))
     }
+
+    /// Every number literal the raw text carried that `serde_json` cannot write back
+    /// digit-for-digit, in document order (issue #1080).
+    ///
+    /// [`Document::value`] holds such a literal as the nearest `f64` — `123456789012345678901234567890`
+    /// is `1.2345678901234568e29` there — so anything that rewrites the file from it changes the
+    /// number. A literal that only changes spelling (`0.10` → `0.1`, `1e2` → `100.0`) is not listed.
+    ///
+    /// Always empty for a document read by [`parse_yaml_document`]: nothing rewrites YAML.
+    pub fn lossy_numbers(&self) -> impl Iterator<Item = &LossyNumber> + '_ {
+        self.lossy_numbers.iter()
+    }
 }
 
 /// Parse `text` into a [`Document`], recording byte-identical duplicate keys before they collapse.
@@ -129,6 +144,7 @@ pub fn parse_document(text: &str) -> Result<Document, serde_json::Error> {
     Ok(Document {
         value,
         duplicates,
+        lossy_numbers: number_fidelity::find(text),
         yaml_sequence_required: false,
     })
 }
@@ -152,6 +168,7 @@ pub fn parse_yaml_document(text: &str) -> Result<Document, serde_yaml::Error> {
     Ok(Document {
         value,
         duplicates,
+        lossy_numbers: Vec::new(),
         yaml_sequence_required: !trimmed.starts_with('{') && !trimmed.starts_with('['),
     })
 }
