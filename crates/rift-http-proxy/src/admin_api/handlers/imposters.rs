@@ -816,6 +816,26 @@ mod allow_injection_tests {
         assert!(reject_if_injection_disallowed(&config, true).is_none());
     }
 
+    /// Issue #1093: `POST /imposters` admits a null behavior key without the flag, and a null
+    /// next to a live `decorate` is still refused.
+    #[test]
+    fn null_behavior_keys_accepted_but_do_not_hide_a_live_script() {
+        let with_behaviors = |behaviors: serde_json::Value| {
+            cfg(json!({
+                "protocol": "http",
+                "stubs": [{
+                    "responses": [{ "is": { "statusCode": 200, "body": "x" }, "_behaviors": behaviors }]
+                }]
+            }))
+        };
+        let null_only =
+            with_behaviors(json!({ "wait": null, "decorate": null, "shellTransform": null }));
+        assert!(reject_if_injection_disallowed(&null_only, false).is_none());
+
+        let mixed = with_behaviors(json!({ "wait": null, "decorate": "function(config) { }" }));
+        assert!(reject_if_injection_disallowed(&mixed, false).is_some());
+    }
+
     #[test]
     fn proxy_add_decorate_behavior_rejected_when_disallowed() {
         let config = cfg(json!({

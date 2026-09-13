@@ -141,14 +141,18 @@ fn raw_behaviors_are_scripted(behaviors: &serde_json::Value) -> bool {
         // so it is inert: dropped at construction, with `new_is` logging the drop.
         return false;
     };
-    let scripted_key_present = obj.contains_key("decorate") || obj.contains_key("shellTransform");
-    let wait_is_scripted = obj.get("wait").is_some_and(|w| !wait_is_plainly_numeric(w));
+    // An explicit `null` is the key absent (issue #1093): it parses to no behavior, so it is
+    // provably inert, not merely unparsed.
+    let present = |key: &str| obj.get(key).filter(|v| !v.is_null());
+    let scripted_key_present = present("decorate").is_some() || present("shellTransform").is_some();
+    let wait_is_scripted = present("wait").is_some_and(|w| !wait_is_plainly_numeric(w));
     scripted_key_present || wait_is_scripted
 }
 
 /// True only for the two wait spellings that cannot execute code: a fixed millisecond number and
 /// the `{min, max}` range. Everything else — a bare JS string, `{"inject": ...}`, or a shape this
-/// gate does not recognize — is treated as executable (issue #610).
+/// gate does not recognize — is treated as executable (issue #610). A `null` wait never reaches
+/// here: the caller treats it as absent (issue #1093).
 fn wait_is_plainly_numeric(wait: &serde_json::Value) -> bool {
     if wait.is_number() {
         return true;
@@ -158,4 +162,53 @@ fn wait_is_plainly_numeric(wait: &serde_json::Value) -> bool {
             && o.get("min").is_some_and(|v| v.is_number())
             && o.get("max").is_some_and(|v| v.is_number())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::raw_behaviors_are_scripted;
+    use serde_json::json;
+
+    /// Issue #1093: `null` deserializes to no behavior, so it is provably inert.
+    #[test]
+    fn null_behavior_keys_are_not_scripted() {
+        for block in [
+            json!({"wait": null}),
+            json!({"decorate": null}),
+            json!({"shellTransform": null}),
+            json!({"wait": null, "decorate": null, "shellTransform": null}),
+        ] {
+            assert!(!raw_behaviors_are_scripted(&block), "{block}");
+        }
+    }
+
+    #[test]
+    fn scripted_behaviors_are_still_scripted() {
+        for block in [
+            json!({"wait": "function() { return 1; }"}),
+            json!({"wait": {"inject": "function() { return 1; }"}}),
+            json!({"wait": true}),
+            json!({"decorate": "response.body = 'x';"}),
+            json!({"decorate": 1}),
+            json!({"shellTransform": "echo hi"}),
+            json!({"shellTransform": []}),
+            // A null sibling must not launder a live script.
+            json!({"wait": null, "decorate": "response.body = 'x';"}),
+            json!({"decorate": null, "shellTransform": "echo hi"}),
+            json!({"shellTransform": null, "wait": "function() { return 1; }"}),
+        ] {
+            assert!(raw_behaviors_are_scripted(&block), "{block}");
+        }
+    }
+
+    #[test]
+    fn plain_delays_are_not_scripted() {
+        for block in [
+            json!({"wait": 100}),
+            json!({"wait": {"min": 1, "max": 5}}),
+            json!({"repeat": 2}),
+        ] {
+            assert!(!raw_behaviors_are_scripted(&block), "{block}");
+        }
+    }
 }

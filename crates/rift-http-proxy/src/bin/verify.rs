@@ -1059,9 +1059,13 @@ fn check_if_dynamic(responses: &[serde_json::Value]) -> (bool, Option<String>) {
         _ => "dynamic behavior",
     };
     const DYNAMIC_BEHAVIORS: [&str; 5] = ["repeat", "decorate", "copy", "lookup", "shellTransform"];
+    // `null` is the key absent (issue #1093): it configures no behavior.
+    let has = |obj: &serde_json::Map<String, serde_json::Value>, k: &str| {
+        obj.get(k).is_some_and(|v| !v.is_null())
+    };
     if let Some(obj) = first.get("_behaviors").and_then(|v| v.as_object()) {
         for k in DYNAMIC_BEHAVIORS {
-            if obj.contains_key(k) {
+            if has(obj, k) {
                 return (true, Some(label(k).to_string()));
             }
         }
@@ -1069,7 +1073,7 @@ fn check_if_dynamic(responses: &[serde_json::Value]) -> (bool, Option<String>) {
     if let Some(arr) = first.get("behaviors").and_then(|v| v.as_array()) {
         for item in arr.iter().filter_map(|v| v.as_object()) {
             for k in DYNAMIC_BEHAVIORS {
-                if item.contains_key(k) {
+                if has(item, k) {
                     return (true, Some(label(k).to_string()));
                 }
             }
@@ -2516,6 +2520,25 @@ fn build_verify_client(timeout_secs: u64, insecure: bool) -> Result<Client, reqw
 #[cfg(test)]
 mod verify_tests {
     use super::*;
+
+    /// Issue #1093: a null behavior key configures nothing, so it must not make a stub "dynamic".
+    #[test]
+    fn a_null_behavior_key_does_not_make_a_response_dynamic() {
+        for responses in [
+            vec![
+                serde_json::json!({"is": {"statusCode": 200}, "_behaviors": {"copy": null, "repeat": null}}),
+            ],
+            vec![
+                serde_json::json!({"is": {"statusCode": 200}, "behaviors": [{"shellTransform": null}]}),
+            ],
+        ] {
+            assert_eq!(check_if_dynamic(&responses), (false, None), "{responses:?}");
+        }
+        let live = vec![
+            serde_json::json!({"is": {"statusCode": 200}, "_behaviors": {"wait": null, "copy": []}}),
+        ];
+        assert!(check_if_dynamic(&live).0, "a present copy is still dynamic");
+    }
 
     // Issue #982: the verify client must open a NEW connection per request.
     //

@@ -1938,6 +1938,33 @@ mod tests {
         assert!(err.contains("--allowInjection"), "got: {err}");
     }
 
+    /// Issue #1093: an explicit `null` behavior key is the key absent. It parses to no behavior,
+    /// so there is nothing to execute and the default configuration must admit it.
+    #[test]
+    fn configfile_injection_error_none_for_null_behavior_keys() {
+        let path = PathBuf::from("/cfg/imposters.json");
+        for behaviors in [
+            serde_json::json!({"wait": null}),
+            serde_json::json!({"decorate": null}),
+            serde_json::json!({"shellTransform": null}),
+            serde_json::json!({"wait": null, "decorate": null, "shellTransform": null, "repeat": 2}),
+        ] {
+            let config = config_from(serde_json::json!({
+                "port": 4545,
+                "protocol": "http",
+                "stubs": [{"responses": [{
+                    "is": {"statusCode": 200, "body": "ok"},
+                    "_behaviors": behaviors,
+                }]}],
+            }));
+            assert_eq!(
+                configfile_injection_error(&path, &[config], false),
+                None,
+                "{behaviors} must be admitted without --allowInjection"
+            );
+        }
+    }
+
     // AC3: the flag is the whole point — with it set, the same config loads.
     #[test]
     fn configfile_injection_error_none_when_flag_set() {
@@ -2024,6 +2051,31 @@ mod tests {
             summary.contains("/data/4501.json") && summary.contains("NOT being served"),
             "the gated file flows into the existing skip summary: {summary}"
         );
+    }
+
+    /// Issue #1093: a datadir file whose only "script" is a null behavior key stays servable.
+    #[test]
+    fn partition_gated_datadir_serves_a_null_behavior_file() {
+        let null_wait = config_from(serde_json::json!({
+            "port": 4503,
+            "protocol": "http",
+            "stubs": [{"responses": [{
+                "is": {"statusCode": 200, "body": "ok"},
+                "_behaviors": {"wait": null, "decorate": null},
+            }]}],
+        }));
+        let parsed = vec![
+            (
+                PathBuf::from("/data/4501.json"),
+                inject_response_config(4501),
+            ),
+            (PathBuf::from("/data/4503.json"), null_wait),
+        ];
+        let (servable, gated) = partition_gated_datadir(parsed, false);
+        assert_eq!(servable.len(), 1);
+        assert_eq!(servable[0].0, PathBuf::from("/data/4503.json"));
+        assert_eq!(gated.len(), 1);
+        assert_eq!(gated[0].path, PathBuf::from("/data/4501.json"));
     }
 
     // AC6: with the flag set, nothing is gated.

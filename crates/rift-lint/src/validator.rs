@@ -1257,8 +1257,11 @@ pub fn validate_behavior(
     let Some(obj) = behavior.as_object() else {
         return;
     };
+    // An explicit `null` is the key absent, to the engine's parser and its `--allowInjection` gate
+    // alike (issue #1093).
+    let present = |key: &str| obj.get(key).filter(|v| !v.is_null());
 
-    if let Some(wait) = obj.get("wait") {
+    if let Some(wait) = present("wait") {
         if let Some(script) = wait.as_str() {
             validate_javascript_behavior(
                 file,
@@ -1297,7 +1300,7 @@ pub fn validate_behavior(
         }
     }
 
-    if let Some(repeat) = obj.get("repeat") {
+    if let Some(repeat) = present("repeat") {
         let valid = repeat.as_u64().map(|n| n > 0).unwrap_or(false);
         if !valid {
             result.add_issue(
@@ -1312,7 +1315,7 @@ pub fn validate_behavior(
         }
     }
 
-    if let Some(decorate) = obj.get("decorate")
+    if let Some(decorate) = present("decorate")
         && let Some(script) = decorate.as_str()
     {
         validate_javascript_behavior(
@@ -1325,7 +1328,7 @@ pub fn validate_behavior(
         );
     }
 
-    if let Some(shell) = obj.get("shellTransform")
+    if let Some(shell) = present("shellTransform")
         && let Some(cmd) = shell.as_str()
     {
         let dangerous_patterns = ["rm ", "rm -", "sudo ", "chmod ", "dd ", "> /dev/"];
@@ -1344,11 +1347,11 @@ pub fn validate_behavior(
         }
     }
 
-    if let Some(copy) = obj.get("copy") {
+    if let Some(copy) = present("copy") {
         validate_copy_behavior(file, copy, &format!("{location}.copy"), result);
     }
 
-    if let Some(lookup) = obj.get("lookup") {
+    if let Some(lookup) = present("lookup") {
         validate_lookup_behavior(file, lookup, &format!("{location}.lookup"), result);
     }
 }

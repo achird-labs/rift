@@ -751,6 +751,27 @@ fn e035_not_fired_for_valid_repeat() {
     assert!(!has_code(&r, "E035"), "unexpected E035: {:?}", codes(&r));
 }
 
+// Issue #1093: `null` for a behavior key is the key absent, as it is to the engine.
+#[test]
+fn null_behavior_keys_are_absent() {
+    let behavior = json!({
+        "wait": null, "repeat": null, "decorate": null,
+        "shellTransform": null, "copy": null, "lookup": null
+    });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &behavior, "loc", &mut r, &opts());
+    assert!(r.issues.is_empty(), "got {:?}", codes(&r));
+
+    for (bad, code) in [
+        (json!({ "wait": true }), "E025"),
+        (json!({ "repeat": "3" }), "E035"),
+    ] {
+        let mut r = LintResult::new();
+        validate_behavior(path(), &bad, "loc", &mut r, &opts());
+        assert_eq!(codes(&r), vec![code], "{bad}");
+    }
+}
+
 #[test]
 fn w008_shell_transform_dangerous_command() {
     let behavior = json!({ "shellTransform": "rm -rf /tmp/foo" });

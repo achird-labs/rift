@@ -434,7 +434,10 @@ fn inject_wait_behavior(response: StubResponse, wait_val: serde_json::Value) -> 
         } => {
             let behaviors = Some(match behaviors {
                 Some(serde_json::Value::Object(mut obj)) => {
-                    obj.entry("wait").or_insert(wait_val);
+                    // `"wait": null` is no wait (issue #1093), so the stub's delay still applies.
+                    if obj.get("wait").is_none_or(serde_json::Value::is_null) {
+                        obj.insert("wait".to_string(), wait_val);
+                    }
                     serde_json::Value::Object(obj)
                 }
                 Some(other) => other,
@@ -2435,6 +2438,25 @@ mod tests {
             // min != max → range object
             assert_eq!(wait.get("min").unwrap(), &json!(50u64));
             assert_eq!(wait.get("max").unwrap(), &json!(100u64));
+        } else {
+            panic!("expected Is response");
+        }
+    }
+
+    /// Issue #1093: a response's `"wait": null` is no wait, so the stub-level delay fills it.
+    #[test]
+    fn test_stub_delay_range_fills_a_null_wait() {
+        let stub: Stub = serde_json::from_value(json!({
+            "predicates": [],
+            "delayRange": [{ "min": 200, "max": 200 }],
+            "responses": [{ "is": { "statusCode": 200 }, "_behaviors": { "wait": null } }]
+        }))
+        .unwrap();
+        if let StubResponse::Is { behaviors, .. } = &stub.responses[0] {
+            assert_eq!(
+                behaviors.as_ref().unwrap().get("wait"),
+                Some(&json!(200u64))
+            );
         } else {
             panic!("expected Is response");
         }
