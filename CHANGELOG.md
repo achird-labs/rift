@@ -59,6 +59,18 @@ record.
     fails to parse, and with an error log line the response loses its `wait`, `copy`, `lookup`,
     `decorate` and `shellTransform`. Only `repeat`, which is read separately, still applies.
 
+- **EJS examples on five docs pages could not work as written** (#1092). The config loader evaluates
+  only `process.env` expressions and the `include` and `stringify` tags, and strips every other
+  tag, so each example loaded with an empty field.
+  - `docs/mountebank/imposters.md` set `"port": "<%= port || 4545 %>"`, which became `"port": ""`
+    and was refused at load. It now reads `"port": <%= process.env.PORT || '4545' %>`, without quotes.
+  - `docs/mountebank/responses.md` built a response body from `<%- request.path %>`. The loader
+    strips it, since EJS runs at load time and has no request. It now uses `${request.path}` and
+    points to date templates.
+  - `docs/features/tls.md` (twice), `docs/configuration/mountebank.md` and
+    `docs/deployment/kubernetes.md` loaded a TLS key and certificate with `<%- include('…') %>`, a
+    spelling the loader does not recognize, so both were empty. They now use `<%- stringify('…') %>`.
+
 - **A float in a stub body was served with different digits than it was written with** (#1085).
   `serde_json`'s default float parser is not correctly rounded: outside a narrow fast path it can
   land one representable double away, so a body written as `{"n": 7e23}` was served as

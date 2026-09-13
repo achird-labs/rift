@@ -180,8 +180,8 @@ data:
       "imposters": [{
         "port": 4545,
         "protocol": "https",
-        "key": "<%- include('/tls/tls.key') %>",
-        "cert": "<%- include('/tls/tls.crt') %>",
+        "key": "<%- stringify('/tls/tls.key') %>",
+        "cert": "<%- stringify('/tls/tls.crt') %>",
         "stubs": [...]
       }]
     }
