@@ -1,6 +1,6 @@
 use rift_lint::{
-    LintOptions, LintResult, Severity, lint_directory, lint_file, lint_json, lint_value,
-    validate_behavior, validate_imposter, validate_is_response, validate_predicate,
+    LintOptions, LintResult, Severity, imposters_in, lint_directory, lint_file, lint_json,
+    lint_value, validate_behavior, validate_imposter, validate_is_response, validate_predicate,
     validate_proxy_response, validate_response, validate_stub,
 };
 use serde_json::{Value, json};
@@ -1605,17 +1605,19 @@ fn e044_finds_the_field_through_every_document_shape() {
         format!(r#"{{"imposters":[{{"port":3000,"protocol":"http","stubs":[{stub}]}}]}}"#);
     let bare = format!(r#"[{{"port":3000,"protocol":"http","stubs":[{stub}]}}]"#);
 
-    for (shape, raw) in [
-        ("single imposter", &single),
-        ("imposters wrapper", &wrapped),
-        ("bare array", &bare),
+    // Issue #1094 moved the prefix dispatch into `imposters_in`; pin the exact locations.
+    for (raw, location) in [
+        (&single, "stubs[0].responses[0].proxy.injectHeaders"),
+        (
+            &wrapped,
+            "imposters[0].stubs[0].responses[0].proxy.injectHeaders",
+        ),
+        (&bare, "[0].stubs[0].responses[0].proxy.injectHeaders"),
     ] {
         let r = lint_json(raw, "<test>", &opts());
-        assert!(
-            has_code(&r, "E044"),
-            "{shape}: expected E044, got {:?}",
-            codes(&r)
-        );
+        let hits: Vec<_> = r.issues.iter().filter(|i| i.code == "E044").collect();
+        assert_eq!(hits.len(), 1, "{location}: got {:?}", codes(&r));
+        assert_eq!(hits[0].location.as_deref(), Some(location));
     }
 }
 
@@ -2251,4 +2253,48 @@ fn w012_reports_a_number_outside_a_response_body_in_neutral_terms() {
         "got: {}",
         hits[0].message
     );
+}
+
+/// Issue #1094: every imposter a document holds, with the location prefix of its slot, for the
+/// three shapes `--configfile` loads.
+#[test]
+fn imposters_in_yields_each_shape_with_its_prefix() {
+    let single = json!({"port": 1, "protocol": "http"});
+    let slots: Vec<(String, Value)> = imposters_in(&single)
+        .into_iter()
+        .map(|(p, v)| (p, v.clone()))
+        .collect();
+    assert_eq!(
+        slots,
+        vec![(String::new(), json!({"port": 1, "protocol": "http"}))]
+    );
+
+    let wrapper = json!({"imposters": [{"port": 1}, {"port": 2}]});
+    let slots: Vec<(String, Value)> = imposters_in(&wrapper)
+        .into_iter()
+        .map(|(p, v)| (p, v.clone()))
+        .collect();
+    assert_eq!(
+        slots,
+        vec![
+            ("imposters[0].".to_string(), json!({"port": 1})),
+            ("imposters[1].".to_string(), json!({"port": 2})),
+        ]
+    );
+
+    let array = json!([{"port": 1}, {"port": 2}]);
+    let slots: Vec<(String, Value)> = imposters_in(&array)
+        .into_iter()
+        .map(|(p, v)| (p, v.clone()))
+        .collect();
+    assert_eq!(
+        slots,
+        vec![
+            ("[0].".to_string(), json!({"port": 1})),
+            ("[1].".to_string(), json!({"port": 2})),
+        ]
+    );
+
+    assert!(imposters_in(&json!({"imposters": []})).is_empty());
+    assert!(imposters_in(&json!([])).is_empty());
 }

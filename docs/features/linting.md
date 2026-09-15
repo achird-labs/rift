@@ -84,7 +84,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | Code | Description | Example |
 |:-----|:------------|:--------|
 | E001 | File could not be read, or is not valid JSON | Missing comma, unquoted string, unreadable path |
-| E002 | Port conflict | Two imposters on port 4545 |
+| E002 | Port conflict — more than one imposter declares the same port, inside one file (`{"imposters": [...]}` or `[...]`) or across files. An absent or `null` port is auto-assigned and never conflicts; `0` is reported as E005 instead | Two imposters on port 4545 |
 | E003 | Missing required field, or set to `null` | No `port` or `stubs` field |
 | E004 | Invalid protocol | Protocol is "ftp" instead of "http" |
 | E005 | Port out of range | Port 70000 (max is 65535) |

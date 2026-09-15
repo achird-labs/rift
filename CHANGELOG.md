@@ -103,6 +103,15 @@ record.
   overflowed while suggesting the next free port: a panic in a debug build, "Consider using ports
   0+" in a release build. It now reports E002 without that suggestion.
 
+- **`rift-lint` never reported a port used twice inside one file, or by a file in the
+  `{"imposters": [...]}` or bare `[...]` form** (#1094). The E002 check read only a document's
+  top-level `port`, so those two shapes added nothing to the conflict map. A duplicate there loads
+  with one imposter silently missing under `--configfile`, and `POST /admin/reload` refuses the whole
+  set. Every imposter in a document is now compared, within the file and across files. The finding
+  names the first imposter's slot as its location (`imposters[0].port`, `[0].port`, or `port`), and
+  the message counts imposters rather than files: `Port 4545 is used by 2 imposters: a.json
+  (imposters[0], imposters[1])`.
+
 - **`rift-lint --fix` no longer rewrites a file whose parse dropped a repeated key** (#1076).
   `--fix` re-serializes the whole document from its parsed form, where a byte-identical repeated key
   is already gone (`serde_json::Map` is last-wins), so repairing an unrelated numeric header could
