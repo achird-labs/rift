@@ -568,19 +568,17 @@ impl ServerBuilder {
         // `--configfile` and `--imposters` converge here: the flag is sugar for a single `file:`
         // ref, so both spellings run the same fetch, gating and block handling (U-12).
         let source_set = resolve_source_set(&cli, extra_sources, &outbound_tls)?;
-        if let Some(set) = &source_set {
-            let loaded = load_imposters_from_sources(
+        if source_set.is_some() || cli.datadir.is_some() {
+            let loaded = load_startup_imposters(
                 &manager,
-                set,
+                source_set.as_deref(),
+                cli.datadir.as_deref(),
                 cli.allow_injection,
                 &cli_intercept_flags(&cli),
             )
             .await?;
             intercept_block = loaded.intercept;
             routes_block = loaded.routes;
-        }
-        if let Some(ref datadir) = cli.datadir {
-            load_imposters_from_datadir(&manager, datadir, cli.allow_injection).await?;
         }
 
         // Bind the metrics server now so a `:0` request can report its port. A bind failure
@@ -1366,7 +1364,7 @@ fn configfile_intercept_injection_error(
 /// What a `--configfile` load hands back to the caller besides the imposters themselves: the
 /// optional `intercept` block (issue #655) and the optional `routes` block (issue #19 / U-11).
 /// Both are boot-time-only and already validated by `load_configs_full` before this returns.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct ConfigFileStartOptions {
     intercept: Option<InterceptStartOptions>,
     routes: Option<RouteTable>,
@@ -1406,15 +1404,54 @@ fn resolve_source_set(
     Ok(Some(Arc::new(SourceSet::new(refs, registry))))
 }
 
-/// Boot-time load from every `--imposters` source, with the same refusals `--configfile` has
-/// always applied — injection gating and the intercept-source conflict — evaluated across the
-/// merged set before a single imposter exists, so a rejected document cannot half-load.
-async fn load_imposters_from_sources(
+/// Boot-time load of every imposter store: the `--imposters`/`--configfile` sources and the
+/// `--datadir`.
+///
+/// Every refusal comes before the first create: the sources' injection gating and intercept-source
+/// conflict abort startup, and a datadir that cannot be listed aborts it too, so a rejected
+/// document cannot half-load. Then both stores are created in one pass with explicit ports first
+/// (issue #1120): an auto-assigned port is the lowest free one, so a port-less imposter created
+/// before a datadir file's imposter could take the port that file names.
+async fn load_startup_imposters(
     manager: &Arc<ImposterManager>,
-    set: &SourceSet,
+    sources: Option<&SourceSet>,
+    datadir: Option<&Path>,
     allow_injection: bool,
     intercept_flags: &[&str],
 ) -> anyhow::Result<ConfigFileStartOptions> {
+    let (source_configs, options) = match sources {
+        Some(set) => fetch_and_gate_sources(set, allow_injection, intercept_flags).await?,
+        None => (Vec::new(), ConfigFileStartOptions::default()),
+    };
+    let (datadir_configs, mut skipped) = match datadir {
+        Some(dir) => read_and_gate_datadir(dir, allow_injection)?,
+        None => (Vec::new(), Vec::new()),
+    };
+
+    let entries = source_configs
+        .into_iter()
+        .map(|config| (StartupOrigin::Source, config))
+        .chain(
+            datadir_configs
+                .into_iter()
+                .map(|(path, config)| (StartupOrigin::Datadir(path), config)),
+        )
+        .collect();
+    skipped.extend(create_startup_imposters(manager, entries).await);
+
+    if let Some(summary) = format_skipped_summary(&skipped) {
+        error!("{summary}");
+    }
+    Ok(options)
+}
+
+/// Fetch every source and apply the refusals `--configfile` has always applied, across the merged
+/// set. Creates nothing.
+async fn fetch_and_gate_sources(
+    set: &SourceSet,
+    allow_injection: bool,
+    intercept_flags: &[&str],
+) -> anyhow::Result<(Vec<ImposterConfig>, ConfigFileStartOptions)> {
     for source_ref in &set.refs {
         info!("Loading imposters from source: {}", source_ref.uri);
     }
@@ -1442,30 +1479,68 @@ async fn load_imposters_from_sources(
         }
     }
 
-    let mut imposters = merged.imposters;
-    // Explicit ports first, as `apply_config` does, so a port-less imposter cannot take a port a
-    // later one in the file names (issue #1112).
-    ImposterManager::explicit_ports_first(&mut imposters);
-    for config in imposters {
-        info!("Creating imposter on port {:?} from source", config.port);
-        // Ephemeral (issue #1122): the source is where this imposter is re-read from, at restart
-        // and at reload. A datadir copy would load as a second imposter beside it.
-        match manager
-            .create_imposter_as(config, Persistence::Ephemeral)
-            .await
-        {
-            Ok(port) => info!("Created imposter on port {}", port),
-            Err(e) => error!("Failed to create imposter: {}", e),
-        }
-    }
-
-    Ok(ConfigFileStartOptions {
-        intercept: merged.intercept,
-        routes: merged.routes,
-    })
+    Ok((
+        merged.imposters,
+        ConfigFileStartOptions {
+            intercept: merged.intercept,
+            routes: merged.routes,
+        },
+    ))
 }
 
-/// Load imposters from a data directory
+/// Which store a startup imposter came from: it decides whether the imposter is written to the
+/// datadir and where a failure to create it is reported.
+#[derive(Debug)]
+enum StartupOrigin {
+    Source,
+    Datadir(PathBuf),
+}
+
+/// Create every startup imposter, explicit ports first, and return the datadir files that could
+/// not be created. A source imposter that fails is logged on its own, as it always was.
+async fn create_startup_imposters(
+    manager: &Arc<ImposterManager>,
+    mut entries: Vec<(StartupOrigin, ImposterConfig)>,
+) -> Vec<SkippedImposterFile> {
+    // Stable, so sources still precede the datadir within each class: a port both declare is
+    // served from the source, and the datadir file is skipped and named.
+    entries.sort_by_key(|(_, config)| config.explicit_port().is_none());
+
+    let mut skipped = Vec::new();
+    for (origin, config) in entries {
+        match origin {
+            StartupOrigin::Source => {
+                let port = config.port;
+                info!("Creating imposter on port {:?} from source", port);
+                // Ephemeral (issue #1122): the source is where this imposter is re-read from, at
+                // restart and at reload. A datadir copy would load as a second imposter beside it.
+                match manager
+                    .create_imposter_as(config, Persistence::Ephemeral)
+                    .await
+                {
+                    Ok(assigned) => info!("Created imposter on port {}", assigned),
+                    Err(e) => error!("Failed to create imposter on port {port:?} from source: {e}"),
+                }
+            }
+            StartupOrigin::Datadir(path) => {
+                info!("Loading imposter on port {:?} from {:?}", config.port, path);
+                match manager
+                    .create_imposter_as(config, Persistence::Datadir)
+                    .await
+                {
+                    Ok(port) => info!("Created imposter on port {} from {:?}", port, path),
+                    // Surfaced once, via the aggregated summary, uniform with the other skip reasons.
+                    Err(e) => skipped.push(SkippedImposterFile {
+                        path,
+                        reason: format!("imposter creation failed: {e}"),
+                    }),
+                }
+            }
+        }
+    }
+    skipped
+}
+
 /// A datadir `*.json` file that could not be turned into a served imposter, kept so the loader can
 /// surface all of them together instead of dropping each with only a per-file log line (issue #532).
 struct SkippedImposterFile {
@@ -1553,44 +1628,28 @@ fn read_and_parse_datadir(
     Ok((parsed, skipped))
 }
 
-async fn load_imposters_from_datadir(
-    manager: &Arc<ImposterManager>,
-    datadir: &PathBuf,
+/// Parse and gate every file in `datadir`, creating the directory when it is missing. Creates no
+/// imposter; unparseable and gated files come back as skipped, never fatal.
+fn read_and_gate_datadir(
+    datadir: &Path,
     allow_injection: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(Vec<LoadedImposter>, Vec<SkippedImposterFile>)> {
     info!("Loading imposters from datadir: {:?}", datadir);
 
     if !datadir.exists() {
         std::fs::create_dir_all(datadir)?;
-        return Ok(());
+        return Ok((Vec::new(), Vec::new()));
     }
 
     // `file:`/`ref:` scripts in a datadir-loaded imposter resolve relative to the datadir itself,
     // escape-checked: these `{port}.json` files can be network-authored (persisted from an
     // admin-API POST), so an absolute path or `..` escape is rejected, never read (issue #356
     // B1/B2 defense-in-depth against a datadir re-resolution reading `/etc/passwd`).
-    let base = ScriptBaseDir::DatadirRelative(datadir.clone());
+    let base = ScriptBaseDir::DatadirRelative(datadir.to_path_buf());
     let (parsed, mut skipped) = read_and_parse_datadir(datadir, &base)?;
     let (parsed, gated) = partition_gated_datadir(parsed, allow_injection);
     skipped.extend(gated);
-
-    for (path, config) in parsed {
-        info!("Loading imposter on port {:?} from {:?}", config.port, path);
-        match manager.create_imposter(config).await {
-            Ok(port) => info!("Created imposter on port {} from {:?}", port, path),
-            // Surfaced once, via the aggregated summary below, uniform with the other skip reasons.
-            Err(e) => skipped.push(SkippedImposterFile {
-                path,
-                reason: format!("imposter creation failed: {e}"),
-            }),
-        }
-    }
-
-    if let Some(summary) = format_skipped_summary(&skipped) {
-        error!("{summary}");
-    }
-
-    Ok(())
+    Ok((parsed, skipped))
 }
 
 #[cfg(test)]
@@ -2180,7 +2239,7 @@ mod tests {
 
         let manager = Arc::new(ImposterManager::new());
         let set = single_file_source(&path);
-        let err = load_imposters_from_sources(&manager, &set, false, &[])
+        let err = load_startup_imposters(&manager, Some(&set), None, false, &[])
             .await
             .expect_err("a gated configfile must abort startup");
         assert!(err.to_string().contains("--allowInjection"), "got: {err}");
@@ -2207,7 +2266,7 @@ mod tests {
 
         let manager = Arc::new(ImposterManager::new());
         let set = single_file_source(&example);
-        let err = load_imposters_from_sources(&manager, &set, false, &[])
+        let err = load_startup_imposters(&manager, Some(&set), None, false, &[])
             .await
             .expect_err("examples/latency-testing.json uses a JS-function wait; it must be gated");
         assert!(err.to_string().contains("--allowInjection"), "got: {err}");
@@ -2217,6 +2276,8 @@ mod tests {
 
     // Issue #1122: persist-on-create exists for the admin API. A source-loaded imposter is re-read
     // from its source, so a datadir copy of it is a second, unmatched imposter on the next load.
+    // Serial with the tests that learn the next auto-assigned port (issue #1120).
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn source_loaded_imposters_are_not_persisted_to_the_datadir() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2232,7 +2293,7 @@ mod tests {
         );
 
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        load_imposters_from_sources(&manager, &single_file_source(&path), false, &[])
+        load_startup_imposters(&manager, Some(&single_file_source(&path)), None, false, &[])
             .await
             .expect("clean configfile loads");
         assert_eq!(manager.count(), 2);
@@ -2257,6 +2318,347 @@ mod tests {
         manager.delete_all().await;
     }
 
+    // ── Issue #1120: one startup create pass over both stores ───────────────────────────────────
+
+    /// What `ServerBuilder::start` runs for `--configfile`/`--imposters` and `--datadir`.
+    async fn startup_load(
+        manager: &Arc<ImposterManager>,
+        set: Option<&SourceSet>,
+        datadir: Option<&Path>,
+    ) -> anyhow::Result<()> {
+        load_startup_imposters(manager, set, datadir, false, &[])
+            .await
+            .map(|_| ())
+    }
+
+    /// The port the next port-less create will be given, learned rather than hardcoded: fixed test
+    /// ports live below the 49152 auto-assign floor.
+    async fn next_auto_assigned_port() -> u16 {
+        let probe = ImposterManager::new();
+        let port = probe
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({"protocol": "http", "stubs": []}))
+                    .expect("config"),
+            )
+            .await
+            .expect("probe create");
+        probe.delete_all().await;
+        port
+    }
+
+    fn datadir_name(datadir: &Path, port: u16) -> Option<String> {
+        let file = datadir.join(format!("{port}.json"));
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()?;
+        body["name"].as_str().map(str::to_string)
+    }
+
+    // Serial: it learns the next auto-assigned port, which any parallel port-less create can take.
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_port_less_configfile_imposter_does_not_take_a_datadir_files_port() {
+        let port = next_auto_assigned_port().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let datadir = dir.path().join("data");
+        std::fs::create_dir(&datadir).expect("mkdir");
+        write_json(
+            &datadir.join(format!("{port}.json")),
+            serde_json::json!({"port": port, "protocol": "http", "name": "from-datadir", "stubs": []}),
+        );
+        let path = dir.path().join("imposters.json");
+        write_json(
+            &path,
+            serde_json::json!({"imposters": [
+                {"protocol": "http", "name": "from-configfile", "stubs": []}
+            ]}),
+        );
+
+        let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        startup_load(&manager, Some(&single_file_source(&path)), Some(&datadir))
+            .await
+            .expect("startup load");
+
+        assert_eq!(manager.count(), 2, "both stores' imposters are served");
+        let on_port = manager
+            .get_imposter(port)
+            .expect("the datadir imposter keeps its port");
+        assert_eq!(on_port.config.name.as_deref(), Some("from-datadir"));
+        assert_eq!(
+            datadir_name(&datadir, port).as_deref(),
+            Some("from-datadir")
+        );
+        assert!(
+            !logs_contain("were skipped and are NOT being served"),
+            "no datadir file may be skipped"
+        );
+
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn a_gated_configfile_beside_a_datadir_creates_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let datadir = dir.path().join("data");
+        std::fs::create_dir(&datadir).expect("mkdir");
+        write_json(
+            &datadir.join("23771.json"),
+            serde_json::json!({"port": 23771, "protocol": "http", "stubs": []}),
+        );
+        let path = dir.path().join("imposters.json");
+        write_json(
+            &path,
+            serde_json::json!({"imposters": [
+                {"port": 23772, "protocol": "http",
+                 "stubs": [{"responses": [{"inject": "function (req) { return {body: 'x'}; }"}]}]},
+            ]}),
+        );
+
+        let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        let err = startup_load(&manager, Some(&single_file_source(&path)), Some(&datadir))
+            .await
+            .expect_err("a gated configfile aborts startup");
+        assert!(
+            format!("{err:#}").contains("--allowInjection"),
+            "got: {err:#}"
+        );
+        assert_eq!(
+            manager.count(),
+            0,
+            "nothing from either store may be serving"
+        );
+
+        manager.delete_all().await;
+    }
+
+    // The same hazard inside one datadir: a port-less file must be created after every file that
+    // names a port, whatever order the directory lists them in.
+    // Serial: it learns the next auto-assigned port, which any parallel port-less create can take.
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn a_port_less_datadir_file_does_not_take_another_datadir_files_port() {
+        let port = next_auto_assigned_port().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let datadir = dir.path().join("data");
+        std::fs::create_dir(&datadir).expect("mkdir");
+        // The directory's listing order is up to the filesystem, so this passes against an unsorted
+        // loader whenever `<port>.json` happens to be listed first. The assertions hold for any
+        // order; `the_startup_create_pass_creates_explicit_ports_first` is the deterministic guard.
+        for name in ["0a.json", "0b.json"] {
+            write_json(
+                &datadir.join(name),
+                serde_json::json!({"protocol": "http", "name": "port-less", "stubs": []}),
+            );
+        }
+        write_json(
+            &datadir.join(format!("{port}.json")),
+            serde_json::json!({"port": port, "protocol": "http", "name": "from-datadir", "stubs": []}),
+        );
+
+        let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        startup_load(&manager, None, Some(&datadir))
+            .await
+            .expect("startup load");
+
+        assert_eq!(manager.count(), 3);
+        let on_port = manager
+            .get_imposter(port)
+            .expect("the explicit file keeps its port");
+        assert_eq!(on_port.config.name.as_deref(), Some("from-datadir"));
+        assert_eq!(
+            datadir_name(&datadir, port).as_deref(),
+            Some("from-datadir")
+        );
+
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn a_missing_datadir_is_created_and_the_sources_still_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let datadir = dir.path().join("data");
+        let path = dir.path().join("imposters.json");
+        write_json(
+            &path,
+            serde_json::json!({"imposters": [{"port": 23774, "protocol": "http", "stubs": []}]}),
+        );
+
+        let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        startup_load(&manager, Some(&single_file_source(&path)), Some(&datadir))
+            .await
+            .expect("startup load");
+
+        assert!(datadir.is_dir(), "the datadir is created");
+        assert!(manager.get_imposter(23774).is_ok());
+
+        manager.delete_all().await;
+    }
+
+    // A datadir that cannot be listed aborts startup. It used to do so after the source imposters
+    // were already bound and serving.
+    #[tokio::test]
+    async fn an_unlistable_datadir_aborts_before_any_source_imposter_is_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let not_a_dir = dir.path().join("data");
+        std::fs::write(&not_a_dir, "a file, not a directory").expect("write");
+        let path = dir.path().join("imposters.json");
+        write_json(
+            &path,
+            serde_json::json!({"imposters": [{"port": 23775, "protocol": "http", "stubs": []}]}),
+        );
+
+        let manager = Arc::new(ImposterManager::with_datadir(Some(not_a_dir.clone())));
+        startup_load(&manager, Some(&single_file_source(&path)), Some(&not_a_dir))
+            .await
+            .expect_err("an unlistable datadir is fatal");
+        assert_eq!(manager.count(), 0, "no source imposter may be serving");
+
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn a_port_in_both_stores_names_the_datadir_file_as_skipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("23776.json");
+        let config = |name: &str| -> ImposterConfig {
+            serde_json::from_value(
+                serde_json::json!({"port": 23776, "protocol": "http", "name": name, "stubs": []}),
+            )
+            .expect("config")
+        };
+
+        let manager = Arc::new(ImposterManager::with_datadir(Some(
+            dir.path().to_path_buf(),
+        )));
+        let skipped = create_startup_imposters(
+            &manager,
+            vec![
+                (StartupOrigin::Source, config("from-configfile")),
+                (StartupOrigin::Datadir(file.clone()), config("from-datadir")),
+            ],
+        )
+        .await;
+
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].path, file);
+        assert!(
+            skipped[0].reason.starts_with("imposter creation failed: "),
+            "got: {}",
+            skipped[0].reason
+        );
+        assert_eq!(
+            manager
+                .get_imposter(23776)
+                .expect("served")
+                .config
+                .name
+                .as_deref(),
+            Some("from-configfile"),
+            "sources are handed over first, as `load_startup_imposters` does"
+        );
+
+        manager.delete_all().await;
+    }
+
+    // The ordering itself, independent of how a filesystem lists a directory: a port-less entry
+    // handed over first must still be created after the entry that names the port it would take.
+    // Serial: it learns the next auto-assigned port, which any parallel port-less create can take.
+    #[serial_test::serial(auto_assigned_port)]
+    #[tokio::test]
+    async fn the_startup_create_pass_creates_explicit_ports_first() {
+        let port = next_auto_assigned_port().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = |value: serde_json::Value| -> ImposterConfig {
+            serde_json::from_value(value).expect("config")
+        };
+
+        let manager = Arc::new(ImposterManager::with_datadir(Some(
+            dir.path().to_path_buf(),
+        )));
+        let skipped = create_startup_imposters(
+            &manager,
+            vec![
+                (
+                    StartupOrigin::Source,
+                    config(
+                        serde_json::json!({"protocol": "http", "name": "port-less", "stubs": []}),
+                    ),
+                ),
+                (
+                    StartupOrigin::Datadir(dir.path().join(format!("{port}.json"))),
+                    config(serde_json::json!(
+                        {"port": port, "protocol": "http", "name": "explicit", "stubs": []}
+                    )),
+                ),
+            ],
+        )
+        .await;
+
+        assert!(
+            skipped.is_empty(),
+            "nothing may be skipped, got: {:?}",
+            skipped.iter().map(|s| &s.reason).collect::<Vec<_>>()
+        );
+        assert_eq!(manager.count(), 2);
+        assert_eq!(
+            manager
+                .get_imposter(port)
+                .expect("explicit")
+                .config
+                .name
+                .as_deref(),
+            Some("explicit")
+        );
+
+        manager.delete_all().await;
+    }
+
+    // Boot stays lenient where reload refuses (#1122): a port declared by both stores is served
+    // from the source, and the datadir file is skipped, named, and left on disk.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_port_in_both_stores_is_served_from_the_source_and_the_file_is_kept() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let datadir = dir.path().join("data");
+        std::fs::create_dir(&datadir).expect("mkdir");
+        write_json(
+            &datadir.join("23773.json"),
+            serde_json::json!({"port": 23773, "protocol": "http", "name": "from-datadir", "stubs": []}),
+        );
+        let path = dir.path().join("imposters.json");
+        write_json(
+            &path,
+            serde_json::json!({"imposters": [
+                {"port": 23773, "protocol": "http", "name": "from-configfile", "stubs": []}
+            ]}),
+        );
+
+        let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        startup_load(&manager, Some(&single_file_source(&path)), Some(&datadir))
+            .await
+            .expect("a collision is not fatal at startup");
+
+        assert_eq!(manager.count(), 1);
+        assert_eq!(
+            manager
+                .get_imposter(23773)
+                .expect("served")
+                .config
+                .name
+                .as_deref(),
+            Some("from-configfile")
+        );
+        // The per-file entries are continuation lines of one event, which `logs_contain` does not
+        // match; `a_port_in_both_stores_names_the_datadir_file_as_skipped` checks the entry itself.
+        assert!(logs_contain("were skipped and are NOT being served"));
+        assert_eq!(
+            datadir_name(&datadir, 23773).as_deref(),
+            Some("from-datadir")
+        );
+
+        manager.delete_all().await;
+    }
+
     #[tokio::test]
     async fn load_imposters_from_datadir_serves_the_clean_file_and_skips_the_scripted_one() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2273,7 +2675,7 @@ mod tests {
 
         let manager = Arc::new(ImposterManager::new());
         let datadir = dir.path().to_path_buf();
-        load_imposters_from_datadir(&manager, &datadir, false)
+        load_startup_imposters(&manager, None, Some(&datadir), false, &[])
             .await
             .expect("a gated datadir file is skipped, never fatal");
 
@@ -2300,7 +2702,7 @@ mod tests {
 
         let manager = Arc::new(ImposterManager::new());
         let datadir = dir.path().to_path_buf();
-        load_imposters_from_datadir(&manager, &datadir, true)
+        load_startup_imposters(&manager, None, Some(&datadir), true, &[])
             .await
             .expect("datadir load succeeds");
         assert!(

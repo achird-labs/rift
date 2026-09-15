@@ -936,6 +936,8 @@ mod tests {
         manager.delete_all().await;
     }
 
+    // Serial with the tests that learn the next auto-assigned port (issue #1120).
+    #[serial_test::serial(auto_assigned_port)]
     #[tokio::test]
     async fn reload_creates_a_port_less_source_imposter_without_persisting_it() {
         let dir = tempfile::tempdir().expect("tempdir");
