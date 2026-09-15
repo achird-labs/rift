@@ -7,6 +7,27 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::error;
 
+/// Whether an imposter is written through to the manager's datadir (issue #1122).
+///
+/// Persist-on-create exists so an imposter created through the admin API survives a restart
+/// (issues #563/#575). An imposter loaded from `--configfile`/`--imposters` already has a store it
+/// is re-read from; a datadir copy of it would be a second imposter with no rule to match it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Persistence {
+    /// Written to `{port}.json` on create and on every config change.
+    Datadir,
+    /// Never written to the datadir.
+    Ephemeral,
+}
+
+/// One entry of the desired set passed to
+/// [`ImposterManager::apply_desired`](super::ImposterManager::apply_desired).
+#[derive(Debug, Clone)]
+pub struct DesiredImposter {
+    pub config: super::types::ImposterConfig,
+    pub persistence: Persistence,
+}
+
 /// Outcome of [`ImposterManager::apply_config`](super::ImposterManager::apply_config):
 /// which ports were created, replaced wholesale, stub-patched in place, deleted, or
 /// failed to apply. Untouched imposters appear in none of the lists. A port may appear

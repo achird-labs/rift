@@ -691,9 +691,10 @@ dedicated metrics port (`--metrics-port`, default 9090).
 
 ### POST /admin/reload
 
-Hot-reload imposters from the startup config source (`--configfile` / `--datadir`), replacing all
-running imposters atomically. A no-op (200) when no config source was provided. New config is
-validated before running imposters are torn down.
+Hot-reload imposters from the startup config source (`--configfile` / `--datadir`), applying the
+difference incrementally. A no-op (200) when no config source was provided. New config is
+validated before any running imposter is changed. With both `--configfile` (or `--imposters`) and
+`--datadir`, both are re-read and applied as one set. See [Hot Reload](../features/hot-reload.md).
 
 ---
 

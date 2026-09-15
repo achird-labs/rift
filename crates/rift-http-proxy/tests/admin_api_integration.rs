@@ -2063,6 +2063,114 @@ mod reload {
         manager.delete_all().await;
     }
 
+    // Issue #1122: with `--configfile` and `--datadir` together, reload re-reads both stores. It
+    // used to re-apply the config file alone, so the sweep deleted every admin-created imposter and
+    // unlinked its `{port}.json`, which also lost it across a restart.
+    #[tokio::test]
+    async fn reload_with_configfile_and_datadir_keeps_persisted_imposters() {
+        use rift_http_proxy::imposter::Persistence;
+        use rift_http_proxy::sources::{FileSource, SourceRef, SourceRegistry, SourceSet};
+        use std::sync::Arc;
+
+        const ADMIN: u16 = 23751;
+        const FROM_FILE: u16 = 23752;
+        const FROM_API: u16 = 23753;
+
+        let dir = tempfile::tempdir().unwrap();
+        let datadir = dir.path().join("data");
+        std::fs::create_dir(&datadir).unwrap();
+        let path = dir.path().join("imposters.json");
+        std::fs::write(&path, cfg(FROM_FILE, "file")).unwrap();
+
+        let manager = std::sync::Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        // What startup does for a `--configfile` imposter.
+        for config in load_configs(&ConfigSource::File {
+            path: path.clone(),
+            no_parse: false,
+        })
+        .unwrap()
+        {
+            manager
+                .create_imposter_as(config, Persistence::Ephemeral)
+                .await
+                .unwrap();
+        }
+
+        let mut registry = SourceRegistry::new();
+        registry.register(Arc::new(FileSource::new(false))).unwrap();
+        let set = Arc::new(SourceSet::new(
+            vec![SourceRef::new(format!("file:{}", path.display()))],
+            registry,
+        ));
+        let server = rift_http_proxy::admin_api::AdminApiServer::new(
+            format!("127.0.0.1:{ADMIN}").parse().unwrap(),
+            manager.clone(),
+            None,
+        )
+        .with_imposter_sources(set, Some(datadir.clone()));
+        tokio::spawn(server.run());
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let client = reqwest::Client::new();
+        let created = client
+            .post(format!("http://127.0.0.1:{ADMIN}/imposters"))
+            .json(&serde_json::json!({"port": FROM_API, "protocol": "http", "stubs": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), 201);
+        let api_file = datadir.join(format!("{FROM_API}.json"));
+        assert!(api_file.exists(), "an admin-API create is persisted");
+
+        let reload = || async {
+            let resp = client
+                .post(format!("http://127.0.0.1:{ADMIN}/admin/reload"))
+                .send()
+                .await
+                .unwrap();
+            let status = resp.status();
+            let body: serde_json::Value = resp.json().await.unwrap();
+            (status, body)
+        };
+
+        let (status, body) = reload().await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["deleted"], serde_json::json!([]), "{body}");
+        assert!(
+            manager.get_imposter(FROM_API).is_ok(),
+            "admin imposter still served"
+        );
+        assert!(
+            manager.get_imposter(FROM_FILE).is_ok(),
+            "config-file imposter still served"
+        );
+        assert!(
+            api_file.exists(),
+            "reload must not unlink a persisted imposter's file"
+        );
+        assert!(
+            !datadir.join(format!("{FROM_FILE}.json")).exists(),
+            "a config-file imposter is never written to the datadir"
+        );
+
+        // Each store still sweeps what it no longer declares.
+        std::fs::write(&path, r#"{"imposters":[]}"#).unwrap();
+        let (status, body) = reload().await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["deleted"], serde_json::json!([FROM_FILE]), "{body}");
+        assert!(
+            manager.get_imposter(FROM_API).is_ok(),
+            "the datadir imposter is kept"
+        );
+
+        std::fs::remove_file(&api_file).unwrap();
+        let (status, body) = reload().await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["deleted"], serde_json::json!([FROM_API]), "{body}");
+
+        manager.delete_all().await;
+    }
+
     #[tokio::test]
     async fn reload_with_no_source_is_noop_200() {
         let manager = start(12599, None).await;

@@ -126,6 +126,7 @@ println!("admin bound to {}", running.local_addr());
 |:-----|:----------|:--------|
 | `AdminApiServer::new` | `fn new(addr: SocketAddr, manager: Arc<ImposterManager>, api_key: Option<String>) -> Self` | Construct the admin server; `api_key` (when `Some`) gates the admin API via the `Authorization` header. |
 | `with_config_source` | `fn with_config_source(self, source: ConfigSource) -> Self` | Retain the load source so `POST /admin/reload` can re-read it. |
+| `with_imposter_sources` | `fn with_imposter_sources(self, sources: Arc<SourceSet>, datadir: Option<PathBuf>) -> Self` | Retain an `--imposters` source set, and the `--datadir` loaded beside it, so `POST /admin/reload` re-reads both and applies them as one set. Source imposters are applied as `Persistence::Ephemeral` and never written to the datadir (issue #1122). `ImposterManager::apply_config` keeps a running imposter in the store it is in: it persists what it creates, and changes to imposters already in the datadir. |
 | `with_allow_injection` | `fn with_allow_injection(self, allow: bool) -> Self` | Enable JavaScript `inject` responses. |
 | `with_require_admin_auth` | `fn with_require_admin_auth(self, require: bool) -> Self` | Make `bind` **fail** when this server would be reachable off-host with no `api_key`, instead of warning (issue #863). The embedder spelling of `--require-admin-auth`. |
 | `bind` | `async fn bind(self) -> anyhow::Result<RunningAdminApi>` | Bind and start serving; returns once bound. |

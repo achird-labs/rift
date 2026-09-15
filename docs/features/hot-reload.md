@@ -40,6 +40,34 @@ curl -X POST http://localhost:2525/admin/reload   # 200; delta applied, state pr
 To reload from a directory of one-imposter-per-file configs, start with `--datadir ./mb-data`
 instead; `POST /admin/reload` re-reads the directory.
 
+### A config file and a data directory together
+
+`rift --configfile imposters.json --datadir ./mb-data` seeds imposters from the file and persists
+the ones created through the admin API to the directory. `--imposters` behaves the same as
+`--configfile`. `POST /admin/reload` re-reads **both** and applies them as one set, so each store
+keeps its own imposters:
+
+- An imposter from the config file is **never written to the data directory**, at startup or on
+  reload. Neither are changes made to it at runtime, through the stub endpoints or a
+  `PUT /imposters` that repeats it. The file is where it is re-read from. An imposter without a port
+  in a `PUT /imposters` cannot be matched to a running one, so it is created and persisted like any
+  other admin-API imposter.
+- An imposter created with `POST /imposters` is written to `<datadir>/<port>.json` and survives a
+  reload. Remove its file, or delete the imposter, to drop it.
+- A port declared by both the config file and a file in the data directory **refuses the reload**
+  with a `500`, and the running imposters are left unchanged. Remove one of the two declarations.
+- Every file in the data directory must load. A malformed file refuses the reload with a `500` that
+  names it, and a file that uses a scripting feature refuses it unless `--allowInjection` is set.
+  Startup skips such a file and names it in the log instead.
+- A data directory has no change marker, so a reload with one always runs the diff, even when every
+  config source reports it is unchanged.
+
+Before this behaviour (issue #1122), a server run with both flags wrote a `<port>.json` copy of every
+config-file imposter into the data directory, and the first reload deleted every imposter that only
+the directory declared, together with its file. If you ran both flags on an earlier release, delete
+the copies: a copy of an imposter with an explicit port now refuses every reload, and a copy of one
+without a port is served as a second imposter.
+
 ---
 
 ## What the diff does

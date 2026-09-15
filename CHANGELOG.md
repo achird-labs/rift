@@ -13,6 +13,23 @@ record.
 
 ### Changed
 
+- **Imposters loaded from `--configfile` or `--imposters` are no longer written to `--datadir`**
+  (#1122). The data directory now holds only what the admin API created and the files an operator
+  put there; a config-file imposter is re-read from its file, and a copy of it in the directory
+  loaded as a second imposter. Runtime changes to a config-file imposter, through the stub endpoints
+  or a `PUT /imposters` that repeats it, are not persisted either. A malformed datadir file named in
+  a refused reload is now identified by its path.
+  - **Migration:** a server that ran both flags on an earlier release has a `<port>.json` copy of
+    every config-file imposter in its data directory. Delete them. A copy with an explicit port now
+    refuses every `POST /admin/reload`, and a copy of a port-less imposter is served beside the
+    original.
+  - Embedders: `AdminApiServer::with_imposter_sources` takes the datadir as a second argument,
+    `ReloadSource::Sources` is a struct variant carrying it, and `ImposterManager` gains
+    `create_imposter_as` and `apply_desired` with a `Persistence` tag. `create_imposter` and
+    `apply_config` keep their signatures. `create_imposter` persists; `apply_config` persists the
+    imposters it creates and leaves a running imposter in the store it is in, so a config-file
+    imposter it changes is not written.
+
 - **Security: an `--rcfile` that cannot be read or applied now aborts startup** (#1114). It used to be
   skipped with a warning and the server started with none of its keys, so a mistyped
   `"requireAdminAuth": "true"` served the admin plane off-host with no authentication. A missing file,
@@ -77,6 +94,20 @@ record.
     are unchanged — a stored value read back into a header is repaired at that read.
 
 ### Fixed
+
+- **`POST /admin/reload` with both `--configfile` and `--datadir` deleted every datadir imposter and
+  its file** (#1122). Reload re-applied the config file alone, so its sweep deleted each imposter
+  only the data directory declared, including every one created through the admin API, and unlinked
+  its `<port>.json`, so the imposter did not come back on restart either. Reload now re-reads both
+  stores and applies them as one set; a port declared by both refuses the reload with the running
+  imposters unchanged.
+- **A wholesale replace on a `--datadir` server removed `<port>.json` before re-creating the
+  imposter** (#1122). When the re-create failed, for example on an unreadable certificate, the file
+  was lost along with the imposter; on a `--datadir` reload that file is the operator's own. A replace
+  now leaves the file for the re-create to overwrite, and removes it only when the re-create fails
+  on an apply whose file was a copy of runtime state (`PUT /imposters`, `apply_config`). Separately, a delete removed the file on a
+  detached task, so a create on the same port straight after could have its new file deleted; the
+  removal is now awaited.
 
 - **An EJS `<%= process.env.VAR %>` whose variable is unset rendered empty with nothing logged** (#1116).
   A typo in a variable name, or a deployment missing one, loaded a config that silently differed from

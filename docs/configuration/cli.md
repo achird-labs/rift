@@ -360,6 +360,10 @@ rift --api-key s3cr3t --require-admin-auth
 
 # With persistent data directory
 rift --datadir ./mb-data
+
+# Seed from a config file and persist admin-API imposters. Config-file imposters are not written
+# to the data directory, and POST /admin/reload re-reads both.
+rift --configfile imposters.json --datadir ./mb-data
 ```
 
 ---

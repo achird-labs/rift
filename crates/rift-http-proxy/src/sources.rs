@@ -510,17 +510,20 @@ impl SourceSet {
     }
 }
 
-/// What `POST /admin/reload` re-reads.
-///
-/// One slot, not two: a server reloads from the sources it booted from, and making
-/// "a datadir *and* a source set" representable would leave the handler picking a winner at
-/// runtime for a state the CLI cannot produce.
+/// What `POST /admin/reload` re-reads: whatever the server booted from.
 #[derive(Clone)]
 pub enum ReloadSource {
-    /// A bare `--datadir`: re-read the directory synchronously, exactly as before U-12.
+    /// One synchronous re-read: a bare `--datadir`, or an embedder's config file.
     Legacy(Arc<ConfigSource>),
     /// `--imposters`, or `--configfile` desugared into one: re-fetch every source.
-    Sources(Arc<SourceSet>),
+    ///
+    /// `datadir` is the `--datadir` given alongside (issue #1122). Both stores are re-read and
+    /// applied as one set, so the reload's delete sweep never removes what only the other store
+    /// declares.
+    Sources {
+        set: Arc<SourceSet>,
+        datadir: Option<PathBuf>,
+    },
 }
 
 /// Split a `--imposters` value into refs. Empty entries are dropped so a trailing comma is not an

@@ -164,9 +164,58 @@ fn reload_is_gated(configs: &[crate::imposter::ImposterConfig], allow_injection:
             .any(crate::injection_gate::config_uses_script_surface)
 }
 
+/// Read a synchronous config source for a reload, or the message of the 500 that refuses it.
+///
+/// On the blocking pool (issue #550): `load_configs` is synchronous — many small `std::fs` reads
+/// plus EJS/regex/serde work — and unlike startup, reload is network-triggered and repeatable, so
+/// a large datadir or a stalled mount would pin a runtime worker for the whole read. Awaited, so
+/// the parse still completes before anything mutates.
+async fn read_blocking(
+    source: Arc<crate::config_loader::ConfigSource>,
+) -> Result<crate::config_loader::LoadedConfig, String> {
+    match tokio::task::spawn_blocking(move || crate::config_loader::load_configs_full(&source))
+        .await
+    {
+        Ok(Ok(loaded)) => Ok(loaded),
+        // `{e:#}`, not `{e}`: anyhow prints only the outermost context otherwise, and a reload
+        // failure is the one place a config-load error reaches an operator (issue #951).
+        Ok(Err(e)) => Err(format!("Reload failed (imposters unchanged): {e:#}")),
+        Err(e) => Err(format!("Reload task failed: {e}")),
+    }
+}
+
+fn tagged(
+    configs: Vec<crate::imposter::ImposterConfig>,
+    persistence: crate::imposter::Persistence,
+) -> impl Iterator<Item = crate::imposter::DesiredImposter> {
+    configs
+        .into_iter()
+        .map(move |config| crate::imposter::DesiredImposter {
+            config,
+            persistence,
+        })
+}
+
+/// The lowest explicit port declared by both a source and the datadir, if any (issue #1122).
+fn port_declared_by_both(
+    ephemeral: &[crate::imposter::ImposterConfig],
+    persisted: &[crate::imposter::ImposterConfig],
+) -> Option<u16> {
+    let from_sources: std::collections::HashSet<u16> = ephemeral
+        .iter()
+        .filter_map(crate::imposter::ImposterConfig::explicit_port)
+        .collect();
+    persisted
+        .iter()
+        .filter_map(crate::imposter::ImposterConfig::explicit_port)
+        .filter(|port| from_sources.contains(port))
+        .min()
+}
+
 /// POST /admin/reload - re-read the startup config source and reconcile the running imposters
 /// toward it incrementally (issues #197/#316, Rift extension). No-op (200) when no
-/// `--configfile`/`--datadir` was given. The new set is validated before the running imposters
+/// `--configfile`/`--datadir` was given. With both, the config source and the datadir are re-read
+/// and applied as one set (issue #1122). The new set is validated before the running imposters
 /// are touched, so a parse or semantic error (bad protocol, duplicate port) returns 500 with the
 /// running imposters left unchanged. Unchanged imposters keep all runtime state (recorded
 /// requests, scenario state, response cyclers); only changed ports are patched or replaced.
@@ -184,62 +233,62 @@ pub async fn handle_reload(
 
     // Parse/fetch before touching state — a bad config leaves the running imposters intact.
     //
-    // On the blocking pool (issue #550): `load_configs` is synchronous — many small `std::fs`
-    // reads plus EJS/regex/serde work — and unlike startup, reload is network-triggered and
-    // repeatable, so a large datadir or a stalled mount would pin a runtime worker for the whole
-    // read. Awaited here, so the parse still completes before anything mutates.
-    let (loaded, all_unchanged) = match source {
-        crate::sources::ReloadSource::Legacy(source) => {
-            match tokio::task::spawn_blocking(move || {
-                crate::config_loader::load_configs_full(&source)
-            })
-            .await
-            {
-                Ok(Ok(loaded)) => (loaded, false),
-                Ok(Err(e)) => {
-                    // `{e:#}`, not `{e}`: anyhow prints only the outermost context otherwise, and
-                    // a reload failure is the one place a config-load error reaches an operator
-                    // (issue #951).
+    // `persisted` holds the imposters that belong to the datadir, `ephemeral` those re-read from a
+    // source (issue #1122); the two are applied as one set, so neither store's sweep removes
+    // what only the other declares.
+    let (persisted, ephemeral, intercept_declared, all_unchanged) = match source {
+        crate::sources::ReloadSource::Legacy(source) => match read_blocking(source).await {
+            Ok(loaded) => (
+                loaded.imposters,
+                Vec::new(),
+                loaded.intercept.is_some(),
+                false,
+            ),
+            Err(message) => {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &message);
+            }
+        },
+        // U-12: each source's own fetch is already async and does its own I/O budgeting
+        // (`FileSource` hops to the blocking pool; `HttpSource` is non-blocking), so this arm
+        // must not be wrapped in `spawn_blocking`.
+        crate::sources::ReloadSource::Sources { set, datadir } => {
+            let merged = match set.fetch_all().await {
+                Ok(merged) => merged,
+                Err(e) => {
+                    // `{e:#}` renders the whole chain: a source fetch failure's actual reason — the
+                    // hop cap, a refused redirect scheme, a timeout — is a cause under the
+                    // "fetching imposter source <uri>" context, never the top line (issue #951).
                     return error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         &format!("Reload failed (imposters unchanged): {e:#}"),
                     );
                 }
-                Err(e) => {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("Reload task failed: {e}"),
-                    );
+            };
+            // A directory has no change token, so with a datadir the apply always runs; an
+            // identical set is a no-op diff.
+            let unchanged = merged.all_unchanged && datadir.is_none();
+            let persisted = match datadir {
+                Some(dir) => {
+                    match read_blocking(Arc::new(crate::config_loader::ConfigSource::Dir(dir)))
+                        .await
+                    {
+                        Ok(loaded) => loaded.imposters,
+                        Err(message) => {
+                            return error_response(StatusCode::INTERNAL_SERVER_ERROR, &message);
+                        }
+                    }
                 }
-            }
+                None => Vec::new(),
+            };
+            // Boot-only blocks; reload deliberately does not re-apply them, and the warning below
+            // is driven off `intercept` being present in the document.
+            (
+                persisted,
+                merged.imposters,
+                merged.intercept.is_some(),
+                unchanged,
+            )
         }
-        // U-12: each source's own fetch is already async and does its own I/O budgeting
-        // (`FileSource` hops to the blocking pool; `HttpSource` is non-blocking), so this arm
-        // must not be wrapped in `spawn_blocking`.
-        crate::sources::ReloadSource::Sources(set) => match set.fetch_all().await {
-            Ok(merged) => {
-                let unchanged = merged.all_unchanged;
-                (
-                    crate::config_loader::LoadedConfig {
-                        imposters: merged.imposters,
-                        // Boot-only blocks; reload deliberately does not re-apply them, and the
-                        // warning below is driven off `intercept` being present in the document.
-                        intercept: merged.intercept,
-                        routes: merged.routes,
-                    },
-                    unchanged,
-                )
-            }
-            Err(e) => {
-                // `{e:#}` renders the whole chain: a source fetch failure's actual reason — the
-                // hop cap, a refused redirect scheme, a timeout — is a cause under the
-                // "fetching imposter source <uri>" context, never the top line (issue #951).
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Reload failed (imposters unchanged): {e:#}"),
-                );
-            }
-        },
     };
 
     // Every source proved its content unmoved (an HTTP 304, a matching sha), so there is nothing
@@ -265,7 +314,7 @@ pub async fn handle_reload(
     // server-side log is invisible to it (doubly so over FFI, where tracing may go nowhere) — so
     // the response body carries the warning and the log is a `warn!`, not an `info!`: the caller
     // asked for something that deliberately did not happen.
-    let warnings: Vec<String> = if loaded.intercept.is_some() {
+    let warnings: Vec<String> = if intercept_declared {
         let warning = "the config file's `intercept` block is applied at startup only and was NOT \
                        re-applied; imposters were reloaded. Use /intercept/rules to change rules \
                        at runtime, or restart to re-read the block.";
@@ -274,16 +323,33 @@ pub async fn handle_reload(
     } else {
         Vec::new()
     };
-    let configs = loaded.imposters;
+
+    // Each port belongs to exactly one store, the rule `SourceSet::fetch_all` already applies
+    // between sources. Picking a winner would silently drop one of the operator's imposters, and a
+    // replace would unlink the datadir file.
+    if let Some(port) = port_declared_by_both(&ephemeral, &persisted) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!(
+                "Reload failed (imposters unchanged): port {port} is declared by an imposter \
+                 source and by a file in the datadir; each port may be declared by exactly one \
+                 store"
+            ),
+        );
+    }
 
     // Validate-before-touch: refuse a gated config before anything mutates, so a refused reload
     // leaves the running imposters exactly as they were (issue #612).
-    if reload_is_gated(&configs, allow_injection) {
+    if reload_is_gated(&persisted, allow_injection) || reload_is_gated(&ephemeral, allow_injection)
+    {
         return crate::admin_api::handlers::imposters::injection_disallowed_response();
     }
 
-    let count = configs.len();
-    match manager.apply_config(configs).await {
+    let count = persisted.len() + ephemeral.len();
+    let desired = tagged(persisted, crate::imposter::Persistence::Datadir)
+        .chain(tagged(ephemeral, crate::imposter::Persistence::Ephemeral))
+        .collect();
+    match manager.apply_desired(desired).await {
         Ok(report) if report.failed.is_empty() => {
             let mut body = serde_json::json!({
                 "message": format!("Reloaded {count} imposter(s)"),
@@ -655,6 +721,243 @@ mod tests {
             "--allowInjection must permit a decorate behavior on reload"
         );
         assert!(manager.get_imposter(22601).is_ok());
+
+        manager.delete_all().await;
+    }
+
+    // ── Issue #1122: a source set and a datadir together ────────────────────────────────────────
+
+    fn sources_and_datadir(
+        registry: crate::sources::SourceRegistry,
+        uri: String,
+        datadir: &std::path::Path,
+    ) -> crate::sources::ReloadSource {
+        crate::sources::ReloadSource::Sources {
+            set: Arc::new(crate::sources::SourceSet::new(
+                vec![crate::sources::SourceRef::new(uri)],
+                registry,
+            )),
+            datadir: Some(datadir.to_path_buf()),
+        }
+    }
+
+    fn file_registry() -> crate::sources::SourceRegistry {
+        let mut registry = crate::sources::SourceRegistry::new();
+        registry
+            .register(Arc::new(crate::sources::FileSource::new(false)))
+            .expect("register file source");
+        registry
+    }
+
+    /// A source store and a datadir, each in its own subdirectory of `root`.
+    fn two_stores(
+        root: &std::path::Path,
+        source_doc: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let datadir = root.join("data");
+        std::fs::create_dir(&datadir).expect("mkdir datadir");
+        let file = root.join("imposters.json");
+        std::fs::write(&file, source_doc).expect("write source");
+        (file, datadir)
+    }
+
+    async fn body_json(resp: Response<Full<Bytes>>) -> serde_json::Value {
+        use http_body_util::BodyExt;
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn reload_refuses_a_port_declared_by_a_source_and_by_the_datadir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (file, datadir) = two_stores(
+            dir.path(),
+            r#"{"imposters":[{"port":23742,"protocol":"http","stubs":[]}]}"#,
+        );
+        std::fs::write(
+            datadir.join("23742.json"),
+            r#"{"port":23742,"protocol":"http","stubs":[]}"#,
+        )
+        .expect("write datadir file");
+
+        let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        manager
+            .create_imposter(
+                serde_json::from_str(r#"{"port":23743,"protocol":"http","stubs":[]}"#)
+                    .expect("config"),
+            )
+            .await
+            .expect("running imposter");
+
+        let source = sources_and_datadir(
+            file_registry(),
+            format!("file:{}", file.display()),
+            &datadir,
+        );
+        let resp = handle_reload(manager.clone(), Some(source), false).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(resp).await;
+        let message = body["errors"][0]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.starts_with("Reload failed (imposters unchanged): port 23742 is declared by"),
+            "got: {body}"
+        );
+
+        assert_eq!(manager.count(), 1, "nothing was applied");
+        assert!(manager.get_imposter(23742).is_err());
+        assert!(manager.get_imposter(23743).is_ok());
+        assert!(
+            datadir.join("23742.json").exists(),
+            "the operator's file is untouched"
+        );
+        assert!(datadir.join("23743.json").exists());
+
+        manager.delete_all().await;
+    }
+
+    /// A source that always proves its content unchanged, as an HTTP 304 would.
+    struct UnchangedSource;
+
+    impl crate::sources::ImposterSource for UnchangedSource {
+        fn schemes(&self) -> &'static [&'static str] {
+            &["unchanged"]
+        }
+
+        fn fetch<'a>(
+            &'a self,
+            _r: &'a crate::sources::SourceRef,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = anyhow::Result<crate::sources::FetchedImposters>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async {
+                Ok(crate::sources::FetchedImposters {
+                    configs: Vec::new(),
+                    intercept: None,
+                    routes: None,
+                    meta: crate::sources::SourceMeta {
+                        version: Some("v1".to_string()),
+                        fetched_at: std::time::SystemTime::now(),
+                    },
+                    unchanged: true,
+                })
+            })
+        }
+    }
+
+    // A directory has no change token, so "every source is unchanged" must not skip the apply when
+    // a datadir is part of the reload.
+    #[tokio::test]
+    async fn reload_applies_a_datadir_change_when_every_source_is_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let datadir = dir.path().join("data");
+        std::fs::create_dir(&datadir).expect("mkdir");
+        std::fs::write(
+            datadir.join("23741.json"),
+            r#"{"port":23741,"protocol":"http","stubs":[]}"#,
+        )
+        .expect("write datadir file");
+
+        let mut registry = crate::sources::SourceRegistry::new();
+        registry
+            .register(Arc::new(UnchangedSource))
+            .expect("register");
+        let source = sources_and_datadir(registry, "unchanged:x".to_string(), &datadir);
+
+        let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        let resp = handle_reload(manager.clone(), Some(source), false).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["created"], serde_json::json!([23741]), "got: {body}");
+        assert!(manager.get_imposter(23741).is_ok());
+
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn reload_with_a_malformed_datadir_file_leaves_imposters_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (file, datadir) = two_stores(dir.path(), r#"{"imposters":[]}"#);
+        let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        manager
+            .create_imposter(
+                serde_json::from_str(r#"{"port":23744,"protocol":"http","stubs":[]}"#)
+                    .expect("config"),
+            )
+            .await
+            .expect("running imposter");
+        std::fs::write(datadir.join("broken.json"), "{").expect("write broken file");
+
+        let source = sources_and_datadir(
+            file_registry(),
+            format!("file:{}", file.display()),
+            &datadir,
+        );
+        let resp = handle_reload(manager.clone(), Some(source), false).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(resp).await;
+        let message = body["errors"][0]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.starts_with("Reload failed (imposters unchanged): datadir file ")
+                && message.contains("broken.json"),
+            "the refusal must name the file, got: {body}"
+        );
+        assert!(manager.get_imposter(23744).is_ok());
+        assert!(datadir.join("23744.json").exists());
+
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn reload_refuses_a_scripted_datadir_file_without_allow_injection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (file, datadir) = two_stores(dir.path(), r#"{"imposters":[]}"#);
+        std::fs::write(
+            datadir.join("23745.json"),
+            r#"{"port":23745,"protocol":"http","stubs":[
+                {"responses":[{"inject":"function (req) { return {body: 'x'}; }"}]}
+            ]}"#,
+        )
+        .expect("write scripted file");
+
+        let source = sources_and_datadir(
+            file_registry(),
+            format!("file:{}", file.display()),
+            &datadir,
+        );
+        let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        let resp = handle_reload(manager.clone(), Some(source), false).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(manager.get_imposter(23745).is_err());
+
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn reload_creates_a_port_less_source_imposter_without_persisting_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (file, datadir) = two_stores(
+            dir.path(),
+            r#"{"imposters":[{"protocol":"http","stubs":[]}]}"#,
+        );
+
+        let source = sources_and_datadir(
+            file_registry(),
+            format!("file:{}", file.display()),
+            &datadir,
+        );
+        let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        let resp = handle_reload(manager.clone(), Some(source), false).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(manager.count(), 1);
+        let written: Vec<_> = std::fs::read_dir(&datadir)
+            .expect("read datadir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert!(written.is_empty(), "found {written:?}");
 
         manager.delete_all().await;
     }

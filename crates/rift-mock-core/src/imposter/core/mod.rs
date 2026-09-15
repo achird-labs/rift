@@ -207,6 +207,9 @@ pub struct Imposter {
     pub(crate) journal: Arc<dyn crate::imposter::journal::RequestJournal>,
     /// Whether imposter is enabled
     pub enabled: AtomicBool,
+    /// `true` = [`Persistence::Datadir`](crate::imposter::Persistence) (issue #1122). Atomic
+    /// because an apply can move a running, `Arc`-shared imposter from one store to the other.
+    persist_to_datadir: AtomicBool,
     /// Creation timestamp (for future metrics/admin display)
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Shutdown signal sender (for future graceful shutdown)
@@ -348,6 +351,7 @@ impl Imposter {
             journal: journal
                 .unwrap_or_else(|| Arc::new(crate::imposter::journal::LocalJournal::default())),
             enabled: AtomicBool::new(enabled),
+            persist_to_datadir: AtomicBool::new(true),
             created_at: chrono::Utc::now(),
             shutdown_tx: None,
             serve_handles: Mutex::new(Vec::new()),
@@ -356,6 +360,23 @@ impl Imposter {
             sequencer,
             stub_warnings: ArcSwapOption::empty(),
         })
+    }
+
+    /// Which store this imposter belongs to (issue #1122).
+    #[must_use]
+    pub fn persistence(&self) -> crate::imposter::Persistence {
+        if self.persist_to_datadir.load(Ordering::SeqCst) {
+            crate::imposter::Persistence::Datadir
+        } else {
+            crate::imposter::Persistence::Ephemeral
+        }
+    }
+
+    pub(crate) fn set_persistence(&self, persistence: crate::imposter::Persistence) {
+        self.persist_to_datadir.store(
+            persistence == crate::imposter::Persistence::Datadir,
+            Ordering::SeqCst,
+        );
     }
 
     /// The current stub snapshot: stubs, the index over them, and the matching gates, from a single
@@ -623,7 +644,7 @@ impl Imposter {
     /// the process-global `IMPOSTER_STATE` map — the imposter's bound listener port.
     ///
     /// `config.port` is `Some(bound_port)` for the entire life of a live imposter: the manager
-    /// assigns and records the real, distinct bound port in `create_imposter_inner` *before* the
+    /// assigns and records the real, distinct bound port in `create_imposter_staged` *before* the
     /// imposter is constructed or serves a request, so distinct imposters (including auto-bind
     /// ones) always get distinct keys and never clobber each other's script state (issue #439).
     /// The `unwrap_or(0)` fallback is therefore unreachable for a live imposter — `0` is the

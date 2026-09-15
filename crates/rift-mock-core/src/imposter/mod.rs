@@ -74,7 +74,10 @@ pub use manager::{ImposterManager, TlsDefaults};
 
 // Re-export incremental reconciliation types (issue #316)
 pub use events::{AdminEvent, AdminEventBus, AdminEventKind, ImposterAction};
-pub use reconcile::{ApplyReport, EventContext, ImposterEvent, ImposterEventListener, stub_key};
+pub use reconcile::{
+    ApplyReport, DesiredImposter, EventContext, ImposterEvent, ImposterEventListener, Persistence,
+    stub_key,
+};
 
 // Re-export predicate utilities (used in tests and for external consumers)
 #[allow(unused_imports)]
