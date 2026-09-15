@@ -106,7 +106,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E022 | Proxy `to` URL does not start with `http://` or `https://` | `"to": "ftp://host/x"` |
 | E023 | Proxy `to` is not a string URL | `"to": 8080` |
 | E024 | Proxy missing required `to` field | `"proxy": {"mode": "proxyOnce"}` |
-| E025 | Invalid `wait` behavior value — a bare number must be a non-negative integer of milliseconds; anything else makes the engine ignore the block's behaviors (all but `repeat`) with only a log line. `null` counts as absent | `"wait": []`, `"wait": 500.5` |
+| E025 | Invalid `wait` behavior value — a bare number must be a non-negative integer of milliseconds; anything else makes the engine ignore the block's behaviors (all but `repeat`) with only a log line. `null` counts as absent. A `behaviors` array is checked as the engine merges it, so only the last value for each key is checked and the finding names that element; `"_behaviors": null` falls back to `behaviors` | `"wait": []`, `"wait": 500.5` |
 | E026 | Unbalanced braces in JavaScript | `function () { return 1;` |
 | E027 | Unbalanced parentheses in JavaScript | `function ( { return 1; }` |
 | E028 | JavaScript syntax error | A malformed `inject` function |

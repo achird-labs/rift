@@ -3,7 +3,7 @@
 use crate::types::{LintIssue, LintOptions, LintResult};
 use regex::Regex;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -903,23 +903,80 @@ pub fn validate_response(
         validate_proxy_response(file, proxy, &format!("{location}.proxy"), result);
     }
 
-    // Rift/Mountebank write behaviors as `_behaviors: { wait, repeat, ... }` (object).
-    // Rift also accepts and serializes `behaviors: [...]` (array) for MB compatibility.
-    // Validate whichever form is present.
-    if let Some(b) = response.get("_behaviors") {
-        if b.is_object() {
-            validate_behavior(file, b, &format!("{location}._behaviors"), result, options);
+    validate_response_behaviors(file, response, location, result, options);
+}
+
+/// Validate the behaviors block the engine will actually read (issue #1099).
+///
+/// The engine's raw response (`StubResponseRaw` in rift-mock-core's `imposter/types.rs`) takes
+/// `_behaviors` when it is present and not `null`, and otherwise `behaviors`: an object as-is, or an
+/// array folded into one object by `normalize_behaviors`, where the last element to set a key wins
+/// and non-object elements are skipped. Validating each array element on its own reported values a
+/// later element overrides, and a `null` `_behaviors` used to hide the array altogether.
+///
+/// Every key is checked independently by [`validate_behavior`], so the fold is validated one element
+/// at a time with only the keys that element wins, and a finding names the element it came from.
+fn validate_response_behaviors(
+    file: &Path,
+    response: &Value,
+    location: &str,
+    result: &mut LintResult,
+    options: &LintOptions,
+) {
+    let present = |key: &str| response.get(key).filter(|v| !v.is_null());
+    match (present("_behaviors"), present("behaviors")) {
+        (Some(block), _) => {
+            // A non-object `_behaviors` is not linted here, and it never falls back to `behaviors`:
+            // the engine takes any non-null `_behaviors` as the block.
+            if block.is_object() {
+                validate_behavior(
+                    file,
+                    block,
+                    &format!("{location}._behaviors"),
+                    result,
+                    options,
+                );
+            }
         }
-    } else if let Some(behaviors) = response.get("behaviors").and_then(|v| v.as_array()) {
-        for (idx, behavior) in behaviors.iter().enumerate() {
+        (None, Some(block @ Value::Object(_))) => {
             validate_behavior(
                 file,
-                behavior,
-                &format!("{location}.behaviors[{idx}]"),
+                block,
+                &format!("{location}.behaviors"),
                 result,
                 options,
             );
         }
+        (None, Some(Value::Array(elements))) => {
+            let mut winner: HashMap<&str, usize> = HashMap::new();
+            for (idx, element) in elements.iter().enumerate() {
+                for key in element.as_object().into_iter().flat_map(|obj| obj.keys()) {
+                    winner.insert(key, idx);
+                }
+            }
+            for (idx, element) in elements.iter().enumerate() {
+                let Some(obj) = element.as_object() else {
+                    continue;
+                };
+                // Cloned: `validate_behavior` reads a behaviors object, and this one is assembled.
+                let won: serde_json::Map<String, Value> = obj
+                    .iter()
+                    .filter(|(key, _)| winner.get(key.as_str()) == Some(&idx))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                if !won.is_empty() {
+                    validate_behavior(
+                        file,
+                        &Value::Object(won),
+                        &format!("{location}.behaviors[{idx}]"),
+                        result,
+                        options,
+                    );
+                }
+            }
+        }
+        // A scalar `behaviors` normalizes to no block in the engine, so there is nothing to check.
+        (None, _) => {}
     }
 }
 

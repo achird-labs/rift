@@ -55,7 +55,7 @@ Behaviors can also be specified as an array of behavior objects:
 }
 ```
 
-When using array format, behaviors are merged into a single object. If the same behavior type appears multiple times, the last one takes precedence.
+When using array format, behaviors are merged into a single object. If the same behavior type appears multiple times, the last one takes precedence. `_behaviors` takes precedence over `behaviors` when both are present; `"_behaviors": null` counts as absent, so `behaviors` is used.
 
 ---
 

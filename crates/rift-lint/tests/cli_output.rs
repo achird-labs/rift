@@ -1283,3 +1283,35 @@ fn cli_is_clean_for_a_null_wait() {
     assert_eq!(report["issues"], serde_json::json!([]), "got {report}");
     assert!(out.status.success());
 }
+
+/// Issue #1099, through the binary: a null `_behaviors` no longer hides the array from the lint.
+#[test]
+fn cli_reports_e025_in_a_behaviors_array_behind_a_null_underscore_behaviors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("imposter.json");
+    std::fs::write(
+        &f,
+        r#"{"port":3000,"protocol":"http","stubs":[
+            {"responses":[{"is":{"statusCode":200},"_behaviors":null,"behaviors":[{"wait":true}]}]}
+        ]}"#,
+    )
+    .expect("write");
+
+    let out = Command::new(BIN)
+        .args([f.to_str().unwrap(), "-o", "json"])
+        .output()
+        .expect("run rift-lint");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    let e025: Vec<_> = report["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .filter(|i| i["code"] == "E025")
+        .collect();
+    assert_eq!(e025.len(), 1, "got {report}");
+    assert_eq!(
+        e025[0]["location"],
+        "stubs[0].responses[0].behaviors[0].wait"
+    );
+    assert_eq!(out.status.code(), Some(1));
+}
