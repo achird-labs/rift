@@ -9,10 +9,10 @@
 use clap::Parser;
 use rift_lint::{
     Document, LintIssue, LintOptions, LintResult, Severity, lint_document, parse_document,
-    parse_yaml_document,
+    parse_yaml_document, render_template,
 };
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -99,6 +99,10 @@ struct Args {
     /// Strict mode - treat warnings as errors
     #[arg(short, long)]
     strict: bool,
+
+    /// Lint files verbatim, without rendering EJS `<% %>` tags, as `rift --no-parse` loads them
+    #[arg(long, visible_alias = "noParse")]
+    no_parse: bool,
 }
 
 /// Print to stdout in text mode, or stderr in json mode. In `-o json`, stdout is reserved
@@ -130,7 +134,9 @@ fn main() {
     eprintln!("{dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{reset}");
 
     let mut result = LintResult::default();
-    let options = LintOptions::default();
+    let options = LintOptions {
+        no_parse: args.no_parse,
+    };
 
     // Collect all imposter files
     let files = collect_imposter_files(&args.path);
@@ -163,10 +169,23 @@ fn main() {
     // so the first occurrence of a port — the one E002 is reported against — is deterministic.
     let mut port_map: BTreeMap<u16, Vec<(PathBuf, String)>> = BTreeMap::new();
     let mut imposters: Vec<(PathBuf, Document)> = Vec::new();
+    // Files whose text was rendered from EJS tags: `--fix` must never write the rendering back.
+    let mut templated: HashSet<PathBuf> = HashSet::new();
 
     for file in &files {
-        match load_imposter_file(file) {
-            Ok(imposter) => {
+        match load_imposter_file(file, &options) {
+            Ok(Loaded::Refused(issue)) => result.add_issue(issue),
+            Ok(Loaded::Document {
+                doc: imposter,
+                rendered,
+                template_issues,
+            }) => {
+                if rendered {
+                    templated.insert(file.clone());
+                }
+                for issue in template_issues {
+                    result.add_issue(issue);
+                }
                 // Every imposter the document holds, not just a top-level `port`: a wrapper or a
                 // bare array used to contribute nothing to the map (issue #1094).
                 for (prefix, slot) in rift_lint::imposters_in(&imposter.value) {
@@ -188,20 +207,23 @@ fn main() {
                 }
                 imposters.push((file.clone(), imposter));
             }
-            Err(e) => {
-                let format_name = match format_of(file) {
-                    Format::Json => "JSON",
-                    Format::Yaml => "YAML",
-                };
-                result.add_issue(
-                    LintIssue::error(
-                        "E001",
-                        format!("Failed to parse {format_name}: {e}"),
-                        file.clone(),
-                    )
-                    .with_suggestion(format!("Check for {format_name} syntax errors")),
-                );
+            Ok(Loaded::Unparsable {
+                error,
+                rendered,
+                template_issues,
+            }) => {
+                let mut failed = LintResult::new();
+                failed.add_issue(parse_failure(file, &error));
+                if rendered {
+                    rift_lint::mark_rendered_positions(&mut failed);
+                }
+                // A W013 is often why rendered text does not parse (`"port": ,`), so it is kept.
+                failed.issues.extend(template_issues);
+                for issue in failed.issues {
+                    result.add_issue(issue);
+                }
             }
+            Err(e) => result.add_issue(parse_failure(file, &e)),
         }
     }
 
@@ -212,7 +234,10 @@ fn main() {
     for (file, doc) in &imposters {
         // `lint_document`, not `lint_value`: the binary is the path that used to drop the raw text
         // and with it every duplicate key in the document (issue #1069).
-        let file_result = lint_document(doc, &file.to_string_lossy(), &options);
+        let mut file_result = lint_document(doc, &file.to_string_lossy(), &options);
+        if templated.contains(file) {
+            rift_lint::mark_rendered_positions(&mut file_result);
+        }
         // Merge without double-counting files_checked (we already counted)
         result.issues.extend(file_result.issues);
         result.errors += file_result.errors;
@@ -229,7 +254,7 @@ fn main() {
     // Apply fixes if requested
     if args.fix && result.errors > 0 {
         emit(json_mode, &format!("\n{bold}Applying fixes...{reset}"));
-        apply_fixes(&imposters, json_mode);
+        apply_fixes(&imposters, &templated, json_mode);
     }
 
     // Exit with error code if there were errors (or warnings in strict mode)
@@ -300,12 +325,60 @@ enum LoadError {
     Yaml(#[from] serde_yaml::Error),
 }
 
-fn load_imposter_file(path: &Path) -> Result<Document, LoadError> {
+/// A file read for linting (issue #1108). `rendered` is whether its text had EJS tags that were
+/// rendered, and `template_issues` are the `W013`s rendering found.
+enum Loaded {
+    Document {
+        doc: Document,
+        rendered: bool,
+        template_issues: Vec<LintIssue>,
+    },
+    /// The rendered text is not valid JSON/YAML.
+    Unparsable {
+        error: LoadError,
+        rendered: bool,
+        template_issues: Vec<LintIssue>,
+    },
+    /// The engine would refuse to load the file (`E049`).
+    Refused(LintIssue),
+}
+
+fn load_imposter_file(path: &Path, options: &LintOptions) -> Result<Loaded, LoadError> {
     let content = std::fs::read_to_string(path)?;
-    match format_of(path) {
-        Format::Json => Ok(parse_document(&content)?),
-        Format::Yaml => Ok(parse_yaml_document(&content)?),
-    }
+    let rendered = match render_template(&content, path, options) {
+        Ok(rendered) => rendered,
+        Err(issue) => return Ok(Loaded::Refused(*issue)),
+    };
+    let was_rendered = rendered.was_rendered();
+    let parsed: Result<Document, LoadError> = match format_of(path) {
+        Format::Json => parse_document(&rendered.text).map_err(LoadError::from),
+        Format::Yaml => parse_yaml_document(&rendered.text).map_err(LoadError::from),
+    };
+    Ok(match parsed {
+        Ok(doc) => Loaded::Document {
+            doc,
+            rendered: was_rendered,
+            template_issues: rendered.issues,
+        },
+        Err(error) => Loaded::Unparsable {
+            error,
+            rendered: was_rendered,
+            template_issues: rendered.issues,
+        },
+    })
+}
+
+fn parse_failure(file: &Path, error: &LoadError) -> LintIssue {
+    let format_name = match format_of(file) {
+        Format::Json => "JSON",
+        Format::Yaml => "YAML",
+    };
+    LintIssue::error(
+        "E001",
+        format!("Failed to parse {format_name}: {error}"),
+        file.to_path_buf(),
+    )
+    .with_suggestion(format!("Check for {format_name} syntax errors"))
 }
 
 /// One E002 per port declared by more than one imposter, inside one file or across files, in
@@ -589,7 +662,7 @@ fn has_fixable_header(value: &serde_json::Value) -> bool {
     }
 }
 
-fn apply_fixes(imposters: &[(PathBuf, Document)], json_mode: bool) {
+fn apply_fixes(imposters: &[(PathBuf, Document)], templated: &HashSet<PathBuf>, json_mode: bool) {
     let Palette {
         green, red, reset, ..
     } = palette();
@@ -682,6 +755,11 @@ fn apply_fixes(imposters: &[(PathBuf, Document)], json_mode: bool) {
                     )
                 })
                 .collect();
+            if templated.contains(file) {
+                refusals.push(
+                    "it is a template: rewriting it would replace its <% %> tags with what they rendered to here; fix it by hand, or lint with --no-parse if the tags are meant literally".to_string(),
+                );
+            }
             refusals.extend(imposter.lossy_numbers().map(|n| {
                 format!(
                     "rewriting it would change a number: '{}' at line {} column {} would be written as {}, which is also what the engine serves for it; write the value you mean",

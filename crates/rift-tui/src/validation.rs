@@ -10,7 +10,9 @@ use std::path::PathBuf;
 ///
 /// Returns a `ValidationReport` containing all issues found.
 pub fn validate_imposter_json(json: &str, source_name: &str) -> ValidationReport {
-    let options = LintOptions::default();
+    // Verbatim: an import is sent to `POST /imposters`, which never renders EJS tags, so a literal
+    // `<%` in a body is data there and must not be refused as a template (issue #1108).
+    let options = LintOptions { no_parse: true };
     let result = lint_json(json, source_name, &options);
     ValidationReport::from_lint_result(result)
 }
@@ -183,6 +185,13 @@ impl ValidationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_imposter_with_a_literal_ejs_tag_in_its_body_validates() {
+        let json = r#"{"port": 4545, "protocol": "http", "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "<% if (user) { %>hi<% } %>"}}]}]}"#;
+        let report = validate_imposter_json(json, "import.json");
+        assert!(report.is_valid(), "{:?}", report.issues);
+    }
 
     #[test]
     fn test_validate_valid_stub() {

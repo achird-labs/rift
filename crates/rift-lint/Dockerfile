@@ -23,6 +23,7 @@ COPY crates/rift-lint/Cargo.toml ./crates/rift-lint/
 COPY crates/rift-http-proxy/Cargo.toml ./crates/rift-http-proxy/
 COPY crates/rift-tui/Cargo.toml ./crates/rift-tui/
 COPY crates/rift-types/Cargo.toml ./crates/rift-types/
+COPY crates/rift-ejs/Cargo.toml ./crates/rift-ejs/
 COPY crates/rift-mock-core/Cargo.toml ./crates/rift-mock-core/
 COPY crates/rift-ffi/Cargo.toml ./crates/rift-ffi/
 COPY crates/rift-store-redis/Cargo.toml ./crates/rift-store-redis/
@@ -30,8 +31,9 @@ COPY crates/rift-store-redis/Cargo.toml ./crates/rift-store-redis/
 # Create dummy source files to build dependencies.
 # Every workspace member needs an entry here, even one this image does not run: cargo resolves the
 # whole workspace, so a member with no manifest/source fails the build outright.
-RUN mkdir -p crates/rift-lint/src crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches crates/rift-tui/src crates/rift-types/src crates/rift-mock-core/src crates/rift-ffi/src crates/rift-store-redis/src && \
+RUN mkdir -p crates/rift-lint/src crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches crates/rift-tui/src crates/rift-types/src crates/rift-ejs/src crates/rift-mock-core/src crates/rift-ffi/src crates/rift-store-redis/src && \
     echo "" > crates/rift-types/src/lib.rs && \
+    echo "" > crates/rift-ejs/src/lib.rs && \
     echo "" > crates/rift-mock-core/src/lib.rs && \
     echo "" > crates/rift-ffi/src/lib.rs && \
     echo "" > crates/rift-store-redis/src/lib.rs && \
@@ -56,7 +58,7 @@ COPY . .
 # the old globs into no-ops and let empty dummy rlibs reach the link (`no `extensions` in the root`).
 # Third-party dependency artifacts are untouched, so the dependency cache layer still pays off.
 RUN cargo clean --release \
-      --package rift-types --package rift-mock-core --package rift-store-redis \
+      --package rift-types --package rift-ejs --package rift-mock-core --package rift-store-redis \
       --package rift-ffi --package rift-http-proxy --package rift-lint && \
     cargo build --release --locked --package rift-lint
 

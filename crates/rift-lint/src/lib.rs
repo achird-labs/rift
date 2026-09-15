@@ -24,6 +24,7 @@ mod number_fidelity;
 mod types;
 mod validator;
 
+use std::borrow::Cow;
 use std::path::Path;
 
 // Re-export public types
@@ -416,9 +417,113 @@ pub fn lint_yaml(yaml: &str, source_name: &str, options: &LintOptions) -> LintRe
     lint_text(yaml, Path::new(source_name), Format::Yaml, options)
 }
 
+/// A document's text as the engine parses it, and what rendering it found.
+#[derive(Debug)]
+pub struct RenderedText<'a> {
+    /// Borrowed when there was nothing to render.
+    pub text: Cow<'a, str>,
+    /// `W013` for each variable a tag read while unset.
+    pub issues: Vec<LintIssue>,
+}
+
+impl RenderedText<'_> {
+    /// True when the text had EJS tags that were rendered, so it is not what the file holds.
+    #[must_use]
+    pub fn was_rendered(&self) -> bool {
+        matches!(self.text, Cow::Owned(_))
+    }
+}
+
+/// Render `text`'s EJS tags the way the engine does before parsing a `--configfile` or `file:`
+/// source (issue #1108), with the engine's own code, so the lint judges the document the engine
+/// loads. With [`LintOptions::no_parse`], or with no tags, the text is returned as it is.
+///
+/// Includes resolve against `path`'s directory, and `process.env` is this process's environment.
+///
+/// # Errors
+///
+/// `E049` with the engine's message when the engine would refuse to load the file.
+pub fn render_template<'a>(
+    text: &'a str,
+    path: &Path,
+    options: &LintOptions,
+) -> Result<RenderedText<'a>, Box<LintIssue>> {
+    if options.no_parse || !rift_ejs::has_tags(text) {
+        return Ok(RenderedText {
+            text: Cow::Borrowed(text),
+            issues: Vec::new(),
+        });
+    }
+    let rendered = rift_ejs::render(text, path, rift_ejs::FileAccess::Allowed)
+        .map_err(|e| LintIssue::error("E049", e.to_string(), path.to_path_buf()))?;
+    let issues = rendered
+        .unset_env
+        .iter()
+        .map(|unset| {
+            LintIssue::warning(
+                "W013",
+                format!(
+                    "`{}` is unset and the tag {} gives no default, so the engine renders it \
+                     empty; the document was linted that way",
+                    unset.name, unset.place
+                ),
+                path.to_path_buf(),
+            )
+            .with_suggestion(format!(
+                "Set {} where rift runs, or give the tag a default: \
+                 <%= process.env.{} || 'value' %>",
+                unset.name, unset.name
+            ))
+        })
+        .collect();
+    Ok(RenderedText {
+        text: Cow::Owned(rendered.text),
+        issues,
+    })
+}
+
 /// The `&Path`-taking core of [`lint_json`] and [`lint_yaml`]; see [`lint_document_at`] for why
 /// the path stays a path.
 fn lint_text(text: &str, path: &Path, format: Format, options: &LintOptions) -> LintResult {
+    let rendered = match render_template(text, path, options) {
+        Ok(rendered) => rendered,
+        Err(issue) => {
+            let mut result = LintResult::new();
+            result.files_checked = 1;
+            result.add_issue(*issue);
+            return result;
+        }
+    };
+    let mut result = lint_parsed_text(&rendered.text, path, format, options);
+    if rendered.was_rendered() {
+        mark_rendered_positions(&mut result);
+    }
+    for issue in rendered.issues {
+        result.add_issue(issue);
+    }
+    result
+}
+
+/// Say where a finding's line and column count from when the document was rendered from a template
+/// (issue #1108): an `include` or a substitution moves them, so they locate the rendered text, not
+/// the file on disk. Only `E001` and `W012` carry a line and column.
+pub fn mark_rendered_positions(result: &mut LintResult) {
+    for issue in &mut result.issues {
+        match issue.code.as_str() {
+            "E001" => issue
+                .message
+                .push_str(" (line and column are in the rendered document)"),
+            "W012" => {
+                if let Some(location) = issue.location.as_mut() {
+                    location.push_str(" of the rendered document");
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn lint_parsed_text(text: &str, path: &Path, format: Format, options: &LintOptions) -> LintResult {
     match format {
         Format::Json => match parse_document(text) {
             Ok(doc) => lint_document_at(&doc, path, options),

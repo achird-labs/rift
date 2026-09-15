@@ -65,6 +65,22 @@ record.
 
 ### Fixed
 
+- **`rift-lint` reported `E001` for a templated config the engine loads, and passed ones it refuses**
+  (#1108). It parsed a file's raw text, so the documented `"port": <%= process.env.PORT || '4545' %>`
+  was invalid JSON to it, a tag inside a string was validated as literal text, and a tag the loader
+  refuses (since #1095) went unreported.
+  - The EJS preprocessor moved from `rift-http-proxy` into a new `rift-ejs` crate, and `rift-lint`
+    renders a file with it before linting, as `--configfile` does. The engine's behaviour is unchanged,
+    and `config_loader::EjsFileAccess` still resolves.
+  - A tag the engine refuses, or an unreadable `include`/`stringify` file, is the new error `E049`,
+    carrying the engine's message. A `process.env` tag with no default whose variable is unset is the
+    new warning `W013`.
+  - `rift-lint --no-parse` lints the text verbatim, and `--fix` refuses to rewrite a templated file.
+    A line and column in `E001`/`W012` for a templated file are marked as counting in the rendered
+    document. The TUI still validates an import verbatim, as `POST /imposters` reads it.
+  - `LintOptions` gained a public `no_parse` field, which breaks a `LintOptions {}` struct literal;
+    `LintOptions::default()` is unaffected.
+
 - **Security: a `_behaviors` array ran a shell command or script without `--allowInjection`**
   (#1101). The engine read a JSON array into the behaviors block by position (`wait`, `repeat`,
   `copy`, `lookup`, `shellTransform`, `decorate`), so `"_behaviors": [null, null, null, null, "cmd"]`

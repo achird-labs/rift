@@ -1255,6 +1255,178 @@ fn empty_or_null_behaviors_forms_report_nothing() {
     }
 }
 
+// ─── Templated documents (issue #1108) ────────────────────────────────────────
+//
+// The engine renders `<% %>` tags before it parses a `--configfile`, so the lint does too, with the
+// same code (`rift-ejs`). These use a variable no environment sets, so the result does not depend on
+// the machine running the tests.
+
+const UNSET: &str = "RIFT_LINT_TEST_1108_NEVER_SET";
+
+#[test]
+fn a_templated_port_with_a_default_lints_clean() {
+    let text = format!(
+        r#"{{"port": <%= process.env.{UNSET} || '4545' %>, "protocol": "http", "stubs": []}}"#
+    );
+    let r = lint_json(&text, "imposters.json", &opts());
+    assert!(
+        r.issues.is_empty(),
+        "the documented form must not be E001: {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn a_templated_document_is_validated_as_rendered() {
+    let text = format!(
+        r#"{{"port": <%= process.env.{UNSET} || '70000' %>, "protocol": "http", "stubs": []}}"#
+    );
+    let r = lint_json(&text, "imposters.json", &opts());
+    assert_eq!(codes(&r), vec!["E005"]);
+}
+
+#[test]
+fn an_unsupported_tag_is_e049_with_the_engine_message() {
+    let r = lint_json(
+        r#"{"port": 4545, "protocol": "http", "stubs": [{"responses": [{"is": {"body": "<% for (x) %>"}}]}]}"#,
+        "imposters.json",
+        &opts(),
+    );
+    assert_eq!(codes(&r), vec!["E049"]);
+    assert!(
+        r.issues[0].message.starts_with(
+            "unsupported EJS tag `<% for (x) %>` at imposters.json:1, so the file was not loaded."
+        ),
+        "{}",
+        r.issues[0].message
+    );
+    assert_eq!(r.errors, 1);
+}
+
+#[test]
+fn a_missing_include_is_e049() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("imposters.json");
+    std::fs::write(&path, r#"{"imposters": [<% include 'missing.json' %>]}"#).expect("write");
+    let r = lint_file(&path, &opts());
+    assert_eq!(codes(&r), vec!["E049"]);
+    assert_eq!(r.errors, 1);
+    assert!(
+        r.issues[0].message.contains("missing.json"),
+        "{}",
+        r.issues[0].message
+    );
+}
+
+#[test]
+fn an_unset_variable_without_a_default_is_w013() {
+    let text = format!(
+        r#"{{"port": 4545, "protocol": "http", "stubs": [{{"responses": [{{"is": {{"body": "<%= process.env.{UNSET} %>"}}}}]}}]}}"#
+    );
+    let r = lint_json(&text, "imposters.json", &opts());
+    assert_eq!(codes(&r), vec!["W013"]);
+    assert!(
+        r.issues[0].message.contains(UNSET),
+        "{}",
+        r.issues[0].message
+    );
+    assert!(
+        r.issues[0].message.contains("imposters.json:1"),
+        "{}",
+        r.issues[0].message
+    );
+    assert_eq!((r.errors, r.warnings), (0, 1));
+}
+
+#[test]
+fn an_included_file_is_linted_as_part_of_the_document() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("imposter.json"),
+        r#"{"port": 70000, "protocol": "http", "stubs": []}"#,
+    )
+    .expect("write include");
+    let path = dir.path().join("imposters.json");
+    std::fs::write(&path, r#"{"imposters": [<% include 'imposter.json' %>]}"#).expect("write");
+    let r = lint_file(&path, &opts());
+    assert!(
+        has_code(&r, "E005"),
+        "the included imposter is linted: {:?}",
+        codes(&r)
+    );
+    assert!(!has_code(&r, "E001"), "{:?}", codes(&r));
+}
+
+// Includes and substitutions move lines and columns, so a finding that names one says it counts in
+// the rendered text rather than pointing at the wrong place in the file.
+#[test]
+fn a_position_in_a_rendered_document_says_so() {
+    let broken = format!(
+        r#"{{"port": <%= process.env.{UNSET} || '4545' %>,, "protocol": "http", "stubs": []}}"#
+    );
+    let r = lint_json(&broken, "imposters.json", &opts());
+    assert_eq!(codes(&r), vec!["E001"]);
+    assert!(
+        r.issues[0]
+            .message
+            .ends_with("(line and column are in the rendered document)"),
+        "{}",
+        r.issues[0].message
+    );
+
+    let lossy = format!(
+        r#"{{"port": <%= process.env.{UNSET} || '4545' %>, "protocol": "http", "stubs": [{{"responses": [{{"is": {{"body": {{"big": 123456789012345678901234567890}}}}}}]}}]}}"#
+    );
+    let r = lint_json(&lossy, "imposters.json", &opts());
+    let w012: Vec<_> = r.issues.iter().filter(|i| i.code == "W012").collect();
+    assert_eq!(w012.len(), 1, "{:?}", codes(&r));
+    assert!(
+        w012[0]
+            .location
+            .as_deref()
+            .is_some_and(|l| l.ends_with(" of the rendered document")),
+        "{:?}",
+        w012[0].location
+    );
+
+    let plain = r#"{"port": 4545,, "protocol": "http", "stubs": []}"#;
+    let r = lint_json(plain, "imposters.json", &opts());
+    assert!(
+        !r.issues[0].message.contains("rendered"),
+        "an untemplated file is not annotated"
+    );
+}
+
+#[test]
+fn a_templated_yaml_document_lints_clean() {
+    let text =
+        format!("- port: <%= process.env.{UNSET} || '4545' %>\n  protocol: http\n  stubs: []\n");
+    let r = rift_lint::lint_yaml(&text, "imposters.yaml", &opts());
+    assert!(r.issues.is_empty(), "{:?}", codes(&r));
+}
+
+#[test]
+fn no_parse_lints_the_text_verbatim() {
+    let verbatim = LintOptions { no_parse: true };
+    let text = format!(
+        r#"{{"port": <%= process.env.{UNSET} || '4545' %>, "protocol": "http", "stubs": []}}"#
+    );
+    let r = lint_json(&text, "imposters.json", &verbatim);
+    assert_eq!(
+        codes(&r),
+        vec!["E001"],
+        "--no-parse loads the tag as text, which is not JSON"
+    );
+
+    let literal = r#"{"port": 4545, "protocol": "http", "stubs": [{"responses": [{"is": {"body": "<% literal %>"}}]}]}"#;
+    let r = lint_json(literal, "imposters.json", &verbatim);
+    assert!(
+        r.issues.is_empty(),
+        "a literal tag in a string is fine verbatim: {:?}",
+        codes(&r)
+    );
+}
+
 // ─── Public API tests ─────────────────────────────────────────────────────────
 
 /// Issue #1008: this asserted `E002`, encoding the collision rather than the contract — the

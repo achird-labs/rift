@@ -156,4 +156,8 @@ impl LintResult {
 
 /// Options for validation.
 #[derive(Debug, Clone, Default)]
-pub struct LintOptions {}
+pub struct LintOptions {
+    /// Lint a document's text verbatim instead of rendering its EJS tags first, matching a file
+    /// loaded with `rift --no-parse` (issue #1108).
+    pub no_parse: bool,
+}

@@ -69,9 +69,29 @@ Options:
   -e, --errors-only  Only show errors (hide warnings)
   -v, --verbose      Verbose output
   -s, --strict       Treat warnings as errors
+      --no-parse     Lint files verbatim, without rendering EJS tags (alias: --noParse)
   -h, --help         Print help
   -V, --version      Print version
 ```
+
+### Templated files
+
+A JSON or YAML file with EJS `<% %>` tags is rendered before it is linted, exactly as `--configfile`
+renders it: the same four tags, the same refusals, `include` and `stringify` paths relative to the
+file, and `process.env` read from the environment `rift-lint` runs in. So the documented
+`"port": <%= process.env.PORT || '4545' %>` lints clean, and an included file's imposters are
+checked too.
+
+- A tag the engine would refuse, or an included file it cannot read, is [E049](#errors), with the
+  engine's own message. The rest of that file is not checked.
+- A `process.env` tag with no default whose variable is unset is [W013](#warnings). Run the lint
+  with the same environment rift will have, or give the tag a default.
+- `--no-parse` lints the text as it is, matching `rift --no-parse`. Use it for a `--datadir` and for
+  JSON sent to `POST /imposters`, which the engine never preprocesses, so a literal `<%` there is
+  data. The TUI validates imports this way.
+- A line and column in `E001` or `W012` count in the rendered document, and the finding says so,
+  because an `include` or a substitution moves them.
+- `--fix` never rewrites a templated file, because it would write the rendered values over the tags.
 
 ---
 
@@ -130,6 +150,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E046 | A YAML document's root is not a sequence of imposters — the engine's YAML loader accepts only a top-level list, unlike `--configfile`'s JSON, which also accepts a single imposter object or an `{"imposters": [...]}` wrapper | `port: 3000` at the document root |
 | E047 | `port` is present but not a non-negative integer — the engine refuses the file at load (`expected u16`), and an integral float such as `3000.0` is no exception. `null` is reported as E003 instead, because the engine reads it as absent and auto-assigns a port | `"port": "3000"`, `"port": 3000.5` |
 | E048 | A response's behaviors block has a shape the engine does not read: a `_behaviors` that is not an object, or a `behaviors` that is neither an object nor an array, is refused at load; a non-object, non-null element of a `behaviors` array is skipped | `"_behaviors": [null, null, null, null, "cmd"]`, `"behaviors": "wait"`, `"behaviors": [5]` |
+| E049 | The engine would refuse to preprocess the file: an EJS tag it does not evaluate, or an `include`/`stringify` file that cannot be read. The message is the engine's own | `"body": "<% for (x) %>"`, `<% include 'missing.json' %>` |
 
 ### Warnings
 
@@ -149,6 +170,7 @@ Warnings indicate potential issues that may cause unexpected behavior.
 | W010 | Protocol `tcp` is not yet implemented and will fail at runtime | `"protocol": "tcp"` |
 | W011 | Unknown TCP fault type — the fault will not fire at runtime | `{"type": "NONSENSE"}` |
 | W012 | Number literal cannot be kept as written — the engine reads it as the nearest double (a `.yaml`/`.yml` file is not checked, even one holding JSON text) | `"body": {"big": 123456789012345678901234567890}` is served as `1.2345678901234568e29` |
+| W013 | A `<%= process.env.VAR %>` tag with no default reads a variable that is unset where `rift-lint` runs, so the engine would render it empty. The document is linted as rendered | `"port": <%= process.env.PORT %>` with `PORT` unset |
 
 ### Info
 
@@ -178,6 +200,9 @@ read back as JSON.
 ```bash
 rift-lint ./imposters/ --fix
 ```
+
+**A templated file is never rewritten** (see [Templated files](#templated-files)): the rewrite
+would replace its `<% %>` tags with what they rendered to.
 
 **A file that gives the same key twice anywhere is never rewritten.** `--fix` re-serializes the
 whole document from its parsed form, and a repeated key does not survive parsing — the first value

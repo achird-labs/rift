@@ -1,0 +1,18 @@
+[package]
+name = "rift-ejs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The EJS template subset Rift's config loader evaluates, shared with rift-lint."
+
+[lints]
+workspace = true
+
+[dependencies]
+regex = "1"
+serde_json.workspace = true
+thiserror.workspace = true

@@ -439,7 +439,8 @@ preprocessed, so it cannot carry a literal `<%`.
 `<% include 'path' %>` inlines another file, and `<%- stringify('path') %>` inlines a file's contents
 escaped for use inside a JSON string. A stringified file is rendered first, so `process.env` tags in it
 are substituted. `--no-parse` turns preprocessing off; see the
-[CLI reference]({{ site.baseurl }}/configuration/cli/).
+[CLI reference]({{ site.baseurl }}/configuration/cli/). `rift-lint` renders a templated file the same
+way before it checks it; see [Linting]({{ site.baseurl }}/features/linting/#templated-files).
 
 ---
 
