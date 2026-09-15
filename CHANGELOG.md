@@ -95,6 +95,16 @@ record.
 
 ### Fixed
 
+- **With `--configfile` or `--imposters` and `--datadir` together, a port-less config-file imposter
+  could take the port of a data-directory file at startup, and that file's imposter was not served**
+  (#1120). Startup created every source imposter before reading the data directory, and an
+  auto-assigned port is the lowest free one from 49152, so the data-directory imposter on that port
+  was skipped with `PortInUse` until the next reload. Before #1122 the config-file imposter was also
+  written over that file. Both stores are now created in one pass, every imposter with an explicit
+  port first, which also covers a port-less file inside the data directory. Every refusal while
+  loading imposters, including a data directory that cannot be listed, now comes before the first
+  imposter is created.
+
 - **`POST /admin/reload` with both `--configfile` and `--datadir` deleted every datadir imposter and
   its file** (#1122). Reload re-applied the config file alone, so its sweep deleted each imposter
   only the data directory declared, including every one created through the admin API, and unlinked
