@@ -180,7 +180,7 @@ pub struct Cli {
     #[arg(long, value_name = "TOKEN", env = "MB_APIKEY")]
     pub api_key: Option<String>,
 
-    /// RC file with default flag values (Mountebank compatibility; partial support — port/host/loglevel only)
+    /// RC file with default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/datadir/configfile/noParse); one that cannot be read or applied aborts startup
     #[arg(long, value_name = "FILE")]
     pub rcfile: Option<PathBuf>,
 

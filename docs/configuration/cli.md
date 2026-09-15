@@ -183,7 +183,7 @@ Options:
       --pidfile <FILE>             PID file path
       --origin <ORIGIN>            CORS allowed origin
       --api-key <TOKEN>            Require this token in the Authorization header for all admin API requests
-      --rcfile <FILE>              RC file of default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/datadir/configfile/noParse)
+      --rcfile <FILE>              RC file with default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/datadir/configfile/noParse); one that cannot be read or applied aborts startup
       --default-tls-cert <FILE>    Default TLS certificate (PEM) for HTTPS imposters without their own
       --default-tls-key <FILE>     Default TLS private key (PEM), paired with --default-tls-cert
       --no-self-signed-tls         Disable the self-signed fallback; an HTTPS imposter with no cert is an error

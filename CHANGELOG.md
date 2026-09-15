@@ -13,6 +13,19 @@ record.
 
 ### Changed
 
+- **Security: an `--rcfile` that cannot be read or applied now aborts startup** (#1114). It used to be
+  skipped with a warning and the server started with none of its keys, so a mistyped
+  `"requireAdminAuth": "true"` served the admin plane off-host with no authentication. A missing file,
+  invalid JSON, a root that is not an object, and a recognised key with the wrong type are all fatal,
+  and the error names the file.
+  - Every recognised key is now type-checked before any is applied. A wrong-typed value used to be
+    ignored or coerced: `"localOnly": "yes"` bound the admin plane on every interface, `"port": "4321"`
+    kept the default port, and `"port": 70000` wrapped to `4464`.
+  - An unsupported rcfile key is now printed as a warning on stderr. It was logged before the log
+    subscriber existed, so it never appeared.
+  - `bootstrap::apply_rcfile_defaults_reporting` returns the unsupported keys for an embedder that
+    applies the rcfile before installing a subscriber.
+
 - **An EJS tag that `--configfile`, `--imposters file:` and `https:` sources do not evaluate now
   fails the load, naming the tag and its line** (#1095). It used to be blanked or stripped with only
   a log line, so the config that loaded silently differed from the file: an empty `port`, a body with
