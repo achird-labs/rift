@@ -459,7 +459,18 @@ fn check_port_range(file: &Path, imposter: &Value, result: &mut LintResult) {
         );
         return;
     };
-    if !(1..=65535).contains(&port) {
+    if port == 0 {
+        result.add_issue(
+            LintIssue::error(
+                "E005",
+                "Port 0 is auto-assigned by the engine, like an absent port, but a config file must \
+                 pin its ports (1-65535)",
+                file.to_path_buf(),
+            )
+            .with_location("port")
+            .with_suggestion("Write the port the imposter should listen on, e.g. \"port\": 3000"),
+        );
+    } else if port > 65535 {
         result.add_issue(
             LintIssue::error(
                 "E005",

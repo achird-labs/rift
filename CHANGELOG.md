@@ -65,6 +65,14 @@ record.
 
 ### Fixed
 
+- **Two imposters on `port: 0` were refused as a duplicate port `0`, although `POST /imposters`
+  auto-assigns a `0`** (#1104). `--configfile`, `--imposters` and `--datadir` startup aborted with
+  "both declare port 0", even for two imposters in one file, and `POST /admin/reload`,
+  `PUT /imposters`, `rift_apply_config` and the embedded `configFile` returned `PortInUse(0)`. `0` now
+  means auto-assign at every door, exactly like an absent port: such an imposter is re-created on each
+  apply rather than reconciled. `rift-lint` still reports `port: 0` as `E005`, now explaining that a
+  config file must pin its ports.
+
 - **An explicit `null` for a `_behaviors` key was treated three different ways** (#1093). Writing
   `"wait": null` (or `null` for `decorate`, `shellTransform`, `copy`, `lookup` or `repeat`) now means
   the key is absent everywhere, the way `null` already works for `port` and `statusCode`.

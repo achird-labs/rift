@@ -602,6 +602,49 @@ fn origin_announces_connection_close_on_a_304() {
 
 // ===== AC3: a port claimed by two sources names both =====
 
+// Issue #1104: `port: 0` is auto-assigned at creation, like an absent port, so two sources that
+// each declare it claim nothing and must not be refused as a collision on port 0.
+#[tokio::test]
+async fn two_sources_declaring_port_zero_do_not_collide() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.json");
+    let b = dir.path().join("b.json");
+    std::fs::write(&a, imposter_doc(0, "from-a")).unwrap();
+    std::fs::write(&b, imposter_doc(0, "from-b")).unwrap();
+
+    let set = set_of(
+        &[
+            &format!("file:{}", a.display()),
+            &format!("file:{}", b.display()),
+        ],
+        false,
+    );
+    let merged = set
+        .fetch_all()
+        .await
+        .expect("port 0 in two sources is two auto-assigned imposters, not a collision");
+    assert_eq!(merged.imposters.len(), 2);
+}
+
+// The common shape: both `port: 0` imposters in one `--configfile`, which used to abort startup with
+// "sources `file:x` and `file:x` both declare port 0".
+#[tokio::test]
+async fn one_source_declaring_port_zero_twice_does_not_collide() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("imposters.json");
+    std::fs::write(
+        &path,
+        r#"{"imposters":[{"port":0,"protocol":"http","stubs":[]},{"port":0,"protocol":"http","stubs":[]}]}"#,
+    )
+    .unwrap();
+
+    let merged = set_of(&[&format!("file:{}", path.display())], false)
+        .fetch_all()
+        .await
+        .expect("two port-0 imposters in one file are auto-assigned, not a collision");
+    assert_eq!(merged.imposters.len(), 2);
+}
+
 #[tokio::test]
 async fn merge_collision_names_both_sources() {
     let dir = tempfile::tempdir().unwrap();
