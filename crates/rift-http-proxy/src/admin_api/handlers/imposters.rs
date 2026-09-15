@@ -21,7 +21,7 @@ use hyper::{Request, Response, StatusCode};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// The `ScriptBaseDir` a `--scripts-dir`-carrying admin API resolves `file:` scripts under;
 /// `Unconfigured` when the flag was never set. Shared by the imposter CRUD handlers and the stub
@@ -342,9 +342,39 @@ pub async fn handle_delete_all(
     manager: Arc<ImposterManager>,
     _base_url: &str,
 ) -> Response<Full<Bytes>> {
-    let configs = manager.delete_all().await;
-    let body = serde_json::json!({ "imposters": configs });
-    json_response(StatusCode::OK, &body)
+    let report = manager.delete_all().await;
+    if report.failed.is_empty() {
+        return json_response(
+            StatusCode::OK,
+            &serde_json::json!({ "imposters": report.deleted }),
+        );
+    }
+    // Issue #1124: an imposter whose datadir file could not be removed is still serving. The client
+    // is told which, and which were deleted, in the Mountebank envelope plus the deleted list.
+    let failures: Vec<String> = report
+        .failed
+        .iter()
+        .map(|(port, e)| {
+            error!(port, error = %e, "DELETE /imposters: imposter could not be deleted");
+            format!("{port}: {e}")
+        })
+        .collect();
+    let status = StatusCode::SERVICE_UNAVAILABLE;
+    json_response(
+        status,
+        &serde_json::json!({
+            "errors": [{
+                "code": status.as_str(),
+                "type": ErrorKind::for_status(status).slug(),
+                "message": format!(
+                    "Persistence error: {} imposter(s) could not be deleted and are still serving: {}",
+                    report.failed.len(),
+                    failures.join("; ")
+                ),
+            }],
+            "imposters": report.deleted,
+        }),
+    )
 }
 
 /// GET /imposters/:port - Get a specific imposter
@@ -2264,6 +2294,92 @@ mod list_tests {
             false,
             "a non-recording imposter must report recordRequests: false, not a missing field"
         );
+        manager.delete_all().await;
+    }
+}
+
+// Issue #1124: a delete whose datadir file cannot be removed is a 503, not a 200.
+#[cfg(test)]
+mod delete_persistence_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    /// A datadir that has been replaced by a regular file after the imposter was persisted, so the
+    /// unlink fails with ENOTDIR.
+    async fn manager_with_unremovable_file(
+        root: &std::path::Path,
+        ports: &[u16],
+    ) -> Arc<ImposterManager> {
+        let datadir = root.join("data");
+        std::fs::create_dir(&datadir).expect("mkdir");
+        let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        for port in ports {
+            manager
+                .create_imposter(
+                    serde_json::from_value(
+                        serde_json::json!({"port": port, "protocol": "http", "stubs": []}),
+                    )
+                    .expect("config"),
+                )
+                .await
+                .expect("create");
+        }
+        std::fs::rename(&datadir, root.join("moved")).expect("move datadir");
+        std::fs::write(&datadir, "not a directory").expect("replace with a file");
+        manager
+    }
+
+    async fn body_json(resp: Response<Full<Bytes>>) -> serde_json::Value {
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    #[tokio::test]
+    async fn delete_one_answers_503_and_keeps_the_imposter() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = manager_with_unremovable_file(dir.path(), &[23786]).await;
+
+        let resp = handle_delete(23786, "http://localhost:2525", Arc::clone(&manager)).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        let message = body["errors"][0]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("23786.json"), "got: {body}");
+        assert!(manager.get_imposter(23786).is_ok());
+
+        std::fs::remove_file(dir.path().join("data")).expect("restore");
+        std::fs::create_dir(dir.path().join("data")).expect("restore");
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn delete_all_answers_503_naming_the_port_and_lists_what_was_deleted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = manager_with_unremovable_file(dir.path(), &[23787]).await;
+        manager
+            .create_imposter_as(
+                serde_json::from_value(
+                    serde_json::json!({"port": 23788, "protocol": "http", "stubs": []}),
+                )
+                .expect("config"),
+                crate::imposter::Persistence::Ephemeral,
+            )
+            .await
+            .expect("create ephemeral");
+
+        let resp = handle_delete_all(Arc::clone(&manager), "http://localhost:2525").await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        let message = body["errors"][0]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("23787") && message.contains("23787.json"),
+            "got: {body}"
+        );
+        assert_eq!(body["imposters"][0]["port"], 23788, "got: {body}");
+        assert_eq!(body["imposters"].as_array().map(Vec::len), Some(1));
+        assert!(manager.get_imposter(23787).is_ok());
+
+        std::fs::remove_file(dir.path().join("data")).expect("restore");
+        std::fs::create_dir(dir.path().join("data")).expect("restore");
         manager.delete_all().await;
     }
 }

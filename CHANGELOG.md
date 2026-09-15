@@ -13,6 +13,12 @@ record.
 
 ### Changed
 
+- **Embedders: `ImposterManager::delete_all` returns a `DeleteAllReport`** (#1124) with the `deleted`
+  configs and the `failed` ports, instead of the deleted configs alone. When anything failed it emits
+  a `Deleted` event per deleted port instead of `AllDeleted`. `rift_delete_all` returns `-1` in that
+  case, and the deprecated `ImposterManager::reload` returns the error instead of creating the new
+  set beside the imposter that is still serving.
+
 - **Imposters loaded from `--configfile` or `--imposters` are no longer written to `--datadir`**
   (#1122). The data directory now holds only what the admin API created and the files an operator
   put there; a config-file imposter is re-read from its file, and a copy of it in the directory
@@ -94,6 +100,13 @@ record.
     are unchanged — a stored value read back into a header is repaired at that read.
 
 ### Fixed
+
+- **A delete whose `--datadir` file could not be removed reported success, and the imposter came back
+  on restart** (#1124). The unlink failure was only logged, and `DELETE /imposters/:port`,
+  `DELETE /imposters` and a reload's sweep all reported the imposter as deleted. The file is now
+  removed before the imposter is torn down. If that fails, the delete returns `503` naming the file,
+  the imposter keeps serving, and a reload lists the port under `failed`. `DELETE /imposters`
+  returns `503` naming each such port, with the imposters that were deleted.
 
 - **With `--configfile` or `--imposters` and `--datadir` together, a port-less config-file imposter
   could take the port of a data-directory file at startup, and that file's imposter was not served**

@@ -230,6 +230,10 @@ the new imposter, never the deleted one's state.
 **Query Parameters:**
 - `replayable` (boolean) - Return imposter config before deletion
 
+With `--datadir`, the imposter's `<datadir>/<port>.json` is removed first. If that fails, the call
+returns `503` naming the file and the imposter is **not** deleted: it keeps serving, and deleting it
+anyway would bring it back on the next restart.
+
 **Response:** `200 OK`
 ```json
 {
@@ -249,6 +253,10 @@ curl -X DELETE http://localhost:2525/imposters/4545
 ### DELETE /imposters
 
 Delete all imposters.
+
+If an imposter's `<datadir>/<port>.json` cannot be removed, that imposter is not deleted and keeps
+serving. The call then returns `503` with an `errors` entry naming each such port and file, and
+`imposters` lists the ones that were deleted.
 
 **Response:** `200 OK`
 ```json

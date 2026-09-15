@@ -7,8 +7,8 @@ use super::core::Imposter;
 use super::fault_io::{FaultCell, FaultIo, TcpFaultKind};
 use super::handler::handle_imposter_request_decorated;
 use super::reconcile::{
-    ApplyReport, DesiredImposter, EventContext, ImposterEvent, ImposterEventListener, Persistence,
-    StubReconcile,
+    ApplyReport, DeleteAllReport, DesiredImposter, EventContext, ImposterEvent,
+    ImposterEventListener, Persistence, StubReconcile,
 };
 use super::types::{ImposterConfig, ImposterError, Stub};
 use crate::behaviors::ResponseSequencer;
@@ -247,6 +247,27 @@ impl PortTable {
         Ok(())
     }
 
+    /// Vacate a slot only if it still holds `expected` (issue #1124): a delete that looked an imposter
+    /// up and removed its file must not then tear down a different imposter that took the port
+    /// meanwhile.
+    fn remove_if_same(&self, port: u16, expected: &Arc<Imposter>) -> Option<Arc<Imposter>> {
+        let _guard = self.mutations.lock();
+        let slot = &self.slots[port as usize];
+        if !slot
+            .load()
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+        {
+            return None;
+        }
+        let previous = slot.swap(None);
+        if previous.is_some() {
+            self.count
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        previous
+    }
+
     /// Vacate a slot, returning what was there (if anything).
     fn remove(&self, port: u16) -> Option<Arc<Imposter>> {
         let _guard = self.mutations.lock();
@@ -290,6 +311,10 @@ pub struct ImposterManager {
     shutdown_tx: broadcast::Sender<()>,
     /// Optional data directory for persistence write-through
     datadir: Option<Arc<PathBuf>>,
+    /// Serializes datadir writes against a delete's unlink-then-remove (issue #1124), so a write
+    /// cannot land between the two and bring back the file of an imposter being deleted. Taken only
+    /// by admin mutations that persist, never by request handling.
+    persist_lock: tokio::sync::Mutex<()>,
     /// TLS defaults for HTTPS imposters (issue #206)
     tls_defaults: TlsDefaults,
     /// Observer for config mutations (issue #316)
@@ -357,6 +382,7 @@ impl ImposterManager {
             imposters: PortTable::new(),
             shutdown_tx,
             datadir: datadir.map(Arc::new),
+            persist_lock: tokio::sync::Mutex::new(()),
             tls_defaults: TlsDefaults::default(),
             event_listener: None,
             response_decorator: None,
@@ -913,7 +939,9 @@ impl ImposterManager {
             self.imposters.remove(port);
             // A write that failed partway (e.g. ENOSPC) can leave a truncated {port}.json; drop it
             // so a later restart doesn't try to load a corrupt file for a create that never took.
-            self.remove_persisted_imposter(&imposter).await;
+            if let Err(cleanup) = self.remove_persisted_imposter(&imposter).await {
+                error!("rolling back a create that could not be persisted: {cleanup}");
+            }
             let _ = shutdown_tx.send(());
             return Err(e);
         }
@@ -1382,10 +1410,23 @@ impl ImposterManager {
         port: u16,
         unlink_file: bool,
     ) -> Result<ImposterConfig, ImposterError> {
-        let imposter = self
-            .imposters
-            .remove(port)
-            .ok_or(ImposterError::NotFound(port))?;
+        // The file goes first (issue #1124): a delete that cannot remove it fails with the imposter
+        // still registered and serving, so `Err` keeps meaning "not deleted". Removing the imposter
+        // first would leave nothing to fall back to, and the file would bring it back on restart.
+        let imposter = if unlink_file {
+            // Held until the imposter is out of the map, so no write can recreate its file between
+            // the unlink and the removal.
+            let _persist = self.persist_lock.lock().await;
+            let imposter = self.get_imposter(port)?;
+            self.remove_persisted_imposter(&imposter).await?;
+            self.imposters
+                .remove_if_same(port, &imposter)
+                .ok_or(ImposterError::NotFound(port))?
+        } else {
+            self.imposters
+                .remove(port)
+                .ok_or(ImposterError::NotFound(port))?
+        };
 
         // Signal the accept loop and every live connection to stop (issue #207), then **await** the
         // teardown so this delete does not return until the old generation can no longer serve
@@ -1443,9 +1484,6 @@ impl ImposterManager {
         }
 
         info!("Imposter on port {} deleted", port);
-        if unlink_file {
-            self.remove_persisted_imposter(&imposter).await;
-        }
         Ok(imposter.config.clone())
     }
 
@@ -1461,22 +1499,30 @@ impl ImposterManager {
         self.imposters.imposters()
     }
 
-    /// Delete all imposters. Emits a single `AllDeleted` event rather than one `Deleted`
-    /// per port.
-    pub async fn delete_all(&self) -> Vec<ImposterConfig> {
-        let ports = self.imposters.ports();
-
-        let mut configs = Vec::new();
-        for port in ports {
+    /// Delete all imposters. Emits a single `AllDeleted` event rather than one `Deleted` per port,
+    /// unless an imposter could not be deleted (its datadir file could not be removed, issue #1124):
+    /// then each deleted port gets its own `Deleted`, because the others are still serving.
+    pub async fn delete_all(&self) -> DeleteAllReport {
+        let mut report = DeleteAllReport::default();
+        for port in self.imposters.ports() {
             match self.delete_imposter_inner(port, true).await {
-                Ok(config) => configs.push(config),
-                // Only realizable as a concurrent-delete race (NotFound) — already gone.
-                Err(e) => debug!("delete_all: imposter on port {} not deleted: {}", port, e),
+                Ok(config) => report.deleted.push(config),
+                // A concurrent delete got there first: already gone, which is what was asked.
+                Err(ImposterError::NotFound(_)) => {
+                    debug!("delete_all: imposter on port {port} was already gone");
+                }
+                Err(e) => report.failed.push((port, e)),
             }
         }
 
-        self.emit(ImposterEvent::AllDeleted);
-        configs
+        if report.failed.is_empty() {
+            self.emit(ImposterEvent::AllDeleted);
+        } else {
+            for port in report.deleted.iter().filter_map(|config| config.port) {
+                self.emit(ImposterEvent::Deleted(port));
+            }
+        }
+        report
     }
 
     /// Replace all imposters with a fresh set (issue #197 hot-reload). The whole set is validated
@@ -1495,7 +1541,11 @@ impl ImposterManager {
         Self::validate_config_set(&configs)?;
         Self::explicit_ports_first(&mut configs);
 
-        self.delete_all().await;
+        // An imposter whose datadir file could not be removed is still serving (issue #1124); creating
+        // the new set beside it would report a clean reload over a stale imposter.
+        if let Some((_, e)) = self.delete_all().await.failed.into_iter().next() {
+            return Err(e);
+        }
         for config in configs {
             self.create_imposter(config).await?;
         }
@@ -1795,8 +1845,9 @@ impl ImposterManager {
                 if requested.is_none()
                     && persistence == Persistence::Datadir
                     && !matches!(e, ImposterError::PortInUse(_))
+                    && let Err(cleanup) = self.remove_persisted_file(port).await
                 {
-                    self.remove_persisted_file(port).await;
+                    report.failed.push((port, cleanup));
                 }
                 report.deleted.push(port);
                 self.emit(ImposterEvent::Deleted(port));
@@ -1953,7 +2004,10 @@ impl ImposterManager {
     /// Shutdown all imposters (for future graceful shutdown)
     pub async fn shutdown(&self) {
         let _ = self.shutdown_tx.send(());
-        self.delete_all().await;
+        let report = self.delete_all().await;
+        for (port, e) in &report.failed {
+            error!("shutdown: imposter on port {port} could not be deleted: {e}");
+        }
     }
 
     /// Persist an imposter's current config to datadir (if configured).
@@ -1969,6 +2023,16 @@ impl ImposterManager {
         let Some(port) = imposter.config.port else {
             return Ok(());
         };
+        let _persist = self.persist_lock.lock().await;
+        // A delete that ran first has removed both the file and the imposter; writing now would bring
+        // back, on the next restart, an imposter that no longer exists (issue #1124).
+        if !self
+            .imposters
+            .get(port)
+            .is_some_and(|current| std::ptr::eq(Arc::as_ptr(&current), imposter))
+        {
+            return Ok(());
+        }
         let mut snapshot = imposter.config.clone();
         snapshot.stubs = imposter.get_stubs();
         // The atomic is the runtime truth; the retained config only holds the
@@ -1993,32 +2057,33 @@ impl ImposterManager {
     ///
     /// Awaited, not spawned: a delete that returned before its unlink ran let a following create on
     /// the same port write `{port}.json` first, and the late unlink then deleted the new file.
-    async fn remove_persisted_imposter(&self, imposter: &Imposter) {
+    async fn remove_persisted_imposter(&self, imposter: &Imposter) -> Result<(), ImposterError> {
         if imposter.persistence() == Persistence::Ephemeral {
-            return;
+            return Ok(());
         }
-        if let Some(port) = imposter.config.port {
-            self.remove_persisted_file(port).await;
+        match imposter.config.port {
+            Some(port) => self.remove_persisted_file(port).await,
+            None => Ok(()),
         }
     }
 
     /// Remove `{port}.json` from the datadir (if configured), whatever store the imposter was in.
-    async fn remove_persisted_file(&self, port: u16) {
+    async fn remove_persisted_file(&self, port: u16) -> Result<(), ImposterError> {
         let Some(ref datadir) = self.datadir else {
-            return;
+            return Ok(());
         };
         let path = datadir.join(format!("{port}.json"));
         match tokio::fs::remove_file(&path).await {
-            Ok(()) => {}
+            Ok(()) => Ok(()),
             // An absent file is the desired end state, not a failure: the imposter may never
             // have been persisted, or the file was already removed. Handling NotFound here
             // (rather than pre-checking `exists()`) also closes the TOCTOU window between
             // check and unlink.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => error!(
-                "Failed to remove persisted imposter {} at {:?}: {}",
-                port, path, e
-            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(ImposterError::PersistError(
+                anyhow::Error::new(e)
+                    .context(format!("Failed to remove imposter {port} file {path:?}")),
+            )),
         }
     }
 }
@@ -3519,6 +3584,255 @@ mod tests {
                 ImposterEvent::AllDeleted,          // delete_all
             ]
         );
+    }
+
+    // ── Issue #1124: a datadir file that cannot be removed fails the delete ────────────────────────
+
+    /// A manager whose datadir is replaced by a regular file once `setup` has persisted into it, so
+    /// every later unlink fails with ENOTDIR (not NotFound), for root as well.
+    struct BrokenDatadir {
+        _dir: tempfile::TempDir,
+        path: std::path::PathBuf,
+    }
+
+    impl BrokenDatadir {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("data");
+            std::fs::create_dir(&path).expect("mkdir");
+            Self { _dir: dir, path }
+        }
+
+        fn break_it(&self) {
+            std::fs::rename(&self.path, self.path.with_file_name("moved")).expect("move datadir");
+            std::fs::write(&self.path, "not a directory").expect("replace with a file");
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_imposter_surfaces_a_failed_unlink_and_keeps_serving() {
+        let datadir = BrokenDatadir::new();
+        let manager = ImposterManager::with_datadir(Some(datadir.path.clone()));
+        manager
+            .create_imposter(imposter_cfg(
+                json!({"protocol": "http", "port": 23781, "stubs": []}),
+            ))
+            .await
+            .expect("create");
+        datadir.break_it();
+
+        let err = manager
+            .delete_imposter(23781)
+            .await
+            .expect_err("a delete whose file cannot be removed must fail");
+        let message = format!("{err}");
+        assert!(
+            matches!(err, ImposterError::PersistError(_)),
+            "got: {message}"
+        );
+        assert!(
+            message.contains("23781.json"),
+            "the error names the file: {message}"
+        );
+        assert!(
+            manager.get_imposter(23781).is_ok(),
+            "Err means not deleted: the imposter is still registered"
+        );
+
+        std::fs::remove_file(&datadir.path).expect("restore");
+        std::fs::create_dir(&datadir.path).expect("restore");
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn delete_all_reports_an_imposter_whose_file_cannot_be_removed() {
+        let listener = Arc::new(RecordingListener::default());
+        let datadir = BrokenDatadir::new();
+        let manager = ImposterManager::with_datadir(Some(datadir.path.clone()))
+            .with_event_listener(listener.clone());
+        manager
+            .create_imposter(imposter_cfg(
+                json!({"protocol": "http", "port": 23782, "stubs": []}),
+            ))
+            .await
+            .expect("create persisted");
+        manager
+            .create_imposter_as(
+                imposter_cfg(json!({"protocol": "http", "port": 23783, "stubs": []})),
+                Persistence::Ephemeral,
+            )
+            .await
+            .expect("create ephemeral");
+        datadir.break_it();
+        listener.0.lock().clear();
+
+        let report = manager.delete_all().await;
+
+        assert_eq!(
+            report.deleted.iter().map(|c| c.port).collect::<Vec<_>>(),
+            vec![Some(23783)],
+            "the ephemeral imposter never touches the datadir, so it deletes cleanly"
+        );
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].0, 23782);
+        assert!(matches!(report.failed[0].1, ImposterError::PersistError(_)));
+        assert!(manager.get_imposter(23782).is_ok());
+        assert_eq!(
+            listener.0.lock().clone(),
+            vec![ImposterEvent::Deleted(23783)],
+            "not everything was deleted, so AllDeleted would be false"
+        );
+
+        std::fs::remove_file(&datadir.path).expect("restore");
+        std::fs::create_dir(&datadir.path).expect("restore");
+        let rest = manager.delete_all().await;
+        assert!(rest.failed.is_empty(), "{:?}", rest.failed);
+    }
+
+    #[tokio::test]
+    async fn delete_all_emits_all_deleted_when_nothing_failed() {
+        let listener = Arc::new(RecordingListener::default());
+        let manager = ImposterManager::new().with_event_listener(listener.clone());
+        manager
+            .create_imposter(imposter_cfg(
+                json!({"protocol": "http", "port": 23784, "stubs": []}),
+            ))
+            .await
+            .expect("create");
+        listener.0.lock().clear();
+
+        let report = manager.delete_all().await;
+        assert_eq!(report.deleted.len(), 1);
+        assert!(report.failed.is_empty());
+        assert_eq!(listener.0.lock().clone(), vec![ImposterEvent::AllDeleted]);
+    }
+
+    #[tokio::test]
+    async fn an_apply_sweep_reports_an_imposter_whose_file_cannot_be_removed() {
+        let datadir = BrokenDatadir::new();
+        let manager = ImposterManager::with_datadir(Some(datadir.path.clone()));
+        manager
+            .create_imposter(imposter_cfg(
+                json!({"protocol": "http", "port": 23785, "stubs": []}),
+            ))
+            .await
+            .expect("create");
+        datadir.break_it();
+
+        let report = manager.apply_config(Vec::new()).await.expect("apply");
+        assert!(report.deleted.is_empty(), "{report:?}");
+        assert_eq!(report.failed.len(), 1, "{report:?}");
+        assert_eq!(report.failed[0].0, 23785);
+        assert!(manager.get_imposter(23785).is_ok());
+
+        std::fs::remove_file(&datadir.path).expect("restore");
+        std::fs::create_dir(&datadir.path).expect("restore");
+        manager.delete_all().await;
+    }
+
+    // When a create cannot be persisted, its rollback unlink fails the same way. The create must
+    // still report its own write failure, not the cleanup's.
+    #[tokio::test]
+    async fn a_failed_create_reports_the_write_even_when_the_rollback_unlink_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let not_a_dir = dir.path().join("data");
+        std::fs::write(&not_a_dir, "not a directory").expect("write");
+        let manager = ImposterManager::with_datadir(Some(not_a_dir));
+
+        let err = manager
+            .create_imposter(imposter_cfg(
+                json!({"protocol": "http", "port": 23780, "stubs": []}),
+            ))
+            .await
+            .expect_err("the write fails");
+        let message = format!("{err}");
+        assert!(
+            message.contains("Failed to write imposter 23780"),
+            "got: {message}"
+        );
+        assert!(!message.contains("Failed to remove"), "got: {message}");
+        assert_eq!(manager.count(), 0);
+    }
+
+    // A replace whose re-create fails and whose stale-copy cleanup also fails reports both.
+    #[tokio::test]
+    async fn a_failed_replace_reports_a_cleanup_unlink_that_also_failed() {
+        let datadir = BrokenDatadir::new();
+        let manager = ImposterManager::with_datadir(Some(datadir.path.clone()));
+        manager
+            .create_imposter(imposter_cfg(
+                json!({"protocol": "http", "port": 23777, "stubs": []}),
+            ))
+            .await
+            .expect("create");
+        datadir.break_it();
+
+        let report = manager
+            .apply_config(vec![imposter_cfg(json!({
+                "protocol": "https", "port": 23777,
+                "cert": "not a pem", "key": "not a pem", "stubs": []
+            }))])
+            .await
+            .expect("validation passes; the re-create fails");
+        assert_eq!(report.deleted, vec![23777], "{report:?}");
+        let messages: Vec<String> = report.failed.iter().map(|(_, e)| format!("{e}")).collect();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("Failed to remove imposter 23777")),
+            "the cleanup failure is reported: {messages:?}"
+        );
+
+        std::fs::remove_file(&datadir.path).expect("restore");
+        std::fs::create_dir(&datadir.path).expect("restore");
+        manager.delete_all().await;
+    }
+
+    // A write that runs after a delete (a stub edit that looked the imposter up first) must not
+    // recreate the deleted imposter's file.
+    #[tokio::test]
+    async fn a_write_after_delete_does_not_recreate_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        manager
+            .create_imposter(imposter_cfg(
+                json!({"protocol": "http", "port": 23789, "stubs": []}),
+            ))
+            .await
+            .expect("create");
+        let stale = manager.get_imposter(23789).expect("running");
+        manager.delete_imposter(23789).await.expect("delete");
+
+        manager
+            .persist_imposter_checked(&stale)
+            .await
+            .expect("a write for an imposter no longer registered is a no-op");
+        assert!(!dir.path().join("23789.json").exists());
+    }
+
+    #[test]
+    fn remove_if_same_leaves_a_different_imposter_in_place() {
+        let table = PortTable::new();
+        let make = || {
+            Arc::new(
+                Imposter::new(imposter_cfg(
+                    json!({"protocol": "http", "port": 23789, "stubs": []}),
+                ))
+                .expect("imposter"),
+            )
+        };
+        let (first, second) = (make(), make());
+        table.try_claim(23789, Arc::clone(&second)).expect("claim");
+
+        assert!(table.remove_if_same(23789, &first).is_none());
+        assert!(
+            table.contains(23789),
+            "the imposter that took the port stays"
+        );
+        assert!(table.remove_if_same(23789, &second).is_some());
+        assert!(!table.contains(23789));
+        assert_eq!(table.len(), 0);
     }
 
     // Per-port apply failures land in `failed` while sibling ports still apply.
