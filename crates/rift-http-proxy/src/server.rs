@@ -9,7 +9,7 @@ use crate::config_loader::ConfigSource;
 use crate::extensions::metrics;
 use crate::front_door::{CompiledRoutes, RouteTable, RunningFrontDoor, bind_front_door};
 use crate::imposter::{
-    ImposterConfig, ImposterManager, ScriptBaseDir, TlsDefaults, resolve_scripts,
+    ImposterConfig, ImposterManager, Persistence, ScriptBaseDir, TlsDefaults, resolve_scripts,
 };
 use crate::injection_gate::GATED_SCRIPT_SURFACES;
 use crate::intercept_control::{InterceptAuth, InterceptControl, InterceptStartOptions};
@@ -680,7 +680,7 @@ impl ServerBuilder {
         // desugared into one) re-fetches every source; a bare `--datadir` keeps the original
         // synchronous directory re-read.
         if let Some(set) = source_set {
-            server = server.with_imposter_sources(set);
+            server = server.with_imposter_sources(set, cli.datadir);
         } else if let Some(datadir) = cli.datadir {
             server = server.with_config_source(ConfigSource::Dir(datadir));
         }
@@ -1448,7 +1448,12 @@ async fn load_imposters_from_sources(
     ImposterManager::explicit_ports_first(&mut imposters);
     for config in imposters {
         info!("Creating imposter on port {:?} from source", config.port);
-        match manager.create_imposter(config).await {
+        // Ephemeral (issue #1122): the source is where this imposter is re-read from, at restart
+        // and at reload. A datadir copy would load as a second imposter beside it.
+        match manager
+            .create_imposter_as(config, Persistence::Ephemeral)
+            .await
+        {
             Ok(port) => info!("Created imposter on port {}", port),
             Err(e) => error!("Failed to create imposter: {}", e),
         }
@@ -2206,6 +2211,48 @@ mod tests {
             .await
             .expect_err("examples/latency-testing.json uses a JS-function wait; it must be gated");
         assert!(err.to_string().contains("--allowInjection"), "got: {err}");
+
+        manager.delete_all().await;
+    }
+
+    // Issue #1122: persist-on-create exists for the admin API. A source-loaded imposter is re-read
+    // from its source, so a datadir copy of it is a second, unmatched imposter on the next load.
+    #[tokio::test]
+    async fn source_loaded_imposters_are_not_persisted_to_the_datadir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let datadir = dir.path().join("data");
+        std::fs::create_dir(&datadir).expect("mkdir");
+        let path = dir.path().join("imposters.json");
+        write_json(
+            &path,
+            serde_json::json!({"imposters": [
+                {"port": 23761, "protocol": "http", "stubs": []},
+                {"protocol": "http", "stubs": []},
+            ]}),
+        );
+
+        let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        load_imposters_from_sources(&manager, &single_file_source(&path), false, &[])
+            .await
+            .expect("clean configfile loads");
+        assert_eq!(manager.count(), 2);
+
+        let stub: crate::imposter::Stub =
+            serde_json::from_value(serde_json::json!({"responses": [{"is": {"statusCode": 200}}]}))
+                .expect("stub");
+        manager
+            .add_stub(23761, stub, None)
+            .await
+            .expect("add_stub on a source-loaded imposter");
+
+        let written: Vec<_> = std::fs::read_dir(&datadir)
+            .expect("read datadir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert!(
+            written.is_empty(),
+            "datadir must stay empty, found {written:?}"
+        );
 
         manager.delete_all().await;
     }

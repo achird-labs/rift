@@ -124,11 +124,19 @@ impl AdminApiServer {
         self
     }
 
-    /// Set the `--imposters` source set so `POST /admin/reload` re-fetches every source (U-12).
-    /// Replaces any previously-set config source: a server reloads from one place.
+    /// Set the `--imposters` source set so `POST /admin/reload` re-fetches every source (U-12),
+    /// together with the `--datadir` the server also loaded, if any (issue #1122). Replaces any
+    /// previously-set config source.
     #[must_use]
-    pub fn with_imposter_sources(mut self, sources: Arc<SourceSet>) -> Self {
-        self.config_source = Some(ReloadSource::Sources(sources));
+    pub fn with_imposter_sources(
+        mut self,
+        sources: Arc<SourceSet>,
+        datadir: Option<std::path::PathBuf>,
+    ) -> Self {
+        self.config_source = Some(ReloadSource::Sources {
+            set: sources,
+            datadir,
+        });
         self
     }
 

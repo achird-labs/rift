@@ -182,9 +182,13 @@ fn load_dir(dir: &Path) -> anyhow::Result<Vec<ImposterConfig>> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if path.extension().map(|e| e == "json").unwrap_or(false) {
-            let content = std::fs::read_to_string(&path)?;
-            let mut config: ImposterConfig = serde_json::from_str(&content)?;
-            resolve_scripts(&mut config, &base)?;
+            // Named, because a reload refuses the whole set on one bad file and the operator has to
+            // find it among the others (issue #1122).
+            let in_file = || format!("datadir file {}", path.display());
+            let content = std::fs::read_to_string(&path).with_context(in_file)?;
+            let mut config: ImposterConfig =
+                serde_json::from_str(&content).with_context(in_file)?;
+            resolve_scripts(&mut config, &base).with_context(in_file)?;
             configs.push(config);
         }
     }
@@ -365,7 +369,8 @@ mod tests {
 
             let result = load_configs(&ConfigSource::Dir(datadir));
             let err = result.expect_err("escaping datadir file: must be rejected");
-            let msg = err.to_string();
+            // The whole chain: the outermost context names the datadir file (issue #1122).
+            let msg = format!("{err:#}");
             assert!(
                 msg.contains("escapes"),
                 "datadir `{bad}` should be a path-escape error, got: {msg}"

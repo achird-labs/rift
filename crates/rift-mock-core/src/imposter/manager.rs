@@ -7,7 +7,8 @@ use super::core::Imposter;
 use super::fault_io::{FaultCell, FaultIo, TcpFaultKind};
 use super::handler::handle_imposter_request_decorated;
 use super::reconcile::{
-    ApplyReport, EventContext, ImposterEvent, ImposterEventListener, StubReconcile,
+    ApplyReport, DesiredImposter, EventContext, ImposterEvent, ImposterEventListener, Persistence,
+    StubReconcile,
 };
 use super::types::{ImposterConfig, ImposterError, Stub};
 use crate::behaviors::ResponseSequencer;
@@ -743,19 +744,24 @@ impl ImposterManager {
     /// Create and start an imposter
     /// Returns the assigned port (which may have been auto-assigned if not specified)
     pub async fn create_imposter(&self, config: ImposterConfig) -> Result<u16, ImposterError> {
-        let port = self.create_imposter_inner(config).await?;
-        self.emit(ImposterEvent::Created(port));
-        Ok(port)
+        self.create_imposter_as(config, Persistence::Datadir).await
     }
 
-    /// Create without emitting an event, so composite operations (wholesale replace in
-    /// `apply_config`) can report a single higher-level event instead of Deleted+Created.
-    async fn create_imposter_inner(&self, config: ImposterConfig) -> Result<u16, ImposterError> {
+    /// [`create_imposter`](Self::create_imposter), choosing whether the imposter is written to the
+    /// datadir (issue #1122). A startup loader creates what it read from `--configfile` or
+    /// `--imposters` as [`Persistence::Ephemeral`]: its source is where it is re-read from.
+    pub async fn create_imposter_as(
+        &self,
+        config: ImposterConfig,
+        persistence: Persistence,
+    ) -> Result<u16, ImposterError> {
         // `false`: the direct-create contract is all-or-nothing whatever `serve_unbound` says
         // (issue #143) — `Err` here means "the imposter does not exist" to every caller.
-        self.create_imposter_staged(config, false)
-            .await
-            .map(|(port, _)| port)
+        let (port, _) = self
+            .create_imposter_staged(config, false, persistence)
+            .await?;
+        self.emit(ImposterEvent::Created(port));
+        Ok(port)
     }
 
     /// The create pipeline, shared by the direct and apply paths.
@@ -769,6 +775,7 @@ impl ImposterManager {
         &self,
         mut config: ImposterConfig,
         allow_unbound: bool,
+        persistence: Persistence,
     ) -> Result<(u16, Option<ImposterError>), ImposterError> {
         // Validate protocol first
         match config.protocol.as_str() {
@@ -834,6 +841,7 @@ impl ImposterManager {
             &self.flow_store_backends,
         )
         .map_err(|e| ImposterError::FlowStoreConfig(format!("{e:#}")))?;
+        imposter.set_persistence(persistence);
 
         // Inject the shared proxy-recording store, if one is registered (issue #315);
         // otherwise the imposter keeps its private per-mode LocalProxyStore.
@@ -905,7 +913,7 @@ impl ImposterManager {
             self.imposters.remove(port);
             // A write that failed partway (e.g. ENOSPC) can leave a truncated {port}.json; drop it
             // so a later restart doesn't try to load a corrupt file for a create that never took.
-            self.remove_persisted_imposter(port);
+            self.remove_persisted_imposter(&imposter).await;
             let _ = shutdown_tx.send(());
             return Err(e);
         }
@@ -1128,7 +1136,7 @@ impl ImposterManager {
         Ok(())
     }
 
-    /// One listener's accept loop, extracted verbatim from `create_imposter_inner` so the
+    /// One listener's accept loop, extracted verbatim from `create_imposter_staged` so the
     /// per-core fan-out (issue #745) can run N of them. Parameters are the loop's former
     /// captures — `imposter_clone` keeps its capture-era name precisely so the body is a
     /// verbatim move with zero semantic drift.
@@ -1362,13 +1370,18 @@ impl ImposterManager {
 
     /// Delete an imposter
     pub async fn delete_imposter(&self, port: u16) -> Result<ImposterConfig, ImposterError> {
-        let config = self.delete_imposter_inner(port).await?;
+        let config = self.delete_imposter_inner(port, true).await?;
         self.emit(ImposterEvent::Deleted(port));
         Ok(config)
     }
 
-    /// Delete without emitting an event (see `create_imposter_inner`).
-    async fn delete_imposter_inner(&self, port: u16) -> Result<ImposterConfig, ImposterError> {
+    /// Delete without emitting an event, so a wholesale replace in `apply_config` reports one
+    /// `Replaced` instead of Deleted+Created. `unlink_file` removes the imposter's `{port}.json`.
+    async fn delete_imposter_inner(
+        &self,
+        port: u16,
+        unlink_file: bool,
+    ) -> Result<ImposterConfig, ImposterError> {
         let imposter = self
             .imposters
             .remove(port)
@@ -1430,7 +1443,9 @@ impl ImposterManager {
         }
 
         info!("Imposter on port {} deleted", port);
-        self.remove_persisted_imposter(port);
+        if unlink_file {
+            self.remove_persisted_imposter(&imposter).await;
+        }
         Ok(imposter.config.clone())
     }
 
@@ -1453,7 +1468,7 @@ impl ImposterManager {
 
         let mut configs = Vec::new();
         for port in ports {
-            match self.delete_imposter_inner(port).await {
+            match self.delete_imposter_inner(port, true).await {
                 Ok(config) => configs.push(config),
                 // Only realizable as a concurrent-delete race (NotFound) — already gone.
                 Err(e) => debug!("delete_all: imposter on port {} not deleted: {}", port, e),
@@ -1492,7 +1507,9 @@ impl ImposterManager {
     /// duplicate explicit stub ids within an imposter
     /// (the invariant `add_stub_unique` enforces incrementally, issue #202 — duplicate ids
     /// would silently corrupt the stub-key diff). Runs before anything mutates.
-    fn validate_config_set(configs: &[ImposterConfig]) -> Result<(), ImposterError> {
+    fn validate_config_set<'a>(
+        configs: impl IntoIterator<Item = &'a ImposterConfig>,
+    ) -> Result<(), ImposterError> {
         let mut seen = std::collections::HashSet::new();
         for config in configs {
             match config.protocol.as_str() {
@@ -1540,16 +1557,48 @@ impl ImposterManager {
     /// in input order.
     pub async fn apply_config(
         &self,
-        mut desired: Vec<ImposterConfig>,
+        desired: Vec<ImposterConfig>,
     ) -> Result<ApplyReport, ImposterError> {
-        Self::validate_config_set(&desired)?;
+        self.apply_entries(desired.into_iter().map(|config| (config, None)).collect())
+            .await
+    }
+
+    /// [`apply_config`](Self::apply_config) over a desired set whose entries say which store each
+    /// imposter belongs to (issue #1122): `POST /admin/reload` with both a source set and a datadir
+    /// applies the union, with the sources' imposters [`Persistence::Ephemeral`].
+    ///
+    /// A running imposter whose store changed is retagged in place, keeping its runtime state; one
+    /// moving to [`Persistence::Datadir`] is written at once, and one moving to
+    /// [`Persistence::Ephemeral`] is no longer written (its file, if any, is left alone).
+    pub async fn apply_desired(
+        &self,
+        desired: Vec<DesiredImposter>,
+    ) -> Result<ApplyReport, ImposterError> {
+        self.apply_entries(
+            desired
+                .into_iter()
+                .map(|d| (d.config, Some(d.persistence)))
+                .collect(),
+        )
+        .await
+    }
+
+    /// The reconcile behind both apply entry points. `None` keeps a running imposter in the store it
+    /// is in and creates a new one as [`Persistence::Datadir`]: `apply_config` is the admin API's
+    /// and an embedder's door, and a `PUT /imposters` that repeats a config-file imposter must not
+    /// move it into the datadir, where it would collide with its own source on the next reload.
+    async fn apply_entries(
+        &self,
+        mut desired: Vec<(ImposterConfig, Option<Persistence>)>,
+    ) -> Result<ApplyReport, ImposterError> {
+        Self::validate_config_set(desired.iter().map(|(config, _)| config))?;
 
         let mut report = ApplyReport::default();
 
         // Deletes first, so ports freed here can be re-bound by creates below.
         let desired_ports: std::collections::HashSet<u16> = desired
             .iter()
-            .filter_map(ImposterConfig::explicit_port)
+            .filter_map(|(config, _)| config.explicit_port())
             .collect();
         // `ports()` already scans ascending, so no separate sort is needed here (was needed for
         // the old HashMap's arbitrary key order).
@@ -1560,7 +1609,7 @@ impl ImposterManager {
             .filter(|port| !desired_ports.contains(port))
             .collect();
         for port in removed_ports {
-            match self.delete_imposter_inner(port).await {
+            match self.delete_imposter_inner(port, true).await {
                 Ok(_) => {
                     report.deleted.push(port);
                     self.emit(ImposterEvent::Deleted(port));
@@ -1569,22 +1618,35 @@ impl ImposterManager {
             }
         }
 
-        Self::explicit_ports_first(&mut desired);
-        for config in desired {
+        desired.sort_by_key(|(config, _)| config.explicit_port().is_none());
+        for (config, requested) in desired {
             let Some(port) = config.explicit_port() else {
                 // No explicit port (absent or `0`) → nothing to reconcile against; always an
                 // auto-assigned create.
-                self.create_for_apply(config, 0, &mut report).await;
+                let persistence = requested.unwrap_or(Persistence::Datadir);
+                self.create_for_apply(config, 0, persistence, &mut report)
+                    .await;
                 continue;
             };
 
             let Ok(existing) = self.get_imposter(port) else {
-                self.create_for_apply(config, port, &mut report).await;
+                let persistence = requested.unwrap_or(Persistence::Datadir);
+                self.create_for_apply(config, port, persistence, &mut report)
+                    .await;
                 continue;
             };
 
+            // Retag before anything below can write the file, so every write in this iteration
+            // (the enabled toggle, a stub patch, a replace's re-create) goes to the new store.
+            let persistence = requested.unwrap_or_else(|| existing.persistence());
+            let retagged = existing.persistence() != persistence;
+            if retagged {
+                existing.set_persistence(persistence);
+            }
+
             if imposter_level_differs_ignoring_enabled(&existing.config, &config) {
-                self.replace_imposter(port, config, &mut report).await;
+                self.replace_imposter(port, config, persistence, requested, &mut report)
+                    .await;
                 continue;
             }
 
@@ -1613,7 +1675,14 @@ impl ImposterManager {
             }
 
             match existing.reconcile_stubs(config.stubs.clone()) {
-                StubReconcile::Unchanged => {}
+                StubReconcile::Unchanged => {
+                    if retagged
+                        && persistence == Persistence::Datadir
+                        && let Err(e) = self.persist_imposter_checked(&existing).await
+                    {
+                        report.failed.push((port, e));
+                    }
+                }
                 StubReconcile::Patched { removed_keys } => {
                     // apply_config removals are stub deletes: fire the sequencer GC hook
                     // per removed stub, same as delete_stub (issue #313).
@@ -1631,7 +1700,8 @@ impl ImposterManager {
                     }
                 }
                 StubReconcile::Degenerate => {
-                    self.replace_imposter(port, config, &mut report).await;
+                    self.replace_imposter(port, config, persistence, requested, &mut report)
+                        .await;
                 }
             }
         }
@@ -1660,10 +1730,11 @@ impl ImposterManager {
         &self,
         config: ImposterConfig,
         fail_port: u16,
+        persistence: Persistence,
         report: &mut ApplyReport,
     ) {
         match self
-            .create_imposter_staged(config, self.serve_unbound)
+            .create_imposter_staged(config, self.serve_unbound, persistence)
             .await
         {
             Ok((assigned, bind_failure)) => {
@@ -1686,13 +1757,25 @@ impl ImposterManager {
     /// It has to: without it, editing an imposter whose port is squatted would delete the entry and
     /// the node would silently stop serving the imposter it had been serving in-process — the exact
     /// regression the flag exists to prevent, reintroduced through the replace path.
-    async fn replace_imposter(&self, port: u16, config: ImposterConfig, report: &mut ApplyReport) {
-        if let Err(e) = self.delete_imposter_inner(port).await {
+    ///
+    /// `requested` is the apply entry's store: `Some` when the file was read from the datadir as
+    /// this apply's input (a reload), `None` when the file is only a copy of runtime state.
+    async fn replace_imposter(
+        &self,
+        port: u16,
+        config: ImposterConfig,
+        persistence: Persistence,
+        requested: Option<Persistence>,
+        report: &mut ApplyReport,
+    ) {
+        // `false`: the re-create overwrites `{port}.json`, so unlinking it first only opens a window
+        // in which a failed re-create loses the file — the operator's own file, on a datadir reload.
+        if let Err(e) = self.delete_imposter_inner(port, false).await {
             report.failed.push((port, e));
             return;
         }
         match self
-            .create_imposter_staged(config, self.serve_unbound)
+            .create_imposter_staged(config, self.serve_unbound, persistence)
             .await
         {
             Ok((_, bind_failure)) => {
@@ -1706,6 +1789,15 @@ impl ImposterManager {
                 self.emit(ImposterEvent::Replaced(port));
             }
             Err(e) => {
+                // Reported deleted, so a runtime copy must go too, or a restart would bring back the
+                // imposter this apply replaced. A file that was the apply's input stays, and so does
+                // one a concurrent create on this port has just written (`PortInUse`).
+                if requested.is_none()
+                    && persistence == Persistence::Datadir
+                    && !matches!(e, ImposterError::PortInUse(_))
+                {
+                    self.remove_persisted_file(port).await;
+                }
                 report.deleted.push(port);
                 self.emit(ImposterEvent::Deleted(port));
                 report.failed.push((port, e));
@@ -1871,6 +1963,9 @@ impl ImposterManager {
         let Some(ref datadir) = self.datadir else {
             return Ok(());
         };
+        if imposter.persistence() == Persistence::Ephemeral {
+            return Ok(());
+        }
         let Some(port) = imposter.config.port else {
             return Ok(());
         };
@@ -1894,26 +1989,37 @@ impl ImposterManager {
         })
     }
 
-    /// Remove an imposter's file from datadir (if configured).
-    fn remove_persisted_imposter(&self, port: u16) {
+    /// Remove an imposter's file from datadir (if configured and the imposter belongs there).
+    ///
+    /// Awaited, not spawned: a delete that returned before its unlink ran let a following create on
+    /// the same port write `{port}.json` first, and the late unlink then deleted the new file.
+    async fn remove_persisted_imposter(&self, imposter: &Imposter) {
+        if imposter.persistence() == Persistence::Ephemeral {
+            return;
+        }
+        if let Some(port) = imposter.config.port {
+            self.remove_persisted_file(port).await;
+        }
+    }
+
+    /// Remove `{port}.json` from the datadir (if configured), whatever store the imposter was in.
+    async fn remove_persisted_file(&self, port: u16) {
         let Some(ref datadir) = self.datadir else {
             return;
         };
         let path = datadir.join(format!("{port}.json"));
-        tokio::spawn(async move {
-            match tokio::fs::remove_file(&path).await {
-                Ok(()) => {}
-                // An absent file is the desired end state, not a failure: the imposter may never
-                // have been persisted, or the file was already removed. Handling NotFound here
-                // (rather than pre-checking `exists()`) also closes the TOCTOU window between
-                // check and unlink.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => error!(
-                    "Failed to remove persisted imposter {} at {:?}: {}",
-                    port, path, e
-                ),
-            }
-        });
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            // An absent file is the desired end state, not a failure: the imposter may never
+            // have been persisted, or the file was already removed. Handling NotFound here
+            // (rather than pre-checking `exists()`) also closes the TOCTOU window between
+            // check and unlink.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => error!(
+                "Failed to remove persisted imposter {} at {:?}: {}",
+                port, path, e
+            ),
+        }
     }
 }
 
@@ -2211,6 +2317,339 @@ mod tests {
         assert_eq!(json["stubs"].as_array().unwrap().len(), 1);
 
         manager.delete_imposter(19702).await.unwrap();
+    }
+
+    fn datadir_files(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read datadir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn datadir_cfg(v: serde_json::Value) -> ImposterConfig {
+        serde_json::from_value(v).expect("test imposter config")
+    }
+
+    fn one_stub() -> Stub {
+        serde_json::from_value(serde_json::json!({
+            "responses": [{"is": {"statusCode": 200, "body": "hello"}}]
+        }))
+        .expect("stub")
+    }
+
+    // Issue #1122: an ephemeral imposter (loaded from `--configfile`/`--imposters`) is re-read from
+    // its source, so neither its create nor a later stub edit may write it to the datadir.
+    #[tokio::test]
+    async fn ephemeral_imposter_never_touches_the_datadir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+
+        let explicit =
+            datadir_cfg(serde_json::json!({"port": 23731, "protocol": "http", "stubs": []}));
+        let port_less = datadir_cfg(serde_json::json!({"protocol": "http", "stubs": []}));
+        manager
+            .create_imposter_as(explicit, Persistence::Ephemeral)
+            .await
+            .expect("create explicit");
+        manager
+            .create_imposter_as(port_less, Persistence::Ephemeral)
+            .await
+            .expect("create port-less");
+        manager
+            .add_stub(23731, one_stub(), None)
+            .await
+            .expect("add_stub");
+
+        assert_eq!(manager.count(), 2);
+        assert_eq!(datadir_files(dir.path()), Vec::<String>::new());
+
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn apply_desired_persists_only_datadir_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+
+        let entry = |value: serde_json::Value, persistence| DesiredImposter {
+            config: datadir_cfg(value),
+            persistence,
+        };
+        let report = manager
+            .apply_desired(vec![
+                entry(
+                    serde_json::json!({"port": 23732, "protocol": "http", "stubs": []}),
+                    Persistence::Ephemeral,
+                ),
+                entry(
+                    serde_json::json!({"port": 23733, "protocol": "http", "stubs": []}),
+                    Persistence::Datadir,
+                ),
+                entry(
+                    serde_json::json!({"protocol": "http", "stubs": []}),
+                    Persistence::Ephemeral,
+                ),
+            ])
+            .await
+            .expect("apply");
+
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(report.created.len(), 3);
+        assert_eq!(datadir_files(dir.path()), vec!["23733.json".to_string()]);
+
+        manager.delete_all().await;
+    }
+
+    // A running imposter can change store between two applies (its source dropped it and the
+    // operator put the same imposter in the datadir). That is retagged in place, never replaced,
+    // and from then on it persists exactly as its new store requires.
+    #[tokio::test]
+    async fn apply_desired_retags_a_running_imposter_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        let config =
+            || datadir_cfg(serde_json::json!({"port": 23734, "protocol": "http", "stubs": []}));
+        let file = dir.path().join("23734.json");
+
+        manager
+            .create_imposter_as(config(), Persistence::Ephemeral)
+            .await
+            .expect("create");
+        assert!(!file.exists());
+
+        let report = manager
+            .apply_desired(vec![DesiredImposter {
+                config: config(),
+                persistence: Persistence::Datadir,
+            }])
+            .await
+            .expect("retag to datadir");
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(
+            report.created.is_empty() && report.replaced.is_empty() && report.deleted.is_empty(),
+            "a retag is not a create, replace or delete: {report:?}"
+        );
+        let persisted: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).expect("retag writes the file"))
+                .expect("json");
+        assert_eq!(persisted["port"], 23734);
+        assert_eq!(persisted["stubs"], serde_json::json!([]));
+
+        manager
+            .apply_desired(vec![DesiredImposter {
+                config: config(),
+                persistence: Persistence::Ephemeral,
+            }])
+            .await
+            .expect("retag to ephemeral");
+        manager
+            .add_stub(23734, one_stub(), None)
+            .await
+            .expect("add_stub");
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).expect("file")).expect("json");
+        assert_eq!(
+            after["stubs"],
+            serde_json::json!([]),
+            "an ephemeral imposter's stub edit must not be written"
+        );
+
+        manager.delete_all().await;
+    }
+
+    // Review of #1122: the enabled toggle persists, so it must see the new tag. Before the fix it ran
+    // before the retag and wrote back the file the operator had moved into the config file.
+    #[tokio::test]
+    async fn apply_desired_retag_with_an_enabled_change_writes_no_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        let file = dir.path().join("23735.json");
+
+        manager
+            .create_imposter(datadir_cfg(
+                serde_json::json!({"port": 23735, "protocol": "http", "stubs": []}),
+            ))
+            .await
+            .expect("create");
+        std::fs::remove_file(&file).expect("operator removes the datadir file");
+
+        let report = manager
+            .apply_desired(vec![DesiredImposter {
+                config: datadir_cfg(serde_json::json!(
+                    {"port": 23735, "protocol": "http", "enabled": false, "stubs": []}
+                )),
+                persistence: Persistence::Ephemeral,
+            }])
+            .await
+            .expect("apply");
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(report.toggled, vec![23735]);
+        assert!(
+            !file.exists(),
+            "a pause applied as ephemeral must not write the file back"
+        );
+
+        manager.delete_all().await;
+    }
+
+    // `apply_config` is the admin API's door (`PUT /imposters`). Repeating a config-file imposter
+    // through it, unchanged or edited, must not move that imposter into the datadir.
+    #[tokio::test]
+    async fn apply_config_keeps_a_running_imposter_in_its_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        let seeded = serde_json::json!({"port": 23736, "protocol": "http", "stubs": []});
+
+        manager
+            .create_imposter_as(datadir_cfg(seeded.clone()), Persistence::Ephemeral)
+            .await
+            .expect("create");
+
+        let unchanged = manager
+            .apply_config(vec![datadir_cfg(seeded)])
+            .await
+            .expect("apply unchanged");
+        assert!(unchanged.failed.is_empty(), "{:?}", unchanged.failed);
+
+        let renamed = manager
+            .apply_config(vec![datadir_cfg(serde_json::json!(
+                {"port": 23736, "protocol": "http", "name": "renamed", "stubs": []}
+            ))])
+            .await
+            .expect("apply renamed");
+        assert_eq!(renamed.replaced, vec![23736]);
+
+        let created = manager
+            .apply_config(vec![
+                datadir_cfg(serde_json::json!(
+                    {"port": 23736, "protocol": "http", "name": "renamed", "stubs": []}
+                )),
+                datadir_cfg(serde_json::json!({"port": 23739, "protocol": "http", "stubs": []})),
+            ])
+            .await
+            .expect("apply with a new imposter");
+        assert_eq!(created.created, vec![23739]);
+
+        assert_eq!(
+            datadir_files(dir.path()),
+            vec!["23739.json".to_string()],
+            "only the imposter the admin API created is persisted"
+        );
+        assert_eq!(
+            manager.get_imposter(23736).expect("running").persistence(),
+            Persistence::Ephemeral
+        );
+
+        manager.delete_all().await;
+    }
+
+    // A replace used to unlink `{port}.json` before re-creating. When the re-create failed on a
+    // datadir reload, the operator's own file was lost along with the imposter.
+    #[tokio::test]
+    async fn a_failed_replace_from_the_datadir_keeps_its_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        let file = dir.path().join("23737.json");
+
+        manager
+            .create_imposter(datadir_cfg(
+                serde_json::json!({"port": 23737, "protocol": "http", "stubs": []}),
+            ))
+            .await
+            .expect("create");
+        assert!(file.exists());
+
+        let report = manager
+            .apply_desired(vec![DesiredImposter {
+                config: datadir_cfg(serde_json::json!({
+                    "port": 23737, "protocol": "https",
+                    "cert": "not a pem", "key": "not a pem", "stubs": []
+                })),
+                persistence: Persistence::Datadir,
+            }])
+            .await
+            .expect("validation passes; the re-create fails");
+        assert_eq!(report.deleted, vec![23737], "{report:?}");
+        assert_eq!(report.failed.len(), 1, "{report:?}");
+        assert!(
+            file.exists(),
+            "a failed replace must not lose the datadir's file"
+        );
+
+        manager.delete_all().await;
+    }
+
+    // Through `apply_config` (`PUT /imposters`) the file is a copy of the imposter being replaced. The
+    // report says it was deleted, so a restart must not bring it back.
+    #[tokio::test]
+    async fn a_failed_replace_through_apply_config_removes_the_stale_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        let file = dir.path().join("23740.json");
+
+        manager
+            .create_imposter(datadir_cfg(
+                serde_json::json!({"port": 23740, "protocol": "http", "stubs": []}),
+            ))
+            .await
+            .expect("create");
+        assert!(file.exists());
+
+        let report = manager
+            .apply_config(vec![datadir_cfg(serde_json::json!({
+                "port": 23740, "protocol": "https",
+                "cert": "not a pem", "key": "not a pem", "stubs": []
+            }))])
+            .await
+            .expect("validation passes; the re-create fails");
+        assert_eq!(report.deleted, vec![23740], "{report:?}");
+        assert!(
+            !file.exists(),
+            "the replaced imposter's copy must not survive a reported delete"
+        );
+
+        manager.delete_all().await;
+    }
+
+    // A stub patch and a move out of the datadir in one apply: the patch must not be written.
+    #[tokio::test]
+    async fn apply_desired_patch_and_retag_to_ephemeral_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        let file = dir.path().join("23738.json");
+        let stub = |body: &str| serde_json::json!({"responses": [{"is": {"body": body}}]});
+
+        manager
+            .create_imposter(datadir_cfg(serde_json::json!({
+                "port": 23738, "protocol": "http",
+                "stubs": [stub("a"), stub("b"), stub("c")]
+            })))
+            .await
+            .expect("create");
+
+        let report = manager
+            .apply_desired(vec![DesiredImposter {
+                config: datadir_cfg(serde_json::json!({
+                    "port": 23738, "protocol": "http",
+                    "stubs": [stub("a"), stub("b"), stub("c"), stub("d")]
+                })),
+                persistence: Persistence::Ephemeral,
+            }])
+            .await
+            .expect("apply");
+        assert_eq!(report.stub_patched, vec![23738], "{report:?}");
+
+        let persisted: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).expect("file")).expect("json");
+        assert_eq!(
+            persisted["stubs"].as_array().map(Vec::len),
+            Some(3),
+            "the patch was applied as ephemeral and must not reach the file"
+        );
+
+        manager.delete_all().await;
     }
 
     #[test]
