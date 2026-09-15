@@ -65,6 +65,11 @@ record.
 
 ### Fixed
 
+- **`rift-verify` treated a stub as dynamic when its `copy`, `lookup` or `shellTransform` was an empty
+  list** (#1103). The engine runs nothing for an empty list, so the response is static. Such a stub was
+  skipped under `--skip-dynamic` and `--verify-dynamic`, and otherwise accepted any `2xx` status, so a
+  stub serving `404` failed and one serving `201` passed on a `200`. Its status is now asserted exactly.
+
 - **An explicit `null` for a `_behaviors` key was treated three different ways** (#1093). Writing
   `"wait": null` (or `null` for `decorate`, `shellTransform`, `copy`, `lookup` or `repeat`) now means
   the key is absent everywhere, the way `null` already works for `port` and `statusCode`.
