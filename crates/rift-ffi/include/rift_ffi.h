@@ -45,7 +45,9 @@ uint16_t rift_create_imposter(RiftHandle *h, const char *json);
 int32_t rift_replace_stubs(RiftHandle *h, uint16_t port, const char *json);
 
 /**
- * Remove all imposters. Returns `0` on success, `-1` if the handle is null.
+ * Remove all imposters. Returns `0` on success, `-1` if the handle is null or the manager reports an
+ * imposter it could not delete (issue #1124; only a datadir-backed manager can, and the C ABI does
+ * not configure one today).
  *
  * # Safety
  * `h` must be a live handle (or null).
