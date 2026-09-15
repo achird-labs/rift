@@ -50,6 +50,16 @@ pub struct ApplyReport {
     pub failed: Vec<(u16, ImposterError)>,
 }
 
+/// Outcome of [`ImposterManager::delete_all`](super::ImposterManager::delete_all) (issue #1124).
+///
+/// A port in `failed` was **not** deleted: it is still registered and serving, because its datadir
+/// file could not be removed and deleting it anyway would bring it back on the next restart.
+#[derive(Debug, Default)]
+pub struct DeleteAllReport {
+    pub deleted: Vec<super::types::ImposterConfig>,
+    pub failed: Vec<(u16, ImposterError)>,
+}
+
 /// A config mutation observed on the manager (issue #316), for embedders that need to
 /// react to config changes (audit logging, persistence hooks, webhooks).
 #[derive(Debug, Clone, PartialEq, Eq)]

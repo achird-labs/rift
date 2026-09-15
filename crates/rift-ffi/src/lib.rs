@@ -386,7 +386,9 @@ pub unsafe extern "C" fn rift_replace_stubs(
     })
 }
 
-/// Remove all imposters. Returns `0` on success, `-1` if the handle is null.
+/// Remove all imposters. Returns `0` on success, `-1` if the handle is null or the manager reports an
+/// imposter it could not delete (issue #1124; only a datadir-backed manager can, and the C ABI does
+/// not configure one today).
 ///
 /// # Safety
 /// `h` must be a live handle (or null).
@@ -398,8 +400,21 @@ pub unsafe extern "C" fn rift_delete_all(h: *mut RiftHandle) -> i32 {
             set_last_error("rift_delete_all: null handle");
             return -1;
         };
-        handle.runtime.block_on(handle.manager.delete_all());
-        0
+        let report = handle.runtime.block_on(handle.manager.delete_all());
+        if report.failed.is_empty() {
+            return 0;
+        }
+        let failures: Vec<String> = report
+            .failed
+            .iter()
+            .map(|(port, e)| format!("{port}: {e}"))
+            .collect();
+        set_last_error(format!(
+            "rift_delete_all: {} imposter(s) could not be deleted: {}",
+            report.failed.len(),
+            failures.join("; ")
+        ));
+        -1
     })
 }
 
