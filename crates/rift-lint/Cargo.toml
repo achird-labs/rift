@@ -24,6 +24,7 @@ serde_yaml.workspace = true
 
 # Regex for pattern validation
 regex = "1"
+rift-ejs = { path = "../rift-ejs", version = "0.1.0" }
 
 # Structured error types
 thiserror.workspace = true

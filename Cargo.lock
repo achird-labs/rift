@@ -3330,6 +3330,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rift-ejs"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde_json",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "rift-ffi"
 version = "0.1.0"
 dependencies = [
@@ -3378,6 +3387,7 @@ dependencies = [
  "rcgen",
  "regex",
  "reqwest",
+ "rift-ejs",
  "rift-http-proxy",
  "rift-lint",
  "rift-mock-core",
@@ -3419,6 +3429,7 @@ dependencies = [
  "boa_engine",
  "clap",
  "regex",
+ "rift-ejs",
  "serde",
  "serde_json",
  "serde_yaml",

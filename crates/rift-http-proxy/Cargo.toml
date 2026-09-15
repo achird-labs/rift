@@ -50,6 +50,7 @@ serde_json.workspace = true
 
 # Shared workspace types + CLI-free engine (issue #203)
 rift-types = { path = "../rift-types", version = "0.1.0" }
+rift-ejs = { path = "../rift-ejs", version = "0.1.0" }
 rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-features = false }
 # The Redis flow-state backend, opt-in as its own crate (issue #853). Optional so a build
 # without `redis-backend` pulls no redis/r2d2 at all; default-on below, so shipped artifacts

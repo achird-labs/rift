@@ -1315,3 +1315,118 @@ fn cli_reports_e025_in_a_behaviors_array_behind_a_null_underscore_behaviors() {
     );
     assert_eq!(out.status.code(), Some(1));
 }
+
+// ─── Templated documents (issue #1108) ────────────────────────────────────────
+
+const UNSET: &str = "RIFT_LINT_CLI_TEST_1108_NEVER_SET";
+
+#[test]
+fn cli_lints_a_templated_config_as_the_engine_renders_it() {
+    let (report, code) = lint_dir(&[(
+        "imposters.json",
+        &format!(
+            r#"{{"port": <%= process.env.{UNSET} || '4545' %>, "protocol": "http", "stubs": []}}"#
+        ),
+    )]);
+    assert_eq!(code, Some(0), "{report}");
+    assert_eq!(report["errors"].as_u64(), Some(0), "{report}");
+}
+
+#[test]
+fn cli_reports_an_unsupported_tag_as_e049_not_e001() {
+    let (report, code) = lint_dir(&[(
+        "imposters.json",
+        r#"{"port": 4545, "protocol": "http", "stubs": [{"responses": [{"is": {"body": "<% for (x) %>"}}]}]}"#,
+    )]);
+    assert_eq!(code, Some(1), "{report}");
+    let e049 = issues_with_code(&report, "E049");
+    assert_eq!(e049.len(), 1, "{report}");
+    assert!(
+        e049[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("unsupported EJS tag `<% for (x) %>`")),
+        "{report}"
+    );
+    assert!(issues_with_code(&report, "E001").is_empty(), "{report}");
+}
+
+// The W013 is the explanation for the E001 here: the unset variable rendered `"port": ,`.
+#[test]
+fn cli_reports_w013_alongside_the_parse_error_it_explains() {
+    let (report, code) = lint_dir(&[(
+        "imposters.json",
+        &format!(r#"{{"port": <%= process.env.{UNSET} %>, "protocol": "http", "stubs": []}}"#),
+    )]);
+    assert_eq!(code, Some(1), "{report}");
+    let e001 = issues_with_code(&report, "E001");
+    assert_eq!(e001.len(), 1, "{report}");
+    assert!(
+        e001[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.ends_with("(line and column are in the rendered document)")),
+        "{report}"
+    );
+    let w013 = issues_with_code(&report, "W013");
+    assert_eq!(w013.len(), 1, "{report}");
+    assert!(
+        w013[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains(UNSET)),
+        "{report}"
+    );
+    assert_eq!(report["warnings"].as_u64(), Some(1), "{report}");
+}
+
+#[test]
+fn cli_no_parse_reads_the_file_verbatim() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("imposters.json"),
+        format!(
+            r#"{{"port": <%= process.env.{UNSET} || '4545' %>, "protocol": "http", "stubs": []}}"#
+        ),
+    )
+    .expect("write");
+    for flag in ["--no-parse", "--noParse"] {
+        let out = Command::new(BIN)
+            .args([dir.path().to_str().unwrap(), "-o", "json", flag])
+            .output()
+            .expect("run rift-lint");
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+        assert_eq!(
+            issues_with_code(&report, "E001").len(),
+            1,
+            "{flag}: {report}"
+        );
+        assert!(
+            issues_with_code(&report, "E049").is_empty(),
+            "{flag}: {report}"
+        );
+    }
+}
+
+#[test]
+fn cli_fix_refuses_to_rewrite_a_template() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("imposters.json");
+    let original = format!(
+        r#"{{"port": <%= process.env.{UNSET} || '4545' %>, "protocol": "http", "stubs": [{{"responses": [{{"is": {{"statusCode": 200, "headers": {{"X-Count": 5}}}}}}]}}]}}"#
+    );
+    std::fs::write(&path, &original).expect("write");
+    let out = Command::new(BIN)
+        .args([dir.path().to_str().unwrap(), "--fix"])
+        .output()
+        .expect("run rift-lint");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(output.contains("Skipped"), "{output}");
+    assert!(output.contains("template"), "{output}");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read back"),
+        original,
+        "a template must never be rewritten with the values it rendered to"
+    );
+}
