@@ -20,8 +20,10 @@ an imposter in a file and reloading no longer tears every imposter down.
 - The new config is **validated in full before** any running imposter is mutated. If it fails to
   parse or has duplicate ports / unsupported protocols, the running imposters are left untouched and
   the call errors. An imposter with no port, or `port: 0`, is auto-assigned and never counts as a
-  duplicate. It is never diffed either: each reload deletes and re-creates it on a fresh port, so
-  its runtime state resets, and a failure to create it is reported under port `0`.
+  duplicate. It is never diffed either: each reload deletes and re-creates it on a fresh port, so its
+  runtime state resets, and a failure to create it is reported under port `0`. It is created after
+  every imposter with an explicit port, so the fresh port is never one an explicit imposter in the
+  config is serving.
 - The reload is **incremental** (issue #319): each port is diffed and only the delta is applied.
   Unchanged imposters — and unchanged stubs within a changed imposter — **keep their runtime
   state**: recorded requests, scenario state, and response cyclers (`repeat`) all survive the

@@ -65,6 +65,15 @@ record.
 
 ### Fixed
 
+- **A port-less imposter could take a port another imposter in the same set names, and one of the two
+  was lost** (#1112). An auto-assigned port is the lowest free one from 49152, and imposters were
+  created in the order the set listed them. `PUT /imposters`, `POST /admin/reload`, `rift_apply_config`
+  and the embedded `configFile` or inline `config` then replaced, patched or kept the auto-assigned
+  imposter as if it were the explicit one and reported success; `--configfile` and `--imposters`
+  startup logged `PortInUse` and skipped the explicit one. Imposters with an explicit port are now
+  created first, so an auto-assigned port never takes a port an explicit imposter in the set is
+  serving.
+
 - **`rift-lint` reported `E001` for a templated config the engine loads, and passed ones it refuses**
   (#1108). It parsed a file's raw text, so the documented `"port": <%= process.env.PORT || '4545' %>`
   was invalid JSON to it, a tag inside a string was validated as literal text, and a tag the loader
