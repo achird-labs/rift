@@ -1257,6 +1257,16 @@ impl Default for ImposterConfig {
     }
 }
 
+impl ImposterConfig {
+    /// The port the author pinned, if any. `Some(0)` reads as absent: `0` is the "any free port"
+    /// idiom and is auto-assigned at creation (issue #637), so every door that asks whether a port
+    /// is explicit — creation, `apply_config`, cross-source claims — agrees on it (issue #1104).
+    #[must_use]
+    pub fn explicit_port(&self) -> Option<u16> {
+        self.port.filter(|port| *port != 0)
+    }
+}
+
 /// Flow state configuration for Rift extensions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1757,6 +1767,21 @@ mod imposter_error_chain_tests {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // Issue #1104: `0` is the BSD "any free port" idiom and create auto-assigns it (#637), so every
+    // door that asks whether a port was pinned must read `Some(0)` the way it reads `None`.
+    #[test]
+    fn explicit_port_reads_zero_as_absent() {
+        let with = |port: Option<u16>| ImposterConfig {
+            port,
+            ..Default::default()
+        };
+        assert_eq!(with(None).explicit_port(), None);
+        assert_eq!(with(Some(0)).explicit_port(), None);
+        assert_eq!(with(Some(1)).explicit_port(), Some(1));
+        assert_eq!(with(Some(4545)).explicit_port(), Some(4545));
+        assert_eq!(with(Some(u16::MAX)).explicit_port(), Some(u16::MAX));
+    }
 
     // AC 608-4 (#608): a `_behaviors` block that fails to parse is still dropped — the parse-once
     // cache has nowhere to put it — but it must never be dropped *silently*. Before this, a config

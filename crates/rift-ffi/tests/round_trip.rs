@@ -529,6 +529,35 @@ fn ffi_serve_admin_inline_config_inject_is_ungated() {
     }
 }
 
+// Issue #1104: the C-ABI applies through `apply_config`, which refused two `port: 0` imposters as a
+// duplicate port 0 although `POST /imposters` auto-assigns a `0`. Both are auto-assigned now.
+#[test]
+fn ffi_apply_config_auto_assigns_every_port_zero_imposter() {
+    unsafe {
+        let h = rift_start();
+        let cfg = cstr(
+            r#"{"imposters":[{"port":0,"protocol":"http","stubs":[]},{"port":0,"protocol":"http","stubs":[]}]}"#,
+        );
+        let report = rift_apply_config(h, cfg.as_ptr());
+        assert!(
+            !report.is_null(),
+            "two port-0 imposters must apply, not fail as a duplicate port"
+        );
+        let v: serde_json::Value = serde_json::from_str(&take_json(report)).expect("report json");
+        let mut created: Vec<u64> = v["created"]
+            .as_array()
+            .expect("created array")
+            .iter()
+            .filter_map(serde_json::Value::as_u64)
+            .collect();
+        created.sort_unstable();
+        created.dedup();
+        assert_eq!(created.len(), 2, "two distinct ports: {v}");
+        assert!(created.iter().all(|p| *p != 0), "{v}");
+        rift_stop(h);
+    }
+}
+
 // AC2: rift_apply_config returns the reload report field names; failed is [{port,error}]; an
 // up-front validation failure returns NULL, sets last_error, and mutates nothing.
 #[test]

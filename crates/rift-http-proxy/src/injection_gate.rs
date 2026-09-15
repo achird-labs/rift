@@ -52,7 +52,7 @@ pub fn gated_offender_ports(configs: &[ImposterConfig]) -> Vec<String> {
     configs
         .iter()
         .filter(|config| config_uses_script_surface(config))
-        .map(|config| match config.port {
+        .map(|config| match config.explicit_port() {
             Some(port) => port.to_string(),
             None => "<auto-assigned>".to_string(),
         })

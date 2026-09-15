@@ -116,7 +116,7 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | E002 | Port conflict |
 | E003 | Missing required field |
 | E004 | Invalid protocol |
-| E005 | Port out of range |
+| E005 | Port out of range, or `0` (auto-assigned by the engine; a config file must pin its ports) |
 | E006-E033 | Various structural errors |
 | E034 | Multiple predicate operations in one predicate |
 

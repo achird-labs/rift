@@ -317,8 +317,8 @@ fn cli_reports_e002_between_a_wrapper_file_and_a_single_imposter_file() {
     assert_eq!(code, Some(1));
 }
 
-/// The engine auto-assigns an absent or `null` port, so those never conflict. A `0` is E005's to
-/// report (the engine's reload path would refuse two of them as `PortInUse`), so E002 stays quiet.
+/// The engine auto-assigns an absent, `null` or `0` port, so those never conflict (issue #1104). A
+/// config file must still pin its ports, so a `0` is E005's to report and E002 stays quiet.
 #[test]
 fn cli_does_not_report_e002_for_auto_assigned_ports_in_a_wrapper() {
     let (report, _) = lint_dir(&[(

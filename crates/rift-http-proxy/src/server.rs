@@ -2021,6 +2021,22 @@ mod tests {
         assert!(err.contains("--allowInjection"), "got: {err}");
     }
 
+    // Issue #1104: `port: 0` is auto-assigned like an absent port, so the offender list labels it the
+    // same way instead of naming a port nothing will ever listen on.
+    #[test]
+    fn configfile_injection_error_labels_a_port_zero_config_as_auto_assigned() {
+        let path = PathBuf::from("/cfg/imposters.json");
+        let port_zero = config_from(serde_json::json!({
+            "port": 0,
+            "protocol": "http",
+            "stubs": [{"responses": [{"inject": "function (req) { return {}; }"}]}],
+        }));
+        let err = configfile_injection_error(&path, &[port_zero], false)
+            .expect("a port-0 offender must still abort startup");
+        assert!(err.contains("<auto-assigned>"), "got: {err}");
+        assert!(!err.contains("port(s) 0 "), "got: {err}");
+    }
+
     // AC5: a datadir gates per file and fails closed — the leftover scripted file is skipped and
     // named, while the clean file is still served. A persisted `{port}.json` from an earlier
     // --allowInjection run must not brick startup for everything else.
