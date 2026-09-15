@@ -1334,6 +1334,110 @@ async fn remote_document_still_substitutes_env() {
     unsafe { std::env::remove_var("RIFT_TEST_U12_BODY") };
 }
 
+// ===== Issue #1095: an unsupported EJS tag fails the load instead of being stripped =====
+
+#[tokio::test]
+async fn remote_document_refuses_an_unsupported_ejs_tag() {
+    let origin = Origin::start(Reply::Etagged {
+        body: imposter_doc(21430, "<% if (x) { %>"),
+        etag: "\"stmt\"".to_string(),
+    });
+    let err = HttpSource::new()
+        .unwrap()
+        .fetch(&SourceRef::new(origin.uri()))
+        .await
+        .expect_err("a remote document with an unsupported tag must not load");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("unsupported EJS tag `<% if (x) { %>`") && msg.contains("remove the tag"),
+        "the error must name the tag and point at the source: {msg}"
+    );
+}
+
+/// `--configfile` startup used to boot with the tag blanked out of the body.
+#[tokio::test]
+async fn configfile_with_an_unsupported_ejs_tag_aborts_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("imposters.json");
+    std::fs::write(&path, imposter_doc(21431, "<%= greeting %>")).unwrap();
+
+    let result = ServerBuilder::from_cli(cli(&[
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+        "--configfile",
+        path.to_str().unwrap(),
+    ]))
+    .start()
+    .await;
+    let msg = match result {
+        Ok(server) => {
+            server.shutdown().await;
+            panic!("a config with an unsupported EJS tag must not boot");
+        }
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        msg.contains("unsupported EJS tag `<%= greeting %>`")
+            && msg.contains("imposters.json:")
+            && msg.contains("--no-parse"),
+        "the error must name the tag, the file and the escape hatch: {msg}"
+    );
+}
+
+/// A reload of an edited file is refused before anything changes, and the running imposter keeps
+/// serving what it served; it used to reload with the tag blanked.
+#[tokio::test]
+async fn reload_of_a_file_with_an_unsupported_ejs_tag_is_refused_and_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("imposters.json");
+    std::fs::write(&path, imposter_doc(21432, "v1")).unwrap();
+
+    let server = ServerBuilder::from_cli(cli(&[
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+        "--configfile",
+        path.to_str().unwrap(),
+    ]))
+    .start()
+    .await
+    .expect("server starts");
+    let admin = server.admin_addr();
+    let client = reqwest::Client::new();
+
+    std::fs::write(&path, imposter_doc(21432, "<% for (;;) { %>v2")).unwrap();
+    let reload = client
+        .post(format!("http://127.0.0.1:{}/admin/reload", admin.port()))
+        .send()
+        .await
+        .expect("reload responds");
+    assert_eq!(reload.status().as_u16(), 500);
+    let body = reload.text().await.unwrap();
+    assert!(
+        body.contains("Reload failed (imposters unchanged)")
+            && body.contains("unsupported EJS tag `<% for (;;) { %>`"),
+        "the reload error must name the tag: {body}"
+    );
+
+    let served = client
+        .get("http://127.0.0.1:21432/")
+        .send()
+        .await
+        .expect("imposter still serving")
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(
+        served, "v1",
+        "a refused reload must leave the imposter as it was"
+    );
+
+    server.shutdown().await;
+}
+
 // ===== AC1: reload across two sources is incremental =====
 
 /// The #316 composition claim, tested rather than asserted: changing one source must not reset

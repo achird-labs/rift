@@ -7,7 +7,6 @@ use crate::intercept_control::InterceptStartOptions;
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use tracing::warn;
 
 // Fixed EJS tag patterns (issue #560): compile once at first use rather than on every
 // `preprocess_ejs` call — that runs per config file at startup, on every `POST /admin/reload`, and
@@ -35,11 +34,6 @@ static EJS_EXPR_RE: LazyLock<Regex> = LazyLock::new(|| {
 static EJS_ENV_VAR_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"^process\.env\.([A-Za-z_][A-Za-z0-9_]*)(?:\s*\|\|\s*['"]([^'"]*)['"]\s*)?$"#)
         .expect("EJS env-var pattern is a valid constant regex")
-});
-
-/// Remaining `<% ... %>` control blocks (non-expression tags); `(?s)` enables dotall.
-static EJS_STMT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<%[^=].*?%>").expect("EJS statement pattern is a valid constant regex")
 });
 
 /// Whether EJS tags that read the local filesystem are honoured.
@@ -238,11 +232,17 @@ fn load_dir(dir: &Path) -> anyhow::Result<Vec<ImposterConfig>> {
 ///
 /// Handles the patterns emitted by Mountebank and compatible tooling:
 /// - `<% include 'path' %>` — inline the referenced file (relative to the config file)
+/// - `<%- stringify('path') %>` — inline a file's rendered contents, escaped for a JSON string
 /// - `<%= process.env.VAR %>` — substitute with the env var value (empty string if unset)
 /// - `<%= process.env.VAR || 'default' %>` — substitute with env var or the literal default
 ///
-/// Any other `<%= expr %>` token is replaced with an empty string and logged as a warning.
-/// `<% expr %>` (without `=`) statements (e.g., `<% for (...) %>`) are removed and logged.
+/// Any other tag — another `<%= expr %>`, a `<% statement %>`, `<%- expr %>`, `<%# comment %>`, a
+/// `<%` with no closing `%>` — fails the load, naming the tag and where it is (issue #1095).
+/// Stripping it would load a config that silently differs from the file.
+///
+/// Includes are expanded first, so an included file is templated like the document. Every other
+/// tag is then substituted by its own span in one pass, so text a substitution inserts — an env
+/// var's value, a stringified file — is never scanned again as if it were template.
 fn preprocess_ejs(
     content: &str,
     config_path: &Path,
@@ -253,8 +253,7 @@ fn preprocess_ejs(
     }
 
     // Fail closed before any resolution: a remote document that names a local file is refused
-    // outright, naming the tag, rather than having it quietly stripped by the `<% ... %>`
-    // catch-all further down (which would produce a silently different config, not an error).
+    // outright, naming the tag.
     if file_access == EjsFileAccess::Denied {
         for (re, tag) in [
             (&*EJS_INCLUDE_RE, "<% include ... %>"),
@@ -274,94 +273,263 @@ fn preprocess_ejs(
     }
 
     let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let expanded = expand_includes(content, config_dir)?;
+    let locate = |offset: usize| expanded.locate(offset, content, config_path);
+    render_tags(
+        &expanded.text,
+        TagScope::Document,
+        config_dir,
+        file_access,
+        &locate,
+    )
+}
 
-    // Process include directives first:
-    // `<% include 'path' %>`, `<% include "path" %>`, or `<% include path %>`
-    let mut result = String::new();
-    let mut last = 0;
-    for cap in EJS_INCLUDE_RE.captures_iter(content) {
-        let full = cap.get(0).unwrap();
-        let include_path = cap.get(1).unwrap().as_str();
-        result.push_str(&content[last..full.start()]);
-        let abs_path = config_dir.join(include_path);
-        match std::fs::read_to_string(&abs_path) {
-            Ok(included) => result.push_str(&included),
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "EJS include file '{}' not found ({}): {}",
-                    include_path,
-                    abs_path.display(),
-                    e
-                ));
+/// A document with its `<% include %>` tags replaced by the files they name.
+#[derive(Debug)]
+struct ExpandedDocument {
+    text: String,
+    includes: Vec<IncludedSpan>,
+}
+
+/// Where one included file landed in [`ExpandedDocument::text`].
+#[derive(Debug)]
+struct IncludedSpan {
+    /// The included file's bytes within the expanded text.
+    range: std::ops::Range<usize>,
+    /// The include tag's position and length in the original document.
+    tag_offset: usize,
+    tag_len: usize,
+    /// The path as the tag wrote it.
+    file: String,
+}
+
+impl ExpandedDocument {
+    /// Describe `offset` in the expanded text as a place a reader can open: a line of the original
+    /// document, or a line of the included file together with the line that included it.
+    fn locate(&self, offset: usize, original: &str, config_path: &Path) -> String {
+        let mut inserted = 0;
+        let mut removed = 0;
+        for span in &self.includes {
+            if span.range.contains(&offset) {
+                let local = &self.text[span.range.clone()];
+                return format!(
+                    "at {}:{}, included at {}:{}",
+                    span.file,
+                    line_of(local, offset - span.range.start),
+                    config_path.display(),
+                    line_of(original, span.tag_offset)
+                );
+            }
+            if span.range.end <= offset {
+                inserted += span.range.len();
+                removed += span.tag_len;
             }
         }
-        last = full.end();
+        let original_offset = offset + removed - inserted;
+        format!(
+            "at {}:{}",
+            config_path.display(),
+            line_of(original, original_offset)
+        )
     }
-    result.push_str(&content[last..]);
-    let content = result;
+}
 
-    // Process `<%- stringify('relative/path') %>` (issue #355 Item 7): inline the referenced
-    // file's contents as a JSON-string-safe body. Must run BEFORE the final `<% ... %>` strip
-    // below — that catch-all matches `<%[^=].*?%>`, which would otherwise eat `<%-` tokens too.
-    // `<%-` is EJS's "unescaped output" tag; here the template already supplies the surrounding
-    // quotes (e.g. `"inject": "<%- stringify('inject.js') %>"`), so only the escaped INNER
-    // content is substituted — `serde_json::to_string` then stripping its own wrapping quotes —
-    // keeping the surrounding JSON valid.
-    let mut result = String::new();
+fn line_of(text: &str, offset: usize) -> usize {
+    text[..offset].matches('\n').count() + 1
+}
+
+fn expand_includes(content: &str, config_dir: &Path) -> anyhow::Result<ExpandedDocument> {
+    let mut text = String::with_capacity(content.len());
+    let mut includes = Vec::new();
     let mut last = 0;
-    for cap in EJS_STRINGIFY_RE.captures_iter(&content) {
-        let full = cap.get(0).unwrap();
-        let rel_path = cap.get(1).unwrap().as_str();
-        result.push_str(&content[last..full.start()]);
-        let abs_path = config_dir.join(rel_path);
-        let file_contents = std::fs::read_to_string(&abs_path).map_err(|e| {
+    for cap in EJS_INCLUDE_RE.captures_iter(content) {
+        let (Some(full), Some(include_path)) = (cap.get(0), cap.get(1)) else {
+            continue;
+        };
+        text.push_str(&content[last..full.start()]);
+        let abs_path = config_dir.join(include_path.as_str());
+        let included = std::fs::read_to_string(&abs_path).map_err(|e| {
             anyhow::anyhow!(
-                "EJS stringify file '{}' not found ({}): {}",
-                rel_path,
+                "EJS include file '{}' not found ({}): {}",
+                include_path.as_str(),
                 abs_path.display(),
                 e
             )
         })?;
-        let json_quoted = serde_json::to_string(&file_contents).map_err(|e| {
-            anyhow::anyhow!("failed to JSON-encode stringify file '{rel_path}': {e}")
-        })?;
-        // Strip the wrapping quotes serde_json added; the template's own quotes surround the tag.
-        let inner = &json_quoted[1..json_quoted.len() - 1];
-        result.push_str(inner);
+        let start = text.len();
+        text.push_str(&included);
+        includes.push(IncludedSpan {
+            range: start..text.len(),
+            tag_offset: full.start(),
+            tag_len: full.len(),
+            file: include_path.as_str().to_string(),
+        });
         last = full.end();
     }
-    result.push_str(&content[last..]);
-    let content = result;
+    text.push_str(&content[last..]);
+    Ok(ExpandedDocument { text, includes })
+}
 
-    // Process expression tags: `<%= expr %>`
-    let mut result = String::new();
-    let mut last = 0;
-    for cap in EJS_EXPR_RE.captures_iter(&content) {
-        let full = cap.get(0).unwrap();
-        let expr = cap.get(1).unwrap().as_str().trim();
-        result.push_str(&content[last..full.start()]);
+/// What template text is being rendered, which decides the tags it may hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TagScope {
+    /// The document, includes already expanded.
+    Document,
+    /// A file a `<%- stringify %>` tag inlines. It is rendered like the document before it is
+    /// escaped (Mountebank's formatter does the same), but it may not include or stringify again.
+    Stringified,
+}
 
-        if let Some(env_cap) = EJS_ENV_VAR_RE.captures(expr) {
-            let var_name = env_cap.get(1).unwrap().as_str();
-            let default_val = env_cap.get(2).map(|m| m.as_str()).unwrap_or("");
-            let value = std::env::var(var_name).unwrap_or_else(|_| default_val.to_string());
-            result.push_str(&value);
+/// Substitute every tag in `text` by its own span, refusing the first one that is not evaluated.
+/// `locate` turns an offset in `text` into the place named in an error.
+fn render_tags(
+    text: &str,
+    scope: TagScope,
+    config_dir: &Path,
+    file_access: EjsFileAccess,
+    locate: &dyn Fn(usize) -> String,
+) -> anyhow::Result<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
+    while let Some(found) = text[from..].find("<%") {
+        let offset = from + found;
+        out.push_str(&text[from..offset]);
+        let Some(close) = text[offset + 2..].find("%>") else {
+            let tag = UnsupportedTag {
+                text: &text[offset..],
+                terminated: false,
+                note: "",
+            };
+            anyhow::bail!(tag.message(&locate(offset), file_access));
+        };
+        let end = offset + 2 + close + 2;
+        let tag = &text[offset..end];
+
+        if let Some(value) = env_expression(tag) {
+            out.push_str(&value);
+        } else if let Some(rel_path) = whole_tag_capture(&EJS_STRINGIFY_RE, tag)
+            && scope == TagScope::Document
+        {
+            out.push_str(&stringified(rel_path, config_dir, file_access, &|inner| {
+                format!("{}, stringified {}", inner, locate(offset))
+            })?);
         } else {
-            warn!(
-                "EJS expression '{}' is not supported; substituting empty string",
-                expr
-            );
+            let note = if whole_tag_capture(&EJS_INCLUDE_RE, tag).is_some() {
+                " (an include inside an included or stringified file is not evaluated)"
+            } else if whole_tag_capture(&EJS_STRINGIFY_RE, tag).is_some() {
+                " (a stringify inside a stringified file is not evaluated)"
+            } else {
+                ""
+            };
+            let tag = UnsupportedTag {
+                text: tag,
+                terminated: true,
+                note,
+            };
+            anyhow::bail!(tag.message(&locate(offset), file_access));
         }
-        last = full.end();
+        from = end;
     }
-    result.push_str(&content[last..]);
-    let content = result;
+    out.push_str(&text[from..]);
+    Ok(out)
+}
 
-    // Strip remaining `<% ... %>` control blocks (non-expression tags).
-    if EJS_STMT_RE.is_match(&content) {
-        warn!("EJS statement blocks (<% ... %>) are not supported and will be removed");
+/// The file `rel_path` names, rendered and escaped for use inside a JSON string (issue #355 Item
+/// 7). The template supplies the surrounding quotes (`"inject": "<%- stringify('inject.js') %>"`),
+/// so only the escaped inner content is returned. `outer` wraps a place in the file with where the
+/// stringify tag is.
+fn stringified(
+    rel_path: &str,
+    config_dir: &Path,
+    file_access: EjsFileAccess,
+    outer: &dyn Fn(String) -> String,
+) -> anyhow::Result<String> {
+    let abs_path = config_dir.join(rel_path);
+    let contents = std::fs::read_to_string(&abs_path).map_err(|e| {
+        anyhow::anyhow!(
+            "EJS stringify file '{}' not found ({}): {}",
+            rel_path,
+            abs_path.display(),
+            e
+        )
+    })?;
+    let locate = |offset: usize| outer(format!("at {rel_path}:{}", line_of(&contents, offset)));
+    let rendered = render_tags(
+        &contents,
+        TagScope::Stringified,
+        config_dir,
+        file_access,
+        &locate,
+    )?;
+    let json_quoted = serde_json::to_string(&rendered)
+        .map_err(|e| anyhow::anyhow!("failed to JSON-encode stringify file '{rel_path}': {e}"))?;
+    // `to_string` of a `String` always yields a quoted JSON string.
+    Ok(json_quoted[1..json_quoted.len() - 1].to_string())
+}
+
+/// `re`'s first capture group when `re` matches the whole of `tag`, not just part of it.
+fn whole_tag_capture<'t>(re: &Regex, tag: &'t str) -> Option<&'t str> {
+    let cap = re.captures(tag)?;
+    let whole = cap.get(0)?;
+    if whole.range() != (0..tag.len()) {
+        return None;
     }
-    Ok(EJS_STMT_RE.replace_all(&content, "").to_string())
+    cap.get(1).map(|m| m.as_str())
+}
+
+/// The value of a `<%= process.env.VAR %>` / `<%= process.env.VAR || 'default' %>` tag, or `None`
+/// when `tag` is not one.
+fn env_expression(tag: &str) -> Option<String> {
+    let body = whole_tag_capture(&EJS_EXPR_RE, tag)?.trim();
+    let env_cap = EJS_ENV_VAR_RE.captures(body)?;
+    let var_name = env_cap.get(1)?.as_str();
+    let default_val = env_cap.get(2).map_or("", |m| m.as_str());
+    Some(std::env::var(var_name).unwrap_or_else(|_| default_val.to_string()))
+}
+
+/// An EJS tag the preprocessor found and does not evaluate.
+#[derive(Debug)]
+struct UnsupportedTag<'a> {
+    /// The tag as written, from `<%` through `%>` (or to the end of the text when unterminated).
+    text: &'a str,
+    terminated: bool,
+    /// Why a tag that looks supported is not, where that applies.
+    note: &'static str,
+}
+
+impl UnsupportedTag<'_> {
+    const MAX_SHOWN_CHARS: usize = 80;
+
+    /// The load error, with the tag found `place` (from [`ExpandedDocument::locate`]).
+    fn message(&self, place: &str, file_access: EjsFileAccess) -> String {
+        let shown: String = if self.text.chars().count() > Self::MAX_SHOWN_CHARS {
+            let head: String = self.text.chars().take(Self::MAX_SHOWN_CHARS - 1).collect();
+            format!("{head}…")
+        } else {
+            self.text.to_string()
+        };
+        let unterminated = if self.terminated {
+            ""
+        } else {
+            " (no closing `%>`)"
+        };
+        let note = self.note;
+        match file_access {
+            EjsFileAccess::Allowed => format!(
+                "unsupported EJS tag `{shown}`{unterminated} {place}{note}, so the file was not \
+                 loaded. Only `<%= process.env.VAR %>`, `<%= process.env.VAR || 'default' %>`, \
+                 `<% include 'file' %>` and `<%- stringify('file') %>` are evaluated. If the tag \
+                 is meant literally, load the file with --no-parse (a --configfile or file: \
+                 source)."
+            ),
+            EjsFileAccess::Denied => format!(
+                "unsupported EJS tag `{shown}`{unterminated} {place}{note}, so the document was not \
+                 loaded. Only `<%= process.env.VAR %>` and `<%= process.env.VAR || 'default' %>` are \
+                 evaluated in a fetched document, and it is always preprocessed: remove the tag at \
+                 the source."
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -839,11 +1007,10 @@ mod tests {
         assert_eq!(with_var.unwrap()[0].port, Some(8080));
     }
 
-    /// Issue #1092: the tag the TLS docs used before. It matches neither `include` nor `stringify`,
-    /// so the catch-all strips it and the key is silently empty. #1095 asks whether an unsupported
-    /// tag should fail the load instead; if it does, the first assertion here is expected to flip.
+    /// Issue #1092: the tag the TLS docs used before. It matches neither `include` nor `stringify`;
+    /// it used to be stripped, leaving the key silently empty, and is now refused (issue #1095).
     #[test]
-    fn a_call_style_include_tag_is_stripped_not_inlined() {
+    fn a_call_style_include_tag_is_refused_not_stripped() {
         let dir = tempfile::tempdir().unwrap();
         write(
             dir.path(),
@@ -852,9 +1019,12 @@ mod tests {
         );
         let path = dir.path().join("cfg.json");
         let content = r#"{"key": "<%- include('server.key') %>"}"#;
-        assert_eq!(
-            preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap(),
-            r#"{"key": ""}"#
+        let err = preprocess_ejs(content, &path, EjsFileAccess::Allowed)
+            .expect_err("an unsupported tag must fail the load")
+            .to_string();
+        assert!(
+            err.contains("`<%- include('server.key') %>`") && err.contains("cfg.json:1"),
+            "the error must name the tag and where it is: {err}"
         );
         let content = r#"{"key": "<%- stringify('server.key') %>"}"#;
         assert_eq!(
@@ -946,44 +1116,371 @@ mod tests {
         );
     }
 
-    /// Pins the ordering invariant documented at the `<%- stringify %>` step: it must run BEFORE
-    /// the `EJS_STMT_RE` catch-all, which also matches `<%- ... %>` and would otherwise silently
-    /// eat the tag — wrong output, no error. Neither tag type alone catches a reordering.
+    /// Issue #1095: the refusal message, in full, for an expression tag on a later line.
     #[test]
-    fn ejs_stringify_survives_when_statement_blocks_present() {
+    fn an_unsupported_expression_is_refused_naming_tag_file_and_line() {
+        let content = "{\n  \"imposters\": [\n    {\"port\": <%= port || 4545 %>, \"protocol\": \"http\"}\n  ]\n}";
+        let path = PathBuf::from("dir/imposters.json");
+        let err = preprocess_ejs(content, &path, EjsFileAccess::Allowed)
+            .expect_err("an unsupported expression must fail the load")
+            .to_string();
+        assert_eq!(
+            err,
+            "unsupported EJS tag `<%= port || 4545 %>` at dir/imposters.json:3, so the file was \
+             not loaded. Only `<%= process.env.VAR %>`, `<%= process.env.VAR || 'default' %>`, \
+             `<% include 'file' %>` and `<%- stringify('file') %>` are evaluated. If the tag is \
+             meant literally, load the file with --no-parse (a --configfile or file: source)."
+        );
+    }
+
+    /// Every tag shape that used to be blanked or stripped is refused, and each refusal names the
+    /// tag it found — including the ones the old regexes never matched and left for the JSON parser.
+    #[test]
+    fn every_unsupported_tag_shape_is_refused_by_name() {
+        let path = PathBuf::from("config.json");
+        for (content, tag) in [
+            (
+                r#"{"a": 1<% for (var i=0;i<3;i++) { %><% } %>}"#,
+                "`<% for (var i=0;i<3;i++) { %>`",
+            ),
+            (
+                "{\"a\": 1<% if (x) {\n  y();\n} %>}",
+                "`<% if (x) {\n  y();\n} %>`",
+            ),
+            (r#"{"a": "<%- request.path %>"}"#, "`<%- request.path %>`"),
+            (r#"{"a": "<%# a comment %>"}"#, "`<%# a comment %>`"),
+            (r#"{"a": "<%% literal %>"}"#, "`<%% literal %>`"),
+            (
+                "{\"a\": <%= process.env\n.HOME %>}",
+                "`<%= process.env\n.HOME %>`",
+            ),
+            (
+                r#"{"a": "<%= process.env.lower-case %>"}"#,
+                "`<%= process.env.lower-case %>`",
+            ),
+        ] {
+            let err = preprocess_ejs(content, &path, EjsFileAccess::Allowed)
+                .expect_err(content)
+                .to_string();
+            assert!(
+                err.starts_with(&format!("unsupported EJS tag {tag} at config.json:")),
+                "for {content:?}: {err}"
+            );
+        }
+    }
+
+    /// Whitespace around the body may include newlines, so a tag laid out over three lines is still
+    /// the supported expression, substituted like the one-line form.
+    #[test]
+    fn a_supported_expression_padded_with_newlines_is_substituted() {
+        unsafe { std::env::set_var("RIFT_TEST_1095_PAD", "padded") };
+        let content = "{\"a\": \"<%=\n  process.env.RIFT_TEST_1095_PAD\n%>\"}";
+        let result = preprocess_ejs(content, &PathBuf::from("c.json"), EjsFileAccess::Allowed);
+        unsafe { std::env::remove_var("RIFT_TEST_1095_PAD") };
+        assert_eq!(result.unwrap(), r#"{"a": "padded"}"#);
+    }
+
+    #[test]
+    fn an_unterminated_tag_is_refused() {
+        let content = r#"{"a": "<% never closed"}"#;
+        let err = preprocess_ejs(
+            content,
+            &PathBuf::from("config.json"),
+            EjsFileAccess::Allowed,
+        )
+        .expect_err("an unterminated tag must fail the load")
+        .to_string();
+        assert!(
+            err.starts_with(
+                "unsupported EJS tag `<% never closed\"}` (no closing `%>`) at config.json:1"
+            ),
+            "{err}"
+        );
+    }
+
+    /// A supported tag earlier in the document does not hide an unsupported one after it, and the
+    /// line reported is the later tag's.
+    #[test]
+    fn the_first_unsupported_tag_after_supported_ones_is_reported() {
+        unsafe { std::env::set_var("RIFT_TEST_1095_A", "a") };
+        let content = "{\"a\": \"<%= process.env.RIFT_TEST_1095_A %>\",\n\"b\": \"<%= other %>\"}";
+        let result = preprocess_ejs(content, &PathBuf::from("c.json"), EjsFileAccess::Allowed);
+        unsafe { std::env::remove_var("RIFT_TEST_1095_A") };
+        let err = result
+            .expect_err("the second tag is unsupported")
+            .to_string();
+        assert!(
+            err.starts_with("unsupported EJS tag `<%= other %>` at c.json:2,"),
+            "{err}"
+        );
+    }
+
+    /// A long tag is truncated in the message rather than pasting a whole document into it.
+    #[test]
+    fn a_long_unsupported_tag_is_truncated_in_the_message() {
+        let body = "x".repeat(200);
+        let content = format!(r#"{{"a": "<% {body} %>"}}"#);
+        let err = preprocess_ejs(&content, &PathBuf::from("c.json"), EjsFileAccess::Allowed)
+            .expect_err("unsupported")
+            .to_string();
+        let expected_tag = format!("`<% {}…`", "x".repeat(76));
+        assert!(
+            err.starts_with(&format!("unsupported EJS tag {expected_tag} at c.json:1,")),
+            "{err}"
+        );
+    }
+
+    /// An env var's value is content: a `<%` in it is neither refused nor substituted again.
+    #[test]
+    fn a_tag_inside_an_env_value_is_left_as_content() {
+        unsafe { std::env::set_var("RIFT_TEST_1095_ENV", "<%= not a tag %>") };
+        let content = r#"{"b": "<%= process.env.RIFT_TEST_1095_ENV %>"}"#;
+        let result = preprocess_ejs(content, &PathBuf::from("c.json"), EjsFileAccess::Allowed);
+        unsafe { std::env::remove_var("RIFT_TEST_1095_ENV") };
+        assert_eq!(result.unwrap(), r#"{"b": "<%= not a tag %>"}"#);
+    }
+
+    /// A stringified file is rendered before it is escaped, as Mountebank's formatter does: its env
+    /// tags are substituted, and text it inserts is not rescanned against the rest of the document.
+    #[test]
+    fn a_stringified_file_is_rendered_by_its_own_spans() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("inject.js"), "hi").unwrap();
-        let content = r#"{"a": "<%- stringify('inject.js') %>"}<% if (x) { %><% } %>"#;
-        let config_path = dir.path().join("config.ejs");
+        std::fs::write(
+            dir.path().join("f.js"),
+            "var host = \"<%= process.env.RIFT_TEST_1095_HOST %>\";",
+        )
+        .unwrap();
+        unsafe { std::env::set_var("RIFT_TEST_1095_HOST", "h") };
+        unsafe { std::env::set_var("RIFT_TEST_1095_PORT", "8080") };
+        let content =
+            r#"{"a": "<%- stringify('f.js') %>", "b": "<%= process.env.RIFT_TEST_1095_PORT %>"}"#;
+        let result = preprocess_ejs(content, &dir.path().join("c.json"), EjsFileAccess::Allowed);
+        unsafe { std::env::remove_var("RIFT_TEST_1095_HOST") };
+        unsafe { std::env::remove_var("RIFT_TEST_1095_PORT") };
         assert_eq!(
-            preprocess_ejs(content, &config_path, EjsFileAccess::Allowed).unwrap(),
-            r#"{"a": "hi"}"#
+            result.unwrap(),
+            r#"{"a": "var host = \"h\";", "b": "8080"}"#
+        );
+    }
+
+    /// Before the one-pass render, an unclosed `<%=` inside a stringified file ran on to the `%>` of
+    /// the next real tag, and that tag was left unsubstituted with no error. It is refused instead,
+    /// at its line in the stringified file.
+    #[test]
+    fn an_unclosed_tag_in_a_stringified_file_is_refused_where_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.js"), "// ok\nvar open = \"<%=\";").unwrap();
+        let content = "{\n\"a\": \"<%- stringify('f.js') %>\", \"b\": \"<%= process.env.HOME %>\"}";
+        let err = preprocess_ejs(content, &dir.path().join("c.json"), EjsFileAccess::Allowed)
+            .expect_err("the stringified file holds an unclosed tag")
+            .to_string();
+        assert!(
+            err.starts_with(
+                "unsupported EJS tag `<%=\";` (no closing `%>`) at f.js:2, stringified at "
+            ) && err.contains("c.json:2,"),
+            "{err}"
         );
     }
 
     #[test]
-    fn ejs_statement_blocks_are_stripped() {
-        let content = r#"{"a": 1<% for (var i=0;i<3;i++) { %><% } %>}"#;
-        let path = PathBuf::from("config.json");
-        assert_eq!(
-            preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap(),
-            r#"{"a": 1}"#
+    fn a_stringify_inside_a_stringified_file_is_refused_with_a_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("inner.txt"), "x").unwrap();
+        std::fs::write(
+            dir.path().join("outer.txt"),
+            "<%- stringify('inner.txt') %>",
+        )
+        .unwrap();
+        let content = r#"{"a": "<%- stringify('outer.txt') %>"}"#;
+        let err = preprocess_ejs(content, &dir.path().join("c.json"), EjsFileAccess::Allowed)
+            .expect_err("nested stringify is not evaluated")
+            .to_string();
+        assert!(
+            err.starts_with(
+                "unsupported EJS tag `<%- stringify('inner.txt') %>` at outer.txt:1, stringified at "
+            ) && err.contains("(a stringify inside a stringified file is not evaluated)"),
+            "{err}"
+        );
+    }
+
+    /// Included text is templated like the document itself, so an unsupported tag there is refused
+    /// too, at its line in the included file and the line that included it.
+    #[test]
+    fn an_unsupported_tag_in_an_included_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("part.json"), "{\n\"port\": <%= port %>}").unwrap();
+        let content = "{\"imposters\": [\n<% include 'part.json' %>]}";
+        let err = preprocess_ejs(content, &dir.path().join("c.json"), EjsFileAccess::Allowed)
+            .expect_err("the included tag is unsupported")
+            .to_string();
+        assert!(
+            err.starts_with("unsupported EJS tag `<%= port %>` at part.json:2, included at ")
+                && err.contains("c.json:2,"),
+            "{err}"
+        );
+    }
+
+    /// The same tag text in the included file and later in the document: the failure is the
+    /// included one, and it is not blamed on the document's line.
+    #[test]
+    fn a_tag_repeated_in_an_include_and_the_document_is_attributed_to_the_include() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("inc.txt"), "<%= other %>").unwrap();
+        let content = "{\n  \"inc\": \"<% include 'inc.txt' %>\",\n  \"b\": \"<%= other %>\"\n}";
+        let err = preprocess_ejs(content, &dir.path().join("c.json"), EjsFileAccess::Allowed)
+            .expect_err("both occurrences are unsupported")
+            .to_string();
+        assert!(
+            err.starts_with("unsupported EJS tag `<%= other %>` at inc.txt:1, included at ")
+                && err.contains("c.json:2,"),
+            "{err}"
+        );
+    }
+
+    /// Lines after an include are counted in the original document, whatever the include expanded
+    /// to — here a multi-line file, then an empty one.
+    #[test]
+    fn a_tag_after_includes_is_reported_at_its_original_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("three.txt"), "1\n2\n3").unwrap();
+        std::fs::write(dir.path().join("empty.txt"), "").unwrap();
+        let content = "{\n\"x\": \"<% include 'three.txt' %>\",\n\"y\": \"<% include 'empty.txt' %>\",\n\"z\": \"<%= bad %>\"\n}";
+        let err = preprocess_ejs(content, &dir.path().join("c.json"), EjsFileAccess::Allowed)
+            .expect_err("unsupported")
+            .to_string();
+        assert!(
+            err.starts_with("unsupported EJS tag `<%= bad %>` at ") && err.contains("c.json:4,"),
+            "{err}"
+        );
+    }
+
+    /// An include longer than its tag, with a tag right at the end of the included text: the tag is
+    /// the document's, on the include's line.
+    #[test]
+    fn a_tag_right_after_a_longer_include_is_the_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("big.json"), "{\n  \"a\": 1,\n  \"b\": 2\n}").unwrap();
+        let content = "x\n<% include 'big.json' %><%= bad %>\n";
+        let err = preprocess_ejs(content, &dir.path().join("c.json"), EjsFileAccess::Allowed)
+            .expect_err("unsupported")
+            .to_string();
+        assert!(
+            err.starts_with("unsupported EJS tag `<%= bad %>` at ") && err.contains("c.json:2,"),
+            "{err}"
         );
     }
 
     #[test]
-    fn ejs_statement_strip_spans_newlines() {
-        let content = "{\"a\": 1<% if (x) {\n  y();\n} %>}";
-        let path = PathBuf::from("config.json");
+    fn a_nested_include_is_refused_with_a_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("common.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("part.json"), "<% include 'common.json' %>").unwrap();
+        let content = "[<% include 'part.json' %>,\n<% include 'common.json' %>]";
+        let err = preprocess_ejs(content, &dir.path().join("c.json"), EjsFileAccess::Allowed)
+            .expect_err("a nested include is not evaluated")
+            .to_string();
+        assert!(
+            err.starts_with(
+                "unsupported EJS tag `<% include 'common.json' %>` at part.json:1, included at "
+            ) && err.contains(
+                "c.json:1 (an include inside an included or stringified file is not evaluated),"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn line_counting_holds_with_crlf_line_endings() {
+        let content = "{\r\n  \"a\": 1,\r\n  \"b\": \"<%= x %>\"\r\n}";
+        let err = preprocess_ejs(content, &PathBuf::from("c.json"), EjsFileAccess::Allowed)
+            .expect_err("unsupported")
+            .to_string();
+        assert!(
+            err.starts_with("unsupported EJS tag `<%= x %>` at c.json:3,"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_bare_lt_percent_gt_is_unterminated() {
+        let err = preprocess_ejs(
+            r#"{"a": "<%>"}"#,
+            &PathBuf::from("c.json"),
+            EjsFileAccess::Allowed,
+        )
+        .expect_err("unsupported")
+        .to_string();
+        assert!(
+            err.starts_with("unsupported EJS tag `<%>\"}` (no closing `%>`) at c.json:1,"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_unsupported_tag_right_after_a_supported_one_is_found() {
+        unsafe { std::env::set_var("RIFT_TEST_1095_ADJ", "v") };
+        let content = r#"{"a": "<%= process.env.RIFT_TEST_1095_ADJ %><%= bad %>"}"#;
+        let result = preprocess_ejs(content, &PathBuf::from("c.json"), EjsFileAccess::Allowed);
+        unsafe { std::env::remove_var("RIFT_TEST_1095_ADJ") };
+        let err = result.expect_err("unsupported").to_string();
+        assert!(
+            err.starts_with("unsupported EJS tag `<%= bad %>` at c.json:1,"),
+            "{err}"
+        );
+    }
+
+    /// A fetched document has no `--no-parse`, so its refusal points at the source instead.
+    #[test]
+    fn a_remote_document_refusal_does_not_suggest_no_parse() {
+        let err = preprocess_ejs(
+            r#"{"a": "<% x %>"}"#,
+            Path::new("https://host/imposters.json"),
+            EjsFileAccess::Denied,
+        )
+        .expect_err("unsupported")
+        .to_string();
         assert_eq!(
-            preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap(),
-            r#"{"a": 1}"#
+            err,
+            "unsupported EJS tag `<% x %>` at https://host/imposters.json:1, so the document was \
+             not loaded. Only `<%= process.env.VAR %>` and `<%= process.env.VAR || 'default' %>` \
+             are evaluated in a fetched document, and it is always preprocessed: remove the tag \
+             at the source."
+        );
+    }
+
+    /// `--no-parse` is the escape hatch for a literal tag, through the real loader.
+    #[test]
+    fn no_parse_loads_a_literal_tag_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "imposters.json",
+            r#"{"imposters": [{"port": 4545, "protocol": "http", "stubs": [{"responses": [{"is": {"body": "<% not a template %>"}}]}]}]}"#,
+        );
+        let untouched = load_configs(&ConfigSource::File {
+            path: path.clone(),
+            no_parse: true,
+        })
+        .expect("--no-parse skips preprocessing");
+        let body =
+            serde_json::to_value(&untouched[0]).unwrap()["stubs"][0]["responses"][0]["is"]["body"]
+                .clone();
+        assert_eq!(body, serde_json::json!("<% not a template %>"));
+
+        let err = load_configs(&ConfigSource::File {
+            path,
+            no_parse: false,
+        })
+        .expect_err("preprocessing refuses the literal tag");
+        assert!(
+            format!("{err:#}").contains("`<% not a template %>`"),
+            "{err:#}"
         );
     }
 
     #[test]
     fn ejs_statics_match_their_tags() {
-        use super::{EJS_ENV_VAR_RE, EJS_EXPR_RE, EJS_INCLUDE_RE, EJS_STMT_RE, EJS_STRINGIFY_RE};
+        use super::{EJS_ENV_VAR_RE, EJS_EXPR_RE, EJS_INCLUDE_RE, EJS_STRINGIFY_RE};
 
         assert_eq!(
             EJS_INCLUDE_RE
@@ -1023,10 +1520,5 @@ mod tests {
                 .is_none()
         );
         assert!(EJS_ENV_VAR_RE.captures("someOtherExpr()").is_none());
-
-        // (?s) dotall: a statement block spanning newlines is one match.
-        assert!(EJS_STMT_RE.is_match("<% if (x) {\n y();\n} %>"));
-        // `<%=` is an expression tag, not a statement — the catch-all must not eat it.
-        assert!(!EJS_STMT_RE.is_match("<%= process.env.HOST %>"));
     }
 }
