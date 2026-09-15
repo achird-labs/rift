@@ -993,6 +993,168 @@ fn underscore_behaviors_takes_priority_over_behaviors_array() {
     );
 }
 
+/// Issue #1099: every behavior finding on `resp`, as `(code, location)`, validated the way
+/// `validate_response` reaches it.
+fn behavior_findings(resp: &Value) -> Vec<(String, String)> {
+    let mut r = LintResult::new();
+    validate_response(path(), resp, "loc", &mut r, &opts(), &Value::Null);
+    r.issues
+        .iter()
+        .filter(|i| {
+            i.location
+                .as_deref()
+                .is_some_and(|l| l.contains("behaviors"))
+        })
+        .map(|i| {
+            let location = i.location.clone().expect("filtered to Some above");
+            (i.code.clone(), location)
+        })
+        .collect()
+}
+
+fn finding(code: &str, location: &str) -> (String, String) {
+    (code.to_string(), location.to_string())
+}
+
+/// The engine reads `"_behaviors": null` as absent and falls back to the array, so the lint must
+/// too; the null used to shadow the array and the block linted clean.
+#[test]
+fn null_underscore_behaviors_falls_back_to_the_array() {
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "_behaviors": null,
+        "behaviors": [{ "wait": true }]
+    });
+    assert_eq!(
+        behavior_findings(&resp),
+        vec![finding("E025", "loc.behaviors[0].wait")]
+    );
+}
+
+/// The engine folds the array last-write-wins per key, so an earlier bad value that a later one
+/// overrides is never read.
+#[test]
+fn behaviors_array_is_merged_last_write_wins() {
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "behaviors": [{ "wait": true }, { "wait": 5 }]
+    });
+    assert_eq!(behavior_findings(&resp), vec![]);
+}
+
+#[test]
+fn behaviors_array_reports_the_winning_element() {
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "behaviors": [{ "wait": 5 }, { "wait": 7 }, { "wait": true }]
+    });
+    assert_eq!(
+        behavior_findings(&resp),
+        vec![finding("E025", "loc.behaviors[2].wait")]
+    );
+}
+
+#[test]
+fn behaviors_array_disjoint_keys_are_each_validated_at_their_element() {
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "behaviors": [{ "wait": true }, 5, { "repeat": 0 }]
+    });
+    assert_eq!(
+        behavior_findings(&resp),
+        vec![
+            finding("E025", "loc.behaviors[0].wait"),
+            finding("E035", "loc.behaviors[2].repeat"),
+        ]
+    );
+}
+
+/// A later `null` makes the key absent in the merged block, exactly as it does in `_behaviors`.
+#[test]
+fn behaviors_array_later_null_makes_the_key_absent() {
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "behaviors": [{ "wait": true }, { "wait": null }]
+    });
+    assert_eq!(behavior_findings(&resp), vec![]);
+}
+
+/// The engine passes an object-valued `behaviors` through unchanged; the lint used to skip it.
+#[test]
+fn behaviors_object_form_is_validated() {
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "behaviors": { "wait": true, "repeat": 0 }
+    });
+    assert_eq!(
+        behavior_findings(&resp),
+        vec![
+            finding("E025", "loc.behaviors.wait"),
+            finding("E035", "loc.behaviors.repeat"),
+        ]
+    );
+}
+
+#[test]
+fn a_live_underscore_behaviors_still_shadows_a_bad_array_at_its_own_location() {
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "_behaviors": { "repeat": 0 },
+        "behaviors": [{ "wait": true }]
+    });
+    assert_eq!(
+        behavior_findings(&resp),
+        vec![finding("E035", "loc._behaviors.repeat")]
+    );
+}
+
+/// Every behavior key follows the fold, not just `wait`: `copy` from the last element that sets it,
+/// and `lookup` and `shellTransform` from the elements that set them once.
+#[test]
+fn behaviors_array_folds_copy_lookup_and_shell_transform_too() {
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "behaviors": [
+            { "copy": [{ "into": "a" }] },
+            { "lookup": { "key": "k", "into": "y" } },
+            { "shellTransform": "sudo reboot" },
+            { "copy": [{ "from": "body", "into": "b" }, { "into": "c" }] }
+        ]
+    });
+    assert_eq!(
+        behavior_findings(&resp),
+        vec![
+            finding("E032", "loc.behaviors[1].lookup"),
+            finding("W008", "loc.behaviors[2].shellTransform"),
+            finding("E029", "loc.behaviors[3].copy[1]"),
+        ]
+    );
+}
+
+/// The engine takes any non-null `_behaviors` as the block, so a non-object one does not hand the
+/// response over to `behaviors`.
+#[test]
+fn a_non_object_underscore_behaviors_does_not_fall_back_to_the_array() {
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "_behaviors": "not-an-object",
+        "behaviors": [{ "wait": true }]
+    });
+    assert_eq!(behavior_findings(&resp), vec![]);
+}
+
+#[test]
+fn empty_or_null_behaviors_forms_report_nothing() {
+    for resp in [
+        json!({ "is": {}, "behaviors": [] }),
+        json!({ "is": {}, "behaviors": null }),
+        json!({ "is": {}, "_behaviors": null, "behaviors": null }),
+        json!({ "is": {}, "behaviors": [5, "x", null] }),
+    ] {
+        assert_eq!(behavior_findings(&resp), vec![], "for {resp}");
+    }
+}
+
 // ─── Public API tests ─────────────────────────────────────────────────────────
 
 /// Issue #1008: this asserted `E002`, encoding the collision rather than the contract — the

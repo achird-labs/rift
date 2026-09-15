@@ -59,6 +59,16 @@ record.
     `repeat` key was present but `null`.
   - `rift-lint` reported `E025` for `"wait": null` and `E035` for `"repeat": null`.
 
+- **`rift-lint` checked a response's `behaviors` differently from how the engine reads them**
+  (#1099). The lint now validates the one block the engine builds.
+  - `"_behaviors": null` hid a `behaviors` array from the lint, while the engine reads the `null` as
+    absent and uses the array. `{"_behaviors": null, "behaviors": [{"wait": true}]}` linted clean, and
+    the engine then dropped the block's behaviors with only an error log line.
+  - The engine merges a `behaviors` array into one object, and the last element to set a key wins.
+    The lint checked each element on its own, so `[{"wait": true}, {"wait": 5}]` reported `E025` for a
+    block that serves a 5 ms wait. A finding now names the element whose value the engine uses.
+  - A `behaviors` object, rather than an array, was not checked at all.
+
 - **`rift-lint` passed a `port` the engine refuses to load** (#1088). The port check only ran when
   the value was an unsigned integer, so `"port": "3000"`, `3000.5`, `-1` or `true` linted clean and
   then failed at startup with `invalid type` (or, for `-1`, `invalid value`) `…, expected u16`.

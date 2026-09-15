@@ -453,6 +453,83 @@ fn test_behaviors_array_merged_to_object() {
     }
 }
 
+/// Issue #1099: the array fold is last-write-wins per key — the contract rift-lint mirrors.
+#[test]
+fn test_behaviors_array_duplicate_key_last_wins() {
+    let json = r#"{
+        "behaviors": [{"wait": 50}, {"repeat": 2}, {"wait": 5}],
+        "is": { "statusCode": 200 }
+    }"#;
+    let response: StubResponse = serde_json::from_str(json).unwrap();
+    let StubResponse::Is { behaviors, .. } = response else {
+        panic!("Expected Is response");
+    };
+    assert_eq!(
+        behaviors.expect("behaviors should be present"),
+        serde_json::json!({"wait": 5, "repeat": 2})
+    );
+}
+
+/// Issue #1099: an explicit `"_behaviors": null` is absent, so the `behaviors` array is read.
+#[test]
+fn test_null_underscore_behaviors_falls_back_to_the_array() {
+    let json = r#"{
+        "_behaviors": null,
+        "behaviors": [{"wait": 5}],
+        "is": { "statusCode": 200 }
+    }"#;
+    let response: StubResponse = serde_json::from_str(json).unwrap();
+    let StubResponse::Is { behaviors, .. } = response else {
+        panic!("Expected Is response");
+    };
+    assert_eq!(behaviors, Some(serde_json::json!({"wait": 5})));
+}
+
+/// Issue #1099: a later `null` stays in the merged block and parses as the key absent.
+#[test]
+fn test_behaviors_array_later_null_clears_the_key() {
+    let json = r#"{
+        "behaviors": [{"wait": 50}, {"wait": null}],
+        "is": { "statusCode": 200 }
+    }"#;
+    let response: StubResponse = serde_json::from_str(json).unwrap();
+    let StubResponse::Is {
+        behaviors,
+        behaviors_parsed,
+        ..
+    } = response
+    else {
+        panic!("Expected Is response");
+    };
+    assert_eq!(behaviors, Some(serde_json::json!({"wait": null})));
+    assert!(behaviors_parsed.expect("the block parses").wait.is_none());
+}
+
+/// Issue #1099: an empty `behaviors` array is no block at all.
+#[test]
+fn test_empty_behaviors_array_is_no_block() {
+    let json = r#"{ "behaviors": [], "is": { "statusCode": 200 } }"#;
+    let response: StubResponse = serde_json::from_str(json).unwrap();
+    let StubResponse::Is { behaviors, .. } = response else {
+        panic!("Expected Is response");
+    };
+    assert_eq!(behaviors, None);
+}
+
+/// Issue #1099: an object-valued `behaviors` is used as-is, not dropped.
+#[test]
+fn test_behaviors_object_form_is_used_as_is() {
+    let json = r#"{
+        "behaviors": {"wait": 5},
+        "is": { "statusCode": 200 }
+    }"#;
+    let response: StubResponse = serde_json::from_str(json).unwrap();
+    let StubResponse::Is { behaviors, .. } = response else {
+        panic!("Expected Is response");
+    };
+    assert_eq!(behaviors, Some(serde_json::json!({"wait": 5})));
+}
+
 #[test]
 fn test_proxy_only_response() {
     // When only proxy is present (not null), it should parse as Proxy variant
