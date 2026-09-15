@@ -65,6 +65,24 @@ record.
 
 ### Fixed
 
+- **Security: a `_behaviors` array ran a shell command or script without `--allowInjection`**
+  (#1101). The engine read a JSON array into the behaviors block by position (`wait`, `repeat`,
+  `copy`, `lookup`, `shellTransform`, `decorate`), so `"_behaviors": [null, null, null, null, "cmd"]`
+  configured a `shellTransform`. The `--allowInjection` gate only looks at object keys and admitted
+  it, and the command ran on every matching request.
+  - A `_behaviors` that is not an object, and a `behaviors` that is neither an object nor an array,
+    are now refused where the stub is parsed: `400` from `POST /imposters`, the stub endpoints and
+    `PUT /imposters`; a failed load for `--configfile`, `--datadir`, `POST /admin/reload` and
+    `configFile`; `NULL` from `rift_apply_config` and the other C-ABI calls. This holds with
+    `--allowInjection` on, because an array `_behaviors` has no documented meaning. The array form is
+    spelled `behaviors`.
+    `null` still means absent.
+  - A scalar `behaviors` used to be dropped silently; it is refused the same way.
+  - The injection gate now treats any non-object block as scripted, so it no longer relies on the
+    parser to stay closed.
+  - `rift-lint` reports these shapes as `E048`, and also flags a non-object, non-null element of a
+    `behaviors` array, which the engine skips.
+
 - **An explicit `null` for a `_behaviors` key was treated three different ways** (#1093). Writing
   `"wait": null` (or `null` for `decorate`, `shellTransform`, `copy`, `lookup` or `repeat`) now means
   the key is absent everywhere, the way `null` already works for `port` and `statusCode`.
