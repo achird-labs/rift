@@ -38,9 +38,11 @@ curl -X POST http://localhost:2525/admin/reload   # 200; delta applied, state pr
 ```
 
 To reload from a directory of one-imposter-per-file configs, start with `--datadir ./mb-data`
-instead; `POST /admin/reload` re-reads the directory. Every file in it must declare its `port`
-(not absent, not `0`): the directory is keyed by port, so a file without one refuses the reload with
-a `500` that names it, and startup skips it and names it in the log.
+instead; `POST /admin/reload` re-reads the directory. The directory is keyed by port: every file in
+it must declare its `port` (not absent, not `0`) and be named `<port>.json` after it, which is the
+name Rift itself writes. A file that breaks either rule refuses the reload with a `500` that names it
+and the rule it breaks, including the name it needs when only the name is wrong, and startup skips
+it and names it in the log. Rift never renames or edits it.
 
 ### A config file and a data directory together
 
@@ -61,9 +63,9 @@ keeps its own imposters:
   reload. Remove its file, or delete the imposter, to drop it.
 - A port declared by both the config file and a file in the data directory **refuses the reload**
   with a `500`, and the running imposters are left unchanged. Remove one of the two declarations.
-- Every file in the data directory must load. A malformed file, or one that declares no `port`,
-  refuses the reload with a `500` that names it, and a file that uses a scripting feature refuses it
-  unless `--allowInjection` is set.
+- Every file in the data directory must load. A malformed file, one that declares no `port`, or one
+  not named `<port>.json` after its port refuses the reload with a `500` that names it, and a file
+  that uses a scripting feature refuses it unless `--allowInjection` is set.
   Startup skips such a file and names it in the log instead.
 - A data directory has no change marker, so a reload with one always runs the diff, even when every
   config source reports it is unchanged.

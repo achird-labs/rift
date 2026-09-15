@@ -175,6 +175,27 @@ fn parse_document(content: &str, base: &ScriptBaseDir) -> anyhow::Result<LoadedC
 /// again under that port on every load, so copies accumulate.
 pub(crate) const DATADIR_PORT_LESS: &str = "declares no port; a datadir file must declare its port";
 
+/// Why a datadir file cannot be loaded as the imposter it contains, or `None` when it can.
+///
+/// The directory is keyed by port: rift writes an imposter to `<port>.json` and nowhere else. A file
+/// that names no port (issue #1125), or is named after anything but the port it declares (issue
+/// #1128), would be created and then written again as `<port>.json` beside the original, leaving two
+/// files for one imposter.
+pub(crate) fn datadir_file_problem(path: &Path, config: &ImposterConfig) -> Option<String> {
+    let Some(port) = config.explicit_port() else {
+        return Some(DATADIR_PORT_LESS.to_string());
+    };
+    let expected = format!("{port}.json");
+    let name = path.file_name().map(|n| n.to_string_lossy());
+    match name {
+        Some(name) if name == expected.as_str() => None,
+        Some(name) => Some(format!(
+            "declares port {port} but is named {name}; a datadir file must be named {expected}"
+        )),
+        None => Some(format!("a datadir file must be named {expected}")),
+    }
+}
+
 fn load_dir(dir: &Path) -> anyhow::Result<Vec<ImposterConfig>> {
     if !dir.exists() {
         return Ok(Vec::new());
@@ -193,8 +214,8 @@ fn load_dir(dir: &Path) -> anyhow::Result<Vec<ImposterConfig>> {
             let content = std::fs::read_to_string(&path).with_context(in_file)?;
             let mut config: ImposterConfig =
                 serde_json::from_str(&content).with_context(in_file)?;
-            if config.explicit_port().is_none() {
-                return Err(anyhow::anyhow!(DATADIR_PORT_LESS)).with_context(in_file);
+            if let Some(problem) = datadir_file_problem(&path, &config) {
+                return Err(anyhow::anyhow!(problem)).with_context(in_file);
             }
             resolve_scripts(&mut config, &base).with_context(in_file)?;
             configs.push(config);
@@ -345,8 +366,16 @@ mod tests {
     #[test]
     fn dir_loads_all_json_and_errors_propagate() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "a.json", r#"{"port":8100,"protocol":"http"}"#);
-        write(dir.path(), "b.json", r#"{"port":8101,"protocol":"http"}"#);
+        write(
+            dir.path(),
+            "8100.json",
+            r#"{"port":8100,"protocol":"http"}"#,
+        );
+        write(
+            dir.path(),
+            "8101.json",
+            r#"{"port":8101,"protocol":"http"}"#,
+        );
         write(dir.path(), "notes.txt", "ignored"); // non-json skipped
         let configs = load_configs(&ConfigSource::Dir(dir.path().to_path_buf())).unwrap();
         assert_eq!(configs.len(), 2);
@@ -522,6 +551,35 @@ mod tests {
         }
     }
 
+    // Issue #1128: the datadir is keyed by port, so a file must be named after the port it declares.
+    #[test]
+    fn a_datadir_file_not_named_after_its_port_refuses_the_load() {
+        for name in ["foo.json", "08102.json", "imposter-8102.json"] {
+            let dir = tempfile::tempdir().unwrap();
+            write(dir.path(), name, r#"{"port":8102,"protocol":"http"}"#);
+            let err = load_configs(&ConfigSource::Dir(dir.path().to_path_buf()))
+                .expect_err("a misnamed datadir file refuses the load");
+            let message = format!("{err:#}");
+            assert!(
+                message.contains(name)
+                    && message.contains(&format!(
+                        "declares port 8102 but is named {name}; a datadir file must be named 8102.json"
+                    )),
+                "got: {message}"
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "8102.json",
+            r#"{"port":8102,"protocol":"http"}"#,
+        );
+        let configs = load_configs(&ConfigSource::Dir(dir.path().to_path_buf()))
+            .expect("a file named after its port loads");
+        assert_eq!(configs.len(), 1);
+    }
+
     // Issue #1125: a reload refuses a datadir file that names no port, whether `port` is absent or 0.
     #[test]
     fn a_port_less_datadir_file_refuses_the_load() {
@@ -530,7 +588,11 @@ mod tests {
             ("0b.json", r#"{"port":0,"protocol":"http"}"#),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            write(dir.path(), "a.json", r#"{"port":8100,"protocol":"http"}"#);
+            write(
+                dir.path(),
+                "8100.json",
+                r#"{"port":8100,"protocol":"http"}"#,
+            );
             write(dir.path(), name, body);
             let err = load_configs(&ConfigSource::Dir(dir.path().to_path_buf()))
                 .expect_err("a port-less datadir file refuses the load");
@@ -546,7 +608,11 @@ mod tests {
     #[test]
     fn load_configs_full_from_dir_has_no_intercept_block() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "a.json", r#"{"port":8100,"protocol":"http"}"#);
+        write(
+            dir.path(),
+            "8100.json",
+            r#"{"port":8100,"protocol":"http"}"#,
+        );
         let loaded = load_configs_full(&ConfigSource::Dir(dir.path().to_path_buf())).unwrap();
         assert_eq!(loaded.imposters.len(), 1);
         assert!(loaded.intercept.is_none());

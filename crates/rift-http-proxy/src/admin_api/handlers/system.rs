@@ -999,4 +999,38 @@ mod tests {
             assert_eq!(manager.count(), 0, "nothing was applied");
         }
     }
+
+    // Issue #1128: both reload shapes that read a datadir refuse a file not named after its port.
+    #[tokio::test]
+    async fn reload_refuses_a_datadir_file_not_named_after_its_port() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (file, datadir) = two_stores(dir.path(), r#"{"imposters":[]}"#);
+        std::fs::write(
+            datadir.join("foo.json"),
+            r#"{"port":23796,"protocol":"http","stubs":[]}"#,
+        )
+        .expect("write misnamed file");
+
+        let manager = Arc::new(ImposterManager::new());
+        let legacy = crate::sources::ReloadSource::Legacy(Arc::new(
+            crate::config_loader::ConfigSource::Dir(datadir.clone()),
+        ));
+        let both = sources_and_datadir(
+            file_registry(),
+            format!("file:{}", file.display()),
+            &datadir,
+        );
+
+        for source in [legacy, both] {
+            let resp = handle_reload(manager.clone(), Some(source), false).await;
+            assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = body_json(resp).await;
+            let message = body["errors"][0]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("foo.json") && message.contains("must be named 23796.json"),
+                "got: {body}"
+            );
+            assert_eq!(manager.count(), 0, "nothing was applied");
+        }
+    }
 }

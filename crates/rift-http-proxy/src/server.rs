@@ -1572,7 +1572,8 @@ fn format_skipped_summary(skipped: &[SkippedImposterFile]) -> Option<String> {
 /// Read and parse every `*.json` in `datadir`, resolving each imposter's scripts. Returns the
 /// successfully-parsed `(path, config)` pairs plus a list of files that could not be parsed into an
 /// imposter config (an unreadable directory entry, an unreadable file, invalid JSON, an imposter that
-/// declares no port (issue #1125), or unresolvable scripts). A single bad file is collected rather than dropped or propagated, so it neither
+/// declares no port (issue #1125) or a file not named after its port (issue #1128), or unresolvable
+/// scripts). A single bad file is collected rather than dropped or propagated, so it neither
 /// vanishes silently nor aborts loading of the remaining valid imposters (issue #532). Only a
 /// failure to open the directory itself is fatal.
 fn read_and_parse_datadir(
@@ -1607,13 +1608,12 @@ fn read_and_parse_datadir(
                 }
             };
             match serde_json::from_str::<ImposterConfig>(&content) {
-                Ok(config) if config.explicit_port().is_none() => {
-                    skipped.push(SkippedImposterFile {
-                        path,
-                        reason: crate::config_loader::DATADIR_PORT_LESS.to_string(),
-                    });
-                }
                 Ok(mut config) => {
+                    if let Some(reason) = crate::config_loader::datadir_file_problem(&path, &config)
+                    {
+                        skipped.push(SkippedImposterFile { path, reason });
+                        continue;
+                    }
                     if let Err(e) = resolve_scripts(&mut config, base) {
                         skipped.push(SkippedImposterFile {
                             path,
@@ -2488,6 +2488,92 @@ mod tests {
             listing(),
             vec!["0a.json", "0b.json", "23778.json"],
             "no copy is written for a port-less file"
+        );
+        manager.delete_all().await;
+    }
+
+    // Issue #1128: a datadir file named other than `<port>.json` used to be served and copied to
+    // `<port>.json` on load, so the next boot and every reload saw two files for one port.
+    #[tokio::test]
+    async fn a_datadir_file_not_named_after_its_port_is_skipped_and_left_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let datadir = dir.path().join("data");
+        std::fs::create_dir(&datadir).expect("mkdir");
+        write_json(
+            &datadir.join("foo.json"),
+            serde_json::json!({"port": 23792, "protocol": "http", "stubs": []}),
+        );
+
+        let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        startup_load(&manager, None, Some(&datadir))
+            .await
+            .expect("a misnamed file is skipped, not fatal");
+
+        assert_eq!(manager.count(), 0);
+        let names: Vec<String> = std::fs::read_dir(&datadir)
+            .expect("read datadir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["foo.json"], "no `23792.json` copy is written");
+
+        let (parsed, skipped) = read_and_gate_datadir(&datadir, false).expect("listable");
+        assert!(parsed.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].path, datadir.join("foo.json"));
+        assert_eq!(
+            skipped[0].reason,
+            "declares port 23792 but is named foo.json; a datadir file must be named 23792.json"
+        );
+    }
+
+    // The state a server is in after booting once before this fix: the misnamed original and rift's
+    // own `<port>.json` copy. The copy is served. Each file is judged on its own name, so listing order
+    // cannot change the outcome; the direct `datadir_file_problem` assertions pin that per file.
+    #[tokio::test]
+    async fn the_port_named_copy_is_served_beside_a_misnamed_original() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let datadir = dir.path().join("data");
+        std::fs::create_dir(&datadir).expect("mkdir");
+        for (name, label) in [("foo.json", "original"), ("23793.json", "copy")] {
+            write_json(
+                &datadir.join(name),
+                serde_json::json!({"port": 23793, "protocol": "http", "name": label, "stubs": []}),
+            );
+        }
+
+        let config: ImposterConfig = serde_json::from_value(
+            serde_json::json!({"port": 23793, "protocol": "http", "stubs": []}),
+        )
+        .expect("config");
+        assert!(
+            crate::config_loader::datadir_file_problem(&datadir.join("foo.json"), &config)
+                .is_some()
+        );
+        assert_eq!(
+            crate::config_loader::datadir_file_problem(&datadir.join("23793.json"), &config),
+            None
+        );
+
+        let (parsed, skipped) = read_and_gate_datadir(&datadir, false).expect("listable");
+        assert_eq!(
+            parsed.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+            vec![datadir.join("23793.json")]
+        );
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].path, datadir.join("foo.json"));
+
+        let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
+        startup_load(&manager, None, Some(&datadir))
+            .await
+            .expect("startup load");
+        assert_eq!(
+            manager
+                .get_imposter(23793)
+                .expect("served")
+                .config
+                .name
+                .as_deref(),
+            Some("copy")
         );
         manager.delete_all().await;
     }
