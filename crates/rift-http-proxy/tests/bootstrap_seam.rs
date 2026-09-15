@@ -115,6 +115,79 @@ fn rcfile_never_overrides_an_explicit_flag() {
     );
 }
 
+// Issue #1114: `port` was read with `as u16`, so 70000 silently became 4464 and the server bound a
+// port nobody asked for. A value that cannot be a port refuses the rcfile, like a mistyped boolean.
+#[test]
+fn rcfile_out_of_range_port_is_refused_not_truncated() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rcfile = write_rcfile(&dir, r#"{"port": 70000}"#);
+    let mut parsed = cli(&[]);
+    let err =
+        bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile).expect_err("70000 is not a port");
+    assert!(format!("{err:#}").contains("port"), "{err:#}");
+    assert_eq!(parsed.port, cli(&[]).port, "nothing is applied");
+}
+
+// Issue #1114: every recognised key must have its type. A wrong-typed value used to be ignored or
+// coerced with nothing said, so the operator's value silently did not apply.
+#[test]
+fn rcfile_wrong_typed_values_are_refused_naming_the_key() {
+    for (key, body) in [
+        ("port", r#"{"port": "4321", "host": "127.0.0.1"}"#),
+        ("port", r#"{"port": -1, "host": "127.0.0.1"}"#),
+        ("port", r#"{"port": 4321.5, "host": "127.0.0.1"}"#),
+        ("host", r#"{"host": 5, "port": 4321}"#),
+        ("logLevel", r#"{"logLevel": true, "port": 4321}"#),
+        ("datadir", r#"{"datadir": true, "port": 4321}"#),
+        ("configfile", r#"{"configfile": 1, "port": 4321}"#),
+        (
+            "allowInjection",
+            r#"{"allowInjection": "yes", "port": 4321}"#,
+        ),
+        ("localOnly", r#"{"localOnly": "yes", "port": 4321}"#),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rcfile = write_rcfile(&dir, body);
+        let mut parsed = cli(&[]);
+        let default = cli(&[]);
+        let err = bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile)
+            .expect_err("a wrong-typed value refuses the rcfile");
+        assert!(
+            err.to_string().contains(&format!("'{key}'")),
+            "{body}: {err}"
+        );
+        assert_eq!(parsed.port, default.port, "{body}: nothing is applied");
+        assert_eq!(parsed.host, default.host, "{body}: nothing is applied");
+    }
+}
+
+#[test]
+fn rcfile_port_boundaries_are_accepted() {
+    for port in [0_u16, 65535] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rcfile = write_rcfile(&dir, &format!(r#"{{"port": {port}}}"#));
+        let mut parsed = cli(&[]);
+        bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile).expect("a valid port applies");
+        assert_eq!(parsed.port, port);
+    }
+}
+
+// Issue #1114: the binary installs its log subscriber after the rcfile is applied, so a `warn!` for
+// an unsupported key went nowhere. The keys are returned so the caller can report them.
+#[test]
+fn rcfile_unsupported_keys_are_returned_to_the_caller() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rcfile = write_rcfile(&dir, r#"{"nopeNotAKey": 1, "port": 4321, "alsoNot": true}"#);
+    let mut parsed = cli(&[]);
+    let unsupported = bootstrap::apply_rcfile_defaults_reporting(&mut parsed, &rcfile)
+        .expect("unknown keys are not fatal");
+    assert_eq!(
+        unsupported,
+        vec!["alsoNot".to_string(), "nopeNotAKey".to_string()]
+    );
+    assert_eq!(parsed.port, 4321);
+}
+
 // AC3: an unrecognised key is ignored (warned), not fatal — and the recognised keys beside it
 // still apply.
 #[test]
@@ -156,20 +229,19 @@ fn rcfile_non_boolean_require_admin_auth_is_rejected() {
     }
 }
 
-// The sibling booleans keep their tolerant behaviour — the stricter rule above is scoped to the one
-// key where the coerced default is the permissive state, not applied across the board.
+// Issue #1114 reversed this: the sibling booleans were tolerant on the premise that `false` is their
+// deny state. For `localOnly` it is the exposed one — `false` binds the admin plane on every
+// interface — so `"localOnly": "yes"` now refuses the rcfile like `requireAdminAuth` does.
 #[test]
-fn rcfile_non_boolean_local_only_is_still_tolerated() {
+fn rcfile_non_boolean_local_only_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     let rcfile = write_rcfile(&dir, r#"{"localOnly": "yes", "port": 4321}"#);
     let mut parsed = cli(&[]);
-    bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile)
-        .expect("a mistyped localOnly stays non-fatal");
+    let err = bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile)
+        .expect_err("a mistyped localOnly is refused");
+    assert!(err.to_string().contains("localOnly"), "{err}");
     assert!(!parsed.local_only);
-    assert_eq!(
-        parsed.port, 4321,
-        "the recognised keys beside it still apply"
-    );
+    assert_ne!(parsed.port, 4321, "nothing beside it is applied");
 }
 
 // AC4: a structurally wrong rcfile is an error, not a silent no-op.
