@@ -57,16 +57,46 @@ pub enum FileAccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rendered {
     pub text: String,
-    /// Each `<%= process.env.VAR %>` with no default whose variable was unset, so it rendered empty.
+    /// Each `<%= process.env.VAR %>` whose variable could not be substituted: unset with no default,
+    /// or set to a value that is not valid Unicode.
     pub unset_env: Vec<UnsetEnv>,
 }
 
-/// An environment variable a tag read while it was unset.
+/// An environment variable a tag read but could not substitute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsetEnv {
     pub name: String,
     /// Where the tag is, as `at <file>:<line>` (with the including file for an included one).
     pub place: String,
+    pub reason: EnvProblem,
+}
+
+/// Why a variable could not be substituted (issue #1116).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvProblem {
+    /// Not set, and the tag gives no default, so the tag renders empty.
+    Unset,
+    /// Set, but the value is not valid Unicode, so the tag renders its default, or empty without one.
+    NotUnicode,
+}
+
+impl UnsetEnv {
+    /// One sentence naming the variable, the tag and what it rendered, shared by the engine's
+    /// warning and `rift-lint`'s `W013` so both describe the condition the same way.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self.reason {
+            EnvProblem::Unset => format!(
+                "`{}` is unset and the tag {} gives no default, so it renders empty",
+                self.name, self.place
+            ),
+            EnvProblem::NotUnicode => format!(
+                "`{}` is set but its value is not valid Unicode, so the tag {} renders its default, \
+                 or empty without one",
+                self.name, self.place
+            ),
+        }
+    }
 }
 
 /// Why a document could not be rendered. Each message names the tag or file and where it is.
@@ -120,7 +150,9 @@ pub fn has_tags(content: &str) -> bool {
 /// var's value, a stringified file — is never scanned again as if it were template.
 ///
 /// A `<%= process.env.VAR %>` whose variable is unset renders empty, as Mountebank's does; each one
-/// is listed in [`Rendered::unset_env`] so a caller can say so. One with a `|| 'default'` is not.
+/// is listed in [`Rendered::unset_env`] so a caller can say so. One with a `|| 'default'` is not. A
+/// variable set to a value that is not valid Unicode is listed either way, because the value the
+/// author set is ignored.
 ///
 /// # Errors
 ///
@@ -294,10 +326,11 @@ fn render_tags(
         let tag = &text[offset..end];
 
         if let Some(expression) = env_expression(tag) {
-            if let Some(name) = expression.unset {
+            if let Some((name, reason)) = expression.problem {
                 unset_env.push(UnsetEnv {
                     name: name.to_string(),
                     place: locate(offset),
+                    reason,
                 });
             }
             out.push_str(&expression.value);
@@ -381,27 +414,33 @@ fn whole_tag_capture<'t>(re: &Regex, tag: &'t str) -> Option<&'t str> {
 /// A rendered `<%= process.env.VAR %>` tag.
 struct EnvExpression<'t> {
     value: String,
-    /// The variable, when it is unset and the tag gives no default, so the value is empty.
-    unset: Option<&'t str>,
+    /// The variable and why it could not be substituted, when it could not.
+    problem: Option<(&'t str, EnvProblem)>,
 }
 
 /// The value of a `<%= process.env.VAR %>` / `<%= process.env.VAR || 'default' %>` tag, or `None`
-/// when `tag` is not one. A variable that is set but not valid Unicode reads as unset, as it did
-/// before this moved here.
+/// when `tag` is not one.
 fn env_expression(tag: &str) -> Option<EnvExpression<'_>> {
     let body = whole_tag_capture(&EJS_EXPR_RE, tag)?.trim();
     let env_cap = EJS_ENV_VAR_RE.captures(body)?;
     let var_name = env_cap.get(1)?.as_str();
     let default = env_cap.get(2).map(|m| m.as_str());
     Some(match (std::env::var(var_name), default) {
-        (Ok(value), _) => EnvExpression { value, unset: None },
-        (Err(_), Some(default)) => EnvExpression {
-            value: default.to_string(),
-            unset: None,
+        (Ok(value), _) => EnvExpression {
+            value,
+            problem: None,
         },
-        (Err(_), None) => EnvExpression {
+        (Err(std::env::VarError::NotPresent), Some(default)) => EnvExpression {
+            value: default.to_string(),
+            problem: None,
+        },
+        (Err(std::env::VarError::NotPresent), None) => EnvExpression {
             value: String::new(),
-            unset: Some(var_name),
+            problem: Some((var_name, EnvProblem::Unset)),
+        },
+        (Err(std::env::VarError::NotUnicode(_)), default) => EnvExpression {
+            value: default.unwrap_or_default().to_string(),
+            problem: Some((var_name, EnvProblem::NotUnicode)),
         },
     })
 }
@@ -517,8 +556,55 @@ mod tests {
             vec![UnsetEnv {
                 name: UNSET.to_string(),
                 place: "at /cfg/imposters.json:2".to_string(),
+                reason: EnvProblem::Unset,
             }]
         );
+        assert_eq!(
+            rendered.unset_env[0].describe(),
+            format!(
+                "`{UNSET}` is unset and the tag at /cfg/imposters.json:2 gives no default, so it \
+                 renders empty"
+            )
+        );
+    }
+
+    // Issue #1116: a variable that is set but not valid Unicode was reported as "unset" without a
+    // default, and not reported at all with one, though the author set a value that was ignored.
+    #[cfg(unix)]
+    #[test]
+    fn a_set_but_non_unicode_variable_is_reported_as_such() {
+        use std::os::unix::ffi::OsStrExt;
+        const NOT_UNICODE: &str = "RIFT_EJS_TEST_1116_NOT_UNICODE";
+        // Safety: a name no other test reads, set once and never removed.
+        unsafe { std::env::set_var(NOT_UNICODE, std::ffi::OsStr::from_bytes(b"\xff\xfe")) };
+
+        for (tag, rendered_text) in [
+            (format!("<%= process.env.{NOT_UNICODE} %>"), ""),
+            (
+                format!("<%= process.env.{NOT_UNICODE} || 'fallback' %>"),
+                "fallback",
+            ),
+        ] {
+            let rendered =
+                render(&tag, Path::new("/cfg/a.json"), FileAccess::Allowed).expect("renders");
+            assert_eq!(rendered.text, rendered_text, "{tag}");
+            assert_eq!(
+                rendered.unset_env,
+                vec![UnsetEnv {
+                    name: NOT_UNICODE.to_string(),
+                    place: "at /cfg/a.json:1".to_string(),
+                    reason: EnvProblem::NotUnicode,
+                }],
+                "{tag}"
+            );
+            assert!(
+                rendered.unset_env[0]
+                    .describe()
+                    .contains("is set but its value is not valid Unicode"),
+                "{}",
+                rendered.unset_env[0].describe()
+            );
+        }
     }
 
     #[test]

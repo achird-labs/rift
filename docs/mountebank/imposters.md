@@ -427,6 +427,12 @@ Only two expression forms are evaluated: `<%= process.env.VAR %>` and
 so leave the tag outside the JSON quotes for a number such as `port`; inside quotes it becomes a
 string, which the engine refuses for a port. There are no template variables.
 
+A variable that is unset renders empty when the tag has no default, and one whose value is not
+valid Unicode renders the default or empty. Either way the engine logs a warning naming the variable
+and the tag's line when the file loads, and if the rendered file then fails to parse, the error names
+the variable too. Give the tag a default to avoid it for an unset variable; a value that is not
+valid Unicode is reported either way.
+
 Any other tag fails the load with an error naming the tag and its line: another `<%= … %>`
 expression, a `<% … %>` statement other than `include`, a `<%- … %>` output tag other than
 `stringify`, a `<%# … %>` comment, or a `<%` with no closing `%>`. An included file is checked the

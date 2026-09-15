@@ -78,6 +78,14 @@ record.
 
 ### Fixed
 
+- **An EJS `<%= process.env.VAR %>` whose variable is unset rendered empty with nothing logged** (#1116).
+  A typo in a variable name, or a deployment missing one, loaded a config that silently differed from
+  the file; for a `port` the load then failed with a JSON error at a line and column that did not
+  mention the variable. The engine now logs a warning per variable at load and reload, naming it and
+  the tag's line, and a parse error after rendering names the variables that rendered empty. A
+  variable set to a value that is not valid Unicode is reported as such, even when the tag has a
+  default, instead of as unset. `rift-lint`'s `W013` uses the same wording.
+
 - **A port-less imposter could take a port another imposter in the same set names, and one of the two
   was lost** (#1112). An auto-assigned port is the lowest free one from 49152, and imposters were
   created in the order the set listed them. `PUT /imposters`, `POST /admin/reload`, `rift_apply_config`

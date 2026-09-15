@@ -1338,6 +1338,36 @@ fn an_unset_variable_without_a_default_is_w013() {
     assert_eq!((r.errors, r.warnings), (0, 1));
 }
 
+// Issue #1116: a set variable whose value is not valid Unicode is not "unset", and it is ignored
+// even when the tag has a default, so it is reported either way with its own wording.
+#[cfg(unix)]
+#[test]
+fn a_non_unicode_variable_is_w013_with_its_own_wording() {
+    use std::os::unix::ffi::OsStrExt;
+    const NOT_UNICODE: &str = "RIFT_LINT_TEST_1116_NOT_UNICODE";
+    // Safety: a name no other test reads, set once and never removed.
+    unsafe { std::env::set_var(NOT_UNICODE, std::ffi::OsStr::from_bytes(b"\xff")) };
+    let text = format!(
+        r#"{{"port": 4545, "protocol": "http", "stubs": [{{"responses": [{{"is": {{"body": "<%= process.env.{NOT_UNICODE} || 'x' %>"}}}}]}}]}}"#
+    );
+    let r = lint_json(&text, "imposters.json", &opts());
+    assert_eq!(codes(&r), vec!["W013"]);
+    assert!(
+        r.issues[0].message.contains("not valid Unicode")
+            && !r.issues[0].message.contains("is unset"),
+        "{}",
+        r.issues[0].message
+    );
+    assert!(
+        r.issues[0]
+            .suggestion
+            .as_deref()
+            .is_some_and(|s| s.contains("valid Unicode")),
+        "{:?}",
+        r.issues[0].suggestion
+    );
+}
+
 #[test]
 fn an_included_file_is_linted_as_part_of_the_document() {
     let dir = tempfile::tempdir().expect("tempdir");
