@@ -170,6 +170,11 @@ fn parse_document(content: &str, base: &ScriptBaseDir) -> anyhow::Result<LoadedC
     })
 }
 
+/// Why a datadir file whose imposter names no port (absent, or `0`) is refused (issue #1125). The
+/// directory is keyed by port: such an imposter would be created on an auto-assigned port and written
+/// again under that port on every load, so copies accumulate.
+pub(crate) const DATADIR_PORT_LESS: &str = "declares no port; a datadir file must declare its port";
+
 fn load_dir(dir: &Path) -> anyhow::Result<Vec<ImposterConfig>> {
     if !dir.exists() {
         return Ok(Vec::new());
@@ -188,6 +193,9 @@ fn load_dir(dir: &Path) -> anyhow::Result<Vec<ImposterConfig>> {
             let content = std::fs::read_to_string(&path).with_context(in_file)?;
             let mut config: ImposterConfig =
                 serde_json::from_str(&content).with_context(in_file)?;
+            if config.explicit_port().is_none() {
+                return Err(anyhow::anyhow!(DATADIR_PORT_LESS)).with_context(in_file);
+            }
             resolve_scripts(&mut config, &base).with_context(in_file)?;
             configs.push(config);
         }
@@ -510,6 +518,26 @@ mod tests {
             assert!(
                 loaded.intercept.is_none(),
                 "{name}: no block means no intercept"
+            );
+        }
+    }
+
+    // Issue #1125: a reload refuses a datadir file that names no port, whether `port` is absent or 0.
+    #[test]
+    fn a_port_less_datadir_file_refuses_the_load() {
+        for (name, body) in [
+            ("0a.json", r#"{"protocol":"http"}"#),
+            ("0b.json", r#"{"port":0,"protocol":"http"}"#),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            write(dir.path(), "a.json", r#"{"port":8100,"protocol":"http"}"#);
+            write(dir.path(), name, body);
+            let err = load_configs(&ConfigSource::Dir(dir.path().to_path_buf()))
+                .expect_err("a port-less datadir file refuses the load");
+            let message = format!("{err:#}");
+            assert!(
+                message.contains(name) && message.contains("declares no port"),
+                "got: {message}"
             );
         }
     }

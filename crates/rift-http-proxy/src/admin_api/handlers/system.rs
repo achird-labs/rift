@@ -963,4 +963,40 @@ mod tests {
 
         manager.delete_all().await;
     }
+
+    // Issue #1125: both reload shapes that read a datadir refuse a file that names no port.
+    #[tokio::test]
+    async fn reload_refuses_a_port_less_datadir_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (file, datadir) = two_stores(dir.path(), r#"{"imposters":[]}"#);
+        std::fs::write(
+            datadir.join("23779.json"),
+            r#"{"port":23779,"protocol":"http","stubs":[]}"#,
+        )
+        .expect("write datadir file");
+        std::fs::write(datadir.join("0a.json"), r#"{"protocol":"http","stubs":[]}"#)
+            .expect("write port-less file");
+
+        let manager = Arc::new(ImposterManager::new());
+        let legacy = crate::sources::ReloadSource::Legacy(Arc::new(
+            crate::config_loader::ConfigSource::Dir(datadir.clone()),
+        ));
+        let both = sources_and_datadir(
+            file_registry(),
+            format!("file:{}", file.display()),
+            &datadir,
+        );
+
+        for source in [legacy, both] {
+            let resp = handle_reload(manager.clone(), Some(source), false).await;
+            assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = body_json(resp).await;
+            let message = body["errors"][0]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("0a.json") && message.contains("declares no port"),
+                "got: {body}"
+            );
+            assert_eq!(manager.count(), 0, "nothing was applied");
+        }
+    }
 }

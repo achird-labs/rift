@@ -13,6 +13,16 @@ record.
 
 ### Changed
 
+- **A `--datadir` file that declares no `port` is now refused** (#1125). An absent `port`, or `0`, used
+  to be created on an auto-assigned port and written to the directory again under that port, and the
+  original was left beside it, so every restart or reload added one more file and one more served
+  imposter. Startup now skips such a file and names it in the skip summary, and `POST /admin/reload`
+  refuses with a `500` that names it; the file itself is never modified. Rift only ever writes
+  `<port>.json` files with an explicit port, so only a hand-written or copied-in file is affected.
+  - **Migration:** if a port-less file already accumulated `<port>.json` copies, those copies still
+    load. Keep one copy and delete the others along with the original, or give the original a
+    `port` and delete all the copies.
+
 - **Embedders: `ImposterManager::delete_all` returns a `DeleteAllReport`** (#1124) with the `deleted`
   configs and the `failed` ports, instead of the deleted configs alone. When anything failed it emits
   a `Deleted` event per deleted port instead of `AllDeleted`. `rift_delete_all` returns `-1` in that
