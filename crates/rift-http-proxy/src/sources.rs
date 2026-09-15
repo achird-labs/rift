@@ -485,9 +485,9 @@ impl SourceSet {
             }
 
             for config in fetched.configs {
-                // An imposter with no port is auto-assigned at creation, so it cannot collide
-                // with anything here.
-                if let Some(port) = config.port {
+                // An imposter with no port, or port `0`, is auto-assigned at creation, so it
+                // cannot collide with anything here (issue #1104).
+                if let Some(port) = config.explicit_port() {
                     if let Some(other) = claimed.get(&port) {
                         anyhow::bail!(
                             "imposter sources `{other}` and `{}` both declare port {port}; each \

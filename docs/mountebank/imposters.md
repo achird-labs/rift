@@ -55,7 +55,7 @@ curl -X POST http://localhost:2525/imposters \
 
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
-| `port` | number | No | Port to listen on (auto-assigned if omitted) |
+| `port` | number | No | Port to listen on (auto-assigned if omitted, `null` or `0`) |
 | `protocol` | string | No | `http` or `https` (default: `http`) |
 | `name` | string | No | Human-readable name |
 | `stubs` | array | No | Request/response mappings |

@@ -191,8 +191,8 @@ fn main() {
                 for (prefix, slot) in rift_lint::imposters_in(&imposter.value) {
                     // Only the ports E005 accepts: an unchecked `as u16` wrapped 70000 onto 4464
                     // and reported a conflict with a file that never used that port (issue #1091).
-                    // An absent or `null` port is auto-assigned by the engine and never conflicts;
-                    // a `0` is E005's to report.
+                    // An absent, `null` or `0` port is auto-assigned by the engine and never
+                    // conflicts (issue #1104); a `0` is still E005's to report.
                     if let Some(port) = slot
                         .get("port")
                         .and_then(Value::as_u64)

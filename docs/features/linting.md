@@ -107,7 +107,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E002 | Port conflict — more than one imposter declares the same port, inside one file (`{"imposters": [...]}` or `[...]`) or across files. An absent or `null` port is auto-assigned and never conflicts; `0` is reported as E005 instead | Two imposters on port 4545 |
 | E003 | Missing required field, or set to `null` | No `port` or `stubs` field |
 | E004 | Invalid protocol | Protocol is "ftp" instead of "http" |
-| E005 | Port out of range | Port 70000 (max is 65535) |
+| E005 | Port out of range, or `0` — the engine auto-assigns `0` like an absent port, but a config file must pin its ports | Port 70000 (max is 65535), port 0 |
 | E010 | Unbalanced brackets in JSONPath | `$.user[0` missing `]` |
 | E013 | Invalid regex | `[invalid(` |
 | E018 | `is.headers` array contains a non-string element (a string array is legal, #238) | `"Accept": ["text/html", 1]` |

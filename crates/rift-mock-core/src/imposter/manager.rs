@@ -796,10 +796,7 @@ impl ImposterManager {
         // Owned (not borrowed from `config`): the per-core fan-out (#745) rebinds listeners
         // after `config` has moved into the imposter.
         let bind_host: String = config.host.clone().unwrap_or_else(|| "0.0.0.0".to_string());
-        let explicit_port = match config.port {
-            Some(p) if p != 0 => Some(p),
-            _ => None,
-        };
+        let explicit_port = config.explicit_port();
 
         // One fallible bind phase covering BOTH binds — the port probe and the fan-out listener
         // group — because either can fail with `BindError` and the degradation below has to cover
@@ -1490,7 +1487,8 @@ impl ImposterManager {
     }
 
     /// Full-set validation shared by `reload` and `apply_config`: protocol validity, no
-    /// duplicate explicit ports, and no duplicate explicit stub ids within an imposter
+    /// duplicate explicit ports (`0` is auto-assigned, not explicit — issue #1104), and no
+    /// duplicate explicit stub ids within an imposter
     /// (the invariant `add_stub_unique` enforces incrementally, issue #202 — duplicate ids
     /// would silently corrupt the stub-key diff). Runs before anything mutates.
     fn validate_config_set(configs: &[ImposterConfig]) -> Result<(), ImposterError> {
@@ -1500,7 +1498,7 @@ impl ImposterManager {
                 "http" | "https" => {}
                 other => return Err(ImposterError::InvalidProtocol(other.to_string())),
             }
-            if let Some(port) = config.port
+            if let Some(port) = config.explicit_port()
                 && !seen.insert(port)
             {
                 return Err(ImposterError::PortInUse(port));
@@ -1534,7 +1532,7 @@ impl ImposterManager {
     /// The whole set is validated up front — `Err` means nothing was mutated. Per-port apply
     /// failures after that (e.g. a bind failure on a freed port) land in
     /// [`ApplyReport::failed`] while the remaining ports are still applied. Configs without
-    /// an explicit port are never reconciled — each apply creates them fresh on an
+    /// an explicit port (absent or `0`) are never reconciled — each apply creates them fresh on an
     /// auto-assigned port (and reports their failures under port `0`).
     pub async fn apply_config(
         &self,
@@ -1545,8 +1543,10 @@ impl ImposterManager {
         let mut report = ApplyReport::default();
 
         // Deletes first, so ports freed here can be re-bound by creates below.
-        let desired_ports: std::collections::HashSet<u16> =
-            desired.iter().filter_map(|c| c.port).collect();
+        let desired_ports: std::collections::HashSet<u16> = desired
+            .iter()
+            .filter_map(ImposterConfig::explicit_port)
+            .collect();
         // `ports()` already scans ascending, so no separate sort is needed here (was needed for
         // the old HashMap's arbitrary key order).
         let removed_ports: Vec<u16> = self
@@ -1566,8 +1566,9 @@ impl ImposterManager {
         }
 
         for config in desired {
-            let Some(port) = config.port else {
-                // No explicit port → nothing to reconcile against; always an auto-assigned create.
+            let Some(port) = config.explicit_port() else {
+                // No explicit port (absent or `0`) → nothing to reconcile against; always an
+                // auto-assigned create.
                 self.create_for_apply(config, 0, &mut report).await;
                 continue;
             };
@@ -2913,6 +2914,46 @@ mod tests {
         let result = manager.apply_config(vec![dup_a, dup_b]).await;
         assert!(matches!(result, Err(ImposterError::PortInUse(19424))));
         assert!(manager.get_imposter(19424).is_err());
+
+        manager.delete_all().await;
+    }
+
+    // Issue #1104: `create_imposter` auto-assigns `port: 0` (#637), but `apply_config` treated it as
+    // a real port, so two of them were refused as `PortInUse(0)` on reload, `PUT /imposters` and the
+    // C-ABI. A `0` must be port-less at every door.
+    #[tokio::test]
+    async fn apply_config_treats_port_zero_as_auto_assign() {
+        let manager = ImposterManager::new();
+        let set = || {
+            vec![
+                imposter_cfg(json!({"protocol": "http", "port": 0, "stubs": []})),
+                imposter_cfg(json!({"protocol": "http", "port": 0, "stubs": []})),
+                imposter_cfg(json!({"protocol": "http", "stubs": []})),
+            ]
+        };
+
+        let report = manager
+            .apply_config(set())
+            .await
+            .expect("two port-0 imposters are auto-assigned, not a duplicate port");
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        let mut ports = report.created.clone();
+        ports.sort_unstable();
+        ports.dedup();
+        assert_eq!(ports.len(), 3, "three distinct ports: {:?}", report.created);
+        assert!(ports.iter().all(|p| *p != 0), "{ports:?}");
+        assert_eq!(manager.count(), 3);
+        assert!(
+            manager.get_imposter(0).is_err(),
+            "nothing registers under 0"
+        );
+
+        // Port-less configs are never reconciled: a re-apply replaces them, it does not add more.
+        manager
+            .apply_config(set())
+            .await
+            .expect("re-applying the same set");
+        assert_eq!(manager.count(), 3);
 
         manager.delete_all().await;
     }

@@ -117,6 +117,38 @@ fn e005_port_zero() {
     assert!(has_code(&r, "E005"));
 }
 
+/// Issue #1104: the engine auto-assigns `port: 0` like an absent port, so the lint must not call it
+/// "out of range" — it is refused for the same reason an absent port is (E003): a config file pins
+/// its ports.
+#[test]
+fn e005_for_port_zero_says_it_is_auto_assigned() {
+    let v = json!({ "port": 0, "protocol": "http", "stubs": [] });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    let e005: Vec<_> = r.issues.iter().filter(|i| i.code == "E005").collect();
+    assert_eq!(e005.len(), 1, "{:?}", codes(&r));
+    assert!(
+        e005[0].message.contains("auto-assign"),
+        "{}",
+        e005[0].message
+    );
+    assert!(
+        !e005[0].message.contains("out of valid range"),
+        "{}",
+        e005[0].message
+    );
+
+    let v = json!({ "port": 70000, "protocol": "http", "stubs": [] });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    let e005: Vec<_> = r.issues.iter().filter(|i| i.code == "E005").collect();
+    assert!(
+        e005[0].message.contains("out of valid range"),
+        "{}",
+        e005[0].message
+    );
+}
+
 fn port_issue_codes(port: Value) -> Vec<String> {
     let v = json!({ "port": port, "protocol": "http", "stubs": [] });
     let mut r = LintResult::new();
