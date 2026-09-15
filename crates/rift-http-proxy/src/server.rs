@@ -1571,8 +1571,8 @@ fn format_skipped_summary(skipped: &[SkippedImposterFile]) -> Option<String> {
 
 /// Read and parse every `*.json` in `datadir`, resolving each imposter's scripts. Returns the
 /// successfully-parsed `(path, config)` pairs plus a list of files that could not be parsed into an
-/// imposter config (an unreadable directory entry, an unreadable file, invalid JSON, or unresolvable
-/// scripts). A single bad file is collected rather than dropped or propagated, so it neither
+/// imposter config (an unreadable directory entry, an unreadable file, invalid JSON, an imposter that
+/// declares no port (issue #1125), or unresolvable scripts). A single bad file is collected rather than dropped or propagated, so it neither
 /// vanishes silently nor aborts loading of the remaining valid imposters (issue #532). Only a
 /// failure to open the directory itself is fatal.
 fn read_and_parse_datadir(
@@ -1607,6 +1607,12 @@ fn read_and_parse_datadir(
                 }
             };
             match serde_json::from_str::<ImposterConfig>(&content) {
+                Ok(config) if config.explicit_port().is_none() => {
+                    skipped.push(SkippedImposterFile {
+                        path,
+                        reason: crate::config_loader::DATADIR_PORT_LESS.to_string(),
+                    });
+                }
                 Ok(mut config) => {
                     if let Err(e) = resolve_scripts(&mut config, base) {
                         skipped.push(SkippedImposterFile {
@@ -2431,46 +2437,103 @@ mod tests {
         manager.delete_all().await;
     }
 
-    // The same hazard inside one datadir: a port-less file must be created after every file that
-    // names a port, whatever order the directory lists them in.
-    // Serial: it learns the next auto-assigned port, which any parallel port-less create can take.
-    #[serial_test::serial(auto_assigned_port)]
+    // Issue #1125: a datadir is keyed by port. A file that names none used to be created on an
+    // auto-assigned port and written again under that port on every load, so copies accumulated.
     #[tokio::test]
-    async fn a_port_less_datadir_file_does_not_take_another_datadir_files_port() {
-        let port = next_auto_assigned_port().await;
+    async fn a_port_less_datadir_file_is_skipped_and_left_untouched() {
         let dir = tempfile::tempdir().expect("tempdir");
         let datadir = dir.path().join("data");
         std::fs::create_dir(&datadir).expect("mkdir");
-        // The directory's listing order is up to the filesystem, so this passes against an unsorted
-        // loader whenever `<port>.json` happens to be listed first. The assertions hold for any
-        // order; `the_startup_create_pass_creates_explicit_ports_first` is the deterministic guard.
-        for name in ["0a.json", "0b.json"] {
-            write_json(
-                &datadir.join(name),
-                serde_json::json!({"protocol": "http", "name": "port-less", "stubs": []}),
-            );
-        }
         write_json(
-            &datadir.join(format!("{port}.json")),
-            serde_json::json!({"port": port, "protocol": "http", "name": "from-datadir", "stubs": []}),
+            &datadir.join("0a.json"),
+            serde_json::json!({"protocol": "http", "name": "port-less", "stubs": []}),
         );
+        write_json(
+            &datadir.join("0b.json"),
+            serde_json::json!({"port": 0, "protocol": "http", "name": "port-zero", "stubs": []}),
+        );
+        write_json(
+            &datadir.join("23778.json"),
+            serde_json::json!({"port": 23778, "protocol": "http", "name": "from-datadir", "stubs": []}),
+        );
+        let listing = || {
+            let mut names: Vec<String> = std::fs::read_dir(&datadir)
+                .expect("read datadir")
+                .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
 
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
         startup_load(&manager, None, Some(&datadir))
             .await
-            .expect("startup load");
-
-        assert_eq!(manager.count(), 3);
-        let on_port = manager
-            .get_imposter(port)
-            .expect("the explicit file keeps its port");
-        assert_eq!(on_port.config.name.as_deref(), Some("from-datadir"));
+            .expect("a port-less file is skipped, not fatal");
         assert_eq!(
-            datadir_name(&datadir, port).as_deref(),
+            manager.count(),
+            1,
+            "only the file that names its port is served"
+        );
+        assert_eq!(
+            manager
+                .get_imposter(23778)
+                .expect("served")
+                .config
+                .name
+                .as_deref(),
             Some("from-datadir")
         );
-
+        // Before `delete_all`, which removes the served imposter's file and would hide a copy.
+        assert_eq!(
+            listing(),
+            vec!["0a.json", "0b.json", "23778.json"],
+            "no copy is written for a port-less file"
+        );
         manager.delete_all().await;
+    }
+
+    #[test]
+    fn read_and_gate_datadir_names_each_port_less_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_json(
+            &dir.path().join("0a.json"),
+            serde_json::json!({"protocol": "http", "stubs": []}),
+        );
+        write_json(
+            &dir.path().join("0b.json"),
+            serde_json::json!({"port": 0, "protocol": "http", "stubs": []}),
+        );
+
+        let (parsed, skipped) = read_and_gate_datadir(dir.path(), false).expect("listable");
+
+        assert!(parsed.is_empty());
+        let mut named: Vec<(String, String)> = skipped
+            .iter()
+            .map(|s| {
+                (
+                    s.path
+                        .file_name()
+                        .expect("name")
+                        .to_string_lossy()
+                        .into_owned(),
+                    s.reason.clone(),
+                )
+            })
+            .collect();
+        named.sort();
+        assert_eq!(
+            named,
+            vec![
+                (
+                    "0a.json".to_string(),
+                    "declares no port; a datadir file must declare its port".to_string()
+                ),
+                (
+                    "0b.json".to_string(),
+                    "declares no port; a datadir file must declare its port".to_string()
+                ),
+            ]
+        );
     }
 
     #[tokio::test]

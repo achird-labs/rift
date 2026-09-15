@@ -168,7 +168,10 @@ async fn put_imposters_refuses_an_array_underscore_behaviors_and_changes_nothing
 #[test]
 fn a_datadir_file_with_an_array_underscore_behaviors_fails_to_load() {
     let dir = tempfile::tempdir().expect("tempdir");
+    // An explicit port, so the only thing refused is `_behaviors` (a port-less file is refused too,
+    // issue #1125).
     let config = json!({
+        "port": 4545,
         "protocol": "http",
         "stubs": [{ "responses": [{
             "is": { "statusCode": 200 },
