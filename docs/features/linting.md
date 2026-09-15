@@ -129,6 +129,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E045 | Single-valued header object has a non-string value (`proxy.injectHeaders`, `_rift.fault.error.headers`) | `{"X-Id": 1}` |
 | E046 | A YAML document's root is not a sequence of imposters — the engine's YAML loader accepts only a top-level list, unlike `--configfile`'s JSON, which also accepts a single imposter object or an `{"imposters": [...]}` wrapper | `port: 3000` at the document root |
 | E047 | `port` is present but not a non-negative integer — the engine refuses the file at load (`expected u16`), and an integral float such as `3000.0` is no exception. `null` is reported as E003 instead, because the engine reads it as absent and auto-assigns a port | `"port": "3000"`, `"port": 3000.5` |
+| E048 | A response's behaviors block has a shape the engine does not read: a `_behaviors` that is not an object, or a `behaviors` that is neither an object nor an array, is refused at load; a non-object, non-null element of a `behaviors` array is skipped | `"_behaviors": [null, null, null, null, "cmd"]`, `"behaviors": "wait"`, `"behaviors": [5]` |
 
 ### Warnings
 

@@ -516,6 +516,19 @@ impl StubResponse {
         let behaviors_parsed = behaviors
             .as_ref()
             .and_then(|v| {
+                // Only an object is a behaviors block. Parsing anything else would read an array
+                // by field position (issue #1101); the deserializer refuses those shapes, and this
+                // keeps a programmatically built response from reaching the positional read.
+                if !v.is_object() {
+                    if !v.is_null() {
+                        tracing::error!(
+                            behaviors = %v,
+                            "`_behaviors` block is not an object and will be ignored if this \
+                             response is served"
+                        );
+                    }
+                    return None;
+                }
                 match serde_json::from_value::<crate::behaviors::ResponseBehaviors>(v.clone()) {
                     Ok(parsed) => Some(parsed),
                     Err(e) => {
@@ -576,11 +589,16 @@ pub(crate) struct StubResponseRaw {
     pub inject: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fault: Option<String>,
-    /// Mountebank-style behaviors (with underscore prefix) - for deserialization
-    #[serde(rename = "_behaviors", skip_serializing_if = "Option::is_none")]
+    /// Mountebank-style behaviors (with underscore prefix): an object, or absent/`null`.
+    #[serde(
+        rename = "_behaviors",
+        default,
+        deserialize_with = "deserialize_underscore_behaviors"
+    )]
     pub underscore_behaviors: Option<serde_json::Value>,
-    /// Alternative behaviors field (without underscore, used by some tools) - for deserialization
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Alternative behaviors field (without underscore, used by some tools): an object or an
+    /// array of behavior objects, or absent/`null`.
+    #[serde(default, deserialize_with = "deserialize_behaviors")]
     pub behaviors: Option<serde_json::Value>,
     /// Rift extensions for advanced features
     #[serde(rename = "_rift", skip_serializing_if = "Option::is_none")]
@@ -666,6 +684,59 @@ where
 
 pub(crate) fn default_status_code() -> u16 {
     200
+}
+
+/// `_behaviors` must be an object (issue #1101). `ResponseBehaviors` is a derived named-field struct,
+/// so serde would also read a JSON array into it by position — wait, repeat, copy, lookup,
+/// shellTransform, decorate — and the `--allowInjection` gate, which classifies object keys, saw
+/// nothing to refuse. Refusing the shape here means no door can admit it. `null` stays absent (#1098).
+fn deserialize_underscore_behaviors<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        block @ (None | Some(serde_json::Value::Object(_))) => Ok(block),
+        Some(other) => Err(serde::de::Error::invalid_type(
+            unexpected_json(&other),
+            &"`_behaviors` to be an object (the array form is spelled `behaviors`)",
+        )),
+    }
+}
+
+/// `behaviors` is an object or an array of behavior objects; a scalar used to normalize to no block
+/// at all, silently dropping what the author wrote.
+fn deserialize_behaviors<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        block @ (None | Some(serde_json::Value::Object(_) | serde_json::Value::Array(_))) => {
+            Ok(block)
+        }
+        Some(other) => Err(serde::de::Error::invalid_type(
+            unexpected_json(&other),
+            &"`behaviors` to be an object or an array of behavior objects",
+        )),
+    }
+}
+
+fn unexpected_json(value: &serde_json::Value) -> serde::de::Unexpected<'_> {
+    use serde::de::Unexpected;
+    match value {
+        serde_json::Value::Null => Unexpected::Unit,
+        serde_json::Value::Bool(b) => Unexpected::Bool(*b),
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .map(Unexpected::Unsigned)
+            .or_else(|| n.as_i64().map(Unexpected::Signed))
+            .or_else(|| n.as_f64().map(Unexpected::Float))
+            .unwrap_or(Unexpected::Other("number")),
+        serde_json::Value::String(s) => Unexpected::Str(s),
+        serde_json::Value::Array(_) => Unexpected::Seq,
+        serde_json::Value::Object(_) => Unexpected::Map,
+    }
 }
 
 impl From<StubResponseRaw> for StubResponse {
@@ -1739,6 +1810,124 @@ mod tests {
         assert!(
             logs_contain("_behaviors"),
             "a dropped behaviors block must be visible in the log, not silent"
+        );
+    }
+
+    // Issue #1101: `ResponseBehaviors` is a derived named-field struct, so serde also accepts a JSON
+    // array and fills its fields by position (wait, repeat, copy, lookup, shellTransform, decorate).
+    // The injection gate only reads object keys, so a positional `_behaviors` ran a shell command
+    // without --allowInjection. Every shape below must be refused where the stub is parsed, naming
+    // the key, so no door can admit it.
+    #[test]
+    fn a_non_object_underscore_behaviors_is_refused_at_parse() {
+        let shapes = [
+            json!([null, null, null, null, "echo pwned"]),
+            json!([
+                500,
+                null,
+                null,
+                null,
+                ["echo pwned"],
+                "function () { return 1; }"
+            ]),
+            json!([{ "wait": 500 }]),
+            json!([]),
+            json!("not-an-object"),
+            json!(5),
+            json!(true),
+        ];
+        for shape in shapes {
+            for response in [
+                json!({ "is": { "statusCode": 200 }, "_behaviors": shape.clone() }),
+                // Flat / recorded form (issue #304) reads the same field.
+                json!({ "statusCode": 200, "_behaviors": shape.clone() }),
+            ] {
+                let err = serde_json::from_value::<StubResponse>(response.clone())
+                    .expect_err("a non-object `_behaviors` must not construct a response")
+                    .to_string();
+                assert!(
+                    err.contains("`_behaviors`"),
+                    "the error must name the key, got {err:?} for {response}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_scalar_behaviors_is_refused_at_parse() {
+        for shape in [json!("not-an-object"), json!(5), json!(false)] {
+            let response = json!({ "is": { "statusCode": 200 }, "behaviors": shape });
+            let err = serde_json::from_value::<StubResponse>(response.clone())
+                .expect_err("a scalar `behaviors` must not construct a response")
+                .to_string();
+            assert!(
+                err.contains("`behaviors`"),
+                "the error must name the key, got {err:?} for {response}"
+            );
+        }
+    }
+
+    fn raw_behaviors_of(response: serde_json::Value) -> Option<serde_json::Value> {
+        match serde_json::from_value::<StubResponse>(response).expect("response parses") {
+            StubResponse::Is { behaviors, .. } => behaviors,
+            other => panic!("expected an Is response, got {other:?}"),
+        }
+    }
+
+    // The refusal must not reach the shapes the engine documents.
+    #[test]
+    fn the_documented_behaviors_shapes_still_parse() {
+        assert_eq!(
+            raw_behaviors_of(json!({ "is": {}, "_behaviors": { "wait": 5 } })),
+            Some(json!({ "wait": 5 }))
+        );
+        assert_eq!(
+            raw_behaviors_of(json!({ "is": {}, "_behaviors": null, "behaviors": [{ "wait": 5 }] })),
+            Some(json!({ "wait": 5 }))
+        );
+        assert_eq!(
+            raw_behaviors_of(json!({ "is": {}, "behaviors": { "repeat": 2 } })),
+            Some(json!({ "repeat": 2 }))
+        );
+        assert_eq!(
+            raw_behaviors_of(json!({ "is": {}, "behaviors": [{ "wait": 1 }, { "wait": 2 }] })),
+            Some(json!({ "wait": 2 }))
+        );
+        assert_eq!(raw_behaviors_of(json!({ "is": {}, "behaviors": [] })), None);
+        assert_eq!(
+            raw_behaviors_of(json!({ "is": {}, "behaviors": null })),
+            None
+        );
+        assert_eq!(raw_behaviors_of(json!({ "is": {} })), None);
+    }
+
+    // `new_is` is also reached programmatically, not only through the parser above. The positional
+    // read is the hazard itself, so the executor's cache must never be filled from a non-object.
+    #[test]
+    #[tracing_test::traced_test]
+    fn new_is_never_parses_a_non_object_block_positionally() {
+        let resp = StubResponse::new_is(
+            IsResponse {
+                status_code: 200,
+                headers: HashMap::new(),
+                body: None,
+                mode: ResponseMode::default(),
+            },
+            Some(json!([null, null, null, null, "echo pwned"])),
+            None,
+        );
+        match &resp {
+            StubResponse::Is {
+                behaviors_parsed, ..
+            } => assert!(
+                behaviors_parsed.is_none(),
+                "a positional array must not become a shellTransform, got {behaviors_parsed:?}"
+            ),
+            other => panic!("expected an Is response, got {other:?}"),
+        }
+        assert!(
+            logs_contain("_behaviors"),
+            "the dropped block must be visible in the log"
         );
     }
 

@@ -1092,10 +1092,12 @@ fn behaviors_array_disjoint_keys_are_each_validated_at_their_element() {
         "is": { "statusCode": 200 },
         "behaviors": [{ "wait": true }, 5, { "repeat": 0 }]
     });
+    // The skipped `5` is itself E048 (issue #1101) and does not shift the indexes after it.
     assert_eq!(
         behavior_findings(&resp),
         vec![
             finding("E025", "loc.behaviors[0].wait"),
+            finding("E048", "loc.behaviors[1]"),
             finding("E035", "loc.behaviors[2].repeat"),
         ]
     );
@@ -1163,16 +1165,82 @@ fn behaviors_array_folds_copy_lookup_and_shell_transform_too() {
     );
 }
 
-/// The engine takes any non-null `_behaviors` as the block, so a non-object one does not hand the
-/// response over to `behaviors`.
+/// The engine refuses a non-null, non-object `_behaviors` (issue #1101), so it is reported once as
+/// E048 — and the `behaviors` array beside it is not linted as if it were the fallback.
 #[test]
-fn a_non_object_underscore_behaviors_does_not_fall_back_to_the_array() {
+fn a_non_object_underscore_behaviors_is_e048_and_does_not_fall_back_to_the_array() {
     let resp = json!({
         "is": { "statusCode": 200 },
         "_behaviors": "not-an-object",
         "behaviors": [{ "wait": true }]
     });
-    assert_eq!(behavior_findings(&resp), vec![]);
+    assert_eq!(
+        behavior_findings(&resp),
+        vec![("E048".to_string(), "loc._behaviors".to_string())]
+    );
+}
+
+/// Issue #1101: the positional array the engine used to read as a shellTransform.
+#[test]
+fn an_array_underscore_behaviors_is_e048() {
+    for block in [json!([null, null, null, null, "echo pwned"]), json!([])] {
+        let resp = json!({ "is": {}, "_behaviors": block });
+        assert_eq!(
+            behavior_findings(&resp),
+            vec![("E048".to_string(), "loc._behaviors".to_string())],
+            "for {resp}"
+        );
+    }
+}
+
+#[test]
+fn a_scalar_behaviors_is_e048() {
+    for block in [json!("x"), json!(5), json!(true)] {
+        let resp = json!({ "is": {}, "behaviors": block });
+        assert_eq!(
+            behavior_findings(&resp),
+            vec![("E048".to_string(), "loc.behaviors".to_string())],
+            "for {resp}"
+        );
+    }
+}
+
+/// The engine skips a non-object element of a `behaviors` array, so the author's entry does nothing.
+/// A `null` element is absent, like a `null` key, and is not reported.
+#[test]
+fn a_non_object_element_of_a_behaviors_array_is_e048_at_its_index() {
+    let resp = json!({ "is": {}, "behaviors": [5, { "wait": 10 }, null, "x"] });
+    assert_eq!(
+        behavior_findings(&resp),
+        vec![
+            ("E048".to_string(), "loc.behaviors[0]".to_string()),
+            ("E048".to_string(), "loc.behaviors[3]".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn e048_names_the_shape_and_what_the_engine_does_with_it() {
+    let messages = |resp: Value| {
+        let mut r = LintResult::new();
+        validate_response(path(), &resp, "loc", &mut r, &opts(), &Value::Null);
+        r.issues
+            .into_iter()
+            .filter(|i| i.code == "E048")
+            .map(|i| i.message)
+            .collect::<Vec<_>>()
+    };
+    let refused = messages(json!({ "is": {}, "_behaviors": [1] }));
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(
+        refused[0].contains("`_behaviors`") && refused[0].contains("array"),
+        "{refused:?}"
+    );
+    assert!(refused[0].contains("refuses"), "{refused:?}");
+
+    let skipped = messages(json!({ "is": {}, "behaviors": ["x"] }));
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert!(skipped[0].contains("skips"), "{skipped:?}");
 }
 
 #[test]
@@ -1181,7 +1249,7 @@ fn empty_or_null_behaviors_forms_report_nothing() {
         json!({ "is": {}, "behaviors": [] }),
         json!({ "is": {}, "behaviors": null }),
         json!({ "is": {}, "_behaviors": null, "behaviors": null }),
-        json!({ "is": {}, "behaviors": [5, "x", null] }),
+        json!({ "is": {}, "_behaviors": {}, "behaviors": {} }),
     ] {
         assert_eq!(behavior_findings(&resp), vec![], "for {resp}");
     }

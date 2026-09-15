@@ -151,6 +151,8 @@ rift_free(result);
   while breaking hosts that legitimately drive script imposters over the C-ABI. If you load config
   from a file you do not fully control, keep `allowInjection: false` — a scripted `configFile` then
   fails the serve outright (`NULL` + `rift_last_error`) rather than loading, so nothing is applied.
+  A behaviors block the engine cannot read as an object (for example an array `_behaviors`) is
+  refused at every door, gated or not, before the gate runs (#1101).
 - **Returns** (caller frees): `{"adminPort":...,"adminUrl":"...","metricsPort":...}`, or `NULL` on
   error (bad JSON, bind failure, or already serving — one admin plane per handle).
 
