@@ -31,6 +31,23 @@ pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow:
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("rcfile {} must be a JSON object", rcfile.display()))?;
 
+    // Type errors are found before any key is applied, so a refused rcfile changes nothing. Applying
+    // keys until the first bad one left the rest unset, and a caller that logs and continues would
+    // then start without a `requireAdminAuth` that sorts after the typo.
+    for (key, val) in map {
+        let must_be_boolean = matches!(
+            key.as_str(),
+            "requireAdminAuth" | "require_admin_auth" | "noParse" | "no_parse"
+        );
+        if must_be_boolean && !val.is_boolean() {
+            anyhow::bail!(
+                "rcfile {}: '{key}' must be a JSON boolean, got {val}. Refusing the rcfile \
+                 rather than reading it as false.",
+                rcfile.display()
+            );
+        }
+    }
+
     for (key, val) in map {
         match key.as_str() {
             "port" => {
@@ -66,21 +83,14 @@ pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow:
             }
             "requireAdminAuth" | "require_admin_auth" => {
                 if !cli.require_admin_auth {
-                    // Deliberately stricter than the sibling booleans above: this one is a security
-                    // gate, and `false` is its *permissive* state. `"requireAdminAuth": "true"` (a
-                    // plausible hand-edit) would coerce to `false` under `unwrap_or`, so a fleet
-                    // that believed it had opted every host into fail-closed startup would keep
-                    // booting keyless and off-host with nothing said — the exact posture this key
-                    // exists to make impossible. `allowInjection` can default to `false` safely
-                    // because there `false` is the deny state; here it is not.
-                    let Some(b) = val.as_bool() else {
-                        anyhow::bail!(
-                            "rcfile {}: '{key}' must be a JSON boolean, got {val}. Refusing \
-                             rather than silently leaving --require-admin-auth off.",
-                            rcfile.display()
-                        );
-                    };
-                    cli.require_admin_auth = b;
+                    // Deliberately stricter than the sibling booleans above (checked before the
+                    // loop): this one is a security gate, and `false` is its *permissive* state.
+                    // `"requireAdminAuth": "true"` (a plausible hand-edit) would coerce to `false`
+                    // under `unwrap_or`, so a fleet that believed it had opted every host into
+                    // fail-closed startup would keep booting keyless and off-host with nothing
+                    // said. `allowInjection` can default to `false` safely because there `false`
+                    // is the deny state; here it is not.
+                    cli.require_admin_auth = val.as_bool().unwrap_or(false);
                 }
             }
             "datadir" => {
@@ -88,6 +98,13 @@ pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow:
                     && let Some(d) = val.as_str()
                 {
                     cli.datadir = Some(std::path::PathBuf::from(d));
+                }
+            }
+            "noParse" | "no_parse" => {
+                if !cli.no_parse {
+                    // Checked before the loop: `"noParse": "true"` read as `false` would preprocess
+                    // a file the author asked to load verbatim.
+                    cli.no_parse = val.as_bool().unwrap_or(false);
                 }
             }
             "configfile" => {

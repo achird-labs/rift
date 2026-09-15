@@ -23,6 +23,45 @@ fn write_rcfile(dir: &tempfile::TempDir, body: &str) -> std::path::PathBuf {
     path
 }
 
+// Issue #1107: an rcfile can name a `configfile`, so it must also be able to turn preprocessing off
+// for it, or a config holding a literal `<%` cannot be started from an rcfile at all.
+#[test]
+fn rcfile_sets_no_parse_under_both_spellings() {
+    for key in ["noParse", "no_parse"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rcfile = write_rcfile(&dir, &format!(r#"{{"{key}": true}}"#));
+        let mut parsed = cli(&[]);
+        bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile).expect("rcfile applies");
+        assert!(parsed.no_parse, "{key}");
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rcfile = write_rcfile(&dir, r#"{"noParse": "true"}"#);
+    let err = bootstrap::apply_rcfile_defaults(&mut cli(&[]), &rcfile)
+        .expect_err("a non-boolean noParse must be refused, not read as false");
+    assert!(err.to_string().contains("noParse"), "{err}");
+}
+
+// A refused rcfile must change nothing. Keys are read in sorted order, so a bail in the middle of
+// applying them used to leave `host` set and `requireAdminAuth` (which sorts after `noParse`) unset.
+#[test]
+fn a_refused_rcfile_applies_no_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rcfile = write_rcfile(
+        &dir,
+        r#"{"host": "127.0.0.1", "noParse": "true", "requireAdminAuth": true}"#,
+    );
+    let mut parsed = cli(&[]);
+    let default_host = parsed.host.clone();
+    bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile).expect_err("a non-boolean is refused");
+    assert_eq!(
+        parsed.host, default_host,
+        "no key before the bad one is applied"
+    );
+    assert!(!parsed.no_parse);
+    assert!(!parsed.require_admin_auth);
+}
+
 // AC1: an rcfile fills only the fields still at their clap defaults.
 #[test]
 fn rcfile_fills_fields_left_at_defaults() {

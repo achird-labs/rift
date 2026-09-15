@@ -51,7 +51,9 @@ impl CheckReport {
 /// for a config target too. The flag is redundant there rather than meaningful, and silently
 /// ignoring a value that names a hook the runtime has never dispatched is a smaller version of
 /// the same defect this guard exists to remove.
-pub fn run_check(target: &Path, hook: &str) -> Result<CheckReport> {
+/// `no_parse` skips EJS preprocessing of a config-file target, as `rift --no-parse` does. A raw
+/// script is never preprocessed, so it is refused there, for the same reason as the hook above.
+pub fn run_check(target: &Path, hook: &str, no_parse: bool) -> Result<CheckReport> {
     if hook != crate::scripting::entrypoints::RESPOND {
         bail!(
             "`rift script check --hook {hook}` is not supported: only `respond` is wired \
@@ -63,8 +65,13 @@ pub fn run_check(target: &Path, hook: &str) -> Result<CheckReport> {
         bail!("file not found: {}", target.display());
     }
     match target_kind(target)? {
+        TargetKind::Script(_) if no_parse => bail!(
+            "`--no-parse` only changes how a config file is read, and {} is a raw script, which is \
+             never preprocessed; remove `--no-parse`",
+            target.display()
+        ),
         TargetKind::Script(engine) => check_raw_script(target, &engine, hook),
-        TargetKind::Config => check_config(target),
+        TargetKind::Config => check_config(target, no_parse),
     }
 }
 
@@ -118,15 +125,15 @@ fn check_one_script(
     }
 }
 
-fn check_config(path: &Path) -> Result<CheckReport> {
+fn check_config(path: &Path, no_parse: bool) -> Result<CheckReport> {
     let mut report = CheckReport::new(path.display().to_string());
 
     // Reuses the exact `--configfile` load path (issue #356 `file:`/`ref:` resolution, EJS
     // preprocessing, single/array/`{"imposters":[...]}` shape handling) — a config `script
-    // check` sees precisely what a real `rift --configfile` startup would.
+    // check` sees precisely what a real `rift --configfile [--no-parse]` startup would.
     let configs = config_loader::load_configs(&ConfigSource::File {
         path: path.to_path_buf(),
-        no_parse: false,
+        no_parse,
     })
     .with_context(|| format!("loading config {}", path.display()))?;
 
@@ -404,8 +411,12 @@ pub fn run_run(
 /// target file doesn't exist) that never got as far as producing a report.
 pub fn dispatch(action: ScriptAction) -> Result<()> {
     match action {
-        ScriptAction::Check { target, hook } => {
-            let report = run_check(&target, &hook)?;
+        ScriptAction::Check {
+            target,
+            hook,
+            no_parse,
+        } => {
+            let report = run_check(&target, &hook, no_parse)?;
             print_check_report(&report);
             if report.is_ok() {
                 Ok(())
@@ -493,6 +504,36 @@ mod tests {
         path
     }
 
+    // Issue #1107: since #1095 a tag the loader does not evaluate fails the load, and `--no-parse`
+    // is the escape. `script check` says it sees what a `--configfile` startup sees, so it needs the
+    // same flag or a config meant literally cannot be checked at all.
+    #[test]
+    fn check_config_honours_no_parse_for_a_literal_ejs_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(
+            &dir,
+            "imposters.json",
+            r#"{"imposters":[{"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"body":"<% literal %>"}}]}]}]}"#,
+        );
+        let report = run_check(&path, "respond", true).expect("--no-parse loads the file verbatim");
+        assert!(report.is_ok(), "expected OK, got {:?}", report.errors);
+
+        let err = run_check(&path, "respond", false).expect_err("preprocessing refuses the tag");
+        assert!(
+            format!("{err:#}").contains("unsupported EJS tag"),
+            "the refusal must name the cause: {err:#}"
+        );
+    }
+
+    #[test]
+    fn no_parse_on_a_raw_script_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(&dir, "s.rhai", "fn respond(ctx) { pass() }");
+        let err =
+            run_check(&path, "respond", true).expect_err("--no-parse does nothing to a script");
+        assert!(err.to_string().contains("--no-parse"), "{err}");
+    }
+
     // ----- check: raw script -----
 
     // AC (issue #360): a valid v2 `respond` script passes.
@@ -500,7 +541,7 @@ mod tests {
     fn check_raw_v2_respond_script_ok() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_temp(&dir, "s.rhai", "fn respond(ctx) { pass() }");
-        let report = run_check(&path, "respond").expect("check runs");
+        let report = run_check(&path, "respond", false).expect("check runs");
         assert!(report.is_ok(), "expected OK, got {:?}", report.errors);
     }
 
@@ -514,7 +555,7 @@ mod tests {
             "s.rhai",
             "fn should_inject(request, flow_store) { #{ inject: false } }",
         );
-        let report = run_check(&path, "respond").expect("check runs");
+        let report = run_check(&path, "respond", false).expect("check runs");
         assert!(
             !report.is_ok(),
             "should_inject-only script must fail as a misnamed entrypoint"
@@ -534,7 +575,7 @@ mod tests {
             "s.js",
             "function should_inject(request, flow_store) { return { inject: false }; }",
         );
-        let report = run_check(&path, "respond").expect("check runs");
+        let report = run_check(&path, "respond", false).expect("check runs");
         assert!(
             !report.is_ok(),
             "should_inject-only JS script must fail as a misnamed entrypoint"
@@ -552,7 +593,7 @@ mod tests {
     fn check_raw_misnamed_entrypoint_fails_naming_respond() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_temp(&dir, "s.rhai", "fn respnod(ctx) { pass() }");
-        let report = run_check(&path, "respond").expect("check runs");
+        let report = run_check(&path, "respond", false).expect("check runs");
         assert!(!report.is_ok(), "misnamed entrypoint must fail");
         assert!(
             report.errors[0].contains('`') && report.errors[0].contains("respond"),
@@ -566,7 +607,7 @@ mod tests {
     fn check_raw_syntax_error_fails() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_temp(&dir, "s.rhai", "fn respond(ctx { pass() }");
-        let report = run_check(&path, "respond").expect("check runs");
+        let report = run_check(&path, "respond", false).expect("check runs");
         assert!(!report.is_ok());
         assert!(report.errors[0].contains("Syntax error"));
     }
@@ -575,13 +616,13 @@ mod tests {
     fn check_unknown_extension_errors() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_temp(&dir, "s.txt", "whatever");
-        let err = run_check(&path, "respond").unwrap_err();
+        let err = run_check(&path, "respond", false).unwrap_err();
         assert!(err.to_string().contains("extension"));
     }
 
     #[test]
     fn check_missing_file_errors() {
-        let err = run_check(Path::new("/no/such/file.rhai"), "respond").unwrap_err();
+        let err = run_check(Path::new("/no/such/file.rhai"), "respond", false).unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
@@ -590,7 +631,7 @@ mod tests {
     fn check_raw_js_misnamed_entrypoint_fails() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_temp(&dir, "s.js", "function respnod(ctx) { return pass(); }");
-        let report = run_check(&path, "respond").expect("check runs");
+        let report = run_check(&path, "respond", false).expect("check runs");
         assert!(!report.is_ok());
         assert!(report.errors[0].contains("respond"));
     }
@@ -610,7 +651,7 @@ mod tests {
             }]
         });
         let path = write_temp(&dir, "imposter.json", &config.to_string());
-        let report = run_check(&path, "respond").expect("check runs");
+        let report = run_check(&path, "respond", false).expect("check runs");
         assert!(!report.is_ok());
         assert!(report.errors[0].contains("stubs[0].responses[0]"));
         assert!(report.errors[0].contains("respond"));
@@ -635,7 +676,7 @@ mod tests {
             }]
         });
         let path = write_temp(&dir, "imposter.json", &config.to_string());
-        let report = run_check(&path, "respond").expect("check runs");
+        let report = run_check(&path, "respond", false).expect("check runs");
         assert!(report.is_ok(), "state usage alone isn't an error");
         assert!(
             report.warnings.iter().any(|w| w.contains("flowState")),
@@ -663,7 +704,7 @@ mod tests {
             }]
         });
         let path = write_temp(&dir, "imposter.json", &config.to_string());
-        let report = run_check(&path, "respond").expect("check runs");
+        let report = run_check(&path, "respond", false).expect("check runs");
         assert!(report.is_ok());
         assert!(report.warnings.is_empty(), "got {:?}", report.warnings);
     }
@@ -839,7 +880,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_temp(&dir, "s.rhai", "fn matches(ctx) { true }");
         for hook in ["matches", "transform", "delay"] {
-            let err = run_check(&path, hook)
+            let err = run_check(&path, hook, false)
                 .unwrap_err()
                 .to_string()
                 .to_ascii_lowercase();
@@ -855,7 +896,7 @@ mod tests {
     fn check_respond_hook_still_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_temp(&dir, "s.rhai", "fn respond(ctx) { pass() }");
-        let report = run_check(&path, "respond").expect("respond is still checkable");
+        let report = run_check(&path, "respond", false).expect("respond is still checkable");
         assert!(
             report.errors.is_empty(),
             "a valid respond script must still pass, got {:?}",

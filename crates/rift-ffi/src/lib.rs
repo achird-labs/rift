@@ -247,6 +247,10 @@ struct ServeOptions {
     api_key: Option<String>,
     metrics_port: Option<u16>,
     config_file: Option<String>,
+    /// Load `configFile` verbatim, skipping EJS preprocessing, as `--no-parse` does for
+    /// `--configfile` (issue #1107). The only escape for a literal `<%` in it, and the reload that
+    /// re-reads the file keeps it. Refused without `configFile`, where it would do nothing.
+    no_parse: Option<bool>,
     config: Option<Value>,
     /// Gate script/inject imposters that reach Rift across a trust boundary: submitted THROUGH the
     /// admin plane (issue #492) or read off disk via `configFile` (issue #616). Default false,
@@ -1888,6 +1892,13 @@ async fn build_admin_plane_inner(
     rift_http_proxy::admin_api::validate_admin_api_key(opts.api_key.as_deref())?;
     let api_key = opts.api_key.clone();
     let allow_injection = opts.allow_injection.unwrap_or(false);
+    let no_parse = opts.no_parse.unwrap_or(false);
+    if no_parse && opts.config_file.is_none() {
+        anyhow::bail!(
+            "`noParse` only changes how `configFile` is read, and no `configFile` was given; \
+             remove `noParse` or add a `configFile`"
+        );
+    }
 
     // Parse both addresses up front, before any side effects (imposter creation / binding).
     let addr: SocketAddr = format!("{host}:{port}")
@@ -1949,7 +1960,7 @@ async fn build_admin_plane_inner(
         Some(path) => {
             let source = ConfigSource::File {
                 path: PathBuf::from(path),
-                no_parse: false,
+                no_parse,
             };
             let loaded = config_loader::load_configs_full(&source).context("configFile load")?;
             if let Some(err) = gated_config_file_error(&loaded.imposters, allow_injection) {
@@ -2225,6 +2236,7 @@ mod build_admin_plane_chain_tests {
             api_key: None,
             metrics_port: None,
             config_file: Some("/nonexistent/rift-688/does-not-exist.json".to_string()),
+            no_parse: None,
             config: None,
             allow_injection: None,
             require_admin_auth: None,
@@ -2518,6 +2530,7 @@ mod serve_option_capability_tests {
             "metricsPort": 0,
             "configFile": "/tmp/nope.json",
             "config": {"imposters": []},
+            "noParse": false,
             "allowInjection": true,
             "requireAdminAuth": false,
             "upstreamCaFile": "/tmp/ca.pem",

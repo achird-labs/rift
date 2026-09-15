@@ -107,7 +107,7 @@ rift_free(result);
 ```
 
 - **Options JSON** (pass `NULL` or `{}` for all defaults; every field optional):
-  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"config":null,"allowInjection":false,"requireAdminAuth":false}`.
+  `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"noParse":false,"config":null,"allowInjection":false,"requireAdminAuth":false,"upstreamCaFile":null,"upstreamCaPem":null,"upstreamTlsSkipVerify":false}`.
   `port: 0` binds an ephemeral port; `configFile` is loaded as the reload source (like `--configfile`);
   `config` is an inline `{"imposters":[...]}`. `configFile` and `config` do not compose — pass one.
   Since 0.17.0 an **unknown key is a hard error** naming the key (`NULL` + `rift_last_error`), not a
@@ -117,6 +117,17 @@ rift_free(result);
   every request, and the realistic way to send one is plumbing rather than intent
   (`apiKey(getProperty("rift.apikey", ""))`, a config value that renders empty). Pass a real token,
   or omit the field to leave the admin plane unauthenticated.
+- **`noParse`** (default `false`, issue #1107): load `configFile` verbatim, skipping EJS
+  preprocessing, as `--no-parse` does for `--configfile`. A tag the loader does not evaluate — a
+  literal `<%` in a body or predicate included — otherwise fails the serve (`NULL` +
+  `rift_last_error`) naming the tag, and there is no per-tag escape. `POST /admin/reload` re-reads
+  the file with the same setting. `noParse: true` without `configFile` is refused, since it would
+  change nothing.
+
+  **Feature-detect it** — see *Detecting which options an engine accepts* below. An engine from
+  0.17.0 on that does not list `"noParse"` refuses the key as unknown. An older engine publishes no
+  `serveOptions`, ignores the key, and strips or blanks the tag with only a log line, so check the
+  list rather than relying on an error.
 - **`requireAdminAuth`** (default `false`, issue #863): refuse to serve when the admin plane would
   bind a non-loopback address with no `apiKey`, instead of logging a warning. `host` defaults to
   `127.0.0.1` for this door, so the check is silent unless you ask for an off-host bind. It gates on

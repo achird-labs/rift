@@ -214,6 +214,14 @@ record.
 
 ### Added
 
+- **A `noParse` serve option lets an embedded host load a `configFile` that contains a literal `<%`**
+  (#1107). Since #1095 a tag the config loader does not evaluate fails the load, and `--no-parse` was
+  the only escape, which `rift_serve_admin` could not pass. `noParse: true` skips EJS preprocessing of
+  `configFile` and of the `POST /admin/reload` that re-reads it, and is listed in
+  `rift_build_info().serveOptions` and `GET /config` for feature detection. Sending it without a
+  `configFile` is refused. `rift script check` gains `--no-parse`, and the rcfile accepts
+  `noParse`.
+
 - **`rift-lint` warns about a number the engine cannot keep as written: `W012`** (#1083). The engine
   holds a JSON number as a 64-bit integer when it fits exactly and as the nearest double otherwise,
   so a literal wider than that, or with more significant digits than a double distinguishes, is read

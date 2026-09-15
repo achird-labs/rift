@@ -438,6 +438,91 @@ fn ffi_serve_admin_config_file_inject_loads_with_allow_injection() {
     }
 }
 
+// Issue #1107: since #1095 a `configFile` holding a tag the loader does not evaluate fails the serve,
+// and the error tells the user to load it with --no-parse — which an embedded host had no way to
+// do. `noParse` is that option; it also governs the reload that re-reads the same file.
+#[test]
+fn ffi_serve_admin_config_file_no_parse_keeps_a_literal_ejs_tag() {
+    unsafe {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        std::fs::write(&path, r#"{"imposters":[{"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"body":"<% literal %>"}}]}]}]}"#).expect("write config");
+        let path_json = serde_json::json!(path.to_str().expect("utf8 path"));
+
+        let refused = rift_start();
+        assert!(
+            rift_serve_admin(
+                refused,
+                cstr(&format!(r#"{{"configFile": {path_json}}}"#)).as_ptr()
+            )
+            .is_null(),
+            "without noParse the literal tag fails the serve"
+        );
+        let err = rift_last_error();
+        assert!(!err.is_null(), "the refusal records last_error");
+        let message = take_json(err);
+        assert!(message.contains("unsupported EJS tag"), "{message}");
+        rift_stop(refused);
+
+        let h = rift_start();
+        let admin = serve_admin(
+            h,
+            &format!(r#"{{"configFile": {path_json}, "noParse": true}}"#),
+        );
+        let admin_url = admin["adminUrl"].as_str().expect("adminUrl").to_string();
+        rt().block_on(async {
+            let client = reqwest::Client::new();
+            let listing: serde_json::Value = client
+                .get(format!("{admin_url}/imposters?replayable=true"))
+                .send()
+                .await
+                .expect("GET /imposters")
+                .json()
+                .await
+                .expect("json");
+            let body = &listing["imposters"][0]["stubs"][0]["responses"][0]["is"]["body"];
+            assert_eq!(body, "<% literal %>", "{listing}");
+
+            let reload = client
+                .post(format!("{admin_url}/admin/reload"))
+                .send()
+                .await
+                .expect("POST /admin/reload");
+            assert_eq!(
+                reload.status(),
+                200,
+                "reload re-reads the file with the same noParse: {}",
+                reload.text().await.unwrap_or_default()
+            );
+        });
+        rift_stop(h);
+    }
+}
+
+// `noParse` only changes how `configFile` is read. Sent without one it would silently do nothing,
+// which is the failure mode #877 made unknown keys an error to avoid.
+#[test]
+fn ffi_serve_admin_no_parse_without_config_file_is_refused() {
+    unsafe {
+        let h = rift_start();
+        assert!(rift_serve_admin(h, cstr(r#"{"noParse": true}"#).as_ptr()).is_null());
+        let err = rift_last_error();
+        assert!(!err.is_null(), "the refusal records last_error");
+        let message = take_json(err);
+        assert!(
+            message.contains("noParse") && message.contains("configFile"),
+            "{message}"
+        );
+
+        let admin = serve_admin(h, r#"{"noParse": false}"#);
+        assert!(
+            admin["adminUrl"].is_string(),
+            "noParse: false is inert and allowed"
+        );
+        rift_stop(h);
+    }
+}
+
 // Issue #616: the gate must classify, not blanket-reject — a configFile with no scripting surface
 // still loads with allowInjection off.
 #[test]
@@ -2680,6 +2765,8 @@ fn ffi_a_document_using_every_advertised_option_still_serves() {
                 "port" | "metricsPort" => serde_json::json!(0),
                 "apiKey" => serde_json::json!("s3cr3t"),
                 "configFile" => continue, // mutually exclusive with `config`; covered elsewhere
+                // `true` requires a `configFile` (issue #1107); `false` is the inert spelling.
+                "noParse" => serde_json::json!(false),
                 "config" => serde_json::json!({"imposters": []}),
                 "allowInjection" => serde_json::json!(true),
                 "requireAdminAuth" => serde_json::json!(false),
