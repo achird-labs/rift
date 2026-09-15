@@ -916,6 +916,9 @@ pub fn validate_response(
 ///
 /// Every key is checked independently by [`validate_behavior`], so the fold is validated one element
 /// at a time with only the keys that element wins, and a finding names the element it came from.
+///
+/// E048 (issue #1101) reports the shapes outside that model: a non-object `_behaviors` or a scalar
+/// `behaviors`, which the engine refuses, and a non-object, non-null array element, which it skips.
 fn validate_response_behaviors(
     file: &Path,
     response: &Value,
@@ -925,18 +928,33 @@ fn validate_response_behaviors(
 ) {
     let present = |key: &str| response.get(key).filter(|v| !v.is_null());
     match (present("_behaviors"), present("behaviors")) {
+        (Some(block @ Value::Object(_)), _) => {
+            validate_behavior(
+                file,
+                block,
+                &format!("{location}._behaviors"),
+                result,
+                options,
+            );
+        }
+        // The engine takes any non-null `_behaviors` as the block, so a refused one never falls
+        // back to `behaviors`.
         (Some(block), _) => {
-            // A non-object `_behaviors` is not linted here, and it never falls back to `behaviors`:
-            // the engine takes any non-null `_behaviors` as the block.
-            if block.is_object() {
-                validate_behavior(
-                    file,
-                    block,
-                    &format!("{location}._behaviors"),
-                    result,
-                    options,
-                );
-            }
+            result.add_issue(
+                LintIssue::error(
+                    "E048",
+                    format!(
+                        "`_behaviors` must be an object, got {}; the engine refuses the file",
+                        json_kind(block)
+                    ),
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}._behaviors"))
+                .with_suggestion(
+                    "Write `_behaviors` as one object, e.g. {\"wait\": 100}; the array form is \
+                     spelled `behaviors`",
+                ),
+            );
         }
         (None, Some(block @ Value::Object(_))) => {
             validate_behavior(
@@ -956,6 +974,25 @@ fn validate_response_behaviors(
             }
             for (idx, element) in elements.iter().enumerate() {
                 let Some(obj) = element.as_object() else {
+                    // A `null` element is absent, as a `null` key is (issues #1093, #1098).
+                    if element.is_null() {
+                        continue;
+                    }
+                    result.add_issue(
+                        LintIssue::error(
+                            "E048",
+                            format!(
+                                "`behaviors[{idx}]` is {}, not a behavior object; the engine skips \
+                                 it, so it configures nothing",
+                                json_kind(element)
+                            ),
+                            file.to_path_buf(),
+                        )
+                        .with_location(format!("{location}.behaviors[{idx}]"))
+                        .with_suggestion(
+                            "Make each element one behavior object, e.g. {\"wait\": 100}",
+                        ),
+                    );
                     continue;
                 };
                 // Cloned: `validate_behavior` reads a behaviors object, and this one is assembled.
@@ -975,8 +1012,33 @@ fn validate_response_behaviors(
                 }
             }
         }
-        // A scalar `behaviors` normalizes to no block in the engine, so there is nothing to check.
-        (None, _) => {}
+        (None, Some(scalar)) => {
+            result.add_issue(
+                LintIssue::error(
+                    "E048",
+                    format!(
+                        "`behaviors` must be an object or an array of behavior objects, got {}; \
+                         the engine refuses the file",
+                        json_kind(scalar)
+                    ),
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}.behaviors"))
+                .with_suggestion("Write `behaviors` as an object or an array of objects"),
+            );
+        }
+        (None, None) => {}
+    }
+}
+
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
     }
 }
 

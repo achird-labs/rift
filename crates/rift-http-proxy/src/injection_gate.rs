@@ -136,10 +136,11 @@ fn response_has_script_surface(response: &StubResponse) -> bool {
 /// provably a delay, never merely because it failed to parse.
 fn raw_behaviors_are_scripted(behaviors: &serde_json::Value) -> bool {
     let Some(obj) = behaviors.as_object() else {
-        // Not an object (e.g. an array) — no key this gate recognizes, so nothing it can
-        // classify as executable. Such a block does not parse into `ResponseBehaviors` either,
-        // so it is inert: dropped at construction, with `new_is` logging the drop.
-        return false;
+        // A non-object block has no keys to classify, and "it will not parse" is not proof it is
+        // inert: serde reads a JSON array into `ResponseBehaviors` by field position, so its fifth
+        // element was a shellTransform (issue #1101). The stub parser now refuses these shapes;
+        // the gate still fails closed rather than depend on that. `null` is the block absent.
+        return !behaviors.is_null();
     };
     // An explicit `null` is the key absent (issue #1093): it parses to no behavior, so it is
     // provably inert, not merely unparsed.
@@ -199,6 +200,29 @@ mod tests {
         ] {
             assert!(raw_behaviors_are_scripted(&block), "{block}");
         }
+    }
+
+    // Issue #1101: the gate must not lean on the parser to stay closed. A non-object block was
+    // classified inert on the premise it could not parse, but serde reads an array positionally,
+    // so its fifth element ran as a shellTransform. The parser now refuses these shapes too; this
+    // is the second, independent layer.
+    #[test]
+    fn non_object_blocks_fail_closed() {
+        for block in [
+            json!([null, null, null, null, "echo pwned"]),
+            json!([]),
+            json!("echo pwned"),
+            json!(5),
+            json!(true),
+        ] {
+            assert!(raw_behaviors_are_scripted(&block), "{block}");
+        }
+    }
+
+    // An explicit `null` block is the key absent (issue #1098): provably inert.
+    #[test]
+    fn a_null_block_is_not_scripted() {
+        assert!(!raw_behaviors_are_scripted(&json!(null)));
     }
 
     #[test]
