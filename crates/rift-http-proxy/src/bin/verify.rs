@@ -1048,8 +1048,9 @@ fn check_if_dynamic(responses: &[serde_json::Value]) -> (bool, Option<String>) {
 
     // Behaviors whose output depends on the request or external state can't be predicted from
     // the stub alone (repeat=stateful; decorate/copy/lookup/shellTransform=dynamic body/headers).
-    // Handle BOTH the input config form (`_behaviors` object) and the form returned by
-    // GET /imposters (`behaviors` array of single-key objects, Mountebank-style).
+    // A rift engine's GET /imposters emits the block it already selected and folded (issue #1103):
+    // `behaviors` as an array of single-key objects, never `_behaviors`, so scanning elements is the
+    // engine's own view. The `_behaviors` object form is still read for other admin APIs.
     let label = |k: &str| match k {
         "repeat" => "repeat behavior (stateful)",
         "decorate" => "decorate behavior (dynamic)",
@@ -1059,9 +1060,16 @@ fn check_if_dynamic(responses: &[serde_json::Value]) -> (bool, Option<String>) {
         _ => "dynamic behavior",
     };
     const DYNAMIC_BEHAVIORS: [&str; 5] = ["repeat", "decorate", "copy", "lookup", "shellTransform"];
-    // `null` is the key absent (issue #1093): it configures no behavior.
+    // A key configures a behavior only the way the engine reads it: `null` is the key absent
+    // (issue #1093), and `copy`/`lookup`/`shellTransform` are lists, so an empty one runs nothing
+    // (issue #1103). An empty array is inert for the other two as well: `repeat` is read with
+    // `as_u64`, and an array `decorate` makes the whole block unparseable, so none of it runs.
     let has = |obj: &serde_json::Map<String, serde_json::Value>, k: &str| {
-        obj.get(k).is_some_and(|v| !v.is_null())
+        obj.get(k).is_some_and(|v| match v {
+            serde_json::Value::Null => false,
+            serde_json::Value::Array(items) => !items.is_empty(),
+            _ => true,
+        })
     };
     if let Some(obj) = first.get("_behaviors").and_then(|v| v.as_object()) {
         for k in DYNAMIC_BEHAVIORS {
@@ -2535,9 +2543,116 @@ mod verify_tests {
             assert_eq!(check_if_dynamic(&responses), (false, None), "{responses:?}");
         }
         let live = vec![
-            serde_json::json!({"is": {"statusCode": 200}, "_behaviors": {"wait": null, "copy": []}}),
+            serde_json::json!({"is": {"statusCode": 200}, "_behaviors": {"wait": null, "copy": [{"from": "path", "into": "${p}", "using": {"method": "regex", "selector": ".*"}}]}}),
         ];
         assert!(check_if_dynamic(&live).0, "a present copy is still dynamic");
+    }
+
+    /// Issue #1103: `copy`, `lookup` and `shellTransform` are lists in the engine, and an empty one
+    /// runs nothing, so the response is static and must be asserted rather than skipped.
+    #[test]
+    fn an_empty_behavior_list_does_not_make_a_response_dynamic() {
+        for block in [
+            serde_json::json!({"copy": []}),
+            serde_json::json!({"lookup": []}),
+            serde_json::json!({"shellTransform": []}),
+            serde_json::json!({"copy": [], "lookup": [], "shellTransform": [], "wait": 5}),
+        ] {
+            for response in [
+                serde_json::json!({"is": {"statusCode": 200}, "_behaviors": block.clone()}),
+                serde_json::json!({"is": {"statusCode": 200}, "behaviors": [block.clone()]}),
+            ] {
+                assert_eq!(
+                    check_if_dynamic(std::slice::from_ref(&response)),
+                    (false, None),
+                    "{response}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_configured_behavior_is_still_dynamic_with_its_label() {
+        let cases = [
+            (
+                serde_json::json!({"repeat": 1}),
+                "repeat behavior (stateful)",
+            ),
+            (
+                serde_json::json!({"decorate": ""}),
+                "decorate behavior (dynamic)",
+            ),
+            (
+                serde_json::json!({"copy": {"from": "path", "into": "${p}", "using": {"method": "regex", "selector": ".*"}}}),
+                "copy behavior (request-derived)",
+            ),
+            (
+                serde_json::json!({"lookup": [{"key": {"from": "path", "using": {"method": "regex", "selector": ".*"}}, "fromDataSource": {"csv": {"path": "x.csv", "keyColumn": "k"}}, "into": "${row}"}]}),
+                "lookup behavior (data-source)",
+            ),
+            (
+                serde_json::json!({"shellTransform": "echo hi"}),
+                "shellTransform behavior (external)",
+            ),
+            (
+                serde_json::json!({"shellTransform": ["echo hi"]}),
+                "shellTransform behavior (external)",
+            ),
+        ];
+        for (block, label) in cases {
+            for response in [
+                serde_json::json!({"is": {"statusCode": 200}, "behaviors": [block.clone()]}),
+                serde_json::json!({"is": {"statusCode": 200}, "_behaviors": block.clone()}),
+            ] {
+                assert_eq!(
+                    check_if_dynamic(std::slice::from_ref(&response)),
+                    (true, Some(label.to_string())),
+                    "{response}"
+                );
+            }
+        }
+    }
+
+    /// rift-verify reads `GET /imposters/:port`, where the engine has already chosen between
+    /// `_behaviors` and `behaviors` and folded an array last-write-wins. This pins that verify's
+    /// view of a response is the engine's own serialized selection, not the source file's.
+    #[test]
+    fn verify_reads_the_engines_folded_behaviors_selection() {
+        let wire = |stub: serde_json::Value| -> Vec<serde_json::Value> {
+            let parsed: rift_mock_core::imposter::Stub =
+                serde_json::from_value(stub).expect("stub parses in the engine");
+            let serialized = serde_json::to_value(&parsed).expect("stub serializes");
+            serialized["responses"]
+                .as_array()
+                .expect("responses array on the wire")
+                .clone()
+        };
+
+        let later_null_clears_repeat = wire(serde_json::json!({"responses": [
+            {"is": {"statusCode": 200}, "behaviors": [{"repeat": 2}, {"repeat": null}]}
+        ]}));
+        assert_eq!(check_if_dynamic(&later_null_clears_repeat), (false, None));
+
+        let underscore_wins = wire(serde_json::json!({"responses": [
+            {"is": {"statusCode": 200}, "_behaviors": {"wait": 5}, "behaviors": [{"repeat": 2}]}
+        ]}));
+        assert_eq!(check_if_dynamic(&underscore_wins), (false, None));
+
+        let empty_list_survives_the_round_trip = wire(serde_json::json!({"responses": [
+            {"is": {"statusCode": 200}, "_behaviors": {"copy": []}}
+        ]}));
+        assert_eq!(
+            check_if_dynamic(&empty_list_survives_the_round_trip),
+            (false, None)
+        );
+
+        let object_form = wire(serde_json::json!({"responses": [
+            {"is": {"statusCode": 200}, "behaviors": {"repeat": 2}}
+        ]}));
+        assert_eq!(
+            check_if_dynamic(&object_form),
+            (true, Some("repeat behavior (stateful)".to_string()))
+        );
     }
 
     // Issue #982: the verify client must open a NEW connection per request.

@@ -75,13 +75,17 @@ record.
     `PUT /imposters`; a failed load for `--configfile`, `--datadir`, `POST /admin/reload` and
     `configFile`; `NULL` from `rift_apply_config` and the other C-ABI calls. This holds with
     `--allowInjection` on, because an array `_behaviors` has no documented meaning. The array form is
-    spelled `behaviors`.
-    `null` still means absent.
+    spelled `behaviors`. `null` still means absent.
   - A scalar `behaviors` used to be dropped silently; it is refused the same way.
   - The injection gate now treats any non-object block as scripted, so it no longer relies on the
     parser to stay closed.
   - `rift-lint` reports these shapes as `E048`, and also flags a non-object, non-null element of a
     `behaviors` array, which the engine skips.
+
+- **`rift-verify` treated a stub as dynamic when its `copy`, `lookup` or `shellTransform` was an empty
+  list** (#1103). The engine runs nothing for an empty list, so the response is static. Such a stub was
+  skipped under `--skip-dynamic` and `--verify-dynamic`, and otherwise accepted any `2xx` status, so a
+  stub serving `404` failed and one serving `201` passed on a `200`. Its status is now asserted exactly.
 
 - **Two imposters on `port: 0` were refused as a duplicate port `0`, although `POST /imposters`
   auto-assigns a `0`** (#1104). `--configfile`, `--imposters` and `--datadir` startup aborted with

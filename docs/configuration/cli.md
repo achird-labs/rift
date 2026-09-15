@@ -723,7 +723,8 @@ With `-o json`, `rift-verify` writes a single summary object to stdout —
 banner output to stderr, so it pipes cleanly into other tools. Color and the decorative banner are
 also suppressed automatically when stdout is not a TTY (piped) or when `NO_COLOR` is set.
 
-By default, `rift-verify` SKIPs stubs whose response is dynamic (proxy/inject/script/cycling/faults)
+By default, `rift-verify` SKIPs stubs whose response is dynamic (proxy/inject/script/cycling/faults,
+and the `repeat`/`decorate`/`copy`/`lookup`/`shellTransform` behaviors unless `null` or an empty list)
 because their output isn't a static function of the stub — `--skip-dynamic` makes that skip explicit.
 `--verify-dynamic` is the opt-in complement: it asserts those stubs instead of skipping them, using
 three mechanisms — an embedded mock upstream for `proxy` stubs (verifying the proxied response and,
