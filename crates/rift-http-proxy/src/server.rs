@@ -150,8 +150,8 @@ pub struct Cli {
     #[arg(long, value_name = "ADDR", env = "RIFT_FRONT_DOOR")]
     pub front_door: Option<String>,
 
-    // === Mountebank compatibility flags (accepted, no-op) ===
-    /// Disable EJS template rendering of --configfile (Rift doesn't use EJS; accepted for compatibility)
+    // === Mountebank compatibility flags ===
+    /// Disable EJS preprocessing of --configfile/file: sources; use it when a document contains a literal `<%`
     #[arg(long, visible_alias = "noParse")]
     pub no_parse: bool,
 

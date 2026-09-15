@@ -425,11 +425,20 @@ environment. `--datadir` files are not preprocessed.
 Only two expression forms are evaluated: `<%= process.env.VAR %>` and
 `<%= process.env.VAR || 'default' %>`, with the default in quotes. The value is pasted in as text,
 so leave the tag outside the JSON quotes for a number such as `port`; inside quotes it becomes a
-string, which the engine refuses for a port. Any other expression is replaced with an empty string,
-and there are no template variables, so a Mountebank template that uses them will not work.
+string, which the engine refuses for a port. There are no template variables.
+
+Any other tag fails the load with an error naming the tag and its line: another `<%= … %>`
+expression, a `<% … %>` statement other than `include`, a `<%- … %>` output tag other than
+`stringify`, a `<%# … %>` comment, or a `<%` with no closing `%>`. An included file is checked the
+same way, but may not include another file. A stringified file may not include or stringify another
+file either. A Mountebank template that relies on them has to be rewritten, not loaded
+with parts of it missing. If a `<%` is meant literally, for example in a response body that serves
+an EJS page, load the file with `--no-parse`. A document fetched from an `https:` source is always
+preprocessed, so it cannot carry a literal `<%`.
 
 `<% include 'path' %>` inlines another file, and `<%- stringify('path') %>` inlines a file's contents
-escaped for use inside a JSON string. `--no-parse` turns preprocessing off; see the
+escaped for use inside a JSON string. A stringified file is rendered first, so `process.env` tags in it
+are substituted. `--no-parse` turns preprocessing off; see the
 [CLI reference]({{ site.baseurl }}/configuration/cli/).
 
 ---

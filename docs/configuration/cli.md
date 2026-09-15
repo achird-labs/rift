@@ -121,6 +121,9 @@ sources:
 - **`_rift.script` `file:` references** — refused, as they are for admin-API-created imposters
   without `--scripts-dir`.
 
+Any other tag the preprocessor does not evaluate is also refused, as it is for a local file, and
+a fetched document has no `--no-parse`.
+
 `<%= process.env.VAR %>` **is** substituted for remote documents: environment is deployment
 configuration the operator supplied to their own process. Note the consequence — a remote source
 you do not control can read your process environment into an imposter response body. Point
@@ -192,7 +195,7 @@ Options:
       --intercept-ca-key <FILE>    PEM CA private key for interception (required with --intercept-ca-cert)
       --intercept-ca-cert-pem <PEM>  Inline PEM CA certificate for interception (with --intercept-ca-key-pem); mutually exclusive with file paths
       --intercept-ca-key-pem <PEM>   Inline PEM CA private key for interception (required with --intercept-ca-cert-pem)
-      --no-parse                   Disable EJS preprocessing of --configfile/file: sources (alias: --noParse)
+      --no-parse                   Disable EJS preprocessing of --configfile/file: sources; use it when a document contains a literal `<%` (alias: --noParse)
       --formatter <NAME>           Custom config formatter module (no-op; Rift auto-detects JSON/YAML)
       --protofile <FILE>           Custom protocol definitions file (no-op; custom protocols unsupported)
   -h, --help                       Print help
@@ -200,7 +203,8 @@ Options:
 ```
 
 `--no-parse` disables EJS preprocessing of `--configfile` (`<% include %>` / `<%= process.env.X %>`
-expansion), which is otherwise applied on load. `--formatter`, `--protofile` and `--ip-whitelist`
+expansion), which is otherwise applied on load. A tag the preprocessor does not evaluate fails the
+load, so use `--no-parse` when a document contains a literal `<%`. `--formatter`, `--protofile` and `--ip-whitelist`
 are accepted for Mountebank command-line compatibility but have no effect in Rift.
 
 ### `--ip-whitelist` does not filter anything

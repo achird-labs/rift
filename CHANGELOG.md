@@ -13,6 +13,25 @@ record.
 
 ### Changed
 
+- **An EJS tag that `--configfile`, `--imposters file:` and `https:` sources do not evaluate now
+  fails the load, naming the tag and its line** (#1095). It used to be blanked or stripped with only
+  a log line, so the config that loaded silently differed from the file: an empty `port`, a body with
+  its content missing, an empty TLS key. That is how three EJS examples in the docs stopped working
+  unnoticed (#1092).
+  - Evaluated as before: `<%= process.env.VAR %>`, `<%= process.env.VAR || 'default' %>`,
+    `<% include 'file' %>` and `<%- stringify('file') %>`. Refused: any other `<%= … %>`, `<% … %>`,
+    `<%- … %>` or `<%# … %>` tag, an include inside an included or stringified file, a stringify
+    inside a stringified file (Mountebank evaluates that one), and a `<%` with no closing `%>`. That last case, for example in a `contains` predicate, used to load unchanged.
+  - An included file is checked like the document, and the error names its file and line and the
+    line that included it.
+  - A stringified file is now rendered before it is escaped, as Mountebank's formatter does: its
+    env tags are substituted and any other tag is refused. It used to have `<% … %>` text stripped
+    out, and a stray `<%=` in it could stop a later env tag in the document from being substituted.
+  - Startup aborts, `POST /admin/reload` returns `500` with the running imposters left unchanged, and
+    an embedded `configFile` load returns the error.
+  - A file whose `<%` is meant literally loads with `--no-parse`. An `https:` source, an embedded
+    `configFile` load and `rift script check` always preprocess, so a literal `<%` is refused there.
+
 - `rift_mock_core::behaviors::apply_copy_behaviors` and `apply_lookup_behaviors` take one additional
   argument, a `StubRef` identifying the stub for log attribution (#1075). Source-breaking for a
   direct caller of those two functions; no wire, admin-API or SDK surface changes.

@@ -102,7 +102,9 @@ did apply and the ones that failed:
 ```
 
 A validation failure that is caught **before** any mutation returns `500` with an `errors` array and
-leaves every running imposter in place.
+leaves every running imposter in place. An EJS tag the preprocessor does not evaluate is one such
+failure; the message names the tag and its line, for example
+``Reload failed (imposters unchanged): unsupported EJS tag `<% if (x) { %>` at imposters.json:3, …``.
 
 When the failure is a source that could not be fetched, the message carries the whole cause chain,
 so it names the specific reason rather than a generic transport error — for example
