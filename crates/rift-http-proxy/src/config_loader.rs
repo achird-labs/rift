@@ -4,7 +4,9 @@
 
 use crate::imposter::{ImposterConfig, ScriptBaseDir, resolve_scripts};
 use crate::intercept_control::InterceptStartOptions;
+use anyhow::Context;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 /// Whether EJS tags that read the local filesystem are honoured; see [`rift_ejs::FileAccess`].
 /// Re-exported under its old name so embedders' paths keep resolving (issue #1108 moved it).
@@ -60,10 +62,11 @@ pub fn load_configs_full(source: &ConfigSource) -> anyhow::Result<LoadedConfig> 
 
 fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<LoadedConfig> {
     let raw = std::fs::read_to_string(path)?;
-    let content = if no_parse {
-        raw
+    let (content, unset_env) = if no_parse {
+        (raw, Vec::new())
     } else {
-        preprocess_ejs(&raw, path, EjsFileAccess::Allowed)?
+        let rendered = render_ejs(&raw, path, EjsFileAccess::Allowed)?;
+        (rendered.text, rendered.unset_env)
     };
 
     // `_rift.script` `file:`/`ref:` sources (issue #356) resolve relative to the config file's
@@ -74,7 +77,7 @@ fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<LoadedConfig> {
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf(),
     );
-    parse_document(&content, &base)
+    name_unset_env_on_failure(parse_document(&content, &base), &unset_env)
 }
 
 /// Parse a document fetched from a source that is not the local filesystem (U-12's `https:`
@@ -89,8 +92,11 @@ fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<LoadedConfig> {
 ///
 /// `uri` is used only to name the source in error messages.
 pub fn parse_remote_document(content: &str, uri: &str) -> anyhow::Result<LoadedConfig> {
-    let processed = preprocess_ejs(content, Path::new(uri), EjsFileAccess::Denied)?;
-    parse_document(&processed, &ScriptBaseDir::Unconfigured)
+    let rendered = render_ejs(content, Path::new(uri), EjsFileAccess::Denied)?;
+    name_unset_env_on_failure(
+        parse_document(&rendered.text, &ScriptBaseDir::Unconfigured),
+        &rendered.unset_env,
+    )
 }
 
 /// The shared parse path: format sniffing, the Mountebank document shapes, and script resolution
@@ -186,14 +192,48 @@ fn load_dir(dir: &Path) -> anyhow::Result<Vec<ImposterConfig>> {
 }
 
 /// Pre-process EJS tokens in a config file before JSON/YAML parsing: the tag subset and every
-/// refusal live in [`rift_ejs::render`], shared with `rift-lint` (issue #1108). A variable read
-/// while unset renders empty, as before.
+/// refusal live in [`rift_ejs::render`], shared with `rift-lint` (issue #1108). A variable that
+/// cannot be substituted still renders empty (or its default), and is logged as a warning here
+/// (issue #1116); the warning is emitted from this crate so its own `traced_test`s can see it.
+fn render_ejs(
+    content: &str,
+    config_path: &Path,
+    file_access: EjsFileAccess,
+) -> anyhow::Result<rift_ejs::Rendered> {
+    let rendered = rift_ejs::render(content, config_path, file_access)?;
+    for problem in &rendered.unset_env {
+        warn!(variable = %problem.name, place = %problem.place, "EJS: {}", problem.describe());
+    }
+    Ok(rendered)
+}
+
+/// The rendered text alone, for the preprocessing tests that assert on it.
+#[cfg(test)]
 fn preprocess_ejs(
     content: &str,
     config_path: &Path,
     file_access: EjsFileAccess,
 ) -> anyhow::Result<String> {
-    Ok(rift_ejs::render(content, config_path, file_access)?.text)
+    Ok(render_ejs(content, config_path, file_access)?.text)
+}
+
+/// When the rendered document fails to parse, name the variables that rendered empty: the parse
+/// error alone gives a line and column in text the author never wrote, which is exactly what an
+/// unset `"port": <%= process.env.PORT %>` produces (issue #1116).
+fn name_unset_env_on_failure(
+    parsed: anyhow::Result<LoadedConfig>,
+    unset_env: &[rift_ejs::UnsetEnv],
+) -> anyhow::Result<LoadedConfig> {
+    if unset_env.is_empty() {
+        return parsed;
+    }
+    parsed.with_context(|| {
+        let problems: Vec<String> = unset_env.iter().map(rift_ejs::UnsetEnv::describe).collect();
+        format!(
+            "the document failed to load after EJS rendering; {}",
+            problems.join("; ")
+        )
+    })
 }
 
 #[cfg(test)]
@@ -615,6 +655,96 @@ mod tests {
             preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap(),
             content
         );
+    }
+
+    // Issue #1116: an unset variable with no default renders empty, and the engine used to say
+    // nothing. It is now a warning at load, naming the variable and the tag's place.
+    #[test]
+    #[tracing_test::traced_test]
+    fn an_unset_variable_is_warned_at_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        std::fs::write(
+            &path,
+            r#"{"imposters": [{"port": 4545, "protocol": "http", "stubs": [{"responses": [
+                {"is": {"body": "<%= process.env.RIFT_TEST_1116_NEVER_SET %>"}}]}]}]}"#,
+        )
+        .expect("write config");
+        let configs = load_configs(&ConfigSource::File {
+            path,
+            no_parse: false,
+        })
+        .expect("an empty body is a valid config");
+        assert_eq!(configs.len(), 1);
+        assert!(logs_contain("RIFT_TEST_1116_NEVER_SET"));
+        assert!(logs_contain("imposters.json:2"));
+    }
+
+    // When the empty value then breaks the document, the parse error alone names a line and column
+    // and not the variable; the load error now names it.
+    #[test]
+    fn a_parse_error_after_an_unset_variable_names_the_variable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        std::fs::write(
+            &path,
+            r#"{"imposters": [{"port": <%= process.env.RIFT_TEST_1116_NEVER_SET_PORT %>, "protocol": "http", "stubs": []}]}"#,
+        )
+        .expect("write config");
+        let err = load_configs(&ConfigSource::File {
+            path,
+            no_parse: false,
+        })
+        .expect_err("an empty port is not JSON");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("RIFT_TEST_1116_NEVER_SET_PORT"),
+            "{message}"
+        );
+    }
+
+    // The same wiring on the remote-document path, which has its own call site.
+    #[test]
+    #[tracing_test::traced_test]
+    fn a_remote_document_warns_and_names_an_unset_variable() {
+        let loaded = parse_remote_document(
+            r#"{"port": 4545, "protocol": "http", "stubs": [{"responses": [{"is": {"body": "<%= process.env.RIFT_TEST_1116_REMOTE_NEVER_SET %>"}}]}]}"#,
+            "https://h/imposters.json",
+        )
+        .expect("an empty body is a valid document");
+        assert_eq!(loaded.imposters.len(), 1);
+        assert!(logs_contain("RIFT_TEST_1116_REMOTE_NEVER_SET"));
+
+        let err = parse_remote_document(
+            r#"{"port": <%= process.env.RIFT_TEST_1116_REMOTE_NEVER_SET_PORT %>, "protocol": "http", "stubs": []}"#,
+            "https://h/imposters.json",
+        )
+        .expect_err("an empty port is not JSON");
+        assert!(
+            format!("{err:#}").contains("RIFT_TEST_1116_REMOTE_NEVER_SET_PORT"),
+            "{err:#}"
+        );
+    }
+
+    // The note is added only when a variable rendered empty; a plain parse error, or one in a file
+    // whose variables all had defaults, is left as it was, and nothing is warned.
+    #[test]
+    #[tracing_test::traced_test]
+    fn a_parse_error_without_an_unset_variable_is_not_annotated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        std::fs::write(
+            &path,
+            r#"{"imposters": [{"port": <%= process.env.RIFT_TEST_1116_DEFAULTED || '4545' %>,, "protocol": "http", "stubs": []}]}"#,
+        )
+        .expect("write config");
+        let err = load_configs(&ConfigSource::File {
+            path,
+            no_parse: false,
+        })
+        .expect_err("a double comma is not JSON");
+        assert!(!format!("{err:#}").contains("EJS rendering"), "{err:#}");
+        assert!(!logs_contain("RIFT_TEST_1116_DEFAULTED"));
     }
 
     #[test]

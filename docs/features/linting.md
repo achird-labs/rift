@@ -84,8 +84,9 @@ checked too.
 
 - A tag the engine would refuse, or an included file it cannot read, is [E049](#errors), with the
   engine's own message. The rest of that file is not checked.
-- A `process.env` tag with no default whose variable is unset is [W013](#warnings). Run the lint
-  with the same environment rift will have, or give the tag a default.
+- A `process.env` tag with no default whose variable is unset, or any `process.env` tag whose
+  variable is set to a value that is not valid Unicode, is [W013](#warnings). Run the lint with the
+  same environment rift will have, or give the tag a default.
 - `--no-parse` lints the text as it is, matching `rift --no-parse`. Use it for a `--datadir` and for
   JSON sent to `POST /imposters`, which the engine never preprocesses, so a literal `<%` there is
   data. The TUI validates imports this way.
@@ -170,7 +171,7 @@ Warnings indicate potential issues that may cause unexpected behavior.
 | W010 | Protocol `tcp` is not yet implemented and will fail at runtime | `"protocol": "tcp"` |
 | W011 | Unknown TCP fault type — the fault will not fire at runtime | `{"type": "NONSENSE"}` |
 | W012 | Number literal cannot be kept as written — the engine reads it as the nearest double (a `.yaml`/`.yml` file is not checked, even one holding JSON text) | `"body": {"big": 123456789012345678901234567890}` is served as `1.2345678901234568e29` |
-| W013 | A `<%= process.env.VAR %>` tag with no default reads a variable that is unset where `rift-lint` runs, so the engine would render it empty. The document is linted as rendered | `"port": <%= process.env.PORT %>` with `PORT` unset |
+| W013 | A `<%= process.env.VAR %>` tag cannot substitute its variable where `rift-lint` runs: the variable is unset and the tag has no default, so it renders empty, or it is set to a value that is not valid Unicode, so the tag renders its default or empty. The engine logs the same warning at load. The document is linted as rendered | `"port": <%= process.env.PORT %>` with `PORT` unset |
 
 ### Info
 

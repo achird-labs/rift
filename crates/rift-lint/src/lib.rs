@@ -422,7 +422,8 @@ pub fn lint_yaml(yaml: &str, source_name: &str, options: &LintOptions) -> LintRe
 pub struct RenderedText<'a> {
     /// Borrowed when there was nothing to render.
     pub text: Cow<'a, str>,
-    /// `W013` for each variable a tag read while unset.
+    /// `W013` for each variable a tag could not substitute (unset with no default, or not valid
+    /// Unicode).
     pub issues: Vec<LintIssue>,
 }
 
@@ -460,20 +461,26 @@ pub fn render_template<'a>(
         .unset_env
         .iter()
         .map(|unset| {
+            let suggestion = match unset.reason {
+                rift_ejs::EnvProblem::Unset => format!(
+                    "Set {} where rift runs, or give the tag a default: \
+                     <%= process.env.{} || 'value' %>",
+                    unset.name, unset.name
+                ),
+                rift_ejs::EnvProblem::NotUnicode => format!(
+                    "Set {} to a value that is valid Unicode where rift runs",
+                    unset.name
+                ),
+            };
             LintIssue::warning(
                 "W013",
                 format!(
-                    "`{}` is unset and the tag {} gives no default, so the engine renders it \
-                     empty; the document was linted that way",
-                    unset.name, unset.place
+                    "{}; the engine does the same, and the document was linted that way",
+                    unset.describe()
                 ),
                 path.to_path_buf(),
             )
-            .with_suggestion(format!(
-                "Set {} where rift runs, or give the tag a default: \
-                 <%= process.env.{} || 'value' %>",
-                unset.name, unset.name
-            ))
+            .with_suggestion(suggestion)
         })
         .collect();
     Ok(RenderedText {

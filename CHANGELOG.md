@@ -65,6 +65,14 @@ record.
 
 ### Fixed
 
+- **An EJS `<%= process.env.VAR %>` whose variable is unset rendered empty with nothing logged** (#1116).
+  A typo in a variable name, or a deployment missing one, loaded a config that silently differed from
+  the file; for a `port` the load then failed with a JSON error at a line and column that did not
+  mention the variable. The engine now logs a warning per variable at load and reload, naming it and
+  the tag's line, and a parse error after rendering names the variables that rendered empty. A
+  variable set to a value that is not valid Unicode is reported as such, even when the tag has a
+  default, instead of as unset. `rift-lint`'s `W013` uses the same wording.
+
 - **`rift-lint` reported `E001` for a templated config the engine loads, and passed ones it refuses**
   (#1108). It parsed a file's raw text, so the documented `"port": <%= process.env.PORT || '4545' %>`
   was invalid JSON to it, a tag inside a string was validated as literal text, and a tag the loader
