@@ -13,7 +13,9 @@ use tracing::error;
 /// in more than one list when that is the truth — e.g. a wholesale replace whose recreate
 /// fails after teardown lands in both `deleted` and `failed`, and a patched imposter whose
 /// datadir write fails lands in both `stub_patched` and `failed`. Failures for configs
-/// without an explicit port (auto-assign creates) are reported under port `0`.
+/// without an explicit port (auto-assign creates) are reported under port `0`. Explicit-port configs
+/// are applied before auto-assigned ones (issue #1112), so `created` lists explicit ports first, in
+/// input order, then auto-assigned ports.
 #[derive(Debug, Default)]
 pub struct ApplyReport {
     pub created: Vec<u16>,
