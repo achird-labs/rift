@@ -198,7 +198,8 @@ imposters. These live in `rift_http_proxy::bootstrap` so an alternative binary k
 
 | Function | Signature | Purpose |
 |:---------|:----------|:--------|
-| `apply_rcfile_defaults` | `fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> anyhow::Result<()>` | Fill CLI fields **still at their clap defaults** from a Mountebank-compatible JSON rcfile. An explicitly-supplied flag always wins; unrecognised keys are warned and ignored. |
+| `apply_rcfile_defaults` | `fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> anyhow::Result<()>` | Fill CLI fields **still at their clap defaults** from a Mountebank-compatible JSON rcfile. An explicitly-supplied flag always wins; unrecognised keys are logged with `warn!` and ignored. An `Err` means nothing was applied; the `rift` binary treats it as fatal. |
+| `apply_rcfile_defaults_reporting` | `fn apply_rcfile_defaults_reporting(cli: &mut Cli, rcfile: &Path) -> anyhow::Result<Vec<String>>` | The same, returning the unrecognised keys instead of logging them — for a caller that applies the rcfile before it installs a log subscriber. |
 | `stop_for_restart` | `fn stop_for_restart(pidfile: &Path) -> anyhow::Result<()>` | `stop_server`, except a missing PID file is a satisfied precondition (nothing to stop) rather than an error — the `restart` semantic. |
 | `DEFAULT_PIDFILE` | `pub const DEFAULT_PIDFILE: &str` | The `rift.pid` fallback `stop`/`restart` apply when `--pidfile` is absent. Applied at the dispatch site so a plain start never writes a PID file it wasn't asked to. |
 | `stop_server` | `fn stop_server(pidfile: &Path) -> anyhow::Result<()>` | Signal the process named in `pidfile` (SIGTERM on unix, `taskkill /F` on Windows), then remove the file. A stale pidfile (process already gone) is cleaned up as `Ok`; a denied or failed signal is an error and the pidfile is kept. |
@@ -207,7 +208,9 @@ imposters. These live in `rift_http_proxy::bootstrap` so an alternative binary k
 
 Supported rcfile keys: `port`, `host`, `logLevel`/`loglevel`, `allowInjection`/`allow_injection`,
 `localOnly`/`local_only`, `requireAdminAuth`/`require_admin_auth`, `datadir`, `configfile`,
-`noParse`/`no_parse`. `requireAdminAuth` and `noParse` must be JSON booleans.
+`noParse`/`no_parse`. Each must have its type — the flags are JSON booleans, `host`, `logLevel`,
+`datadir` and `configfile` are strings, and `port` is an integer from 0 to 65535 — or the whole
+rcfile is refused and nothing is applied.
 
 ```rust
 use rift_http_proxy::bootstrap;

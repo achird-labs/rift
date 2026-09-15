@@ -13,6 +13,19 @@ record.
 
 ### Changed
 
+- **Security: an `--rcfile` that cannot be read or applied now aborts startup** (#1114). It used to be
+  skipped with a warning and the server started with none of its keys, so a mistyped
+  `"requireAdminAuth": "true"` served the admin plane off-host with no authentication. A missing file,
+  invalid JSON, a root that is not an object, and a recognised key with the wrong type are all fatal,
+  and the error names the file.
+  - Every recognised key is now type-checked before any is applied. A wrong-typed value used to be
+    ignored or coerced: `"localOnly": "yes"` bound the admin plane on every interface, `"port": "4321"`
+    kept the default port, and `"port": 70000` wrapped to `4464`.
+  - An unsupported rcfile key is now printed as a warning on stderr. It was logged before the log
+    subscriber existed, so it never appeared.
+  - `bootstrap::apply_rcfile_defaults_reporting` returns the unsupported keys for an embedder that
+    applies the rcfile before installing a subscriber.
+
 - **An EJS tag that `--configfile`, `--imposters file:` and `https:` sources do not evaluate now
   fails the load, naming the tag and its line** (#1095). It used to be blanked or stripped with only
   a log line, so the config that loaded silently differed from the file: an empty `port`, a body with
@@ -72,6 +85,15 @@ record.
   the tag's line, and a parse error after rendering names the variables that rendered empty. A
   variable set to a value that is not valid Unicode is reported as such, even when the tag has a
   default, instead of as unset. `rift-lint`'s `W013` uses the same wording.
+
+- **A port-less imposter could take a port another imposter in the same set names, and one of the two
+  was lost** (#1112). An auto-assigned port is the lowest free one from 49152, and imposters were
+  created in the order the set listed them. `PUT /imposters`, `POST /admin/reload`, `rift_apply_config`
+  and the embedded `configFile` or inline `config` then replaced, patched or kept the auto-assigned
+  imposter as if it were the explicit one and reported success; `--configfile` and `--imposters`
+  startup logged `PortInUse` and skipped the explicit one. Imposters with an explicit port are now
+  created first, so an auto-assigned port never takes a port an explicit imposter in the set is
+  serving.
 
 - **`rift-lint` reported `E001` for a templated config the engine loads, and passed ones it refuses**
   (#1108). It parsed a file's raw text, so the documented `"port": <%= process.env.PORT || '4545' %>`

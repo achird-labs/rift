@@ -43,7 +43,7 @@ const ACTIVE_ALLOCATOR: &str = "system";
 
 use clap::Parser;
 use rift_http_proxy::bootstrap::{
-    DEFAULT_PIDFILE, apply_rcfile_defaults, save_imposters, stop_for_restart, stop_server,
+    DEFAULT_PIDFILE, apply_rcfile_defaults_reporting, save_imposters, stop_for_restart, stop_server,
 };
 use rift_http_proxy::healthcheck;
 use rift_http_proxy::runtime;
@@ -78,14 +78,18 @@ fn main() -> Result<(), anyhow::Error> {
         unsafe { std::env::set_var("RIFT_DEBUG", "1") };
     }
 
-    // Apply rcfile defaults before using CLI values (only for fields at their clap defaults)
-    if let Some(ref rcfile) = cli.rcfile.clone() {
-        match apply_rcfile_defaults(&mut cli, rcfile) {
-            Ok(()) => {}
-            // `{e:#}` renders the whole chain. Plain `{e}` stops at the outermost context, which
-            // since #946 is our own "parsing rcfile <path>" — so it would print the path twice and
-            // drop the only actionable half ("trailing comma at line 1 column 15").
-            Err(e) => eprintln!("Warning: failed to load --rcfile: {e:#}"),
+    // Apply rcfile defaults before using CLI values (only for fields at their clap defaults).
+    // A refused rcfile aborts startup (issue #1114): it was only warned about, so a mistyped
+    // `requireAdminAuth` started the admin plane off-host with no auth and none of the file's keys.
+    // `?` prints the whole error chain, so serde's line and column survive (#946/#1004). The log
+    // subscriber is installed below, after the rcfile may have set the level, so warnings go to
+    // stderr directly.
+    if let Some(rcfile) = cli.rcfile.clone() {
+        for key in apply_rcfile_defaults_reporting(&mut cli, &rcfile)? {
+            eprintln!(
+                "Warning: --rcfile {}: unsupported key '{key}' (ignored)",
+                rcfile.display()
+            );
         }
     }
 

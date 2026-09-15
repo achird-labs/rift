@@ -180,7 +180,7 @@ pub struct Cli {
     #[arg(long, value_name = "TOKEN", env = "MB_APIKEY")]
     pub api_key: Option<String>,
 
-    /// RC file with default flag values (Mountebank compatibility; partial support — port/host/loglevel only)
+    /// RC file with default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/datadir/configfile/noParse); one that cannot be read or applied aborts startup
     #[arg(long, value_name = "FILE")]
     pub rcfile: Option<PathBuf>,
 
@@ -1442,7 +1442,11 @@ async fn load_imposters_from_sources(
         }
     }
 
-    for config in merged.imposters {
+    let mut imposters = merged.imposters;
+    // Explicit ports first, as `apply_config` does, so a port-less imposter cannot take a port a
+    // later one in the file names (issue #1112).
+    ImposterManager::explicit_ports_first(&mut imposters);
+    for config in imposters {
         info!("Creating imposter on port {:?} from source", config.port);
         match manager.create_imposter(config).await {
             Ok(port) => info!("Created imposter on port {}", port),

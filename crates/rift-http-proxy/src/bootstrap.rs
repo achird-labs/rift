@@ -16,8 +16,28 @@ use tracing::{info, warn};
 /// Apply defaults from a Mountebank-compatible rcfile (JSON) to the CLI struct.
 ///
 /// Only sets fields that are still at their clap defaults (i.e., not explicitly supplied
-/// on the command line). Only a subset of keys is supported; unrecognised keys are warned.
+/// on the command line). Only a subset of keys is supported; unrecognised keys are logged with
+/// `warn!` — see [`apply_rcfile_defaults_reporting`] to get them back instead.
 pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow::Error> {
+    for key in apply_rcfile_defaults_reporting(cli, rcfile)? {
+        warn!("--rcfile: unsupported key '{}' (ignored)", key);
+    }
+    Ok(())
+}
+
+/// [`apply_rcfile_defaults`], returning the unsupported keys (in key order) instead of logging them,
+/// for a caller that has no log subscriber yet — the `rift` binary applies the rcfile before it
+/// installs one, because the rcfile can set the log level (issue #1114).
+///
+/// # Errors
+///
+/// The file cannot be read or parsed, is not a JSON object, or gives a recognised key a value of the
+/// wrong type (a non-boolean flag, a non-string path or host, a `port` that is not an integer from 0
+/// to 65535). Nothing is applied then.
+pub fn apply_rcfile_defaults_reporting(
+    cli: &mut Cli,
+    rcfile: &Path,
+) -> Result<Vec<String>, anyhow::Error> {
     // Every failure path out of this function names the file (issue #946). `--rcfile` is resolved
     // from more than one place and a fleet can carry several, and neither `std::fs` nor
     // `serde_json` puts the path in its own error — so an embedder calling this seam directly
@@ -31,30 +51,37 @@ pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow:
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("rcfile {} must be a JSON object", rcfile.display()))?;
 
-    // Type errors are found before any key is applied, so a refused rcfile changes nothing. Applying
-    // keys until the first bad one left the rest unset, and a caller that logs and continues would
-    // then start without a `requireAdminAuth` that sorts after the typo.
+    // Type errors are found before any key is applied, so a refused rcfile changes nothing. Every
+    // recognised key is checked (issue #1114): a wrong-typed value used to be ignored or coerced, so
+    // `"localOnly": "yes"` bound the admin plane on every interface and `"port": 70000` bound 4464,
+    // with nothing said. Applying keys until the first bad one also left the rest unset.
     for (key, val) in map {
-        let must_be_boolean = matches!(
-            key.as_str(),
-            "requireAdminAuth" | "require_admin_auth" | "noParse" | "no_parse"
-        );
-        if must_be_boolean && !val.is_boolean() {
+        let Some(expected) = expected_rcfile_type(key) else {
+            continue;
+        };
+        let accepted = match expected {
+            RcfileType::Boolean => val.is_boolean(),
+            RcfileType::String => val.is_string(),
+            RcfileType::Port => val.as_u64().is_some_and(|p| u16::try_from(p).is_ok()),
+        };
+        if !accepted {
             anyhow::bail!(
-                "rcfile {}: '{key}' must be a JSON boolean, got {val}. Refusing the rcfile \
-                 rather than reading it as false.",
-                rcfile.display()
+                "rcfile {}: '{key}' must be {}, got {val}. Refusing the rcfile rather than \
+                 ignoring or misreading the value.",
+                rcfile.display(),
+                expected.describe()
             );
         }
     }
 
+    let mut unsupported = Vec::new();
     for (key, val) in map {
         match key.as_str() {
             "port" => {
                 if cli.port == DEFAULT_ADMIN_PORT
-                    && let Some(p) = val.as_u64()
+                    && let Some(p) = val.as_u64().and_then(|p| u16::try_from(p).ok())
                 {
-                    cli.port = p as u16;
+                    cli.port = p;
                 }
             }
             "host" => {
@@ -71,6 +98,7 @@ pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow:
                     cli.loglevel = l.to_string();
                 }
             }
+            // Types were checked above, so these reads cannot miss.
             "allowInjection" | "allow_injection" => {
                 if !cli.allow_injection {
                     cli.allow_injection = val.as_bool().unwrap_or(false);
@@ -83,13 +111,6 @@ pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow:
             }
             "requireAdminAuth" | "require_admin_auth" => {
                 if !cli.require_admin_auth {
-                    // Deliberately stricter than the sibling booleans above (checked before the
-                    // loop): this one is a security gate, and `false` is its *permissive* state.
-                    // `"requireAdminAuth": "true"` (a plausible hand-edit) would coerce to `false`
-                    // under `unwrap_or`, so a fleet that believed it had opted every host into
-                    // fail-closed startup would keep booting keyless and off-host with nothing
-                    // said. `allowInjection` can default to `false` safely because there `false`
-                    // is the deny state; here it is not.
                     cli.require_admin_auth = val.as_bool().unwrap_or(false);
                 }
             }
@@ -102,8 +123,6 @@ pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow:
             }
             "noParse" | "no_parse" => {
                 if !cli.no_parse {
-                    // Checked before the loop: `"noParse": "true"` read as `false` would preprocess
-                    // a file the author asked to load verbatim.
                     cli.no_parse = val.as_bool().unwrap_or(false);
                 }
             }
@@ -114,12 +133,38 @@ pub fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &Path) -> Result<(), anyhow:
                     cli.configfile = Some(std::path::PathBuf::from(f));
                 }
             }
-            other => {
-                warn!("--rcfile: unsupported key '{}' (ignored)", other);
-            }
+            other => unsupported.push(other.to_string()),
         }
     }
-    Ok(())
+    Ok(unsupported)
+}
+
+/// The JSON type an rcfile key must have. `None` for a key the rcfile does not recognise.
+#[derive(Debug, Clone, Copy)]
+enum RcfileType {
+    Boolean,
+    String,
+    Port,
+}
+
+impl RcfileType {
+    fn describe(self) -> &'static str {
+        match self {
+            RcfileType::Boolean => "a JSON boolean",
+            RcfileType::String => "a JSON string",
+            RcfileType::Port => "an integer from 0 to 65535",
+        }
+    }
+}
+
+fn expected_rcfile_type(key: &str) -> Option<RcfileType> {
+    match key {
+        "allowInjection" | "allow_injection" | "localOnly" | "local_only" | "requireAdminAuth"
+        | "require_admin_auth" | "noParse" | "no_parse" => Some(RcfileType::Boolean),
+        "host" | "logLevel" | "loglevel" | "datadir" | "configfile" => Some(RcfileType::String),
+        "port" => Some(RcfileType::Port),
+        _ => None,
+    }
 }
 
 /// Default PID file for the `stop`/`restart` subcommands when `--pidfile` is not given.
@@ -266,4 +311,24 @@ pub fn save_imposters(
 ) -> Result<(), anyhow::Error> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(save_imposters_async(host, port, savefile, remove_proxies))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_rcfile_defaults;
+    use crate::server::Cli;
+    use clap::Parser;
+
+    // Issue #1114: the binary now reports unsupported keys itself; an embedder calling the plain
+    // function with its own subscriber must still see them logged.
+    #[test]
+    #[tracing_test::traced_test]
+    fn apply_rcfile_defaults_still_logs_unsupported_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rcfile = dir.path().join("rift.rc");
+        std::fs::write(&rcfile, r#"{"bogusKey": 1}"#).expect("write rcfile");
+        let mut cli = Cli::try_parse_from(["rift"]).expect("cli parse");
+        apply_rcfile_defaults(&mut cli, &rcfile).expect("unknown keys are not fatal");
+        assert!(logs_contain("unsupported key 'bogusKey'"));
+    }
 }

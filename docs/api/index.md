@@ -174,7 +174,8 @@ running imposters. Use `DELETE /imposters` first if you also want unchanged impo
 **Errors:**
 - `400 Bad Request` — the set failed validation (bad protocol, duplicate port, duplicate stub id);
   the running imposters are unchanged. An absent or `0` port is auto-assigned, never a duplicate;
-  such an imposter is re-created on each `PUT`.
+  such an imposter is re-created on each `PUT`, after every imposter with an explicit port, so it
+  never takes a port an explicit imposter in the set is serving.
 - `500 Internal Server Error` — one or more imposters failed to apply (e.g. a port bind failure);
   the body carries the per-port `failed` list plus the `created`/`replaced`/`stubPatched`/`deleted`
   report of what did apply, mirroring `POST /admin/reload`.

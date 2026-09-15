@@ -1476,8 +1476,9 @@ impl ImposterManager {
     #[deprecated(
         note = "use `apply_config`, which reconciles incrementally and preserves unchanged imposters' runtime state"
     )]
-    pub async fn reload(&self, configs: Vec<ImposterConfig>) -> Result<(), ImposterError> {
+    pub async fn reload(&self, mut configs: Vec<ImposterConfig>) -> Result<(), ImposterError> {
         Self::validate_config_set(&configs)?;
+        Self::explicit_ports_first(&mut configs);
 
         self.delete_all().await;
         for config in configs {
@@ -1533,10 +1534,13 @@ impl ImposterManager {
     /// failures after that (e.g. a bind failure on a freed port) land in
     /// [`ApplyReport::failed`] while the remaining ports are still applied. Configs without
     /// an explicit port (absent or `0`) are never reconciled — each apply creates them fresh on an
-    /// auto-assigned port (and reports their failures under port `0`).
+    /// auto-assigned port (and reports their failures under port `0`). They are applied after every
+    /// explicit-port config, so an auto-assigned port never takes a port an explicit imposter in the
+    /// set is serving (issue #1112); [`ApplyReport::created`] therefore lists explicit ports first,
+    /// in input order.
     pub async fn apply_config(
         &self,
-        desired: Vec<ImposterConfig>,
+        mut desired: Vec<ImposterConfig>,
     ) -> Result<ApplyReport, ImposterError> {
         Self::validate_config_set(&desired)?;
 
@@ -1565,6 +1569,7 @@ impl ImposterManager {
             }
         }
 
+        Self::explicit_ports_first(&mut desired);
         for config in desired {
             let Some(port) = config.explicit_port() else {
                 // No explicit port (absent or `0`) → nothing to reconcile against; always an
@@ -1632,6 +1637,15 @@ impl ImposterManager {
         }
 
         Ok(report)
+    }
+
+    /// Stable-sort `configs` so every explicit-port config comes before any auto-assigned one (issue
+    /// #1112). An auto-assigned port is the lowest free port, so a port-less create that runs first
+    /// can take a port a later config in the same set names. With explicit ports created (or
+    /// replaced, which re-binds them) first, auto-assign skips every one that is serving. An explicit
+    /// create that fails leaves its port free, and that failure is reported.
+    pub fn explicit_ports_first(configs: &mut [ImposterConfig]) {
+        configs.sort_by_key(|config| config.explicit_port().is_none());
     }
 
     /// Create for `apply_config`: record the assigned port + Created event, or a failure
@@ -2956,6 +2970,30 @@ mod tests {
         assert_eq!(manager.count(), 3);
 
         manager.delete_all().await;
+    }
+
+    // Issue #1112: explicit ports first, and each group keeps its input order — `created` promises
+    // input order, not port order, so 200 stays before 100. `port: 0` is port-less.
+    #[test]
+    fn explicit_ports_first_keeps_input_order_within_each_group() {
+        let cfg = |port: Option<u16>, name: &str| ImposterConfig {
+            port,
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        let mut configs = vec![
+            cfg(None, "auto-a"),
+            cfg(Some(200), "explicit-b"),
+            cfg(Some(0), "auto-b"),
+            cfg(Some(100), "explicit-a"),
+            cfg(None, "auto-c"),
+        ];
+        ImposterManager::explicit_ports_first(&mut configs);
+        let names: Vec<_> = configs.iter().filter_map(|c| c.name.as_deref()).collect();
+        assert_eq!(
+            names,
+            vec!["explicit-b", "explicit-a", "auto-a", "auto-b", "auto-c"]
+        );
     }
 
     #[tokio::test]
