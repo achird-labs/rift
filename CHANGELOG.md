@@ -13,6 +13,20 @@ record.
 
 ### Changed
 
+- **A `--datadir` file must be named `<port>.json` after the port it declares** (#1128). A file named
+  anything else, `foo.json`, a copied-in `imposter-4545.json` export, or a `4545-orders.json` from
+  `rift-tui`'s folder export, used to be served and then written again as `4545.json` beside the
+  original. From the next start both files declared port 4545: one was skipped with `Port 4545 is
+  already in use`, and every `POST /admin/reload` failed on the duplicate. Startup now skips such a file and names it with the name it needs, and a reload
+  refuses with a `500` saying the same; the file is never modified.
+  - **Migration:** look at the directory, not at whether the server has run before. If a
+    `<port>.json` for the same port sits beside the misnamed file, keep whichever holds the content you
+    want and delete the other: the copy was written when the imposter was created, so it lacks any
+    later edit to the original. If there is no `<port>.json`, rename the misnamed file; deleting it
+    would delete the only definition.
+  - `rift-tui`'s folder export (`E`) now writes every imposter as `<port>.json`, so an exported
+    folder can be used as a data directory. It used to append the imposter's name.
+
 - **A `--datadir` file that declares no `port` is now refused** (#1125). An absent `port`, or `0`, used
   to be created on an auto-assigned port and written to the directory again under that port, and the
   original was left beside it, so every restart or reload added one more file and one more served

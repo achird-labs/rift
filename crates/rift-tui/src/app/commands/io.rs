@@ -383,12 +383,7 @@ impl App {
         for imp in &self.imposters {
             match self.client.export_imposter(imp.port, false).await {
                 Ok(json) => {
-                    let filename = if let Some(name) = &imp.name {
-                        format!("{}-{}.json", imp.port, name.replace(['/', '\\', ' '], "_"))
-                    } else {
-                        format!("{}.json", imp.port)
-                    };
-                    let file_path = path.join(filename);
+                    let file_path = path.join(folder_export_file_name(imp.port));
                     match tokio::fs::write(&file_path, &json).await {
                         Ok(_) => exported += 1,
                         Err(e) => {
@@ -427,5 +422,23 @@ impl App {
 
         self.overlay = Overlay::None;
         self.is_loading = false;
+    }
+}
+
+/// The file a folder export writes for the imposter on `port`: `<port>.json`, the name a `--datadir`
+/// requires (issue #1128), so an exported folder can be served as a data directory. Ports are unique,
+/// so the name needs nothing else.
+fn folder_export_file_name(port: u16) -> String {
+    format!("{port}.json")
+}
+
+#[cfg(test)]
+mod folder_export_tests {
+    use super::folder_export_file_name;
+
+    #[test]
+    fn a_folder_export_is_named_after_the_port_alone() {
+        assert_eq!(folder_export_file_name(4545), "4545.json");
+        assert_eq!(folder_export_file_name(80), "80.json");
     }
 }

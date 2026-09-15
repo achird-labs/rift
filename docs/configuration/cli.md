@@ -358,7 +358,7 @@ rift --loglevel debug
 rift --local-only
 rift --api-key s3cr3t --require-admin-auth
 
-# With persistent data directory (every file in it must declare its port)
+# With persistent data directory (every file in it must declare its port and be named <port>.json)
 rift --datadir ./mb-data
 
 # Seed from a config file and persist admin-API imposters. Config-file imposters are not written

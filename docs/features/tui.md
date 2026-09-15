@@ -79,7 +79,7 @@ Options:
 | `i` | Import from file |
 | `I` | Import from folder |
 | `e` | Export all to file |
-| `E` | Export to folder |
+| `E` | Export to folder, one `<port>.json` per imposter (usable as a `--datadir`) |
 
 ### Imposter Detail
 
@@ -247,7 +247,7 @@ The generator handles:
 | Action | Key | Description |
 |:-------|:----|:------------|
 | Export all | `e` | Save all imposters to single file |
-| Export folder | `E` | Save each imposter to separate file |
+| Export folder | `E` | Save each imposter to `<port>.json` in a folder |
 | Export stubs | `x` | Export stubs without proxy responses |
 | Export full | `X` | Export complete imposter config |
 
