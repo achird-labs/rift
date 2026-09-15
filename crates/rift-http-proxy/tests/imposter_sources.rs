@@ -1336,6 +1336,22 @@ async fn remote_document_still_substitutes_env() {
 
 // ===== Issue #1095: an unsupported EJS tag fails the load instead of being stripped =====
 
+// Issue #1107: `--no-parse` is the documented escape for a literal `<%`; pin that it actually
+// loads the tag verbatim rather than only being accepted by the argument parser.
+#[tokio::test]
+async fn a_file_source_with_no_parse_keeps_a_literal_ejs_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("literal.json");
+    std::fs::write(&path, r#"{"imposters":[{"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"body":"<% literal %>"}}]}]}]}"#).unwrap();
+
+    let merged = set_of(&[&format!("file:{}", path.display())], true)
+        .fetch_all()
+        .await
+        .expect("--no-parse loads the document verbatim");
+    let body = serde_json::to_value(&merged.imposters[0].stubs[0].responses[0]).unwrap();
+    assert_eq!(body["is"]["body"], "<% literal %>");
+}
+
 #[tokio::test]
 async fn remote_document_refuses_an_unsupported_ejs_tag() {
     let origin = Origin::start(Reply::Etagged {

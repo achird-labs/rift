@@ -49,6 +49,7 @@ pub const SERVE_OPTION_KEYS: &[&str] = &[
     "apiKey",
     "metricsPort",
     "configFile",
+    "noParse",
     "config",
     "allowInjection",
     "requireAdminAuth",

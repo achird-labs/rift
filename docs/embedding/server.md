@@ -206,7 +206,8 @@ imposters. These live in `rift_http_proxy::bootstrap` so an alternative binary k
 | `save_imposters` | `fn save_imposters(host: &str, port: u16, savefile: &Path, remove_proxies: bool) -> anyhow::Result<()>` | Blocking wrapper over `save_imposters_async` for the sync `save` subcommand path. |
 
 Supported rcfile keys: `port`, `host`, `logLevel`/`loglevel`, `allowInjection`/`allow_injection`,
-`localOnly`/`local_only`, `requireAdminAuth`/`require_admin_auth`, `datadir`, `configfile`.
+`localOnly`/`local_only`, `requireAdminAuth`/`require_admin_auth`, `datadir`, `configfile`,
+`noParse`/`no_parse`. `requireAdminAuth` and `noParse` must be JSON booleans.
 
 ```rust
 use rift_http_proxy::bootstrap;

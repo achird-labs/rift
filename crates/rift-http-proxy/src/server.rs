@@ -320,6 +320,11 @@ pub enum ScriptAction {
         /// response-position script — so the flag is redundant rather than meaningful.
         #[arg(long, default_value = "respond")]
         hook: String,
+
+        /// Load a config file verbatim, skipping EJS preprocessing — the same as `rift --no-parse`,
+        /// for a config that contains a literal `<%`.
+        #[arg(long, visible_alias = "noParse")]
+        no_parse: bool,
     },
 
     /// Execute a script against a fixture request and seeded flow state — no server running.
@@ -1585,6 +1590,22 @@ mod tests {
     // The CA load/generate logic now lives behind `InterceptControl::start`; these tests still
     // exercise `CertificateAuthority` directly (its contract is unchanged).
     use rift_mock_core::proxy::intercept_ca::CertificateAuthority;
+
+    // Issue #1107: `rift script check` loads a config through the same path as `--configfile`, so
+    // it takes the same escape hatch, under both spellings.
+    #[test]
+    fn script_check_accepts_no_parse() {
+        for flag in ["--no-parse", "--noParse"] {
+            let cli = Cli::try_parse_from(["rift", "script", "check", "imposters.json", flag])
+                .unwrap_or_else(|e| panic!("{flag} should be accepted: {e}"));
+            match cli.command {
+                Some(Commands::Script {
+                    action: ScriptAction::Check { no_parse, .. },
+                }) => assert!(no_parse, "{flag}"),
+                other => panic!("expected `script check`, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn test_no_parse_flag_accepted() {

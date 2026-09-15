@@ -183,7 +183,7 @@ Options:
       --pidfile <FILE>             PID file path
       --origin <ORIGIN>            CORS allowed origin
       --api-key <TOKEN>            Require this token in the Authorization header for all admin API requests
-      --rcfile <FILE>              RC file of default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/datadir/configfile)
+      --rcfile <FILE>              RC file of default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/datadir/configfile/noParse)
       --default-tls-cert <FILE>    Default TLS certificate (PEM) for HTTPS imposters without their own
       --default-tls-key <FILE>     Default TLS private key (PEM), paired with --default-tls-cert
       --no-self-signed-tls         Disable the self-signed fallback; an HTTPS imposter with no cert is an error
@@ -623,6 +623,7 @@ rift script check imposters.yaml            # every _rift.script in the config
 | Flag | Description | Default |
 |:-----|:------------|:--------|
 | `--hook <HOOK>` | Entrypoint to check a raw script against. Only `respond` is dispatched at request time, so any other value is rejected — for a config target too, where the flag is redundant because every `_rift.script` entry is `respond`-position | `respond` |
+| `--no-parse` | Load a config target verbatim, skipping EJS preprocessing, as `rift --no-parse` does — for a config that contains a literal `<%`. No effect on a raw script (alias: `--noParse`) | off |
 
 **`rift script run <target>`** — execute a script against a fixture request and seeded flow state,
 printing the decision, the mutated flow state, captured `ctx.logger` output, and the execution
