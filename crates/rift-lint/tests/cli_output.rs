@@ -133,13 +133,24 @@ fn lint_json_directory_attributes_parse_and_validation_errors() {
 
 /// Issue #1091: run the binary over a directory of single-imposter files, one per `(name, port)`.
 fn lint_ports_dir(ports: &[(&str, &str)]) -> (serde_json::Value, Option<i32>) {
+    let files: Vec<(&str, String)> = ports
+        .iter()
+        .map(|(name, port)| {
+            (
+                *name,
+                format!(r#"{{"port":{port},"protocol":"http","stubs":[]}}"#),
+            )
+        })
+        .collect();
+    let files: Vec<(&str, &str)> = files.iter().map(|(n, c)| (*n, c.as_str())).collect();
+    lint_dir(&files)
+}
+
+/// Issue #1094: run the binary over a directory holding one file per `(name, content)`.
+fn lint_dir(files: &[(&str, &str)]) -> (serde_json::Value, Option<i32>) {
     let dir = tempfile::tempdir().expect("tempdir");
-    for (name, port) in ports {
-        std::fs::write(
-            dir.path().join(name),
-            format!(r#"{{"port":{port},"protocol":"http","stubs":[]}}"#),
-        )
-        .expect("write");
+    for (name, content) in files {
+        std::fs::write(dir.path().join(name), content).expect("write");
     }
     let out = Command::new(BIN)
         .args([dir.path().to_str().unwrap(), "-o", "json"])
@@ -172,7 +183,7 @@ fn cli_reports_e002_once_for_two_files_on_one_port() {
     assert_eq!(e002[0]["location"], "port");
     let message = e002[0]["message"].as_str().expect("message");
     assert!(
-        message.starts_with("Port 4545 is used by 2 files:")
+        message.starts_with("Port 4545 is used by 2 imposters:")
             && message.contains("a.json")
             && message.contains("b.json"),
         "got {message}"
@@ -219,6 +230,217 @@ fn cli_reports_e002_on_the_last_port_without_panicking() {
     let suggestion = e002[0]["suggestion"].as_str().expect("suggestion");
     assert_eq!(suggestion, "Assign unique ports to each imposter");
     assert_eq!(code, Some(1), "a panic exits 101");
+}
+
+/// Issue #1094: the conflict map used to read only a document's top-level `port`, so a wrapper or a
+/// bare array contributed nothing and a repeat inside one file was never compared.
+#[test]
+fn cli_reports_e002_for_a_repeat_inside_one_wrapper_file() {
+    let (report, code) = lint_dir(&[(
+        "a.json",
+        r#"{"imposters":[
+            {"port":4545,"protocol":"http","stubs":[]},
+            {"port":4545,"protocol":"http","stubs":[]}
+        ]}"#,
+    )]);
+    let e002 = issues_with_code(&report, "E002");
+    assert_eq!(e002.len(), 1, "got {report}");
+    assert_eq!(e002[0]["location"], "imposters[0].port");
+    assert!(
+        e002[0]["file"].as_str().expect("file").ends_with("a.json"),
+        "got {report}"
+    );
+    assert_eq!(
+        e002[0]["message"],
+        "Port 4545 is used by 2 imposters: a.json (imposters[0], imposters[1])"
+    );
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn cli_reports_e002_for_a_repeat_inside_one_bare_array_file() {
+    let (report, code) = lint_dir(&[(
+        "a.json",
+        r#"[
+            {"port":4545,"protocol":"http","stubs":[]},
+            {"port":4546,"protocol":"http","stubs":[]},
+            {"port":4545,"protocol":"http","stubs":[]}
+        ]"#,
+    )]);
+    let e002 = issues_with_code(&report, "E002");
+    assert_eq!(e002.len(), 1, "got {report}");
+    assert_eq!(e002[0]["location"], "[0].port");
+    assert_eq!(
+        e002[0]["message"],
+        "Port 4545 is used by 2 imposters: a.json ([0], [2])"
+    );
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn cli_reports_e002_once_across_two_wrapper_files() {
+    let wrapper = r#"{"imposters":[{"port":4545,"protocol":"http","stubs":[]}]}"#;
+    let (report, code) = lint_dir(&[("a.json", wrapper), ("b.json", wrapper)]);
+    let e002 = issues_with_code(&report, "E002");
+    assert_eq!(e002.len(), 1, "got {report}");
+    assert_eq!(e002[0]["location"], "imposters[0].port");
+    assert!(
+        e002[0]["file"].as_str().expect("file").ends_with("a.json"),
+        "got {report}"
+    );
+    assert_eq!(
+        e002[0]["message"],
+        "Port 4545 is used by 2 imposters: a.json (imposters[0]), b.json (imposters[0])"
+    );
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn cli_reports_e002_between_a_wrapper_file_and_a_single_imposter_file() {
+    let (report, code) = lint_dir(&[
+        (
+            "a.json",
+            r#"{"imposters":[
+                {"port":4546,"protocol":"http","stubs":[]},
+                {"port":4545,"protocol":"http","stubs":[]}
+            ]}"#,
+        ),
+        ("b.json", r#"{"port":4545,"protocol":"http","stubs":[]}"#),
+    ]);
+    let e002 = issues_with_code(&report, "E002");
+    assert_eq!(e002.len(), 1, "got {report}");
+    assert_eq!(e002[0]["location"], "imposters[1].port");
+    assert_eq!(
+        e002[0]["message"],
+        "Port 4545 is used by 2 imposters: a.json (imposters[1]), b.json"
+    );
+    assert_eq!(code, Some(1));
+}
+
+/// The engine auto-assigns an absent or `null` port, so those never conflict. A `0` is E005's to
+/// report (the engine's reload path would refuse two of them as `PortInUse`), so E002 stays quiet.
+#[test]
+fn cli_does_not_report_e002_for_auto_assigned_ports_in_a_wrapper() {
+    let (report, _) = lint_dir(&[(
+        "a.json",
+        r#"{"imposters":[
+            {"protocol":"http","stubs":[]},
+            {"protocol":"http","stubs":[]},
+            {"port":null,"protocol":"http","stubs":[]},
+            {"port":null,"protocol":"http","stubs":[]}
+        ]}"#,
+    )]);
+    assert_eq!(issues_with_code(&report, "E002").len(), 0, "got {report}");
+
+    let (report, _) = lint_dir(&[(
+        "a.json",
+        r#"{"imposters":[
+            {"port":0,"protocol":"http","stubs":[]},
+            {"port":0,"protocol":"http","stubs":[]}
+        ]}"#,
+    )]);
+    assert_eq!(issues_with_code(&report, "E002").len(), 0, "got {report}");
+    assert_eq!(issues_with_code(&report, "E005").len(), 2, "got {report}");
+}
+
+/// Filtered slots keep their real index: the skipped port-less imposters are not renumbered away.
+#[test]
+fn cli_reports_e002_slots_by_their_real_index_past_port_less_imposters() {
+    let (report, code) = lint_dir(&[(
+        "a.json",
+        r#"{"imposters":[
+            {"protocol":"http","stubs":[]},
+            {"port":4545,"protocol":"http","stubs":[]},
+            {"port":null,"protocol":"http","stubs":[]},
+            {"port":4545,"protocol":"http","stubs":[]},
+            {"port":4545,"protocol":"http","stubs":[]}
+        ]}"#,
+    )]);
+    let e002 = issues_with_code(&report, "E002");
+    assert_eq!(e002.len(), 1, "got {report}");
+    assert_eq!(e002[0]["location"], "imposters[1].port");
+    assert_eq!(
+        e002[0]["message"],
+        "Port 4545 is used by 3 imposters: a.json (imposters[1], imposters[3], imposters[4])"
+    );
+    assert_eq!(code, Some(1));
+}
+
+/// Files are written out of order: the finding is still reported against the first file by name.
+#[test]
+fn cli_reports_e002_against_the_first_file_by_name() {
+    let single = r#"{"port":4545,"protocol":"http","stubs":[]}"#;
+    let (report, _) = lint_dir(&[("c.json", single), ("a.json", single), ("b.json", single)]);
+    let e002 = issues_with_code(&report, "E002");
+    assert_eq!(e002.len(), 1, "got {report}");
+    assert!(
+        e002[0]["file"].as_str().expect("file").ends_with("a.json"),
+        "got {report}"
+    );
+    assert_eq!(
+        e002[0]["message"],
+        "Port 4545 is used by 3 imposters: a.json, b.json, c.json"
+    );
+}
+
+/// Several conflicts in one file are reported in ascending port order, run after run.
+#[test]
+fn cli_reports_several_e002_in_port_order() {
+    let (report, _) = lint_dir(&[(
+        "a.json",
+        r#"[
+            {"port":4546,"protocol":"http","stubs":[]},
+            {"port":4545,"protocol":"http","stubs":[]},
+            {"port":4546,"protocol":"http","stubs":[]},
+            {"port":4545,"protocol":"http","stubs":[]}
+        ]"#,
+    )]);
+    let messages: Vec<&str> = issues_with_code(&report, "E002")
+        .iter()
+        .map(|i| i["message"].as_str().expect("message"))
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "Port 4545 is used by 2 imposters: a.json ([1], [3])",
+            "Port 4546 is used by 2 imposters: a.json ([0], [2])",
+        ]
+    );
+}
+
+/// Issue #1091's range rule holds on the new path: `70000` is E005's, and never a conflict.
+#[test]
+fn cli_does_not_report_e002_for_out_of_range_repeats_in_a_wrapper() {
+    let (report, code) = lint_dir(&[(
+        "a.json",
+        r#"{"imposters":[
+            {"port":70000,"protocol":"http","stubs":[]},
+            {"port":70000,"protocol":"http","stubs":[]},
+            {"port":4464,"protocol":"http","stubs":[]}
+        ]}"#,
+    )]);
+    assert_eq!(issues_with_code(&report, "E002").len(), 0, "got {report}");
+    assert_eq!(issues_with_code(&report, "E005").len(), 2, "got {report}");
+    assert_eq!(code, Some(1));
+}
+
+/// Distinct ports in one wrapper, and an empty wrapper beside a single-imposter file, are clean.
+#[test]
+fn cli_does_not_report_e002_for_distinct_ports_across_shapes() {
+    let (report, code) = lint_dir(&[
+        (
+            "a.json",
+            r#"{"imposters":[
+                {"port":4545,"protocol":"http","stubs":[]},
+                {"port":4546,"protocol":"http","stubs":[]}
+            ]}"#,
+        ),
+        ("b.json", r#"[{"port":4547,"protocol":"http","stubs":[]}]"#),
+        ("c.json", r#"{"imposters":[]}"#),
+        ("d.json", r#"{"port":4548,"protocol":"http","stubs":[]}"#),
+    ]);
+    assert_eq!(issues_with_code(&report, "E002").len(), 0, "got {report}");
+    assert_eq!(code, Some(0), "got {report}");
 }
 
 // AC1: NO_COLOR is honored regardless of TTY.

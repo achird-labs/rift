@@ -12,7 +12,7 @@ use rift_lint::{
     parse_yaml_document,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -159,22 +159,32 @@ fn main() {
     result.files_checked = files.len();
 
     // First pass: Load all files and check for port conflicts
-    let mut port_map: HashMap<u16, Vec<PathBuf>> = HashMap::new();
+    // Every explicit port, with the file and imposter slot that declares it. Files arrive sorted,
+    // so the first occurrence of a port — the one E002 is reported against — is deterministic.
+    let mut port_map: BTreeMap<u16, Vec<(PathBuf, String)>> = BTreeMap::new();
     let mut imposters: Vec<(PathBuf, Document)> = Vec::new();
 
     for file in &files {
         match load_imposter_file(file) {
             Ok(imposter) => {
-                // Only the ports E005 accepts: an unchecked `as u16` wrapped 70000 onto 4464 and
-                // reported a conflict with a file that never used that port (issue #1091).
-                if let Some(port) = imposter
-                    .value
-                    .get("port")
-                    .and_then(Value::as_u64)
-                    .and_then(|p| u16::try_from(p).ok())
-                    .filter(|p| *p != 0)
-                {
-                    port_map.entry(port).or_default().push(file.clone());
+                // Every imposter the document holds, not just a top-level `port`: a wrapper or a
+                // bare array used to contribute nothing to the map (issue #1094).
+                for (prefix, slot) in rift_lint::imposters_in(&imposter.value) {
+                    // Only the ports E005 accepts: an unchecked `as u16` wrapped 70000 onto 4464
+                    // and reported a conflict with a file that never used that port (issue #1091).
+                    // An absent or `null` port is auto-assigned by the engine and never conflicts;
+                    // a `0` is E005's to report.
+                    if let Some(port) = slot
+                        .get("port")
+                        .and_then(Value::as_u64)
+                        .and_then(|p| u16::try_from(p).ok())
+                        .filter(|p| *p != 0)
+                    {
+                        port_map
+                            .entry(port)
+                            .or_default()
+                            .push((file.clone(), prefix));
+                    }
                 }
                 imposters.push((file.clone(), imposter));
             }
@@ -298,40 +308,56 @@ fn load_imposter_file(path: &Path) -> Result<Document, LoadError> {
     }
 }
 
-fn check_port_conflicts(port_map: &HashMap<u16, Vec<PathBuf>>, result: &mut LintResult) {
-    for (port, files) in port_map {
-        if files.len() > 1 {
-            let file_names: Vec<String> = files
-                .iter()
-                .map(|f| {
-                    f.file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string()
-                })
-                .collect();
+/// One E002 per port declared by more than one imposter, inside one file or across files, in
+/// ascending port order. It is reported against the first declaration, and the message names every
+/// file with the slots it uses (`a.json (imposters[0], imposters[1]), b.json`); a single-imposter
+/// file has no slot to name.
+fn check_port_conflicts(port_map: &BTreeMap<u16, Vec<(PathBuf, String)>>, result: &mut LintResult) {
+    for (port, uses) in port_map {
+        let [(first_file, first_prefix), _, ..] = uses.as_slice() else {
+            continue;
+        };
 
-            result.add_issue(
-                LintIssue::error(
-                    "E002",
-                    format!(
-                        "Port {port} is used by {} files: {}",
-                        files.len(),
-                        file_names.join(", ")
-                    ),
-                    files[0].clone(),
-                )
-                .with_location("port")
-                .with_suggestion(match port.checked_add(1) {
-                    Some(next) => {
-                        format!(
-                            "Assign unique ports to each imposter. Consider using ports {next}+"
-                        )
-                    }
-                    None => "Assign unique ports to each imposter".to_string(),
-                }),
-            );
+        // Group consecutive slots of the same file; `uses` is in file order, then slot order.
+        let mut by_file: Vec<(&Path, Vec<&str>)> = Vec::new();
+        for (file, prefix) in uses {
+            let slot = prefix.strip_suffix('.').unwrap_or(prefix);
+            match by_file.last_mut() {
+                Some((last, slots)) if *last == file.as_path() => slots.push(slot),
+                _ => by_file.push((file.as_path(), vec![slot])),
+            }
         }
+        let named: Vec<String> = by_file
+            .iter()
+            .map(|(file, slots)| {
+                let name = file.file_name().unwrap_or_default().to_string_lossy();
+                let slots: Vec<&str> = slots.iter().copied().filter(|s| !s.is_empty()).collect();
+                if slots.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{name} ({})", slots.join(", "))
+                }
+            })
+            .collect();
+
+        result.add_issue(
+            LintIssue::error(
+                "E002",
+                format!(
+                    "Port {port} is used by {} imposters: {}",
+                    uses.len(),
+                    named.join(", ")
+                ),
+                first_file.clone(),
+            )
+            .with_location(format!("{first_prefix}port"))
+            .with_suggestion(match port.checked_add(1) {
+                Some(next) => {
+                    format!("Assign unique ports to each imposter. Consider using ports {next}+")
+                }
+                None => "Assign unique ports to each imposter".to_string(),
+            }),
+        );
     }
 }
 

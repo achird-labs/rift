@@ -310,20 +310,34 @@ fn single_valued_header_locations(value: &serde_json::Value) -> std::collections
         }
     }
 
-    // The same three document shapes `validate_config` accepts.
     let mut out = std::collections::HashSet::new();
-    if let Some(arr) = value.get("imposters").and_then(serde_json::Value::as_array) {
-        for (i, imposter) in arr.iter().enumerate() {
-            collect(imposter, &format!("imposters[{i}]."), &mut out);
-        }
-    } else if let Some(arr) = value.as_array() {
-        for (i, imposter) in arr.iter().enumerate() {
-            collect(imposter, &format!("[{i}]."), &mut out);
-        }
-    } else {
-        collect(value, "", &mut out);
+    for (prefix, imposter) in imposters_in(value) {
+        collect(imposter, &prefix, &mut out);
     }
     out
+}
+
+/// Every imposter `value` holds, each with the location prefix of its slot: `""` for a single
+/// imposter, `imposters[i].` for the `{"imposters": [...]}` wrapper and `[i].` for a bare array.
+///
+/// These are the three document shapes `rift --configfile` loads, dispatched the way
+/// `validate_config` dispatches them, so a prefix joined with a field name (`imposters[1].port`)
+/// names the same slot the duplicate-key scan reports.
+#[must_use]
+pub fn imposters_in(value: &serde_json::Value) -> Vec<(String, &serde_json::Value)> {
+    if let Some(arr) = value.get("imposters").and_then(serde_json::Value::as_array) {
+        arr.iter()
+            .enumerate()
+            .map(|(i, imposter)| (format!("imposters[{i}]."), imposter))
+            .collect()
+    } else if let Some(arr) = value.as_array() {
+        arr.iter()
+            .enumerate()
+            .map(|(i, imposter)| (format!("[{i}]."), imposter))
+            .collect()
+    } else {
+        vec![(String::new(), value)]
+    }
 }
 
 /// Lint a single imposter configuration file.
