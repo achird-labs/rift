@@ -1072,7 +1072,6 @@ mod allow_injection_tests {
             json!({ "repeat": 2.0 }),
             json!({ "wait": 100.0 }),
             json!({ "repeat": 3 }),
-            json!([{ "wait": 500 }]),
         ];
         for behaviors in script_free {
             let config = cfg(json!({

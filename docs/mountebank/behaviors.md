@@ -57,6 +57,8 @@ Behaviors can also be specified as an array of behavior objects:
 
 When using array format, behaviors are merged into a single object. If the same behavior type appears multiple times, the last one takes precedence. `_behaviors` takes precedence over `behaviors` when both are present; `"_behaviors": null` counts as absent, so `behaviors` is used.
 
+`_behaviors` must be an object; the array form is only accepted under `behaviors`, and each of its elements must be an object (a non-object element is skipped). Any other shape — an array or scalar `_behaviors`, or a scalar `behaviors` — is refused: `POST /imposters` returns `400` and a config file fails to load. This holds with `--allowInjection` on too.
+
 ---
 
 ## wait
