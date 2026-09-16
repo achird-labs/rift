@@ -65,8 +65,19 @@ pub fn apply_rcfile_defaults_reporting(
             RcfileType::Port => val.as_u64().is_some_and(|p| u16::try_from(p).is_ok()),
         };
         if !accepted {
+            // The offending value is echoed so the operator can see what was wrong with it —
+            // except for a credential key, where the wrong-typed value is most likely the token
+            // itself (an unquoted one is exactly the mistake this catches), and this message
+            // reaches stderr, any `2>` redirect and CI output. Name the type it had instead. Same
+            // reasoning as `ServeOptions` in rift-ffi, which does not derive `Debug` because it
+            // holds `api_key`.
+            let got = if rcfile_key_is_secret(key) {
+                describe_json_type(val).to_string()
+            } else {
+                val.to_string()
+            };
             anyhow::bail!(
-                "rcfile {}: '{key}' must be {}, got {val}. Refusing the rcfile rather than \
+                "rcfile {}: '{key}' must be {}, got {got}. Refusing the rcfile rather than \
                  ignoring or misreading the value.",
                 rcfile.display(),
                 expected.describe()
@@ -114,6 +125,19 @@ pub fn apply_rcfile_defaults_reporting(
                     cli.require_admin_auth = val.as_bool().unwrap_or(false);
                 }
             }
+            // The credential the key above gates on (issue #1132). Ignoring an unrecognised key is
+            // right; ignoring this one produced an advisory that read as reassurance and a server
+            // with no key — and paired with `requireAdminAuth` it refused to start, telling the
+            // operator to set `--api-key`, from a file that had set it. A blank value is not
+            // rejected here: it is a valid string, and `validate_admin_api_key` is the one place
+            // that judges it, for the flag and the file alike.
+            "apiKey" | "api_key" => {
+                if cli.api_key.is_none()
+                    && let Some(k) = val.as_str()
+                {
+                    cli.api_key = Some(k.to_string());
+                }
+            }
             "datadir" => {
                 if cli.datadir.is_none()
                     && let Some(d) = val.as_str()
@@ -157,11 +181,30 @@ impl RcfileType {
     }
 }
 
+/// Whether an rcfile key's *value* is a secret that must never be echoed in an error or a log.
+fn rcfile_key_is_secret(key: &str) -> bool {
+    matches!(key, "apiKey" | "api_key")
+}
+
+/// The JSON type a value actually has, for an error that must not quote the value itself.
+fn describe_json_type(val: &serde_json::Value) -> &'static str {
+    match val {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
 fn expected_rcfile_type(key: &str) -> Option<RcfileType> {
     match key {
         "allowInjection" | "allow_injection" | "localOnly" | "local_only" | "requireAdminAuth"
         | "require_admin_auth" | "noParse" | "no_parse" => Some(RcfileType::Boolean),
-        "host" | "logLevel" | "loglevel" | "datadir" | "configfile" => Some(RcfileType::String),
+        "host" | "logLevel" | "loglevel" | "datadir" | "configfile" | "apiKey" | "api_key" => {
+            Some(RcfileType::String)
+        }
         "port" => Some(RcfileType::Port),
         _ => None,
     }
