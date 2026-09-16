@@ -455,9 +455,10 @@ impl ServerBuilder {
         //     server was already up.
         // Owned rather than borrowed: `admin_bind_host` takes the whole `Cli`, and holding that
         // borrow across the rest of `start()` would block moving `cli.scripts_dir` / `cli.datadir`
-        // out below.
+        // out below. The host is still needed on its own further down — the metrics log line and
+        // the intercept address and options.
         let host = admin_bind_host(&cli).to_string();
-        let admin_addr: SocketAddr = format!("{}:{}", host, cli.port).parse::<SocketAddr>()?;
+        let admin_addr = admin_bind_addr(&cli)?;
         crate::admin_api::check_admin_exposure(
             admin_addr,
             cli.api_key.as_deref(),
@@ -887,6 +888,32 @@ fn admin_bind_host(cli: &Cli) -> &str {
     } else {
         &cli.host
     }
+}
+
+/// The address the admin plane binds under this CLI: `--local-only` pins loopback, otherwise
+/// `--host`, on `--port` — resolved to the literal [`SocketAddr`] that [`ServerBuilder::start`]
+/// binds and hands [`check_admin_exposure`](crate::admin_api::check_admin_exposure).
+///
+/// Public because an embedder that composes its own admin listener on top of [`ServerBuilder`]
+/// must judge and bind the *same* address (issue #1131). `start` calls it too, so the rule still
+/// has one definition — a copy of it in another binary is what this exists to make unnecessary.
+///
+/// # Errors
+/// If `host:port` is not a literal socket address — a DNS name, or an IPv6 address written without
+/// brackets. Name resolution is deliberately not attempted: the exposure check classifies a literal
+/// address, and a name that resolves differently there than at bind time is the disagreement this
+/// seam removes.
+pub fn admin_bind_addr(cli: &Cli) -> anyhow::Result<SocketAddr> {
+    let host = admin_bind_host(cli);
+    format!("{host}:{}", cli.port)
+        .parse::<SocketAddr>()
+        .with_context(|| {
+            format!(
+                "--host {host} is not a literal address, so the admin plane has no address to bind \
+                 on port {}. Use an IP literal (`127.0.0.1`, `0.0.0.0`, or a bracketed `[::1]`).",
+                cli.port
+            )
+        })
 }
 
 /// Bind the metrics listener (`:0` is fine) and start serving, returning a handle that reports
