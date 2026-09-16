@@ -46,11 +46,16 @@ pub fn default_url(host: &str, port: u16) -> String {
         h => h,
     };
 
-    // A bare IPv6 literal has to be bracketed in a URL authority, or the port reads as another hextet.
+    format!("http://{}/health", url_authority(host, port))
+}
+
+/// `host:port` as a URL authority. A bare IPv6 literal is bracketed, or its port would read as one
+/// more hextet; a name, an IPv4 literal and an already-bracketed IPv6 literal pass through.
+pub(crate) fn url_authority(host: &str, port: u16) -> String {
     if host.contains(':') && !host.starts_with('[') {
-        format!("http://[{host}]:{port}/health")
+        format!("[{host}]:{port}")
     } else {
-        format!("http://{host}:{port}/health")
+        format!("{host}:{port}")
     }
 }
 
@@ -220,5 +225,14 @@ mod tests {
     #[test]
     fn default_url_brackets_an_ipv6_literal() {
         assert_eq!(default_url("::1", 2525), "http://[::1]:2525/health");
+    }
+
+    // Issue #1137: the bracketing rule is shared with `rift save`, so it is pinned on its own.
+    #[test]
+    fn url_authority_brackets_only_a_bare_ipv6_literal() {
+        assert_eq!(url_authority("::1", 2525), "[::1]:2525");
+        assert_eq!(url_authority("[::1]", 2525), "[::1]:2525");
+        assert_eq!(url_authority("127.0.0.1", 2525), "127.0.0.1:2525");
+        assert_eq!(url_authority("localhost", 80), "localhost:80");
     }
 }

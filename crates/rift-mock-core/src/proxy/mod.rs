@@ -30,6 +30,9 @@ pub use outbound_tls::OutboundTls;
 // HTTP connection-builder tuning, shared with the metrics/admin accept loops in rift-http-proxy
 // (issue #716) — `network` itself stays `pub(crate)`, only this type is exposed.
 pub use network::{DEFAULT_HTTP_MAX_BUF, HttpTuning};
+// The one rule for turning an operator's bind host into an address (issue #1137), shared by every
+// bind door in the workspace: the admin plane, the intercept listener, the FFI, and imposters.
+pub use network::bind_addr;
 // Accept-error handling shared by every listener in the workspace: the imposter serve loop
 // (issue #750) and the admin API accept loop (issue #826), which must classify-and-retry rather
 // than let one transient accept failure end the server.

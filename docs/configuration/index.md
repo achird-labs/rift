@@ -116,7 +116,7 @@ Configure Rift behavior via environment variables:
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `MB_PORT` | Admin API port | `2525` |
-| `MB_HOST` | Bind hostname | `0.0.0.0` |
+| `MB_HOST` | Admin API bind IP address (IPv4, or IPv6 `::1` / `[::1]`) | `0.0.0.0` |
 | `MB_CONFIGFILE` | Imposter config file | |
 | `MB_DATADIR` | Persistent storage directory | |
 | `MB_ALLOW_INJECTION` | Enable JavaScript injection | `false` |
@@ -139,7 +139,7 @@ rift [OPTIONS]
 
 Options:
       --port <PORT>          Admin API port [default: 2525]
-      --host <HOST>          Bind hostname [default: 0.0.0.0]
+      --host <HOST>          Admin API bind IP address (IPv4, or IPv6 `::1` / `[::1]`) [default: 0.0.0.0]
       --configfile <FILE>    Load imposters from JSON file
       --datadir <DIR>        Persistent storage directory
       --allow-injection      Enable JavaScript injection

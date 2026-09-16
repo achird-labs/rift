@@ -305,9 +305,12 @@ impl InterceptControl {
         }
 
         let host = opts.host.as_deref().unwrap_or("127.0.0.1");
-        let addr: SocketAddr = format!("{host}:{}", opts.port.unwrap_or(0))
-            .parse()
-            .map_err(|e| InterceptStartError::InvalidAddr(format!("{e}")))?;
+        let addr =
+            rift_mock_core::proxy::bind_addr(host, opts.port.unwrap_or(0)).ok_or_else(|| {
+                InterceptStartError::InvalidAddr(format!(
+                    "`{host}` is not an IP literal (IPv4, or IPv6 bare `::1` or bracketed `[::1]`)"
+                ))
+            })?;
 
         // Validate the credential before any side effect: a blank secret must never reach the
         // listener, where it would switch the gate on and then admit everyone (issue #878/#844).

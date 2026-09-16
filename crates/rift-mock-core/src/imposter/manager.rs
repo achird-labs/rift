@@ -25,7 +25,6 @@ use arc_swap::ArcSwapOption;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
-use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -967,7 +966,7 @@ impl ImposterManager {
                 }
                 // Bind with SO_REUSEADDR/REUSEPORT so a hot-reload (#197) can re-bind the same port
                 // immediately after the previous imposter's listener is torn down.
-                let addr = Self::resolve_bind_addr(bind_host, p)?;
+                let addr = Self::resolve_bind_addr(bind_host, p).await?;
                 (
                     p,
                     crate::proxy::network::create_reusable_listener(addr)
@@ -979,7 +978,11 @@ impl ImposterManager {
                 self.find_available_port(bind_host).await?
             }
         };
-        let listeners = self.bind_listener_group(bind_host, port, Some(probe))?;
+        // The group binds the address the probe actually took, so a name is resolved only once.
+        let addr = probe
+            .local_addr()
+            .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?;
+        let listeners = self.bind_listener_group(addr, Some(probe))?;
         Ok((port, listeners))
     }
 
@@ -995,22 +998,19 @@ impl ImposterManager {
     /// it (explicit); `None` when rebinding an existing imposter, which has no probe to hand over.
     fn bind_listener_group(
         &self,
-        bind_host: &str,
-        port: u16,
+        addr: std::net::SocketAddr,
         probe: Option<TcpListener>,
     ) -> Result<Vec<TcpListener>, ImposterError> {
+        let port = addr.port();
         match &self.accept_runtimes {
             None => match probe {
                 Some(listener) => Ok(vec![listener]),
                 None => Ok(vec![
-                    crate::proxy::network::create_reusable_listener(Self::resolve_bind_addr(
-                        bind_host, port,
-                    )?)
-                    .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?,
+                    crate::proxy::network::create_reusable_listener(addr)
+                        .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?,
                 ]),
             },
             Some(runtimes) => {
-                let addr = Self::resolve_bind_addr(bind_host, port)?;
                 // The auto-assign probe binds without SO_REUSEPORT and cannot coexist with the
                 // reusable group, so the group is rebound from scratch; explicit-port creates
                 // rebind uniformly for one code path. The instant between drop and rebind is
@@ -1029,12 +1029,18 @@ impl ImposterManager {
         }
     }
 
-    fn resolve_bind_addr(
+    /// An IP literal in either IPv6 spelling binds as written; anything else is resolved as a name,
+    /// as Mountebank's `listen(port, host)` would (issue #1137). The lookup runs off the async
+    /// worker (`lookup_host`), since a slow resolver must not stall other imposters' accept loops.
+    async fn resolve_bind_addr(
         bind_host: &str,
         port: u16,
     ) -> Result<std::net::SocketAddr, ImposterError> {
-        (bind_host, port)
-            .to_socket_addrs()
+        if let Some(addr) = crate::proxy::bind_addr(bind_host, port) {
+            return Ok(addr);
+        }
+        tokio::net::lookup_host((bind_host, port))
+            .await
             .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?
             .next()
             .ok_or_else(|| ImposterError::BindError(port, anyhow::anyhow!("no socket address")))
@@ -1128,7 +1134,8 @@ impl ImposterManager {
             ));
         };
 
-        let listeners = self.bind_listener_group(&bind_host, port, None)?;
+        let addr = Self::resolve_bind_addr(&bind_host, port).await?;
+        let listeners = self.bind_listener_group(addr, None)?;
         let handles = self.spawn_accept_loops(
             imposter,
             listeners,
@@ -1367,6 +1374,7 @@ impl ImposterManager {
     async fn find_available_port(&self, host: &str) -> Result<(u16, TcpListener), ImposterError> {
         let existing_ports: std::collections::HashSet<u16> =
             self.imposters.ports().into_iter().collect();
+        let literal = crate::proxy::bind_addr(host, 0);
 
         // Start from dynamic port range (49152-65535)
         // If we could allow random ports, rather than requiring the minimum available port,
@@ -1377,7 +1385,16 @@ impl ImposterManager {
                 continue;
             }
             // Try to bind to check if OS has it available
-            match TcpListener::bind((host, port)).await {
+            // A literal binds as written; a name goes to tokio, which resolves it off the worker
+            // and tries each of its addresses (issue #1137).
+            let bound = match literal {
+                Some(mut addr) => {
+                    addr.set_port(port);
+                    TcpListener::bind(addr).await
+                }
+                None => TcpListener::bind((host, port)).await,
+            };
+            match bound {
                 Ok(listener) => {
                     // Port is available, return the port and bound listener
                     return Ok((port, listener));
@@ -3108,6 +3125,74 @@ mod tests {
                 .any(|w| w.warning_type == WarningType::ExactDuplicate),
             "embedded/manager-created imposter must have computed stub-analysis warnings"
         );
+    }
+
+    fn has_v6_loopback() -> bool {
+        let ok = std::net::TcpListener::bind("[::1]:0").is_ok();
+        if !ok {
+            eprintln!("skipping: this host has no IPv6 loopback");
+        }
+        ok
+    }
+
+    // Issue #1137: the imposter door resolved `host` by DNS lookup, so the bracketed `[::1]` —
+    // the spelling every other bind door takes — failed with a getaddrinfo error. Both the
+    // auto-assign probe and an explicit port must accept it.
+    #[tokio::test]
+    async fn a_bracketed_ipv6_imposter_host_binds() {
+        if !has_v6_loopback() {
+            return;
+        }
+        let manager = ImposterManager::new();
+        let auto = manager
+            .create_imposter(imposter_cfg(json!({"protocol": "http", "host": "[::1]"})))
+            .await
+            .expect("auto-assigned port on [::1]");
+        let explicit = std::net::TcpListener::bind("[::1]:0")
+            .and_then(|l| l.local_addr())
+            .expect("reserve a v6 port")
+            .port();
+        let port = manager
+            .create_imposter(imposter_cfg(
+                json!({"protocol": "http", "host": "[::1]", "port": explicit}),
+            ))
+            .await
+            .expect("explicit port on [::1]");
+        assert_eq!(port, explicit);
+        for p in [auto, explicit] {
+            tokio::net::TcpStream::connect(("::1", p))
+                .await
+                .unwrap_or_else(|e| panic!("imposter on [::1]:{p} must accept: {e}"));
+        }
+    }
+
+    // The bare spelling already worked here; it must keep working.
+    #[tokio::test]
+    async fn a_bare_ipv6_imposter_host_binds() {
+        if !has_v6_loopback() {
+            return;
+        }
+        let manager = ImposterManager::new();
+        let port = manager
+            .create_imposter(imposter_cfg(json!({"protocol": "http", "host": "::1"})))
+            .await
+            .expect("auto-assigned port on ::1");
+        tokio::net::TcpStream::connect(("::1", port))
+            .await
+            .expect("imposter on ::1 must accept");
+    }
+
+    // Mountebank hands a name to Node's `listen`, which resolves it; a literal-only imposter door
+    // would be a parity regression.
+    #[tokio::test]
+    async fn a_named_imposter_host_still_resolves() {
+        let manager = ImposterManager::new();
+        manager
+            .create_imposter(imposter_cfg(
+                json!({"protocol": "http", "host": "localhost"}),
+            ))
+            .await
+            .expect("a DNS name must still bind on the imposter door");
     }
 
     fn stub_json(body: &str) -> serde_json::Value {

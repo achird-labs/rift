@@ -5,7 +5,7 @@
 //! applying per-connection socket tuning (TCP_NODELAY) to accepted streams.
 
 use socket2::{Domain, Protocol, Socket, Type};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::warn;
@@ -319,6 +319,38 @@ impl SocketTuning {
 
         (Self { backlog, nodelay }, fallbacks)
     }
+}
+
+/// A bind host as an operator writes it, on `port`, as the literal address to bind.
+///
+/// Accepts an IPv4 literal (`127.0.0.1`), a bare IPv6 literal (`::1` — Mountebank's spelling and the
+/// one `MB_HOST` carries) and a bracketed IPv6 literal (`[::1]` — the URL-authority spelling). An
+/// IPv6 literal may carry a numeric scope id (`fe80::1%2`, `[fe80::1%2]`), which link-local binds
+/// need. `None` for anything else: a DNS name, or brackets around something that is not IPv6
+/// (`[1.2.3.4]`). An option rather than an error so each door keeps its own refusal wording and its
+/// own policy on names — the admin plane refuses them, an imposter resolves them (issue #1137).
+///
+/// Built from the parsed address, never by parsing `"{host}:{port}"`: that string is ambiguous for a
+/// bare IPv6 host, whose port reads as one more hextet.
+#[must_use]
+pub fn bind_addr(host: &str, port: u16) -> Option<SocketAddr> {
+    match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        Some(inner) => ipv6_scoped(inner, port),
+        None => match host.parse::<IpAddr>() {
+            Ok(ip) => Some(SocketAddr::new(ip, port)),
+            Err(_) => ipv6_scoped(host, port),
+        },
+    }
+}
+
+/// `ip` or `ip%scope` (numeric scope) as an IPv6 socket address.
+fn ipv6_scoped(host: &str, port: u16) -> Option<SocketAddr> {
+    let (ip, scope_id) = match host.split_once('%') {
+        Some((ip, scope)) => (ip, scope.parse::<u32>().ok()?),
+        None => (host, 0),
+    };
+    let ip = ip.parse::<Ipv6Addr>().ok()?;
+    Some(SocketAddr::V6(SocketAddrV6::new(ip, port, 0, scope_id)))
 }
 
 /// Create a TCP listener with SO_REUSEPORT enabled for multi-worker setup,
@@ -1043,5 +1075,74 @@ mod accept_error {
         // And a fresh outage re-arms the reminder schedule from zero.
         assert_eq!(log.on_error(), Some(AcceptErrorEvent::Onset));
         assert_eq!(log.on_error(), None, "the new outage counts from 0 again");
+    }
+}
+
+#[cfg(test)]
+mod bind_host {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn v6(ip: Ipv6Addr, port: u16, scope_id: u32) -> SocketAddr {
+        SocketAddr::V6(SocketAddrV6::new(ip, port, 0, scope_id))
+    }
+
+    // Issue #1137: both IPv6 spellings an operator writes denote the same address.
+    #[test]
+    fn ip_literals_in_every_spelling_resolve() {
+        let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        let cases: [(&str, SocketAddr); 9] = [
+            ("::1", v6(Ipv6Addr::LOCALHOST, 80, 0)),
+            ("[::1]", v6(Ipv6Addr::LOCALHOST, 80, 0)),
+            ("::", v6(Ipv6Addr::UNSPECIFIED, 80, 0)),
+            ("[::]", v6(Ipv6Addr::UNSPECIFIED, 80, 0)),
+            (
+                "::ffff:127.0.0.1",
+                v6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x7f00, 1), 80, 0),
+            ),
+            // A numeric scope id survives: `[fe80::1%2]` bound before #1137 and must still.
+            ("[fe80::1%2]", v6(link_local, 80, 2)),
+            ("fe80::1%2", v6(link_local, 80, 2)),
+            ("0.0.0.0", SocketAddr::from((Ipv4Addr::UNSPECIFIED, 80))),
+            ("127.0.0.1", SocketAddr::from((Ipv4Addr::LOCALHOST, 80))),
+        ];
+        for (host, want) in cases {
+            assert_eq!(bind_addr(host, 80), Some(want), "host {host:?}");
+        }
+    }
+
+    // A name is not a literal, and brackets mean IPv6 — `[1.2.3.4]` is not an address.
+    #[test]
+    fn names_and_malformed_literals_are_not_addresses() {
+        for host in [
+            "localhost",
+            "[localhost]",
+            "[1.2.3.4]",
+            "1.2.3.4%2",
+            "[",
+            "[]",
+            "[::1",
+            "::1]",
+            "[fe80::1%eth0]",
+            "fe80::1%",
+            "",
+        ] {
+            assert_eq!(bind_addr(host, 80), None, "host {host:?}");
+        }
+    }
+
+    // The bug was a string round trip: `::1` + `:7654` read as one more hextet. The port must land
+    // in the port, never in the address.
+    #[test]
+    fn the_port_lands_in_the_port() {
+        assert_eq!(
+            bind_addr("::1", 7654),
+            Some(v6(Ipv6Addr::LOCALHOST, 7654, 0))
+        );
+        assert_eq!(bind_addr("[::1]", 0), Some(v6(Ipv6Addr::LOCALHOST, 0, 0)));
+        assert_eq!(
+            bind_addr("0.0.0.0", 2525),
+            Some(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 2525)))
+        );
     }
 }

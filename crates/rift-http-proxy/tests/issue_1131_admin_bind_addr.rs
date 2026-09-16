@@ -93,8 +93,7 @@ fn local_only_ignores_an_unparseable_host() {
     );
 }
 
-// Edge: the bracketed spelling is the one IPv6 form `host:port` concatenation can carry, and it
-// is what an embedder binding a v6 admin plane must pass.
+// Edge: the bracketed IPv6 spelling resolves (the bare one is pinned in `issue_1137_*`).
 #[test]
 fn a_bracketed_ipv6_host_resolves() {
     let addr = admin_bind_addr(&cli(&["rift", "--host", "[::1]", "--port", "7654"]))

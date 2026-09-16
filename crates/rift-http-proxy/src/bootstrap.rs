@@ -390,6 +390,17 @@ pub fn stop_server(pidfile: &Path) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// The replayable-imposters endpoint of the admin API at `host:port`.
+fn save_url(host: &str, port: u16, remove_proxies: bool) -> String {
+    let authority = crate::healthcheck::url_authority(host, port);
+    let query = if remove_proxies {
+        "replayable=true&removeProxies=true"
+    } else {
+        "replayable=true"
+    };
+    format!("http://{authority}/imposters?{query}")
+}
+
 /// Save imposters to a file (async form).
 ///
 /// Fetches the replayable imposter config from the admin API at `host:port` and writes it to
@@ -403,11 +414,7 @@ pub async fn save_imposters_async(
     remove_proxies: bool,
 ) -> Result<(), anyhow::Error> {
     let client = reqwest::Client::new();
-    let mut query = "replayable=true".to_string();
-    if remove_proxies {
-        query.push_str("&removeProxies=true");
-    }
-    let url = format!("http://{host}:{port}/imposters?{query}");
+    let url = save_url(host, port, remove_proxies);
 
     // `error_for_status` before `.text()` so a 401/500 response is a value error, not a body
     // silently written to the user's savefile. The error carries the status and URL.
@@ -439,7 +446,7 @@ pub fn save_imposters(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_rcfile_defaults, log_filter_with};
+    use super::{apply_rcfile_defaults, log_filter_with, save_url};
     use crate::server::Cli;
     use clap::Parser;
 
@@ -637,5 +644,22 @@ mod tests {
         let mut cli = Cli::try_parse_from(["rift"]).expect("cli parse");
         apply_rcfile_defaults(&mut cli, &rcfile).expect("unknown keys are not fatal");
         assert!(logs_contain("unsupported key 'bogusKey'"));
+    }
+
+    // Issue #1137: `rift save --host ::1` built `http://::1:2525/...`, which no client can parse.
+    #[test]
+    fn save_url_brackets_a_bare_ipv6_host() {
+        assert_eq!(
+            save_url("::1", 2525, false),
+            "http://[::1]:2525/imposters?replayable=true"
+        );
+        assert_eq!(
+            save_url("[::1]", 2525, true),
+            "http://[::1]:2525/imposters?replayable=true&removeProxies=true"
+        );
+        assert_eq!(
+            save_url("localhost", 2525, false),
+            "http://localhost:2525/imposters?replayable=true"
+        );
     }
 }

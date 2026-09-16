@@ -1779,6 +1779,71 @@ fn ffi_intercept_url_reflects_bind_host() {
     }
 }
 
+/// Issue #1137: a bare IPv6 `host` reaches both C-ABI bind doors. The SDKs pass `host` through as
+/// JSON, so the engine is the only place `::1` can be accepted.
+#[test]
+fn ffi_bind_doors_accept_a_bare_ipv6_host() {
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        eprintln!("skipping: this host has no IPv6 loopback");
+        return;
+    }
+    unsafe {
+        let h = rift_start();
+        let info = serve_admin(h, r#"{"host":"::1","port":0,"metricsPort":0}"#);
+        let admin_port = info["adminPort"].as_u64().expect("adminPort");
+        assert_eq!(
+            info["adminUrl"].as_str().expect("adminUrl"),
+            format!("http://[::1]:{admin_port}")
+        );
+
+        let started: serde_json::Value = serde_json::from_str(&take_json(rift_start_intercept(
+            h,
+            cstr(r#"{"host":"::1","port":0}"#).as_ptr(),
+        )))
+        .expect("rift_start_intercept on ::1 must succeed");
+        let port = started["interceptPort"].as_u64().expect("interceptPort");
+        assert_eq!(
+            started["interceptUrl"].as_str().expect("interceptUrl"),
+            format!("http://[::1]:{port}")
+        );
+        rift_stop(h);
+    }
+}
+
+/// Issue #1137: a DNS name is still refused at both C-ABI bind doors, naming the value.
+#[test]
+fn ffi_bind_doors_refuse_a_name_naming_it() {
+    unsafe {
+        let h = rift_start();
+        assert!(
+            rift_serve_admin(
+                h,
+                cstr(r#"{"host":"no-such-host.invalid","port":0}"#).as_ptr()
+            )
+            .is_null()
+        );
+        let message = take_json(rift_last_error());
+        assert!(
+            message.contains("no-such-host.invalid") && message.contains("not an IP literal"),
+            "{message}"
+        );
+
+        assert!(
+            rift_start_intercept(
+                h,
+                cstr(r#"{"host":"no-such-host.invalid","port":0}"#).as_ptr()
+            )
+            .is_null()
+        );
+        let message = take_json(rift_last_error());
+        assert!(
+            message.contains("no-such-host.invalid") && message.contains("not an IP literal"),
+            "{message}"
+        );
+        rift_stop(h);
+    }
+}
+
 /// Issue #410: opt-in — a handle that never started intercept rejects control calls (not started),
 /// and the data plane is unaffected.
 #[test]
