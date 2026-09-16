@@ -11,6 +11,20 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`healthcheck` now applies `--rcfile` before computing what to probe** (#1133). The subcommand
+  was dispatched ahead of the rcfile, so a deployment that set the admin port in a file — `{"port":
+  4321}` — ran a server on 4321 and a container probe that computed its URL from the unmodified
+  default, 2525, and reported unhealthy forever with nothing in the output mentioning the rcfile.
+  The early dispatch is still right about skipping the *server* bootstrap (the crypto provider and
+  the tracing subscriber); reading one small JSON file is not what that protects, and it is the one
+  step whose output the probe depends on. `script` still runs ahead of the rcfile, since it reads no
+  host or port.
+  - A refused rcfile now refuses the probe, consistent with #1114: a server started with that file
+    would not start either, so *unhealthy* is the true answer. Pass the probe the same `--rcfile`
+    the server was given.
+
 ### Changed
 
 - **A `--datadir` file must be named `<port>.json` after the port it declares** (#1128). A file named

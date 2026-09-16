@@ -49,6 +49,16 @@ Two consequences worth knowing before you switch:
   shell-form healthchecks do not work. Use exec form (`["rift", "healthcheck"]`) and pass flags
   directly. The health probe is built into the binary precisely for this reason — see
   [`rift healthcheck`]({{ site.baseurl }}/configuration/cli/).
+
+  The images' built-in `HEALTHCHECK` is `["rift", "healthcheck"]`, which probes the **default**
+  admin port. If you move that port — with `--port`, `MB_PORT`, or an `--rcfile` that sets it —
+  override the healthcheck so the probe is told the same thing the server was, or it will report
+  unhealthy forever (issue #1133):
+
+  ```yaml
+  healthcheck:
+    test: ["CMD", "rift", "--rcfile", "/etc/rift/rc.json", "healthcheck"]
+  ```
 - **No mimalloc.** The musl binaries are built without the mimalloc allocator (it is a default
   feature of the glibc builds). Scripting and the Redis backend are both present. If you are
   benchmarking allocation-heavy workloads, use the default flavor.

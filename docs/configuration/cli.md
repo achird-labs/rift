@@ -655,15 +655,20 @@ needs no shell and no `curl`, which is what lets the `-static` image be `FROM sc
 (see [Docker]({{ site.baseurl }}/deployment/docker/)).
 
 With no arguments it probes `/health` on the admin API, reading `--host`/`--port` (and therefore
-`MB_HOST`/`MB_PORT`) exactly as the server does — so inside a container `rift healthcheck` needs no
-configuration. A bind-any host (`0.0.0.0`, `::`) is probed on loopback, since that is where a server
-bound to every interface answers.
+`MB_HOST`/`MB_PORT`, and an `--rcfile` that sets them) exactly as the server does — so inside a
+container `rift healthcheck` needs no configuration. A bind-any host (`0.0.0.0`, `::`) is probed on
+loopback, since that is where a server bound to every interface answers.
 
 ```bash
 rift healthcheck                                        # probes http://127.0.0.1:2525/health
 MB_PORT=3000 rift healthcheck                           # follows MB_PORT
+rift --rcfile /etc/rift/rc.json healthcheck             # follows the port that file sets
 rift healthcheck --url http://localhost:9090/metrics    # probe something else
 ```
+
+Pass the same `--rcfile` the server was started with, or the probe knocks on the default port
+(issue #1133). An rcfile the server would refuse (a missing file, a wrong-typed key) refuses the
+probe too, and reports unhealthy: a server started with that file would not have started either.
 
 | Flag | Description | Default |
 |:-----|:------------|:--------|
