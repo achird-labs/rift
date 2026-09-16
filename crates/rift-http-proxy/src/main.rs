@@ -62,7 +62,31 @@ fn main() -> Result<(), anyhow::Error> {
         return script_cli::dispatch(action);
     }
 
-    // Same treatment for `healthcheck` (issue #664): skip the server bootstrap entirely. (It used
+    // Apply rcfile defaults before using CLI values (only for fields at their clap defaults).
+    // A refused rcfile aborts startup (issue #1114): it was only warned about, so a mistyped
+    // `requireAdminAuth` started the admin plane off-host with no auth and none of the file's keys.
+    // `?` prints the whole error chain, so serde's line and column survive (#946/#1004). The log
+    // subscriber is installed below, after the rcfile may have set the level, so warnings go to
+    // stderr directly.
+    //
+    // Ahead of `healthcheck` (issue #1133), which computes its URL from `--host`/`--port`: a
+    // deployment that sets the admin port in an rcfile otherwise ran a server on that port and a
+    // probe that knocked on 2525 forever. This is not the "server bootstrap" the dispatch below
+    // skips — that is the crypto provider and the tracing subscriber; reading one small JSON file
+    // is cheap, and it is the one step whose *output* the probe depends on. A refused rcfile
+    // therefore refuses the probe: a server started with that file would not start either, so
+    // "unhealthy" is the true answer. `script` stays above, since it reads no host or port.
+    if let Some(rcfile) = cli.rcfile.clone() {
+        for key in apply_rcfile_defaults_reporting(&mut cli, &rcfile)? {
+            eprintln!(
+                "Warning: --rcfile {}: unsupported key '{key}' (ignored)",
+                rcfile.display()
+            );
+        }
+    }
+
+    // The same treatment `script` gets above, for `healthcheck` (issue #664): skip the server
+    // bootstrap entirely — but from below the rcfile, which it needs (issue #1133). (It used
     // to matter for a second reason — the path below wrote `--pidfile`, clobbering the running
     // server's PID file with the probe's own — but since #827 the PID file is written only on the
     // serving path, so a transient subcommand can no longer touch it.)
@@ -76,21 +100,6 @@ fn main() -> Result<(), anyhow::Error> {
     // makes both spellings equivalent. Safe: single-threaded, before the tokio runtime starts.
     if cli.debug {
         unsafe { std::env::set_var("RIFT_DEBUG", "1") };
-    }
-
-    // Apply rcfile defaults before using CLI values (only for fields at their clap defaults).
-    // A refused rcfile aborts startup (issue #1114): it was only warned about, so a mistyped
-    // `requireAdminAuth` started the admin plane off-host with no auth and none of the file's keys.
-    // `?` prints the whole error chain, so serde's line and column survive (#946/#1004). The log
-    // subscriber is installed below, after the rcfile may have set the level, so warnings go to
-    // stderr directly.
-    if let Some(rcfile) = cli.rcfile.clone() {
-        for key in apply_rcfile_defaults_reporting(&mut cli, &rcfile)? {
-            eprintln!(
-                "Warning: --rcfile {}: unsupported key '{key}' (ignored)",
-                rcfile.display()
-            );
-        }
     }
 
     // Install default cryptographic provider for rustls
@@ -159,7 +168,8 @@ fn main() -> Result<(), anyhow::Error> {
             return script_cli::dispatch(action.clone());
         }
         // Likewise already handled above — and it must stay that way: reaching here would mean the
-        // probe had already overwritten `--pidfile` with its own PID.
+        // probe had paid for the whole server bootstrap, and (since issue #1133) had computed its
+        // target from `--host`/`--port` before `--rcfile` could set them.
         Some(Commands::Healthcheck { url, timeout }) => {
             return healthcheck::dispatch(url.clone(), &cli.host, cli.port, *timeout);
         }
