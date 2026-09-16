@@ -43,14 +43,15 @@ const ACTIVE_ALLOCATOR: &str = "system";
 
 use clap::Parser;
 use rift_http_proxy::bootstrap::{
-    DEFAULT_PIDFILE, apply_rcfile_defaults_reporting, save_imposters, stop_for_restart, stop_server,
+    DEFAULT_PIDFILE, apply_rcfile_defaults_reporting, log_filter, save_imposters, stop_for_restart,
+    stop_server,
 };
 use rift_http_proxy::healthcheck;
 use rift_http_proxy::runtime;
 use rift_http_proxy::script_cli;
 use rift_http_proxy::server::{Cli, Commands, ServerBuilder};
 use tracing::{info, warn};
-use tracing_subscriber::{EnvFilter, Layer, fmt, prelude::*};
+use tracing_subscriber::{Layer, fmt, prelude::*};
 
 fn main() -> Result<(), anyhow::Error> {
     let mut cli = Cli::parse();
@@ -107,16 +108,11 @@ fn main() -> Result<(), anyhow::Error> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("Failed to install default crypto provider"))?;
 
-    // Initialize tracing based on loglevel
-    let log_level = match cli.loglevel.to_lowercase().as_str() {
-        "debug" => "debug",
-        "warn" | "warning" => "warn",
-        "error" => "error",
-        _ => "info",
-    };
-
-    let filter = if cli.debug { "debug" } else { log_level };
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter));
+    // Initialize tracing based on loglevel. The rules live in the bootstrap seam (issue #1134) so
+    // an alternative binary applies them rather than copying them: a level this binary does not
+    // know is refused instead of becoming `info`, and a `RUST_LOG` that is set but unparseable is
+    // refused instead of being mistaken for an unset one.
+    let env_filter = log_filter(&cli)?;
 
     // Build optional file log layer when --log is set and --nologfile is not
     let file_layer: Option<Box<dyn Layer<_> + Send + Sync>> = if !cli.nologfile {

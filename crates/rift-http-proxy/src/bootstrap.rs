@@ -12,6 +12,87 @@ use crate::server::Cli;
 use anyhow::Context;
 use std::path::Path;
 use tracing::{info, warn};
+use tracing_subscriber::EnvFilter;
+
+/// The environment variable `EnvFilter` reads by default, named here because this module has to
+/// tell "unset" apart from "set but unparseable" itself.
+const RUST_LOG: &str = "RUST_LOG";
+
+/// The `--loglevel` values this binary accepts, in the order an operator would think of them.
+///
+/// Stated in two other places that nothing gates against this one — the `--loglevel` doc comment in
+/// `server.rs` (which `--help` renders) and the options table in `docs/configuration/cli.md`.
+/// `scripts/verify-docs-coverage.sh` checks that a flag is *documented*, not that its help text
+/// matches, so all three drift silently. Change them together.
+const ACCEPTED_LEVELS: &str = "trace, debug, info, warn (or warning), error";
+
+/// The tracing filter this CLI asks for: `RUST_LOG` when it is set, otherwise `--debug`, otherwise
+/// `--loglevel`.
+///
+/// Public so an alternative binary applies the same rules rather than copying them (issue #1134) —
+/// the copy in rift-cluster's `rift-cluster-server` is what this exists to replace.
+///
+/// # Errors
+/// - `--loglevel` names a level that does not exist. It used to fall through to `info`, so `trace`
+///   (a real level) and a typo were equally silent.
+/// - `RUST_LOG` is set and does not parse, or is not valid UTF-8. Both used to be indistinguishable
+///   from *unset* and were replaced by the CLI level with nothing said. Unset remains a
+///   domain-optional absence and is not an error.
+pub fn log_filter(cli: &Cli) -> anyhow::Result<EnvFilter> {
+    let rust_log = match std::env::var(RUST_LOG) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        // Set, but unreadable. Treated as the same class as unparseable rather than as absence:
+        // the operator did configure something, and quietly ignoring it is the bug being fixed.
+        Err(std::env::VarError::NotUnicode(raw)) => anyhow::bail!(
+            "{RUST_LOG} is set to a value that is not valid UTF-8 ({raw:?}), so it cannot be read \
+             as a tracing filter. Unset it to fall back to --loglevel."
+        ),
+    };
+    log_filter_with(cli, rust_log.as_deref())
+}
+
+/// [`log_filter`] with the `RUST_LOG` value supplied rather than read: `None` means unset.
+///
+/// Split out so the rules are testable without mutating the process environment, which is global
+/// and shared by every test in a binary.
+pub fn log_filter_with(cli: &Cli, rust_log: Option<&str>) -> anyhow::Result<EnvFilter> {
+    // Validated even when `RUST_LOG` is about to supersede it: a level that does not exist is a
+    // mistake worth reporting either way, and refusing only when the value happens to be used would
+    // make the same command line succeed or fail depending on the environment.
+    let level = match cli.loglevel.trim().to_lowercase().as_str() {
+        // An empty value means "not supplied", not "a level I could not read". `MB_LOGLEVEL` is a
+        // clap `env`, and clap prefers a *present* variable over the default even when it is empty
+        // — so `MB_LOGLEVEL=${LOG_LEVEL}` in a compose file with `LOG_LEVEL` unset arrives here as
+        // "". Refusing it would abort deployments that work today, to report a typo nobody made.
+        "" => "info",
+        "trace" => "trace",
+        "debug" => "debug",
+        "info" => "info",
+        "warn" | "warning" => "warn",
+        "error" => "error",
+        // Echo what the operator actually typed, not the lowercased form we matched on — they will
+        // be looking for their own string in the message.
+        _ => anyhow::bail!(
+            "--loglevel {:?} is not a log level. Accepted: {ACCEPTED_LEVELS}.",
+            cli.loglevel
+        ),
+    };
+
+    match rust_log {
+        Some(value) => EnvFilter::try_new(value).with_context(|| {
+            format!("{RUST_LOG} is set to {value:?}, which is not a valid tracing filter")
+        }),
+        // `try_new` rather than `new`, which panics on a bad directive. This one cannot fail — every
+        // arm above is a validated literal — but a panicking level construction is the exact defect
+        // this seam exists to remove, and `clippy::panic` does not see into a callee.
+        None => {
+            let level = if cli.debug { "debug" } else { level };
+            EnvFilter::try_new(level)
+                .with_context(|| format!("building a tracing filter for --loglevel {level:?}"))
+        }
+    }
+}
 
 /// Apply defaults from a Mountebank-compatible rcfile (JSON) to the CLI struct.
 ///
@@ -358,9 +439,192 @@ pub fn save_imposters(
 
 #[cfg(test)]
 mod tests {
-    use super::apply_rcfile_defaults;
+    use super::{apply_rcfile_defaults, log_filter_with};
     use crate::server::Cli;
     use clap::Parser;
+
+    fn cli(args: &[&str]) -> Cli {
+        let mut argv = vec!["rift"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv).expect("cli parse")
+    }
+
+    /// The filter's rendered form. `EnvFilter` has no accessor for its directives, but its `Display`
+    /// is the directive list — which is what an operator set and what we are asserting about.
+    fn rendered(cli: &Cli, rust_log: Option<&str>) -> String {
+        log_filter_with(cli, rust_log)
+            .expect("filter must build")
+            .to_string()
+    }
+
+    // AC1: `trace` is a real tracing level and a plausible thing to ask for. It used to land in the
+    // catch-all arm and silently become `info`.
+    #[test]
+    fn trace_is_accepted() {
+        assert_eq!(rendered(&cli(&["--loglevel", "trace"]), None), "trace");
+    }
+
+    #[test]
+    fn every_documented_level_round_trips() {
+        for (given, expected) in [
+            ("trace", "trace"),
+            ("debug", "debug"),
+            ("info", "info"),
+            ("warn", "warn"),
+            ("warning", "warn"),
+            ("error", "error"),
+        ] {
+            assert_eq!(
+                rendered(&cli(&["--loglevel", given]), None),
+                expected,
+                "--loglevel {given}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_level_is_case_insensitive() {
+        for given in ["TRACE", "Trace", "tRaCe"] {
+            assert_eq!(rendered(&cli(&["--loglevel", given]), None), "trace");
+        }
+    }
+
+    #[test]
+    fn the_default_cli_is_info() {
+        assert_eq!(rendered(&cli(&[]), None), "info");
+    }
+
+    // AC2: the #1114 judgement, applied to a wrong *value* rather than a wrong type — a mistyped
+    // level used to start the server at `info` with nothing said.
+    #[test]
+    fn an_unrecognised_level_is_refused_naming_the_value() {
+        for bad in ["warnn", "verbose", "1"] {
+            let err = log_filter_with(&cli(&["--loglevel", bad]), None)
+                .expect_err("an unrecognised --loglevel must be refused, not defaulted to info");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("--loglevel"),
+                "the refusal must name the flag, got: {msg}"
+            );
+            assert!(
+                msg.contains("trace") && msg.contains("error"),
+                "the refusal must list the accepted levels, got: {msg}"
+            );
+            assert!(
+                msg.contains(bad),
+                "the refusal must name the offending value, got: {msg}"
+            );
+        }
+    }
+
+    // An empty or whitespace-only value means "not supplied", not "a level I could not read".
+    // `MB_LOGLEVEL` is a clap `env`, and clap prefers a *present* variable over the default even
+    // when it is empty — so `MB_LOGLEVEL=${LOG_LEVEL}` with `LOG_LEVEL` unset arrives as "".
+    // Refusing that would abort deployments that work today in order to report a typo nobody made.
+    #[test]
+    fn an_empty_level_means_not_supplied() {
+        for empty in ["", "   "] {
+            assert_eq!(
+                rendered(&cli(&["--loglevel", empty]), None),
+                "info",
+                "--loglevel {empty:?} must mean 'not supplied'"
+            );
+        }
+    }
+
+    // The refusal quotes what the operator typed, not the lowercased form matched on — they will be
+    // scanning the message for their own string.
+    #[test]
+    fn the_refusal_echoes_the_original_casing() {
+        let err = log_filter_with(&cli(&["--loglevel", "WaRnN"]), None)
+            .expect_err("still refused regardless of casing");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("WaRnN"),
+            "the refusal must quote the value as given, got: {msg}"
+        );
+    }
+
+    // AC6: `--debug` outranks `--loglevel` — preserved from the code this seam replaces.
+    #[test]
+    fn debug_outranks_the_level() {
+        assert_eq!(
+            rendered(&cli(&["--debug", "--loglevel", "error"]), None),
+            "debug"
+        );
+    }
+
+    // AC6: and RUST_LOG outranks both — also preserved.
+    #[test]
+    fn rust_log_outranks_the_cli() {
+        assert_eq!(
+            rendered(&cli(&["--loglevel", "error"]), Some("warn")),
+            "warn"
+        );
+        assert_eq!(rendered(&cli(&["--debug"]), Some("warn")), "warn");
+    }
+
+    #[test]
+    fn rust_log_carries_a_full_directive_set() {
+        // `EnvFilter`'s `Display` sorts directives rather than preserving input order, so assert on
+        // the set rather than on the rendering.
+        let rendered = rendered(&cli(&[]), Some("info,hyper=off"));
+        assert!(rendered.contains("info"), "{rendered}");
+        assert!(rendered.contains("hyper=off"), "{rendered}");
+    }
+
+    // AC3: the half of the bug that had no spelling at all — a set-but-unparseable RUST_LOG was
+    // indistinguishable from an unset one, so the operator's filter was silently discarded.
+    //
+    // `foo=bar` is invalid because `bar` is not a level. Note the issue's own example, `RUST_LOG=inf`,
+    // is NOT invalid — see the test below.
+    #[test]
+    fn an_unparseable_rust_log_is_refused() {
+        let err = log_filter_with(&cli(&[]), Some("foo=bar"))
+            .expect_err("a set-but-unparseable RUST_LOG must be refused, not silently replaced");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("RUST_LOG"),
+            "the refusal must name the variable, got: {msg}"
+        );
+        assert!(
+            msg.contains("foo=bar"),
+            "the refusal must name the offending value, got: {msg}"
+        );
+    }
+
+    // Recorded because issue #1134 cites `RUST_LOG=inf` as its example of an unparseable filter, and
+    // it is not one: in `EnvFilter` syntax a bare word is a *target* directive, so `inf` is a valid
+    // filter meaning "the target named `inf`". It always parsed, and it is not what the refusal
+    // above is for. Pinned so nobody later "fixes" this into a refusal and breaks real filters like
+    // `RUST_LOG=my_crate`.
+    #[test]
+    fn a_bare_word_rust_log_is_a_target_directive_not_an_error() {
+        log_filter_with(&cli(&[]), Some("inf"))
+            .expect("a bare word is a target name, which is a valid filter");
+    }
+
+    // AC4: absence is a domain value, not a failure — the one silent default that stays.
+    #[test]
+    fn an_unset_rust_log_is_not_an_error() {
+        assert_eq!(rendered(&cli(&["--loglevel", "warn"]), None), "warn");
+    }
+
+    // Deliberately unchanged: `RUST_LOG=` (set, empty) parses to an empty directive set today, and
+    // this seam keeps that meaning rather than quietly reclassifying it as "unset".
+    #[test]
+    fn an_empty_rust_log_keeps_its_current_meaning() {
+        log_filter_with(&cli(&[]), Some(""))
+            .expect("an empty RUST_LOG is set-to-nothing, not unset, and is not an error");
+    }
+
+    // A typo is a typo whether or not RUST_LOG would have superseded it. Refusing only when the
+    // value happens to be used would make the same input succeed or fail based on the environment.
+    #[test]
+    fn a_bad_level_is_refused_even_when_rust_log_would_supersede_it() {
+        log_filter_with(&cli(&["--loglevel", "warnn"]), Some("debug"))
+            .expect_err("an unrecognised --loglevel must be refused regardless of RUST_LOG");
+    }
 
     // Issue #1114: the binary now reports unsupported keys itself; an embedder calling the plain
     // function with its own subscriber must still see them logged.

@@ -97,7 +97,7 @@ pub struct Cli {
     #[arg(long, env = "RIFT_REQUIRE_ADMIN_AUTH")]
     pub require_admin_auth: bool,
 
-    /// Log level (debug, info, warn, error)
+    /// Log level: trace, debug, info, warn, error (an unrecognised value is refused)
     #[arg(long, default_value = "info", env = "MB_LOGLEVEL")]
     pub loglevel: String,
 
