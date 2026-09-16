@@ -46,6 +46,11 @@ pub struct AdminApiServer {
     /// `--local-only` as supplied, reported verbatim by `GET /config` (issue #879). The flag, not
     /// "did we bind loopback" — see `ConfigSnapshot::local_only`.
     local_only: bool,
+    /// The port `GET /config` reports, when the operator's port is not the one this server bound
+    /// (issue #1135). `None` — the default and the CLI's case — reports the bound port, which is
+    /// what #879 made truthful. `Some(0)` is a configured 0, not "unset"; that distinction is why
+    /// this is an `Option` rather than a sentinel.
+    reported_admin_port: Option<u16>,
     authorizer: Option<Arc<dyn AdminAuthorizer>>,
     /// Exposure policy for [`bind`](Self::bind) (issue #863), or `None` when an outer door already
     /// ran the check — see [`with_exposure_checked`](Self::with_exposure_checked).
@@ -65,6 +70,7 @@ impl AdminApiServer {
             scripts_dir: None,
             authorizer: None,
             local_only: false,
+            reported_admin_port: None,
             exposure: Some(AdminExposurePolicy::default()),
         }
     }
@@ -76,6 +82,22 @@ impl AdminApiServer {
     #[must_use]
     pub fn with_local_only(mut self, local_only: bool) -> Self {
         self.local_only = local_only;
+        self
+    }
+
+    /// Report `port` from `GET /config` instead of the port this server bound (issue #1135).
+    ///
+    /// The port's version of [`with_local_only`](Self::with_local_only), for the same reason: the
+    /// value must be *the operator's configuration*, not "what happened to bind". An embedder that
+    /// fronts the admin API with its own public listener binds the core to an ephemeral loopback
+    /// port, and `/config` would otherwise advertise that private port to Mountebank-compat clients
+    /// which read `options.port` to build their URLs.
+    ///
+    /// Unset — the default, and the CLI's case — keeps reporting the bound port, which is what #879
+    /// made truthful. Setting `0` reports `0`: it is a configured value, not an absence.
+    #[must_use]
+    pub fn with_reported_admin_port(mut self, port: u16) -> Self {
+        self.reported_admin_port = Some(port);
         self
     }
 
@@ -234,7 +256,9 @@ impl AdminApiServer {
                 self.scripts_dir,
                 self.authorizer,
                 crate::admin_api::handlers::system::ConfigSnapshot {
-                    admin_port: local_addr.port(),
+                    admin_port: self
+                        .reported_admin_port
+                        .unwrap_or_else(|| local_addr.port()),
                     local_only: self.local_only,
                 },
                 loop_cancel,
