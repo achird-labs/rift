@@ -141,6 +141,34 @@ not on the address: a real `api_key` satisfies it on any bind, and loopback sati
 `RunningAdminApi`: `local_addr(&self) -> SocketAddr`, `shutdown(&self)`, `join(self) -> anyhow::Result<()>`,
 `wait(&self) -> anyhow::Result<()>` (the non-consuming form of `join`, as above).
 
+#### Computing `addr` the way the CLI does
+
+If your binary parses rift's `Cli`, derive the admin address with `server::admin_bind_addr` rather
+than reading `--host`/`--port` yourself — `--local-only` pins loopback and outranks `--host`, and a
+private copy of that rule can disagree with the exposure check about *which address is being judged*
+(issue #1131):
+
+```rust
+use rift_http_proxy::server::admin_bind_addr;
+
+let addr = admin_bind_addr(&cli)?;          // --local-only pins 127.0.0.1, else --host, on --port
+let running = AdminApiServer::new(addr, manager, cli.api_key.clone())
+    .with_require_admin_auth(cli.require_admin_auth)
+    .with_local_only(cli.local_only)
+    .bind()
+    .await?;
+```
+
+Do not call `check_admin_exposure` yourself here: `bind` already runs it on `addr`, so a hand-rolled
+call in front of it judges the same address twice and logs the warning twice. Thread
+`--require-admin-auth` through `with_require_admin_auth` instead — that is what turns the warning
+into a refusal. (`ServerBuilder::start` *does* check before binding, but only because it has a
+metrics listener it must not have to unwind; an embedder binding the admin plane alone does not.)
+
+| Item | Signature | Purpose |
+|:-----|:----------|:--------|
+| `admin_bind_addr` | `fn admin_bind_addr(cli: &Cli) -> anyhow::Result<SocketAddr>` | The address the admin plane binds under this CLI: `--local-only` pins loopback, otherwise `--host`, on `--port`. The same value the exposure check is handed. `ServerBuilder::start` calls it too, so the rule has one definition. Errors when `--host` is not an IP literal — a DNS name, or an IPv6 address written without brackets. |
+
 `ConfigSource` (from `rift-http-proxy`) is either `File { path, no_parse }` (a single `--configfile`,
 with optional EJS preprocessing) or `Dir(PathBuf)` (a `--datadir` of one-imposter-per-file configs).
 

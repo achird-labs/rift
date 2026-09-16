@@ -11,6 +11,16 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **`server::admin_bind_addr` is public**, so an embedder that composes its own admin listener on
+  top of `ServerBuilder` judges and binds the same address the CLI does (#1131). The rule
+  (`--local-only` pins loopback, otherwise `--host`, on `--port`) was private, so such a binary had
+  to copy it — and a copy can disagree with `check_admin_exposure` about which address is being
+  judged, across binaries, in exactly the way one definition exists to prevent. `ServerBuilder::start`
+  calls it too. A non-literal `--host` now fails with a message naming the flag and the value
+  instead of a bare `invalid socket address syntax`.
+
 ### Fixed
 
 - **An `--rcfile` may now set `apiKey`, instead of dropping the credential with an advisory**
