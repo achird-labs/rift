@@ -21,6 +21,22 @@ record.
   calls it too. A non-literal `--host` now fails with a message naming the flag and the value
   instead of a bare `invalid socket address syntax`.
 
+### Fixed
+
+- **An `--rcfile` may now set `apiKey`, instead of dropping the credential with an advisory**
+  (#1132). `apiKey` was the one Mountebank option the rcfile did not recognise, so a file carrying
+  the admin credential produced `unsupported key 'apiKey' (ignored)` and a server with **no key
+  set**. Ignoring an unknown key is right; ignoring a credential the same way is the one case where
+  that advisory reads as reassurance. The pairing that mattered most was
+  `{"apiKey": "…", "requireAdminAuth": true}`: the file applied the gate, dropped the key, and
+  startup then refused with a message telling the operator to set `--api-key` — from a file that
+  plainly had. Both spellings (`apiKey`, `api_key`) are accepted, the value must be a JSON string or
+  the whole rcfile is refused, an explicit `--api-key`/`MB_APIKEY` still wins, and a blank value is
+  refused at startup exactly as a blank `--api-key` is. A wrong-typed `apiKey` names the key and the
+  type the value had — never the value itself, since an unquoted token is exactly the mistake that
+  refusal catches, and the message reaches stderr and CI output. Every other key still echoes its
+  value.
+
 ### Changed
 
 - **A `--datadir` file must be named `<port>.json` after the port it declares** (#1128). A file named
