@@ -39,6 +39,16 @@ record.
 
 ### Added
 
+- **An embedder can set the port `GET /config` reports**, via
+  `AdminApiServer::with_reported_admin_port` / `ServerBuilder::reported_admin_port` (#1135).
+  `/config` reported `options.port` from the bound listener, which #879 made truthful for the CLI —
+  but a host that fronts the admin API with its own public listener binds the core to an ephemeral
+  loopback port, so `/config` told the operator the admin plane was on `54321` while every client
+  reached it on `2525`, and Mountebank-compat clients that read `options.port` to build URLs got an
+  unreachable address. This is the port's version of the existing `with_local_only`, and for the same
+  reason: the value must be the operator's configuration, not "what happened to bind". Unset — the
+  default, and the CLI's path — still reports the bound port, so #879's behaviour is unchanged.
+
 - **`server::admin_bind_addr` is public**, so an embedder that composes its own admin listener on
   top of `ServerBuilder` judges and binds the same address the CLI does (#1131). The rule
   (`--local-only` pins loopback, otherwise `--host`, on `--port`) was private, so such a binary had

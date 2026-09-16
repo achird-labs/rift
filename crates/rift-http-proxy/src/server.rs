@@ -369,6 +369,7 @@ pub struct ServerBuilder {
     accept_runtimes: Vec<tokio::runtime::Handle>,
     imposter_sources: Vec<Arc<dyn ImposterSource>>,
     admin_authorizer: Option<Arc<dyn AdminAuthorizer>>,
+    reported_admin_port: Option<u16>,
 }
 
 impl ServerBuilder {
@@ -381,6 +382,7 @@ impl ServerBuilder {
             accept_runtimes: Vec::new(),
             imposter_sources: Vec::new(),
             admin_authorizer: None,
+            reported_admin_port: None,
         }
     }
 
@@ -421,6 +423,18 @@ impl ServerBuilder {
         self
     }
 
+    /// Report `port` from `GET /config` instead of the port the admin plane bound (issue #1135).
+    ///
+    /// The builder spelling of
+    /// [`AdminApiServer::with_reported_admin_port`](crate::admin_api::AdminApiServer::with_reported_admin_port),
+    /// for a host that fronts this server with its own public listener and binds the core to an
+    /// ephemeral loopback port. Unset — the default, and the CLI's case — reports the bound port.
+    #[must_use]
+    pub fn reported_admin_port(mut self, port: u16) -> Self {
+        self.reported_admin_port = Some(port);
+        self
+    }
+
     /// Inject a pre-built manager (skipping internal construction, including `--datadir`
     /// write-through and TLS defaults) — the embedding seam.
     #[must_use]
@@ -442,6 +456,7 @@ impl ServerBuilder {
         let cli = self.cli;
         let extra_sources = self.imposter_sources;
         let admin_authorizer = self.admin_authorizer;
+        let reported_admin_port = self.reported_admin_port;
         // Refuse a blank `--api-key` before anything binds (issue #844). Same reasoning as the
         // front-door check below, with a security edge: a blank key enables the auth gate and then
         // authenticates every request, so the admin plane must never reach the accept loop in that
@@ -669,6 +684,9 @@ impl ServerBuilder {
             .with_allow_injection(cli.allow_injection)
             .with_local_only(cli.local_only)
             .with_exposure_checked();
+        if let Some(port) = reported_admin_port {
+            server = server.with_reported_admin_port(port);
+        }
         if let Some(authorizer) = admin_authorizer {
             server = server.with_admin_authorizer(authorizer);
         }

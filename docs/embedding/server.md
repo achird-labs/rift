@@ -30,6 +30,7 @@ let builder = ServerBuilder::from_cli(Cli::parse());
 |:-------|:----------|:--------|
 | `from_cli` | `fn from_cli(cli: Cli) -> Self` | Seed the builder from CLI options (port, host, configfile, datadir, TLS defaults, metrics port, …). |
 | `manager` | `fn manager(self, manager: Arc<ImposterManager>) -> Self` | **The embedding seam** — inject a pre-built `ImposterManager` (e.g. one wired with custom SPI backends) instead of letting the builder construct the default one. |
+| `reported_admin_port` | `fn reported_admin_port(self, port: u16) -> Self` | The port `GET /config` reports, when the admin plane binds somewhere other than where clients reach it (issue #1135). See `AdminApiServer::with_reported_admin_port` below. |
 | `run` | `async fn run(self) -> anyhow::Result<()>` | Load configs, bind, and serve **forever** (returns only on error/shutdown). |
 | `start` | `async fn start(self) -> anyhow::Result<RunningServer>` | Same, but returns a `RunningServer` handle **once bound** — supports ephemeral (`:0`) ports and programmatic shutdown. |
 
@@ -128,6 +129,7 @@ println!("admin bound to {}", running.local_addr());
 | `with_config_source` | `fn with_config_source(self, source: ConfigSource) -> Self` | Retain the load source so `POST /admin/reload` can re-read it. |
 | `with_imposter_sources` | `fn with_imposter_sources(self, sources: Arc<SourceSet>, datadir: Option<PathBuf>) -> Self` | Retain an `--imposters` source set, and the `--datadir` loaded beside it, so `POST /admin/reload` re-reads both and applies them as one set. Source imposters are applied as `Persistence::Ephemeral` and never written to the datadir (issue #1122). `ImposterManager::apply_config` keeps a running imposter in the store it is in: it persists what it creates, and changes to imposters already in the datadir. |
 | `with_allow_injection` | `fn with_allow_injection(self, allow: bool) -> Self` | Enable JavaScript `inject` responses. |
+| `with_reported_admin_port` | `fn with_reported_admin_port(self, port: u16) -> Self` | Report `port` from `GET /config` instead of the port this server bound (issue #1135). For a host that fronts the admin API with its own public listener and binds the core to an ephemeral loopback port — without it, `options.port` advertises the *private* port to Mountebank-compat clients that read it to build URLs. Unset reports the bound port; `0` is a configured `0`, not "unset". `ServerBuilder::reported_admin_port` is the builder spelling. |
 | `with_require_admin_auth` | `fn with_require_admin_auth(self, require: bool) -> Self` | Make `bind` **fail** when this server would be reachable off-host with no `api_key`, instead of warning (issue #863). The embedder spelling of `--require-admin-auth`. |
 | `bind` | `async fn bind(self) -> anyhow::Result<RunningAdminApi>` | Bind and start serving; returns once bound. |
 
