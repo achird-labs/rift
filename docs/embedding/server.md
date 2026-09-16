@@ -141,6 +141,34 @@ not on the address: a real `api_key` satisfies it on any bind, and loopback sati
 `RunningAdminApi`: `local_addr(&self) -> SocketAddr`, `shutdown(&self)`, `join(self) -> anyhow::Result<()>`,
 `wait(&self) -> anyhow::Result<()>` (the non-consuming form of `join`, as above).
 
+#### Computing `addr` the way the CLI does
+
+If your binary parses rift's `Cli`, derive the admin address with `server::admin_bind_addr` rather
+than reading `--host`/`--port` yourself — `--local-only` pins loopback and outranks `--host`, and a
+private copy of that rule can disagree with the exposure check about *which address is being judged*
+(issue #1131):
+
+```rust
+use rift_http_proxy::server::admin_bind_addr;
+
+let addr = admin_bind_addr(&cli)?;          // --local-only pins 127.0.0.1, else --host, on --port
+let running = AdminApiServer::new(addr, manager, cli.api_key.clone())
+    .with_require_admin_auth(cli.require_admin_auth)
+    .with_local_only(cli.local_only)
+    .bind()
+    .await?;
+```
+
+Do not call `check_admin_exposure` yourself here: `bind` already runs it on `addr`, so a hand-rolled
+call in front of it judges the same address twice and logs the warning twice. Thread
+`--require-admin-auth` through `with_require_admin_auth` instead — that is what turns the warning
+into a refusal. (`ServerBuilder::start` *does* check before binding, but only because it has a
+metrics listener it must not have to unwind; an embedder binding the admin plane alone does not.)
+
+| Item | Signature | Purpose |
+|:-----|:----------|:--------|
+| `admin_bind_addr` | `fn admin_bind_addr(cli: &Cli) -> anyhow::Result<SocketAddr>` | The address the admin plane binds under this CLI: `--local-only` pins loopback, otherwise `--host`, on `--port`. The same value the exposure check is handed. `ServerBuilder::start` calls it too, so the rule has one definition. Errors when `--host` is not an IP literal — a DNS name, or an IPv6 address written without brackets. |
+
 `ConfigSource` (from `rift-http-proxy`) is either `File { path, no_parse }` (a single `--configfile`,
 with optional EJS preprocessing) or `Dir(PathBuf)` (a `--datadir` of one-imposter-per-file configs).
 
@@ -208,10 +236,15 @@ imposters. These live in `rift_http_proxy::bootstrap` so an alternative binary k
 | `save_imposters` | `fn save_imposters(host: &str, port: u16, savefile: &Path, remove_proxies: bool) -> anyhow::Result<()>` | Blocking wrapper over `save_imposters_async` for the sync `save` subcommand path. |
 
 Supported rcfile keys: `port`, `host`, `logLevel`/`loglevel`, `allowInjection`/`allow_injection`,
-`localOnly`/`local_only`, `requireAdminAuth`/`require_admin_auth`, `datadir`, `configfile`,
-`noParse`/`no_parse`. Each must have its type — the flags are JSON booleans, `host`, `logLevel`,
-`datadir` and `configfile` are strings, and `port` is an integer from 0 to 65535 — or the whole
-rcfile is refused and nothing is applied.
+`localOnly`/`local_only`, `requireAdminAuth`/`require_admin_auth`, `apiKey`/`api_key`, `datadir`,
+`configfile`, `noParse`/`no_parse`. Each must have its type — the flags are JSON booleans, `host`,
+`logLevel`, `apiKey`, `datadir` and `configfile` are strings, and `port` is an integer from 0 to
+65535 — or the whole rcfile is refused and nothing is applied.
+
+`apiKey` sets the admin credential, like `--api-key`/`MB_APIKEY`, and like every other key it defers
+to an explicitly-given flag (issue #1132). A blank value is refused by `validate_admin_api_key` at
+startup exactly as a blank `--api-key` is — an rcfile is a normal place to keep the credential, so
+keep it readable only by the user the server runs as.
 
 ```rust
 use rift_http_proxy::bootstrap;

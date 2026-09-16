@@ -731,6 +731,153 @@ async fn running_server_admin_failure_is_observable_by_an_embedder() {
     );
 }
 
+// Issue #1132: `apiKey` was the one Mountebank option the rcfile did not recognise, so a file
+// carrying the admin credential produced `unsupported key 'apiKey' (ignored)` and a server with no
+// key. Ignoring an unknown key is right; ignoring a *credential* with the same shrug is not, and
+// `validate_admin_api_key`'s own message already named `apiKey` as a spelling that works.
+#[test]
+fn rcfile_sets_the_api_key_under_both_spellings() {
+    for key in ["apiKey", "api_key"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rcfile = write_rcfile(&dir, &format!(r#"{{"{key}": "s3cr3t"}}"#));
+        let mut parsed = cli(&[]);
+        let unsupported = bootstrap::apply_rcfile_defaults_reporting(&mut parsed, &rcfile)
+            .expect("rcfile applies");
+
+        assert_eq!(
+            parsed.api_key.as_deref(),
+            Some("s3cr3t"),
+            "'{key}' must set the admin credential"
+        );
+        assert!(
+            unsupported.is_empty(),
+            "'{key}' must not be reported as an unsupported key, got {unsupported:?}"
+        );
+    }
+}
+
+// The "flags win" rule every other rcfile key follows. `--api-key` and `MB_APIKEY` land in the same
+// `Option`, so `is_none()` is what defers to both; only the flag is exercised here, because setting
+// the env var would leak across the other tests in this binary.
+#[test]
+fn rcfile_never_overrides_an_explicit_api_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rcfile = write_rcfile(&dir, r#"{"apiKey": "from-file"}"#);
+
+    let mut parsed = cli(&["--api-key", "from-flag"]);
+    bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile).expect("rcfile applies");
+
+    assert_eq!(
+        parsed.api_key.as_deref(),
+        Some("from-flag"),
+        "an explicit --api-key must win over the rcfile"
+    );
+}
+
+// Issue #1114's rule reaches the new key too: a wrong-typed credential refuses the whole file
+// rather than being coerced or dropped. A number is the plausible mistake — an unquoted token.
+//
+// And because that mistake means the value IS the operator's token, the refusal must name the key
+// and the type it had, never the value: this message reaches stderr, any `2>` redirect and CI
+// output. Every other key still echoes its value, which the sibling test above pins.
+#[test]
+fn rcfile_wrong_typed_api_key_is_refused_without_echoing_the_credential() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rcfile = write_rcfile(&dir, r#"{"apiKey": 8675309, "port": 4321}"#);
+    let mut parsed = cli(&[]);
+
+    let err = bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile)
+        .expect_err("a non-string apiKey must be refused, never coerced");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("apiKey"),
+        "the refusal must name the key: {msg}"
+    );
+    assert!(
+        !msg.contains("8675309"),
+        "the refusal must NOT echo the credential, got: {msg}"
+    );
+    assert!(
+        msg.contains("a number"),
+        "the refusal must name the type the value had instead: {msg}"
+    );
+    assert_eq!(parsed.api_key, None, "nothing is applied");
+    assert_eq!(parsed.port, cli(&[]).port, "nothing is applied");
+}
+
+// The redaction is scoped to the credential: every other key must still show the offending value,
+// which is what makes its refusal actionable.
+#[test]
+fn a_wrong_typed_non_secret_key_still_echoes_its_value() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rcfile = write_rcfile(&dir, r#"{"host": 8675309}"#);
+    let err = bootstrap::apply_rcfile_defaults(&mut cli(&[]), &rcfile)
+        .expect_err("a non-string host is refused");
+    assert!(
+        format!("{err:#}").contains("8675309"),
+        "a non-secret key must still show what was wrong, got: {err:#}"
+    );
+}
+
+// A blank credential from a file must fail exactly as a blank `--api-key` does (issue #844): it
+// would enable the auth gate and then authenticate everyone. The rcfile applies it; the existing
+// validator is what refuses it, and this pins that the two compose.
+#[test]
+fn a_blank_rcfile_api_key_is_refused_by_the_validator() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rcfile = write_rcfile(&dir, r#"{"apiKey": "   "}"#);
+    let mut parsed = cli(&[]);
+    bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile)
+        .expect("a blank string is still a string");
+
+    let err = rift_http_proxy::admin_api::validate_admin_api_key(parsed.api_key.as_deref())
+        .expect_err("a blank credential from an rcfile must be refused like a blank --api-key");
+    assert!(
+        format!("{err:#}").contains("blank"),
+        "the refusal must say the key is blank, got: {err:#}"
+    );
+}
+
+// The headline pairing from issue #1132. Before this, the file applied `requireAdminAuth`, dropped
+// the key, and startup then refused at `check_admin_exposure` telling the operator to set
+// `--api-key` — from a file that plainly did set it.
+#[test]
+fn an_rcfile_key_satisfies_require_admin_auth_on_an_exposed_bind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rcfile = write_rcfile(&dir, r#"{"apiKey": "s3cr3t", "requireAdminAuth": true}"#);
+    let mut parsed = cli(&[]);
+    bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile).expect("rcfile applies");
+
+    assert!(parsed.require_admin_auth, "guard: the gate must be on");
+    rift_http_proxy::admin_api::check_admin_exposure(
+        "0.0.0.0:2525".parse().expect("literal"),
+        parsed.api_key.as_deref(),
+        parsed.require_admin_auth.into(),
+    )
+    .expect("the key the rcfile set must satisfy --require-admin-auth on an off-host bind");
+}
+
+// The other half of the same pairing: without the key, the refusal must still happen. This is what
+// makes the test above evidence of the credential arriving rather than of a weakened gate.
+#[test]
+fn require_admin_auth_still_refuses_when_the_rcfile_sets_no_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rcfile = write_rcfile(&dir, r#"{"requireAdminAuth": true}"#);
+    let mut parsed = cli(&[]);
+    bootstrap::apply_rcfile_defaults(&mut parsed, &rcfile).expect("rcfile applies");
+
+    let err = rift_http_proxy::admin_api::check_admin_exposure(
+        "0.0.0.0:2525".parse().expect("literal"),
+        parsed.api_key.as_deref(),
+        parsed.require_admin_auth.into(),
+    )
+    .expect_err("a keyless off-host bind under --require-admin-auth must still be refused");
+    assert!(
+        format!("{err:#}").contains("--api-key"),
+        "the refusal must name the flag an operator would fix, got: {err:#}"
+    );
+}
+
 #[tokio::test]
 async fn running_admin_api_failure_is_delivered_exactly_once() {
     let admin = rift_http_proxy::admin_api::RunningAdminApi::with_accept_task(async {

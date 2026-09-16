@@ -11,6 +11,16 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **`server::admin_bind_addr` is public**, so an embedder that composes its own admin listener on
+  top of `ServerBuilder` judges and binds the same address the CLI does (#1131). The rule
+  (`--local-only` pins loopback, otherwise `--host`, on `--port`) was private, so such a binary had
+  to copy it — and a copy can disagree with `check_admin_exposure` about which address is being
+  judged, across binaries, in exactly the way one definition exists to prevent. `ServerBuilder::start`
+  calls it too. A non-literal `--host` now fails with a message naming the flag and the value
+  instead of a bare `invalid socket address syntax`.
+
 ### Fixed
 
 - **`healthcheck` now applies `--rcfile` before computing what to probe** (#1133). The subcommand
@@ -24,6 +34,20 @@ record.
   - A refused rcfile now refuses the probe, consistent with #1114: a server started with that file
     would not start either, so *unhealthy* is the true answer. Pass the probe the same `--rcfile`
     the server was given.
+
+- **An `--rcfile` may now set `apiKey`, instead of dropping the credential with an advisory**
+  (#1132). `apiKey` was the one Mountebank option the rcfile did not recognise, so a file carrying
+  the admin credential produced `unsupported key 'apiKey' (ignored)` and a server with **no key
+  set**. Ignoring an unknown key is right; ignoring a credential the same way is the one case where
+  that advisory reads as reassurance. The pairing that mattered most was
+  `{"apiKey": "…", "requireAdminAuth": true}`: the file applied the gate, dropped the key, and
+  startup then refused with a message telling the operator to set `--api-key` — from a file that
+  plainly had. Both spellings (`apiKey`, `api_key`) are accepted, the value must be a JSON string or
+  the whole rcfile is refused, an explicit `--api-key`/`MB_APIKEY` still wins, and a blank value is
+  refused at startup exactly as a blank `--api-key` is. A wrong-typed `apiKey` names the key and the
+  type the value had — never the value itself, since an unquoted token is exactly the mistake that
+  refusal catches, and the message reaches stderr and CI output. Every other key still echoes its
+  value.
 
 ### Changed
 
@@ -1292,7 +1316,6 @@ record.
   `false` — so `LocalProxyStore` and every existing implementor are untouched and still compile.
   See [SPI: publishing stubs from the store](docs/embedding/spi.md).
 
-
 - **Microcks is now a benchmark subject — `tests/benchmark/scripts/bench_microcks.py`** (issue #900).
   The stub-growth claim was only ever demonstrated against WireMock, a commercial alternative;
   Microcks is the Apache-2.0, CNCF-incubating one a buyer usually reaches first, and we had no data on
@@ -1618,7 +1641,6 @@ record.
   than a client creating an imposter. **If you were setting `ttlSeconds: 0` at server level**, it
   was never doing what it looked like — set a real TTL, or omit the key for the default.
 
-
 - **Reverse-proxy `*.` host routes matched hosts they should not have.** A wildcard route's host
   check was `host.ends_with("example.com")` after stripping `*.`, which has no label boundary: a
   route for `*.example.com` also matched `evilexample.com` and the bare `example.com`. The first is
@@ -1836,7 +1858,6 @@ record.
   served, so nothing breaks — but they are deprecated and will be **removed in 0.17.0** (#801).
   Read `errors[0]` instead. *(Correction, 2026-08-04: the removal missed the 0.17.0 train and
   ships in 0.18.0 — see the `Removed` entry above.)*
-
 
 ## [0.15.0] - 2026-07-21
 
