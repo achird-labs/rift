@@ -208,10 +208,15 @@ imposters. These live in `rift_http_proxy::bootstrap` so an alternative binary k
 | `save_imposters` | `fn save_imposters(host: &str, port: u16, savefile: &Path, remove_proxies: bool) -> anyhow::Result<()>` | Blocking wrapper over `save_imposters_async` for the sync `save` subcommand path. |
 
 Supported rcfile keys: `port`, `host`, `logLevel`/`loglevel`, `allowInjection`/`allow_injection`,
-`localOnly`/`local_only`, `requireAdminAuth`/`require_admin_auth`, `datadir`, `configfile`,
-`noParse`/`no_parse`. Each must have its type — the flags are JSON booleans, `host`, `logLevel`,
-`datadir` and `configfile` are strings, and `port` is an integer from 0 to 65535 — or the whole
-rcfile is refused and nothing is applied.
+`localOnly`/`local_only`, `requireAdminAuth`/`require_admin_auth`, `apiKey`/`api_key`, `datadir`,
+`configfile`, `noParse`/`no_parse`. Each must have its type — the flags are JSON booleans, `host`,
+`logLevel`, `apiKey`, `datadir` and `configfile` are strings, and `port` is an integer from 0 to
+65535 — or the whole rcfile is refused and nothing is applied.
+
+`apiKey` sets the admin credential, like `--api-key`/`MB_APIKEY`, and like every other key it defers
+to an explicitly-given flag (issue #1132). A blank value is refused by `validate_admin_api_key` at
+startup exactly as a blank `--api-key` is — an rcfile is a normal place to keep the credential, so
+keep it readable only by the user the server runs as.
 
 ```rust
 use rift_http_proxy::bootstrap;
