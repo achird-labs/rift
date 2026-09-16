@@ -170,7 +170,7 @@ Options:
       --allow-injection            Enable JavaScript injection in responses (alias: --allowInjection)
       --local-only                 Only accept connections from localhost (binds both the admin API and /metrics to loopback)
       --require-admin-auth         Refuse to start when the admin API would bind a non-loopback address with no --api-key (default: warn)
-      --loglevel <LEVEL>           Log level: debug, info, warn, error [default: info]
+      --loglevel <LEVEL>           Log level: trace, debug, info, warn, error (an unrecognised value is refused) [default: info]
       --runtime <MODE>             Runtime topology: work-stealing (default) or per-core[=N] (RFC-712; experimental, Linux-first — macOS falls back with a warning, Windows rejects it)
       --runtime-affinity           Pin per-core worker threads to CPU cores (with --runtime per-core; effective on Linux)
       --metrics-port <PORT>        Prometheus metrics port [default: 9090]

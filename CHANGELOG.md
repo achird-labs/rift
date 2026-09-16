@@ -11,6 +11,32 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An unrecognised `--loglevel` and an unparseable `RUST_LOG` are refused instead of silently
+  downgraded** (#1134). Two reads in `main.rs` discarded a failure and fell back to a level nobody
+  chose: the level match's catch-all turned **`trace`** — a real `tracing` level — and any typo alike
+  into `info`, and `EnvFilter::try_from_default_env().unwrap_or_else(…)` could not tell `RUST_LOG`
+  *unset* from `RUST_LOG` *set and invalid*, so an operator's filter was replaced with nothing said.
+  Since #1114 the pair was inconsistent in a way that was hard to explain: a wrong-**typed**
+  `logLevel` in an rcfile refused the whole file, while a wrong-**valued** one started the server at
+  `info`.
+  - `trace` is now accepted; an unrecognised level names the value and lists the accepted ones; a
+    `RUST_LOG` that is set and does not parse (or is not valid UTF-8) is refused. An **unset**
+    `RUST_LOG` remains an absence, not a failure, and `RUST_LOG=` keeps its current meaning.
+    Precedence is unchanged: `RUST_LOG` > `--debug` > `--loglevel`.
+  - An **empty** level (`--loglevel ""`, or `MB_LOGLEVEL=${LOG_LEVEL}` with `LOG_LEVEL` unset — clap
+    prefers a present environment variable over the default even when it is empty) still means "not
+    supplied" and yields `info`. Refusing it would abort deployments that work today to report a
+    typo nobody made.
+  - The rules live in `bootstrap::log_filter` (with `log_filter_with`, which takes the `RUST_LOG`
+    value rather than reading it), so an alternative binary calls them instead of copying them —
+    the same treatment #807 gave the rcfile and pidfile helpers.
+  - **Migration:** a level that was never valid — `--loglevel verbose`, a typo, anything outside the
+    accepted set — used to start the server at `info` and now stops it. If a deployment has been
+    passing one, it has been running at `info` all along; set a real level (or drop the flag) before
+    upgrading.
+
 ### Added
 
 - **`server::admin_bind_addr` is public**, so an embedder that composes its own admin listener on
