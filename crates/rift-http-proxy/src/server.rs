@@ -56,7 +56,7 @@ pub struct Cli {
     #[arg(long, default_value_t = DEFAULT_ADMIN_PORT, env = "MB_PORT")]
     pub port: u16,
 
-    /// Hostname to bind the admin API to
+    /// IP address to bind the admin API to (IPv4, or IPv6 bare `::1` or bracketed `[::1]`)
     #[arg(long, default_value = "0.0.0.0", env = "MB_HOST")]
     pub host: String,
 
@@ -468,11 +468,8 @@ impl ServerBuilder {
         //     the metrics listener, which binds further down;
         //   * the `SocketAddr` parse itself — a malformed `--host` used to fail *after* the metrics
         //     server was already up.
-        // Owned rather than borrowed: `admin_bind_host` takes the whole `Cli`, and holding that
-        // borrow across the rest of `start()` would block moving `cli.scripts_dir` / `cli.datadir`
-        // out below. The host is still needed on its own further down — the metrics log line and
-        // the intercept address and options.
-        let host = admin_bind_host(&cli).to_string();
+        // The `--intercept-port` listener inherits this address's IP further down, so the host is
+        // parsed exactly once (issue #1137).
         let admin_addr = admin_bind_addr(&cli)?;
         crate::admin_api::check_admin_exposure(
             admin_addr,
@@ -505,10 +502,8 @@ impl ServerBuilder {
         if cli.require_admin_auth
             && let Some(intercept_port) = cli.intercept_port
         {
-            let intercept_addr: SocketAddr =
-                format!("{host}:{intercept_port}").parse::<SocketAddr>()?;
             crate::admin_api::check_intercept_exposure(
-                intercept_addr,
+                SocketAddr::new(admin_addr.ip(), intercept_port),
                 cli_intercept_auth.is_some(),
                 crate::admin_api::AdminExposurePolicy::Refuse,
             )?;
@@ -650,10 +645,6 @@ impl ServerBuilder {
             "Rift Admin API (Mountebank-compatible) starting on http://{}",
             admin_addr
         );
-        info!(
-            "Metrics available at http://{}:{}/metrics",
-            host, cli.metrics_port
-        );
 
         if cli.allow_injection {
             info!("JavaScript injection enabled");
@@ -720,7 +711,7 @@ impl ServerBuilder {
         let start_options = intercept_block.or_else(|| {
             cli.intercept_port
                 .map(|intercept_port| InterceptStartOptions {
-                    host: Some(host.clone()),
+                    host: Some(admin_addr.ip().to_string()),
                     port: Some(intercept_port),
                     ca_cert_path: cli
                         .intercept_ca_cert
@@ -916,22 +907,22 @@ fn admin_bind_host(cli: &Cli) -> &str {
 /// must judge and bind the *same* address (issue #1131). `start` calls it too, so the rule still
 /// has one definition — a copy of it in another binary is what this exists to make unnecessary.
 ///
+/// `--host` may be an IPv4 literal or an IPv6 literal, bare (`::1`) or bracketed (`[::1]`).
+///
 /// # Errors
-/// If `host:port` is not a literal socket address — a DNS name, or an IPv6 address written without
-/// brackets. Name resolution is deliberately not attempted: the exposure check classifies a literal
-/// address, and a name that resolves differently there than at bind time is the disagreement this
-/// seam removes.
+/// If `--host` is not an IP literal (a DNS name, or `[1.2.3.4]`). Name resolution is deliberately not
+/// attempted: the exposure check classifies a literal address, and a name that resolves differently
+/// there than at bind time is the disagreement this seam removes.
 pub fn admin_bind_addr(cli: &Cli) -> anyhow::Result<SocketAddr> {
     let host = admin_bind_host(cli);
-    format!("{host}:{}", cli.port)
-        .parse::<SocketAddr>()
-        .with_context(|| {
-            format!(
-                "--host {host} is not a literal address, so the admin plane has no address to bind \
-                 on port {}. Use an IP literal (`127.0.0.1`, `0.0.0.0`, or a bracketed `[::1]`).",
-                cli.port
-            )
-        })
+    rift_mock_core::proxy::bind_addr(host, cli.port).ok_or_else(|| {
+        anyhow::anyhow!(
+            "--host {host} is not an IP literal, so the admin plane has no address to bind on port \
+             {}. Use an IPv4 literal (`127.0.0.1`, `0.0.0.0`) or an IPv6 literal (`::1`, `[::]`); \
+             a DNS name is not resolved here.",
+            cli.port
+        )
+    })
 }
 
 /// Bind the metrics listener (`:0` is fine) and start serving, returning a handle that reports

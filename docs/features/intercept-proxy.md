@@ -210,6 +210,8 @@ DELETE /intercept   → 204 always (idempotent); stops the listener and drops it
   signals every tunnel already open: a request in flight runs to completion, and an idle tunnel
   closes immediately rather than lingering until its header-read timeout. The call returns once the
   accept loop has stopped; it does not block on the last in-flight request.
+- `host` is an IP literal: IPv4, or IPv6 written bare (`"::1"`) or bracketed (`"[::1]"`). A DNS
+  name is refused with a `400`.
 - The default bind host is `127.0.0.1` — **not** the admin server's host. A containerized,
   connect-transport caller that needs the proxy reachable off-box must pass `"host": "0.0.0.0"`
   explicitly.

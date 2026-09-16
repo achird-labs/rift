@@ -142,7 +142,7 @@ ENV MB_PORT=2525
 # Admin API port (--port)
 
 ENV MB_HOST=0.0.0.0
-# Hostname to bind admin API (--host)
+# IP address to bind the admin API to (--host; IPv4, or IPv6 `::1` / `[::1]`)
 
 ENV MB_LOGLEVEL=info
 # Log level: debug, info, warn, error (--loglevel)
@@ -204,7 +204,7 @@ ENV RIFT_METRICS_PORT=9090
 #
 # CLI Reference (all flags work as environment variables with MB_ or RIFT_ prefix):
 #   --port <PORT>           Admin API port [env: MB_PORT] [default: 2525]
-#   --host <HOST>           Bind hostname [env: MB_HOST] [default: 0.0.0.0]
+#   --host <HOST>           Admin API bind IP address [env: MB_HOST] [default: 0.0.0.0]
 #   --configfile <FILE>     Load imposters from file [env: MB_CONFIGFILE]
 #   --datadir <DIR>         Persistent storage directory [env: MB_DATADIR]
 #   --allow-injection       Enable JS injection [env: MB_ALLOW_INJECTION]

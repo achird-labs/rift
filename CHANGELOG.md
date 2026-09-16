@@ -13,6 +13,23 @@ record.
 
 ### Fixed
 
+- **A bare IPv6 bind host works on every door** (#1137). The admin plane, the intercept listener and
+  the C-ABI built their bind address by parsing `"{host}:{port}"`, and `"::1:2525"` reads the port as
+  one more hextet — so `--host ::1` (or `MB_HOST=::1`) could never start, and the refusal wrongly
+  called `::1` "not a literal address". Every door now parses the host to an IP and attaches the port,
+  accepting IPv4 and IPv6 in both spellings (`::1`, `[::1]`):
+  - `--host` / `MB_HOST` / rcfile `host`, including with `--intercept-port` under
+    `--require-admin-auth`, which failed with a bare `invalid socket address syntax`;
+  - `POST /intercept` `host`, a config-file `intercept.host`, and `rift_start_intercept`;
+  - an SDK's `serve({host})` (`rift_serve_admin`), for the admin and metrics addresses;
+  - `rift save --host ::1`, which built the unparseable URL `http://::1:2525/…`;
+  - an imposter's `host`, which had the mirror-image defect: `::1` worked and `[::1]` failed with a
+    DNS lookup error. A DNS name (`localhost`) still resolves there, as in Mountebank, and is now
+    looked up without blocking the async runtime.
+  - A scoped link-local literal (`[fe80::1%2]`) keeps its scope id on every door. The startup log no
+    longer prints a malformed metrics URL built from `--host`; the metrics listener already logs the
+    address it bound.
+
 - **An unrecognised `--loglevel` and an unparseable `RUST_LOG` are refused instead of silently
   downgraded** (#1134). Two reads in `main.rs` discarded a failure and fell back to a level nobody
   chose: the level match's catch-all turned **`trace`** — a real `tracing` level — and any typo alike

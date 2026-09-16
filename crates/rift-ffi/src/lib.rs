@@ -1916,17 +1916,12 @@ async fn build_admin_plane_inner(
     }
 
     // Parse both addresses up front, before any side effects (imposter creation / binding).
-    let addr: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .with_context(|| format!("invalid host/port `{host}:{port}`"))?;
-    let metrics_addr: Option<SocketAddr> = match opts.metrics_port {
-        Some(mp) => Some(
-            format!("{host}:{mp}")
-                .parse()
-                .with_context(|| format!("invalid metrics addr `{host}:{mp}`"))?,
-        ),
-        None => None,
-    };
+    let addr = rift_mock_core::proxy::bind_addr(host, port).with_context(|| {
+        format!(
+            "host `{host}` is not an IP literal (IPv4, or IPv6 bare `::1` or bracketed `[::1]`)"
+        )
+    })?;
+    let metrics_addr = opts.metrics_port.map(|mp| SocketAddr::new(addr.ip(), mp));
 
     // Issue #863: judge the resolved admin address before any side effect, for the same reason the
     // blank-key check above is here — this is the one boundary every SDK reaches the admin plane

@@ -169,7 +169,7 @@ metrics listener it must not have to unwind; an embedder binding the admin plane
 
 | Item | Signature | Purpose |
 |:-----|:----------|:--------|
-| `admin_bind_addr` | `fn admin_bind_addr(cli: &Cli) -> anyhow::Result<SocketAddr>` | The address the admin plane binds under this CLI: `--local-only` pins loopback, otherwise `--host`, on `--port`. The same value the exposure check is handed. `ServerBuilder::start` calls it too, so the rule has one definition. Errors when `--host` is not an IP literal — a DNS name, or an IPv6 address written without brackets. |
+| `admin_bind_addr` | `fn admin_bind_addr(cli: &Cli) -> anyhow::Result<SocketAddr>` | The address the admin plane binds under this CLI: `--local-only` pins loopback, otherwise `--host`, on `--port`. The same value the exposure check is handed. `ServerBuilder::start` calls it too, so the rule has one definition. Accepts an IPv4 literal or an IPv6 literal, bare (`::1`) or bracketed (`[::1]`); errors when `--host` is not an IP literal (a DNS name is not resolved). |
 
 `ConfigSource` (from `rift-http-proxy`) is either `File { path, no_parse }` (a single `--configfile`,
 with optional EJS preprocessing) or `Dir(PathBuf)` (a `--datadir` of one-imposter-per-file configs).

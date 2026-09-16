@@ -162,7 +162,7 @@ rift [OPTIONS]
 
 Options:
       --port <PORT>                Admin API port [default: 2525]
-      --host <HOST>                Bind hostname [default: 0.0.0.0]
+      --host <HOST>                IP address to bind the admin API to (IPv4, or IPv6 bare `::1` or bracketed `[::1]`) [default: 0.0.0.0]
       --configfile <FILE>          Load imposters from a JSON/YAML file on startup (sugar for --imposters file:<FILE>)
       --imposters <URI[,URI...]>   Load imposters from one or more source URIs: file:<path>, a bare path, or https://… (see Imposter Sources below)
       --datadir <DIR>              Directory for persistent imposter storage
@@ -376,7 +376,7 @@ Environment variables override CLI defaults:
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `MB_PORT` | Admin API port | `2525` |
-| `MB_HOST` | Bind hostname | `0.0.0.0` |
+| `MB_HOST` | Admin API bind IP address (IPv4, or IPv6 `::1` / `[::1]`) | `0.0.0.0` |
 | `MB_CONFIGFILE` | Imposter config file | |
 | `MB_DATADIR` | Persistent storage directory | |
 | `MB_ALLOW_INJECTION` | Enable injection (`true`/`false`) | `false` |
