@@ -167,6 +167,19 @@ For a simple random range with no JavaScript, use the range form instead:
 }
 ```
 
+### Field reference
+
+| Block | Field | Default | Notes |
+|:------|:------|:--------|:------|
+| `latency` | `probability` | `1.0` | Firing chance, `0.0`–`1.0`. |
+| `latency` | `ms` | — | Fixed delay. When set, it is used instead of `minMs`/`maxMs`. |
+| `latency` | `minMs` / `maxMs` | `0` | Random delay range, in milliseconds. |
+| `error` | `probability` | `1.0` | Firing chance, `0.0`–`1.0`. |
+| `error` | `status` | `503` | Status of the injected response. |
+| `error` | `body` | none | A string; JSON must be written as an escaped string, as above. |
+| `error` | `headers` | none | Name to **string** value. Each header may be named only once, compared case-insensitively — `{"Retry-After": "1", "retry-after": "2"}` is rejected when the imposter is created rather than sending the header twice. |
+| `tcp` | string or `{probability, type}` | — | See [TCP Faults](#tcp-faults). |
+
 ### Combined Faults
 
 Apply both latency and errors:
@@ -194,7 +207,8 @@ Apply both latency and errors:
 
 ### TCP Faults
 
-Simulate network-level failures:
+Simulate network-level failures. Unlike a script, none of `_rift.fault` needs
+`--allowInjection` — it is data, not code.
 
 ```json
 {
@@ -343,6 +357,7 @@ evaluated. If you want the top-level transport fault, the response must be a bar
 
 ## Scripted Faults
 
+Scripted faults need `--allowInjection`: a `_rift.script` is gated the same way as `inject`.
 For dynamic fault injection based on request data or state, use the scripting feature. Full
 reference (the unified `ctx` object, result constructors, and what runs where) lives on the
 [Scripting](./scripting.md#ctx-api) page; this section just shows it applied to fault injection.
@@ -388,7 +403,13 @@ http(503, #{ error: "Service unavailable" })
 
 // Inject latency
 delay(500)
+
+// Reset the connection (same carrier as a TCP fault)
+reset()
 ```
+
+A script-decided fault is counted in the same Prometheus families as a `_rift.fault` one, with
+`source="script"` — see [Metrics](./metrics.md).
 
 ---
 

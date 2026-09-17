@@ -15,13 +15,20 @@ an imposter in a file and reloading no longer tears every imposter down.
 
 ## Requirements & behavior
 
-- Rift must have been started with a config source: `--configfile <file>` or `--datadir <dir>`.
-  Without one, reload is a **no-op** that returns `200`.
+- Rift must have been started with a config source: `--configfile <file>`,
+  `--imposters <uri>[,<uri>...]` (see [imposter sources](../configuration/cli.md#reload-and-etag)),
+  or `--datadir <dir>`. Without one, reload is a **no-op** that returns `200` with
+  `{"message": "No config source configured; nothing to reload"}`.
+- When every `--imposters` source reports it is unchanged (an `http(s):` source answering
+  `304 Not Modified`) and there is no `--datadir`, the reload returns `200` without touching
+  anything; in that body `created`/`replaced`/`stubPatched`/`deleted` are the number `0`, not
+  arrays.
 - The new config is **validated in full before** any running imposter is mutated. If it fails to
   parse or has duplicate ports / unsupported protocols, the running imposters are left untouched and
   the call errors. An imposter with no port, or `port: 0`, is auto-assigned and never counts as a
   duplicate. It is never diffed either: each reload deletes and re-creates it on a fresh port, so its
-  runtime state resets, and a failure to create it is reported under port `0`. It is created after
+  runtime state resets, and a failure to create it is reported as `auto-assign: <error>` rather
+  than under a port. It is created after
   every imposter with an explicit port, so the fresh port is never one an explicit imposter in the
   config is serving.
 - The reload is **incremental** (issue #319): each port is diffed and only the delta is applied.
@@ -64,9 +71,11 @@ keeps its own imposters:
 - A port declared by both the config file and a file in the data directory **refuses the reload**
   with a `500`, and the running imposters are left unchanged. Remove one of the two declarations.
 - Every file in the data directory must load. A malformed file, one that declares no `port`, or one
-  not named `<port>.json` after its port refuses the reload with a `500` that names it, and a file
-  that uses a scripting feature refuses it unless `--allowInjection` is set.
+  not named `<port>.json` after its port refuses the reload with a `500` that names it.
   Startup skips such a file and names it in the log instead.
+- An imposter from either store that uses a scripting feature (`inject`, `decorate`,
+  `shellTransform`, ...) refuses the whole reload with a `400` (`invalid injection`) unless Rift was
+  started with `--allowInjection`, again before any running imposter is touched.
 - A data directory has no change marker, so a reload with one always runs the diff, even when every
   config source reports it is unchanged.
 
@@ -127,13 +136,16 @@ response says so explicitly (the field is absent otherwise):
 Change intercept rules at runtime with `POST`/`DELETE /intercept/rules`, or restart to re-read the
 block.
 
+A [`routes` block](front-door.md) is likewise applied at startup only, but reload does **not** warn
+about it: an edited route table is silently left as it was until the next restart.
+
 If some ports apply and others fail, the call returns `500` and reports both sides — the ports that
 did apply and the ones that failed:
 
 ```json
 {
-  "errors": [{ "code": "500", "message": "Reload partially failed: ..." }],
-  "failed": ["4545: ..."],
+  "errors": [{ "code": "500", "type": "internal error", "message": "Reload partially failed: ..." }],
+  "failed": ["4545: ...", "auto-assign: ..."],
   "created": [],
   "replaced": [],
   "stubPatched": [],

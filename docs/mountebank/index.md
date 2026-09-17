@@ -39,21 +39,23 @@ A **stub** defines how to respond to matching requests:
 ### Predicates
 
 **Predicates** define request matching criteria:
-- `equals` - Exact match
-- `contains` - Partial match
+- `equals`, `deepEquals` - Exact match
+- `contains`, `startsWith`, `endsWith` - Partial match
 - `matches` - Regex match
 - `exists` - Field existence check
-- `jsonpath` - JSON path matching
-- `xpath` - XML path matching
+- `inject` - JavaScript function (requires `--allowInjection`)
+- `jsonpath`, `xpath` - Selectors that scope any of the above to part of a JSON or XML body
 - `and`, `or`, `not` - Logical combinations
 
 ### Behaviors
 
 **Behaviors** modify responses before sending:
 - `wait` - Add latency
-- `decorate` - Transform response with JavaScript
+- `repeat` - Serve a response several times before moving to the next
 - `copy` - Copy request values to response
-- `lookup` - Look up data from external sources
+- `lookup` - Look up a row in a CSV file
+- `decorate` - Transform response with JavaScript
+- `shellTransform` - Pipe the response through a shell command
 
 ---
 

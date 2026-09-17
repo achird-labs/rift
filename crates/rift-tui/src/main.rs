@@ -1,4 +1,4 @@
-//! Rift TUI - Interactive Terminal User Interface for Rift HTTP Proxy
+//! Rift TUI - Interactive Terminal User Interface for Rift
 //!
 //! # Usage
 //!
@@ -19,7 +19,7 @@ use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(name = "rift-tui")]
-#[command(author, version, about = "Interactive TUI for Rift HTTP Proxy")]
+#[command(author, version, about = "Interactive TUI for Rift")]
 struct Args {
     /// Admin API URL
     #[arg(

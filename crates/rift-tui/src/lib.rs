@@ -1,4 +1,4 @@
-//! Rift TUI - Interactive Terminal User Interface for Rift HTTP Proxy
+//! Rift TUI - Interactive Terminal User Interface for Rift
 //!
 //! This crate provides a full-featured TUI for managing imposters, stubs, and
 //! viewing metrics through the Rift Admin API.

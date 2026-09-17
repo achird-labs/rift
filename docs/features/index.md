@@ -27,8 +27,9 @@ Rift provides advanced features for service virtualization and chaos engineering
 
 - **Fault Injection** - Probabilistic latency, error, and TCP fault injection
 - **Scripting** - Rhai and JavaScript engines for dynamic behavior
+- **Response Templates** - Date tokens and the `_rift.templated` `{% raw %}{{ }}{% endraw %}` function grammar
 - **Scenarios (FSM)** - Stateful stubs as declarative state machines
-- **Flow State** - Per-flow key/value store with InMemory or Redis backends
+- **Flow State** - Per-flow key/value store with InMemory or Redis backends, written by scripts or declaratively with `_rift.stateOps`
 - **Correlated Isolation (Spaces)** - Per-flow stub and state partitioning
 - **Stub Analysis** - Overlap detection and conflict warnings
 - **Debug Mode** - Request matching diagnostics with `X-Rift-Debug` header
@@ -59,6 +60,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 | JavaScript Injection | ✅ | — |
 | Probabilistic Faults | Via injection | ✅ `_rift.fault` |
 | Rhai/JS Scripting | — | ✅ `_rift.script` |
+| Response Templates | `${request.*}` | ✅ `{% raw %}{{NOW}}{% endraw %}`, `_rift.templated` |
 | Scenarios (FSM) | Via injection | ✅ stub `scenarioName` |
 | Flow State | Via injection | ✅ `_rift.flowState` |
 | Correlated Isolation | — | ✅ stub `space` |
@@ -85,7 +87,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 - [Scenarios (FSM)]({{ site.baseurl }}/features/scenarios/) - Stateful stubs with declarative state machines
 - [Correlated Isolation (Spaces)]({{ site.baseurl }}/features/spaces/) - Per-flow stub and state partitioning
 - [Flow State]({{ site.baseurl }}/features/flow-state/) - Per-flow key/value store for stateful mocks
-- [Date Templates]({{ site.baseurl }}/features/date-templates/) - `{{NOW}}` / `{{DAYS±N}}` / `{{MONTHS±N}}` in responses
+- [Response Templates]({{ site.baseurl }}/features/date-templates/) - date tokens and the `_rift.templated` `{% raw %}{{ }}{% endraw %}` function grammar
 - [Stub-by-ID]({{ site.baseurl }}/features/stub-by-id/) - Address stubs by stable id
 - [Single-Port Gateway]({{ site.baseurl }}/features/gateway/) - Reach every imposter through the admin port
 - [Front Door]({{ site.baseurl }}/features/front-door/) - One listener routing to many imposters by host, path, header or method
@@ -97,3 +99,9 @@ Rift provides advanced features for service virtualization and chaos engineering
 - [Metrics]({{ site.baseurl }}/features/metrics/) - Prometheus monitoring
 - [Configuration Linting]({{ site.baseurl }}/features/linting/) - Validate imposter configs before loading
 - [Terminal UI]({{ site.baseurl }}/features/tui/) - Interactive imposter management
+
+Documented elsewhere:
+
+- [Outbound TLS trust]({{ site.baseurl }}/features/tls/#trusting-a-private-ca) - `--upstream-ca-file`
+- [Imposter Sources]({{ site.baseurl }}/configuration/cli/#imposter-sources) - `--imposters` URIs and merging
+- [Embedding]({{ site.baseurl }}/embedding/) - Rust API and C ABI

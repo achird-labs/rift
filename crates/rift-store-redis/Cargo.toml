@@ -9,7 +9,7 @@ homepage.workspace = true
 rust-version.workspace = true
 
 description = "Redis-backed flow-state store for Rift, registered through the FlowStoreBackendFactory seam."
-readme = "../../README.md"
+readme = "README.md"
 
 [lints]
 workspace = true

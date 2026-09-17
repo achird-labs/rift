@@ -9,7 +9,7 @@ homepage.workspace = true
 rust-version.workspace = true
 
 # Crate metadata
-description = "Rift: high-performance HTTP chaos engineering proxy with Lua/Rhai/JavaScript scripting for fault injection."
+description = "Rift: a high-performance, Mountebank-compatible HTTP/HTTPS mock server and fault-injection proxy, with Rhai and JavaScript scripting."
 readme = "../../README.md"
 keywords = ["proxy", "http", "chaos", "fault-injection", "kubernetes"]
 categories = ["network-programming", "web-programming::http-server", "development-tools::testing"]

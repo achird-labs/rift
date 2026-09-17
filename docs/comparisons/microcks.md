@@ -26,12 +26,12 @@ so it cannot be relicensed out from under you.
 |:--|:--|:--|
 | Implementation | Java / JVM (Spring Boot) | Rust |
 | Governance | CNCF Incubating, Apache-2.0 | Apache-2.0, single maintainer |
-| Maturity | Mature, CNCF-backed, named enterprise users | **Beta** (v0.16.x) |
-| Authoring model | **Spec-driven** — OpenAPI, AsyncAPI, Postman, gRPC, GraphQL, SoapUI | **Stub-driven** — Mountebank `imposters.json` + native YAML |
+| Maturity | Mature, CNCF-backed, named enterprise users | **Beta** (v0.17) |
+| Authoring model | **Spec-driven** — OpenAPI, AsyncAPI, Postman, gRPC, GraphQL, SoapUI | **Stub-driven** — Mountebank `imposters.json` (JSON or YAML) + `_rift` extensions |
 | Throughput at 2 stubs | 16,192 RPS | 347,604 RPS |
 | Throughput at 310 stubs | 6,420 RPS (**−60%**) | 338,404 RPS (**−3%**) |
 | p99 at 310 stubs | 238 ms | 2.4 ms |
-| Protocols | HTTP, AsyncAPI, Kafka, MQTT, AMQP, WebSocket, gRPC, GraphQL | **HTTP/HTTPS only** |
+| Protocols | HTTP, AsyncAPI, Kafka, MQTT, AMQP, WebSocket, gRPC, GraphQL | **HTTP/HTTPS only** (HTTP/1.1, HTTP/2; WebSocket passthrough on the intercept proxy, no WebSocket mocking) |
 | Contract testing | Yes — validates a real implementation against the spec | No |
 | In-process embedding | No (server, or Testcontainers) | Java, Node, Go, Scala 3 |
 | Web UI | Yes | No (TUI + admin API) |
@@ -162,7 +162,9 @@ X" and "my service does X". Rift has `rift-verify` (generate requests from your 
 ### Protocols beyond HTTP
 
 AsyncAPI, Kafka, MQTT, AMQP, WebSocket, Google Pub/Sub, gRPC and GraphQL. Rift is **HTTP/HTTPS
-only**. If you need to mock an event-driven system, Rift cannot do it at any speed.
+only** — it speaks HTTP/2 and relays WebSocket upgrades through its intercept proxy, but it cannot
+mock a WebSocket, a gRPC service or a broker. If you need to mock an event-driven system, Rift
+cannot do it at any speed.
 
 ### Governance and longevity
 
@@ -194,8 +196,8 @@ constructor argument.
 
 ### Mocking dependencies you cannot repoint
 
-Rift can act as a **TLS-terminating forward proxy** and match intercepted HTTPS traffic with the
-ordinary predicate engine, plus a **front door** that routes many imposters off the `Host` header.
+Rift can act as a **TLS-terminating forward proxy** and match intercepted HTTPS traffic (HTTP/1.1
+or HTTP/2) with the ordinary predicate engine, plus a **front door** that routes many imposters off the `Host` header.
 That covers the vendor SDK with a compiled-in URL and no base-URL setter. Microcks expects you to
 point your client at its mock endpoint.
 

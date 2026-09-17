@@ -53,13 +53,18 @@ spec:
 Standalone deployment without containers:
 
 ```bash
-# Download
-curl -L https://github.com/achird-labs/rift/releases/latest/download/rift-http-proxy-linux-x86_64 -o rift
+# Download (Linux x86_64; see Getting Started for the other platform triples)
+VERSION=v0.17.0
+TARGET=x86_64-unknown-linux-gnu
+curl -LO https://github.com/achird-labs/rift/releases/download/$VERSION/rift-$VERSION-$TARGET.tar.gz
+tar -xzf rift-$VERSION-$TARGET.tar.gz
 
 # Run
-chmod +x rift
-./rift --configfile imposters.json
+./rift-$VERSION-$TARGET/bin/rift --configfile imposters.json
 ```
+
+The archive's `bin/` also holds `rift-lint`, `rift-tui` and `rift-verify`. See
+[Getting Started]({{ site.baseurl }}/getting-started/#download-binary) for every platform.
 
 ---
 
@@ -95,19 +100,23 @@ One Rift per service for isolated fault injection:
 └─────────────────────────────┘
 ```
 
-### API Gateway Pattern
+### Single Entry Point (Front Door)
 
-Rift as a reverse proxy routing to multiple services:
+One listener serving every imposter, routed by host, path, header or method
+(`--front-door`). An imposter behind it can answer itself or forward with a `proxy` response:
 
 ```
-                    ┌─────────────┐
-┌─────────┐        │    Rift     │        ┌─────────┐
-│ Client  │───────▶│  (gateway)  │───────▶│Service A│
-└─────────┘        │             │        └─────────┘
-                   │             │        ┌─────────┐
-                   │             │───────▶│Service B│
-                   └─────────────┘        └─────────┘
+                    ┌──────────────┐        ┌────────────┐
+┌─────────┐        │  Rift        │───────▶│ imposter A │
+│ Client  │───────▶│ (front door) │        └────────────┘
+└─────────┘        │              │        ┌────────────┐     ┌──────────┐
+                   │              │───────▶│ imposter B │────▶│ upstream │
+                   └──────────────┘        └────────────┘     └──────────┘
 ```
+
+See [Front Door]({{ site.baseurl }}/features/front-door/). Without it, the admin port's
+`/__rift/<port>/…` gateway reaches any imposter through one published port — see
+[Gateway]({{ site.baseurl }}/features/gateway/).
 
 ---
 
@@ -169,21 +178,21 @@ belongs to which direction.
 
 ## Environment Configuration
 
-### Required Settings
+No setting is required; every one has a default.
 
 | Setting | Description | Default |
 |:--------|:------------|:--------|
 | `MB_PORT` | Admin API port | `2525` |
-
-### Optional Settings
-
-| Setting | Description | Default |
-|:--------|:------------|:--------|
-| `MB_ALLOW_INJECTION` | Enable JavaScript | `false` |
-| `RUST_LOG` | Log level | `info` |
+| `MB_APIKEY` | Admin API key; strongly recommended whenever the admin port is reachable off-host | |
+| `RIFT_REQUIRE_ADMIN_AUTH` | Refuse to start with a keyless, non-loopback admin API | `false` |
+| `MB_ALLOW_INJECTION` | Enable JavaScript injection and scripts | `false` |
+| `MB_LOGLEVEL` | Log level (`trace`/`debug`/`info`/`warn`/`error`) | `info` |
+| `RUST_LOG` | Full `tracing` filter; overrides `MB_LOGLEVEL` when set | unset |
 | `RIFT_METRICS_PORT` | Metrics port | `9090` |
 | `RIFT_UPSTREAM_CA_FILE` | PEM CA file trusted for outbound TLS — proxy stubs and `--configfile` URLs. Appended to the image's trust store | |
 | `RIFT_UPSTREAM_TLS_SKIP_VERIFY` | Skip outbound certificate verification (development only) | `false` |
+
+The full list is in the [CLI Reference]({{ site.baseurl }}/configuration/cli/#environment-variables).
 
 ---
 
@@ -214,8 +223,13 @@ belongs to which direction.
 ### Admin API
 
 ```bash
-curl http://localhost:2525/
+curl http://localhost:2525/health
+# {"status":"ok"}
 ```
+
+In a container, `rift healthcheck` makes the same probe without needing `curl`. With `--api-key`
+set, admin paths (this one included) answer `401` without the key; probe the metrics endpoint
+instead.
 
 ### Metrics Endpoint
 
@@ -228,14 +242,14 @@ curl http://localhost:9090/metrics
 ```yaml
 livenessProbe:
   httpGet:
-    path: /
+    path: /health
     port: 2525
   initialDelaySeconds: 5
   periodSeconds: 10
 
 readinessProbe:
   httpGet:
-    path: /
+    path: /health
     port: 2525
   initialDelaySeconds: 5
   periodSeconds: 5

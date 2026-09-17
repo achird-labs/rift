@@ -35,10 +35,9 @@ curl -H "X-Rift-Debug: true" http://localhost:4545/api/users
 
 ### Header Values
 
-The debug mode accepts:
-- `X-Rift-Debug: true` (case-insensitive)
-- `X-Rift-Debug: 1`
-- `x-rift-debug: true` (lowercase)
+Debug mode is on when the header's (first) value is `true`, compared case-insensitively, or `1`.
+The header name itself is matched case-insensitively. Any other value (`yes`, `on`, `0`) sends the
+request down the normal path.
 
 ---
 
@@ -84,7 +83,9 @@ The debug mode accepts:
 
 ### When No Stub Matches
 
-When no stub predicates match the request, the response includes all configured stubs for inspection:
+When no stub predicates match the request, the response includes all configured stubs for inspection.
+`reason` is `No stub predicates matched the request`, or `No stubs configured for this imposter`
+when the imposter has none:
 
 ```json
 {
@@ -146,7 +147,7 @@ When no stub predicates match the request, the response includes all configured 
 | `method` | string | HTTP method (GET, POST, etc.) |
 | `path` | string | Request path |
 | `query` | string | Query string (if present) |
-| `headers` | object | Request headers (excluding X-Rift-Debug) |
+| `headers` | object | Request headers (excluding X-Rift-Debug), one string per name — a repeated header shows its first value |
 | `body` | string | Request body (if present) |
 
 ### Imposter Object
@@ -180,10 +181,13 @@ When no stub predicates match the request, the response includes all configured 
 
 | Field | Type | Description |
 |:------|:-----|:------------|
-| `responseType` | string | `is`, `proxy`, `inject`, `fault`, or `_rift` |
+| `responseType` | string | `is`, `proxy`, `inject`, `fault`, or `_rift` (a script-only `_rift` response) |
 | `statusCode` | number | HTTP status code (for `is` responses) |
-| `headers` | object | Response headers (for `is` responses) |
-| `bodyPreview` | string | First 500 characters of the body |
+| `headers` | object | Response headers (for `is` responses); a multi-valued header is joined with `, ` |
+| `bodyPreview` | string | For `is`, the first 500 characters of the body (a JSON body is serialized first). For the other types, a one-line summary: `Proxy to: <url>`, `JavaScript inject: <first 50 chars>`, `Fault: <name>`, or for `_rift` one of `Rift script response`, `Rift fault injection`, `Rift extension response` |
+
+The preview is of the response the stub would serve **next** — it peeks at the response cycle
+without advancing it.
 
 ---
 
@@ -276,6 +280,8 @@ with `Content-Type: application/json`:
 | Situation | Status | Extra header | Body |
 |:----------|:-------|:-------------|:-----|
 | The matching run panicked | `500` | — | `{"errors":[{"code":"...","message":"Debug matching failed"}]}` |
+| A predicate `inject` threw | `400` | — | `invalid predicate injection`, as on the normal path |
+| A predicate `inject` missed its own deadline | `504` | `x-rift-script-timeout: true` | `predicate injection timeout`, as on the normal path |
 | The matching run exceeded `_rift.scriptEngine.timeoutMs` | `504` | `x-rift-script-timeout: true` | `{"errors":[{"code":"...","message":"Debug matching timed out"}]}` |
 
 The timeout answered `500` in earlier releases. It is now a `504`, consistent with every other script

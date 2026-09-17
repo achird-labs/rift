@@ -21,8 +21,13 @@ without its conditions attached cannot be acted on.
 
 | | |
 |---|---|
-| `crates/rift-mock-core` | matching engine, imposters, predicates, proxy |
-| `crates/rift-http-proxy` | the server binary |
+| `crates/rift-types` | shared wire types (imposters, stubs, predicates) |
+| `crates/rift-mock-core` | the engine library: imposters, matching, behaviors, scripting, flow state, listeners and TLS, the SPI traits |
+| `crates/rift-http-proxy` | the `rift` server binary and `rift-verify`: CLI, admin API, front door, intercept proxy |
+| `crates/rift-store-redis` | the Redis flow-state backend |
+| `crates/rift-ejs` | the EJS subset the config loader and `rift-lint` both render |
+| `crates/rift-lint` | the `rift-lint` library and CLI |
+| `crates/rift-tui` | the `rift-tui` terminal UI |
 | `crates/rift-ffi` | the C ABI every SDK binds to |
 | `sdk-conformance/` | the shared corpus each SDK must pass |
 | `tests/benchmark/` | the published benchmark harness |

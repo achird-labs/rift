@@ -33,8 +33,8 @@ CA/key/truststore files) with a couple of Rift admin calls and **no committed cr
 1. The SUT is pointed at Rift's **intercept listener** as its HTTPS proxy
    (`https.proxyHost` / `https.proxyPort`).
 2. The SUT issues `CONNECT cdn.example.com:443`; Rift answers `200 Connection Established` and
-   **TLS-terminates** the tunnel, minting a per-host leaf certificate on the fly, signed by an
-   **intercept CA** Rift generates at startup.
+   **TLS-terminates** the tunnel, minting a per-host leaf certificate on the fly, signed by the
+   **intercept CA** (generated when the listener starts, unless you [supply one](#the-intercept-ca)).
 3. The decrypted request is matched against **intercept rules** using the same
    [predicate engine]({{ site.baseurl }}/features/) as imposters.
 4. A matching rule either **serves an inline stub** or **forwards** the request to one of your
@@ -43,6 +43,83 @@ CA/key/truststore files) with a couple of Rift admin calls and **no committed cr
 The one constraint TLS-MITM cannot remove: **the SUT must trust the intercept CA.** Rift automates
 provisioning that trust (it emits a CA cert and a ready-to-use truststore) — see
 [Trusting the CA](#trusting-the-ca-from-the-sut).
+
+A few consequences of the design:
+
+- **Rules match the `CONNECT` host**, not the SNI or the `Host` header of the decrypted request.
+- **The leaf certificate is minted for the SNI** the client sends, and cached (up to 1,024 hosts,
+  least-recently-used evicted). A client that sends **no SNI** — typically one connecting to an IP
+  literal — fails the handshake, because there is no name to mint a certificate for.
+- The leaf chains to the intercept CA and is served together with it. A client verifies it exactly
+  as it would the real origin's, so the only thing it needs is the CA in its trust store.
+
+### Quick start with curl
+
+Everything below runs against a stock `rift` on `localhost:2525`; `cdn.example.com` never has to
+resolve, because `curl` hands the name to the proxy in the `CONNECT`.
+
+```bash
+# 1. Start the listener on a fixed port, and install one rule.
+curl -s -X POST http://localhost:2525/intercept -d '{"port": 8888}'
+# {"interceptPort":8888,"interceptUrl":"http://127.0.0.1:8888"}
+
+curl -s -X POST http://localhost:2525/intercept/rules -d '{
+  "host": "cdn.example.com",
+  "predicates": [{ "equals": { "path": "/config.json" } }],
+  "action": { "serve": { "statusCode": 200,
+                         "headers": { "content-type": "application/json" },
+                         "body": { "featureX": "ON" } } }
+}'
+
+# 2. Export the CA the SUT has to trust.
+curl -s http://localhost:2525/intercept/ca.pem -o rift-ca.pem
+
+# 3. Call the "real" host through the proxy.
+curl --proxy http://127.0.0.1:8888 --cacert rift-ca.pem https://cdn.example.com/config.json
+# {"featureX":"ON"}
+
+# A path no rule matches still gets an answer — the fixed fall-through:
+curl --proxy http://127.0.0.1:8888 --cacert rift-ca.pem https://cdn.example.com/other
+# rift intercepted GET /other for cdn.example.com
+
+# Without the CA the client refuses the forged certificate, as it should:
+curl --proxy http://127.0.0.1:8888 https://cdn.example.com/config.json
+# curl: (60) SSL certificate problem: self-signed certificate in certificate chain
+```
+
+Add `--http2` to the calls above to see the tunnel negotiate HTTP/2 (`curl -v` prints
+`ALPN: server accepted h2`). With a [proxy credential](#authenticating-the-proxy) set, add
+`--proxy-user ci:s3cr3t`; without it the `CONNECT` is answered `407`. `DELETE /intercept` turns it
+all off again.
+
+### The intercept CA
+
+The CA comes from one of three places, chosen when the listener starts:
+
+| Source | How | Notes |
+|:--|:--|:--|
+| Generated (default) | nothing to configure | An ECDSA P-256 CA named `Rift Intercept CA`, held in memory. A new one every time the listener starts, so re-export it after a restart — or bootstrap it once with [`returnCaKey`](#runtime-lifecycle-admin-api) and supply it back. |
+| PEM files | `--intercept-ca-cert`/`--intercept-ca-key`, or `caCertPath`/`caKeyPath` | Paths on the engine's filesystem. |
+| Inline PEM | `RIFT_INTERCEPT_CA_CERT_PEM`/`RIFT_INTERCEPT_CA_KEY_PEM`, or `caCertPem`/`caKeyPem` | No file or volume needed. |
+
+Each pair is both-or-neither, and the file pair and the PEM pair cannot be combined. A PEM holding
+several certificates pins the **first** as the CA (and logs a warning). Nothing ever hands out a
+private key you supplied: `GET /intercept`, the CA export and the truststores carry the certificate
+only.
+
+To bring your own CA, create a proper CA certificate — `CA:TRUE`, allowed to sign certificates:
+
+```bash
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+  -keyout rift-ca-key.pem -out rift-ca-cert.pem -subj "/CN=My Test Intercept CA" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign,digitalSignature"
+
+rift --intercept-port 8888 --intercept-ca-cert rift-ca-cert.pem --intercept-ca-key rift-ca-key.pem
+```
+
+A CA is private-key material that lets its holder forge a certificate for any host your clients
+trust it for. Keep it out of real trust stores, and never reuse a CA that signs anything real.
 
 ---
 
@@ -58,14 +135,18 @@ use std::sync::Arc;
 use rift_mock_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
 use rift_http_proxy::intercept::InterceptListener;
 use rift_http_proxy::intercept_rules::InterceptRules;
+use rift_mock_core::proxy::OutboundTls;
 
 let ca = Arc::new(CertificateAuthority::generate()?);      // or CertificateAuthority::load_pem(cert, key)
 let rules = InterceptRules::new();
 let resolver = Arc::new(SniCertResolver::new(ca.clone())); // mints one leaf per SNI host
 // `None` = no proxy credential (open). Pass `Some(InterceptAuth { .. })` to require
 // `Proxy-Authorization: Basic …` on every CONNECT (issue #878).
-let listener =
-    InterceptListener::bind("127.0.0.1:0".parse()?, resolver, rules.clone(), None).await?;
+// The last argument is the trust policy for the one outbound leg the listener has, the
+// WebSocket passthrough; `OutboundTls::default()` is the OS trust store.
+let listener = InterceptListener::bind(
+    "127.0.0.1:0".parse()?, resolver, rules.clone(), None, OutboundTls::default(),
+).await?;
 // Point the SUT at `listener.local_addr()` as its HTTPS proxy, trusting `ca`.
 ```
 
@@ -96,7 +177,9 @@ every intercepted origin, handing your admin key to the very servers you are int
 `--require-admin-auth` covers this listener too, at **every** door on the standalone binary — the
 flag, the config block, and a listener started at runtime over `POST /intercept` (which answers
 `403` rather than starting an exposed keyless one). A non-loopback bind with no credential warns by
-default and refuses under the flag.
+default and refuses under the flag. `--intercept-auth` without `--intercept-port` is a startup
+error: the credential would guard nothing, and a listener started later over `POST /intercept`
+would be open (pass `auth` in that body instead).
 
 Embedders driving `rift_start_intercept` over the C-ABI get the **warning** but not the refusal: the
 policy travels on the process's `InterceptControl`, which the standalone binary sets from the flag
@@ -121,6 +204,10 @@ rift --intercept-port 8443 --intercept-ca-cert ca.pem --intercept-ca-key ca.key
 RIFT_INTERCEPT_CA_CERT_PEM="$(cat ca.pem)" RIFT_INTERCEPT_CA_KEY_PEM="$(cat ca.key)" \
   rift --intercept-port 8443
 ```
+
+The flag binds the listener on the admin server's `--host`, which defaults to `0.0.0.0` — so a
+bare `--intercept-port` is reachable off-host, and warns unless `--intercept-auth` is set. Pass
+`--host 127.0.0.1` for a loopback-only rig, or use the config-file block, which names its own host.
 
 (Equivalently `RIFT_INTERCEPT_PORT` / `RIFT_INTERCEPT_CA_CERT` / `RIFT_INTERCEPT_CA_KEY`, or the
 inline `RIFT_INTERCEPT_CA_CERT_PEM` / `RIFT_INTERCEPT_CA_KEY_PEM`. The file pair and the PEM pair are
@@ -197,9 +284,14 @@ it merely *connected* to.
 POST   /intercept   body (optional): { "host"?: "127.0.0.1", "port"?: 0,
                                         "caCertPath"?: "...",  "caKeyPath"?: "...",
                                         "caCertPem"?: "...",   "caKeyPem"?: "...",
-                                        "returnCaKey"?: false }
+                                        "returnCaKey"?: false,
+                                        "auth"?: { "username": "...", "password": "..." },
+                                        "rules"?: [ ... ] }
                     → 201 { "interceptPort": N, "interceptUrl": "http://127.0.0.1:N" }
+                    → 400 bad host / CA / auth / body (see below)
+                    → 403 off-host bind with no `auth` under --require-admin-auth
                     → 409 if a listener is already running (flag, FFI, or a prior POST)
+                    → 429 if `rules` exceeds the rule cap (nothing is started)
 GET    /intercept   → 200 { "interceptPort": N, "interceptUrl": "..." }  |  404 when not running
 DELETE /intercept   → 204 always (idempotent); stops the listener and drops its rules + CA
 ```
@@ -239,6 +331,8 @@ DELETE /intercept   → 204 always (idempotent); stops the listener and drops it
   **fresh** CA — re-export `/intercept/ca.pem` (below), or bootstrap with `returnCaKey` and supply
   the pair back via `caCertPem`/`caKeyPem`, after any restart.
 - All three verbs are gated by `--apikey` like every other admin route.
+- The rule and CA routes below (`/intercept/rules`, `/intercept/ca.pem`, `/intercept/truststore.*`)
+  answer `404` with `intercept listener not running` when no listener is up.
 
 ```bash
 # Enable intercept on an already-running server, then read back the proxy port:
@@ -369,9 +463,19 @@ curl -X POST http://localhost:2525/intercept/rules -d '{
 The rule store is capped at 10,000 rules to bound both memory and the per-request match scan; a
 batch `POST` that would exceed the cap is rejected in full (no partial add).
 
-When no rule matches, the request falls through to a default `200` (so an unconfigured host is
-answered rather than hanging). Non-goal: WebSockets (see
-[Limitations](#limitations)).
+When no rule matches, the request falls through to a default `200` with a `text/plain` body
+`rift intercepted <METHOD> <path> for <host>`, so an unconfigured host is answered rather than
+hanging. The exception is a WebSocket handshake, which is relayed to the real origin instead (see
+[WebSocket passthrough](#websocket-passthrough)).
+
+Other answers the tunnel itself can give, before or instead of a rule:
+
+| Status | When |
+|:--|:--|
+| `413` | The request body exceeds 1 MiB (see [Limitations](#limitations)). |
+| `408` | The request body did not arrive within 30 seconds. |
+| `400` | The request body could not be read to the end (e.g. broken chunked framing). |
+| `502` | A `forward` rule's imposter could not be reached, or a WebSocket relay failed. |
 
 ### Connection reuse
 
@@ -418,6 +522,11 @@ and then goes quiet has no request head for a timer to bound, so the tunnel is c
 keep-alive ping instead, within two `RIFT_HTTP_HEADER_TIMEOUT` intervals. Idle h2 tunnels are
 therefore pinged at that interval; a live client answers and is unaffected.
 
+Connections dropped before that HTTP/1-or-HTTP/2 decision is made are counted in
+`rift_preface_failures_total{listener="intercept", kind="timeout"|"eof"|"io"}`, present at zero
+from the moment the listener starts. `timeout` and `eof` are ordinary client behaviour; a rising
+`io` count is the one worth alerting on.
+
 ---
 
 ## Trusting the CA from the SUT
@@ -449,6 +558,19 @@ loads as a JVM trust anchor by adding the type:
 -Dhttps.proxyHost=<rift-host> -Dhttps.proxyPort=<intercept-port>
 ```
 
+**Other runtimes** take the PEM. Most honour `HTTPS_PROXY` for the route. The trust setting
+differs per runtime, and some *add* the CA to the default roots while others *replace* them:
+
+```bash
+export HTTPS_PROXY=http://<rift-host>:<intercept-port>   # http://user:pass@… with a credential
+export NODE_EXTRA_CA_CERTS=rift-ca.pem                   # Node: adds to the bundled roots
+export REQUESTS_CA_BUNDLE=rift-ca.pem                    # Python requests: replaces them
+export SSL_CERT_FILE=rift-ca.pem                         # OpenSSL-based clients, Go: replace them
+```
+
+With a replacing variable, that client trusts *only* Rift's CA. Anything it reaches without the
+proxy (a `NO_PROXY` host, say) then fails verification.
+
 ---
 
 ## What this replaces
@@ -475,9 +597,13 @@ that connection silently broken by being routed through the proxy.
   `403`. Only when no rule matches is the handshake relayed.
 - **Frames are never inspected, matched or recorded.** Rules apply to the handshake only; there is
   no frame grammar and no frame capture.
-- **The origin connection uses the same outbound TLS trust as everything else** — the process-wide
-  policy, so `--upstream-ca-file` covers an origin behind a private CA. This is the only outbound
-  connection the intercept listener makes; if it fails, the client gets a `502` rather than a hang.
+- **The origin connection uses the same outbound TLS trust as everything else** — on the standalone
+  binary, the process-wide policy, so `--upstream-ca-file` covers an origin behind a private CA
+  (see [TLS/HTTPS → Trusting a private CA]({{ site.baseurl }}/features/tls/#trusting-a-private-ca)).
+  It offers `http/1.1` only, since the upgrade is an HTTP/1.1 mechanism. If the origin declines the
+  upgrade, its response (status, headers and body, minus hop-by-hop headers) is passed back to the
+  client. This is the only outbound connection the intercept listener makes; if it fails, the
+  client gets a `502` rather than a hang.
 - **Only `websocket` takes this path.** Any other `Upgrade` value, `h2c` included, behaves exactly
   as before.
 
@@ -503,7 +629,7 @@ that connection silently broken by being routed through the proxy.
   `host:port` the client named in its `CONNECT`. That is inherent to a forward proxy, but it is a
   change in posture — before it, every request was answered locally. In a shared environment bind
   the listener to loopback and/or set `Proxy-Authorization` (see
-  [Authentication](#authentication)), or a caller that can reach the proxy can use it to probe
+  [Authenticating the proxy](#authenticating-the-proxy)), or a caller that can reach the proxy can use it to probe
   rift's network position.
 - **RFC 8441 extended CONNECT (WebSocket over HTTP/2) is not detected.** HTTP/2 forbids the
   `Connection` header, so an h2 client using `:protocol = websocket` falls through to the ordinary

@@ -1,4 +1,4 @@
-//! Configuration linting library for Rift HTTP Proxy.
+//! Configuration linting library for Rift imposter files.
 //!
 //! This library provides validation capabilities for Mountebank-compatible
 //! imposter configurations. It can be used as a standalone library or through

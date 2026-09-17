@@ -11,6 +11,12 @@ The `rift` binary is a thin wrapper around library entry points in `rift-http-pr
 run the same server in-process — optionally around its own `ImposterManager` — and bind the admin and
 metrics planes to addresses of its choosing.
 
+The server composition lives in the `rift_http_proxy::server` module (`Cli`, `Commands`,
+`ServerBuilder`, `RunningServer`, `admin_bind_addr`, `run_metrics_server`, `bind_metrics_server`,
+`RunningMetrics`); none of these are re-exported at the crate root. The crate root re-exports the
+`rift-mock-core` modules plus `TcpFaultKind`, `tcp_fault_carrier`, `default_flow_store_backends` and
+`install_default_crypto_provider`.
+
 ---
 
 ## `ServerBuilder`
@@ -19,7 +25,7 @@ metrics planes to addresses of its choosing.
 server, then serves them.
 
 ```rust
-use rift_http_proxy::{ServerBuilder, Cli};
+use rift_http_proxy::server::{Cli, ServerBuilder};
 use clap::Parser;
 
 // Build from parsed CLI options (same flags as the `rift` binary):
@@ -29,7 +35,10 @@ let builder = ServerBuilder::from_cli(Cli::parse());
 | Method | Signature | Purpose |
 |:-------|:----------|:--------|
 | `from_cli` | `fn from_cli(cli: Cli) -> Self` | Seed the builder from CLI options (port, host, configfile, datadir, TLS defaults, metrics port, …). |
-| `manager` | `fn manager(self, manager: Arc<ImposterManager>) -> Self` | **The embedding seam** — inject a pre-built `ImposterManager` (e.g. one wired with custom SPI backends) instead of letting the builder construct the default one. |
+| `manager` | `fn manager(self, manager: Arc<ImposterManager>) -> Self` | **The embedding seam** — inject a pre-built `ImposterManager` (e.g. one wired with custom SPI backends) instead of letting the builder construct the default one. Skips internal construction, including `--datadir` write-through and TLS defaults. |
+| `imposter_source` | `fn imposter_source(self, source: Arc<dyn ImposterSource>) -> Self` | Register an `--imposters` URI scheme (repeatable). `file:`/`https:` are built in; claiming a scheme already taken is a startup error. |
+| `accept_runtimes` | `fn accept_runtimes(self, runtimes: Vec<tokio::runtime::Handle>) -> Self` | Fan imposter accept loops out across per-core runtimes (issue #745). Applies only to the builder-constructed manager; an injected one uses `ImposterManager::with_accept_runtimes`. Empty keeps the single-listener topology. |
+| `admin_authorizer` | `fn admin_authorizer(self, authorizer: Arc<dyn AdminAuthorizer>) -> Self` | Per-request admin authorization hook (issue #854) — see [`AdminAuthorizer`]({{ site.baseurl }}/embedding/spi/#adminauthorizer--per-request-admin-authorization). |
 | `reported_admin_port` | `fn reported_admin_port(self, port: u16) -> Self` | The port `GET /config` reports, when the admin plane binds somewhere other than where clients reach it (issue #1135). See `AdminApiServer::with_reported_admin_port` below. |
 | `run` | `async fn run(self) -> anyhow::Result<()>` | Load configs, bind, and serve **forever** (returns only on error/shutdown). |
 | `start` | `async fn start(self) -> anyhow::Result<RunningServer>` | Same, but returns a `RunningServer` handle **once bound** — supports ephemeral (`:0`) ports and programmatic shutdown. |
@@ -42,12 +51,14 @@ Returned by `start()`; lets the host discover bound addresses and control lifecy
 |:-------|:----------|:--------|
 | `admin_addr` | `fn admin_addr(&self) -> SocketAddr` | The bound admin API address (resolve an ephemeral `:0` to the real port). |
 | `metrics_addr` | `fn metrics_addr(&self) -> Option<SocketAddr>` | The bound metrics address, or `None` if metrics weren't started. |
+| `intercept_addr` | `fn intercept_addr(&self) -> Option<SocketAddr>` | The bound [intercept proxy]({{ site.baseurl }}/features/intercept-proxy/) address, whether started by `--intercept-port` or later by `POST /intercept`; `None` when none is running. |
+| `front_door_addr` | `fn front_door_addr(&self) -> Option<SocketAddr>` | The bound [front door]({{ site.baseurl }}/features/front-door/) address; `None` unless `--front-door` was given. |
 | `join` | `async fn join(self) -> anyhow::Result<()>` | Await the server until it exits, consuming it. |
 | `wait` | `async fn wait(&self) -> anyhow::Result<()>` | Await the server until it exits **without consuming it** — so you can race it against your own shutdown signal. |
 | `shutdown` | `async fn shutdown(&self)` | Trigger a graceful shutdown. |
 
 ```rust
-use rift_http_proxy::{ServerBuilder, Cli};
+use rift_http_proxy::server::{Cli, ServerBuilder};
 use clap::Parser;
 
 let server = ServerBuilder::from_cli(Cli::parse()).start().await?;
@@ -85,7 +96,7 @@ the server:
 ```rust
 use std::sync::Arc;
 use rift_mock_core::imposter::ImposterManager;
-use rift_http_proxy::{ServerBuilder, Cli};
+use rift_http_proxy::server::{Cli, ServerBuilder};
 use clap::Parser;
 
 let manager = Arc::new(
@@ -128,10 +139,15 @@ println!("admin bound to {}", running.local_addr());
 | `AdminApiServer::new` | `fn new(addr: SocketAddr, manager: Arc<ImposterManager>, api_key: Option<String>) -> Self` | Construct the admin server; `api_key` (when `Some`) gates the admin API via the `Authorization` header. |
 | `with_config_source` | `fn with_config_source(self, source: ConfigSource) -> Self` | Retain the load source so `POST /admin/reload` can re-read it. |
 | `with_imposter_sources` | `fn with_imposter_sources(self, sources: Arc<SourceSet>, datadir: Option<PathBuf>) -> Self` | Retain an `--imposters` source set, and the `--datadir` loaded beside it, so `POST /admin/reload` re-reads both and applies them as one set. Source imposters are applied as `Persistence::Ephemeral` and never written to the datadir (issue #1122). `ImposterManager::apply_config` keeps a running imposter in the store it is in: it persists what it creates, and changes to imposters already in the datadir. |
-| `with_allow_injection` | `fn with_allow_injection(self, allow: bool) -> Self` | Enable JavaScript `inject` responses. |
+| `with_allow_injection` | `fn with_allow_injection(self, allow: bool) -> Self` | Admit scripted configs (`inject`, `decorate`, `shellTransform`, `_rift.script`, …) submitted through this admin API, and report the setting from `GET /config`. The embedder spelling of `--allowInjection`; default `false`. |
+| `with_local_only` | `fn with_local_only(self, local_only: bool) -> Self` | Record `--local-only` for `GET /config` to report (issue #879). Stated explicitly, not inferred from the bind address. |
+| `with_admin_authorizer` | `fn with_admin_authorizer(self, authorizer: Arc<dyn AdminAuthorizer>) -> Self` | Install the per-request authorization hook (issue #854); `ServerBuilder::admin_authorizer` is the builder spelling. |
+| `with_intercept` | `fn with_intercept(self, control: InterceptControl) -> Self` | Serve the `/intercept*` routes against this shared control slot. Without it every `/intercept*` route answers `404`. See [Intercept proxy]({{ site.baseurl }}/features/intercept-proxy/). |
+| `with_scripts_dir` | `fn with_scripts_dir(self, dir: PathBuf) -> Self` | Root that `_rift.script` `file:` references resolve under for imposters created through this API (issue #356). Without it such references are rejected. |
 | `with_reported_admin_port` | `fn with_reported_admin_port(self, port: u16) -> Self` | Report `port` from `GET /config` instead of the port this server bound (issue #1135). For a host that fronts the admin API with its own public listener and binds the core to an ephemeral loopback port — without it, `options.port` advertises the *private* port to Mountebank-compat clients that read it to build URLs. Unset reports the bound port; `0` is a configured `0`, not "unset". `ServerBuilder::reported_admin_port` is the builder spelling. |
 | `with_require_admin_auth` | `fn with_require_admin_auth(self, require: bool) -> Self` | Make `bind` **fail** when this server would be reachable off-host with no `api_key`, instead of warning (issue #863). The embedder spelling of `--require-admin-auth`. |
 | `bind` | `async fn bind(self) -> anyhow::Result<RunningAdminApi>` | Bind and start serving; returns once bound. |
+| `run` | `async fn run(self) -> anyhow::Result<()>` | Bind and serve until the accept loop exits. |
 
 `bind` reports the authentication posture either way. When `addr` is **not** loopback and `api_key`
 is `None`, it logs a warning naming the address and the remedies — the admin API can create
@@ -177,7 +193,7 @@ with optional EJS preprocessing) or `Dir(PathBuf)` (a `--datadir` of one-imposte
 ### Metrics server
 
 ```rust
-use rift_http_proxy::bind_metrics_server;
+use rift_http_proxy::server::bind_metrics_server;
 
 let metrics = bind_metrics_server(addr).await?;   // addr may be `:0`
 println!("metrics bound to {}", metrics.local_addr());

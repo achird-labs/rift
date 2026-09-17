@@ -35,19 +35,39 @@ Rift-recognised stub fields, so a plain Mountebank config never collides with it
 
 ## The request lifecycle
 
-When a request hits an imposter, Rift:
+When a request reaches an imposter, Rift:
 
-1. **Matches** it against each stub's [predicates]({{ site.baseurl }}/mountebank/predicates/), in
-   order, and picks the first stub whose predicates all pass.
-2. **Selects a response** from that stub's `responses` (cycling through them, honoring `repeat`).
-3. **Resolves the response** — a static `is`, a `proxy` to an upstream, or a script/`inject` — and
-   applies any [fault injection]({{ site.baseurl }}/features/fault-injection/).
-4. **Runs behaviors** — latency (`wait`), request interpolation, `copy`/`lookup`, and
-   `decorate`/`shellTransform` transforms — before sending. (See
+1. **Accepts the connection.** Usually on the imposter's own port, but a request can also arrive
+   through the [front door]({{ site.baseurl }}/features/front-door/) or the
+   [single-port gateway]({{ site.baseurl }}/features/gateway/), which dispatch it in-process to the
+   same imposter. For `https` imposters Rift terminates TLS here — and, with `mutualAuth`, demands a
+   client certificate ([TLS]({{ site.baseurl }}/features/tls/)). HTTP/1.1 or HTTP/2 is settled per
+   connection, by ALPN over TLS or by the connection preface in cleartext.
+2. **Records the request** in the imposter's journal when `recordRequests` is on — before
+   matching, so a request that matches nothing is still visible.
+3. **Matches** it against each stub's [predicates]({{ site.baseurl }}/mountebank/predicates/) and
+   picks the first stub, in declaration order, whose predicates all pass. With the `X-Rift-Debug`
+   header, Rift explains the match instead of serving it
+   ([Debug Mode]({{ site.baseurl }}/features/debug-mode/)). If nothing matches, the imposter's
+   `defaultForward` or `defaultResponse` answers.
+4. **Selects a response** from that stub's `responses` (cycling through them, honoring `repeat`).
+5. **Resolves the response** — a static `is` (with `${request.*}` interpolation and
+   [templates]({{ site.baseurl }}/features/date-templates/)), a `proxy` to an upstream, or a
+   script/`inject` — and applies any [fault injection]({{ site.baseurl }}/features/fault-injection/).
+6. **Runs behaviors** — latency (`wait`), `copy`/`lookup`, and `decorate`/`shellTransform`
+   transforms — before sending. (See
    [Behaviors]({{ site.baseurl }}/mountebank/behaviors/#behavior-order) for the exact order.)
 
 State (flow-state, scenario state, response cursors) is read and written along the way, keyed by the
 request's **flow id**.
+
+Everything above belongs to the imposter. The [intercept proxy]({{ site.baseurl }}/features/intercept-proxy/)
+is a separate listener in front of all of this: it terminates a `CONNECT` tunnel with a certificate
+signed by its own CA, matches each decrypted request against its own rules with the same predicate
+engine, and either serves an inline stub or forwards the request into an imposter, where the
+lifecycle above applies. An embedder can veto or replace a live exchange through the
+[`ExchangeInspector`]({{ site.baseurl }}/embedding/spi/) hook, which sees the request between steps
+2 and 3 and the finished response after step 6.
 
 ---
 

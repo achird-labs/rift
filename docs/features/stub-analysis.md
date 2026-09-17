@@ -19,6 +19,7 @@ When you create or modify stubs, Rift analyzes them for potential problems:
 - **Shadowed stubs** - Stubs that will never match due to earlier stubs
 - **Catch-all ordering** - Empty predicate stubs that shadow subsequent stubs
 - **Exact duplicates** - Stubs with identical predicates
+- **`stateOps` that never run** - `_rift.stateOps` on a response that is not an `is` response
 
 **Note**: This is a **Rift extension**. Mountebank does not provide overlap detection or warnings.
 
@@ -26,7 +27,8 @@ When you create or modify stubs, Rift analyzes them for potential problems:
 
 ## Viewing Warnings
 
-Warnings appear in API responses under the `_rift.warnings` field:
+Warnings appear in the `GET /imposters/:port` response under the `_rift.warnings` field (the
+`_rift` object is omitted when there are no warnings and no `flowState` to report):
 
 ```bash
 curl http://localhost:2525/imposters/4545
@@ -55,7 +57,8 @@ curl http://localhost:2525/imposters/4545
 }
 ```
 
-Warnings are also logged to the server console when stubs are added or modified.
+Each `GET /imposters/:port` that returns warnings also logs them at `warn` level. Creating or
+changing stubs does not log them.
 
 ---
 
@@ -174,6 +177,20 @@ A catch-all stub appears before other stubs, shadowing them:
 }
 ```
 
+### state_ops_never_runs
+
+A response carries `_rift.stateOps` but has no `is` body — a script-only `_rift` response, or the
+bare `_rift` form. `stateOps` runs only after an `is` response is rendered, so the operations never
+execute (see [Flow State]({{ site.baseurl }}/features/flow-state/#is-responses-only)):
+
+```json
+{
+  "warningType": "state_ops_never_runs",
+  "message": "Stub at index 0 has _rift.stateOps on a non-`is` response; stateOps only runs after an `is` response is rendered, so these operations never execute",
+  "stubIndex": 0
+}
+```
+
 ### truncated
 
 Analysis retains at most 100 warnings per imposter. If more are produced (e.g. hundreds of
@@ -191,10 +208,12 @@ returning an unbounded list:
 
 ## Performance & availability
 
-Analysis is computed **once when the stubs change** (on create and stub replace/add) and cached on
-the imposter; `GET /imposters/:port` returns the cached warnings without recomputing. Exact-duplicate
-detection is O(n) (hash-based), and warnings are capped (see `truncated`), so even a pathological
-config with thousands of overlapping stubs stays cheap and bounded.
+Analysis is computed **lazily, once per stub change**: a stub mutation only invalidates the cached
+result, and the next read (`GET /imposters/:port`, or `rift_stub_warnings` over FFI) recomputes and
+caches it. Exact-duplicate detection is O(n) (hash-based), and warnings are capped (see
+`truncated`). The pairwise "partially shadowed by an overlapping stub" check is O(n²), so it is
+**skipped on imposters with more than 200 stubs**; exact duplicates, catch-alls and shadowing by a
+catch-all are still reported at any size.
 
 Because the analysis now lives in the engine, **embedded consumers get it too**: over the C-ABI,
 call `rift_stub_warnings(handle, port)` to retrieve the same warnings as a JSON array (see
@@ -226,7 +245,7 @@ Rift extends the stub schema with an optional `id` field for easier management:
 Benefits:
 - Easier to identify stubs in logs and warnings
 - Self-documenting stub configurations
-- Future: May support ID-based stub operations
+- Addressable through the admin API — see [Stub by ID]({{ site.baseurl }}/features/stub-by-id/)
 
 **Note**: The `id` field is ignored by Mountebank but preserved by Rift.
 

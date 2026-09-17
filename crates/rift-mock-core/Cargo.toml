@@ -9,7 +9,7 @@ homepage.workspace = true
 rust-version.workspace = true
 
 description = "Rift core engine: imposter lifecycle, matching, behaviors, scripting and flow-state — usable in-process without the CLI or admin server."
-readme = "../../README.md"
+readme = "README.md"
 
 [lints]
 workspace = true

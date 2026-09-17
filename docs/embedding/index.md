@@ -27,6 +27,7 @@ the source, the source wins — please file an issue.
 | Bind the admin or metrics plane to a chosen (or ephemeral `:0`) address and learn the bound port | `AdminApiServer::bind` / `bind_metrics_server` | [Embeddable Server]({{ site.baseurl }}/embedding/server/) |
 | Replace a storage backend (flow-state, request journal, proxy recording, response sequencing) | SPI traits on `ImposterManager` | [Extension Points (SPI)]({{ site.baseurl }}/embedding/spi/) |
 | Observe reconciliation events or decorate responses | `ImposterEventListener` / `ResponseDecorator` | [Extension Points (SPI)]({{ site.baseurl }}/embedding/spi/) |
+| Apply policy to live exchanges, rescue a no-match, or authorize admin requests | `ExchangeInspector` / `NoMatchInterceptor` / `AdminAuthorizer` | [Extension Points (SPI)]({{ site.baseurl }}/embedding/spi/) |
 | Drive Rift from a non-Rust host (JVM, Node, Go, …) | The C-ABI (`rift-ffi`) | [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/) |
 | Drive Rift from Java, Scala, Node/TypeScript or Go without writing an FFI bridge yourself | An official SDK | [Language SDKs]({{ site.baseurl }}/sdk/) |
 
@@ -43,8 +44,8 @@ the source, the source wins — please file an issue.
 
 | Crate | Role | Exposes |
 |:------|:-----|:--------|
-| `rift-mock-core` | The engine library — no CLI, no HTTP server wiring. | `ImposterManager` and the SPI traits (`FlowStoreProvider`, `ResponseSequencer`, `RequestJournal`, `ProxyRecordingStore`, `ImposterEventListener`, `ResponseDecorator`), behaviors, predicates, scripting. |
-| `rift-http-proxy` | The server crate — builds the `rift` binary and hosts the admin/metrics HTTP layer. | `ServerBuilder`, `RunningServer`, `AdminApiServer`, `bind_metrics_server`, the single-port gateway, `install_default_crypto_provider()`. |
+| `rift-mock-core` | The engine library — no CLI, no HTTP server wiring. | `ImposterManager` and the SPI traits (`FlowStore`, `FlowStoreProvider`, `FlowStoreBackendFactory`, `ResponseSequencer`, `RequestJournal`, `ProxyRecordingStore`, `ImposterEventListener`, `ResponseDecorator`, `NoMatchInterceptor`, `ExchangeInspector`, `AdminAuthorizer`), `tcp_fault_carrier`, behaviors, predicates, scripting. |
+| `rift-http-proxy` | The server crate — builds the `rift` binary and hosts the admin/metrics HTTP layer. `server::{ServerBuilder, RunningServer, bind_metrics_server, admin_bind_addr}`, `admin_api::AdminApiServer`, `bootstrap` helpers, the single-port gateway, the front door (`RouteObserver`), the intercept proxy, `install_default_crypto_provider()`. |
 | `rift-ffi` | The C-ABI shared library (`cdylib`) plus an `rlib` for in-crate tests. | The `extern "C"` functions (`rift_start`, `rift_serve_admin`, …) and the cbindgen header. |
 
 > The Node.js package used to live here as `packages/rift-node`. It now has its own repository —
@@ -76,7 +77,9 @@ The engines and allocator are feature-gated. Relevant features:
 ## A minimal embedding
 
 ```rust
-use rift_http_proxy::{ServerBuilder, Cli, install_default_crypto_provider};
+use clap::Parser;
+use rift_http_proxy::install_default_crypto_provider;
+use rift_http_proxy::server::{Cli, ServerBuilder};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

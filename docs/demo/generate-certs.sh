@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Generate self-signed certificates for Rift HTTPS demo
+# Generate a throwaway demo CA and a server certificate signed by it, for the Rift HTTPS demo
 #
 # Usage: ./generate-certs.sh
 #

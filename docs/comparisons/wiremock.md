@@ -22,17 +22,17 @@ better, where WireMock is genuinely better, and where you should not switch.
 | | WireMock | Rift |
 |:--|:--|:--|
 | Implementation | Java / JVM (Jetty) | Rust |
-| Maturity | Mature, ~a decade, company-backed | **Beta** (v0.16.x), single maintainer |
+| Maturity | Mature, ~a decade, company-backed | **Beta** (v0.17), single maintainer |
 | Ecosystem | Large — extensions, Cloud, Spring, a decade of answers | Small |
 | Throughput at 1 stub | 83,048 RPS | 334,025 RPS |
 | Throughput at 310 stubs | 24,264 RPS (**−71%**) | 326,779 RPS (**−2%**) |
 | p99 at 310 stubs | 31.6 ms | 2.5 ms |
 | In-process embedding | JVM only | Java, Node, Go, Scala 3 |
-| Config format | WireMock mappings JSON / Java DSL | Mountebank `imposters.json` + native YAML |
-| Response templating | Handlebars, mature | Date templates, `decorate`, Rhai/JS scripting |
+| Config format | WireMock mappings JSON / Java DSL | Mountebank `imposters.json` (JSON or YAML) + `_rift` extensions |
+| Response templating | Handlebars, mature | `${request.*}` interpolation, `_rift.templated` {% raw %}`{{ }}`{% endraw %} functions, `decorate`, Rhai/JS scripting |
 | Recording & playback | Yes, with UI | Yes (proxy mode), no UI |
 | OpenAPI import / validation | Cloud | No |
-| gRPC / GraphQL / WebSocket | Via extensions | No |
+| gRPC / GraphQL / WebSocket | Via extensions | No (WebSocket passthrough only, via the intercept proxy) |
 | Licence | Apache-2.0 | Apache-2.0 |
 
 <sub>Performance figures: Intel Xeon Platinum 8573C, 16 vCPU, 2026-07-27. WireMock 3.9.1 on
@@ -108,8 +108,9 @@ See [Embedding & SPI]({{ site.baseurl }}/embedding/).
 ### 3. Mocking dependencies you cannot repoint
 
 Rift can sit in the request path as a **TLS-terminating forward proxy**: it terminates the
-HTTPS call, matches it with the ordinary predicate engine, and serves inline or forwards to an
-imposter. That covers the vendor SDK with a compiled-in `https://cdn.vendor.com/config.json`
+HTTPS call — HTTP/1.1 or HTTP/2, whichever the client negotiates — matches it with the ordinary
+predicate engine, and serves inline or forwards to an imposter. WebSocket upgrades on the same
+tunnel are relayed to the real origin rather than broken. That covers the vendor SDK with a compiled-in `https://cdn.vendor.com/config.json`
 and no base-URL setter — the dependency most teams quietly stop integration-testing.
 
 There is also a **front door**: one listener serving many imposters, routed by the `Host` header
@@ -160,7 +161,7 @@ Stated plainly, because you should not find these out after migrating.
 
 WireMock has been in production use for roughly a decade, has a company behind it, and has an
 extension ecosystem, a Kotlin DSL, a Cloud product, deep Spring Boot integration, and years of
-accumulated Stack Overflow answers. Rift is **beta**, at v0.16.x, and small. For a lot of teams
+accumulated Stack Overflow answers. Rift is **beta**, at v0.17, and small. For a lot of teams
 that difference outweighs everything in the section above, and that is a reasonable call.
 
 ### Commercial support
@@ -169,11 +170,13 @@ WireMock Inc. sells support and a hosted product. Rift has GitHub issues.
 
 ### Response templating
 
-WireMock's Handlebars templating is mature, well-documented and broadly used. Rift covers this
-ground differently — [date templates]({{ site.baseurl }}/features/date-templates/), the
-`decorate`/`copy`/`lookup` behaviors, and [Rhai or JavaScript scripting]({{ site.baseurl }}/features/scripting/)
-— which is more powerful at the top end and less convenient for the common case of interpolating
-a request value into a response body.
+WireMock's Handlebars templating is mature, well-documented and broadly used, with a large helper
+library. Rift covers the common case — putting a request value, a UUID, a date or a stored value
+into a response — with Mountebank's `${request.*}` interpolation and the opt-in
+[`_rift.templated` grammar]({{ site.baseurl }}/features/date-templates/), and the rest with the
+`decorate`/`copy`/`lookup` behaviors and [Rhai or JavaScript scripting]({{ site.baseurl }}/features/scripting/).
+That is more powerful at the top end, but Rift's template grammar is small next to Handlebars: no
+conditionals or loops outside a script.
 
 ### Specification-driven mocking
 
@@ -184,8 +187,9 @@ workflow starts from a spec, that is a real gap.
 ### Protocols beyond HTTP
 
 WireMock supports gRPC via an official extension (`wiremock-grpc-extension`, WireMock 3.2.0+)
-and documents GraphQL support. Rift is **HTTP/HTTPS only** — no gRPC, no WebSockets, no GraphQL
-as a distinct protocol (GraphQL over HTTP is matchable as an HTTP body), no TCP/SMTP/LDAP.
+and documents GraphQL support. Rift is **HTTP/HTTPS only** (HTTP/1.1 and HTTP/2) — no gRPC, no
+WebSocket mocking (the intercept proxy relays upgrades to the real origin but cannot stub them), no
+GraphQL as a distinct protocol (GraphQL over HTTP is matchable as an HTTP body), no TCP/SMTP/LDAP.
 
 ### Matching features Rift does not have
 
@@ -253,7 +257,7 @@ work, not a drop-in. (If you are coming from **Mountebank**, it *is* a drop-in �
 | `proxyBaseUrl` | `proxy` response |
 | Record & playback | [Proxy mode]({{ site.baseurl }}/mountebank/proxy/) |
 | `verify(...)` | `verify` in the SDKs, or the recorded-requests API |
-| Java DSL | The [Java]({{ site.baseurl }}/getting-started/), Node, Go or Scala SDK DSL |
+| Java DSL | The [Java]({{ site.baseurl }}/sdk/java/), [Node]({{ site.baseurl }}/sdk/node/), [Go]({{ site.baseurl }}/sdk/go/) or [Scala]({{ site.baseurl }}/sdk/scala/) SDK DSL |
 
 Rift's predicate set is `equals`, `deepEquals`, `contains`, `startsWith`, `endsWith`, `matches`,
 `exists`, `jsonpath`, `xpath`, and `and` / `or` / `not`, with a `caseSensitive` option.

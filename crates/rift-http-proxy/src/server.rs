@@ -269,7 +269,7 @@ pub enum Commands {
         #[arg(long, default_value = "mb.json")]
         savefile: PathBuf,
 
-        /// Strip proxy-recorded stubs (those with recordedFrom set) from the output
+        /// Drop `proxy` responses from the saved stubs, keeping the recorded ones (Mountebank removeProxies)
         #[arg(long)]
         remove_proxies: bool,
     },

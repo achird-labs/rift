@@ -29,16 +29,18 @@ The same flow id drives both **flow-state** and **spaces**, which is what lets t
 
 ## Flow-state — a per-flow key/value store
 
-[Flow-state]({{ site.baseurl }}/features/flow-state/) is a `(flow_id, key)` → value store that
-[scripts]({{ site.baseurl }}/features/scripting/) read and write to build stateful behavior. A
-script can count attempts, fail the first N and then succeed, or gate on a stored value:
+[Flow-state]({{ site.baseurl }}/features/flow-state/) is a `(flow_id, key)` → value store for
+stateful behavior. [Scripts]({{ site.baseurl }}/features/scripting/) read and write it freely; a
+static response can also write it declaratively with `_rift.stateOps` and read it back with a
+{% raw %}`{{ state.<key> }}`{% endraw %} [template]({{ site.baseurl }}/features/date-templates/), no script needed. Either
+way you can count attempts, fail the first N and then succeed, or gate on a stored value:
 
 ```
 attempt 1 → 503   attempt 2 → 503   attempt 3 → 200
 ```
 
-Backends are `inmemory` (default) or `redis` (shared across instances). Values expire after
-`ttlSeconds`. You can also inspect and seed flow-state directly over the admin API.
+Backends are `inmemory` (default) or `redis` (shared across instances); an embedder can register
+its own. Values expire after `ttlSeconds`. You can also inspect and seed flow-state directly over the admin API.
 
 ## Scenarios — declarative state machines
 
@@ -60,11 +62,12 @@ without cross-contamination.
 ## How they fit together
 
 - **Flow id** decides *whose* state a request touches.
-- **Flow-state** is the general-purpose store scripts use for that flow.
+- **Flow-state** is the general-purpose store for that flow, written by scripts or `stateOps`.
 - **Scenarios** are a declarative state machine over that flow — no scripting needed.
 - **Spaces** isolate stubs and state *between* flows.
 
-Reach for the simplest one that fits: scenarios for a declarative multi-step flow, flow-state when a
-script needs arbitrary values, spaces when parallel tests must not interfere. See also
+Reach for the simplest one that fits: scenarios for a declarative multi-step flow, `stateOps` and
+templates for counters and stored values, a script when the logic outgrows them, spaces when
+parallel tests must not interfere. See also
 [Fault Injection]({{ site.baseurl }}/features/fault-injection/) for stateful failure simulation built
 on flow-state.

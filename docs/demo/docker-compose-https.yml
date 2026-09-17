@@ -1,7 +1,7 @@
 # Rift Demo - HTTPS/TLS Mode
 #
 # Prerequisites:
-#   2. Generate certificates:
+#   Generate certificates (a demo CA plus a server cert signed by it, into ./certs):
 #      ./generate-certs.sh
 #
 # Quick Start:
@@ -9,7 +9,7 @@
 #   curl --cacert certs/ca.crt https://localhost:4545/api/test
 #
 # This demo shows Rift's TLS support:
-# - HTTPS listener with custom certificates
+# - HTTPS listener serving the server-wide default certificate (--default-tls-cert/-key)
 # - All fault injection features work over TLS
 # - Uses Mountebank format with _rift extensions
 

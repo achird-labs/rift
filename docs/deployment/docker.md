@@ -30,8 +30,19 @@ API, same imposter behaviour, same ports, same environment variables.
 
 | Tag | Base | Use it when |
 |:----|:-----|:------------|
-| `latest`, `X.Y.Z` | `debian:trixie-slim` | The default. |
-| `latest-static`, `X.Y.Z-static` | `scratch` | You want the smallest CVE surface — typically ephemeral CI/test environments. |
+| `latest`, `vX.Y.Z` (e.g. `v0.17.0`) | `debian:bookworm-slim` | The default. |
+| `latest-static`, `vX.Y.Z-static` | `scratch` | You want the smallest CVE surface — typically ephemeral CI/test environments. |
+
+Both are multi-arch (`linux/amd64`, `linux/arm64`). Version tags keep the leading `v` of the release
+tag. Both run as the unprivileged user `rift` (uid 1000) with `/data` as the working directory, and
+set `MB_PORT=2525`, `MB_HOST=0.0.0.0`, `MB_LOGLEVEL=info` and `RIFT_METRICS_PORT=9090`. The
+entrypoint is `rift`, so arguments after the image name are `rift` flags or a subcommand.
+
+The images declare `EXPOSE 2525 9090 4545-4550 8080-8090` as documentation only — publish the ports
+your imposters actually use with `-p`.
+
+The linter ships as its own image, `zainalpour/rift-lint` (`latest`, `vX.Y.Z`); its entrypoint is
+`rift-lint` and its working directory is `/imposters`.
 
 ```bash
 docker pull zainalpour/rift-proxy:latest-static
@@ -50,21 +61,42 @@ Two consequences worth knowing before you switch:
   directly. The health probe is built into the binary precisely for this reason — see
   [`rift healthcheck`]({{ site.baseurl }}/configuration/cli/).
 
-  The images' built-in `HEALTHCHECK` is `["rift", "healthcheck"]`, which probes the **default**
-  admin port. If you move that port — with `--port`, `MB_PORT`, or an `--rcfile` that sets it —
-  override the healthcheck so the probe is told the same thing the server was, or it will report
-  unhealthy forever (issue #1133):
+  The images' built-in `HEALTHCHECK` runs `rift healthcheck` (every 30s, 3s timeout, 3 retries,
+  5s start period), which probes `/health` on the host and port the container's own `MB_HOST` /
+  `MB_PORT` say. Moving the port with `-e MB_PORT=…` is therefore followed automatically. Moving it
+  with a `--port` argument or an `--rcfile` is **not** — the probe never sees the server's command
+  line — so override the healthcheck to tell the probe the same thing, or it will report unhealthy
+  forever (issue #1133):
 
   ```yaml
   healthcheck:
     test: ["CMD", "rift", "--rcfile", "/etc/rift/rc.json", "healthcheck"]
   ```
-- **No mimalloc.** The musl binaries are built without the mimalloc allocator (it is a default
-  feature of the glibc builds). Scripting and the Redis backend are both present. If you are
-  benchmarking allocation-heavy workloads, use the default flavor.
+- **No mimalloc.** The musl binaries are built without the mimalloc allocator. Scripting and the
+  Redis backend are both present. If you are benchmarking allocation-heavy workloads, use the
+  default flavor on `amd64` (the `arm64` default image is built without mimalloc too).
 
 HTTPS upstream proxying works in both: the CA bundle is copied into the static image, because rift's
-TLS client loads the OS trust store at runtime.
+TLS client loads the OS trust store at runtime. For a private CA, see
+[Reaching an Origin Behind a Private CA]({{ site.baseurl }}/deployment/#reaching-an-origin-behind-a-private-ca).
+
+### Health checks and `--api-key`
+
+`rift healthcheck` sends no credential. If you set `MB_APIKEY` (or `--api-key`), the admin API
+answers the probe with `401` and the container is reported **unhealthy**. Probe the metrics listener,
+which the key does not gate, instead:
+
+```yaml
+healthcheck:
+  test: ["CMD", "rift", "healthcheck", "--url", "http://127.0.0.1:9090/metrics"]
+```
+
+### Stopping the container
+
+`rift` installs no signal handlers, and as the container's PID 1 it therefore ignores `SIGTERM`:
+`docker stop` waits out its timeout (10s by default) and then kills it. Add an init process so the
+signal is acted on at once — `docker run --init`, or `init: true` in Compose. Shutdown is immediate
+either way; in-flight requests are not drained.
 
 ---
 
@@ -74,6 +106,7 @@ Published images carry an SBOM and max-mode provenance, and are signed with
 [cosign](https://docs.sigstore.dev/) keyless — the signing identity is the release workflow itself,
 so there is no public key to distribute.
 
+{% raw %}
 ```bash
 # Verify the signature and its provenance
 cosign verify \
@@ -87,6 +120,7 @@ docker buildx imagetools inspect zainalpour/rift-proxy:latest-static \
 docker buildx imagetools inspect zainalpour/rift-proxy:latest-static \
   --format '{{ json .Provenance }}'
 ```
+{% endraw %}
 
 ---
 
@@ -97,11 +131,12 @@ docker buildx imagetools inspect zainalpour/rift-proxy:latest-static \
 ```bash
 docker run -d \
   --name rift \
+  --init \
   -p 2525:2525 \
   -p 9090:9090 \
   -e MB_PORT=2525 \
   -e MB_ALLOW_INJECTION=true \
-  -e RUST_LOG=info \
+  -e MB_LOGLEVEL=info \
   zainalpour/rift-proxy:latest
 ```
 
@@ -125,12 +160,11 @@ docker run -d \
 
 ```yaml
 # docker-compose.yml
-version: '3.8'
-
 services:
   rift:
     image: zainalpour/rift-proxy:latest
     container_name: rift
+    init: true
     ports:
       - "2525:2525"    # Admin API
       - "4545:4545"    # Imposter port
@@ -138,7 +172,7 @@ services:
     environment:
       - MB_PORT=2525
       - MB_ALLOW_INJECTION=true
-      - RUST_LOG=info
+      - MB_LOGLEVEL=info
     volumes:
       - ./imposters.json:/imposters.json:ro
     command: ["--configfile", "/imposters.json"]
@@ -168,6 +202,9 @@ services:
 
 ### With TLS
 
+Mount the certificate and key, and name them as the default for HTTPS imposters that carry no
+`cert`/`key` of their own:
+
 ```yaml
 services:
   rift:
@@ -178,8 +215,17 @@ services:
     volumes:
       - ./imposters.json:/imposters.json:ro
       - ./certs:/certs:ro
-    command: ["--configfile", "/imposters.json"]
+    command:
+      - "--configfile"
+      - "/imposters.json"
+      - "--default-tls-cert"
+      - "/certs/server.pem"
+      - "--default-tls-key"
+      - "/certs/server-key.pem"
 ```
+
+See [TLS/HTTPS]({{ site.baseurl }}/features/tls/) for per-imposter certificates, mutual TLS and the
+self-signed fallback.
 
 ---
 
@@ -188,8 +234,6 @@ services:
 ### Rift with Your Application
 
 ```yaml
-version: '3.8'
-
 services:
   # Your application
   app:
@@ -276,7 +320,7 @@ services:
         max-size: "10m"
         max-file: "3"
     environment:
-      - RUST_LOG=warn
+      - MB_LOGLEVEL=warn
 ```
 
 ### Restart Policy
@@ -317,8 +361,11 @@ docker run -p 2525:2525 -p 4545:4545 my-rift:latest
 
 ### Feature flags for a custom build
 
-`crates/rift-http-proxy/Dockerfile` builds with `ARG FEATURES=javascript,redis-backend` by
-default. If you're building a slimmer image (or embedding Rift as a `cdylib` instead of running the
+The published images are assembled from the release binaries. To build an image from source
+instead, use `crates/rift-http-proxy/Dockerfile` from the repository root
+(`docker build -f crates/rift-http-proxy/Dockerfile .`); its runtime stage is `debian:trixie-slim`,
+and it builds with `ARG FEATURES=javascript,redis-backend` by default (on top of the crate's default
+features). If you're building a slimmer image (or embedding Rift as a `cdylib` instead of running the
 container), see the Cargo feature table in [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/#cargo-features)
 and the [Embedding & SPI]({{ site.baseurl }}/embedding/) overview — the same features gate both the
 binary and the `rift-ffi` cdylib, and `cargo build --no-default-features` (plus an explicit
@@ -381,7 +428,7 @@ docker compose down -v
 docker logs rift
 
 # Verify config (rift-lint ships as its own image; the server image does not include it)
-docker run --rm -v $(pwd):/imposters zainalpour/rift-lint /imposters/imposters.json
+docker run --rm -v $(pwd):/imposters zainalpour/rift-lint imposters.json
 ```
 
 ### Port Already in Use

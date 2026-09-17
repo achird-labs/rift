@@ -9,7 +9,7 @@ homepage.workspace = true
 rust-version.workspace = true
 
 # Crate metadata
-description = "Interactive Terminal User Interface for Rift HTTP Proxy"
+description = "Interactive terminal user interface for a running Rift server"
 readme = "README.md"
 keywords = ["tui", "terminal", "http", "mock", "proxy"]
 categories = ["command-line-interface", "development-tools::testing"]

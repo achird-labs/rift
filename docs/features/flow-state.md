@@ -10,7 +10,7 @@ nav_order: 22
 Flow state is a per-flow key/value store used to build stateful mocks — retry-then-succeed, call
 counters, saga progress. It is keyed by `(flow_id, key)`, where the flow id is resolved exactly as
 for [Spaces]({{ site.baseurl }}/features/spaces/). Scripts read and write it through `ctx.state`;
-`_rift.stateOps` (below) writes it declaratively, with no script at all; and a `{{ state.<key> }}`
+`_rift.stateOps` (below) writes it declaratively, with no script at all; and a `{% raw %}{{ state.<key> }}{% endraw %}`
 token (under `_rift.templated`) reads it back into a response body or header.
 
 ---
@@ -35,8 +35,22 @@ token (under `_rift.templated`) reads it back into a response body or header.
 | `ttlSeconds` | `300` | Default entry TTL, in seconds. Must be `>= 1` (see [TTL semantics](#ttl-semantics)). |
 | `flowIdSource` | `imposter_port` | How the flow id is derived (`imposter_port` or `header:<Name>`). |
 
-With `backend: "redis"` you may also set `url`, `poolSize` (default 10), and `keyPrefix`
-(default `"rift:"`).
+With `backend: "redis"`, add a nested `redis` block: `url` (required), `poolSize` (default 10),
+and `keyPrefix` (default `"rift:"`). These keys belong **inside** `redis`, not directly under
+`flowState` — an unrecognised key directly under `flowState` is collected as an option for an
+embedder-supplied store and ignored by the built-in backends, so a flat `url` leaves the `redis`
+block missing and creation fails.
+
+```json
+{
+  "_rift": {
+    "flowState": {
+      "backend": "redis",
+      "redis": { "url": "redis://localhost:6379", "poolSize": 10, "keyPrefix": "rift:" }
+    }
+  }
+}
+```
 
 ### Backend configuration is fail-loud
 
@@ -117,7 +131,7 @@ TTL is a **per-key** attribute, and every backend applies the same rules:
 
 ## Example — fail twice, then succeed
 
-Requires `--allow-injection`. The counter is keyed by the `X-Flow-Id` header so each caller retries
+Requires `--allow-injection` (a `_rift.script` is a scripting surface, gated like `inject`). The counter is keyed by the `X-Flow-Id` header so each caller retries
 independently.
 
 Using the `ctx.state` API, `ctx.state.incr("attempts")` is already scoped to the caller's flow id
@@ -164,7 +178,7 @@ rendered, just before it is written:
   "_rift": {
     "stateOps": [
       { "op": "increment", "key": "hits" },
-      { "op": "set", "key": "lastId", "value": "{{ request.query.id }}" },
+      { "op": "set", "key": "lastId", "value": "{% raw %}{{ request.query.id }}{% endraw %}" },
       { "op": "delete", "key": "tmp" },
       { "op": "clearFlow" }
     ]
@@ -175,7 +189,7 @@ rendered, just before it is written:
 | Op | Effect |
 |:---|:-------|
 | `{ "op": "increment", "key", "by"? }` | Add `by` (default `1`) to an integer key, creating it at `0`. Atomic on every backend that has one. |
-| `{ "op": "set", "key", "value" }` | Set `key` to the rendered `value` template (`{{ }}` grammar, plus one extra head: `previousValue`). |
+| `{ "op": "set", "key", "value" }` | Set `key` to the rendered `value` template (`{% raw %}{{ }}{% endraw %}` grammar, plus one extra head: `previousValue`). |
 | `{ "op": "delete", "key" }` | Delete one key. |
 | `{ "op": "clearFlow" }` | Delete every key in the flow. |
 
@@ -188,12 +202,12 @@ rendered, just before it is written:
   "stubs": [{
     "predicates": [{ "equals": { "method": "GET", "path": "/api/resource" } }],
     "responses": [{
-      "is": { "statusCode": 200, "body": "{{ state.hits }} (was {{ previousValue }})" },
+      "is": { "statusCode": 200, "body": "hits before this request: {% raw %}{{ state.hits }}{% endraw %}" },
       "_rift": {
         "templated": true,
         "stateOps": [
           { "op": "increment", "key": "hits" },
-          { "op": "set", "key": "trail", "value": "{{ previousValue }}|{{ state.hits }}" }
+          { "op": "set", "key": "trail", "value": "{% raw %}{{ previousValue }}{% endraw %}|{% raw %}{{ state.hits }}{% endraw %}" }
         ]
       }
     }]
@@ -201,16 +215,25 @@ rendered, just before it is written:
 }
 ```
 
-The body's `{{ state.hits }}` reads the value from *before* this request's own `increment` — the
+The body's `{% raw %}{{ state.hits }}{% endraw %}` reads the value from *before* this request's own `increment` — the
 same "show the count, then bump it" order WireMock uses — because `stateOps` runs last, right
 before the response is written. The `set` on `trail` mentions `previousValue`, so it is a bounded
-compare-and-set loop rather than a plain write: concurrent requests never lose an update.
+compare-and-set loop rather than a plain write: concurrent requests never lose an update. A `set`
+whose value reads its own key through `{% raw %}{{ state.<that key> }}{% endraw %}` is a compare-and-set loop too; a
+`set` that reads no prior value is a plain write. The loop gives up after 64 lost races and reports
+the failure like any other op error (below).
+
+`previousValue` is meaningful only inside a `stateOps` `set` value — the key's value before that
+op, empty when it had none. Anywhere else (a response body or header) it renders empty.
 
 ### `is` responses only
 
 `stateOps` belongs to an `is` response. A `proxy`, `inject`, or script-only (`_rift.script`)
 response has its own means of touching state (a script reaches `ctx.state` directly); `stateOps` on
-one of those never runs, and `rift-lint`/the admin-API stub-analysis warning both flag it.
+one of those never runs. On a `proxy`, `inject` or bare `fault` response the whole `_rift` block is dropped when
+the imposter is parsed. On a script-only `_rift` response it is kept, and `GET /imposters/:port`
+reports a [`state_ops_never_runs`]({{ site.baseurl }}/features/stub-analysis/#state_ops_never_runs)
+stub-analysis warning. `rift-lint` does not flag either case.
 
 ### Not run when the response never serves
 
@@ -223,12 +246,20 @@ one of those never runs, and `rift-lint`/the admin-API stub-analysis warning bot
 
 A `wait` behavior delays the ops along with the response it delays — it does not skip them.
 
+### When an op fails
+
+Ops are fail-loud but **not transactional**. Normally a failing op (a store error, a `set` value
+that fails to render, a compare-and-set that lost 64 races) is logged at `warn` and the remaining
+ops still run. With `RIFT_DEBUG` (or `--debug`) on, the first failing op
+aborts the rest and the request is answered with a `500` naming it — the ops before it have
+already been applied.
+
 ### What `set` stores
 
 A rendered `value` that is exactly a canonical integer (`"42"`, `"-3"`, `"0"` — not `"007"`, not
 `"4.5"`) is stored as a JSON number; anything else is stored as a string. This is what lets
 `set hits "0"` seed a counter that a later `increment` continues from — an `increment` on a
-*string* value would otherwise silently restart at `0` — and what keeps `{{ state.hits }}` reading
+*string* value would otherwise silently restart at `0` — and what keeps `{% raw %}{{ state.hits }}{% endraw %}` reading
 back as the number it looks like.
 
 ### Auto-provisioning and `rift-lint`
@@ -263,6 +294,6 @@ stubs, or it has a `_rift.script` stub, or a `_rift.stateOps` block (auto-provis
 only an imposter with none of those uses a no-op store where values never persist.
 
 > **Embedding over the C-ABI (non-Rust)**: a non-Rust host can read, write, and delete flow-state
-> keys with zero loopback HTTP via [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/#admin-long-tail-over-ffi-scenario-state--correlated-spaces) —
+> keys with zero loopback HTTP via [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/#admin-long-tail-over-ffi) —
 > `rift_flow_state_get` / `rift_flow_state_put` / `rift_flow_state_delete` mirror the admin-API
 > calls above exactly (same `ImposterManager` calls, same JSON shapes).

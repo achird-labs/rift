@@ -54,16 +54,21 @@ Enable stateful testing scenarios with flow state:
 | Option | Type | Default | Description |
 |:-------|:-----|:--------|:------------|
 | `backend` | string | `"inmemory"` | Storage backend: inmemory or redis |
-| `ttlSeconds` | integer | `300` | Time-to-live for state entries (5 minutes) |
+| `ttlSeconds` | integer | `300` | Time-to-live for state entries (5 minutes); must be at least `1` |
 | `redis` | object | - | Redis-specific configuration (required for redis backend) |
+| `flowIdSource` | string | `"imposter_port"` | Where the flow id comes from: `"imposter_port"`, or `"header:<Name>"` to key state by a request header |
+
+Other keys under `flowState` are kept and passed to an embedder-supplied store; the built-in
+backends ignore them.
 
 **Fail-loud backend errors**: an unknown `backend` string, or a `redis` backend that can't be
 created (missing `redis` config, a connection/pool failure, or a binary built without the
 `redis-backend` feature), fails imposter creation with `400 Bad Request` rather than silently
 degrading to a no-op store. See
 [Flow State → Backend configuration is fail-loud]({{ site.baseurl }}/features/flow-state/#backend-configuration-is-fail-loud)
-for details. Only the *implicit* case — no `flowState` block at all — stays silent, using a no-op
-store.
+for details. With no `flowState` block, an imposter that has a script, scenario or `stateOps` stub
+gets an in-memory store auto-provisioned (with a warning); only an imposter with no state surface at
+all uses a no-op store.
 
 ### Redis Configuration
 
@@ -100,13 +105,11 @@ redis://:password@localhost:6379
 
 # With database selection
 redis://localhost:6379/0
-
-# TLS connection
-rediss://localhost:6379
-
-# Sentinel
-redis+sentinel://localhost:26379/mymaster
 ```
+
+The Redis client is built without TLS or Sentinel support, so `rediss://` and `redis+sentinel://`
+URLs are rejected when the imposter is created. Imposter creation also fails if the server cannot be
+reached: the store connects and sends a `PING` up front (5-second pool timeout).
 
 **Key isolation example:**
 
@@ -126,25 +129,26 @@ This prefixes all keys with `rift:staging:` to isolate test environments.
 
 ### Enabling Redis Backend
 
-Redis support requires building with the `redis-backend` feature:
+Redis support is the `redis-backend` Cargo feature. It is on by default, and every release binary
+and container image includes it, so nothing needs enabling. Only a build with
+`--no-default-features` has to add it back:
 
 ```bash
-# Build with Redis support
-cargo build --release --features redis-backend
-
-# Run with Redis backend
-rift --configfile imposters.json
+cargo build --release --no-default-features --features javascript,redis-backend
 ```
 
 ---
 
 ## Imposter Settings
 
-Besides `flowState`, the imposter-level `_rift` block accepts these settings:
+Besides `flowState`, the imposter-level `_rift` block accepts these settings. Only
+`scriptEngine.timeoutMs` and `scripts` change behaviour; the others are accepted and returned by
+`GET /imposters`, but nothing in the engine reads them.
 
 ### `metrics`
 
-Per-imposter metric emission.
+**Accepted, no effect.** Metrics are always served by the process-wide listener on
+`--metrics-port`; this block does not enable, disable or move them.
 
 ```json
 "_rift": {
@@ -159,7 +163,8 @@ Per-imposter metric emission.
 
 ### `proxy`
 
-Upstream target and connection-pool tuning for proxy responses.
+**Accepted, no effect.** A `proxy` response's upstream is its own `to` field, and connection pooling
+is not configurable per imposter.
 
 ```json
 "_rift": {
@@ -190,8 +195,27 @@ Defaults for `_rift.script` execution.
 
 | Field | Type | Default | Notes |
 |:------|:-----|:--------|:------|
-| `defaultEngine` | string | `"rhai"` | Engine used when a script omits `engine`. |
-| `timeoutMs` | integer | `5000` | Per-script wall-clock timeout. |
+| `defaultEngine` | string | `"rhai"` | **Accepted, no effect.** A script that omits `engine` uses the engine its `file` extension names (`.rhai`, `.js`), else `rhai`. |
+| `timeoutMs` | integer | `5000` | Per-script wall-clock timeout, also applied to `decorate`. |
+
+### `scripts`
+
+A named registry of scripts. A response script can say `{ "ref": "<name>" }` instead of carrying
+`code` or `file`; each entry is itself a `code` or `file` script (a `ref` to another `ref` is an
+error). See [Scripting → Authoring Scripts]({{ site.baseurl }}/features/scripting/#authoring-scripts-file-and-ref-yaml).
+
+```json
+"_rift": {
+  "scripts": {
+    "failTwice": { "engine": "rhai", "file": "scripts/fail-twice.rhai" }
+  }
+}
+```
+
+### `sequencing`
+
+**Carried, not executed.** A `{ "mode": "...", ... }` block kept for an embedder that replaces the
+response cursor. Standalone Rift behaves the same whether it is present or not.
 
 ---
 
@@ -332,6 +356,9 @@ is disrupted at the transport level instead of an HTTP response being sent:
 }
 ```
 
+`tcp` also takes an object with a firing probability — `{ "probability": 0.2, "type": "reset" }`;
+both keys are required in that form.
+
 TCP fault types (canonical name or short alias):
 
 | Value | Aliases | Effect |
@@ -350,7 +377,8 @@ top-level `fault` response form, and scripted faults.
 ## Scripting
 
 `_rift.script` runs a script (engine `rhai` or `javascript`) that decides whether to inject a
-response. The script defines `respond(ctx)` and returns a result constructor — `http(status, body)`,
+response. The source is exactly one of `code` (inline), `file` (a path, relative to the config
+file, or to `--scripts-dir` for admin-API imposters) or `ref` (an entry in `_rift.scripts`). The script defines `respond(ctx)` and returns a result constructor — `http(status, body)`,
 `delay(ms)`, `reset()`, or `pass()`/nothing for no injection. `ctx.state` is a key/value handle
 already scoped to the request's resolved flow id — no explicit flow id argument needed. See
 [Scripting]({{ site.baseurl }}/features/scripting/#ctx-api) for the full `ctx` reference.
@@ -431,7 +459,7 @@ the state model.
         "_rift": {
           "script": {
             "engine": "rhai",
-            "code": "let count = flow.get('requests').unwrap_or(0) + 1; flow.set('requests', count); #{ statusCode: 200, body: `Request #${count}` }"
+            "code": "fn respond(ctx) { let n = ctx.state.incr(\"requests\"); http(200, `Request #${n}`) }"
           }
         }
       }]
@@ -439,6 +467,20 @@ the state model.
   ]
 }
 ```
+
+This imposter uses `_rift.script`, so it needs `--allow-injection`.
+
+---
+
+## Other Response-Level Keys
+
+Besides `fault` and `script`, a response's `_rift` block accepts:
+
+| Key | Purpose |
+|:----|:--------|
+| `templated` | `true` evaluates the function-grammar templates in the body and header values. See [Response Templates]({{ site.baseurl }}/features/date-templates/). |
+| `stateOps` | Declarative flow-state writes after an `is` response is rendered. See [Flow State]({{ site.baseurl }}/features/flow-state/). |
+| `dataset` | **Carried, not executed** by standalone Rift — a named `lookup` binding that Rift Cluster resolves per node. |
 
 ---
 
@@ -473,6 +515,6 @@ Both `_behaviors.wait` and `_rift.fault.latency` will be applied.
 
 ## See Also
 
-- [Mountebank Compatibility](mountebank.md) - Standard Mountebank configuration
-- [Fault Injection](../features/fault-injection.md) - Detailed fault injection documentation
-- [Scripting](../features/scripting.md) - Scripting engine documentation
+- [Mountebank Compatibility]({{ site.baseurl }}/configuration/mountebank/) - Standard Mountebank configuration
+- [Fault Injection]({{ site.baseurl }}/features/fault-injection/) - Detailed fault injection documentation
+- [Scripting]({{ site.baseurl }}/features/scripting/) - Scripting engine documentation

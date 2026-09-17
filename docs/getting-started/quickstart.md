@@ -16,7 +16,8 @@ This tutorial walks you through creating various types of imposters with Rift.
 Ensure Rift is running:
 
 ```bash
-docker run -p 2525:2525 -p 4545:4545 zainalpour/rift-proxy:latest
+# The admin port plus the imposter ports this tutorial uses (4545-4552)
+docker run -p 2525:2525 -p 4545-4552:4545-4552 zainalpour/rift-proxy:latest
 ```
 
 ---
@@ -117,7 +118,7 @@ curl -X POST http://localhost:2525/imposters \
 ```bash
 curl http://localhost:4546/users/123    # User found
 curl http://localhost:4546/users/999    # User found
-curl http://localhost:4546/users/abc    # No match (404)
+curl http://localhost:4546/users/abc    # No match: 200 with an empty body (Mountebank behaviour)
 ```
 
 ---
@@ -450,40 +451,12 @@ Complete working examples are available in the [`examples/`](https://github.com/
 | `feature-flags-api.json` | Feature toggle service mock |
 | `authentication-api.json` | Login/logout with token validation |
 
-Load an example:
+Load an example (from a checkout of the repository):
 
 ```bash
 curl -X POST http://localhost:2525/imposters \
   -H "Content-Type: application/json" \
   -d @examples/task-management-api.json
-```
-
----
-
-## Managing Imposters
-
-### List All Imposters
-
-```bash
-curl http://localhost:2525/imposters
-```
-
-### Get Imposter Details
-
-```bash
-curl http://localhost:2525/imposters/4545
-```
-
-### Delete an Imposter
-
-```bash
-curl -X DELETE http://localhost:2525/imposters/4545
-```
-
-### Delete All Imposters
-
-```bash
-curl -X DELETE http://localhost:2525/imposters
 ```
 
 ---

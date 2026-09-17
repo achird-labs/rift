@@ -28,6 +28,14 @@ Behaviors are added to responses using `_behaviors`:
 }
 ```
 
+`decorate`, `shellTransform` and a `wait` written as a JavaScript function run code, so an imposter
+using any of them is refused unless the server was started with `--allowInjection`. A numeric
+`wait`, `repeat`, `copy` and `lookup` need no flag. A behavior key set to `null` is treated as
+absent everywhere, including by that check.
+
+Behaviors apply to `is` responses (and the flat response form). On a `proxy`, `inject` or `fault`
+response they are ignored.
+
 ### Alternative Format: behaviors (without underscore)
 
 Some tools generate `behaviors` without the underscore prefix. Both formats are supported:
@@ -55,7 +63,7 @@ Behaviors can also be specified as an array of behavior objects:
 }
 ```
 
-When using array format, behaviors are merged into a single object. If the same behavior type appears multiple times, the last one takes precedence. `_behaviors` takes precedence over `behaviors` when both are present; `"_behaviors": null` counts as absent, so `behaviors` is used.
+When using array format, behaviors are merged into a single object. If the same behavior type appears multiple times, the last one replaces the earlier ones — two array elements that each hold a `copy` keep only the second; put both copies in one `copy` array instead. `_behaviors` takes precedence over `behaviors` when both are present; `"_behaviors": null` counts as absent, so `behaviors` is used.
 
 `_behaviors` must be an object; the array form is only accepted under `behaviors`, and each of its elements must be an object (a non-object element is skipped). Any other shape — an array or scalar `_behaviors`, or a scalar `behaviors` — is refused: `POST /imposters` returns `400` and a config file fails to load. This holds with `--allowInjection` on too.
 
@@ -79,6 +87,19 @@ Adds exactly 2000ms delay.
 
 ### Random Delay
 
+A `{min, max}` range picks a delay uniformly between the two, inclusive (Rift extension):
+
+```json
+{
+  "_behaviors": {
+    "wait": { "min": 500, "max": 1500 }
+  }
+}
+```
+
+A JavaScript function can compute the delay instead. The `{"inject": ...}` object spelling is a Rift
+extension; Mountebank's own spelling is the bare function string shown in the next section.
+
 ```json
 {
   "_behaviors": {
@@ -89,7 +110,8 @@ Adds exactly 2000ms delay.
 }
 ```
 
-Returns random delay between 500-1500ms.
+Returns random delay between 500-1500ms. A delay computed by a function is capped at 60 seconds;
+a function that throws or returns no usable number falls back to 100ms and logs a warning.
 
 ### JavaScript Function String
 
@@ -137,6 +159,10 @@ This format is supported and the function is evaluated to compute the delay.
 
 Transform responses using JavaScript. The function receives request and response, and must return the modified response.
 
+`response.body` arrives as a **string**, even when the stub's `body` is a JSON object, so parse it
+before changing fields. If the function sets `response.body` to an object, Rift serializes it back
+to JSON. `response.headers` holds one string per header name.
+
 ### Basic Transformation
 
 ```json
@@ -146,7 +172,7 @@ Transform responses using JavaScript. The function receives request and response
     "body": { "data": [] }
   },
   "_behaviors": {
-    "decorate": "function(request, response) { response.body.timestamp = Date.now(); return response; }"
+    "decorate": "function(request, response) { var body = JSON.parse(response.body); body.timestamp = Date.now(); response.body = body; return response; }"
   }
 }
 ```
@@ -250,6 +276,22 @@ with `strictBehaviors` / `RIFT_STRICT_BEHAVIORS` it returns `500` (see
 
 Copy values from the request to the response. Useful for echoing request data.
 
+`from` names the request field: `"path"`, `"method"` or `"body"` as a string, or
+`{"query": "<name>"}` / `{"headers": "<name>"}` for one query parameter or header. `using` extracts
+from that value:
+
+| `method` | `selector` | Result |
+|:---------|:-----------|:-------|
+| `regex` | A regular expression | The first capture group, or the whole match if the pattern has none. `options` takes `ignoreCase` and `multiline`. |
+| `jsonpath` | A JSONPath selector | The selected value from a JSON source |
+| `xpath` | An XPath selector | The selected value from an XML source |
+
+Every occurrence of the `into` token in the body and header values is replaced. If the source is
+absent, or nothing is extracted, the token is replaced with an empty string.
+
+Rift returns the first capture group where Mountebank returns the whole regex match, so a pattern
+like `/users/(\d+)` yields just the id.
+
 When a `copy` token sits in a **header** value, the substituted text comes from the request, so
 Rift removes any character a header value cannot carry (CR, LF, NUL and the other ASCII controls)
 and logs a `rift::template` warning naming what it removed, with `port`, `stub` and `stub_id` identifying the stub. A tab and any non-ASCII character are
@@ -266,9 +308,9 @@ into the header is left alone, and still fails that response with a `500`.
   },
   "_behaviors": {
     "copy": {
-      "from": { "path": "/users/(\\d+)" },
+      "from": "path",
       "into": "${id}",
-      "using": { "method": "regex", "selector": "$1" }
+      "using": { "method": "regex", "selector": "/users/(\\d+)" }
     }
   }
 }
@@ -286,9 +328,9 @@ Request to `/users/123` returns `{ "id": "123" }`.
   },
   "_behaviors": {
     "copy": {
-      "from": "query",
+      "from": { "query": "page" },
       "into": "${page}",
-      "using": { "method": "jsonpath", "selector": "$.page" }
+      "using": { "method": "regex", "selector": ".+" }
     }
   }
 }
@@ -304,9 +346,9 @@ Request to `/users/123` returns `{ "id": "123" }`.
   },
   "_behaviors": {
     "copy": {
-      "from": "headers",
+      "from": { "headers": "X-Request-Id" },
       "into": "${reqId}",
-      "using": { "method": "jsonpath", "selector": "$['X-Request-Id']" }
+      "using": { "method": "regex", "selector": ".+" }
     }
   }
 }
@@ -337,14 +379,14 @@ Request to `/users/123` returns `{ "id": "123" }`.
   "_behaviors": {
     "copy": [
       {
-        "from": { "path": "/orders/(\\d+)" },
+        "from": "path",
         "into": "${orderId}",
-        "using": { "method": "regex", "selector": "$1" }
+        "using": { "method": "regex", "selector": "/orders/(\\d+)" }
       },
       {
-        "from": "query",
+        "from": { "query": "format" },
         "into": "${format}",
-        "using": { "method": "jsonpath", "selector": "$.format" }
+        "using": { "method": "regex", "selector": ".+" }
       }
     ]
   }
@@ -355,7 +397,9 @@ Request to `/users/123` returns `{ "id": "123" }`.
 
 ## lookup
 
-Look up data from external sources (CSV files, etc.).
+Look up a row in a CSV file, keyed by a value extracted from the request. `key` takes the same
+`from` and `using` as [`copy`](#copy). Each column of the matched row replaces the token
+`<into>[<column>]`, so with `"into": "${row}"` the `email` column fills `${row}[email]`.
 
 As with [`copy`](#copy), a `lookup` token in a **header** value is repaired after substitution: the
 request chooses which row is read, so a CSV cell holding a character a header value cannot carry
@@ -368,13 +412,13 @@ a `rift::template` warning names them, alongside the `port`, `stub` and `stub_id
 {
   "is": {
     "statusCode": 200,
-    "body": { "name": "${name}", "email": "${email}" }
+    "body": { "name": "${row}[name]", "email": "${row}[email]" }
   },
   "_behaviors": {
     "lookup": {
       "key": {
-        "from": { "path": "/users/(\\d+)" },
-        "using": { "method": "regex", "selector": "$1" }
+        "from": "path",
+        "using": { "method": "regex", "selector": "/users/(\\d+)" }
       },
       "fromDataSource": {
         "csv": {
@@ -396,6 +440,11 @@ id,name,email
 ```
 
 Request to `/users/1` returns `{ "name": "Alice", "email": "alice@example.com" }`.
+
+`csv.delimiter` sets a single-character separator (default `,`). The file is read once and cached;
+its path is resolved relative to the server's working directory. Cells are split on the delimiter
+without CSV quoting rules, so a quoted cell containing the delimiter is not supported. If the file
+cannot be read, a warning is logged and the tokens are left in place.
 
 ---
 
@@ -525,12 +574,15 @@ Each response is returned once in sequence (standard cycling).
 
 ## Behavior Order
 
-When multiple behaviors are defined, they execute in this order:
+When multiple behaviors are defined on an `is` response, they execute in this order:
 
-1. **copy** - Copy request values into response
-2. **lookup** - Perform data lookups
-3. **decorate** - Transform the response
-4. **wait** - Add delay before sending
+1. **wait** - Delay first
+2. **copy** - Copy request values into response
+3. **lookup** - Perform data lookups
+4. **decorate** - Transform the response
+5. **shellTransform** - Pipe the body through each command in turn
+
+`repeat` is not a step here; it controls which response is chosen.
 
 ---
 
@@ -544,15 +596,11 @@ When multiple behaviors are defined, they execute in this order:
   },
   "_behaviors": {
     "copy": {
-      "from": { "path": "/users/(\\d+)" },
+      "from": "path",
       "into": "${id}",
-      "using": { "method": "regex", "selector": "$1" }
+      "using": { "method": "regex", "selector": "/users/(\\d+)" }
     },
-    "decorate": "function(request, response) { \
-      response.body.processed = true; \
-      response.body.timestamp = Date.now(); \
-      return response; \
-    }",
+    "decorate": "function(request, response) { var body = JSON.parse(response.body); body.processed = true; body.timestamp = Date.now(); response.body = body; return response; }",
     "wait": 100
   }
 }

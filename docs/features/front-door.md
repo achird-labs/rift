@@ -2,7 +2,7 @@
 layout: default
 title: Front Door
 parent: Features
-nav_order: 26
+nav_order: 27
 ---
 
 # Front Door
@@ -44,8 +44,24 @@ curl -H 'Host: payments.test' http://localhost:8080/api/charges   # -> imposter 
 curl -H 'Host: search.test'   http://localhost:8080/api/query     # -> imposter 4546
 ```
 
+The `routes` block is read only when `--front-door` is set; without the flag it is parsed and
+validated but nothing listens for it. It may come from at most one imposter source (a second source
+declaring `routes` is a startup error).
+
 Dispatch is **in-process** — the same path the gateway uses. There is no second hop, no extra
 socket, and the imposter behaves exactly as if the request had arrived on its own port.
+
+---
+
+## Route fields
+
+| Field | Default | Meaning |
+|---|---|---|
+| `id` | — (required, non-empty) | Unique within the table; ties in evaluation order are broken on it. |
+| `priority` | `0` | Higher is evaluated first. |
+| `match` | `{}` | The clauses below. |
+| `target` | — (required) | Where a matched request goes (see [Targets](#targets)). |
+| `enabled` | `true` | A disabled route is kept in the table but never matches. |
 
 ---
 
@@ -57,9 +73,9 @@ which is a legitimate catch-all.
 | Clause | Meaning |
 |---|---|
 | `host` | Exact (`payments.test`), or one leading wildcard label (`*.payments.test`). Compared case-insensitively; any `:port` on the `Host` header is ignored. |
-| `path_prefix` | **Segment-aligned**: `/api/v1` matches `/api/v1` and `/api/v1/users`, but never `/api/v1x`. |
-| `headers` | A list of `{ "name": ..., "value": ... }`. Names are case-insensitive, values are not. |
-| `method` | Exact HTTP method. |
+| `path_prefix` | **Segment-aligned**: `/api/v1` matches `/api/v1` and `/api/v1/users`, but never `/api/v1x`. A trailing `/` on the prefix is ignored. |
+| `headers` | A list of `{ "name": ..., "value": ... }`. Names are case-insensitive; values must match byte for byte (only the first value of a repeated header is compared). |
+| `method` | HTTP method, compared case-insensitively. |
 
 A wildcard host means a real subdomain. `*.payments.test` matches `api.payments.test` but **not**
 the bare `payments.test`, and **not** `evilpayments.test` — the `.` boundary is what makes a
@@ -124,7 +140,7 @@ A route table is validated and applied **as a unit**, at load time — so a tabl
 fails the boot rather than the first request, and there is no half-applied routing topology to
 reason about. A table is rejected when:
 
-- two routes share an `id`;
+- a route has an empty `id`, or two routes share an `id`;
 - two *enabled* routes at the same `priority` have byte-identical `match` clauses (see above);
 - a route sets `strip_prefix` with no `path_prefix` to strip;
 - a `host` contains `*` anywhere but as one leading `*.` label;
@@ -136,3 +152,17 @@ actionable.
 A `routes` block is only read from the `{"imposters": [...], "routes": {...}}` wrapper form. Putting
 one on a single-imposter document is an error rather than a silent no-op — unknown fields are
 otherwise ignored, so the quiet version would be no routes, no diagnostic, and a green boot.
+
+The route table is applied **at startup only**. `POST /admin/reload` re-reads imposters but does not
+re-apply an edited `routes` block, and its response does not say so; restart to pick up route
+changes.
+
+---
+
+## Observing dispatches (embedders)
+
+An embedder can count traffic per route by passing a `RouteObserver` to
+`bind_front_door_with_observer`. Its `note_dispatch(route_id)` is called once for every request a
+route claims, including one whose imposter is gone and answers `404`. It is not called for the
+`/__rift/{port}` fallback or for the `no-route` 404. `bind_front_door` is the same call with no
+observer.

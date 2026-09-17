@@ -55,10 +55,10 @@ and `script` for one a `_rift.script` returned.
 | `rift_faults_injected_total` | counter | `type`, `rule_id`, `source` | Faults injected (`type` = latency/error/tcp). |
 | `rift_latency_injected_ms` | histogram | `rule_id` | Injected latency, in milliseconds. |
 | `rift_error_status_total` | counter | `status`, `rule_id` | Error-fault responses, by status. |
-| `rift_script_execution_duration_ms` | histogram | `rule_id`, `result` | Script execution time, in milliseconds. |
-| `rift_script_errors_total` | counter | `rule_id`, `error_type` | Script failures, by error type. |
-| `rift_flow_state_ops_total` | counter | `operation`, `result` | Flow-store operations (get/set/…), by result. |
-| `rift_upstream_request_duration_ms` | histogram | `method`, `status` | Upstream (proxied) request time, in milliseconds. |
+| `rift_script_execution_duration_ms` | histogram | `rule_id`, `result` | Script execution time, in milliseconds. `result` is `pass` (no fault), `fault` (the script decided a fault) or `error`. |
+| `rift_script_errors_total` | counter | `rule_id`, `error_type` | Script failures. `error_type` is `timeout` (the script missed its deadline) or `runtime` (any other failure). |
+| `rift_flow_state_ops_total` | counter | `operation`, `result` | Flow-store operations, by `operation` (`get`, `set`, `exists`, `delete`, `increment`, `increment_by`, `set_ttl`, `clear_flow`, `flow_ids`, `entry_count`) and `result` (`success`/`error`). |
+| `rift_upstream_request_duration_ms` | histogram | `method`, `status` | Upstream request time for `proxy` responses, in milliseconds — the forward itself, not Rift's own handling. |
 | `rift_accepted_connections_total` | counter | `worker` | Connections accepted per accept-loop worker slot. Under `--runtime per-core` the slot is the worker index, making SO_REUSEPORT skew observable; in the default topology everything lands on slot `0`. |
 | `rift_accept_errors_total` | counter | `listener`, `class` | Accept errors by listener (`imposter`, `admin`, `metrics`, `front-door`) and class (`transient`, `systemic`). The accept loops classify and retry rather than terminate, so a listener can stay bound while unable to serve — this is the signal that it is degraded. Fatal (broken-fd) errors are excluded on the admin, metrics and proxy listeners — they end the loop and surface through its owner. The imposter loops have no fatal class by design (a dying imposter loop is recoverable through the still-live admin API), so there a broken fd counts as `systemic`. No port label, deliberately (unbounded cardinality); the log lines carry the port. Present at `0` from startup for every running listener, so `rate()`/`increase()` behave on the first error. |
 | `rift_preface_failures_total` | counter | `listener`, `kind` | Connections dropped before an HTTP/1-or-HTTP/2 decision could be made, by listener (`imposter`, `admin`, `metrics`, `front-door`, `intercept`) and cause. `kind` is `timeout` (the client completed the transport handshake and then sent nothing in time), `eof` (it hung up first), or `io` (the read itself failed). The distinction is the point: `timeout` and `eof` are ordinary client behaviour, whereas a rising `io` rate is a systemic signal — a bad certificate, a resolver rollout — and the call sites deliberately log all three at `debug!` only, since the trigger is client-controlled and a per-connection warning would be an unbounded log-volume lever (#718). Present at `0` from startup for every running listener, so `rate()`/`increase()` behave on the first failure. |
@@ -142,7 +142,7 @@ sum(rate(rift_requests_total[5m]))
 sum(rate(rift_faults_injected_total[5m])) by (type)
 ```
 
-**P99 upstream latency (proxy mode):**
+**P99 upstream latency (`proxy` responses):**
 ```promql
 histogram_quantile(0.99, sum(rate(rift_upstream_request_duration_ms_bucket[5m])) by (le))
 ```
@@ -176,7 +176,7 @@ groups:
         labels: { severity: critical }
         annotations:
           summary: "Script errors in Rift"
-          description: "error_type={{ $labels.error_type }}"
+          description: "error_type={% raw %}{{ $labels.error_type }}{% endraw %}"
 ```
 
 ---
