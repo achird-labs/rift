@@ -169,7 +169,10 @@ async fn no_unlisted_method_is_dispatched_on_a_listed_path() {
             let response = tokio::time::timeout(
                 Duration::from_secs(5),
                 client
-                    .request(reqwest::Method::from_bytes(method.as_bytes()).expect("method"), url)
+                    .request(
+                        reqwest::Method::from_bytes(method.as_bytes()).expect("method"),
+                        url,
+                    )
                     .send(),
             )
             .await
@@ -182,7 +185,10 @@ async fn no_unlisted_method_is_dispatched_on_a_listed_path() {
             } else {
                 is_router_404(response).await
             };
-            assert!(routed_away, "{method} {path} is dispatched ({status}) but not listed");
+            assert!(
+                routed_away,
+                "{method} {path} is dispatched ({status}) but not listed"
+            );
         }
     }
     admin.shutdown().await;
