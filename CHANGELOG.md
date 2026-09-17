@@ -11,49 +11,6 @@ record.
 
 ## [Unreleased]
 
-### Fixed
-
-- **A bare IPv6 bind host works on every door** (#1137). The admin plane, the intercept listener and
-  the C-ABI built their bind address by parsing `"{host}:{port}"`, and `"::1:2525"` reads the port as
-  one more hextet — so `--host ::1` (or `MB_HOST=::1`) could never start, and the refusal wrongly
-  called `::1` "not a literal address". Every door now parses the host to an IP and attaches the port,
-  accepting IPv4 and IPv6 in both spellings (`::1`, `[::1]`):
-  - `--host` / `MB_HOST` / rcfile `host`, including with `--intercept-port` under
-    `--require-admin-auth`, which failed with a bare `invalid socket address syntax`;
-  - `POST /intercept` `host`, a config-file `intercept.host`, and `rift_start_intercept`;
-  - an SDK's `serve({host})` (`rift_serve_admin`), for the admin and metrics addresses;
-  - `rift save --host ::1`, which built the unparseable URL `http://::1:2525/…`;
-  - an imposter's `host`, which had the mirror-image defect: `::1` worked and `[::1]` failed with a
-    DNS lookup error. A DNS name (`localhost`) still resolves there, as in Mountebank, and is now
-    looked up without blocking the async runtime.
-  - A scoped link-local literal (`[fe80::1%2]`) keeps its scope id on every door. The startup log no
-    longer prints a malformed metrics URL built from `--host`; the metrics listener already logs the
-    address it bound.
-
-- **An unrecognised `--loglevel` and an unparseable `RUST_LOG` are refused instead of silently
-  downgraded** (#1134). Two reads in `main.rs` discarded a failure and fell back to a level nobody
-  chose: the level match's catch-all turned **`trace`** — a real `tracing` level — and any typo alike
-  into `info`, and `EnvFilter::try_from_default_env().unwrap_or_else(…)` could not tell `RUST_LOG`
-  *unset* from `RUST_LOG` *set and invalid*, so an operator's filter was replaced with nothing said.
-  Since #1114 the pair was inconsistent in a way that was hard to explain: a wrong-**typed**
-  `logLevel` in an rcfile refused the whole file, while a wrong-**valued** one started the server at
-  `info`.
-  - `trace` is now accepted; an unrecognised level names the value and lists the accepted ones; a
-    `RUST_LOG` that is set and does not parse (or is not valid UTF-8) is refused. An **unset**
-    `RUST_LOG` remains an absence, not a failure, and `RUST_LOG=` keeps its current meaning.
-    Precedence is unchanged: `RUST_LOG` > `--debug` > `--loglevel`.
-  - An **empty** level (`--loglevel ""`, or `MB_LOGLEVEL=${LOG_LEVEL}` with `LOG_LEVEL` unset — clap
-    prefers a present environment variable over the default even when it is empty) still means "not
-    supplied" and yields `info`. Refusing it would abort deployments that work today to report a
-    typo nobody made.
-  - The rules live in `bootstrap::log_filter` (with `log_filter_with`, which takes the `RUST_LOG`
-    value rather than reading it), so an alternative binary calls them instead of copying them —
-    the same treatment #807 gave the rcfile and pidfile helpers.
-  - **Migration:** a level that was never valid — `--loglevel verbose`, a typo, anything outside the
-    accepted set — used to start the server at `info` and now stops it. If a deployment has been
-    passing one, it has been running at `info` all along; set a real level (or drop the flag) before
-    upgrading.
-
 ### Added
 
 - **An embedder can set the port `GET /config` reports**, via
@@ -74,366 +31,12 @@ record.
   calls it too. A non-literal `--host` now fails with a message naming the flag and the value
   instead of a bare `invalid socket address syntax`.
 
-### Fixed
-
-- **`healthcheck` now applies `--rcfile` before computing what to probe** (#1133). The subcommand
-  was dispatched ahead of the rcfile, so a deployment that set the admin port in a file — `{"port":
-  4321}` — ran a server on 4321 and a container probe that computed its URL from the unmodified
-  default, 2525, and reported unhealthy forever with nothing in the output mentioning the rcfile.
-  The early dispatch is still right about skipping the *server* bootstrap (the crypto provider and
-  the tracing subscriber); reading one small JSON file is not what that protects, and it is the one
-  step whose output the probe depends on. `script` still runs ahead of the rcfile, since it reads no
-  host or port.
-  - A refused rcfile now refuses the probe, consistent with #1114: a server started with that file
-    would not start either, so *unhealthy* is the true answer. Pass the probe the same `--rcfile`
-    the server was given.
-
-- **An `--rcfile` may now set `apiKey`, instead of dropping the credential with an advisory**
-  (#1132). `apiKey` was the one Mountebank option the rcfile did not recognise, so a file carrying
-  the admin credential produced `unsupported key 'apiKey' (ignored)` and a server with **no key
-  set**. Ignoring an unknown key is right; ignoring a credential the same way is the one case where
-  that advisory reads as reassurance. The pairing that mattered most was
-  `{"apiKey": "…", "requireAdminAuth": true}`: the file applied the gate, dropped the key, and
-  startup then refused with a message telling the operator to set `--api-key` — from a file that
-  plainly had. Both spellings (`apiKey`, `api_key`) are accepted, the value must be a JSON string or
-  the whole rcfile is refused, an explicit `--api-key`/`MB_APIKEY` still wins, and a blank value is
-  refused at startup exactly as a blank `--api-key` is. A wrong-typed `apiKey` names the key and the
-  type the value had — never the value itself, since an unquoted token is exactly the mistake that
-  refusal catches, and the message reaches stderr and CI output. Every other key still echoes its
-  value.
-
-### Changed
-
-- **A `--datadir` file must be named `<port>.json` after the port it declares** (#1128). A file named
-  anything else, `foo.json`, a copied-in `imposter-4545.json` export, or a `4545-orders.json` from
-  `rift-tui`'s folder export, used to be served and then written again as `4545.json` beside the
-  original. From the next start both files declared port 4545: one was skipped with `Port 4545 is
-  already in use`, and every `POST /admin/reload` failed on the duplicate. Startup now skips such a file and names it with the name it needs, and a reload
-  refuses with a `500` saying the same; the file is never modified.
-  - **Migration:** look at the directory, not at whether the server has run before. If a
-    `<port>.json` for the same port sits beside the misnamed file, keep whichever holds the content you
-    want and delete the other: the copy was written when the imposter was created, so it lacks any
-    later edit to the original. If there is no `<port>.json`, rename the misnamed file; deleting it
-    would delete the only definition.
-  - `rift-tui`'s folder export (`E`) now writes every imposter as `<port>.json`, so an exported
-    folder can be used as a data directory. It used to append the imposter's name.
-
-- **A `--datadir` file that declares no `port` is now refused** (#1125). An absent `port`, or `0`, used
-  to be created on an auto-assigned port and written to the directory again under that port, and the
-  original was left beside it, so every restart or reload added one more file and one more served
-  imposter. Startup now skips such a file and names it in the skip summary, and `POST /admin/reload`
-  refuses with a `500` that names it; the file itself is never modified. Rift only ever writes
-  `<port>.json` files with an explicit port, so only a hand-written or copied-in file is affected.
-  - **Migration:** if a port-less file already accumulated `<port>.json` copies, those copies still
-    load. Keep one copy and delete the others along with the original, or give the original a
-    `port` and delete all the copies.
-
-- **Embedders: `ImposterManager::delete_all` returns a `DeleteAllReport`** (#1124) with the `deleted`
-  configs and the `failed` ports, instead of the deleted configs alone. When anything failed it emits
-  a `Deleted` event per deleted port instead of `AllDeleted`. `rift_delete_all` returns `-1` in that
-  case, and the deprecated `ImposterManager::reload` returns the error instead of creating the new
-  set beside the imposter that is still serving.
-
-- **Imposters loaded from `--configfile` or `--imposters` are no longer written to `--datadir`**
-  (#1122). The data directory now holds only what the admin API created and the files an operator
-  put there; a config-file imposter is re-read from its file, and a copy of it in the directory
-  loaded as a second imposter. Runtime changes to a config-file imposter, through the stub endpoints
-  or a `PUT /imposters` that repeats it, are not persisted either. A malformed datadir file named in
-  a refused reload is now identified by its path.
-  - **Migration:** a server that ran both flags on an earlier release has a `<port>.json` copy of
-    every config-file imposter in its data directory. Delete them. A copy with an explicit port now
-    refuses every `POST /admin/reload`, and a copy of a port-less imposter is served beside the
-    original.
-  - Embedders: `AdminApiServer::with_imposter_sources` takes the datadir as a second argument,
-    `ReloadSource::Sources` is a struct variant carrying it, and `ImposterManager` gains
-    `create_imposter_as` and `apply_desired` with a `Persistence` tag. `create_imposter` and
-    `apply_config` keep their signatures. `create_imposter` persists; `apply_config` persists the
-    imposters it creates and leaves a running imposter in the store it is in, so a config-file
-    imposter it changes is not written.
-
-- **Security: an `--rcfile` that cannot be read or applied now aborts startup** (#1114). It used to be
-  skipped with a warning and the server started with none of its keys, so a mistyped
-  `"requireAdminAuth": "true"` served the admin plane off-host with no authentication. A missing file,
-  invalid JSON, a root that is not an object, and a recognised key with the wrong type are all fatal,
-  and the error names the file.
-  - Every recognised key is now type-checked before any is applied. A wrong-typed value used to be
-    ignored or coerced: `"localOnly": "yes"` bound the admin plane on every interface, `"port": "4321"`
-    kept the default port, and `"port": 70000` wrapped to `4464`.
-  - An unsupported rcfile key is now printed as a warning on stderr. It was logged before the log
-    subscriber existed, so it never appeared.
-  - `bootstrap::apply_rcfile_defaults_reporting` returns the unsupported keys for an embedder that
-    applies the rcfile before installing a subscriber.
-
-- **An EJS tag that `--configfile`, `--imposters file:` and `https:` sources do not evaluate now
-  fails the load, naming the tag and its line** (#1095). It used to be blanked or stripped with only
-  a log line, so the config that loaded silently differed from the file: an empty `port`, a body with
-  its content missing, an empty TLS key. That is how three EJS examples in the docs stopped working
-  unnoticed (#1092).
-  - Evaluated as before: `<%= process.env.VAR %>`, `<%= process.env.VAR || 'default' %>`,
-    `<% include 'file' %>` and `<%- stringify('file') %>`. Refused: any other `<%= … %>`, `<% … %>`,
-    `<%- … %>` or `<%# … %>` tag, an include inside an included or stringified file, a stringify
-    inside a stringified file (Mountebank evaluates that one), and a `<%` with no closing `%>`. That last case, for example in a `contains` predicate, used to load unchanged.
-  - An included file is checked like the document, and the error names its file and line and the
-    line that included it.
-  - A stringified file is now rendered before it is escaped, as Mountebank's formatter does: its
-    env tags are substituted and any other tag is refused. It used to have `<% … %>` text stripped
-    out, and a stray `<%=` in it could stop a later env tag in the document from being substituted.
-  - Startup aborts, `POST /admin/reload` returns `500` with the running imposters left unchanged, and
-    an embedded `configFile` load returns the error.
-  - A file whose `<%` is meant literally loads with `--no-parse`. An `https:` source, an embedded
-    `configFile` load and `rift script check` always preprocess, so a literal `<%` is refused there.
-
-- `rift_mock_core::behaviors::apply_copy_behaviors` and `apply_lookup_behaviors` take one additional
-  argument, a `StubRef` identifying the stub for log attribution (#1075). Source-breaking for a
-  direct caller of those two functions; no wire, admin-API or SDK surface changes.
-
-- **A `_rift.templated` response with a control character written literally into a header now fails
-  with a `500` instead of being silently repaired** (#1073). The `{{ }}` renderer had repaired every
-  header value *whole* since #359 B3, so a stray byte the author typed was stripped and the warning
-  blamed the client for it ("a CR or LF here would have terminated the header line"). #1067 drew the
-  opposite boundary for the `${request.*}` pass and the `copy`/`lookup` behaviors — repair the
-  substituted text, leave the author's literal text to fail loudly — and the two disagreed.
-  - The `{{ }}` pass now repairs per substitution too, so all four paths agree. A control character
-    arriving *through* a token is removed exactly as before, and the injection defence is unchanged;
-    tabs and non-ASCII still survive byte-exact (#1058).
-  - Only a stub that writes a control character literally into a header of a templated response is
-    affected, and only that response. Bodies are still never filtered, and `_rift.stateOps` values
-- **The templated-header repair warning now says which stub produced it** (#1075). When a repair
-  removed characters from a header value it logged the value and the removed characters and nothing
-  else, so on a server running many imposters an operator could see a mangled header and have no way
-  back to the config that caused it. The `rift::template` warning now also carries `port`, `stub`
-  (the stub's index) and `stub_id`, with the same names and rendering as the fields a `rift::script`
-  event already uses, so one grep finds a stub's lines on both targets. A stub with no `id` logs
-  `stub_id=` empty rather than omitting the field.
-  - Deliberately **not** a `tracing` span. `render_template_parts` can run on a `spawn_blocking`
-    pool thread when the flow store blocks, and a span's thread-local is empty there — so a span
-    would have gone missing on exactly the Redis + `{{ state.* }}`-in-a-header path. The identity
-    travels as a plain argument instead, which cannot be lost that way.
-  - The request path and query are deliberately **not** logged: both are client-controlled, and the
-    existing `value` field already shows the operator the offending client data.
-
-    are unchanged — a stored value read back into a header is repaired at that read.
-
-### Fixed
-
-- **A delete whose `--datadir` file could not be removed reported success, and the imposter came back
-  on restart** (#1124). The unlink failure was only logged, and `DELETE /imposters/:port`,
-  `DELETE /imposters` and a reload's sweep all reported the imposter as deleted. The file is now
-  removed before the imposter is torn down. If that fails, the delete returns `503` naming the file,
-  the imposter keeps serving, and a reload lists the port under `failed`. `DELETE /imposters`
-  returns `503` naming each such port, with the imposters that were deleted.
-
-- **With `--configfile` or `--imposters` and `--datadir` together, a port-less config-file imposter
-  could take the port of a data-directory file at startup, and that file's imposter was not served**
-  (#1120). Startup created every source imposter before reading the data directory, and an
-  auto-assigned port is the lowest free one from 49152, so the data-directory imposter on that port
-  was skipped with `PortInUse` until the next reload. Before #1122 the config-file imposter was also
-  written over that file. Both stores are now created in one pass, every imposter with an explicit
-  port first, which also covers a port-less file inside the data directory. Every refusal while
-  loading imposters, including a data directory that cannot be listed, now comes before the first
-  imposter is created.
-
-- **`POST /admin/reload` with both `--configfile` and `--datadir` deleted every datadir imposter and
-  its file** (#1122). Reload re-applied the config file alone, so its sweep deleted each imposter
-  only the data directory declared, including every one created through the admin API, and unlinked
-  its `<port>.json`, so the imposter did not come back on restart either. Reload now re-reads both
-  stores and applies them as one set; a port declared by both refuses the reload with the running
-  imposters unchanged.
-- **A wholesale replace on a `--datadir` server removed `<port>.json` before re-creating the
-  imposter** (#1122). When the re-create failed, for example on an unreadable certificate, the file
-  was lost along with the imposter; on a `--datadir` reload that file is the operator's own. A replace
-  now leaves the file for the re-create to overwrite, and removes it only when the re-create fails
-  on an apply whose file was a copy of runtime state (`PUT /imposters`, `apply_config`). Separately, a delete removed the file on a
-  detached task, so a create on the same port straight after could have its new file deleted; the
-  removal is now awaited.
-
-- **An EJS `<%= process.env.VAR %>` whose variable is unset rendered empty with nothing logged** (#1116).
-  A typo in a variable name, or a deployment missing one, loaded a config that silently differed from
-  the file; for a `port` the load then failed with a JSON error at a line and column that did not
-  mention the variable. The engine now logs a warning per variable at load and reload, naming it and
-  the tag's line, and a parse error after rendering names the variables that rendered empty. A
-  variable set to a value that is not valid Unicode is reported as such, even when the tag has a
-  default, instead of as unset. `rift-lint`'s `W013` uses the same wording.
-
-- **A port-less imposter could take a port another imposter in the same set names, and one of the two
-  was lost** (#1112). An auto-assigned port is the lowest free one from 49152, and imposters were
-  created in the order the set listed them. `PUT /imposters`, `POST /admin/reload`, `rift_apply_config`
-  and the embedded `configFile` or inline `config` then replaced, patched or kept the auto-assigned
-  imposter as if it were the explicit one and reported success; `--configfile` and `--imposters`
-  startup logged `PortInUse` and skipped the explicit one. Imposters with an explicit port are now
-  created first, so an auto-assigned port never takes a port an explicit imposter in the set is
-  serving.
-
-- **`rift-lint` reported `E001` for a templated config the engine loads, and passed ones it refuses**
-  (#1108). It parsed a file's raw text, so the documented `"port": <%= process.env.PORT || '4545' %>`
-  was invalid JSON to it, a tag inside a string was validated as literal text, and a tag the loader
-  refuses (since #1095) went unreported.
-  - The EJS preprocessor moved from `rift-http-proxy` into a new `rift-ejs` crate, and `rift-lint`
-    renders a file with it before linting, as `--configfile` does. The engine's behaviour is unchanged,
-    and `config_loader::EjsFileAccess` still resolves.
-  - A tag the engine refuses, or an unreadable `include`/`stringify` file, is the new error `E049`,
-    carrying the engine's message. A `process.env` tag with no default whose variable is unset is the
-    new warning `W013`.
-  - `rift-lint --no-parse` lints the text verbatim, and `--fix` refuses to rewrite a templated file.
-    A line and column in `E001`/`W012` for a templated file are marked as counting in the rendered
-    document. The TUI still validates an import verbatim, as `POST /imposters` reads it.
-  - `LintOptions` gained a public `no_parse` field, which breaks a `LintOptions {}` struct literal;
-    `LintOptions::default()` is unaffected.
-
-- **Security: a `_behaviors` array ran a shell command or script without `--allowInjection`**
-  (#1101). The engine read a JSON array into the behaviors block by position (`wait`, `repeat`,
-  `copy`, `lookup`, `shellTransform`, `decorate`), so `"_behaviors": [null, null, null, null, "cmd"]`
-  configured a `shellTransform`. The `--allowInjection` gate only looks at object keys and admitted
-  it, and the command ran on every matching request.
-  - A `_behaviors` that is not an object, and a `behaviors` that is neither an object nor an array,
-    are now refused where the stub is parsed: `400` from `POST /imposters`, the stub endpoints and
-    `PUT /imposters`; a failed load for `--configfile`, `--datadir`, `POST /admin/reload` and
-    `configFile`; `NULL` from `rift_apply_config` and the other C-ABI calls. This holds with
-    `--allowInjection` on, because an array `_behaviors` has no documented meaning. The array form is
-    spelled `behaviors`. `null` still means absent.
-  - A scalar `behaviors` used to be dropped silently; it is refused the same way.
-  - The injection gate now treats any non-object block as scripted, so it no longer relies on the
-    parser to stay closed.
-  - `rift-lint` reports these shapes as `E048`, and also flags a non-object, non-null element of a
-    `behaviors` array, which the engine skips.
-
-- **`rift-verify` treated a stub as dynamic when its `copy`, `lookup` or `shellTransform` was an empty
-  list** (#1103). The engine runs nothing for an empty list, so the response is static. Such a stub was
-  skipped under `--skip-dynamic` and `--verify-dynamic`, and otherwise accepted any `2xx` status, so a
-  stub serving `404` failed and one serving `201` passed on a `200`. Its status is now asserted exactly.
-
-- **Two imposters on `port: 0` were refused as a duplicate port `0`, although `POST /imposters`
-  auto-assigns a `0`** (#1104). `--configfile`, `--imposters` and `--datadir` startup aborted with
-  "both declare port 0", even for two imposters in one file, and `POST /admin/reload`,
-  `PUT /imposters`, `rift_apply_config` and the embedded `configFile` returned `PortInUse(0)`. `0` now
-  means auto-assign at every door, exactly like an absent port: such an imposter is re-created on each
-  apply rather than reconciled. `rift-lint` still reports `port: 0` as `E005`, now explaining that a
-  config file must pin its ports.
-
-- **An explicit `null` for a `_behaviors` key was treated three different ways** (#1093). Writing
-  `"wait": null` (or `null` for `decorate`, `shellTransform`, `copy`, `lookup` or `repeat`) now means
-  the key is absent everywhere, the way `null` already works for `port` and `statusCode`.
-  - Without `--allowInjection`, `wait`, `decorate` or `shellTransform` set to `null` was refused as a
-    scripting surface: `--configfile` aborted, `--datadir` skipped the file and `POST /imposters`
-    returned 400. A `null` runs nothing, so these are now admitted.
-  - `copy` or `lookup` set to `null` (or `shellTransform`, with `--allowInjection`) failed to parse,
-    and the response lost every behavior in the block except `repeat`, with only an error log line.
-  - A stub-level `delayRange` did not fill a response's `"wait": null`, so the delay was dropped.
-  - `rift-verify` skipped a stub as dynamic when a `copy`, `lookup`, `decorate`, `shellTransform` or
-    `repeat` key was present but `null`.
-  - `rift-lint` reported `E025` for `"wait": null` and `E035` for `"repeat": null`.
-
-- **`rift-lint` checked a response's `behaviors` differently from how the engine reads them**
-  (#1099). The lint now validates the one block the engine builds.
-  - `"_behaviors": null` hid a `behaviors` array from the lint, while the engine reads the `null` as
-    absent and uses the array. `{"_behaviors": null, "behaviors": [{"wait": true}]}` linted clean, and
-    the engine then dropped the block's behaviors with only an error log line.
-  - The engine merges a `behaviors` array into one object, and the last element to set a key wins.
-    The lint checked each element on its own, so `[{"wait": true}, {"wait": 5}]` reported `E025` for a
-    block that serves a 5 ms wait. A finding now names the element whose value the engine uses.
-  - A `behaviors` object, rather than an array, was not checked at all.
-
-- **`rift-lint` passed a `port` the engine refuses to load** (#1088). The port check only ran when
-  the value was an unsigned integer, so `"port": "3000"`, `3000.5`, `-1` or `true` linted clean and
-  then failed at startup with `invalid type` (or, for `-1`, `invalid value`) `…, expected u16`.
-  `3000.0` is refused too: serde reads any literal with a decimal point or exponent as a float, and
-  a `u16` accepts no float.
-  - A present `port` that is not a non-negative integer is now error `E047`. This also covers the `3000.00000000000000001`
-    case where `W012` (#1083) was the only issue reported.
-  - `null` for `port`, `protocol` or `stubs` is now `E003`, as if the field were missing. The engine
-    treats a `null` port as absent and auto-assigns one, and it refuses a `null` protocol or stubs.
-  - A `wait` of `500.5` or `-1` is now `E025`. The engine does not refuse the file for it. The block
-    fails to parse, and with an error log line the response loses its `wait`, `copy`, `lookup`,
-    `decorate` and `shellTransform`. Only `repeat`, which is read separately, still applies.
-
-- **EJS examples on five docs pages could not work as written** (#1092). The config loader evaluates
-  only `process.env` expressions and the `include` and `stringify` tags, and strips every other
-  tag, so each example loaded with an empty field.
-  - `docs/mountebank/imposters.md` set `"port": "<%= port || 4545 %>"`, which became `"port": ""`
-    and was refused at load. It now reads `"port": <%= process.env.PORT || '4545' %>`, without quotes.
-  - `docs/mountebank/responses.md` built a response body from `<%- request.path %>`. The loader
-    strips it, since EJS runs at load time and has no request. It now uses `${request.path}` and
-    points to date templates.
-  - `docs/features/tls.md` (twice), `docs/configuration/mountebank.md` and
-    `docs/deployment/kubernetes.md` loaded a TLS key and certificate with `<%- include('…') %>`, a
-    spelling the loader does not recognize, so both were empty. They now use `<%- stringify('…') %>`.
-
-- **A float in a stub body was served with different digits than it was written with** (#1085).
-  `serde_json`'s default float parser is not correctly rounded: outside a narrow fast path it can
-  land one representable double away, so a body written as `{"n": 7e23}` was served as
-  `{"n":6.999999999999999e23}`, and `1e-23` as `1.0000000000000001e-23`. Ordinary 17-digit doubles —
-  the form JavaScript, Python and recorded proxy bodies use — were affected too
-  (`0.10018513143495411` came back as `0.10018513143495412`), as was every other place rift parses
-  JSON: request bodies matched by predicates, `rift-verify`, and `rift-lint`.
-  - `serde_json`'s `float_roundtrip` feature is now on workspace-wide, which makes the parse exact.
-    It costs roughly 2x on parsing a float; integers and strings are unaffected.
-  - Only a number wider than a 64-bit integer, or with more significant digits than a double can
-    hold, is still served rounded.
-
-- **`rift-lint` reported a port conflict between files that do not share a port, and suggested a
-  port that does not exist for a real conflict at 65535** (#1091). The E002 check narrowed each port with an unchecked cast, so an
-  out-of-range `70000` was read as `4464` and conflicted with a file on `4464`, and `0` conflicted
-  with `65536`. Ports outside 1-65535 are now left to `E005` alone. A conflict on port `65535` also
-  overflowed while suggesting the next free port: a panic in a debug build, "Consider using ports
-  0+" in a release build. It now reports E002 without that suggestion.
-
-- **`rift-lint` never reported a port used twice inside one file, or by a file in the
-  `{"imposters": [...]}` or bare `[...]` form** (#1094). The E002 check read only a document's
-  top-level `port`, so those two shapes added nothing to the conflict map. A duplicate there loads
-  with one imposter silently missing under `--configfile`, and `POST /admin/reload` refuses the whole
-  set. Every imposter in a document is now compared, within the file and across files. The finding
-  names the first imposter's slot as its location (`imposters[0].port`, `[0].port`, or `port`), and
-  the message counts imposters rather than files: `Port 4545 is used by 2 imposters: a.json
-  (imposters[0], imposters[1])`.
-
-- **`rift-lint --fix` no longer rewrites a file whose parse dropped a repeated key** (#1076).
-  `--fix` re-serializes the whole document from its parsed form, where a byte-identical repeated key
-  is already gone (`serde_json::Map` is last-wins), so repairing an unrelated numeric header could
-  silently write that loss to disk. It now skips such a file and names the key it would have
-  dropped.
-  - The case that mattered is the one the linter reports **nothing** about: a repeated name in
-    `is.headers` is how a stub sends two `Set-Cookie` lines, and the engine merges it deliberately
-    (`E044` does not fire there). Running `--fix` to quote a `Content-Length` in the same file would
-    have halved the cookies with no finding anywhere.
-  - `Document::duplicate_keys()` exposes the list the check reads. It is document-wide rather than
-    limited to `E044`'s two fields, because a whole-file rewrite loses all of them.
-
-- **`rift-lint --fix` no longer rewrites a file whose number literal it cannot write back** (#1080).
-  A literal wider than `u64` or with more digits than `f64` carries is held as the nearest `f64`
-  once parsed, so `--fix` wrote `123456789012345678901234567890` back as `1.2345678901234568e29` and
-  `0.1000000000000000055511151231257827` as `0.1` while repairing an unrelated header. It now skips
-  such a file and names each literal, its line and column, and what it would have become.
-  - The engine parses a config file the same way, so it already serves the rounded value for such a
-    literal; `--fix` was destroying the only place the original digits still existed.
-  - A number that only changes spelling (`0.10` → `0.1`, `1e2` → `100.0`) is formatting, not loss,
-    and does not stop the rewrite. `Document::lossy_numbers()` exposes the list the check reads.
-
-- **A `${request.*}`, `copy` or `lookup` header value carrying a client-supplied control character
-  failed the whole response instead of being repaired** (#1067). Response header values pass through
-  two templating stages: the `{{ }}` stage has stripped characters a header value cannot carry since
-  #359 B3, and the `${request.*}` stage — which runs *after* it, on the same values — stripped
-  nothing. `request.query` is percent-decoded and `request.body` is the raw body, so
-  `GET /x?x=a%0Db` against a stub with `"X-Echo": "${request.query.x}"` put a CR into the header,
-  which `Builder::header` rejected and the response surfaced as a `500`. The same stub written with
-  `{{ }}` answered `200`. A client could therefore fail an otherwise-valid stub with a query string,
-  and the author could neither see it nor fix it.
-  - The repair now also runs on the `${request.*}` substitution and on the text the `copy` and
-    `lookup` behaviors splice into a header — the other two places request-derived data reaches a
-    header value. It is the same filter, so tabs and non-ASCII obs-text are still kept byte-exact
-    (#1058), and it is idempotent: a value the `{{ }}` stage already repaired passes through
-    unchanged and is not warned about twice.
-  - On these three paths the repair covers **only the substituted text**, never the literal text
-    around it. A control character written literally into a header stays an authoring bug and still
-    fails that response with a `500`, even when the same header value also contains a token.
-    Response bodies are never filtered. `decorate` and script-authored headers are unchanged.
-
-### Added
-
 - **A `noParse` serve option lets an embedded host load a `configFile` that contains a literal `<%`**
   (#1107). Since #1095 a tag the config loader does not evaluate fails the load, and `--no-parse` was
   the only escape, which `rift_serve_admin` could not pass. `noParse: true` skips EJS preprocessing of
   `configFile` and of the `POST /admin/reload` that re-reads it, and is listed in
-  `rift_build_info().serveOptions` and `GET /config` for feature detection. Sending it without a
+  `rift_build_info().serveOptions` and `GET /config` for feature detection — an SDK should check for
+  `noParse` there before sending it, since an engine at 0.17.0 or older does not know the key. Sending it without a
   `configFile` is refused. `rift script check` gains `--no-parse`, and the rcfile accepts
   `noParse`.
 
@@ -494,7 +97,7 @@ record.
   pre-flight check, and the one `rift-conformance` drives as Plane A.
   - The rule reports the **case-variant** shape (`X-Id` beside `x-id`), which is the shape that
     survives into a parsed `serde_json::Value`. The byte-identical shape is reported by E045's
-    sibling E044 below, which reads the raw text.
+    sibling E044 above, which reads the raw text.
   - `is.headers` is deliberately **not** flagged: it is multi-valued, and the engine folds a
     case-variant pair there (#1039) rather than rejecting it.
 
@@ -547,7 +150,276 @@ record.
     authority in `:authority` and hyper does not synthesize a `host` header from it, so such a
     rule would otherwise have matched over h1 and silently stopped matching over h2.
 
+- **A proxy-recording store can refuse a claim instead of being degraded around** (#990).
+  `ProxyStoreError` gains `Refused(BackendUnavailable)` and becomes `#[non_exhaustive]`. The
+  existing `Unavailable` is unchanged and still means *degrade*: the engine forwards upstream
+  without recording, which is right when the store is a persistence aid and the engine enforces
+  exactly-once itself. `Refused` is for the other case — a store that **is** the exactly-once
+  arbiter (a shared or clustered backend) and could not decide. There, forwarding is the bug: with
+  nothing serializing claims, every request for the duration of the outage reaches the upstream, so
+  the duplicate is bounded by the outage rather than by one racing window. On `Refused` the engine
+  fails the request without calling the upstream, and both proxy-leg response arms (the stub proxy
+  and `defaultForward`) answer it `503` through the existing `backend_error_response` door, naming
+  the backend in `feature`/`detail`. A genuine upstream failure keeps its `502`, and the refusal is
+  not logged as an upstream failure — no upstream was called. `ClaimOutcome::InFlight` is
+  unaffected: a claim *was* serialized there, so that forward stays by design.
+
+- **In-process embedders can detect a TCP fault — `tcp_fault_carrier`** (#965). A TCP fault never
+  reaches the wire: Rift builds a placeholder *carrier* response and the serve loop aborts the
+  socket instead of sending it. A program embedding the engine and calling
+  `handle_imposter_request` directly receives that carrier, and had no reliable way to recognise
+  it — the only signal was the `x-rift-fault` header, which echoes the raw configured alias, is
+  also set by `_rift.fault.error` on a response the client genuinely receives, and was **absent
+  entirely** on the carrier a script's `reset()` produces. Classifying on it therefore both missed
+  a real fault and reported one that was not there.
+  - `rift_mock_core::tcp_fault_carrier(&response)` returns the fault's canonical name
+    (`CONNECTION_RESET_BY_PEER`, …) for all three carrier sites, or `None` for an ordinary
+    response. It reads the extension the serve loop itself acts on, not the header.
+  - `TcpFaultKind` is now public (and `#[non_exhaustive]`) for embedders that branch per fault.
+  - Both are re-exported from `rift-http-proxy` as well.
+  - The script-`reset()` carrier now also stamps `x-rift-fault: reset`, so all three carrier sites
+    carry the same marker for consumers written before this API existed.
+
+- **HTTPS imposters can require a client certificate — `mutualAuth`, `rejectUnauthorized`, `ca`**
+  (#977). `docs/features/tls.md` has documented `mutualAuth` since before this engine implemented
+  anything: `ImposterConfig` has no `deny_unknown_fields`, so the key was **silently dropped**. A
+  user following our own documentation to require client certificates got a listener that accepted
+  every client, with no error, no warning, and a config that read back unchanged — a security
+  control the docs promised and the code did not provide.
+  - `mutualAuth: true` requests **and requires** a client certificate; a client presenting none
+    fails the TLS handshake. Without `rejectUnauthorized` the chain is not validated, but the
+    signature still is — "any certificate" means "any certificate whose key you hold", not any
+    bytes copied off the wire.
+  - `rejectUnauthorized: true` + `ca` validates the chain against the supplied anchors.
+  - `ca` takes a single PEM string or an array, as Mountebank does.
+  - Both work on the self-signed fallback, so no `cert`/`key` is needed to test mTLS.
+  - **Every** combination that cannot take effect is refused at creation (400), not half-honoured:
+    `rejectUnauthorized`/`ca` without `mutualAuth`; `ca` without `rejectUnauthorized`;
+    `rejectUnauthorized` without `ca` (including `ca: []`); a `ca` holding no certificate; and
+    `mutualAuth: true` on `protocol: "http"`. `"mutualAuth": false` on http stays valid — it
+    appears in our own documented example.
+
+    Refused rather than logged, deliberately: a warning reaches the server log and never the
+    `POST /imposters` response, so the author who wrote the setting is the one person who would
+    not learn it does nothing — which is precisely the failure this issue exists to remove.
+
+    **Migration.** These keys were previously *dropped on parse*, so two kinds of existing config
+    change behaviour on upgrade:
+    - An HTTPS imposter with `mutualAuth: true` — which used to accept every client — now
+      **requires a client certificate**, and a client that presents none fails the TLS handshake.
+      Give the test clients a certificate, or remove `mutualAuth` to keep the behaviour you were
+      actually getting.
+    - A config carrying one of the refused combinations — most plausibly `rejectUnauthorized`
+      without `mutualAuth`, which is valid in Mountebank — used to create an imposter and now
+      is refused at creation with a 400. Either add `mutualAuth: true` (to get the
+      behaviour the config was asking for) or remove the key.
+  - Defaults are omitted from serialization, so an imposter that never mentions client auth
+    round-trips byte-identically through `GET /imposters`.
+
+  **Deliberate divergence from Mountebank**, in both directions. Mountebank's `mutualAuth` only
+  *requests* a certificate and never rejects one — and since its implementation gates the request on
+  `rejectUnauthorized`, a bare `mutualAuth: true` is a no-op there. Requiring the certificate is the
+  point of the feature for a mock standing in for an mTLS gateway. And where Mountebank silently
+  falls back to the public CA bundle when `ca` is missing, Rift errors: validating a *client*
+  certificate against public roots verifies nothing, and a silent fallback is the defect class this
+  issue was filed under.
+
+- **`_rift.dataset`: a `lookup` named by dataset rather than by file path** (#973) — a **carrier
+  field only; nothing in the engine reads it.** A `lookup` behavior needs a filesystem path, and a path is
+  node-local, so a clustered deployment has no way to put one in a config that replicates. The
+  config schema now carries the declarative form — `name`, optional `version`, `key`, `keyColumn`,
+  `into`, and the `digest` the binder pins — so a cluster can resolve it to a content-addressed file
+  on each node and rewrite it into a real `behaviors.lookup` at apply time. Standalone Rift serves a
+  response carrying one exactly as if it were absent. Without this field the block was dropped on
+  parse, so the binding could not be stored at all.
+
+- **`_rift.stateOps`: declarative post-response flow-state writes, no script required** (issue
+  #969). An `is` response's `_rift` block can now carry a `stateOps` array —
+  `set`/`increment`/`delete`/`clearFlow` against the request's resolved flow id, run in order right
+  before the response is written — for the common "bump a counter" / "remember a value" cases that
+  previously needed a full `_rift.script` response. `set` renders its value through the same
+  `{{ }}` templating grammar plus one extra head, `previousValue`, which turns a `set` that reads
+  its own key into a bounded compare-and-set loop so concurrent read-modify-writes never lose an
+  update; `increment` is atomic on every backend that has one. An imposter with `stateOps` but no
+  `_rift.flowState` configured now auto-provisions an in-memory store, the same convenience a
+  `_rift.script` stub already got, rather than silently discarding every write on the no-op store.
+  See [Flow State](docs/features/flow-state.md#riftstateops--declarative-writes-no-script).
+
+- **An intercept `serve` rule now accepts a numeric-string `statusCode` and multi-value `headers`**
+  (issue #936), completing the parity #933 started for `body`. `"statusCode": "418"` and
+  `"set-cookie": ["a=1", "b=2"]` are the forms Mountebank accepts and the imposter stub path has
+  always handled; on the intercept path they were refused, and because rules parse through an
+  untagged enum the caller saw only `data did not match any variant`. Non-string scalar header
+  values (`"x-retry": 3`) coerce to strings, matching what recorders emit. Each value of a
+  multi-value header becomes its own line on the wire — never comma-joined, which is what
+  `set-cookie` requires — and the CR/LF response-splitting guard applies per value.
+  The helpers behind this moved from `rift-mock-core`'s crate-private module into the shared
+  `rift-types::wire`, so the two paths cannot drift apart again; no crate gained a dependency.
+  Strictly widening: previously-valid rules deserialize identically and
+  `GET /intercept/rules` still lists a single-value header as a plain string and a status as a
+  number. See [Intercept proxy](docs/features/intercept-proxy.md#serve-an-inline-stub).
+
+- **An intercept `serve` rule's `body` now accepts any JSON value**, not just a string (issue
+  #933). `body` was `Option<String>` while the imposter stub path's `is.body` has always taken any
+  value, so an object body — legal Mountebank semantics — was refused by serde, and because rules
+  parse through an untagged enum the caller saw only `data did not match any variant of untagged
+  enum RuleOrRules` with no hint that `body` was at fault. A non-string body is rendered once, at
+  rule-insert time, with compact `serde_json::to_string` (the same render-once shape as `is.body`,
+  issue #479), so the intercept request path never re-serializes it. Strictly widening: a string
+  body is still served byte-identically, `null`/absent still means an empty body, and
+  `GET /intercept/rules` gives the body back in its original JSON shape. See
+  [Intercept proxy](docs/features/intercept-proxy.md#serve-an-inline-stub).
+
+- **Journal entries record the status and latency a request was answered with** (#364).
+  A recorded request (`GET /imposters/:port` `requests`, `savedRequests`, the SSE request stream)
+  said when a request arrived and which stub answered it, but not what went back or how long it
+  took. `RecordedRequest` gains `status` and `latencyMs`, attached after the response is built the
+  same way `matchOutcome` is; latency is measured before CORS header injection. A third field,
+  `node`, is carried for an embedder whose journal spans nodes and is never set by single-node
+  Rift.
+  - All three are optional and omitted when not recorded, so an entry without an outcome — an
+    `X-Rift-Debug` request, a request that failed before the response, or a recording written by an
+    older release — serializes exactly as before. A present `latencyMs` of `0` is ordinary.
+  - The pushed SSE copy is emitted at record time, so it does not carry `status` or `latencyMs`.
+  - **Embedders:** `RequestJournal` gains a defaulted `attach_response`, so an existing journal
+    implementation keeps compiling and simply records no outcomes.
+
+- **Embedders: an `ExchangeInspector` seam for policy on live exchanges** (#966). A synchronous
+  per-imposter hook pair, installed through `ImposterManager::with_exchange_inspector_provider`
+  (mirroring `FlowStoreProvider`), for request linting, contract validation, compliance capture or
+  a chaos veto. The request-side hook runs after journaling and before matching, so a rejection
+  never advances a cycler, a scenario FSM or a match counter; the response-side hook runs before the
+  decorator and CORS, so the journal and the client agree on what was served. With nothing
+  installed behaviour is unchanged.
+
+- **Embedders: a `FlowStore` can enumerate its flows** (#962). `FlowStore` gains defaulted
+  `flow_ids` and `entry_count`, both returning `Option` — `None` means the store cannot enumerate,
+  `Some(vec![])` means it can and there are none. The in-memory backend implements both and honours
+  expiry; the Redis backend deliberately returns `None` rather than walk the keyspace. Existing
+  `FlowStore` implementations keep compiling.
+
+- **Embedders: a `RouteObserver` seam on the front door** (#961). `bind_front_door_with_observer`
+  notifies an observer with the route id of every request a route claims (including one whose
+  imposter is gone and answers `404`), so an embedder can keep per-route hit counts.
+  `bind_front_door` keeps its signature. The `/__rift/:port` gateway fallback and the no-route
+  `404` are not reported.
+
+- **Embedders: the space-stub shape guard is public** (#1012). `admin_api::not_a_stub_reason`
+  returns why a `POST /imposters/:port/spaces/:flowId/stubs` body is not a stub (the rule #932, under
+  Changed, added), so a host that terminates that route itself applies the same rule instead of copying the
+  stub field list. The built-in handler's behaviour is unchanged.
+
+- **`_rift.sequencing` is carried through the config schema** (#978) — a **carrier field only;
+  nothing in the engine reads it.** `mode` plus an `extra` passthrough give an embedder's
+  `ResponseSequencer` (#313) per-imposter options. The block used to be dropped on parse; it now
+  round-trips through `GET /imposters`. The built-in per-stub cycler behaves identically whether it
+  is present or absent. Same shape as `_rift.dataset` (#973).
+
 ### Changed
+
+- **A `--datadir` file must be named `<port>.json` after the port it declares** (#1128). A file named
+  anything else, `foo.json`, a copied-in `imposter-4545.json` export, or a `4545-orders.json` from
+  `rift-tui`'s folder export, used to be served and then written again as `4545.json` beside the
+  original. From the next start both files declared port 4545: one was skipped with `Port 4545 is
+  already in use`, and every `POST /admin/reload` failed on the duplicate. Startup now skips such a file and names it with the name it needs, and a reload
+  refuses with a `500` saying the same; the file is never modified.
+  - **Migration:** look at the directory, not at whether the server has run before. If a
+    `<port>.json` for the same port sits beside the misnamed file, keep whichever holds the content you
+    want and delete the other: the copy was written when the imposter was created, so it lacks any
+    later edit to the original. If there is no `<port>.json`, rename the misnamed file; deleting it
+    would delete the only definition.
+  - `rift-tui`'s folder export (`E`) now writes every imposter as `<port>.json`, so an exported
+    folder can be used as a data directory. It used to append the imposter's name.
+
+- **A `--datadir` file that declares no `port` is now refused** (#1125). An absent `port`, or `0`, used
+  to be created on an auto-assigned port and written to the directory again under that port, and the
+  original was left beside it, so every restart or reload added one more file and one more served
+  imposter. Startup now skips such a file and names it in the skip summary, and `POST /admin/reload`
+  refuses with a `500` that names it; the file itself is never modified. Rift only ever writes
+  `<port>.json` files with an explicit port, so only a hand-written or copied-in file is affected.
+  - **Migration:** if a port-less file already accumulated `<port>.json` copies, those copies still
+    load. Keep one copy and delete the others along with the original, or give the original a
+    `port` and delete all the copies.
+
+- **Embedders: `ImposterManager::delete_all` returns a `DeleteAllReport`** (#1124) with the `deleted`
+  configs and the `failed` ports, instead of the deleted configs alone. When anything failed it emits
+  a `Deleted` event per deleted port instead of `AllDeleted`. `rift_delete_all` returns `-1` in that
+  case, and the deprecated `ImposterManager::reload` returns the error instead of creating the new
+  set beside the imposter that is still serving.
+
+- **Imposters loaded from `--configfile` or `--imposters` are no longer written to `--datadir`**
+  (#1122). The data directory now holds only what the admin API created and the files an operator
+  put there; a config-file imposter is re-read from its file, and a copy of it in the directory
+  loaded as a second imposter. Runtime changes to a config-file imposter, through the stub endpoints
+  or a `PUT /imposters` that repeats it, are not persisted either. A malformed datadir file named in
+  a refused reload is now identified by its path.
+  - **Migration:** a server that ran both flags on an earlier release has a `<port>.json` copy of
+    every config-file imposter in its data directory. Delete them. A copy with an explicit port now
+    refuses every `POST /admin/reload`, and a copy of a port-less imposter is served beside the
+    original.
+  - Embedders: `AdminApiServer::with_imposter_sources` takes the datadir as a second argument,
+    `ReloadSource::Sources` is a struct variant carrying it, and `ImposterManager` gains
+    `create_imposter_as` and `apply_desired` with a `Persistence` tag. `create_imposter` and
+    `apply_config` keep their signatures. `create_imposter` persists; `apply_config` persists the
+    imposters it creates and leaves a running imposter in the store it is in, so a config-file
+    imposter it changes is not written.
+
+- **An EJS tag that `--configfile`, `--imposters file:` and `https:` sources do not evaluate now
+  fails the load, naming the tag and its line** (#1095). It used to be blanked or stripped with only
+  a log line, so the config that loaded silently differed from the file: an empty `port`, a body with
+  its content missing, an empty TLS key. That is how three EJS examples in the docs stopped working
+  unnoticed (#1092).
+  - Evaluated as before: `<%= process.env.VAR %>`, `<%= process.env.VAR || 'default' %>`,
+    `<% include 'file' %>` and `<%- stringify('file') %>`. Refused: any other `<%= … %>`, `<% … %>`,
+    `<%- … %>` or `<%# … %>` tag, an include inside an included or stringified file, a stringify
+    inside a stringified file (Mountebank evaluates that one), and a `<%` with no closing `%>`. That last case, for example in a `contains` predicate, used to load unchanged.
+  - An included file is checked like the document, and the error names its file and line and the
+    line that included it.
+  - A stringified file is now rendered before it is escaped, as Mountebank's formatter does: its
+    env tags are substituted and any other tag is refused. It used to have `<% … %>` text stripped
+    out, and a stray `<%=` in it could stop a later env tag in the document from being substituted.
+  - Startup aborts, `POST /admin/reload` returns `500` with the running imposters left unchanged, and
+    an embedded `configFile` load returns the error.
+  - A file whose `<%` is meant literally loads with `--no-parse`. An `https:` source always
+    preprocesses, so a literal `<%` is refused there; an embedded `configFile` and `rift script check`
+    gained their own no-parse switch in #1107 (under Added).
+  - **Migration:** a config that loaded before with an unsupported tag was being served with that
+    tag blanked. Rewrite the tag to one of the evaluated forms above, remove it, or start with
+    `--no-parse` if the `<%` is literal text. Run `rift-lint` on the file first: since #1108 it
+    reports the refused tag as `E049` before a deploy does.
+
+- `rift_mock_core::behaviors::apply_copy_behaviors` and `apply_lookup_behaviors` take one additional
+  argument, a `StubRef` identifying the stub for log attribution (#1075). Source-breaking for a
+  direct caller of those two functions; no wire, admin-API or SDK surface changes.
+
+- **A `_rift.templated` response with a control character written literally into a header now fails
+  with a `500` instead of being silently repaired** (#1073). The `{{ }}` renderer had repaired every
+  header value *whole* since #359 B3, so a stray byte the author typed was stripped and the warning
+  blamed the client for it ("a CR or LF here would have terminated the header line"). #1067 drew the
+  opposite boundary for the `${request.*}` pass and the `copy`/`lookup` behaviors — repair the
+  substituted text, leave the author's literal text to fail loudly — and the two disagreed.
+  - The `{{ }}` pass now repairs per substitution too, so all four paths agree. A control character
+    arriving *through* a token is removed exactly as before, and the injection defence is unchanged;
+    tabs and non-ASCII still survive byte-exact (#1058).
+  - Only a stub that writes a control character literally into a header of a templated response is
+    affected, and only that response. Bodies are still never filtered, and `_rift.stateOps` values
+    are unchanged — a stored value read back into a header is repaired at that read.
+  - **Migration:** a templated stub that types a control character (other than a tab) directly into
+    a header value now answers `500`; remove the character from the stub.
+
+- **The templated-header repair warning now says which stub produced it** (#1075). When a repair
+  removed characters from a header value it logged the value and the removed characters and nothing
+  else, so on a server running many imposters an operator could see a mangled header and have no way
+  back to the config that caused it. The `rift::template` warning now also carries `port`, `stub`
+  (the stub's index) and `stub_id`, with the same names and rendering as the fields a `rift::script`
+  event already uses, so one grep finds a stub's lines on both targets. A stub with no `id` logs
+  `stub_id=` empty rather than omitting the field.
+  - Deliberately **not** a `tracing` span. `render_template_parts` can run on a `spawn_blocking`
+    pool thread when the flow store blocks, and a span's thread-local is empty there — so a span
+    would have gone missing on exactly the Redis + `{{ state.* }}`-in-a-header path. The identity
+    travels as a plain argument instead, which cannot be lost that way.
+  - The request path and query are deliberately **not** logged: both are client-controlled, and the
+    existing `value` field already shows the operator the offending client data.
 
 - **A repeated request header now matches on any of its values at an imposter, and a non-UTF-8
   header value is dropped instead of becoming `""`** (#1025). The imposter listener built a
@@ -628,8 +500,9 @@ record.
     predicates against U+FFFD text the client never sent; response header values relay verbatim
     instead of being dropped.
 
-  `connection: close` on every response, one request per tunnel, and last-wins for repeated
-  request headers are all unchanged.
+  The refactor itself kept `connection: close` on every response and last-wins for repeated request
+  headers; both changed later in this release (#993 keep-alive, #994 every value of a repeated
+  header).
 
 - **Flow-store work is offloaded only when it can reach the store** (#986). `run_flow_blocking`
   moves a closure to a blocking thread whenever the backend reports `is_blocking()`, without
@@ -654,254 +527,16 @@ record.
 
   Rendered output, FSM behaviour, and the default in-memory path are unchanged.
 
-### Fixed
-
-- **A templated header value carrying a tab or legal non-ASCII was silently truncated and reported
-  as an injection attempt** (#1058). The header-injection filter for `{{ }}`-templated response
-  headers (#359 B3) tested `char::is_control`, which is Unicode category Cc — so it also removed
-  HTAB and everything in U+0080–U+009F, all of which a header value may legally carry. A templated
-  `X-Name` echoing `José` came back mangled, and the log accused the client of attempting header
-  injection. #1048 made this newly reachable through `request.header`; `request.query` and
-  `request.json` could always carry it.
-  - The filter is now the `http` crate's own validity rule (`b >= 32 && b != 127 || b == b'\t'`),
-    so exactly the characters a header value cannot hold are removed and nothing else. **CR, LF and
-    NUL are still stripped** — the injection defence is unchanged.
-  - The warning no longer writes the offending value through `Display`. It was the one place a
-    client-supplied CR/LF reached a log line unescaped, which let it forge a second log entry. The
-    value is now escaped and length-capped, and the warning names which characters it removed — so
-    an operator can tell a real CR/LF injection attempt from a stray NUL, which is what the single
-    "possible header-injection attempt" wording could not express.
-
-- **The dev/CI tools took a single-valued header map that #1050 missed** (#1061). `rift-verify`'s
-  `_verify` request block and `rift script run --request` both parse `headers` into a one-value-per-name
-  map from a user-written document, which #1050 fixed everywhere else but not here.
-  - A `_verify` request spelling one name twice put **two** case-variant lines on the wire, ordered by
-    `HashMap` iteration. Stub *selection* survived that, since the engine folds both spellings into one
-    name with two values — but every first-value consumer downstream (flow-id resolution, `copy`/`lookup`,
-    scripts, `${request.headers.*}`) read whichever happened to land first, so a `_verify` sequence that
-    keyed state on the header changed outcome between runs of the same document.
-  - A `--request` fixture doing the same never reached the wire, but scripts read headers by
-    case-insensitive find-first, so `request.header('x-trace')` returned a different value per run.
-  - Both are now **rejected** at parse time with a message naming both spellings — a malformed `_verify`
-    for the first, a fixture-parse error for the second. As in #1050, rejecting beats folding: picking a
-    winner silently is the behaviour that made this hard to see in the first place.
-
-- **A single-valued header object that named one header twice sent two header lines** (#1050).
-  `proxy.injectHeaders` and `_rift.fault.error.headers` hold one value per name, but nothing
-  enforced that: `injectHeaders: {"x-trace": "a", "X-Trace": "b"}` deserialized into two distinct
-  keys, and because `RequestBuilder::header` and `http::response::Builder::header` **append**
-  rather than replace, both lines were emitted — ordered by `HashMap` iteration, so differently
-  from one process to the next. #1039 fixed the equivalent for multi-valued header objects by
-  merging; these two were missed, and merging is not available to them.
-  - Such a document is now **rejected** at parse time — a `400` from `POST /imposters`, a startup
-    error from `--configfile` — with a message naming both spellings. Rejecting rather than folding
-    is deliberate: two different values for one slot have no correct combination, so any fold
-    silently discards one, which is the swallow rather than the fix for it. Nor could a tie-break
-    be made deterministic, since which spelling the deserializer sees first depends on whether the
-    document was streamed from text or routed through a `serde_json::Value`.
-  - A document that spelled one of these names twice loaded before and is refused now. Nothing that
-    worked stops working: what it was doing was emitting two nondeterministically ordered header
-    lines. Every fixture in the SDK conformance corpus spells each name once and is unaffected.
-  - **A deliberate Mountebank divergence, on `injectHeaders` only.** Node applies an options
-    `headers` object through case-insensitive `setHeader`, so Mountebank emits one header,
-    deterministically last-in-insertion-order, for a document Rift now refuses. Rift cannot
-    reproduce that: its `--configfile` wrapper form parses to a `serde_json::Value`, which is
-    key-sorted, so insertion order is not available to it. The real choice was between a
-    nondeterministic winner and a loud refusal. (`_rift.fault.error.headers` is a Rift extension
-    and carries no such constraint.)
-- **Valid non-ASCII header values were dropped and reported as "non-UTF-8"** (#1048). The request
-  collector decoded with `HeaderValue::to_str`, which accepts only *visible ASCII*
-  (`b >= 32 && b < 127 || b == b'\t'`). Every byte above `0x7F` therefore failed it, so a header a
-  client can legally send — `X-User-Name: José`, `Content-Disposition: attachment;
-  filename="résumé.pdf"` — was discarded before matching, forwarding, the journal, behaviors and
-  templating ever saw it, and the server logged that a perfectly valid UTF-8 value was not UTF-8.
-  The documentation promised that *invalid* UTF-8 is dropped; the code dropped a strict superset of
-  that, so the promise was false for every non-ASCII header.
-  - The check is now UTF-8 validity. Such values are kept byte-exact — the round trip was always
-    lossless, since `httparse` admits obs-text in a request header value and `HeaderValue::from_str`
-    accepts the same bytes back. Genuinely invalid UTF-8 is still dropped, with the same one warning
-    per request, which now says something true.
-  - This is the same rule #1041 applied to upstream *response* headers, so the two collectors no
-    longer disagree: a non-ASCII header is now matched, forwarded and recorded consistently rather
-    than relayed by the proxy but invisible to a predicate.
-  - The dead header half of `predicate::deep_equals` is removed with it — see **Removed** below.
-
-- **An HTTP/2 connection that went silent after the preface was pinned indefinitely** (#1044).
-  #1030 bounded the protocol-detection window, and `RIFT_HTTP_HEADER_TIMEOUT` bounds an HTTP/1
-  request head — but a client that sent the full 24-byte HTTP/2 preface *completed* detection, and
-  HTTP/2 has no equivalent of HTTP/1's header timer. Such a peer held a task, a file descriptor and
-  (over TLS) a `TlsStream` for as long as it cared to stay quiet, unauthenticated. So did one that
-  completed the whole handshake and then never opened a stream, which the issue did not mention.
-  - hyper's HTTP/2 keep-alive ping is the only mechanism that reaches this, and it was simply never
-    configured — it does not arm unless an interval is set. All five listeners now set it, reusing
-    `RIFT_HTTP_HEADER_TIMEOUT` rather than adding a knob: that variable already means "how long a
-    client may hold a connection without producing a request head". A silent peer is closed within
-    two intervals.
-  - **Idle HTTP/2 connections are now pinged** every `RIFT_HTTP_HEADER_TIMEOUT` (30s by default). A
-    live client answers and is unaffected.
-  - Note for anyone extending this: hyper panics (`Time::Empty`) if an HTTP/2 timeout is set without
-    an HTTP/2 timer, and every listener previously set a timer on the HTTP/1 leg only — so a missed
-    `.http2().timer(...)` would surface only on real HTTP/2 traffic. A prior-knowledge h2 request
-    test guards each site against exactly that.
-
-- **The upstream proxy blanked response header values it could not decode** (#1041). Relaying a
-  `proxy` response ran `v.to_str().unwrap_or("")` over the upstream's headers, so a value that did
-  not decode was replaced by an empty string the origin never sent — a data-path swallow, which the
-  repo's own error-handling rules classify as never acceptable. That one list feeds three places, so
-  the blank went to all of them: the client's response, the `RecordedResponse`, and the stub
-  `proxyOnce`/`proxyAlways` generates. The stub is the one that lasts — it kept serving the empty
-  header on every later request, long after the upstream was out of the picture.
-  - Such values are now **dropped**, with one warning per response naming the affected headers, so
-    the header is simply absent rather than present-and-wrong. Repeated headers keep their
-    multiplicity, `Set-Cookie` included.
-  - **More upstream headers now relay than before.** The check is UTF-8 validity, not
-    `HeaderValue::to_str`, which accepts only *visible ASCII* and therefore rejected valid UTF-8
-    such as `Content-Disposition: attachment; filename="résumé.pdf"`. Rift's serving side always
-    accepted those bytes, so blanking them was never necessary; they now relay, record and replay
-    byte-exact.
-  - The **request**-side collector had the same over-strict check; that is now fixed too, in #1048
-    below, so both directions decode identically.
-- **Behaviors and template substitution disagreed with predicates about the same request** (#1040).
-  `copy`, `lookup`, `decorate`, `shellTransform` and `${request.headers.*}` built their own view of
-  the request headers — a second pass over the raw header map, with a different rule from the one
-  everything else uses. A header the client sent twice exposed its **last** value to a behavior
-  while predicates, `proxy` forwarding, the journal and `inject` all took the first; a header value
-  that was not valid UTF-8 arrived at a behavior as `""` — an empty string the client never sent —
-  where every other surface had already dropped it with a warning. One request could therefore
-  answer two ways depending on which surface asked.
-  - Both now project the map the request was already collected into, so a repeated header
-    contributes its **first** value and an undecodable one is **absent**, in behaviors and
-    templating exactly as in predicates. `${request.headers.*}` also stops dropping undecodable
-    values *silently* — that drop is now covered by the collector's existing single warning per
-    request.
-  - Visible to a stub only when a request repeats a header (last → first) or sends a header value
-    that is not valid UTF-8 (`""` → absent). `MB_REQUEST.headers` and the JS/Rhai `request.headers`
-    object are unchanged in shape: still one string per name.
-  - `RequestContext::from_request` and `RequestData::new` take the collected map rather than a
-    `hyper::HeaderMap`. Both are `pub`, so an embedder calling them directly needs the new argument;
-    the C ABI and the language SDKs are unaffected.
-- **A header object that spelled one name two ways became two headers** (#1039). HTTP header names
-  are case-insensitive, but the shared wire deserializer keyed its map by the literal spelling, so
-  `{"content-type": …, "Content-Type": …}` in a recorded request, a stub, a flat response or an
-  intercept rule loaded as two separate entries. Every case-insensitive lookup downstream — form
-  parsing, predicate fields, `copy`, the JS and Rhai engines, the verify CLI — resolves such a name
-  by scanning for the first case-matching key, so with two entries present the answer depended on
-  hash iteration order: the same stored request could parse its form one way on one run and another
-  way on the next. `deepEquals` on headers was worse than nondeterministic, comparing the expected
-  object's name count against a map that held one name twice, so it failed consistently and
-  wrongly.
-  - Such entries are now merged as they are parsed into a single entry carrying every value. Which
-    spelling survives, and the resulting order of the values, is deterministic but **unspecified**:
-    it depends on how the document reached Rift, and a single `--configfile` document can go either
-    way depending only on whether it uses the `{"imposters": [...]}` wrapper or a bare array. Depend
-    on there being one entry, not on which spelling wins. The spelling you write is still the
-    spelling Rift serves — the fix does not lowercase or title-case anything — and a document that
-    spells each name once is byte-for-byte unaffected in every respect.
-  - A name repeated with **identical** spelling now keeps both values instead of silently keeping
-    only the last. This diverges from Mountebank, which is Node and inherits `JSON.parse`'s
-    last-wins rule for a duplicate key. It affects only documents already relying on duplicate keys
-    within one JSON object — no fixture in the SDK conformance corpus, the examples or the test
-    suite has one — but the divergence is real and intentional: silently discarding a value the
-    document contains is the behaviour that made this class of bug hard to see in the first place.
-- **HTTPS imposters advertised HTTP/2 they would not speak** (#1029). The TLS handshake offered
-  `h2, http/1.1` unconditionally, while the server serves HTTP/1-only whenever the imposter can fire
-  a TCP fault, carries a `_rift.script` response, or `RIFT_DISABLE_HTTP2` is set. Advertising a
-  protocol the server will not speak is worse than not advertising it: ALPN is negotiated during the
-  handshake, so a client that selects `h2` has already committed by the time the server answers in
-  HTTP/1, and has no way back. `RIFT_DISABLE_HTTP2` — a kill switch whose whole purpose is to force
-  HTTP/1.1 — produced exactly this mismatch.
-  - The offer now follows the same per-connection decision as the server. That matters more than it
-    sounds: the TLS acceptor is built once per imposter, but whether the server is HTTP/1-only
-    depends on the *live* stub set, which changes through the admin API without rebuilding the
-    acceptor. Deciding once at construction would have been correct only until the first stub
-    mutation. Each HTTPS imposter now holds two acceptors built from one `ServerConfig` — sharing a
-    single session cache and ticketer, so resumption survives a stub change — and picks between them
-    per connection.
-  - This also closes a latent TOCTOU: the handshake used to complete and only *then* have the
-    protocol decision re-evaluated, so a stub mutation in between flipped it after the client had
-    already committed. One evaluation now drives both the advertisement and the server.
-  - Plaintext imposters are unaffected: they have no ALPN, and h2c prior-knowledge negotiation is
-    unchanged.
-
-- **A connection that completed the handshake and then said nothing was never timed out**
-  (#1030). Every listener that serves with `hyper_util`'s `auto::Builder` sniffs the connection
-  preface to choose HTTP/1 or HTTP/2 *before* it builds either protocol's connection — and
-  `header_read_timeout` lives on that connection, so it could not arm until the sniff resolved.
-  A client that finished the TCP (and TLS) handshake and then sent nothing held a task, a file
-  descriptor and, over TLS, a whole `TlsStream`, for as long as it cared to, unauthenticated.
-  Each listener now runs that detection itself under `RIFT_HTTP_HEADER_TIMEOUT` and replays the
-  sniffed bytes, so the detection window is bounded like every other phase of a request.
-  - Two things the issue's own framing understated. It is **not** "until the first byte": the
-    detection loop only exits on a complete 24-byte preface or a byte that diverges from it, so a
-    client sending `P` and stopping was equally stuck — a fix keyed on "has the client sent
-    anything?" would have left that open. And it is **not** TLS-specific: the three plaintext
-    listeners had the identical hole; TLS only makes the parked connection more expensive.
-  - Keep-alive and HTTP/2 connections are deliberately untouched. Bounding the whole connection
-    (rather than just its detection window) would have closed every long-lived connection at the
-    deadline, which is why the obvious `timeout(serve_connection)` was not the fix.
-  - Worst-case silence before a close is now up to **2×** `RIFT_HTTP_HEADER_TIMEOUT` — once for
-    detection, then once for HTTP/1's own header timer, which can only start afterwards. Documented
-    rather than netted: subtracting elapsed time makes a very small timeout behave erratically.
-
-- **The intercept listener ignored `RIFT_MAX_CONNECTIONS`** (#1030). It read the tuning at bind
-  time but never applied the cap, so it was the one listener with no bound on concurrently-accepted
-  connections. It now takes a permit before accepting, exactly as the imposter and front-door
-  listeners do, holding excess in the kernel backlog instead of accepting and then failing.
-
-- **`/verify` and rule matching disagreed about a repeated request header** (#1026). Since #994 the
-  predicate engine matches if *any* value of a repeated header satisfies the predicate, but
-  `POST /imposters/{port}/verify` still collapsed a recorded request's headers to one value per name
-  — the **last** — before handing them over. The same predicate against the same recorded request
-  therefore gave two answers depending on which path evaluated it: an intercept rule matched while
-  verify reported `matched: 0`. Verify now passes the multi-value map straight to the shared engine.
-  Two behaviour flips follow: a predicate on a shadowed value (the first of a repeated header) now
-  matches, and `not` on such a value now fails rather than succeeding. Repeated `Content-Type` on a
-  form body now takes the first value (single-valued per RFC 9110) instead of letting a stray second
-  one suppress the form parse.
-  - Landed alongside #1025, which fixes the live imposter path the same way, so the two agree in
-    this release rather than the disagreement merely moving between them.
-
-- **Test ports that collided across concurrently-run test binaries** (#1000, correcting #999).
-  `cargo test` runs each `tests/*.rs` as its own binary in parallel, so a fixed port reused by two
-  files is bound twice at once. `issue_999_metrics_wiring.rs` shared 19911-19916 with
-  `front_door.rs` and 19921 with `issue_797_error_envelope_type.rs`; it now uses 21500-21507,
-  picked by enumerating every port literal in the repo. This never failed CI — it is exactly the
-  kind of flake that gets written off later.
-
-- **Nine documented Prometheus metrics are now actually written** (#999). `docs/features/metrics.md`
-  documented thirteen families on `:9090`; nine had no writer on any code path. Because the
-  `lazy_static!` families register on first *touch*, nothing touching them meant they were **absent
-  from the scrape entirely** rather than zero — so `absent()` alerts fired and `rate()` queries
-  returned nothing. The recorders lost their only callers when #975 removed the reverse-proxy mode;
-  the imposter path, which does inject faults, run scripts and drive the flow store, never reported
-  any of it.
-  - **Wired seven**: `rift_faults_injected_total`, `rift_latency_injected_ms`,
-    `rift_error_status_total`, `rift_script_execution_duration_ms`, `rift_script_errors_total`,
-    `rift_upstream_request_duration_ms` and `rift_flow_state_ops_total`. Faults are counted where
-    the fault *fires*, not where its probability roll succeeds — a roll that passes with a zero
-    delay injects nothing, and the metric's name promises faults injected.
-  - **Removed two**, rather than leave a documented series nothing can populate: `rift_active_flows`
-    (a gauge only the in-memory backend can maintain cheaply — a backend-partial gauge would be this
-    same defect reborn) and `rift_proxy_request_duration_ms` (it measured the removed reverse-proxy
-    hop; reusing the name for the imposter path would silently change its meaning). Both doc rows go
-    with them.
-  - **Label semantics, previously undocumented, are now stated**: `rule_id` is the imposter's port
-    as a string (the imposter path has no named rules), and `source` is `rift` for a `_rift.fault`
-    decision or `script` for one a `_rift.script` returned.
-  - Flow-store operations are counted by a delegating `MeteredFlowStore` wrapped once around the
-    store each imposter resolves, so the provider path, `inmemory`, registered backends such as
-    `redis`, and the NoOp fallback are all covered without touching a call site. It forwards *every*
-    trait method, including the defaulted ones: inheriting `is_blocking` would reclassify a blocking
-    backend as non-blocking and break the `spawn_blocking` routing from #985/#988/#989, and
-    inheriting `increment_by` would discard the backend's atomic implementation.
-  - **`_rift.metrics` now says it does nothing.** The per-imposter block parsed but had no reader,
-    while the docs claimed it "controls per-imposter metric emission". The field still parses —
-    `RiftConfig` has no `deny_unknown_fields`, so deleting it would turn a known-ignored key into an
-    unknown-ignored one — but an imposter carrying it now logs a warning, and the false claim is
-    gone from the docs.
-  - The regression guard that was missing: an integration test parses the family names out of the
-    published table and asserts each appears in a real scrape after real traffic. Adding a doc row
-    without wiring it now fails CI, which is what would have caught this nine months ago.
+- **`POST /imposters/:port/spaces/:flowId/stubs` refuses a body that is not a stub** (#932). The
+  route answered `201` for any JSON object, so a body of unrecognised keys — most often the
+  `{"stub": {...}}` envelope that the sibling `POST /imposters/:port/stubs` requires — created a stub
+  with no predicates, no responses and no id: it matched everything in its space, served a default
+  nobody wrote, and could not be deleted except by tearing the space down. An object carrying none
+  of the stub field names is now a `400`, and the message names the envelope mistake when the body
+  has a `stub` key. `{}` and `{"predicates": []}` are still accepted as a space-wide default. The
+  imposter-level stub routes are unchanged.
+  - **Migration:** a client that posts `{"stub": {...}}` to the space route gets a `400`; post the
+    bare stub instead. That request never did what it asked.
 
 ### Removed
 
@@ -963,6 +598,10 @@ record.
     `call_matches`/`call_transform`/`call_delay` dispatchers and `entrypoints::{MATCHES, TRANSFORM,
     DELAY}`. `ctx.response` was reachable only from a hook that never ran, so no serve path changes.
     `check_entrypoint` keeps its signature and gains an `UnsupportedHook` error variant.
+  - **Migration:** `respond(ctx)` is the only script entrypoint. A CI step running
+    `rift script check --hook matches|transform|delay` now fails; those hooks never ran, so move the
+    logic to Mountebank `inject` (predicates), `decorate`/`shellTransform` (response rewriting) or
+    `_behaviors.wait` (delays), and drop the `--hook` value.
 
 - **The script decision cache is gone** (#998), discharging the follow-up #975 named. It memoised
   `FaultDecision`s for the reverse-proxy `script_rules` hook, and when that mode was removed in
@@ -987,126 +626,6 @@ record.
     comment now names its actual consumers — `util::FastMap`/`FastSet`, the predicate regex cache
     and the JSON body index — rather than the deleted module.
 
-### Added
-
-- **A proxy-recording store can refuse a claim instead of being degraded around.**
-  `ProxyStoreError` gains `Refused(BackendUnavailable)` and becomes `#[non_exhaustive]`. The
-  existing `Unavailable` is unchanged and still means *degrade*: the engine forwards upstream
-  without recording, which is right when the store is a persistence aid and the engine enforces
-  exactly-once itself. `Refused` is for the other case — a store that **is** the exactly-once
-  arbiter (a shared or clustered backend) and could not decide. There, forwarding is the bug: with
-  nothing serializing claims, every request for the duration of the outage reaches the upstream, so
-  the duplicate is bounded by the outage rather than by one racing window. On `Refused` the engine
-  fails the request without calling the upstream, and both proxy-leg response arms (the stub proxy
-  and `defaultForward`) answer it `503` through the existing `backend_error_response` door, naming
-  the backend in `feature`/`detail`. A genuine upstream failure keeps its `502`, and the refusal is
-  not logged as an upstream failure — no upstream was called. `ClaimOutcome::InFlight` is
-  unaffected: a claim *was* serialized there, so that forward stays by design.
-
-- **In-process embedders can detect a TCP fault — `tcp_fault_carrier`** (#965). A TCP fault never
-  reaches the wire: Rift builds a placeholder *carrier* response and the serve loop aborts the
-  socket instead of sending it. A program embedding the engine and calling
-  `handle_imposter_request` directly receives that carrier, and had no reliable way to recognise
-  it — the only signal was the `x-rift-fault` header, which echoes the raw configured alias, is
-  also set by `_rift.fault.error` on a response the client genuinely receives, and was **absent
-  entirely** on the carrier a script's `reset()` produces. Classifying on it therefore both missed
-  a real fault and reported one that was not there.
-  - `rift_mock_core::tcp_fault_carrier(&response)` returns the fault's canonical name
-    (`CONNECTION_RESET_BY_PEER`, …) for all three carrier sites, or `None` for an ordinary
-    response. It reads the extension the serve loop itself acts on, not the header.
-  - `TcpFaultKind` is now public (and `#[non_exhaustive]`) for embedders that branch per fault.
-  - Both are re-exported from `rift-http-proxy` as well.
-  - The script-`reset()` carrier now also stamps `x-rift-fault: reset`, so all three carrier sites
-    carry the same marker for consumers written before this API existed.
-
-- **HTTPS imposters can require a client certificate — `mutualAuth`, `rejectUnauthorized`, `ca`**
-  (#977). `docs/features/tls.md` has documented `mutualAuth` since before this engine implemented
-  anything: `ImposterConfig` has no `deny_unknown_fields`, so the key was **silently dropped**. A
-  user following our own documentation to require client certificates got a listener that accepted
-  every client, with no error, no warning, and a config that read back unchanged — a security
-  control the docs promised and the code did not provide.
-  - `mutualAuth: true` requests **and requires** a client certificate; a client presenting none
-    fails the TLS handshake. Without `rejectUnauthorized` the chain is not validated, but the
-    signature still is — "any certificate" means "any certificate whose key you hold", not any
-    bytes copied off the wire.
-  - `rejectUnauthorized: true` + `ca` validates the chain against the supplied anchors.
-  - `ca` takes a single PEM string or an array, as Mountebank does.
-  - Both work on the self-signed fallback, so no `cert`/`key` is needed to test mTLS.
-  - **Every** combination that cannot take effect is refused at creation (400), not half-honoured:
-    `rejectUnauthorized`/`ca` without `mutualAuth`; `ca` without `rejectUnauthorized`;
-    `rejectUnauthorized` without `ca` (including `ca: []`); a `ca` holding no certificate; and
-    `mutualAuth: true` on `protocol: "http"`. `"mutualAuth": false` on http stays valid — it
-    appears in our own documented example.
-
-    Refused rather than logged, deliberately: a warning reaches the server log and never the
-    `POST /imposters` response, so the author who wrote the setting is the one person who would
-    not learn it does nothing — which is precisely the failure this issue exists to remove.
-
-    **Upgrade note.** Because these keys were previously *dropped on parse*, a config carrying one
-    of the refused combinations — most plausibly `rejectUnauthorized` without `mutualAuth`, which
-    is valid in Mountebank — used to create an imposter successfully and now returns a 400. That is
-    intended: the imposter it created was not enforcing what the config asked for. If you hit it,
-    either add `mutualAuth: true` (to get the behaviour the config was asking for) or remove the
-    key (to keep the behaviour you were actually getting).
-  - Defaults are omitted from serialization, so an imposter that never mentions client auth
-    round-trips byte-identically through `GET /imposters`.
-
-  **Deliberate divergence from Mountebank**, in both directions. Mountebank's `mutualAuth` only
-  *requests* a certificate and never rejects one — and since its implementation gates the request on
-  `rejectUnauthorized`, a bare `mutualAuth: true` is a no-op there. Requiring the certificate is the
-  point of the feature for a mock standing in for an mTLS gateway. And where Mountebank silently
-  falls back to the public CA bundle when `ca` is missing, Rift errors: validating a *client*
-  certificate against public roots verifies nothing, and a silent fallback is the defect class this
-  issue was filed under.
-
-- **`_rift.dataset`: a `lookup` named by dataset rather than by file path** — a **carrier field
-  only; nothing in the engine reads it.** A `lookup` behavior needs a filesystem path, and a path is
-  node-local, so a clustered deployment has no way to put one in a config that replicates. The
-  config schema now carries the declarative form — `name`, optional `version`, `key`, `keyColumn`,
-  `into`, and the `digest` the binder pins — so a cluster can resolve it to a content-addressed file
-  on each node and rewrite it into a real `behaviors.lookup` at apply time. Standalone Rift serves a
-  response carrying one exactly as if it were absent. Without this field the block was dropped on
-  parse, so the binding could not be stored at all.
-
-- **`_rift.stateOps`: declarative post-response flow-state writes, no script required** (issue
-  #969). An `is` response's `_rift` block can now carry a `stateOps` array —
-  `set`/`increment`/`delete`/`clearFlow` against the request's resolved flow id, run in order right
-  before the response is written — for the common "bump a counter" / "remember a value" cases that
-  previously needed a full `_rift.script` response. `set` renders its value through the same
-  `{{ }}` templating grammar plus one extra head, `previousValue`, which turns a `set` that reads
-  its own key into a bounded compare-and-set loop so concurrent read-modify-writes never lose an
-  update; `increment` is atomic on every backend that has one. An imposter with `stateOps` but no
-  `_rift.flowState` configured now auto-provisions an in-memory store, the same convenience a
-  `_rift.script` stub already got, rather than silently discarding every write on the no-op store.
-  See [Flow State](docs/features/flow-state.md#riftstateops--declarative-writes-no-script).
-
-- **An intercept `serve` rule now accepts a numeric-string `statusCode` and multi-value `headers`**
-  (issue #936), completing the parity #933 started for `body`. `"statusCode": "418"` and
-  `"set-cookie": ["a=1", "b=2"]` are the forms Mountebank accepts and the imposter stub path has
-  always handled; on the intercept path they were refused, and because rules parse through an
-  untagged enum the caller saw only `data did not match any variant`. Non-string scalar header
-  values (`"x-retry": 3`) coerce to strings, matching what recorders emit. Each value of a
-  multi-value header becomes its own line on the wire — never comma-joined, which is what
-  `set-cookie` requires — and the CR/LF response-splitting guard applies per value.
-  The helpers behind this moved from `rift-mock-core`'s crate-private module into the shared
-  `rift-types::wire`, so the two paths cannot drift apart again; no crate gained a dependency.
-  Strictly widening: previously-valid rules deserialize identically and
-  `GET /intercept/rules` still lists a single-value header as a plain string and a status as a
-  number. See [Intercept proxy](docs/features/intercept-proxy.md#serve-an-inline-stub).
-
-- **An intercept `serve` rule's `body` now accepts any JSON value**, not just a string (issue
-  #933). `body` was `Option<String>` while the imposter stub path's `is.body` has always taken any
-  value, so an object body — legal Mountebank semantics — was refused by serde, and because rules
-  parse through an untagged enum the caller saw only `data did not match any variant of untagged
-  enum RuleOrRules` with no hint that `body` was at fault. A non-string body is rendered once, at
-  rule-insert time, with compact `serde_json::to_string` (the same render-once shape as `is.body`,
-  issue #479), so the intercept request path never re-serializes it. Strictly widening: a string
-  body is still served byte-identically, `null`/absent still means an empty body, and
-  `GET /intercept/rules` gives the body back in its original JSON shape. See
-  [Intercept proxy](docs/features/intercept-proxy.md#serve-an-inline-stub).
-
-### Removed
-
 - **The reverse-proxy / sidecar `Config` mode is gone** (#975). `rift_mock_core::config::Config` —
   the YAML surface with `upstreams`, `routing`, `rules` and `recording` — and the `ProxyServer` that
   consumed it are the tail of a removal that began in **ada6f30 (2025-11-30)**, whose own message
@@ -1128,9 +647,8 @@ record.
   `docs/deployment/` are unaffected — they are built from imposters (`--configfile imposters.json`)
   and the front door, neither of which this touches.
 
-  Note for follow-up: `scripting::decision_cache` (and its bench) was reachable **only** from this
-  proxy path — `scripting/trace.rs` says so — so it is now orphaned in the same way. It is left in
-  place rather than swept into this change; that is its own decision.
+  `scripting::decision_cache` (and its bench) was reachable **only** from this proxy path; it was
+  removed separately in #998 (above).
 
   Nine months of maintenance went into that dead path regardless — #543, #545, #555 and #834 all
   fixed bugs in code nobody could run. Removing it retires ~6.4k lines.
@@ -1162,10 +680,9 @@ record.
   path genuinely reads; and `extensions::routing::is_subdomain_of`, because the front door matches
   hosts by the same rule.
 
-  Also kept, but with **no in-tree reader**: `config::{FaultConfig, TcpFault, LatencyFault,
-  ErrorFault}` and the `extensions::fault` helpers over them. The imposter path injects faults
-  through its own `_rift.fault` type, not these. They are left as public API rather than swept into
-  this change because that is a separate should-question — tracked separately.
+  `config::{FaultConfig, TcpFault, LatencyFault, ErrorFault}` and the `extensions::fault` helpers
+  over them had no in-tree reader either; they were kept by this change and removed later in the
+  release by #1000 (above).
 
   Two top-level re-export paths also disappear: `rift_mock_core::matcher` and
   `rift_mock_core::routing`. `is_subdomain_of` survives at its real path,
@@ -1174,7 +691,535 @@ record.
   A public-API removal on a 0.x crate, so a minor bump. `hyper-rustls` also leaves
   `rift-mock-core`'s dependencies — `proxy/client.rs` was its only consumer.
 
+  **Migration:** the `rift` binary is unaffected — it has not accepted this format since ada6f30.
+  An embedder that constructed `Config` or `ProxyServer` must move to imposters (`_rift` namespace
+  on imposter JSON) and the front door. `recording.persistence` has no replacement.
+
+- **The deprecated top-level `error` / `feature` / `detail` keys on backend-error responses**
+  (issue #801). Deprecated in 0.16.0 and retained through 0.17.0, the pre-envelope duplicates are
+  now gone: the Mountebank `errors` envelope is the only shape this door serves. Branch on
+  `errors[0].type == "backend unavailable"`; `errors[0].feature` / `errors[0].detail` carry the
+  same information the top-level keys did (#922).
+  - **Migration:** a client that reads the top-level `error`, `feature` or `detail` of a `503`
+    backend-error body gets nothing now; read `errors[0].type`, `errors[0].feature` and
+    `errors[0].detail` instead.
+
 ### Fixed
+
+- **A bare IPv6 bind host works on every door** (#1137). The admin plane, the intercept listener and
+  the C-ABI built their bind address by parsing `"{host}:{port}"`, and `"::1:2525"` reads the port as
+  one more hextet — so `--host ::1` (or `MB_HOST=::1`) could never start, and the refusal wrongly
+  called `::1` "not a literal address". Every door now parses the host to an IP and attaches the port,
+  accepting IPv4 and IPv6 in both spellings (`::1`, `[::1]`):
+  - `--host` / `MB_HOST` / rcfile `host`, including with `--intercept-port` under
+    `--require-admin-auth`, which failed with a bare `invalid socket address syntax`;
+  - `POST /intercept` `host`, a config-file `intercept.host`, and `rift_start_intercept`;
+  - an SDK's `serve({host})` (`rift_serve_admin`), for the admin and metrics addresses;
+  - `rift save --host ::1`, which built the unparseable URL `http://::1:2525/…`;
+  - an imposter's `host`, which had the mirror-image defect: `::1` worked and `[::1]` failed with a
+    DNS lookup error. A DNS name (`localhost`) still resolves there, as in Mountebank, and is now
+    looked up without blocking the async runtime.
+  - A scoped link-local literal (`[fe80::1%2]`) keeps its scope id on every door. The startup log no
+    longer prints a malformed metrics URL built from `--host`; the metrics listener already logs the
+    address it bound.
+
+- **An unrecognised `--loglevel` and an unparseable `RUST_LOG` are refused instead of silently
+  downgraded** (#1134). Two reads in `main.rs` discarded a failure and fell back to a level nobody
+  chose: the level match's catch-all turned **`trace`** — a real `tracing` level — and any typo alike
+  into `info`, and `EnvFilter::try_from_default_env().unwrap_or_else(…)` could not tell `RUST_LOG`
+  *unset* from `RUST_LOG` *set and invalid*, so an operator's filter was replaced with nothing said.
+  Since #1114 the pair was inconsistent in a way that was hard to explain: a wrong-**typed**
+  `logLevel` in an rcfile refused the whole file, while a wrong-**valued** one started the server at
+  `info`.
+  - `trace` is now accepted; an unrecognised level names the value and lists the accepted ones; a
+    `RUST_LOG` that is set and does not parse (or is not valid UTF-8) is refused. An **unset**
+    `RUST_LOG` remains an absence, not a failure, and `RUST_LOG=` keeps its current meaning.
+    Precedence is unchanged: `RUST_LOG` > `--debug` > `--loglevel`.
+  - An **empty** level (`--loglevel ""`, or `MB_LOGLEVEL=${LOG_LEVEL}` with `LOG_LEVEL` unset — clap
+    prefers a present environment variable over the default even when it is empty) still means "not
+    supplied" and yields `info`. Refusing it would abort deployments that work today to report a
+    typo nobody made.
+  - The rules live in `bootstrap::log_filter` (with `log_filter_with`, which takes the `RUST_LOG`
+    value rather than reading it), so an alternative binary calls them instead of copying them —
+    the same treatment #807 gave the rcfile and pidfile helpers.
+  - **Migration:** a level that was never valid — `--loglevel verbose`, a typo, anything outside the
+    accepted set — used to start the server at `info` and now stops it. If a deployment has been
+    passing one, it has been running at `info` all along; set a real level (or drop the flag) before
+    upgrading.
+
+- **`healthcheck` now applies `--rcfile` before computing what to probe** (#1133). The subcommand
+  was dispatched ahead of the rcfile, so a deployment that set the admin port in a file — `{"port":
+  4321}` — ran a server on 4321 and a container probe that computed its URL from the unmodified
+  default, 2525, and reported unhealthy forever with nothing in the output mentioning the rcfile.
+  The early dispatch is still right about skipping the *server* bootstrap (the crypto provider and
+  the tracing subscriber); reading one small JSON file is not what that protects, and it is the one
+  step whose output the probe depends on. `script` still runs ahead of the rcfile, since it reads no
+  host or port.
+  - A refused rcfile now refuses the probe, consistent with #1114: a server started with that file
+    would not start either, so *unhealthy* is the true answer. Pass the probe the same `--rcfile`
+    the server was given.
+
+- **An `--rcfile` may now set `apiKey`, instead of dropping the credential with an advisory**
+  (#1132). `apiKey` was the one Mountebank option the rcfile did not recognise, so a file carrying
+  the admin credential produced `unsupported key 'apiKey' (ignored)` and a server with **no key
+  set**. Ignoring an unknown key is right; ignoring a credential the same way is the one case where
+  that advisory reads as reassurance. The pairing that mattered most was
+  `{"apiKey": "…", "requireAdminAuth": true}`: the file applied the gate, dropped the key, and
+  startup then refused with a message telling the operator to set `--api-key` — from a file that
+  plainly had. Both spellings (`apiKey`, `api_key`) are accepted, the value must be a JSON string or
+  the whole rcfile is refused, an explicit `--api-key`/`MB_APIKEY` still wins, and a blank value is
+  refused at startup exactly as a blank `--api-key` is. A wrong-typed `apiKey` names the key and the
+  type the value had — never the value itself, since an unquoted token is exactly the mistake that
+  refusal catches, and the message reaches stderr and CI output. Every other key still echoes its
+  value.
+
+- **A delete whose `--datadir` file could not be removed reported success, and the imposter came back
+  on restart** (#1124). The unlink failure was only logged, and `DELETE /imposters/:port`,
+  `DELETE /imposters` and a reload's sweep all reported the imposter as deleted. The file is now
+  removed before the imposter is torn down. If that fails, the delete returns `503` naming the file,
+  the imposter keeps serving, and a reload lists the port under `failed`. `DELETE /imposters`
+  returns `503` naming each such port, with the imposters that were deleted.
+
+- **With `--configfile` or `--imposters` and `--datadir` together, a port-less config-file imposter
+  could take the port of a data-directory file at startup, and that file's imposter was not served**
+  (#1120). Startup created every source imposter before reading the data directory, and an
+  auto-assigned port is the lowest free one from 49152, so the data-directory imposter on that port
+  was skipped with `PortInUse` until the next reload. Before #1122 the config-file imposter was also
+  written over that file. Both stores are now created in one pass, every imposter with an explicit
+  port first, which also covers a port-less file inside the data directory. Every refusal while
+  loading imposters, including a data directory that cannot be listed, now comes before the first
+  imposter is created.
+
+- **`POST /admin/reload` with both `--configfile` and `--datadir` deleted every datadir imposter and
+  its file** (#1122). Reload re-applied the config file alone, so its sweep deleted each imposter
+  only the data directory declared, including every one created through the admin API, and unlinked
+  its `<port>.json`, so the imposter did not come back on restart either. Reload now re-reads both
+  stores and applies them as one set; a port declared by both refuses the reload with the running
+  imposters unchanged.
+
+- **A wholesale replace on a `--datadir` server removed `<port>.json` before re-creating the
+  imposter** (#1122). When the re-create failed, for example on an unreadable certificate, the file
+  was lost along with the imposter; on a `--datadir` reload that file is the operator's own. A replace
+  now leaves the file for the re-create to overwrite, and removes it only when the re-create fails
+  on an apply whose file was a copy of runtime state (`PUT /imposters`, `apply_config`). Separately, a delete removed the file on a
+  detached task, so a create on the same port straight after could have its new file deleted; the
+  removal is now awaited.
+
+- **An EJS `<%= process.env.VAR %>` whose variable is unset rendered empty with nothing logged** (#1116).
+  A typo in a variable name, or a deployment missing one, loaded a config that silently differed from
+  the file; for a `port` the load then failed with a JSON error at a line and column that did not
+  mention the variable. The engine now logs a warning per variable at load and reload, naming it and
+  the tag's line, and a parse error after rendering names the variables that rendered empty. A
+  variable set to a value that is not valid Unicode is reported as such, even when the tag has a
+  default, instead of as unset. `rift-lint`'s `W013` uses the same wording.
+
+- **A port-less imposter could take a port another imposter in the same set names, and one of the two
+  was lost** (#1112). An auto-assigned port is the lowest free one from 49152, and imposters were
+  created in the order the set listed them. `PUT /imposters`, `POST /admin/reload`, `rift_apply_config`
+  and the embedded `configFile` or inline `config` then replaced, patched or kept the auto-assigned
+  imposter as if it were the explicit one and reported success; `--configfile` and `--imposters`
+  startup logged `PortInUse` and skipped the explicit one. Imposters with an explicit port are now
+  created first, so an auto-assigned port never takes a port an explicit imposter in the set is
+  serving.
+
+- **`rift-lint` reported `E001` for a templated config the engine loads, and passed ones it refuses**
+  (#1108). It parsed a file's raw text, so the documented `"port": <%= process.env.PORT || '4545' %>`
+  was invalid JSON to it, a tag inside a string was validated as literal text, and a tag the loader
+  refuses (since #1095) went unreported.
+  - The EJS preprocessor moved from `rift-http-proxy` into a new `rift-ejs` crate, and `rift-lint`
+    renders a file with it before linting, as `--configfile` does. The engine's behaviour is unchanged,
+    and `config_loader::EjsFileAccess` still resolves.
+  - A tag the engine refuses, or an unreadable `include`/`stringify` file, is the new error `E049`,
+    carrying the engine's message. A `process.env` tag with no default whose variable is unset is the
+    new warning `W013`.
+  - `rift-lint --no-parse` lints the text verbatim, and `--fix` refuses to rewrite a templated file.
+    A line and column in `E001`/`W012` for a templated file are marked as counting in the rendered
+    document. The TUI still validates an import verbatim, as `POST /imposters` reads it.
+  - `LintOptions` gained a public `no_parse` field, which breaks a `LintOptions {}` struct literal;
+    `LintOptions::default()` is unaffected.
+
+- **`rift-verify` treated a stub as dynamic when its `copy`, `lookup` or `shellTransform` was an empty
+  list** (#1103). The engine runs nothing for an empty list, so the response is static. Such a stub was
+  skipped under `--skip-dynamic` and `--verify-dynamic`, and otherwise accepted any `2xx` status, so a
+  stub serving `404` failed and one serving `201` passed on a `200`. Its status is now asserted exactly.
+
+- **Two imposters on `port: 0` were refused as a duplicate port `0`, although `POST /imposters`
+  auto-assigns a `0`** (#1104). `--configfile`, `--imposters` and `--datadir` startup aborted with
+  "both declare port 0", even for two imposters in one file, and `POST /admin/reload`,
+  `PUT /imposters`, `rift_apply_config` and the embedded `configFile` returned `PortInUse(0)`. `0` now
+  means auto-assign at every door, exactly like an absent port: such an imposter is re-created on each
+  apply rather than reconciled. `rift-lint` still reports `port: 0` as `E005`, now explaining that a
+  config file must pin its ports.
+
+- **An explicit `null` for a `_behaviors` key was treated three different ways** (#1093). Writing
+  `"wait": null` (or `null` for `decorate`, `shellTransform`, `copy`, `lookup` or `repeat`) now means
+  the key is absent everywhere, the way `null` already works for `port` and `statusCode`.
+  - Without `--allowInjection`, `wait`, `decorate` or `shellTransform` set to `null` was refused as a
+    scripting surface: `--configfile` aborted, `--datadir` skipped the file and `POST /imposters`
+    returned 400. A `null` runs nothing, so these are now admitted.
+  - `copy` or `lookup` set to `null` (or `shellTransform`, with `--allowInjection`) failed to parse,
+    and the response lost every behavior in the block except `repeat`, with only an error log line.
+  - A stub-level `delayRange` did not fill a response's `"wait": null`, so the delay was dropped.
+  - `rift-verify` skipped a stub as dynamic when a `copy`, `lookup`, `decorate`, `shellTransform` or
+    `repeat` key was present but `null`.
+  - `rift-lint` reported `E025` for `"wait": null` and `E035` for `"repeat": null`.
+  - **Migration:** only widening. A config that relied on a `null` `wait`/`decorate`/`shellTransform`
+    being refused without `--allowInjection` now loads, and runs nothing for that key.
+
+- **`rift-lint` checked a response's `behaviors` differently from how the engine reads them**
+  (#1099). The lint now validates the one block the engine builds.
+  - `"_behaviors": null` hid a `behaviors` array from the lint, while the engine reads the `null` as
+    absent and uses the array. `{"_behaviors": null, "behaviors": [{"wait": true}]}` linted clean, and
+    the engine then dropped the block's behaviors with only an error log line.
+  - The engine merges a `behaviors` array into one object, and the last element to set a key wins.
+    The lint checked each element on its own, so `[{"wait": true}, {"wait": 5}]` reported `E025` for a
+    block that serves a 5 ms wait. A finding now names the element whose value the engine uses.
+  - A `behaviors` object, rather than an array, was not checked at all.
+
+- **`rift-lint` passed a `port` the engine refuses to load** (#1088). The port check only ran when
+  the value was an unsigned integer, so `"port": "3000"`, `3000.5`, `-1` or `true` linted clean and
+  then failed at startup with `invalid type` (or, for `-1`, `invalid value`) `…, expected u16`.
+  `3000.0` is refused too: serde reads any literal with a decimal point or exponent as a float, and
+  a `u16` accepts no float.
+  - A present `port` that is not a non-negative integer is now error `E047`. This also covers the `3000.00000000000000001`
+    case where `W012` (#1083) was the only issue reported.
+  - `null` for `port`, `protocol` or `stubs` is now `E003`, as if the field were missing. The engine
+    treats a `null` port as absent and auto-assigns one, and it refuses a `null` protocol or stubs.
+  - A `wait` of `500.5` or `-1` is now `E025`. The engine does not refuse the file for it. The block
+    fails to parse, and with an error log line the response loses its `wait`, `copy`, `lookup`,
+    `decorate` and `shellTransform`. Only `repeat`, which is read separately, still applies.
+
+- **EJS examples on five docs pages could not work as written** (#1092). The config loader evaluates
+  only `process.env` expressions and the `include` and `stringify` tags. It used to strip every
+  other tag, so each example loaded with an empty field; since #1095 it refuses them instead.
+  - `docs/mountebank/imposters.md` set `"port": "<%= port || 4545 %>"`, which became `"port": ""`
+    and was refused at load. It now reads `"port": <%= process.env.PORT || '4545' %>`, without quotes.
+  - `docs/mountebank/responses.md` built a response body from `<%- request.path %>`. The loader
+    strips it, since EJS runs at load time and has no request. It now uses `${request.path}` and
+    points to date templates.
+  - `docs/features/tls.md` (twice), `docs/configuration/mountebank.md` and
+    `docs/deployment/kubernetes.md` loaded a TLS key and certificate with `<%- include('…') %>`, a
+    spelling the loader does not recognize, so both loaded empty. They now use `<%- stringify('…') %>`.
+
+- **A float in a stub body was served with different digits than it was written with** (#1085).
+  `serde_json`'s default float parser is not correctly rounded: outside a narrow fast path it can
+  land one representable double away, so a body written as `{"n": 7e23}` was served as
+  `{"n":6.999999999999999e23}`, and `1e-23` as `1.0000000000000001e-23`. Ordinary 17-digit doubles —
+  the form JavaScript, Python and recorded proxy bodies use — were affected too
+  (`0.10018513143495411` came back as `0.10018513143495412`), as was every other place rift parses
+  JSON: request bodies matched by predicates, `rift-verify`, and `rift-lint`.
+  - `serde_json`'s `float_roundtrip` feature is now on workspace-wide, which makes the parse exact.
+    It costs roughly 2x on parsing a float; integers and strings are unaffected.
+  - Only a number wider than a 64-bit integer, or with more significant digits than a double can
+    hold, is still served rounded.
+
+- **`rift-lint` reported a port conflict between files that do not share a port, and suggested a
+  port that does not exist for a real conflict at 65535** (#1091). The E002 check narrowed each port with an unchecked cast, so an
+  out-of-range `70000` was read as `4464` and conflicted with a file on `4464`, and `0` conflicted
+  with `65536`. Ports outside 1-65535 are now left to `E005` alone. A conflict on port `65535` also
+  overflowed while suggesting the next free port: a panic in a debug build, "Consider using ports
+  0+" in a release build. It now reports E002 without that suggestion.
+
+- **`rift-lint` never reported a port used twice inside one file, or by a file in the
+  `{"imposters": [...]}` or bare `[...]` form** (#1094). The E002 check read only a document's
+  top-level `port`, so those two shapes added nothing to the conflict map. A duplicate there loads
+  with one imposter silently missing under `--configfile`, and `POST /admin/reload` refuses the whole
+  set. Every imposter in a document is now compared, within the file and across files. The finding
+  names the first imposter's slot as its location (`imposters[0].port`, `[0].port`, or `port`), and
+  the message counts imposters rather than files: `Port 4545 is used by 2 imposters: a.json
+  (imposters[0], imposters[1])`.
+
+- **`rift-lint --fix` no longer rewrites a file whose parse dropped a repeated key** (#1076).
+  `--fix` re-serializes the whole document from its parsed form, where a byte-identical repeated key
+  is already gone (`serde_json::Map` is last-wins), so repairing an unrelated numeric header could
+  silently write that loss to disk. It now skips such a file and names the key it would have
+  dropped.
+  - The case that mattered is the one the linter reports **nothing** about: a repeated name in
+    `is.headers` is how a stub sends two `Set-Cookie` lines, and the engine merges it deliberately
+    (`E044` does not fire there). Running `--fix` to quote a `Content-Length` in the same file would
+    have halved the cookies with no finding anywhere.
+  - `Document::duplicate_keys()` exposes the list the check reads. It is document-wide rather than
+    limited to `E044`'s two fields, because a whole-file rewrite loses all of them.
+
+- **`rift-lint --fix` no longer rewrites a file whose number literal it cannot write back** (#1080).
+  A literal wider than `u64` or with more digits than `f64` carries is held as the nearest `f64`
+  once parsed, so `--fix` wrote `123456789012345678901234567890` back as `1.2345678901234568e29` and
+  `0.1000000000000000055511151231257827` as `0.1` while repairing an unrelated header. It now skips
+  such a file and names each literal, its line and column, and what it would have become.
+  - The engine parses a config file the same way, so it already serves the rounded value for such a
+    literal; `--fix` was destroying the only place the original digits still existed.
+  - A number that only changes spelling (`0.10` → `0.1`, `1e2` → `100.0`) is formatting, not loss,
+    and does not stop the rewrite. `Document::lossy_numbers()` exposes the list the check reads.
+
+- **A `${request.*}`, `copy` or `lookup` header value carrying a client-supplied control character
+  failed the whole response instead of being repaired** (#1067). Response header values pass through
+  two templating stages: the `{{ }}` stage has stripped characters a header value cannot carry since
+  #359 B3, and the `${request.*}` stage — which runs *after* it, on the same values — stripped
+  nothing. `request.query` is percent-decoded and `request.body` is the raw body, so
+  `GET /x?x=a%0Db` against a stub with `"X-Echo": "${request.query.x}"` put a CR into the header,
+  which `Builder::header` rejected and the response surfaced as a `500`. The same stub written with
+  `{{ }}` answered `200`. A client could therefore fail an otherwise-valid stub with a query string,
+  and the author could neither see it nor fix it.
+  - The repair now also runs on the `${request.*}` substitution and on the text the `copy` and
+    `lookup` behaviors splice into a header — the other two places request-derived data reaches a
+    header value. It is the same filter, so tabs and non-ASCII obs-text are still kept byte-exact
+    (#1058), and it is idempotent: a value the `{{ }}` stage already repaired passes through
+    unchanged and is not warned about twice.
+  - On these three paths the repair covers **only the substituted text**, never the literal text
+    around it. A control character written literally into a header stays an authoring bug and still
+    fails that response with a `500`, even when the same header value also contains a token.
+    Response bodies are never filtered. `decorate` and script-authored headers are unchanged.
+
+- **A templated header value carrying a tab or legal non-ASCII was silently truncated and reported
+  as an injection attempt** (#1058). The header-injection filter for `{{ }}`-templated response
+  headers (#359 B3) tested `char::is_control`, which is Unicode category Cc — so it also removed
+  HTAB and everything in U+0080–U+009F, all of which a header value may legally carry. A templated
+  `X-Name` echoing `José` came back mangled, and the log accused the client of attempting header
+  injection. #1048 made this newly reachable through `request.header`; `request.query` and
+  `request.json` could always carry it.
+  - The filter is now the `http` crate's own validity rule (`b >= 32 && b != 127 || b == b'\t'`),
+    so exactly the characters a header value cannot hold are removed and nothing else. **CR, LF and
+    NUL are still stripped** — the injection defence is unchanged.
+  - The warning no longer writes the offending value through `Display`. It was the one place a
+    client-supplied CR/LF reached a log line unescaped, which let it forge a second log entry. The
+    value is now escaped and length-capped, and the warning names which characters it removed — so
+    an operator can tell a real CR/LF injection attempt from a stray NUL, which is what the single
+    "possible header-injection attempt" wording could not express.
+
+- **The dev/CI tools took a single-valued header map that #1050 missed** (#1061). `rift-verify`'s
+  `_verify` request block and `rift script run --request` both parse `headers` into a one-value-per-name
+  map from a user-written document, which #1050 fixed everywhere else but not here.
+  - A `_verify` request spelling one name twice put **two** case-variant lines on the wire, ordered by
+    `HashMap` iteration. Stub *selection* survived that, since the engine folds both spellings into one
+    name with two values — but every first-value consumer downstream (flow-id resolution, `copy`/`lookup`,
+    scripts, `${request.headers.*}`) read whichever happened to land first, so a `_verify` sequence that
+    keyed state on the header changed outcome between runs of the same document.
+  - A `--request` fixture doing the same never reached the wire, but scripts read headers by
+    case-insensitive find-first, so `request.header('x-trace')` returned a different value per run.
+  - Both are now **rejected** at parse time with a message naming both spellings — a malformed `_verify`
+    for the first, a fixture-parse error for the second. As in #1050, rejecting beats folding: picking a
+    winner silently is the behaviour that made this hard to see in the first place.
+  - **Migration:** a `_verify` block or `--request` fixture that names one header twice (in any
+    case) now fails; keep one spelling.
+
+- **A single-valued header object that named one header twice sent two header lines** (#1050).
+  `proxy.injectHeaders` and `_rift.fault.error.headers` hold one value per name, but nothing
+  enforced that: `injectHeaders: {"x-trace": "a", "X-Trace": "b"}` deserialized into two distinct
+  keys, and because `RequestBuilder::header` and `http::response::Builder::header` **append**
+  rather than replace, both lines were emitted — ordered by `HashMap` iteration, so differently
+  from one process to the next. #1039 fixed the equivalent for multi-valued header objects by
+  merging; these two were missed, and merging is not available to them.
+  - Such a document is now **rejected** at parse time — a `400` from `POST /imposters`, a startup
+    error from `--configfile` — with a message naming both spellings. Rejecting rather than folding
+    is deliberate: two different values for one slot have no correct combination, so any fold
+    silently discards one, which is the swallow rather than the fix for it. Nor could a tie-break
+    be made deterministic, since which spelling the deserializer sees first depends on whether the
+    document was streamed from text or routed through a `serde_json::Value`.
+  - A document that spelled one of these names twice loaded before and is refused now. Nothing that
+    worked stops working: what it was doing was emitting two nondeterministically ordered header
+    lines. Every fixture in the SDK conformance corpus spells each name once and is unaffected.
+  - **A deliberate Mountebank divergence, on `injectHeaders` only.** Node applies an options
+    `headers` object through case-insensitive `setHeader`, so Mountebank emits one header,
+    deterministically last-in-insertion-order, for a document Rift now refuses. Rift cannot
+    reproduce that: its `--configfile` wrapper form parses to a `serde_json::Value`, which is
+    key-sorted, so insertion order is not available to it. The real choice was between a
+    nondeterministic winner and a loud refusal. (`_rift.fault.error.headers` is a Rift extension
+    and carries no such constraint.)
+  - **Migration:** a `proxy.injectHeaders` or `_rift.fault.error.headers` object that names one
+    header twice — byte-identically or in two cases — now fails to load (`400` from
+    `POST /imposters`, a startup error from `--configfile`). Keep one entry per name. `rift-lint`
+    reports both shapes before deploy (`E043`, `E044`). `is.headers` is unaffected: a repeat there is
+    merged (#1039).
+
+- **Valid non-ASCII header values were dropped and reported as "non-UTF-8"** (#1048). The request
+  collector decoded with `HeaderValue::to_str`, which accepts only *visible ASCII*
+  (`b >= 32 && b < 127 || b == b'\t'`). Every byte above `0x7F` therefore failed it, so a header a
+  client can legally send — `X-User-Name: José`, `Content-Disposition: attachment;
+  filename="résumé.pdf"` — was discarded before matching, forwarding, the journal, behaviors and
+  templating ever saw it, and the server logged that a perfectly valid UTF-8 value was not UTF-8.
+  The documentation promised that *invalid* UTF-8 is dropped; the code dropped a strict superset of
+  that, so the promise was false for every non-ASCII header.
+  - The check is now UTF-8 validity. Such values are kept byte-exact — the round trip was always
+    lossless, since `httparse` admits obs-text in a request header value and `HeaderValue::from_str`
+    accepts the same bytes back. Genuinely invalid UTF-8 is still dropped, with the same one warning
+    per request, which now says something true.
+  - This is the same rule #1041 applied to upstream *response* headers, so the two collectors no
+    longer disagree: a non-ASCII header is now matched, forwarded and recorded consistently rather
+    than relayed by the proxy but invisible to a predicate.
+  - The dead header half of `predicate::deep_equals` is removed with it — see **Removed** above.
+
+- **An HTTP/2 connection that went silent after the preface was pinned indefinitely** (#1044).
+  #1030 bounded the protocol-detection window, and `RIFT_HTTP_HEADER_TIMEOUT` bounds an HTTP/1
+  request head — but a client that sent the full 24-byte HTTP/2 preface *completed* detection, and
+  HTTP/2 has no equivalent of HTTP/1's header timer. Such a peer held a task, a file descriptor and
+  (over TLS) a `TlsStream` for as long as it cared to stay quiet, unauthenticated. So did one that
+  completed the whole handshake and then never opened a stream, which the issue did not mention.
+  - hyper's HTTP/2 keep-alive ping is the only mechanism that reaches this, and it was simply never
+    configured — it does not arm unless an interval is set. All five listeners now set it, reusing
+    `RIFT_HTTP_HEADER_TIMEOUT` rather than adding a knob: that variable already means "how long a
+    client may hold a connection without producing a request head". A silent peer is closed within
+    two intervals.
+  - **Idle HTTP/2 connections are now pinged** every `RIFT_HTTP_HEADER_TIMEOUT` (30s by default). A
+    live client answers and is unaffected.
+  - Note for anyone extending this: hyper panics (`Time::Empty`) if an HTTP/2 timeout is set without
+    an HTTP/2 timer, and every listener previously set a timer on the HTTP/1 leg only — so a missed
+    `.http2().timer(...)` would surface only on real HTTP/2 traffic. A prior-knowledge h2 request
+    test guards each site against exactly that.
+
+- **The upstream proxy blanked response header values it could not decode** (#1041). Relaying a
+  `proxy` response ran `v.to_str().unwrap_or("")` over the upstream's headers, so a value that did
+  not decode was replaced by an empty string the origin never sent — a data-path swallow, which the
+  repo's own error-handling rules classify as never acceptable. That one list feeds three places, so
+  the blank went to all of them: the client's response, the `RecordedResponse`, and the stub
+  `proxyOnce`/`proxyAlways` generates. The stub is the one that lasts — it kept serving the empty
+  header on every later request, long after the upstream was out of the picture.
+  - Such values are now **dropped**, with one warning per response naming the affected headers, so
+    the header is simply absent rather than present-and-wrong. Repeated headers keep their
+    multiplicity, `Set-Cookie` included.
+  - **More upstream headers now relay than before.** The check is UTF-8 validity, not
+    `HeaderValue::to_str`, which accepts only *visible ASCII* and therefore rejected valid UTF-8
+    such as `Content-Disposition: attachment; filename="résumé.pdf"`. Rift's serving side always
+    accepted those bytes, so blanking them was never necessary; they now relay, record and replay
+    byte-exact.
+  - The **request**-side collector had the same over-strict check; that is now fixed too, in #1048
+    below, so both directions decode identically.
+
+- **Behaviors and template substitution disagreed with predicates about the same request** (#1040).
+  `copy`, `lookup`, `decorate`, `shellTransform` and `${request.headers.*}` built their own view of
+  the request headers — a second pass over the raw header map, with a different rule from the one
+  everything else uses. A header the client sent twice exposed its **last** value to a behavior
+  while predicates, `proxy` forwarding, the journal and `inject` all took the first; a header value
+  that was not valid UTF-8 arrived at a behavior as `""` — an empty string the client never sent —
+  where every other surface had already dropped it with a warning. One request could therefore
+  answer two ways depending on which surface asked.
+  - Both now project the map the request was already collected into, so a repeated header
+    contributes its **first** value and an undecodable one is **absent**, in behaviors and
+    templating exactly as in predicates. `${request.headers.*}` also stops dropping undecodable
+    values *silently* — that drop is now covered by the collector's existing single warning per
+    request.
+  - Visible to a stub only when a request repeats a header (last → first) or sends a header value
+    that is not valid UTF-8 (`""` → absent). `MB_REQUEST.headers` and the JS/Rhai `request.headers`
+    object are unchanged in shape: still one string per name.
+  - `RequestContext::from_request` and `RequestData::new` take the collected map rather than a
+    `hyper::HeaderMap`. Both are `pub`, so an embedder calling them directly needs the new argument;
+    the C ABI and the language SDKs are unaffected.
+
+- **A header object that spelled one name two ways became two headers** (#1039). HTTP header names
+  are case-insensitive, but the shared wire deserializer keyed its map by the literal spelling, so
+  `{"content-type": …, "Content-Type": …}` in a recorded request, a stub, a flat response or an
+  intercept rule loaded as two separate entries. Every case-insensitive lookup downstream — form
+  parsing, predicate fields, `copy`, the JS and Rhai engines, the verify CLI — resolves such a name
+  by scanning for the first case-matching key, so with two entries present the answer depended on
+  hash iteration order: the same stored request could parse its form one way on one run and another
+  way on the next. `deepEquals` on headers was worse than nondeterministic, comparing the expected
+  object's name count against a map that held one name twice, so it failed consistently and
+  wrongly.
+  - Such entries are now merged as they are parsed into a single entry carrying every value. Which
+    spelling survives, and the resulting order of the values, is deterministic but **unspecified**:
+    it depends on how the document reached Rift, and a single `--configfile` document can go either
+    way depending only on whether it uses the `{"imposters": [...]}` wrapper or a bare array. Depend
+    on there being one entry, not on which spelling wins. The spelling you write is still the
+    spelling Rift serves — the fix does not lowercase or title-case anything — and a document that
+    spells each name once is byte-for-byte unaffected in every respect.
+  - A name repeated with **identical** spelling now keeps both values instead of silently keeping
+    only the last. This diverges from Mountebank, which is Node and inherits `JSON.parse`'s
+    last-wins rule for a duplicate key. It affects only documents already relying on duplicate keys
+    within one JSON object — no fixture in the SDK conformance corpus, the examples or the test
+    suite has one — but the divergence is real and intentional: silently discarding a value the
+    document contains is the behaviour that made this class of bug hard to see in the first place.
+
+- **HTTPS imposters advertised HTTP/2 they would not speak** (#1029). The TLS handshake offered
+  `h2, http/1.1` unconditionally, while the server serves HTTP/1-only whenever the imposter can fire
+  a TCP fault, carries a `_rift.script` response, or `RIFT_DISABLE_HTTP2` is set. Advertising a
+  protocol the server will not speak is worse than not advertising it: ALPN is negotiated during the
+  handshake, so a client that selects `h2` has already committed by the time the server answers in
+  HTTP/1, and has no way back. `RIFT_DISABLE_HTTP2` — a kill switch whose whole purpose is to force
+  HTTP/1.1 — produced exactly this mismatch.
+  - The offer now follows the same per-connection decision as the server. That matters more than it
+    sounds: the TLS acceptor is built once per imposter, but whether the server is HTTP/1-only
+    depends on the *live* stub set, which changes through the admin API without rebuilding the
+    acceptor. Deciding once at construction would have been correct only until the first stub
+    mutation. Each HTTPS imposter now holds two acceptors built from one `ServerConfig` — sharing a
+    single session cache and ticketer, so resumption survives a stub change — and picks between them
+    per connection.
+  - This also closes a latent TOCTOU: the handshake used to complete and only *then* have the
+    protocol decision re-evaluated, so a stub mutation in between flipped it after the client had
+    already committed. One evaluation now drives both the advertisement and the server.
+  - Plaintext imposters are unaffected: they have no ALPN, and h2c prior-knowledge negotiation is
+    unchanged.
+
+- **A connection that completed the handshake and then said nothing was never timed out**
+  (#1030). Every listener that serves with `hyper_util`'s `auto::Builder` sniffs the connection
+  preface to choose HTTP/1 or HTTP/2 *before* it builds either protocol's connection — and
+  `header_read_timeout` lives on that connection, so it could not arm until the sniff resolved.
+  A client that finished the TCP (and TLS) handshake and then sent nothing held a task, a file
+  descriptor and, over TLS, a whole `TlsStream`, for as long as it cared to, unauthenticated.
+  Each listener now runs that detection itself under `RIFT_HTTP_HEADER_TIMEOUT` and replays the
+  sniffed bytes, so the detection window is bounded like every other phase of a request.
+  - Two things the issue's own framing understated. It is **not** "until the first byte": the
+    detection loop only exits on a complete 24-byte preface or a byte that diverges from it, so a
+    client sending `P` and stopping was equally stuck — a fix keyed on "has the client sent
+    anything?" would have left that open. And it is **not** TLS-specific: the three plaintext
+    listeners had the identical hole; TLS only makes the parked connection more expensive.
+  - Keep-alive and HTTP/2 connections are deliberately untouched. Bounding the whole connection
+    (rather than just its detection window) would have closed every long-lived connection at the
+    deadline, which is why the obvious `timeout(serve_connection)` was not the fix.
+  - Worst-case silence before a close is now up to **2×** `RIFT_HTTP_HEADER_TIMEOUT` — once for
+    detection, then once for HTTP/1's own header timer, which can only start afterwards. Documented
+    rather than netted: subtracting elapsed time makes a very small timeout behave erratically.
+
+- **The intercept listener ignored `RIFT_MAX_CONNECTIONS`** (#1030). It read the tuning at bind
+  time but never applied the cap, so it was the one listener with no bound on concurrently-accepted
+  connections. It now takes a permit before accepting, exactly as the imposter and front-door
+  listeners do, holding excess in the kernel backlog instead of accepting and then failing.
+
+- **`/verify` and rule matching disagreed about a repeated request header** (#1026). Since #994 the
+  predicate engine matches if *any* value of a repeated header satisfies the predicate, but
+  `POST /imposters/{port}/verify` still collapsed a recorded request's headers to one value per name
+  — the **last** — before handing them over. The same predicate against the same recorded request
+  therefore gave two answers depending on which path evaluated it: an intercept rule matched while
+  verify reported `matched: 0`. Verify now passes the multi-value map straight to the shared engine.
+  Two behaviour flips follow: a predicate on a shadowed value (the first of a repeated header) now
+  matches, and `not` on such a value now fails rather than succeeding. Repeated `Content-Type` on a
+  form body now takes the first value (single-valued per RFC 9110) instead of letting a stray second
+  one suppress the form parse.
+  - Landed alongside #1025, which fixes the live imposter path the same way, so the two agree in
+    this release rather than the disagreement merely moving between them.
+
+- **Nine documented Prometheus metrics are now actually written** (#999). `docs/features/metrics.md`
+  documented thirteen families on `:9090`; nine had no writer on any code path. Because the
+  `lazy_static!` families register on first *touch*, nothing touching them meant they were **absent
+  from the scrape entirely** rather than zero — so `absent()` alerts fired and `rate()` queries
+  returned nothing. The recorders lost their only callers when #975 removed the reverse-proxy mode;
+  the imposter path, which does inject faults, run scripts and drive the flow store, never reported
+  any of it.
+  - **Wired seven**: `rift_faults_injected_total`, `rift_latency_injected_ms`,
+    `rift_error_status_total`, `rift_script_execution_duration_ms`, `rift_script_errors_total`,
+    `rift_upstream_request_duration_ms` and `rift_flow_state_ops_total`. Faults are counted where
+    the fault *fires*, not where its probability roll succeeds — a roll that passes with a zero
+    delay injects nothing, and the metric's name promises faults injected.
+  - **Removed two**, rather than leave a documented series nothing can populate: `rift_active_flows`
+    (a gauge only the in-memory backend can maintain cheaply — a backend-partial gauge would be this
+    same defect reborn) and `rift_proxy_request_duration_ms` (it measured the removed reverse-proxy
+    hop; reusing the name for the imposter path would silently change its meaning). Both doc rows go
+    with them.
+  - **Label semantics, previously undocumented, are now stated**: `rule_id` is the imposter's port
+    as a string (the imposter path has no named rules), and `source` is `rift` for a `_rift.fault`
+    decision or `script` for one a `_rift.script` returned.
+  - Flow-store operations are counted by a delegating `MeteredFlowStore` wrapped once around the
+    store each imposter resolves, so the provider path, `inmemory`, registered backends such as
+    `redis`, and the NoOp fallback are all covered without touching a call site. It forwards *every*
+    trait method, including the defaulted ones: inheriting `is_blocking` would reclassify a blocking
+    backend as non-blocking and break the `spawn_blocking` routing from #985/#988/#989, and
+    inheriting `increment_by` would discard the backend's atomic implementation.
+  - **`_rift.metrics` now says it does nothing.** The per-imposter block parsed but had no reader,
+    while the docs claimed it "controls per-imposter metric emission". The field still parses —
+    `RiftConfig` has no `deny_unknown_fields`, so deleting it would turn a known-ignored key into an
+    unknown-ignored one — but an imposter carrying it now logs a warning, and the false claim is
+    gone from the docs.
+  - The regression guard that was missing: an integration test parses the family names out of the
+    published table and asserts each appears in a real scrape after real traffic. Adding a doc row
+    without wiring it now fails CI, which is what would have caught this nine months ago.
 
 - **A repeated intercept request header now matches and forwards every value, not just the last**
   (#994). `collect_request_headers` built a plain `name -> value` map with `insert`, so a header
@@ -1301,13 +1346,13 @@ record.
   response body`. With several `--imposters` sources configured that names none of them, which is
   exactly the situation where the only useful question is *which one*. The chunk read is wrapped
   with `.with_context(…)` now, matching the convention the send and parse paths in this file
-  adopted above. The wrap sits inside `read_capped` rather than around its call site, so every exit
+  adopted in #951. The wrap sits inside `read_capped` rather than around its call site, so every exit
   path names the source exactly once — wrapping the call would have prefixed the cap and UTF-8
   messages with a second copy of the URI they already carry. As in that earlier fix, the
   `reqwest::Error` survives as a link in the chain rather than being rendered into text, so a
   body-phase timeout stays distinguishable from a reset via `is_timeout()`.
 
-- **A failing `--imposters` fetch now tells you *why*.** `HttpSource::fetch` wrapped its errors
+- **A failing `--imposters` fetch now tells you *why*** (#951). `HttpSource::fetch` wrapped its errors
   with `anyhow!("fetching imposter source {uri}: {e}")`, which renders the cause into a string and
   returns a fresh error with no `source()` — severing the chain at the wrap, not merely hiding it
   at render time. Since `reqwest`'s own `Display` prints only the kind (`error following redirect`,
@@ -1317,33 +1362,79 @@ record.
   takes care to write reached nobody. The wraps use `.with_context(…)` now, so a reload failure
   names the cause it was always meant to. A `reqwest::Error` also survives as a link in the chain,
   so callers can downcast to distinguish a timeout from a connection reset — the two are otherwise
-  worded identically. **Response-body change:** `POST /admin/reload`'s `500` message now carries
-  the whole chain, where it previously carried only the outermost context. This is the opposite of
-  the call made for the proxy `502` above, and deliberately so: a cause chain can name internal
+  worded identically. **Response-body change:** `POST /admin/reload`'s `500` message now
+  carries the whole chain, where it previously carried only the outermost context. This is the
+  opposite of the call made for the proxy `502` in 0.14.0, and deliberately so: a cause chain can name internal
   hosts, which is why the *data* plane still gets only the outermost context — but `/admin/reload`
   is the operator's own control plane and the hosts it names are the imposter sources they
   configured. Operators who expose the admin plane should be running it behind `--api-key` /
   `--require-auth` regardless.
 
 - **`--imposters` now dispatches on a bare `scheme:` URI instead of always reading it as a file
-  path.** `SourceRef::scheme` split on `://` and otherwise returned `file`, through two
+  path** (#926). `SourceRef::scheme` split on `://` and otherwise returned `file`, through two
   byte-identical `None` arms — the second of which made the first dead code, and with it the
   shorter `s3:key` / `registry:svc` spelling that a registered provider should answer. The
   fallback is restored behind an [RFC 3986 §3.1](https://www.rfc-editor.org/rfc/rfc3986#section-3.1)
   scheme grammar with a length-greater-than-one rule, so a Windows drive-letter path
   (`C:\mocks.json`) stays a path rather than becoming a scheme named `C`. **Behaviour change:** a
   path whose leading segment is scheme-shaped (`weird:path.json`) is now taken as a scheme and
-  fails at startup naming the known schemes, where it was previously opened as a literal filename;
-  spell it `file:weird:path.json` to keep the old reading. See
+  fails at startup naming the known schemes, where it was previously opened as a literal filename.
+  **Migration:** spell it `file:weird:path.json` to keep the old reading. See
   [Imposter Sources](docs/configuration/cli.md#how-a-scheme-is-recognised).
 
-### Removed
+- **`rift-verify --verify-dynamic` no longer fails intermittently with `Connection reset by
+  peer`** (#982). Each throwaway imposter is created on `port: 0`, so successive ones land on
+  recycled ports, and a pooled connection to a deleted imposter was reused for the next one; the
+  lost request also skewed counters (`"count":1` where `2` was expected). Connection pooling is now
+  off for `rift-verify`'s client.
 
-- **The deprecated top-level `error` / `feature` / `detail` keys on backend-error responses**
-  (issue #801). Deprecated in 0.16.0 and retained through 0.17.0, the pre-envelope duplicates are
-  now gone: the Mountebank `errors` envelope is the only shape this door serves. Branch on
-  `errors[0].type == "backend unavailable"`; `errors[0].feature` / `errors[0].detail` carry the
-  same information the top-level keys did.
+- **The TUI help overlay lists every keybinding** (#944). Five handled keys were missing: `C`
+  (server config) in the imposter list, `[` / `]` (reorder) and `D` (duplicate) in imposter
+  detail, `D` in stub detail, and `Ctrl+L` (lint results) in the editor.
+
+- **`rift-store-redis` is published to crates.io** (#917). It was split into its own crate in
+  #853 but left out of the release's publish list, so the v0.17.0 publish failed at
+  `rift-http-proxy`, which depends on it. The publish step's "already published" check also always
+  failed (crates.io refuses requests without a User-Agent), so a re-run would have re-published
+  instead of skipping. Both are fixed.
+
+### Security
+
+- **An `--rcfile` that cannot be read or applied now aborts startup** (#1114). It used to be
+  skipped with a warning and the server started with none of its keys, so a mistyped
+  `"requireAdminAuth": "true"` served the admin plane off-host with no authentication. A missing file,
+  invalid JSON, a root that is not an object, and a recognised key with the wrong type are all fatal,
+  and the error names the file.
+  - Every recognised key is now type-checked before any is applied. A wrong-typed value used to be
+    ignored or coerced: `"localOnly": "yes"` bound the admin plane on every interface, `"port": "4321"`
+    kept the default port, and `"port": 70000` wrapped to `4464`.
+  - An unsupported rcfile key is now printed as a warning on stderr. It was logged before the log
+    subscriber existed, so it never appeared.
+  - `bootstrap::apply_rcfile_defaults_reporting` returns the unsupported keys for an embedder that
+    applies the rcfile before installing a subscriber.
+  - **Migration:** a deployment whose rcfile is missing, malformed or carries a wrong-typed value
+    used to start with defaults and now refuses to start. Fix the file (booleans and numbers unquoted:
+    `"requireAdminAuth": true`, `"port": 4321`) or drop `--rcfile`. Keys that used to be ignored now
+    take effect, so confirm the resulting port, bind address and auth are the ones you intend.
+
+- **A `_behaviors` array ran a shell command or script without `--allowInjection`**
+  (#1101). The engine read a JSON array into the behaviors block by position (`wait`, `repeat`,
+  `copy`, `lookup`, `shellTransform`, `decorate`), so `"_behaviors": [null, null, null, null, "cmd"]`
+  configured a `shellTransform`. The `--allowInjection` gate only looks at object keys and admitted
+  it, and the command ran on every matching request.
+  - A `_behaviors` that is not an object, and a `behaviors` that is neither an object nor an array,
+    are now refused where the stub is parsed: `400` from `POST /imposters`, the stub endpoints and
+    `PUT /imposters`; a failed load for `--configfile`, `--datadir`, `POST /admin/reload` and
+    `configFile`; `NULL` from `rift_apply_config` and the other C-ABI calls. This holds with
+    `--allowInjection` on, because an array `_behaviors` has no documented meaning. The array form is
+    spelled `behaviors`. `null` still means absent.
+  - A scalar `behaviors` used to be dropped silently; it is refused the same way.
+  - The injection gate now treats any non-object block as scripted, so it no longer relies on the
+    parser to stay closed.
+  - `rift-lint` reports these shapes as `E048`, and also flags a non-object, non-null element of a
+    `behaviors` array, which the engine skips.
+  - **Migration:** a stub whose `_behaviors` is an array, or whose `behaviors` is a scalar, now fails
+    to load (or answers `400`). Write `_behaviors` as an object, or use the `behaviors` array form.
 
 ## [0.17.0] - 2026-08-03
 
