@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 
-description = "Configuration linter library and CLI for Rift HTTP Proxy"
+description = "Configuration linter library and CLI for Rift imposter files"
 readme = "README.md"
 keywords = ["lint", "validation", "http", "mock", "mountebank"]
 categories = ["development-tools::testing", "command-line-utilities"]
