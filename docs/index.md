@@ -33,13 +33,13 @@ Built in Rust with async I/O, Rift delivers exceptional performance:
 
 | Feature | Mountebank | Rift | Speedup |
 |:--------|:-----------|:-----|:--------|
-| Simple stubs | 8,898 RPS | 214,818 RPS | **24x faster** |
-| Regex (100th pattern) | 112 RPS | 207,024 RPS | **1,857x faster** |
-| JSONPath predicates | 4,312 RPS | 199,404 RPS | **46x faster** |
-| API stub — no match (404) | 1,351 RPS | 209,763 RPS | **155x faster** |
-| Complex predicates | 4,703 RPS | 191,987 RPS | **41x faster** |
+| Static stub (first match) | 7,240 RPS | 209,192 RPS | **29x faster** |
+| Regex (100th pattern) | 110 RPS | 201,067 RPS | **1,821x faster** |
+| JSONPath predicates | 4,586 RPS | 190,329 RPS | **42x faster** |
+| API stub — no match (404) | 1,376 RPS | 204,358 RPS | **149x faster** |
+| Complex predicates | 4,884 RPS | 185,867 RPS | **38x faster** |
 
-<sub>Apple M4 laptop, 50 connections, median of 3 repetitions. On a 16-vCPU AMD EPYC server the
+<sub>Apple M4 laptop, 50 connections, median of 3 repetitions, 2026-09-17. On a 16-vCPU AMD EPYC server the
 same suite reaches 325k RPS and 6,160x on regex — but Mountebank is *slower* there, so the M4
 figures above are the conservative read.</sub>
 
@@ -49,11 +49,11 @@ See the [performance page](performance/) for both hosts, the full suite, and the
 
 Rift supports all major Mountebank features:
 
-- **Imposters** - HTTP/HTTPS mock servers on any port
+- **Imposters** - HTTP/HTTPS mock servers on any port, including mutual TLS
 - **Stubs** - Request matching with responses
 - **Predicates** - equals, contains, matches, exists, jsonpath, xpath, and, or, not
 - **Responses** - Static, proxy, injection with behaviors
-- **Behaviors** - wait, decorate, copy, lookup
+- **Behaviors** - wait, decorate, copy, lookup, shellTransform
 - **Recording** - Proxy mode with response recording
 
 ### And Then Some
@@ -66,7 +66,9 @@ on top of a mock server:
 - **[Scenarios]({{ site.baseurl }}/features/scenarios/)** and **[Flow State]({{ site.baseurl }}/features/flow-state/)** - declarative state machines and a per-flow key/value store
 - **[Correlated Isolation]({{ site.baseurl }}/features/spaces/)** - per-flow partitioning so parallel tests don't collide
 - **[Front Door]({{ site.baseurl }}/features/front-door/)** and **[Gateway]({{ site.baseurl }}/features/gateway/)** - route many imposters through one listener
-- **[Intercept Proxy]({{ site.baseurl }}/features/intercept-proxy/)** - TLS-MITM a hard-coded external host without mitmproxy
+- **[Intercept Proxy]({{ site.baseurl }}/features/intercept-proxy/)** - TLS-MITM a hard-coded external host without mitmproxy, over HTTP/1.1 or HTTP/2, with WebSocket upgrades relayed to the real origin
+- **[TLS & Mutual TLS]({{ site.baseurl }}/features/tls/)** - HTTPS imposters that require and validate client certificates, plus a private-CA trust store for proxying
+- **[Response Templates]({{ site.baseurl }}/features/date-templates/)** - date tokens and the `_rift.templated` {% raw %}`{{ }}`{% endraw %} grammar, no script engine needed
 - **[Stub Analysis]({{ site.baseurl }}/features/stub-analysis/)** and **[Debug Mode]({{ site.baseurl }}/features/debug-mode/)** - find shadowed stubs, and see why a request matched
 - **[Embedding & FFI]({{ site.baseurl }}/embedding/)** - run the engine in-process from Rust or any language over the C ABI
 
@@ -226,12 +228,12 @@ hello-world for each, plus the transport and version-compatibility matrices.
 - [Imposters]({{ site.baseurl }}/mountebank/imposters/) - Creating and managing mock servers
 - [Predicates]({{ site.baseurl }}/mountebank/predicates/) - Request matching (equals, contains, regex, jsonpath, xpath)
 - [Responses]({{ site.baseurl }}/mountebank/responses/) - Configuring stub responses
-- [Behaviors]({{ site.baseurl }}/mountebank/behaviors/) - Response modification (wait, decorate, copy)
+- [Behaviors]({{ site.baseurl }}/mountebank/behaviors/) - Response modification (wait, decorate, copy, lookup, shellTransform)
 - [Proxy Mode]({{ site.baseurl }}/mountebank/proxy/) - Recording and replaying responses
 
 ### Configuration
 - [Mountebank Format]({{ site.baseurl }}/configuration/mountebank/) - JSON configuration reference
-- [Native Rift Format]({{ site.baseurl }}/configuration/native/) - YAML configuration for advanced features
+- [Rift Extensions]({{ site.baseurl }}/configuration/native/) - The `_rift` namespace and other Rift-specific keys
 - [CLI Reference]({{ site.baseurl }}/configuration/cli/) - Command-line options
 
 ### Features
@@ -243,11 +245,12 @@ hello-world for each, plus the transport and version-compatibility matrices.
 - [Flow State]({{ site.baseurl }}/features/flow-state/) - Per-flow key/value store
 - [Front Door]({{ site.baseurl }}/features/front-door/) - One listener routing to many imposters
 - [Single-Port Gateway]({{ site.baseurl }}/features/gateway/) - Reach every imposter through the admin port
-- [Intercept Proxy (TLS-MITM)]({{ site.baseurl }}/features/intercept-proxy/) - Mock a hard-coded external HTTPS host
+- [Intercept Proxy (TLS-MITM)]({{ site.baseurl }}/features/intercept-proxy/) - Mock a hard-coded external HTTPS host (HTTP/1.1, HTTP/2, WebSocket passthrough)
+- [Response Templates]({{ site.baseurl }}/features/date-templates/) - Date tokens and the `_rift.templated` grammar
 - [Hot Reload]({{ site.baseurl }}/features/hot-reload/) - Re-read config without restarting
 - [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) - Overlap detection and warnings
 - [Debug Mode]({{ site.baseurl }}/features/debug-mode/) - Why a request matched, or didn't
-- [TLS/HTTPS]({{ site.baseurl }}/features/tls/) - Secure connections
+- [TLS/HTTPS]({{ site.baseurl }}/features/tls/) - HTTPS imposters, mutual TLS, outbound trust for private CAs
 - [Metrics]({{ site.baseurl }}/features/metrics/) - Prometheus integration
 - [Configuration Linting]({{ site.baseurl }}/features/linting/) - Validate configs before they load
 - [Terminal UI]({{ site.baseurl }}/features/tui/) - Interactive imposter management
@@ -260,12 +263,13 @@ hello-world for each, plus the transport and version-compatibility matrices.
 - [REST API]({{ site.baseurl }}/api/) - Admin API reference
 - [Performance]({{ site.baseurl }}/performance/) - Benchmark results
 - [Rift vs WireMock]({{ site.baseurl }}/comparisons/wiremock/) - Where each one wins, and when not to switch
+- [Rift vs Microcks]({{ site.baseurl }}/comparisons/microcks/) - Spec-driven vs stub-driven, and where they overlap
 - [Changelog]({{ site.baseurl }}/changelog/) - Notable user-facing changes
 
 ### Embedding & Extension
 - [Embedding & SPI]({{ site.baseurl }}/embedding/) - Embed Rift as a library, extend it via SPI traits
 - [Embeddable Server]({{ site.baseurl }}/embedding/server/) - `ServerBuilder`, bindable admin/metrics
-- [Extension Points (SPI)]({{ site.baseurl }}/embedding/spi/) - Pluggable flow-store, journal, proxy store, sequencer
+- [Extension Points (SPI)]({{ site.baseurl }}/embedding/spi/) - Pluggable flow-store, journal, proxy store, sequencer, plus exchange-inspector, no-match, admin-authorizer and front-door observer hooks
 - [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/) - Drive Rift from any language
 
 ---
@@ -276,19 +280,19 @@ The HTTP/HTTPS surface is stable and actively developed. Current status:
 
 | Area | Status |
 |:-----|:-------|
-| HTTP / HTTPS imposters | Stable |
+| HTTP / HTTPS imposters, including mutual TLS | Stable |
 | All predicates, static responses, behaviors | Stable |
 | Proxy mode (record & replay) | Stable |
 | JavaScript injection | Stable |
 | Fault injection, scripting (Rhai / JS) | Stable |
 | Scenarios, flow state, correlated isolation | Stable |
 | Front door, single-port gateway | Stable |
-| Intercept proxy (TLS-MITM) | Stable |
+| Intercept proxy (TLS-MITM, HTTP/2, WebSocket passthrough) | Stable |
 | Stub analysis, debug mode, hot reload | Stable |
 | Prometheus metrics, linting, terminal UI | Stable |
 | Embedding (Rust API, C ABI) and the four SDKs | Stable |
-| TCP protocol | Planned |
-| SMTP protocol | Planned |
+| TCP protocol | Not supported |
+| SMTP protocol | Not supported |
 
 ---
 

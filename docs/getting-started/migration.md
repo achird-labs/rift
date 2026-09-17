@@ -78,8 +78,18 @@ Map Mountebank CLI options to Rift environment variables:
 |:---------------|:--------------------------|
 | `--port 2525` | `MB_PORT=2525` |
 | `--allowInjection` | `MB_ALLOW_INJECTION=true` |
-| `--configfile` | `--configfile` (CLI) |
-| `--loglevel debug` | `RUST_LOG=debug` |
+| `--configfile` | `--configfile` (CLI) or `MB_CONFIGFILE` |
+| `--datadir` | `--datadir` (CLI) or `MB_DATADIR` |
+| `--loglevel debug` | `--loglevel debug` or `MB_LOGLEVEL=debug` |
+| `--apikey` | `--api-key` (CLI) or `MB_APIKEY` |
+| `--localOnly` | `--local-only` (CLI) or `MB_LOCAL_ONLY=true` |
+| `--rcfile` | `--rcfile` (CLI) — a subset of keys, see the [CLI Reference]({{ site.baseurl }}/configuration/cli/#rc-file---rcfile) |
+
+Rift's flags are kebab-case. Of Mountebank's camelCase spellings, only `--allowInjection` and
+`--noParse` are accepted as aliases — `--localOnly`, `--apikey` and `--ipWhitelist` must be written
+`--local-only`, `--api-key` and `--ip-whitelist`, and Mountebank's `--logfile` is `--log`.
+`--ip-whitelist`, `--origin`, `--mock`, `--formatter` and `--protofile` are accepted but do nothing.
+An unrecognised `--loglevel` value is refused at startup instead of being ignored.
 
 ### Step 4: Verify Functionality
 
@@ -116,9 +126,11 @@ Rift includes features not in Mountebank:
 
 | Area | Mountebank | Rift |
 |:-----|:-----------|:-----|
-| Logging | Custom format | Structured JSON (configurable) |
+| Logging | Custom format | Plain-text `tracing` lines; `RUST_LOG` takes a full filter |
 | Metrics | Third-party | Built-in Prometheus |
-| Admin UI | Built-in web UI | API only (UI planned) |
+| Admin UI | Built-in web UI | No web UI; a terminal UI (`rift-tui`) ships with the binaries |
+| `mb replay` | Switches a running server's proxies to replay | `rift replay --configfile <file>` starts a server with that file loaded |
+| Shutdown | — | No signal handler: `SIGTERM` ends the process immediately; in a container, run with `--init` |
 
 ### Known HTTP Behavior Differences
 
@@ -169,7 +181,7 @@ mb start \
 docker run \
   -e MB_PORT=2525 \
   -e MB_ALLOW_INJECTION=true \
-  -e RUST_LOG=warn \
+  -e MB_LOGLEVEL=warn \
   -v $(pwd)/imposters.json:/imposters.json \
   zainalpour/rift-proxy:latest \
   --configfile /imposters.json
@@ -178,11 +190,10 @@ docker run \
 ### Docker Compose
 
 ```yaml
-version: '3.8'
-
 services:
   rift:
     image: zainalpour/rift-proxy:latest
+    init: true           # rift ignores SIGTERM as PID 1 without it
     ports:
       - "2525:2525"      # Admin API
       - "4545:4545"      # Imposter port
@@ -190,7 +201,7 @@ services:
     environment:
       - MB_PORT=2525
       - MB_ALLOW_INJECTION=true
-      - RUST_LOG=info
+      - MB_LOGLEVEL=info
     volumes:
       - ./imposters.json:/imposters.json
     command: ["--configfile", "/imposters.json"]

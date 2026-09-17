@@ -91,15 +91,22 @@ docker compose down
 
 ## Demo 2: HTTPS/TLS Mode
 
-Demonstrates Rift's TLS support with custom certificates.
+Demonstrates Rift's TLS support with your own certificate.
 
 ### Prerequisites
 
-Generate self-signed certificates:
+Generate a throwaway demo CA and a server certificate signed by it (into `certs/`):
 
 ```bash
 ./generate-certs.sh
 ```
+
+The imposter in `imposters-https.json` only says `"protocol": "https"` — it carries no `cert`/`key`.
+Its certificate comes from the server-wide default, set in `docker-compose-https.yml` with
+`--default-tls-cert /certs/server.crt --default-tls-key /certs/server.key`. The certificate is valid
+for `localhost`, `127.0.0.1`, `rift` and `rift-https-demo`, so clients have to use one of those
+names. See [TLS/HTTPS](../features/tls.md) for the other ways to give an imposter a
+certificate, and for mutual TLS.
 
 ### Start
 
@@ -112,6 +119,11 @@ docker compose -f docker-compose-https.yml up -d
 ```bash
 # Basic HTTPS request (with CA certificate)
 curl --cacert certs/ca.crt https://localhost:4545/api/test
+# {"message": "Secure response over HTTPS", "tls": true}
+
+# Without the CA, verification fails — the demo CA is not in your trust store
+curl https://localhost:4545/api/test
+# curl: (60) SSL certificate problem: ...
 
 # Or skip verification (development only)
 curl -k https://localhost:4545/api/test
@@ -340,4 +352,4 @@ Example imposter with `_rift` extensions:
 }
 ```
 
-See the [Rift Extensions documentation](/docs/features/rift-extensions.md) for more details.
+See the [Rift Extensions documentation](../configuration/native.md) for more details.

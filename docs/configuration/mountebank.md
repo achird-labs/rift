@@ -31,12 +31,15 @@ The Mountebank JSON format is the recommended way to configure Rift for service 
 
 ## Imposter Configuration
 
-### Required Fields
+### Core Fields
 
-| Field | Type | Description |
-|:------|:-----|:------------|
-| `port` | number | Port to listen on |
-| `protocol` | string | `http` or `https` |
+No field is strictly required.
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:------------|
+| `port` | number | auto-assigned | Port to listen on. Omitted or `0` means "pick a free port"; imposters that name a port are created first. A `--datadir` file must name one |
+| `protocol` | string | `http` | `http` or `https`; anything else (`tcp`, `smtp`) is rejected |
+| `host` | string | `0.0.0.0` | Address to bind the imposter to |
 
 ### Optional Fields
 
@@ -53,6 +56,15 @@ The Mountebank JSON format is the recommended way to configure Rift for service 
 | `mutualAuth` | boolean | Request and **require** a client certificate (`https` only) |
 | `rejectUnauthorized` | boolean | Validate the client certificate against `ca`; requires `ca` |
 | `ca` | string or array | PEM trust anchor(s) client certificates must chain to |
+| `defaultForward` | string | *Rift extension.* Upstream URL an unmatched request is forwarded to (takes precedence over `defaultResponse`) |
+| `strictBehaviors` | boolean | *Rift extension.* Turn a failing behavior into a `500` — see [Strict Behaviors]({{ site.baseurl }}/configuration/native/#strict-behaviors-strictbehaviors) |
+| `enabled` | boolean | Whether the imposter serves traffic (default `true`); toggled by `POST /imposters/{port}/disable` and `/enable` |
+
+A request that matches no stub gets the `defaultResponse` when there is one, and otherwise a `200`
+with an empty body — as in Mountebank, never a `404`.
+
+TLS fields (`key`, `cert`, `mutualAuth`, `rejectUnauthorized`, `ca`) are covered in
+[TLS/HTTPS]({{ site.baseurl }}/features/tls/).
 
 ### Rift-Specific Metadata Fields
 
@@ -175,14 +187,17 @@ Each predicate object can contain:
 
 ### jsonpath
 
+`jsonpath` is a parameter of another predicate, not a predicate of its own: the selector narrows
+the body, and the operator beside it tests what was selected.
+
 ```json
-{ "jsonpath": { "selector": "$.user.id", "equals": 1 } }
+{ "equals": { "body": 1 }, "jsonpath": { "selector": "$.user.id" } }
 ```
 
 ### xpath
 
 ```json
-{ "xpath": { "selector": "//user/id", "equals": "1" } }
+{ "equals": { "body": "1" }, "xpath": { "selector": "//user/id" } }
 ```
 
 ### Logical Operators
@@ -247,13 +262,17 @@ Each predicate object can contain:
 
 ### copy
 
+`from` is `"path"`, `"method"` or `"body"`, or `{"query": "<name>"}` / `{"headers": "<name>"}`.
+A `regex` selector yields its first capture group (or the whole match when it has none); `jsonpath`
+and `xpath` selectors apply to the value `from` picked.
+
 ```json
 {
   "_behaviors": {
     "copy": {
-      "from": { "path": "/(\\d+)" },
+      "from": "path",
       "into": "${id}",
-      "using": { "method": "regex", "selector": "$1" }
+      "using": { "method": "regex", "selector": "/users/(\\d+)" }
     }
   }
 }
@@ -265,13 +284,17 @@ Each predicate object can contain:
 {
   "_behaviors": {
     "lookup": {
-      "key": { "from": "query", "using": { "method": "jsonpath", "selector": "$.id" } },
+      "key": { "from": { "query": "id" }, "using": { "method": "regex", "selector": ".*" } },
       "fromDataSource": { "csv": { "path": "data.csv", "keyColumn": "id" } },
       "into": "${row}"
     }
   }
 }
 ```
+
+`copy` and `lookup` each accept a single object or an array of them. See
+[Behaviors]({{ site.baseurl }}/mountebank/behaviors/) for `shellTransform`, `repeat` and the
+error semantics.
 
 ---
 
@@ -343,9 +366,9 @@ Each predicate object can contain:
               },
               "_behaviors": {
                 "copy": {
-                  "from": { "path": "/users/(\\d+)" },
+                  "from": "path",
                   "into": "${id}",
-                  "using": { "method": "regex", "selector": "$1" }
+                  "using": { "method": "regex", "selector": "/users/(\\d+)" }
                 }
               }
             }
@@ -354,7 +377,7 @@ Each predicate object can contain:
         {
           "predicates": [
             { "equals": { "method": "POST", "path": "/users" } },
-            { "jsonpath": { "selector": "$.name", "exists": true } }
+            { "exists": { "body": true }, "jsonpath": { "selector": "$.name" } }
           ],
           "responses": [
             {
@@ -380,12 +403,15 @@ Each predicate object can contain:
 
 ```bash
 # Docker
-docker run -v $(pwd)/imposters.json:/imposters.json \
+docker run -p 2525:2525 -p 4545:4545 -v $(pwd)/imposters.json:/imposters.json \
   zainalpour/rift-proxy:latest --configfile /imposters.json
 
 # Binary
-./rift --configfile imposters.json
+rift --configfile imposters.json
 ```
+
+The file may also be YAML (a sequence of imposters) or a single imposter object, and may use the
+Mountebank EJS tags — see [Document shapes and formats]({{ site.baseurl }}/configuration/#document-shapes-and-formats).
 
 ### Via REST API
 
@@ -395,7 +421,7 @@ curl -X POST http://localhost:2525/imposters \
   -H "Content-Type: application/json" \
   -d @imposter.json
 
-# Load multiple imposters
+# Replace the whole set (imposters absent from the payload are deleted)
 curl -X PUT http://localhost:2525/imposters \
   -H "Content-Type: application/json" \
   -d @imposters.json

@@ -108,7 +108,10 @@ rift_free(result);
 
 - **Options JSON** (pass `NULL` or `{}` for all defaults; every field optional):
   `{"host":"127.0.0.1","port":0,"apiKey":null,"metricsPort":null,"configFile":null,"noParse":false,"config":null,"allowInjection":false,"requireAdminAuth":false,"upstreamCaFile":null,"upstreamCaPem":null,"upstreamTlsSkipVerify":false}`.
-  `port: 0` binds an ephemeral port; `configFile` is loaded as the reload source (like `--configfile`);
+  `port: 0` binds an ephemeral port; `host` must be an IP literal — IPv4, or IPv6 bare (`::1`) or
+  bracketed (`[::1]`), a numeric scope id (`fe80::1%2`) kept — and a DNS name such as `localhost` is
+  refused (#1137; before that fix a bare IPv6 host could never bind). The metrics server, if asked
+  for, binds the same IP. `configFile` is loaded as the reload source (like `--configfile`);
   `config` is an inline `{"imposters":[...]}`. `configFile` and `config` do not compose — pass one.
   Since 0.17.0 an **unknown key is a hard error** naming the key (`NULL` + `rift_last_error`), not a
   silent drop — so a typo fails loudly instead of leaving the option quietly inert.
@@ -165,7 +168,8 @@ rift_free(result);
   A behaviors block the engine cannot read as an object (for example an array `_behaviors`) is
   refused at every door, gated or not, before the gate runs (#1101).
 - **Returns** (caller frees): `{"adminPort":...,"adminUrl":"...","metricsPort":...}`, or `NULL` on
-  error (bad JSON, bind failure, or already serving — one admin plane per handle).
+  error (bad JSON, bind failure, or already serving — one admin plane per handle). `adminUrl` is
+  built from the bound address, so an IPv6 bind reads `http://[::1]:49321`.
 
 ### Detecting which options an engine accepts
 
@@ -173,10 +177,14 @@ rift_free(result);
 check before sending one:
 
 ```jsonc
-{"version":"0.17.0","commit":"…","builtAt":"…","features":["javascript"],
- "serveOptions":["host","port","apiKey","metricsPort","configFile","config",
-                 "allowInjection","requireAdminAuth"]}
+{"version":"…","commit":"…","builtAt":"…","features":["javascript"],
+ "serveOptions":["host","port","apiKey","metricsPort","configFile","noParse","config",
+                 "allowInjection","requireAdminAuth","upstreamCaFile","upstreamCaPem",
+                 "upstreamTlsSkipVerify"]}
 ```
+
+0.17.0 published the first eight keys without `noParse`; `noParse` and the three `upstream*` keys
+(outbound TLS trust, #974) arrived after it. Check for the specific key you are about to send.
 
 **Absence of the key is the signal.** An engine older than 0.17.0 reports no `serveOptions` at all —
 treat that as "no serve option can be relied upon" and fall back to the behaviour you would have had
@@ -200,7 +208,7 @@ per handle; `rift_stop_intercept` stops it, and `rift_stop` shuts it down with t
 
 | Function | Signature | Returns |
 |---|---|---|
-| `rift_start_intercept` | `char* rift_start_intercept(RiftHandle* h, const char* options_json)` | JSON `{"interceptPort","interceptUrl"}` (**caller frees**), or `NULL` on error (bad JSON, bind failure, half-configured CA pair, both CA pairs supplied, CA load failure, already started). `options_json`: `{"host":"127.0.0.1","port":0,"caCertPath":null,"caKeyPath":null,"caCertPem":null,"caKeyPem":null,"returnCaKey":false,"auth":null}` (port 0 = OS-assigned); `NULL`/`{}` for defaults. Supply the CA as files (`caCertPath`/`caKeyPath`) **or** inline PEM bytes (`caCertPem`/`caKeyPem`, issue #593 — each pair both-or-neither, mutually exclusive). `"returnCaKey":true` (only with no CA source) mints a fresh CA and adds `"caCertPem"`/`"caKeyPem"` to the response once — CA private-key material, treat as secret. |
+| `rift_start_intercept` | `char* rift_start_intercept(RiftHandle* h, const char* options_json)` | JSON `{"interceptPort","interceptUrl"}` (**caller frees**), or `NULL` on error (bad JSON, bind failure, half-configured CA pair, both CA pairs supplied, CA load failure, already started). `options_json`: `{"host":"127.0.0.1","port":0,"caCertPath":null,"caKeyPath":null,"caCertPem":null,"caKeyPem":null,"returnCaKey":false,"auth":null,"rules":[]}` (port 0 = OS-assigned; `host` an IPv4 or IPv6 literal, bare or bracketed); `NULL`/`{}` for defaults. `rules` (issue #655) installs rules — the `/intercept/rules` shape — before the listener accepts a connection, so no traffic races a follow-up `rift_intercept_add_rules`; exceeding the rule-store capacity fails the start. Supply the CA as files (`caCertPath`/`caKeyPath`) **or** inline PEM bytes (`caCertPem`/`caKeyPem`, issue #593 — each pair both-or-neither, mutually exclusive). `"returnCaKey":true` (only with no CA source) mints a fresh CA and adds `"caCertPem"`/`"caKeyPem"` to the response once — CA private-key material, treat as secret. |
 | `rift_stop_intercept` | `int rift_stop_intercept(RiftHandle* h)` | `0` on success (**including** the idempotent nothing-running case), `-1` only on a null handle / caught panic. Stops the listener, releases its port, and drops its rules + CA — parity with `DELETE /intercept`. A later `rift_start_intercept` without CA paths mints a fresh CA. |
 | `rift_intercept_add_rules` | `int rift_intercept_add_rules(RiftHandle* h, const char* rules_json)` | `0`/`-1`. One rule (object) or many (array), same shape as `/intercept/rules`. |
 | `rift_intercept_list_rules` | `char* rift_intercept_list_rules(RiftHandle* h)` | The current rules as a JSON array (**caller frees**), or `NULL` on error. |
@@ -259,11 +267,13 @@ which engines are compiled in:
 
 ```c
 const char* info = rift_build_info();
-// {"version":"0.11.3","commit":"<sha>|null","builtAt":"<iso8601>|null","features":["redis-backend","javascript"]}
+// {"version":"<release>","commit":"<sha>|null","builtAt":"<iso8601>|null",
+//  "features":["redis-backend","javascript"],"serveOptions":[...]}
 // Do NOT call rift_free on this pointer.
 ```
 
-`commit`/`builtAt` are `null` unless stamped at build time (via `build.rs`).
+`commit`/`builtAt` are `null` unless stamped at build time (via `build.rs`). `serveOptions` (0.17.0+)
+is described in [Detecting which options an engine accepts](#detecting-which-options-an-engine-accepts).
 
 ## ABI contract version
 
@@ -307,7 +317,7 @@ is present, gate on it; if absent (an older cdylib), fall back to probing the sy
 ## Cargo features
 
 `rift-ffi` forwards engine features rather than hard-coding them, so a per-platform build can drop
-engines it doesn't need: `default = ["redis-backend", "javascript"]`. The `mimalloc` allocator
+engines it doesn't need: `default = ["redis-backend", "javascript", "quamina-matching"]`. (`rift_build_info().features` reports only `redis-backend` and `javascript`.) The `mimalloc` allocator
 feature is **deliberately never forwarded** — a `cdylib` must not impose a global allocator on its
 host process.
 
@@ -315,7 +325,7 @@ host process.
 # Full-featured cdylib (default)
 cargo build -p rift-ffi --release
 
-# Minimal cdylib — no scripting engines, no Redis
+# Minimal cdylib — no scripting engine, no Redis, no Quamina prefilter
 cargo build -p rift-ffi --release --no-default-features
 ```
 

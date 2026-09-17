@@ -22,6 +22,9 @@ Predicates can match on these request fields:
 | `query` | Query parameters | `{ "page": "1" }` |
 | `headers` | Request headers | `{ "Authorization": "Bearer..." }` |
 | `body` | Request body | String or JSON object |
+| `form` | Form fields of an `application/x-www-form-urlencoded` body | `{ "name": "alice" }` |
+| `requestFrom` | Client address and port | `127.0.0.1:53412` |
+| `ip` | Client IP address | `127.0.0.1` |
 
 ### Repeated request headers
 
@@ -207,6 +210,21 @@ Check field existence:
 - `true` - Field must exist
 - `false` - Field must not exist
 
+### inject
+
+Match with a JavaScript function that returns `true` or `false`. It requires the server to be
+started with `--allowInjection`; without it the imposter is refused.
+
+```json
+{
+  "inject": "function (config) { return config.request.path.indexOf('/admin') === 0; }"
+}
+```
+
+The function receives Mountebank's `config` object (`config.request`, `config.state`,
+`config.logger`); the legacy `function (request, logger)` form also works, because the request
+fields are copied onto `config` too.
+
 ---
 
 ## JSONPath Predicates
@@ -259,12 +277,12 @@ selector is used — predicates and the `copy` behavior's `jsonpath` extraction 
 
 Match values in XML bodies using XPath:
 
+The `xpath` selector sits next to the operator, the same way `jsonpath` does:
+
 ```json
 {
-  "xpath": {
-    "selector": "//user/name",
-    "equals": "admin"
-  }
+  "xpath": { "selector": "//user/name" },
+  "equals": { "body": "admin" }
 }
 ```
 
@@ -274,9 +292,9 @@ Match values in XML bodies using XPath:
 {
   "xpath": {
     "selector": "//ns:item/ns:price",
-    "ns": { "ns": "http://example.com/schema" },
-    "equals": "99.99"
-  }
+    "ns": { "ns": "http://example.com/schema" }
+  },
+  "equals": { "body": "99.99" }
 }
 ```
 
@@ -383,16 +401,30 @@ If you need one rule across both, set `caseSensitive: true` and normalise case y
 an inline `(?i)` in a `matches` pattern overrides the flag for that pattern, and still folds per
 Unicode.
 
-### except
+### keyCaseSensitive
 
-Exclude fields from matching:
+Controls whether the *names* in `query`, `headers` and `form` are compared case-sensitively. It
+defaults to the value of `caseSensitive`.
 
 ```json
 {
-  "equals": { "body": { "id": 1, "name": "Test" } },
-  "except": "body.timestamp"
+  "exists": { "query": { "Debug": true } },
+  "keyCaseSensitive": true
 }
 ```
+
+### except
+
+A regular expression whose matches are removed from each value before it is compared:
+
+```json
+{
+  "equals": { "path": "/orders/" },
+  "except": "\\d+"
+}
+```
+
+This matches `/orders/123` and `/orders/456`, because the digits are stripped first.
 
 ---
 

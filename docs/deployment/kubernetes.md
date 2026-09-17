@@ -54,13 +54,13 @@ spec:
               cpu: "1000m"
           livenessProbe:
             httpGet:
-              path: /
+              path: /health
               port: admin
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             httpGet:
-              path: /
+              path: /health
               port: admin
             initialDelaySeconds: 5
             periodSeconds: 5
@@ -80,6 +80,29 @@ spec:
       port: 9090
       targetPort: metrics
 ```
+
+### Probes and `--api-key`
+
+With `MB_APIKEY` / `--api-key` set, every admin API path — `/health` included — answers `401`
+without the key, so an `httpGet` probe on the admin port fails. Probe the metrics port instead,
+which the key does not gate (unless `--local-only` has bound it to loopback):
+
+```yaml
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+```
+
+The image's own Docker `HEALTHCHECK` is ignored by Kubernetes; `rift healthcheck` can still be used
+as an `exec` probe (`command: ["rift", "healthcheck"]`), with the same `--api-key` caveat.
+
+### Shutdown
+
+`rift` installs no signal handlers, and as the container's PID 1 it ignores the `SIGTERM` the
+kubelet sends, so a pod takes the full `terminationGracePeriodSeconds` (30s by default) to stop and
+is then killed. Lower the grace period for mock servers, or run the binary under an init process in
+an image of your own.
 
 ---
 
@@ -169,6 +192,9 @@ data:
 
 ### HTTPS Imposter
 
+`<%- stringify('…') %>` inlines a file's contents into the JSON string when the config is loaded;
+an absolute path is used as-is, a relative one is resolved against the config file's directory.
+
 ```yaml
 apiVersion: v1
 kind: ConfigMap
@@ -195,6 +221,8 @@ spec:
     spec:
       containers:
         - name: rift
+          image: zainalpour/rift-proxy:latest
+          args: ["--configfile", "/config/imposters.json"]
           volumeMounts:
             - name: config
               mountPath: /config
@@ -254,6 +282,12 @@ spec:
 
 ### Multi-Replica Deployment
 
+Each replica is an independent Rift: an imposter created through the admin API exists only on the
+replica that received the request, and so do recorded requests. Behind a `Service`, admin calls and
+verification land on arbitrary pods. Replicate only when every pod loads the same imposters at
+startup (`--configfile` from a ConfigMap) and nothing mutates them at runtime; a Redis
+`flowState` backend shares flow state between pods, not imposters.
+
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -278,6 +312,8 @@ spec:
 ```
 
 ### Horizontal Pod Autoscaler
+
+The same caveat applies: a pod the autoscaler adds starts with only the startup config.
 
 ```yaml
 apiVersion: autoscaling/v2
@@ -386,6 +422,10 @@ spec:
 
 ## Helm Chart (Example)
 
+Rift does not publish a Helm chart. The values below are a starting point for a chart of your own;
+map `config.allowInjection` to `MB_ALLOW_INJECTION`, `config.logLevel` to `MB_LOGLEVEL`, and
+`imposters` to a ConfigMap passed with `--configfile`.
+
 ### values.yaml
 
 ```yaml
@@ -442,4 +482,11 @@ curl http://localhost:2525/imposters
 
 ```bash
 kubectl exec -it deployment/rift -- /bin/sh
+```
+
+The default image has a shell but no `curl`; the `-static` image has neither. For the static image,
+use an ephemeral debug container instead:
+
+```bash
+kubectl debug -it <rift-pod-name> --image=busybox --target=rift
 ```

@@ -7,7 +7,7 @@ permalink: /performance/
 
 # Performance
 
-Rift delivers **20–6,000x** the throughput of Mountebank on identical imposter
+Rift delivers **18–6,000x** the throughput of Mountebank on identical imposter
 configs, with sub-millisecond tail latency that stays flat as stub count grows.
 
 ---
@@ -17,7 +17,7 @@ configs, with sub-millisecond tail latency that stays flat as stub count grows.
 Three comparisons live on this page, each with its own hardware, date and engine versions, because
 mixing them would produce a number nothing measured:
 
-- **[vs Mountebank](#benchmark-summary)** (below) — two hosts, 50 connections, 2026-07-20.
+- **[vs Mountebank](#benchmark-summary)** (below) — two hosts, 50 connections; M4 2026-09-17, EPYC 2026-07-20.
 - **[vs WireMock](#rift-vs-wiremock)** — 256 and 50 connections, 2026-07-27.
 - **[vs Microcks](#rift-vs-microcks)** — 256 connections, 2026-07-30.
 
@@ -32,44 +32,55 @@ the result.
 - **Apple M4 laptop** (10 cores, macOS) — the conservative read
 - **AMD EPYC 9V74** (16 vCPU, 62 GiB, Linux) — the server read
 
-Rift built from `master` (`924cf73`) · Mountebank 2.9.1 · `oha`, 50 keep-alive
-connections, 20s/scenario after warmup, native processes (no Docker), each engine run
-alone. Every figure is the **median of 3 repetitions**. Measured 2026-07-20. Full
-method and reproduction:
+Mountebank 2.9.1 · `oha`, 50 keep-alive connections, 20s/scenario after a 3s warmup, native
+processes (no Docker), each engine run alone. Every figure is the **median of 3 repetitions**. The
+two hosts were measured on different dates and revisions, so compare the columns *within* a host,
+never a cell from one host against a cell from the other:
+
+- **M4:** Rift `master` @ `34a42cb`, measured 2026-09-17 (the pre-release rerun).
+- **EPYC:** Rift `master` @ `924cf73`, measured 2026-07-20.
+
+Full method and reproduction:
 [`tests/benchmark`](https://github.com/achird-labs/rift/tree/master/tests/benchmark).
 
 | Scenario | MB (M4) | Rift (M4) | M4 speedup | MB (EPYC) | Rift (EPYC) | EPYC speedup |
 |:---------|--------:|----------:|:-----------|----------:|------------:|:-------------|
-| Regex (100th pattern) | 112 | 207,024 | **1,857x** | 52 | 317,851 | **6,160x** |
-| API stub — no match (404) | 1,351 | 209,763 | **155x** | 549 | 332,574 | **606x** |
-| API stub — last match | 1,344 | 209,523 | **156x** | 542 | 322,530 | **595x** |
-| API stub — middle match | 3,437 | 210,151 | **61x** | 1,081 | 324,067 | **300x** |
-| API stub — first match | 8,546 | 211,378 | **25x** | 5,728 | 323,408 | **57x** |
-| Query-param routing | 2,751 | 164,133 | **60x** | 1,112 | 211,748 | **190x** |
-| Header routing | 3,016 | 158,596 | **53x** | 1,202 | 201,940 | **168x** |
-| Complex AND/OR predicates | 4,703 | 191,987 | **41x** | 1,814 | 259,548 | **143x** |
-| JSONPath predicates | 4,312 | 199,404 | **46x** | 1,921 | 304,796 | **159x** |
-| XPath predicates | 5,542 | 187,869 | **34x** | 1,966 | 247,897 | **126x** |
-| JSON body matching | 7,611 | 199,670 | **26x** | 2,730 | 294,294 | **108x** |
-| Template responses | 9,022 | 194,236 | **22x** | 3,152 | 283,815 | **90x** |
-| Simple static stub | 8,898 | 214,818 | **24x** | 5,982 | 324,952 | **54x** |
+| Regex (100th pattern) | 110 | 201,067 | **1,821x** | 52 | 317,851 | **6,160x** |
+| API stub — no match (404) | 1,376 | 204,358 | **149x** | 549 | 332,574 | **606x** |
+| API stub — last match | 1,369 | 202,410 | **148x** | 542 | 322,530 | **595x** |
+| API stub — middle match | 2,957 | 206,904 | **70x** | 1,081 | 324,067 | **300x** |
+| API stub — first match | 7,240 | 209,192 | **29x** | 5,728 | 323,408 | **57x** |
+| Query-param routing | 2,834 | 156,298 | **55x** | 1,112 | 211,748 | **190x** |
+| Header routing | 3,058 | 145,289 | **48x** | 1,202 | 201,940 | **168x** |
+| Complex AND/OR predicates | 4,884 | 185,867 | **38x** | 1,814 | 259,548 | **143x** |
+| JSONPath predicates | 4,586 | 190,329 | **42x** | 1,921 | 304,796 | **159x** |
+| XPath predicates | 5,787 | 181,012 | **31x** | 1,966 | 247,897 | **126x** |
+| JSON body matching | 7,996 | 194,017 | **24x** | 2,730 | 294,294 | **108x** |
+| Template responses | 9,538 | 174,784 | **18x** | 3,152 | 283,815 | **90x** |
+| Simple static stub | 3,549\* | 210,762 | **59x\*** | 5,982 | 324,952 | **54x** |
+
+\* Mountebank's `simple_health` is the first scenario it serves after loading the 1,512-stub fixture,
+and on the M4 it stalled in every repetition: ~3,500 RPS with a p99 of 1.5–5.8 *seconds*. In July
+the same row read 8,898 with a 59% spread between reps. Treat that cell as unrepresentative, and
+use the **API stub — first match** row (7,240 → 209,192, **29x**) as the static-stub comparison.
 
 ### How to read the two columns
 
-Going from the laptop to the 16-vCPU server, **Rift gets faster (215k → 325k) and
-Mountebank gets slower (8,898 → 5,982)**. Mountebank is single-threaded, so it can
+Going from the laptop to the 16-vCPU server, **Rift gets faster (~210k → ~325k) and
+Mountebank gets slower (7,240 → 5,728 on the first-match stub)**. Mountebank is single-threaded, so it can
 only use one core, and this server's individual cores are slower than the M4's — it
 gains nothing from the other 15. Rift uses them all.
 
 That means the EPYC multipliers are inflated at *both* ends, and the honest headline
-is the M4 column. It is still 22x–1,857x.
+is the M4 column. It is still 18x–1,821x.
 
-Tail latency is the more stable comparison: Rift's p99 is **0.43–0.97 ms on both
-hosts**, while Mountebank's ranges from 2.9 ms to 1.7 *seconds* depending on scenario.
+Tail latency is the more stable comparison: Rift's p99 is **0.48–0.97 ms on both
+hosts**, while Mountebank's ranges from 3.4 ms to 1.7 *seconds* depending on scenario.
 
-> Measurement caveat: a laptop thermally throttles under a 30-minute run — both
-> engines lost ~7% between the first and last repetition, and per-scenario spread
-> reached 12% on the M4 versus 5% on EPYC. Treat M4 figures as ±10%.
+> Measurement caveat: a laptop is not a quiet benchmark host. On the M4, Rift's per-scenario
+> spread reached 12.5% (template) in the September run and 12% in July, versus 5% on EPYC. Treat
+> M4 figures as ±10%. Against July, the M4 Rift medians moved -2% to -10%; the largest moves
+> (template -10%, header routing -8%) sit at the edge of that band.
 
 ---
 
@@ -81,21 +92,24 @@ stub count:
 
 | API stub position | Mountebank (RPS) | Rift (RPS) | Speedup |
 |:------------------|:-----------------|:-----------|:--------|
-| First | 8,546 | 211,378 | **25x** |
-| Middle | 3,437 | 210,151 | **61x** |
-| Last | 1,344 | 209,523 | **156x** |
-| No match (404) | 1,351 | 209,763 | **155x** |
+| First | 7,240 | 209,192 | **29x** |
+| Middle | 2,957 | 206,904 | **70x** |
+| Last | 1,369 | 202,410 | **148x** |
+| No match (404) | 1,376 | 204,358 | **149x** |
+
+<sub>Apple M4, median of 3 repetitions, 2026-09-17.</sub>
 
 Regex used to be the exception on Rift's side too — it can't be hash-dispatched, and
 at the 100th pattern Rift managed ~54k RPS against Mountebank's 106. The
-candidate-bitset matching framework removed that cliff: regex now runs at **207k RPS**,
+candidate-bitset matching framework removed that cliff: regex now runs at **~200k RPS**,
 in line with every other predicate type. Mountebank's per-stub JS `RegExp` scan still
-collapses to 112 RPS at the 100th pattern, so the gap widened from 515x to **1,857x**
+collapses to ~110 RPS at the 100th pattern, so the gap widened from 515x to **1,821x** on the M4
 — not because Mountebank got slower, but because Rift stopped having a slow path.
 
 On the admin control plane, creating 1,000 fully-overlapping stubs (the O(n²) case
-issue #423 fixed) takes Rift 6.6ms vs Mountebank's 114.7ms, and grows memory +9MB vs
-+51MB — while Rift additionally computes stub-overlap warnings Mountebank does not.
+issue #423 fixed) takes Rift 11.0ms vs Mountebank's 77.3ms, and grows memory +11.7MB vs
++71.7MB — while Rift additionally computes stub-overlap warnings Mountebank does not (M4, median of
+4 runs, 2026-09-17).
 
 ---
 
@@ -255,12 +269,14 @@ Being clear about the limits, since the section above is the optimistic half:
 
 ### Latency (p99)
 
+Apple M4, 50 connections, median of 3 repetitions (2026-09-17):
+
 | Scenario | Mountebank | Rift |
 |:---------|:-----------|:-----|
-| Exact stub match (last of 310) | 40ms | 0.6ms |
-| Complex AND/OR predicate | 17ms | 0.8ms |
-| JSONPath match | 17ms | 1.0ms |
-| Regex (100th pattern) | 641ms | 1.8ms |
+| Exact stub match (last of 310) | 39.8ms | 0.63ms |
+| Complex AND/OR predicate | 13.0ms | 0.83ms |
+| JSONPath match | 16.3ms | 0.88ms |
+| Regex (100th pattern) | 630ms | 0.54ms |
 
 ### Throughput Scaling
 
@@ -669,7 +685,7 @@ JavaScript `wait` function that computes a delay — run inline on the calling w
 the blocking pool, so keep such scripts cheap under per-core.
 
 Flow-store work is offloaded only when it can actually reach the store. A matched stub with no
-`newScenarioState` has no transition to apply, and a `_rift.templated` response whose `{{ }}`
+`newScenarioState` has no transition to apply, and a `_rift.templated` response whose `{% raw %}{{ }}{% endraw %}`
 expressions never read `state.<key>` has nothing to look up — both render on the worker even on a
 blocking backend, rather than paying a pool round trip to do nothing.
 

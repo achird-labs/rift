@@ -176,12 +176,12 @@ Options:
       --metrics-port <PORT>        Prometheus metrics port [default: 9090]
       --front-door <ADDR>          Serve every imposter from one address, routed by host/path/header (see Features -> Front Door)
       --ip-whitelist <IPS>         Comma-separated allowed IPs (accepted for Mountebank compatibility; NOT enforced)
-      --mock                       Run in mock mode
-      --debug                      Enable debug mode
-      --nologfile                  Disable log file (stdout only)
-      --log <FILE>                 Log file path
-      --pidfile <FILE>             PID file path
-      --origin <ORIGIN>            CORS allowed origin
+      --mock                       Accepted for Mountebank compatibility; no effect
+      --debug                      Enable debug mode (same as RIFT_DEBUG=1; also sets the log level to debug unless RUST_LOG is set)
+      --nologfile                  Do not write the --log file (stdout only)
+      --log <FILE>                 Also write logs to this file (off unless set)
+      --pidfile <FILE>             Write the server's PID here (off unless set; stop/restart read ./rift.pid when omitted)
+      --origin <ORIGIN>            Accepted for Mountebank compatibility; no effect (use the imposter's `allowCORS` field)
       --api-key <TOKEN>            Require this token in the Authorization header for all admin API requests
       --rcfile <FILE>              RC file with default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/apiKey/datadir/configfile/noParse); one that cannot be read or applied aborts startup
       --default-tls-cert <FILE>    Default TLS certificate (PEM) for HTTPS imposters without their own
@@ -204,8 +204,13 @@ Options:
 
 `--no-parse` disables EJS preprocessing of `--configfile` (`<% include %>` / `<%= process.env.X %>`
 expansion), which is otherwise applied on load. A tag the preprocessor does not evaluate fails the
-load, so use `--no-parse` when a document contains a literal `<%`. `--formatter`, `--protofile` and `--ip-whitelist`
-are accepted for Mountebank command-line compatibility but have no effect in Rift.
+load, so use `--no-parse` when a document contains a literal `<%`. A `<%= process.env.VAR %>` whose
+variable is unset (and has no `|| 'default'`) renders empty and logs a `WARN` naming the variable
+and where the tag is; if the rendered document then fails to parse, the error names it too.
+
+`--formatter`, `--protofile`, `--ip-whitelist`, `--origin` and `--mock` are accepted for Mountebank
+command-line compatibility but have no effect in Rift. The first three log a warning when given;
+`--origin` and `--mock` are silently ignored.
 
 ### `--ip-whitelist` does not filter anything
 
@@ -272,6 +277,42 @@ very servers you are intercepting.
 `--require-admin-auth` covers this listener too: a non-loopback intercept bind with no credential
 warns by default and refuses to start under that flag.
 
+### RC file (`--rcfile`)
+
+`--rcfile <FILE>` reads defaults from a JSON object, as Mountebank's `--rcfile` does. Only these
+keys are recognised (the snake_case spellings are accepted too):
+
+| Key | Type | Sets |
+|:----|:-----|:-----|
+| `port` | integer 0–65535 | `--port` |
+| `host` | string | `--host` |
+| `loglevel` / `logLevel` | string | `--loglevel` |
+| `allowInjection` | boolean | `--allow-injection` |
+| `localOnly` | boolean | `--local-only` |
+| `requireAdminAuth` | boolean | `--require-admin-auth` |
+| `apiKey` | string | `--api-key` |
+| `datadir` | string | `--datadir` |
+| `configfile` | string | `--configfile` |
+| `noParse` | boolean | `--no-parse` |
+
+```json
+{ "port": 3000, "apiKey": "s3cr3t", "requireAdminAuth": true, "datadir": "/data/mb" }
+```
+
+Rules:
+
+- **Lowest precedence.** A key is applied only when the setting is still at its built-in default, so
+  a flag or environment variable wins. The check is by value: `--port 2525` on the command line does
+  not stop an rcfile `port` from applying, because 2525 is the default.
+- **Refused, not ignored.** A file that cannot be read or parsed, is not a JSON object, or gives a
+  recognised key the wrong type (`"localOnly": "yes"`, `"port": 70000`) aborts startup, naming the
+  file — and nothing from it is applied. An `apiKey` of the wrong type is reported by its type, never
+  echoed.
+- **Unknown keys** are skipped with a warning on stderr.
+- A blank `apiKey` is refused exactly as `--api-key ""` is (see below).
+- The file is read before `rift healthcheck` computes its target, so the probe follows a port the
+  rcfile sets.
+
 ### API-key authentication
 
 `--api-key` (or `MB_APIKEY`) requires every admin API request to carry the token in the
@@ -332,8 +373,9 @@ an `AdminApiServer` directly gets it from `.with_require_admin_auth(true)`.
 
 An imposter declared with `protocol: https` terminates TLS. If it carries no `cert`/`key`, Rift
 falls back to `--default-tls-cert` / `--default-tls-key` when set, otherwise to a generated
-self-signed certificate. Pass `--no-self-signed-tls` to turn a missing certificate into a startup
-error instead of silently self-signing.
+self-signed certificate. Pass `--no-self-signed-tls` to refuse such an imposter instead of silently
+self-signing: `POST /imposters` answers `400`, and an imposter loaded at startup is skipped with an
+error log while the server still starts. See [TLS/HTTPS Support]({{ site.baseurl }}/features/tls/).
 
 ```bash
 rift \
@@ -358,31 +400,61 @@ rift --loglevel debug
 rift --local-only
 rift --api-key s3cr3t --require-admin-auth
 
-# With persistent data directory (every file in it must declare its port and be named <port>.json)
+# With persistent data directory (see "Data directory" below)
 rift --datadir ./mb-data
 
-# Seed from a config file and persist admin-API imposters. Config-file imposters are not written
-# to the data directory, POST /admin/reload re-reads both, and at startup every imposter with a port
-# is created before any imposter without one.
+# Seed from a config file and persist admin-API imposters
 rift --configfile imposters.json --datadir ./mb-data
 ```
+
+### Data directory (`--datadir`)
+
+`--datadir` persists imposters created or changed through the admin API: each one is written to
+`<dir>/<port>.json`, and deleting the imposter deletes the file. At startup (and on
+`POST /admin/reload`) every `*.json` file in the directory is loaded back. Other extensions are
+ignored.
+
+The directory is keyed by port, so each file is held to that:
+
+- It holds **one imposter object** (not an `{"imposters": [...]}` wrapper), as plain JSON. EJS tags
+  are not rendered in datadir files.
+- It must **declare its port**. A file with no `port`, or `"port": 0`, is refused — it would be
+  auto-assigned a port and written again as a second file on every load.
+- It must be **named after that port**. `4545.json` must declare `"port": 4545`; a file named
+  anything else is refused with the name it should have.
+
+At startup a file that breaks these rules — or that cannot be parsed, needs `--allow-injection`
+without it, or fails to create — is **skipped**: the server still starts, and one `ERROR` line lists
+every skipped file with its reason. `POST /admin/reload` is stricter: one bad file refuses the whole
+reload, naming the file, and the running imposters are left as they are. A missing directory is
+created, empty.
+
+With both `--configfile` (or `--imposters`) and `--datadir`, config-file imposters are **not**
+written to the data directory, and `POST /admin/reload` re-reads both stores. When both declare the
+same port, the config-file imposter is served and the datadir file is skipped and named.
+
+At startup, every imposter that declares a port — from either store — is created before any
+imposter that does not, so an auto-assigned port can never take a port another imposter asked for.
+`"port": 0` means "auto-assign", the same as omitting the port.
 
 ---
 
 ## Environment Variables
 
-Environment variables override CLI defaults:
+A flag given on the command line wins over its environment variable, and the environment variable
+wins over the built-in default (and over an `--rcfile` value — see [RC file](#rc-file---rcfile)).
 
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `MB_PORT` | Admin API port | `2525` |
 | `MB_HOST` | Admin API bind IP address (IPv4, or IPv6 `::1` / `[::1]`) | `0.0.0.0` |
 | `MB_CONFIGFILE` | Imposter config file | |
+| `RIFT_IMPOSTERS` | Imposter source URIs (env alias of `--imposters`) | |
 | `MB_DATADIR` | Persistent storage directory | |
 | `MB_ALLOW_INJECTION` | Enable injection (`true`/`false`) | `false` |
 | `MB_LOCAL_ONLY` | Localhost only | `false` |
 | `RIFT_REQUIRE_ADMIN_AUTH` | Refuse to start on a keyless non-loopback admin bind (env alias of `--require-admin-auth`) | `false` |
-| `MB_LOGLEVEL` | Log level | `info` |
+| `MB_LOGLEVEL` | Log level (env alias of `--loglevel`). Set-but-empty means `info` | `info` |
 | `MB_APIKEY` | Admin API authorization token (see `--api-key`) | |
 | `RIFT_SCRIPTS_DIR` | Root directory for admin-API `file:`/`ref:` script resolution (env alias of `--scripts-dir`); references escaping it are rejected | |
 | `RIFT_DEBUG` | Enable debug mode (truthy: `1`/`true`/`yes`/`on`); same as `--debug`. Adds an `x-rift-script-trace` response header and makes response-template errors return a request-time error instead of an empty substitution | off |
@@ -409,7 +481,7 @@ Environment variables override CLI defaults:
 | `RIFT_MAX_CONNECTIONS` | Cap on concurrently-served connections per listener (positive integer). Unset means unlimited; at the cap the server stops accepting until a connection closes, so overload waits in the kernel backlog rather than piling up. Applies to the intercept listener too, as of #1030 | unlimited |
 | `RIFT_STRICT_BEHAVIORS` | Force strict mode process-wide (truthy: `1`/`true`/`yes`/`on`): a `decorate`/`shellTransform`/binary-base64-decode failure returns `500` instead of the lenient fallback body | off |
 | `NO_COLOR` | Suppress ANSI color and the decorative banner in `rift-verify` / `rift-lint` output | |
-| `RUST_LOG` | Detailed log configuration | `info` |
+| `RUST_LOG` | A full `tracing` filter (e.g. `warn,rift::script=debug`). When set it replaces `--loglevel`/`--debug`; a value that does not parse is refused at startup | unset |
 
 `RIFT_DISABLE_HTTP2` is an escape hatch for clients or intermediaries that mishandle HTTP/2; see
 [HTTP/2 and h2c]({{ site.baseurl }}/mountebank/imposters/#http2-and-h2c). `RIFT_TCP_BACKLOG` and
@@ -488,29 +560,52 @@ services:
 rift --loglevel debug
 
 # Via environment
-RUST_LOG=debug rift
+MB_LOGLEVEL=debug rift
 ```
 
 | Level | Description |
 |:------|:------------|
 | `error` | Only errors |
-| `warn` | Warnings and errors |
+| `warn` | Warnings and errors (`warning` is also accepted) |
 | `info` | Standard operation (default) |
 | `debug` | Detailed debugging |
 | `trace` | Very verbose (development) |
 
+Levels are case-insensitive. Any other value is refused at startup with an error listing the
+accepted ones — it used to fall back to `info` silently. An empty value (for example
+`MB_LOGLEVEL=${LOG_LEVEL}` with `LOG_LEVEL` unset) means `info`.
+
+The filter actually used is chosen in this order:
+
+1. `RUST_LOG`, when it is set — a full `tracing` filter. A value that does not parse, or is not
+   valid UTF-8, is refused at startup rather than ignored. (`RUST_LOG=` set to the empty string is
+   accepted.)
+2. `--debug`, which means `debug`.
+3. `--loglevel` / `MB_LOGLEVEL` / the rcfile `loglevel` key.
+4. `info`.
+
+`--loglevel` is validated even when `RUST_LOG` overrides it, so a typo fails the same way in every
+environment.
+
 ### Module-Specific Logging
 
+`RUST_LOG` targets are matched by prefix. Rift's own log lines use the crate module paths
+(`rift_http_proxy::…`, `rift_mock_core::…`) plus the explicit targets `rift::script`,
+`rift::template` and `rift::state_ops`:
+
 ```bash
-# Debug only rift modules
+# Debug everything Rift logs (the prefix `rift` covers all of the above)
 RUST_LOG=rift=debug rift
 
-# Debug HTTP handling
-RUST_LOG=rift::http=debug rift
+# Debug script execution only
+RUST_LOG=info,rift::script=debug rift
 
-# Multiple modules
-RUST_LOG=rift=info,rift::proxy=debug rift
+# Debug imposter handling in the engine, admin API at info
+RUST_LOG=info,rift_mock_core::imposter=debug rift
 ```
+
+Log lines are plain text on stdout (the `tracing` default format); `--log <FILE>` writes the same
+lines to a file as well.
 
 ---
 
@@ -519,29 +614,35 @@ RUST_LOG=rift=info,rift::proxy=debug rift
 Rift provides health endpoints:
 
 ```bash
-# Admin API health
-curl http://localhost:2525/
+# Admin API health — answers {"status":"ok"}
+curl http://localhost:2525/health
 
-# Metrics health
+# Metrics endpoint (separate listener)
 curl http://localhost:9090/metrics
 ```
+
+With `--api-key` set, **every** admin API path — `/health` and `/` included — requires the
+`Authorization` header and answers `401` without it. The metrics listener on `--metrics-port` is
+not gated by the key.
 
 ---
 
 ## Signal Handling
 
-| Signal | Action |
-|:-------|:-------|
-| `SIGTERM` | Graceful shutdown |
-| `SIGINT` | Graceful shutdown (Ctrl+C) |
+The `rift` binary installs no signal handlers. `SIGTERM` and `SIGINT` (Ctrl+C) take their default
+action and end the process immediately: in-flight requests are not drained, and imposters are not
+torn down first. (The graceful `shutdown` path exists for embedders — see
+[Embedding & SPI]({{ site.baseurl }}/embedding/).)
 
 ```bash
-# Graceful shutdown
 kill -TERM $(pidof rift)
-
-# Force kill (not recommended)
-kill -9 $(pidof rift)
 ```
+
+In a container this has one sharp edge: the kernel does not apply default signal actions to PID 1,
+so a `rift` that is the container's PID 1 ignores `SIGTERM`, and `docker stop` waits out its
+timeout before sending `SIGKILL`. Run it under an init process — `docker run --init`, or
+`init: true` in Compose — to stop promptly. Kubernetes has the same behaviour; there, lower
+`terminationGracePeriodSeconds` or add an init process to the image you deploy.
 
 ---
 
@@ -550,9 +651,11 @@ kill -9 $(pidof rift)
 | Code | Meaning |
 |:-----|:--------|
 | `0` | Success |
-| `1` | General error |
-| `2` | Configuration error |
-| `3` | Port binding error |
+| `1` | Any runtime failure: a refused flag value, config file or rcfile, a port that cannot be bound, a failed `stop`/`save`, an unhealthy `healthcheck` |
+| `2` | The command line itself could not be parsed (unknown flag, missing value, conflicting flags) |
+
+The error is printed to stderr in every case; the exit code does not distinguish the cause further.
+A server ended by a signal has no exit code of its own — a shell reports `143` after `SIGTERM`.
 
 ---
 
@@ -571,43 +674,69 @@ rift start --port 3525 --configfile imposters.json
 
 ### stop
 
-Stop a running Rift server using its PID file:
+Stop a running Rift server using its PID file. A server only writes a PID file when it was started
+with `--pidfile`, so start it that way if you intend to use `stop`/`restart`:
 
 ```bash
-# Stop server using default PID file (rift.pid)
-rift stop
+rift --pidfile /var/run/rift.pid &
 
-# Stop using custom PID file
+# Stop using that PID file
 rift stop --pidfile /var/run/rift.pid
+
+# Without --pidfile, stop reads ./rift.pid
+rift stop
 ```
+
+`stop` sends `SIGTERM` (`taskkill /F` on Windows) and removes the PID file. A PID file whose process
+is already gone is treated as stale: it is removed and `stop` succeeds. A missing PID file, a
+non-positive PID, or a process `rift` is not permitted to signal is an error, and the file is left
+in place.
 
 ### restart
 
-Restart a running Rift server:
+Stop the server named by the PID file, then start a new one in this process with the other flags
+given:
 
 ```bash
-rift restart --pidfile /var/run/rift.pid
+rift restart --pidfile /var/run/rift.pid --configfile imposters.json
 ```
+
+A missing PID file is not an error for `restart` — there is nothing to stop, so it just starts.
 
 ### save
 
-Save current imposters to a file for later replay:
+Save the running server's imposters to a file for later replay. The server is found through
+`--host`/`--port` (so `MB_HOST`/`MB_PORT` and `--rcfile` apply):
 
 ```bash
-# Save imposters to file
+# Save imposters to ./mb.json (the default, as in Mountebank)
+rift save
+
+# Save to a named file
 rift save --savefile recorded.json
 
-# Save with proxies removed (pure recorded responses)
+# Drop `proxy` responses, keeping what they recorded (stubs left with no response are dropped)
 rift save --savefile mocks.json --remove-proxies
 ```
 
+| Flag | Description | Default |
+|:-----|:------------|:--------|
+| `--savefile <FILE>` | Output file | `mb.json` |
+| `--remove-proxies` | Request the `removeProxies=true` view | off |
+
+A non-2xx answer (for example `401` from a server started with `--api-key` — `save` sends no key)
+fails the command instead of writing the error body to the file.
+
 ### replay
 
-Replay saved imposters from a file:
+Start a server with the saved imposters loaded:
 
 ```bash
 rift replay --configfile recorded.json
 ```
+
+This is `rift --configfile recorded.json` under another name: it starts a new server rather than
+switching a running Mountebank-style server from recording to replaying.
 
 ### script
 
@@ -670,6 +799,14 @@ Pass the same `--rcfile` the server was started with, or the probe knocks on the
 (issue #1133). An rcfile the server would refuse (a missing file, a wrong-typed key) refuses the
 probe too, and reports unhealthy: a server started with that file would not have started either.
 
+The probe sends no `Authorization` header. Against a server started with `--api-key` (or
+`MB_APIKEY`), the default `/health` probe gets `401` and reports **unhealthy**. Point it at the
+metrics listener instead, which the key does not gate:
+
+```bash
+rift healthcheck --url http://127.0.0.1:9090/metrics
+```
+
 | Flag | Description | Default |
 |:-----|:------------|:--------|
 | `--url <URL>` | URL to probe instead of the admin API's `/health` | (from `--host`/`--port`) |
@@ -699,6 +836,10 @@ Options:
       --skip-dynamic      Skip stubs with inject/proxy/script responses
       --verify-dynamic    Opt-in: assert dynamic stubs instead of skipping them
       --status-only       Only verify status codes (ignore body/headers)
+      --gateway           Send requests through the admin port's /__rift/<port>/ gateway
+      --insecure          Accept self-signed/invalid TLS certificates (https imposters)
+      --space <SPACE>     Correlation value sent to imposters whose flowIdSource is a header [default: rift-verify]
+      --flow-id-header <FLOW_ID_HEADER>  Fallback correlation header name when it cannot be discovered
       --demo              Run demo showing enhanced error output
   -h, --help              Print help
   -V, --version           Print version
@@ -757,14 +898,14 @@ Validate imposter configuration files before loading.
 rift-lint <path> [OPTIONS]
 
 Arguments:
-  <path>              Path to imposter file or directory
+  <path>              Path to imposter file or directory (required)
 
 Options:
   -f, --fix           Fix issues automatically where possible
   -o, --output <FMT>  Output format: text (default), json
   -e, --errors-only   Only show errors (hide warnings)
-  -v, --verbose       Verbose output
   -s, --strict        Strict mode - treat warnings as errors
+      --no-parse      Lint files verbatim, without rendering EJS tags, as `rift --no-parse` loads them (alias: --noParse)
   -h, --help          Print help
   -V, --version       Print version
 ```

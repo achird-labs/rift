@@ -26,6 +26,11 @@ docker pull zainalpour/rift-proxy:latest
 docker run -p 2525:2525 zainalpour/rift-proxy:latest
 ```
 
+Publish every imposter port you intend to call from the host as well (for example
+`-p 4545:4545`), and see [Docker]({{ site.baseurl }}/deployment/docker/) for the `-static` image.
+With no `--api-key`, the admin API is open to anyone who can reach the port; Rift logs a warning
+saying so at startup.
+
 ### Homebrew (macOS/Linux)
 
 ```bash
@@ -185,7 +190,11 @@ Scala, Node/TypeScript and Go live in [Language SDKs]({{ site.baseurl }}/sdk/).
 Once Rift is running, verify it's working:
 
 ```bash
-# Check the admin API
+# Liveness
+curl http://localhost:2525/health
+# {"status":"ok"}
+
+# The admin API root
 curl http://localhost:2525/
 
 # Expected response (hrefs are absolute, built from the admin host and port):
@@ -238,6 +247,9 @@ curl http://localhost:4545/api/greeting
 {"message":"Hello from Rift!"}
 ```
 
+If Rift runs in Docker, start it with `-p 4545:4545` as well, or the imposter is unreachable from
+the host. A request that matches no stub gets `200` with an empty body, as in Mountebank.
+
 ---
 
 ## Load Existing Configuration
@@ -245,13 +257,17 @@ curl http://localhost:4545/api/greeting
 If you have an existing Mountebank configuration file, load it directly:
 
 ```bash
-# Using Docker
-docker run -p 2525:2525 -v $(pwd)/imposters.json:/imposters.json \
+# Using Docker (publish every port your imposters listen on)
+docker run -p 2525:2525 -p 4545:4545 -v $(pwd)/imposters.json:/imposters.json \
   zainalpour/rift-proxy:latest --configfile /imposters.json
 
 # Using binary
-./rift --configfile imposters.json
+rift --configfile imposters.json
 ```
+
+Mountebank's EJS tags (`<% include %>`, `<%- stringify() %>`, `<%= process.env.X %>`) work in the
+file; any other `<% %>` tag is refused, so pass `--no-parse` if a file holds a literal `<%`. YAML is
+accepted too — see [Configuration]({{ site.baseurl }}/configuration/#document-shapes-and-formats).
 
 Example `imposters.json`:
 

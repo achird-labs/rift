@@ -539,8 +539,10 @@ median. Read it before quoting a number: a large spread means the reps disagree 
 provisional. Aggregation **fails loudly** if a point is missing from any rep, rather than quietly
 producing a median backed by fewer samples than the report implies.
 
-`--rep` is Rift-only — the rift-vs-mb comparison report reads unsuffixed artefacts, so a repped
-comparison run would report a stale file as the current one.
+`--rep` applies to the rift-vs-mb comparison too: each engine's artefacts get the same `_repN`
+suffix, and `--aggregate-comparison ""` collapses them into `DIRECT_BENCHMARK_REPORT_median.md`
+(it refuses unequal rep counts between the engines). The sweep, open-loop, allocator, runtime and
+quamina modes remain Rift-only.
 
 Both scripts run each engine **one at a time on disjoint port ranges** (no CPU
 contention, no cross-talk), launch it in its own process group and hard-kill it by
@@ -553,9 +555,10 @@ Outputs land in `results/` and are gitignored (machine-specific — regenerate p
 
 ## Latest results
 
-Measured 2026-07-20. Rift built from `master` @ `924cf73`, Mountebank `2.9.1`, `oha`
-at 50 keep-alive connections, 20s/scenario after a 3s warmup, native processes
-(no Docker), each engine run alone. Fixture: 14 imposters, 1,512 stubs. Every figure
+**M4** measured 2026-09-17 with Rift `master` @ `34a42cb` (pre-release rerun); **EPYC**
+measured 2026-07-20 with Rift `master` @ `924cf73`. Mountebank `2.9.1`, `oha` at 50 keep-alive
+connections, 20s/scenario after a 3s warmup, native processes (no Docker), each engine run alone.
+Compare columns within a host only — the two hosts are different dates and revisions. Fixture: 14 imposters, 1,512 stubs. Every figure
 is the **median of 3 repetitions** — reproduce with `--rep 1|2|3` then
 `--aggregate-comparison`.
 
@@ -568,52 +571,57 @@ Two hosts, because the multiplier is hardware-dependent:
 
 | Scenario | MB (M4) | Rift (M4) | M4 | MB (EPYC) | Rift (EPYC) | EPYC |
 |---|--:|--:|--:|--:|--:|--:|
-| simple_health | 8,898 | 214,818 | **24x** | 5,982 | 324,952 | **54x** |
-| api_first | 8,546 | 211,378 | **25x** | 5,728 | 323,408 | **57x** |
-| api_middle | 3,437 | 210,151 | **61x** | 1,081 | 324,067 | **300x** |
-| api_last | 1,344 | 209,523 | **156x** | 542 | 322,530 | **595x** |
-| no_match (404) | 1,351 | 209,763 | **155x** | 549 | 332,574 | **606x** |
-| regex_last | 112 | 207,024 | **1,857x** | 52 | 317,851 | **6,160x** |
-| complex_and_or | 4,703 | 191,987 | **41x** | 1,814 | 259,548 | **143x** |
-| json_body_equals | 7,611 | 199,670 | **26x** | 2,730 | 294,294 | **108x** |
-| jsonpath | 4,312 | 199,404 | **46x** | 1,921 | 304,796 | **159x** |
-| xpath | 5,542 | 187,869 | **34x** | 1,966 | 247,897 | **126x** |
-| template | 9,022 | 194,236 | **22x** | 3,152 | 283,815 | **90x** |
-| header_route | 3,016 | 158,596 | **53x** | 1,202 | 201,940 | **168x** |
-| query_param | 2,751 | 164,133 | **60x** | 1,112 | 211,748 | **190x** |
+| simple_health | 3,549\* | 210,762 | **59x\*** | 5,982 | 324,952 | **54x** |
+| api_first | 7,240 | 209,192 | **29x** | 5,728 | 323,408 | **57x** |
+| api_middle | 2,957 | 206,904 | **70x** | 1,081 | 324,067 | **300x** |
+| api_last | 1,369 | 202,410 | **148x** | 542 | 322,530 | **595x** |
+| no_match (404) | 1,376 | 204,358 | **149x** | 549 | 332,574 | **606x** |
+| regex_last | 110 | 201,067 | **1,821x** | 52 | 317,851 | **6,160x** |
+| complex_and_or | 4,884 | 185,867 | **38x** | 1,814 | 259,548 | **143x** |
+| json_body_equals | 7,996 | 194,017 | **24x** | 2,730 | 294,294 | **108x** |
+| jsonpath | 4,586 | 190,329 | **42x** | 1,921 | 304,796 | **159x** |
+| xpath | 5,787 | 181,012 | **31x** | 1,966 | 247,897 | **126x** |
+| template | 9,538 | 174,784 | **18x** | 3,152 | 283,815 | **90x** |
+| header_route | 3,058 | 145,289 | **48x** | 1,202 | 201,940 | **168x** |
+| query_param | 2,834 | 156,298 | **55x** | 1,112 | 211,748 | **190x** |
 
-p99 latency, same runs:
+\* Mountebank stalled on `simple_health` — the first scenario after the 1,512-stub load — in all
+three M4 reps (p99 1.5–5.8 s). Use `api_first` as the static-stub comparison on the M4.
+
+p99 latency, same runs (median of the 3 reps' p99):
 
 | Scenario | p99 MB → Rift, M4 (ms) | p99 MB → Rift, EPYC (ms) |
 |---|---|---|
-| simple_health | 2.9 → 0.46 | 9.6 → 0.49 |
-| api_first | 2.9 → 0.47 | 10.4 → 0.49 |
-| api_middle | 46.0 → 0.46 | 51.2 → 0.49 |
-| api_last | 40.3 → 0.45 | 114.4 → 0.49 |
-| no_match (404) | 40.0 → 0.43 | 96.1 → 0.48 |
-| regex_last | 613.9 → 0.46 | 1741.6 → 0.51 |
-| complex_and_or | 13.5 → 0.77 | 28.1 → 0.73 |
-| json_body_equals | 8.5 → 0.58 | 22.1 → 0.59 |
-| jsonpath | 16.2 → 0.54 | 30.3 → 0.56 |
-| xpath | 13.0 → 0.70 | 30.0 → 0.75 |
-| template | 7.2 → 0.51 | 19.5 → 0.61 |
-| header_route | 34.9 → 0.72 | 46.3 → 0.97 |
-| query_param | 31.8 → 0.66 | 50.0 → 0.91 |
+| simple_health | 1464 → 0.62 | 9.6 → 0.49 |
+| api_first | 3.4 → 0.57 | 10.4 → 0.49 |
+| api_middle | 53.6 → 0.57 | 51.2 → 0.49 |
+| api_last | 39.8 → 0.63 | 114.4 → 0.49 |
+| no_match (404) | 40.7 → 0.53 | 96.1 → 0.48 |
+| regex_last | 630.4 → 0.54 | 1741.6 → 0.51 |
+| complex_and_or | 13.0 → 0.83 | 28.1 → 0.73 |
+| json_body_equals | 8.8 → 0.84 | 22.1 → 0.59 |
+| jsonpath | 16.3 → 0.88 | 30.3 → 0.56 |
+| xpath | 11.5 → 0.88 | 30.0 → 0.75 |
+| template | 6.7 → 0.72 | 19.5 → 0.61 |
+| header_route | 34.9 → 0.89 | 46.3 → 0.97 |
+| query_param | 31.3 → 0.84 | 50.0 → 0.91 |
 
 Reading notes:
 
-- **Rift is faster on EPYC (215k → 325k); Mountebank is *slower* (8,898 → 5,982).**
+- **Rift is faster on EPYC (~209k → ~323k); Mountebank is *slower* (7,240 → 5,728, `api_first`).**
   Mountebank is single-threaded, and this server's individual cores are slower than
   the M4's, so it gains nothing from the extra 15. The EPYC multipliers are therefore
   inflated at both ends — quote the M4 column when a conservative figure is wanted.
-- **`regex_last` is the headline change since the previous run** (54,434 → 207,024 RPS
-  on comparable hardware). The candidate-bitset matching framework removed regex as
+- **`regex_last` was the headline change of the July run** (54,434 → 207,024 RPS
+  on comparable hardware; 201,067 in September). The candidate-bitset matching framework removed regex as
   Rift's slow path; it is now in line with every other predicate type. Mountebank did
   not change.
-- **M4 figures carry ~±10%.** A laptop thermally throttles over a 30-minute run: both
-  engines lost ~7% aggregate between the first and last repetition, and per-scenario
-  spread reached 12% (versus 5% on EPYC). This is why the table is a median of 3 and
-  not a single sample.
+- **M4 figures carry ~±10%.** A laptop is a noisy host: per-scenario Rift spread reached
+  12.5% (`template`) in September and 12% in July, versus 5% on EPYC. This is why the table is a
+  median of 3 and not a single sample.
+- **September vs July on the M4:** Rift medians moved -2% to -10%, and p99 rose ~0.1–0.3 ms.
+  The biggest drops (`template` -10%, `header_route` -8%) sit at the edge of the noise band; a
+  same-session A/B against `924cf73` is the way to tell a regression from the host.
 
 ### Admin create/read
 
@@ -624,31 +632,35 @@ stub-overlap analysis, a Rift extension Mountebank does not perform.
 
 | Shape | N | Create MB → Rift (ms) | GET MB → Rift (ms) | RSS Δ MB → Rift (MB) | Rift warnings |
 |---|--:|---|---|---|--:|
-| identical | 100 | 16.1 → 9.5 | 4.7 → 1.6 | 6.9 → 2.3 | 99 |
-| identical | 1000 | 114.7 → 6.6 | 6.6 → 2.5 | 51.1 → 9.1 | 101 |
-| distinct | 100 | 13.8 → 2.3 | 2.1 → 0.3 | 6.0 → 2.2 | 0 |
-| distinct | 1000 | 134.9 → 5.3 | 8.6 → 1.4 | 50.3 → 9.5 | 0 |
+| identical | 100 | 17.2 → 6.3 | 1.4 → 1.1 | 0.8 → 3.2 | 99 |
+| identical | 1000 | 77.3 → 11.0 | 1.8 → 2.0 | 71.7 → 11.7 | 101 |
+| distinct | 100 | 18.0 → 4.6 | 1.2 → 0.6 | 3.7 → 3.2 | 0 |
+| distinct | 1000 | 80.4 → 10.1 | 1.8 → 1.5 | 78.9 → 12.0 | 0 |
+
+M4, 2026-09-17, median of 4 runs (the harness takes one sample per run). The July table read
+Rift's 1,000-stub creates at 5–7 ms; they are ~10–11 ms here — worth a same-session A/B before
+calling it a regression, since the admin suite has no repetition support.
 
 ### Key findings
 
-1. **Position-independent matching.** Rift holds ~210k RPS (M4) / ~325k RPS (EPYC)
+1. **Position-independent matching.** Rift holds ~205k RPS (M4) / ~325k RPS (EPYC)
    whether the matching stub is first, middle, or last — and on a no-match 404.
-   Mountebank degrades linearly with stub count (8,546 → 1,351 RPS, first → no-match):
-   up to **155x** at the tail on the M4, **606x** on EPYC.
+   Mountebank degrades linearly with stub count (7,240 → 1,376 RPS, first → no-match):
+   up to **149x** at the tail on the M4, **606x** on EPYC.
 2. **Regex is no longer Rift's slow path.** It used to be the one predicate type that
    couldn't be hash-dispatched (~54k RPS vs ~180k elsewhere); the candidate-bitset
-   matching framework brought it to **207k RPS**, in line with everything else.
+   matching framework brought it to **~200k RPS**, in line with everything else.
    Mountebank's per-stub JS `RegExp` scan still collapses at the 100th pattern, so the
-   gap is now **1,857x** (M4) / **6,160x** (EPYC) — widened by Rift improving, not by
+   gap is now **1,821x** (M4) / **6,160x** (EPYC) — widened by Rift improving, not by
    Mountebank regressing.
-3. **Structured predicates** (JSONPath, XPath, JSON body, complex AND/OR): **26–46x**
-   on the M4, **108–159x** on EPYC. Native Rust evaluation stays 188k–200k RPS (M4)
-   vs Mountebank's JS 4.3k–7.6k.
-4. **Sub-millisecond tail.** Rift p99 stays **0.43–0.97ms on both hosts**, across every
-   scenario; Mountebank ranges from 2.9ms to 1.7 *seconds* depending on stub count,
+3. **Structured predicates** (JSONPath, XPath, JSON body, complex AND/OR): **24–42x**
+   on the M4, **108–159x** on EPYC. Native Rust evaluation stays 181k–194k RPS (M4)
+   vs Mountebank's JS 4.6k–8.0k.
+4. **Sub-millisecond tail.** Rift p99 stays **0.48–0.97ms on both hosts**, across every
+   scenario; Mountebank ranges from 3.4ms to 1.7 *seconds* depending on stub count,
    position, and predicate type.
 5. **Admin plane / overlap analysis.** Creating 1,000 fully-overlapping stubs, Rift
-   creates in **6.6ms vs Mountebank's 114.7ms** and grows RSS **+9MB vs +51MB**, while
+   creates in **11.0ms vs Mountebank's 77.3ms** and grows RSS **+11.7MB vs +71.7MB**, while
    still computing 101 stub-overlap warnings Mountebank never produces.
 
 ## Related

@@ -24,7 +24,9 @@ let manager = ImposterManager::new()
     .with_request_journal(Arc::new(MyJournal))
     .with_proxy_store(Arc::new(MyProxyStore))
     .with_event_listener(Arc::new(MyListener))
-    .with_response_decorator(Arc::new(MyDecorator));
+    .with_response_decorator(Arc::new(MyDecorator))
+    .with_no_match_interceptor(Arc::new(MyRescue))
+    .with_exchange_inspector_provider(Arc::new(MyInspectors));
 ```
 
 Then pass `Arc::new(manager)` to `ServerBuilder::manager(...)` (see
@@ -94,6 +96,24 @@ Choosing between the two seams:
 A backend name that nothing registered is a config error, never a silent downgrade to a no-op store:
 creation fails with an error listing the names this build does serve.
 
+### Implementing `FlowStore`
+
+Either seam hands back an `Arc<dyn FlowStore>` (`rift_mock_core::flow_state::FlowStore`). Required:
+`get`, `set`, `exists`, `delete`, `increment`, `set_ttl`. Defaulted, so an older
+implementation keeps compiling: `is_blocking`, `increment_by`, `set_key_ttl`, `clear_flow`, `compare_and_set` (a non-atomic get-then-set; a real backend should override it),
+`flow_ids`, `entry_count`.
+
+- **`is_blocking()`** (default `false`): return `true` if calls do network or disk I/O. The request
+  path then runs flow-store calls on `spawn_blocking` so a slow backend cannot stall a tokio worker.
+  Annotations your store records there reach the `ResponseDecorator` (#987 fixed them being
+  dropped on that thread).
+- **`flow_ids()` / `entry_count(flow_id)`** (issue #962): list the flow ids that have live state,
+  and count the live keys under one. Both return `Result<Option<_>>`, and the default is
+  `Ok(None)`, meaning "this store cannot enumerate". That is different from `Some(vec![])` / `Some(0)`,
+  which mean "it can, and there are none". The built-in in-memory store enumerates. The Redis store
+  deliberately returns `None`, because an admin screen should not trigger a `SCAN` over a shared
+  keyspace. Keep the two answers distinct, so a UI shows "unsupported" rather than "empty".
+
 ## `ResponseSequencer` — custom response cycling
 
 Owns the per-stub cursor that drives multiple-response cycling and `repeat` (see
@@ -130,8 +150,24 @@ pub trait RequestJournal: Send + Sync {
     /// Clear just one flow's entries. Fallible.
     fn clear_flow(&self, port: u16, flow_id: &str) -> anyhow::Result<()>;
     fn count(&self, port: u16) -> u64;
+
+    // Defaulted — override for richer behaviour:
+    fn read_filtered(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) -> JournalRead;
+    /// Stable per-port indices (the `since=` cursor). `None` = unsupported (the default).
+    fn read_since(&self, port: u16, since: Option<u64>,
+                  keep: &dyn Fn(&RecordedRequest) -> bool) -> Option<JournalReadSince>;
+    /// Default calls `record` and returns `None`. Never point `record` back at it without overriding it.
+    fn record_indexed(&self, port: u16, flow_id: &str, req: RecordedRequest) -> Option<u64>;
+    /// Second writes after the entry exists (no-ops by default).
+    fn attach_match(&self, port: u16, index: u64, outcome: MatchOutcome);
+    fn attach_response(&self, port: u16, index: u64, status: u16, latency_ms: u64);
 }
 ```
+
+The `attach_*` hooks fill in `matchOutcome`, and since issue #940 also `status` and `latencyMs`, on
+an entry recorded earlier. A backend without stable indices cannot address an entry, so it never
+carries these fields. That is not an error. `RecordedRequest` also has a `node: Option<String>`
+that the engine never sets: a journal spanning several nodes stamps it in its own `record`.
 
 Note that `clear` and `clear_flow` are **fallible** (`anyhow::Result<()>`): clearing is a correctness
 operation whose postcondition ("the data is gone") a remote backend can fail to guarantee, so the
@@ -161,8 +197,15 @@ pub trait ProxyRecordingStore: Send + Sync {
 }
 ```
 
-Its typed error is `ProxyStoreError` (`ProxyStoreError::Unavailable(String)`). Inject with
+Its typed error is `ProxyStoreError`, `#[non_exhaustive]`. Inject with
 `.with_proxy_store(Arc<dyn ProxyRecordingStore>)`.
+
+| Variant | Engine response |
+|:--|:--|
+| `Unavailable(String)` | **Degrade**: forward upstream without recording. Use it when the store only helps persistence and the engine still enforces exactly-once itself. |
+| `Refused(BackendUnavailable)` (issue #990) | **Fail the request without calling the upstream.** Use it when the store *is* the exactly-once arbiter (shared or clustered) and could not decide. Forwarding would let every request during the outage reach the upstream. Both the stub `proxy` and `defaultForward` answer `503` through `backend_error_response` (see [Backend errors](#backend-errors-and-annotations)). |
+
+`ClaimOutcome::InFlight` is unaffected: a claim was serialized, so that request still forwards.
 
 ### Publishing stubs from the store
 
@@ -246,7 +289,7 @@ non-blocking. Inject with `.with_event_listener(Arc<dyn ImposterEventListener>)`
 ### Attribution — who changed it
 
 An event says *what* changed; `ctx.principal` says *who* (issue #855). It is populated from
-`AuthzDecision::Allow { principal }` when an [`AdminAuthorizer`](#adminauthorizer--authorize-admin-requests)
+`AuthzDecision::Allow { principal }` when an [`AdminAuthorizer`](#adminauthorizer--per-request-admin-authorization)
 is installed, which is what makes these events usable as an audit trail instead of something you
 have to correlate against request logs out of band.
 
@@ -354,6 +397,68 @@ Contract:
   that window with your own readiness gating.
 
 Registering no interceptor leaves behaviour byte-identical, on both the serve loop and the gateway.
+
+## `ExchangeInspector` — policy on live exchanges
+
+A synchronous hook pair on an imposter's live traffic (issue #966). It can reject a request before
+matching and replace a response before it is written. Use it for request linting, contract
+validation, compliance capture or a chaos veto. It sits where no other seam does: `NoMatchInterceptor`
+fires only on a miss, and `ResponseDecorator` may only add headers.
+
+```rust
+use rift_mock_core::extensions::exchange_inspector::{
+    ExchangeInspector, ExchangeInspectorProvider, InspectRequest, InspectResponse, InspectVerdict,
+};
+
+pub trait ExchangeInspector: Send + Sync {
+    /// After body collection and journaling, before stub matching.
+    fn inspect_request(&self, req: &InspectRequest<'_>) -> InspectVerdict;
+    /// After the response is built, before it is written and decorated.
+    fn inspect_response(&self, req: &InspectRequest<'_>, resp: &InspectResponse<'_>) -> InspectVerdict;
+}
+
+pub trait ExchangeInspectorProvider: Send + Sync {
+    /// Consulted once per imposter, at creation. `None` = no hooks for that imposter.
+    fn provide(&self, config: &ImposterConfig) -> Option<Arc<dyn ExchangeInspector>>;
+}
+
+pub enum InspectVerdict {
+    Proceed,
+    Reject { status: u16, content_type: String, body: Bytes },
+}
+```
+
+Inject with `.with_exchange_inspector_provider(Arc<dyn ExchangeInspectorProvider>)`.
+
+- `InspectRequest` borrows `port`, `method`, `path`, `query` (without the `?`), `headers` (every
+  value), `body` (text, or base64 when `mode` is binary) and `mode`. `InspectResponse` borrows
+  `status`, `headers` and `body` bytes.
+- **Request-side rejection happens before matching**, so a rejected request never advances a
+  response cycler, a scenario or a match count. It is still journaled, with the rejection's status.
+- **The response hook runs on every path**: the serve loop, the `/__rift/` gateway and in-process
+  dispatch. It runs before the decorator and CORS. It is not called for a response the request hook
+  produced.
+- **Early exits see neither hook**: a disabled imposter, a CORS preflight, a `413`, a body-read error.
+- **Inert by default.** With no provider, or a provider returning `None`, the cost is one `is_none`
+  check per phase. The hooks are synchronous on purpose: keep I/O off them.
+
+## Detecting a TCP fault in-process
+
+A program that calls `handle_imposter_request` directly receives a placeholder *carrier* response
+when a stub injects a TCP fault, where a socket client would see the connection aborted. Classify it
+with `rift_mock_core::tcp_fault_carrier(&response)`, which returns the canonical fault name or `None`.
+To branch per fault, read the `#[non_exhaustive]` `TcpFaultKind` extension (issue #984). Both are
+also re-exported from `rift_http_proxy`. See
+[Fault injection → Detecting a fault in-process]({{ site.baseurl }}/features/fault-injection/#detecting-a-fault-in-process-embedders).
+Do not classify on the `x-rift-fault` header.
+
+## Observing front-door route dispatches
+
+`RouteObserver` (`rift_http_proxy::front_door`) is called once for each request a route claims, with
+the route id. It is meant for a per-route hit counter (issue #961). Pass it to
+`bind_front_door_with_observer(addr, manager, routes, Some(observer))`. `bind_front_door` is the same
+call without an observer. See
+[Front door → Observing dispatches]({{ site.baseurl }}/features/front-door/#observing-dispatches-embedders).
 
 ## `AdminAuthorizer` — per-request admin authorization
 
@@ -474,6 +579,13 @@ because `classify` calls the router's own parser and matches its route enum exha
 exactly the property a hand-written copy gives up. `SCOPE_HEADER` likewise spares you a copied
 header literal.
 
+The same applies to validating a request body you terminate. If you answer
+`POST /imposters/:port/spaces/:flowId/stubs` yourself, apply
+`rift_http_proxy::admin_api::not_a_stub_reason(&payload) -> Option<String>` (issue #1012). It returns
+the reason the body is not a stub, such as a `{"stub": …}` envelope or no recognised stub field, or
+`None` if the body is acceptable. Render the reason in your own error envelope as a `400`. A private
+copy of the stub-field list goes stale when a field is added, and then rejects valid stubs.
+
 ## Backend errors and annotations
 
 A custom backend signals unavailability by attaching `BackendUnavailable` to a failed operation's
@@ -508,7 +620,9 @@ failed:
 
 Per-request operational metadata travels through a tokio task-local annotation scope:
 `annotate(key: &'static str, value: String)` records a `(key, value)` that a `ResponseDecorator` later
-reads. This is the same mechanism behind the script/behavior error headers — e.g. a script that hits a
+reads. It still arrives when the engine ran the work on `spawn_blocking` (a store with
+`is_blocking() == true`, such as Redis). Before #987, annotations made on that thread were silently
+dropped. This is the same mechanism behind the script/behavior error headers — e.g. a script that hits a
 down flow-store backend records an annotation, and a `ctx.state` call against that backend is
 **fail-loud**: it raises a script error that surfaces to the response rather than silently returning a
 default (see [Scripting → `ctx.state` and `ctx.store`]({{ site.baseurl }}/features/scripting/#ctxstate-and-ctxstore)).

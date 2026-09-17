@@ -49,8 +49,14 @@ script is attached — see the table below.
 
 | Engine | Format | Use Case |
 |:-------|:-------|:---------|
-| **JavaScript** | `inject` response | Mountebank-compatible injection responses |
-| **Rhai** | `_rift.script` | Lightweight fault logic with flow state |
+| **JavaScript** | `inject` response, `decorate`, or `_rift.script` with `"engine": "javascript"` (alias `js`) | Mountebank-compatible injection; the same `ctx` API as Rhai |
+| **Rhai** | `_rift.script` (`"engine": "rhai"`, the default) | Lightweight fault logic with flow state |
+
+Every script surface — `inject` responses and predicates, `decorate`, `shellTransform`, a
+function `wait`, and `_rift.script` — requires `--allowInjection`, exactly as Mountebank gates
+`inject`. Without it, creating the imposter returns `400 invalid injection`. The Lua engine was
+removed; `"engine": "lua"` (or a `.lua` script file) is rejected with an error naming the
+replacement.
 
 ---
 
@@ -190,7 +196,7 @@ ctx.state.clear();
 below for the full reference:
 
 ```rhai
-// No injection (pass through to next response or upstream)
+// No injection
 pass()
 
 // Inject error response
@@ -475,10 +481,14 @@ Available in `respond(ctx)` (and as the return value of a bare-expression script
 | Constructor | Meaning |
 |:------------|:--------|
 | `http(status)` / `http(status, body)` | respond with this status/body; chain `.header(k, v)` for extra headers |
-| `delay(ms)` | inject latency, then respond normally |
+| `delay(ms)` | wait `ms`, then answer `200` with an empty body and an `x-rift-latency-ms` header |
 | `reset()` | reset the connection (transport-level) |
-| `pass()` | respond normally, no injection |
+| `pass()` | answer `200` with an empty body — no injection |
 | *(nothing)* | same as `pass()` |
+
+A `_rift.script` response is script-only: there is no `is` body behind it to fall through to, and
+`pass()` does not advance to the stub's next response or to another stub. Use `http(...)` to shape
+the success response too. Every script response carries `x-rift-script: <engine>`.
 
 `http`'s body is a **value**, not a hand-assembled JSON string: pass a map/array and it is
 JSON-serialized with `Content-Type: application/json` set automatically (unless you set your own
@@ -541,17 +551,11 @@ predicate `inject`, and the `decorate` behavior — all of which run off the asy
 }
 ```
 
-`_rift.scriptEngine.defaultEngine` sets which engine runs a `_rift.script` block when the block
-itself omits `engine`: `"rhai"` (default) or `"javascript"`. A per-script `engine` field
-always takes precedence over `defaultEngine`.
-
-```json
-{
-  "_rift": {
-    "scriptEngine": { "defaultEngine": "javascript" }
-  }
-}
-```
+A `_rift.script` block that omits `engine` runs on the engine inferred from its `file:`
+extension (`.rhai` -> `rhai`, `.js` -> `javascript`), and otherwise on **Rhai**. Set `engine` on
+each JavaScript block explicitly. `_rift.scriptEngine.defaultEngine` is accepted and round-trips
+through `GET /imposters`, but the current engine does not apply it — an inline block without
+`engine` runs on Rhai whatever it says.
 
 ## Flow-Store Error Semantics
 

@@ -244,16 +244,21 @@ Transform proxied responses before recording:
 
 ### addWaitBehavior
 
-Add latency to proxied responses:
+Record the upstream's observed latency on the generated stub, so replay reproduces it as a `wait`
+behavior. It is a boolean (default `false`), as in Mountebank, and does not delay the proxied
+response itself:
 
 ```json
 {
   "proxy": {
     "to": "https://api.example.com",
-    "addWaitBehavior": 100
+    "addWaitBehavior": true
   }
 }
 ```
+
+Like `predicateGenerators`, enabling it causes a stub to be generated from the proxied response. The
+live proxied response also carries an `x-rift-proxy-latency: <ms>` header when it is set.
 
 ---
 
@@ -269,6 +274,12 @@ Add latency to proxied responses:
 }
 ```
 
+The origin's certificate is verified against the operating system trust store, and the connection
+offers `http/1.1` only. A TLS failure on this hop (an untrusted issuer, a name mismatch) answers the
+client `502` with an `x-rift-proxy-error: true` header and a `Proxy error: …` body naming the
+upstream. The TLS cause itself, e.g. `invalid peer certificate: UnknownIssuer`, goes to the server
+log only.
+
 ### Trusting a Private CA
 
 Rift verifies outbound TLS against the operating system trust store. An origin issued by an
@@ -280,8 +291,12 @@ rift --upstream-ca-file /etc/rift/corp-ca.pem
 RIFT_UPSTREAM_CA_FILE=/etc/rift/corp-ca.pem rift
 ```
 
-The anchor is **appended** to the OS store, so public origins keep working. This applies to every
-outbound call Rift makes: `proxy` stub upstreams and `--configfile https://…` alike.
+The anchor is **appended** to the OS store, so public origins keep working. The file may hold
+several certificates, and a missing or unusable one stops startup. This applies to every outbound
+call Rift makes: `proxy` stub upstreams, `--configfile https://…`, and (on the standalone binary) the
+intercept listener's WebSocket passthrough. Embedders pass `upstreamCaFile` / `upstreamCaPem` to
+`rift_serve_admin` instead. For a worked example, see
+[TLS/HTTPS → Trusting a Private CA]({{ site.baseurl }}/features/tls/#trusting-a-private-ca).
 
 > `SSL_CERT_FILE` / `SSL_CERT_DIR` are also honoured, but they **replace** the trust store rather
 > than adding to it — pointing `SSL_CERT_FILE` at a lone private CA silently drops every public
@@ -290,14 +305,16 @@ outbound call Rift makes: `proxy` stub upstreams and `--configfile https://…` 
 ### Skipping Verification (development only)
 
 ```bash
-rift --upstream-tls-skip-verify
+rift --upstream-tls-skip-verify      # or RIFT_UPSTREAM_TLS_SKIP_VERIFY=true
 ```
 
 Accepts any certificate and logs a warning. Prefer `--upstream-ca-file`: a recording proxy with
 verification disabled will faithfully record MITM'd traffic.
 
-> `key`, `cert` and `ciphers` on a `proxy` response are accepted for Mountebank compatibility and
-> **are not honoured** — Rift's outbound trust is process-wide, configured by the two flags above.
+> `key`, `cert`, `passphrase` and `ciphers` on a `proxy` response are accepted for Mountebank
+> compatibility and **are not honoured** — they are dropped on load and do not appear when the
+> imposter is read back. Rift cannot present a client certificate to an upstream, and its outbound
+> trust is process-wide, configured by the two flags above.
 
 ---
 

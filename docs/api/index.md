@@ -64,7 +64,12 @@ calls, so a client may rely on it — for example when diffing two snapshots of 
 Earlier releases followed an internal hash map order, which could vary between calls (#713).
 
 **Query Parameters:**
-- `replayable` (boolean) - Include full stub details for export
+- `replayable` (boolean) - Return each imposter's full config, for export
+- `removeProxies` (boolean, with `replayable`) - Strip proxy responses from the export
+- `list` (boolean) - Return a shorter entry per imposter: `protocol`, `port`, `name`,
+  `numberOfRequests`, `_links`
+
+Without either flag each entry is the summary shown below, plus `_links`.
 
 **Response:**
 ```json
@@ -119,7 +124,10 @@ Create a new imposter.
 }
 ```
 
-**Response:** `201 Created`
+**Response:** `201 Created` with the imposter detail (as `GET /imposters/{port}`). `400` for invalid
+JSON or an invalid imposter. That includes a single-valued header object (`proxy.injectHeaders`,
+`_rift.fault.error.headers`) naming one header twice in different cases (#1050), and a scripted
+config without `--allowInjection` (`400 invalid injection`).
 ```json
 {
   "port": 4545,
@@ -227,14 +235,14 @@ for any in-flight response. So once `DELETE` returns you can immediately re-`POS
 same port without racing the old one: a pooled client connection gets a clean close and reconnects to
 the new imposter, never the deleted one's state.
 
-**Query Parameters:**
-- `replayable` (boolean) - Return imposter config before deletion
+The handler reads no query parameters.
 
 With `--datadir`, the imposter's `<datadir>/<port>.json` is removed first. If that fails, the call
 returns `503` naming the file and the imposter is **not** deleted: it keeps serving, and deleting it
 anyway would bring it back on the next restart.
 
-**Response:** `200 OK`
+**Response:** `200 OK` with a snapshot of the deleted imposter (`numberOfRequests` `0`, `requests`
+empty); `404` if no imposter is on that port.
 ```json
 {
   "port": 4545,
@@ -276,7 +284,16 @@ curl -X DELETE http://localhost:2525/imposters
 
 ### GET /imposters/{port}/stubs
 
-List all stubs for an imposter (with HATEOAS `_links`).
+List all stubs for an imposter: `{"stubs": [...]}`, each stub with its HATEOAS `_links`. `404` if
+there is no imposter on that port.
+
+---
+
+### PUT /imposters/{port}/stubs
+
+Replace every stub on the imposter. **Request Body:** `{"stubs": [ ... ]}`. **Response:** `200 OK`
+with the imposter detail. `400` for invalid JSON, an invalid stub, or a scripted stub without
+`--allowInjection`.
 
 ---
 
@@ -295,7 +312,9 @@ Add a stub to an existing imposter.
 }
 ```
 
-**Response:** `200 OK`
+`index` is optional (it appends when omitted); an out-of-range index is a `400`.
+
+**Response:** `200 OK` with the imposter detail.
 
 **Example:**
 ```bash
@@ -313,13 +332,14 @@ curl -X POST http://localhost:2525/imposters/4545/stubs \
 
 ### GET /imposters/{port}/stubs/{index}
 
-Get a single stub by its array index.
+Get a single stub by its array index, with its `_links`.
 
 ---
 
 ### PUT /imposters/{port}/stubs/{index}
 
-Replace a stub at a specific index.
+Replace a stub at a specific index. The body is the bare stub, with no `{"stub": …}` envelope.
+**Response:** `200 OK` with the imposter detail.
 
 **Request Body:**
 ```json
@@ -333,7 +353,7 @@ Replace a stub at a specific index.
 
 ### DELETE /imposters/{port}/stubs/{index}
 
-Delete a stub at a specific index.
+Delete a stub at a specific index. **Response:** `200 OK` with the imposter detail.
 
 ---
 
@@ -344,9 +364,12 @@ by that id instead of by positional index, so concurrent edits don't shift the t
 
 | Method | Path | Action |
 |:-------|:-----|:-------|
-| `GET` | `/imposters/{port}/stubs/by-id/{id}` | Get the stub with this id |
+| `GET` | `/imposters/{port}/stubs/by-id/{id}` | Get the stub with this id (the bare stub JSON) |
 | `PUT` | `/imposters/{port}/stubs/by-id/{id}` | Replace the stub with this id (position preserved) |
 | `DELETE` | `/imposters/{port}/stubs/by-id/{id}` | Delete the stub with this id |
+
+`PUT` takes the bare stub. `PUT` and `DELETE` answer `200` with the imposter detail. An unknown id
+is a `404`.
 
 ```bash
 curl http://localhost:2525/imposters/4545/stubs/by-id/6f1c...e2
@@ -363,6 +386,8 @@ Re-enable a disabled imposter.
 ### POST /imposters/{port}/disable
 
 Disable an imposter — it stops matching stubs and returns a default response — without deleting it.
+
+Both answer `200` with `{"message": "Imposter enabled"}` / `{"message": "Imposter disabled"}`.
 
 ```bash
 curl -X POST http://localhost:2525/imposters/4545/disable
@@ -388,7 +413,12 @@ Get recorded requests (if `recordRequests: true`). Also available under the alia
 Multiple `match` clauses are AND-ed together. `since` is applied first, then the `match` clauses.
 
 **Response:** a JSON array of recorded requests. Each element carries `requestFrom` (the client
-`ip:port`); `body` is present only when the request had one.
+`ip:port`); `body` is present only when the request had one. `status` and `latencyMs` (issue #940)
+give the status sent back and how long the imposter took to produce it, in whole milliseconds. They
+are either both present or both absent. Absent means "not recorded", never `0`: the `X-Rift-Debug`
+path, a request that errored before responding, and a custom journal without stable indices all
+leave them out. `latencyMs: 0` is a normal reading for a stub served from memory. `node` is present
+only when a clustered embedder's journal sets it; single-node Rift never does.
 ```json
 [
   {
@@ -401,6 +431,8 @@ Multiple `match` clauses are AND-ed together. `since` is applied first, then the
       "user-agent": "curl/7.88.0"
     },
     "timestamp": "2024-01-15T10:30:00.000Z",
+    "status": 404,
+    "latencyMs": 0,
     "matchOutcome": {
       "matched": false,
       "tried": [
@@ -623,16 +655,19 @@ transition via `newScenarioState`. State is partitioned per flow id.
 ### GET /imposters/{port}/scenarios
 
 List scenario states. Accepts an optional `?flowId=<id>` query parameter (defaults to the imposter port).
+**Response:** `{"flowId", "scenarios": [{"name", "state"}]}`.
 
 ### PUT /imposters/{port}/scenarios/{name}/state
 
 Arrange a scenario's state directly.
 
-**Request Body:** `{ "state": "AWAITING_PAYMENT", "flowId": "order-42" }` (`flowId` optional)
+**Request Body:** `{ "state": "AWAITING_PAYMENT", "flowId": "order-42" }` (`flowId` optional; a
+missing `state` is a `400`). **Response:** `{"flowId", "name", "state"}`.
 
 ### POST /imposters/{port}/scenarios/reset
 
 Reset scenarios. **Request Body:** `{ "flowId": "order-42" }` (optional; omit to reset the default flow).
+**Response:** `{"flowId", "reset": true}`.
 
 ---
 
@@ -642,19 +677,27 @@ A "space" isolates stubs and state to a correlation id (`flowId`), so parallel t
 
 ### POST /imposters/{port}/spaces/{flowId}/stubs
 
-Add a stub scoped to this space.
+Add a stub scoped to this space. The body is the **bare stub**. This differs from
+`POST /imposters/{port}/stubs`, which takes a `{"stub": …}` envelope. **Response:** `201 Created`
+with `{"space", "stubs"}`.
+
+A body that has none of the recognised stub fields is refused with `400` (#932). Before that fix it
+created a stub with no predicates, which matched everything in the space. A body with a `stub` key
+gets a message that points to the envelope mistake. `{}` and `{"predicates": []}` are still
+accepted as a space-wide default.
 
 ### GET /imposters/{port}/spaces/{flowId}/stubs
 
-List this space's stubs.
+List this space's stubs: `{"space", "stubs"}`.
 
 ### GET /imposters/{port}/spaces/{flowId}
 
-Inspect the space — its stubs, scenario state, and request count.
+Inspect the space: `{"space", "stubs", "scenarios": [{"name", "state"}], "numberOfRequests"}`.
 
 ### DELETE /imposters/{port}/spaces/{flowId}
 
 Tear down the space, removing its scoped stubs, recorded requests, and scenario state.
+**Response:** `{"space", "tornDown": true}`.
 
 ---
 
@@ -665,9 +708,38 @@ inspect and arrange it directly.
 
 | Method | Path | Action |
 |:-------|:-----|:-------|
-| `GET` | `/admin/imposters/{port}/flow-state/{flow_id}/{key}` | Read a value (404 if absent) |
-| `PUT` | `/admin/imposters/{port}/flow-state/{flow_id}/{key}` | Set a value — body `{ "value": <any JSON> }` |
-| `DELETE` | `/admin/imposters/{port}/flow-state/{flow_id}/{key}` | Delete a key |
+| `GET` | `/admin/imposters/{port}/flow-state/{flow_id}/{key}` | Read a value: `{"flowId","key","value"}`, or `404` if absent |
+| `PUT` | `/admin/imposters/{port}/flow-state/{flow_id}/{key}` | Set a value. Body `{ "value": <any JSON> }` (a missing `value` is a `400`); returns `{"flowId","key","value"}` |
+| `DELETE` | `/admin/imposters/{port}/flow-state/{flow_id}/{key}` | Delete a key: `{"flowId","key","deleted":true}` |
+| `DELETE` | `/admin/imposters/{port}/flow-state/{flow_id}` | Delete every key under `flow_id` (issue #530). Idempotent: `{"flowId","cleared":true}` |
+
+Each route answers `404` for an unknown imposter, and returns the backend-unavailable `503` when
+the flow store fails.
+
+---
+
+## Intercept proxy
+
+These routes exist only when the server was built with an intercept control. The `rift` binary
+always has one, and so does an embedded `rift_serve_admin`. Without one, every `/intercept*` path
+returns `404`. The request and rule schemas, CA options and authentication are documented in
+[Intercept proxy]({{ site.baseurl }}/features/intercept-proxy/#runtime-lifecycle-admin-api).
+Authorization actions are `intercept.read` / `intercept.write`.
+
+| Method | Path | Success | Errors |
+|:-------|:-----|:--------|:-------|
+| `POST` | `/intercept` | `201` + `{"interceptPort","interceptUrl"}` (plus `caCertPem`/`caKeyPem` with `returnCaKey`). An empty body or `{}` means defaults. The body may seed `rules`. | `400` bad options, CA or bind; `400 invalid injection` for a scripted seeded rule without `--allowInjection`; `403` off-host with no `auth` under `--require-admin-auth`; `409` already running; `429` seeded rules over capacity |
+| `GET` | `/intercept` | `200` + `{"interceptPort","interceptUrl"}` | `404` not running |
+| `DELETE` | `/intercept` | `204`, idempotent. Drops rules and the CA. | — |
+| `POST` | `/intercept/rules` | `201` + the added rules as an array. The body is one rule object or an array of rules. | `400` bad JSON or scripted rule; `404` not running; `429` rule store full |
+| `GET` | `/intercept/rules` | `200` + array of rules | `404` not running |
+| `DELETE` | `/intercept/rules` | `200` + `{"deleted": N}` | `404` not running |
+| `GET` | `/intercept/ca.pem` | `200`, `application/x-pem-file` | `404` not running |
+| `GET` | `/intercept/truststore.p12`, `/intercept/truststore.jks` | `200`, binary truststore (`?password=`, default `changeit`) | `404` not running; `500` export failure |
+
+A serve rule's `body` may be any JSON value (#934), and a serve rule accepts the Mountebank
+`statusCode` and `headers` spellings (#938). The
+[rule schema]({{ site.baseurl }}/features/intercept-proxy/#configuring-rules-admin-api) is canonical.
 
 ---
 
@@ -715,7 +787,8 @@ Get current configuration.
 **Response:**
 ```json
 {
-  "version": "0.17.0",
+  "version": "X.Y.Z",
+  "commit": "<sha>",
   "options": {
     "port": 2525,
     "allowInjection": true,
@@ -723,16 +796,27 @@ Get current configuration.
     "ipWhitelist": ["*"]
   },
   "serveOptions": [
-    "host", "port", "apiKey", "metricsPort",
-    "configFile", "config", "allowInjection", "requireAdminAuth"
-  ]
+    "host", "port", "apiKey", "metricsPort", "configFile", "noParse", "config",
+    "allowInjection", "requireAdminAuth", "upstreamCaFile", "upstreamCaPem",
+    "upstreamTlsSkipVerify"
+  ],
+  "process": {
+    "nodeVersion": "N/A (Rust)", "architecture": "aarch64", "platform": "macos",
+    "rss": 0, "heapTotal": 0, "heapUsed": 0, "uptime": 0, "cwd": "/srv/rift"
+  }
 }
 ```
+
+`commit` is `null` unless the build was stamped with one. `process` mirrors Mountebank's shape: only
+`architecture`, `platform` and `cwd` carry real values.
 
 Field notes (issue #879 — these were previously hardcoded literals):
 
 - **`port`** is the port the admin plane actually bound, so a `--port 0` (ephemeral) server reports
-  the real one rather than the `2525` default.
+  the real one rather than the `2525` default. An embedder that fronts the admin API with its own
+  public listener can override it with `AdminApiServer::with_reported_admin_port` /
+  `ServerBuilder::reported_admin_port` (issue #1135), so clients building URLs from `options.port`
+  get the public port. See [Embeddable Server]({{ site.baseurl }}/embedding/server/).
 - **`localOnly`** reports whether **`--local-only` was supplied**, not whether the admin listener
   happened to bind loopback. The distinction matters: `--host 127.0.0.1` narrows only the admin
   plane, while `/metrics` and every imposter port stay on `0.0.0.0` — so reporting `true` there
@@ -741,8 +825,8 @@ Field notes (issue #879 — these were previously hardcoded literals):
   **never enforced**, so every address may connect; see the
   [CLI reference]({{ site.baseurl }}/configuration/cli/#--ip-whitelist-does-not-filter-anything).
 
-`serveOptions` (since 0.17.0, issue #877) lists the keys the embedded serve-options document
-accepts, so a consumer can feature-detect an option before sending it. **Absence of the key means an
+`serveOptions` (since 0.17.0, issue #877; 0.17.0 listed the first eight keys without `noParse`)
+lists the keys the embedded serve-options document accepts, so a consumer can feature-detect an option before sending it. **Absence of the key means an
 engine too old to report capabilities** — treat every option as unsupported rather than assuming a
 rejection you will never receive. It is the same list `rift_build_info().serveOptions` publishes over
 the C-ABI, and is a sibling of `options` rather than a member of it: `options` is the
@@ -752,7 +836,8 @@ Mountebank-compatible shape and is unchanged.
 that door only exists for an embedded host going through `rift_serve_admin`. The list is still a
 faithful capability signal for the running release, but a process-mode consumer sets the equivalent
 lever on the command line instead: `requireAdminAuth` → `--require-admin-auth`, `allowInjection` →
-`--allow-injection`, `configFile` → `--configfile`, `apiKey` → `--api-key`, and so on.
+`--allow-injection`, `configFile` → `--configfile`, `noParse` → `--no-parse`, `apiKey` → `--api-key`,
+and so on.
 
 ---
 
@@ -760,11 +845,15 @@ lever on the command line instead: `requireAdminAuth` → `--require-admin-auth`
 
 ### GET /logs
 
-Get server logs (if logging enabled).
+Mountebank-compatible stub. Rift writes its logs through `tracing` (stderr), not to an in-memory
+buffer, so this always returns an empty list:
 
-**Query Parameters:**
-- `startIndex` (number) - Start from this log entry
-- `endIndex` (number) - End at this log entry
+```json
+{ "logs": [], "_links": { "self": { "href": "/logs?startIndex=0&endIndex=100" } } }
+```
+
+**Query Parameters:** `startIndex` (default `0`) and `endIndex` (default `100`) are parsed and only
+echoed in `_links.self`.
 
 ---
 

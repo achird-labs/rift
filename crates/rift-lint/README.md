@@ -1,15 +1,18 @@
 # rift-lint
 
-Configuration linter for Rift HTTP Proxy - validates imposter configuration files for Mountebank compatibility.
+Configuration linter for [Rift](https://github.com/achird-labs/rift) — validates imposter
+configuration files (JSON or YAML) before the server loads them.
 
 ## Features
 
-- **Port conflict detection** across multiple imposter files
-- **Header validation** - ensures values are strings (not arrays, numbers, booleans)
+- **Port conflict detection** within a file and across multiple imposter files
+- **EJS rendering** with the same preprocessor the server uses, so a templated config is linted as it will load
+- **Header validation** - values must be strings; duplicate header names are reported
 - **Predicate validation** - JSONPath selectors, regex patterns, operators
 - **JavaScript validation** - syntax checking for wait/decorate behaviors
-- **Response validation** - status codes, proxy URLs, required fields
-- **Auto-fix** capability for common issues
+- **Response validation** - status codes, proxy URLs, required fields, behaviors as the engine merges them
+- **Number fidelity** - warns when a JSON number literal would not be served as written
+- **Auto-fix** capability for common issues (refused when the rewrite would lose information)
 
 ## Installation
 
@@ -56,7 +59,7 @@ rift-lint = { path = "../rift-lint", default-features = false }
 # Lint a directory of imposters
 rift-lint ./imposters/
 
-# Lint a single file
+# Lint a single file (JSON or YAML)
 rift-lint ./imposters/my-service.json
 
 # Show only errors (hide warnings)
@@ -70,6 +73,9 @@ rift-lint ./imposters/ --strict
 
 # Auto-fix issues where possible
 rift-lint ./imposters/ --fix
+
+# Lint verbatim, without rendering EJS tags (matches `rift --no-parse`)
+rift-lint ./imposters/ --no-parse
 ```
 
 ### Options
@@ -80,13 +86,13 @@ rift-lint ./imposters/ --fix
 | `--fix` | `-f` | Auto-fix issues | `false` |
 | `--output` | `-o` | Output format: `text`, `json` | `text` |
 | `--errors-only` | `-e` | Hide warnings | `false` |
-| `--verbose` | `-v` | Verbose output | `false` |
 | `--strict` | `-s` | Warnings become errors | `false` |
+| `--no-parse` | | Skip EJS rendering (alias `--noParse`) | `false` |
 
 ## Library Usage
 
 ```rust
-use rift_lint::{lint_file, lint_json, lint_value, LintOptions};
+use rift_lint::{lint_directory, lint_file, lint_json, lint_value, lint_yaml, LintOptions};
 use std::path::Path;
 
 // Lint a file
@@ -100,6 +106,10 @@ if result.has_errors() {
 // Lint a JSON string (useful for in-memory validation)
 let json = r#"{"port": 4545, "protocol": "http", "stubs": []}"#;
 let result = lint_json(json, "inline", &LintOptions::default());
+
+// Lint a YAML string, or every imposter file in a directory
+let result = lint_yaml("port: 4545\nprotocol: http\n", "inline.yaml", &LintOptions::default());
+let result = lint_directory(Path::new("imposters/"), &LintOptions::default());
 
 // Lint already-parsed JSON
 let value: serde_json::Value = serde_json::from_str(json).unwrap();
@@ -117,15 +127,15 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | E003 | Missing required field |
 | E004 | Invalid protocol |
 | E005 | Port out of range, or `0` (auto-assigned by the engine; a config file must pin its ports) |
-| E006-E033 | Various structural errors |
-| E034 | Multiple predicate operations in one predicate |
+| E006-E048 | Structural errors in predicates, responses, behaviors, scripts and headers |
+| E049 | The engine would refuse to preprocess the file (unsupported EJS tag, unreadable include) |
 
 ### Warnings
 
 | Code | Description |
 |------|-------------|
 | W001 | Privileged port |
-| W002-W009 | Various potential issues |
+| W002-W013 | Potential issues, including lossy number literals (W012) and unset EJS env vars (W013) |
 
 ### Info
 
@@ -133,6 +143,10 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 |------|-------------|
 | I001 | Mountebank slice notation in JSONPath |
 | I002 | Proxy targets localhost |
+| I003 | Response uses the Rift `_rift` extension |
+
+The full table, with an example for every code, is in
+[Configuration Linting](https://achird-labs.github.io/rift/features/linting/).
 
 ## Feature Flags
 

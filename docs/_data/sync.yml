@@ -16,7 +16,7 @@
 #      --merges returned 3 commits where the real answer was 50)
 #   2. Update the affected pages.
 #   3. Bump this file AND the version in _config.yml footer_content in the same PR.
-release: v0.17.0
-commit: 4318cdb9069a25bf13cefc43a711ceb824d5d655
-date: 2026-08-04
+release: v0.18.0
+commit: 34a42cb64f3da6e03710c620fa75dd217a41cba9
+date: 2026-09-17
 tracking_issue: 280

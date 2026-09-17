@@ -41,24 +41,24 @@ much of the gap is the engine and how much is the hardware:
 
 | Workload | Apple M4 laptop<br><sub>Mountebank → Rift</sub> | AMD EPYC 9V74, 16 vCPU<br><sub>Mountebank → Rift</sub> |
 |:---------|:--------------------------|:----------------------------|
-| Simple static stub | 8,898 → 214,818 RPS (**24x**) | 5,982 → 324,952 RPS (**54x**) |
-| Deep path match (310 stubs) | 1,344 → 209,523 RPS (**156x**) | 542 → 322,530 RPS (**595x**) |
-| Complex AND/OR predicates | 4,703 → 191,987 RPS (**41x**) | 1,814 → 259,548 RPS (**143x**) |
-| JSON body equals | 7,611 → 199,670 RPS (**26x**) | 2,730 → 294,294 RPS (**108x**) |
-| JSONPath predicate | 4,312 → 199,404 RPS (**46x**) | 1,921 → 304,796 RPS (**159x**) |
-| XPath predicate | 5,542 → 187,869 RPS (**34x**) | 1,966 → 247,897 RPS (**126x**) |
-| Regex path (100 patterns) | 112 → 207,024 RPS (**1,857x**) | 52 → 317,851 RPS (**6,160x**) |
+| Static stub (first match) | 7,240 → 209,192 RPS (**29x**) | 5,728 → 323,408 RPS (**57x**) |
+| Deep path match (310 stubs) | 1,369 → 202,410 RPS (**148x**) | 542 → 322,530 RPS (**595x**) |
+| Complex AND/OR predicates | 4,884 → 185,867 RPS (**38x**) | 1,814 → 259,548 RPS (**143x**) |
+| JSON body equals | 7,996 → 194,017 RPS (**24x**) | 2,730 → 294,294 RPS (**108x**) |
+| JSONPath predicate | 4,586 → 190,329 RPS (**42x**) | 1,921 → 304,796 RPS (**159x**) |
+| XPath predicate | 5,787 → 181,012 RPS (**31x**) | 1,966 → 247,897 RPS (**126x**) |
+| Regex path (100 patterns) | 110 → 201,067 RPS (**1,821x**) | 52 → 317,851 RPS (**6,160x**) |
 
-Read the two columns together, not separately. Rift gets **faster** with more cores (215k → 325k);
-Mountebank gets **slower** (8,898 → 5,982), because it is single-threaded and the server's
+Read the two columns together, not separately. Rift gets **faster** with more cores (209k → 323k);
+Mountebank gets **slower** (7,240 → 5,728), because it is single-threaded and the server's
 individual cores are slower than the laptop's. So the EPYC multipliers are inflated at both ends —
-the M4 column is the more conservative read, and it is still 24x–1,857x.
+the M4 column is the more conservative read, and it is still 24x–1,821x.
 
-<sub>Measured 2026-07-20 — Rift built from `master` (`924cf73`) vs Mountebank `2.9.1`, native
-processes (no Docker), `oha` at 50 keep-alive connections, 20s/scenario after warmup, each engine
-run alone on the same machine. Each figure is the median of 3 repetitions; per-scenario spread was
-≤12% on the M4 (a laptop thermally throttles over a 30-minute run — both engines lost ~7% between
-the first and last repetition) and ≤5% on EPYC. Throughput scales with matching complexity: Rift
+<sub>M4 measured 2026-09-17 with Rift `master` (`34a42cb`); EPYC measured 2026-07-20 with Rift
+`master` (`924cf73`); Mountebank `2.9.1` on both. Native processes (no Docker), `oha` at 50
+keep-alive connections, 20s/scenario after warmup, each engine run alone on the same machine. Each
+figure is the median of 3 repetitions; per-scenario spread was ≤12.5% on the M4 (a laptop is a
+noisy host) and ≤5% on EPYC. Compare columns within a host, not across hosts. Throughput scales with matching complexity: Rift
 stays flat while Mountebank's per-request cost grows with stub count and predicate type. Full
 methodology and all 13 scenarios: [`tests/benchmark`](tests/benchmark/). Your numbers will vary
 with hardware and config.</sub>
@@ -143,10 +143,10 @@ data does *not* support: [docs/comparisons/microcks](docs/comparisons/microcks.m
 
 Everything Mountebank does:
 
-- **Imposters** - HTTP/HTTPS mock servers
+- **Imposters** - HTTP/HTTPS mock servers, including mutual TLS (`mutualAuth`, `rejectUnauthorized`, `ca`)
 - **Predicates** - equals, contains, matches, exists, jsonpath, xpath, and, or, not
 - **Responses** - Static, proxy, injection
-- **Behaviors** - wait, decorate, copy, lookup
+- **Behaviors** - wait, decorate, copy, lookup, shellTransform
 - **Proxy Mode** - Record and replay
 
 ...and a good deal it doesn't:
@@ -155,12 +155,14 @@ Everything Mountebank does:
 |:--|:--|
 | [Fault Injection](docs/features/fault-injection.md) | Probabilistic latency, error, and TCP faults — chaos testing without a sidecar |
 | [Scripting](docs/features/scripting.md) | Rhai and JavaScript engines for dynamic responses, with a `script check`/`script run` CLI |
+| [Response Templates](docs/features/date-templates.md) | Date tokens and the `_rift.templated` `{{ }}` grammar — request values, UUIDs, flow state — without a script engine |
 | [Scenarios (FSM)](docs/features/scenarios.md) | Declarative state machines instead of hand-rolled stateful injection |
 | [Flow State](docs/features/flow-state.md) | Per-flow key/value store, in-memory or Redis-backed |
 | [Correlated Isolation](docs/features/spaces.md) | Per-flow stub and state partitioning, so parallel tests don't collide |
 | [Front Door](docs/features/front-door.md) | One listener routing to many imposters by host, path, header or method |
 | [Single-Port Gateway](docs/features/gateway.md) | Reach every imposter through the admin port |
-| [Intercept Proxy](docs/features/intercept-proxy.md) | TLS-MITM a hard-coded external HTTPS host — no mitmproxy needed |
+| [Intercept Proxy](docs/features/intercept-proxy.md) | TLS-MITM a hard-coded external HTTPS host over HTTP/1.1 or HTTP/2, with WebSocket upgrades relayed to the real origin — no mitmproxy needed |
+| [TLS & Mutual TLS](docs/features/tls.md) | HTTPS imposters that require and validate client certificates, and a private-CA trust store for proxying to internal origins |
 | [Stub Analysis](docs/features/stub-analysis.md) | Overlap and conflict detection before a stub silently shadows another |
 | [Debug Mode](docs/features/debug-mode.md) | `X-Rift-Debug` explains why a request matched, or didn't |
 | [Hot Reload](docs/features/hot-reload.md) | Re-read config without dropping the process |
@@ -408,18 +410,20 @@ hello-worlds, transport matrix and version-compatibility table.
 - [Imposters](https://achird-labs.github.io/rift/mountebank/imposters) - Mock server configuration
 - [Predicates](https://achird-labs.github.io/rift/mountebank/predicates) - Request matching
 - [Responses](https://achird-labs.github.io/rift/mountebank/responses) - Response configuration
-- [Behaviors](https://achird-labs.github.io/rift/mountebank/behaviors) - wait, decorate, copy
+- [Behaviors](https://achird-labs.github.io/rift/mountebank/behaviors) - wait, decorate, copy, lookup, shellTransform
 - [Proxy Mode](https://achird-labs.github.io/rift/mountebank/proxy) - Record and replay
 
 ### Configuration
 - [Mountebank Format](https://achird-labs.github.io/rift/configuration/mountebank) - JSON configuration
-- [Native Rift Format](https://achird-labs.github.io/rift/configuration/native) - YAML for advanced features
+- [Rift Extensions](https://achird-labs.github.io/rift/configuration/native) - The `_rift` namespace and other Rift-specific keys
 - [CLI Reference](https://achird-labs.github.io/rift/configuration/cli) - Command-line options
 
 ### Features
 - [Fault Injection](https://achird-labs.github.io/rift/features/fault-injection) - Chaos engineering
 - [Scripting](https://achird-labs.github.io/rift/features/scripting) - Rhai, JavaScript
-- [TLS/HTTPS](https://achird-labs.github.io/rift/features/tls) - Secure connections
+- [TLS/HTTPS](https://achird-labs.github.io/rift/features/tls) - HTTPS imposters, mutual TLS, outbound trust for private CAs
+- [Intercept Proxy](https://achird-labs.github.io/rift/features/intercept-proxy) - TLS-MITM for hosts you cannot repoint (HTTP/1.1, HTTP/2, WebSocket passthrough)
+- [Front Door](https://achird-labs.github.io/rift/features/front-door) - One listener routing to many imposters
 - [Metrics](https://achird-labs.github.io/rift/features/metrics) - Prometheus integration
 - [TUI](https://achird-labs.github.io/rift/features/tui) - Interactive terminal interface
 
@@ -430,6 +434,7 @@ hello-worlds, transport matrix and version-compatibility table.
 ### Reference
 - [REST API](https://achird-labs.github.io/rift/api/) - Admin API reference
 - [Performance](https://achird-labs.github.io/rift/performance/) - Benchmarks
+- [Rift vs WireMock](https://achird-labs.github.io/rift/comparisons/wiremock/) and [Rift vs Microcks](https://achird-labs.github.io/rift/comparisons/microcks/) - Where each one wins
 
 ---
 
@@ -565,7 +570,8 @@ Using Rift somewhere? Open a PR to add it here.
 
 ## Contributing
 
-Contributions welcome! Please read our contributing guidelines and submit PRs.
+Contributions welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first — it covers where things live,
+the checks CI runs, and the kind of issue that helps most.
 
 ---
 

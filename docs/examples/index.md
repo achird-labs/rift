@@ -358,6 +358,23 @@ With custom certificate:
 }
 ```
 
+Requiring and validating a client certificate (mutual TLS) against your own CA:
+
+```json
+{
+  "port": 4551,
+  "protocol": "https",
+  "mutualAuth": true,
+  "rejectUnauthorized": true,
+  "ca": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+  "stubs": [...]
+}
+```
+
+A client that presents no certificate, or one that does not chain to `ca`, fails the handshake. See
+[TLS/HTTPS]({{ site.baseurl }}/features/tls/#mutual-tls-mtls) for the other combinations and a
+walkthrough with `curl`.
+
 ---
 
 ## Complete Multi-Service Setup

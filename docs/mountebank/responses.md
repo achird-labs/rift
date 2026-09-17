@@ -51,13 +51,31 @@ Forward requests to a real server and optionally record responses:
 
 ### inject (Dynamic Response)
 
-Generate responses with JavaScript:
+Generate responses with JavaScript (requires `--allowInjection`):
 
 ```json
 {
   "inject": "function(request, state, logger) { return { statusCode: 200, body: 'Request path: ' + request.path }; }"
 }
 ```
+
+### fault (Connection Fault)
+
+Break the connection instead of answering, as Mountebank's `fault` response does:
+
+```json
+{ "fault": "CONNECTION_RESET_BY_PEER" }
+```
+
+`CONNECTION_RESET_BY_PEER` and `RANDOM_DATA_THEN_CLOSE` are Mountebank's names; Rift also accepts
+`EMPTY_RESPONSE`, `MALFORMED_RESPONSE_CHUNK` and the short aliases listed in
+[Fault Injection]({{ site.baseurl }}/features/fault-injection/). An unrecognised name is served as a
+`500` with an `Unknown fault` body.
+
+### Where behaviors and `_rift` apply
+
+`_behaviors`/`behaviors` and a response-level `_rift` block are read on an `is` response (and the
+flat form below). On a `proxy`, `inject` or `fault` response they are ignored.
 
 ---
 
@@ -117,6 +135,13 @@ automatic `Content-Type`.
 ```
 
 **JSON body (auto-serialized):**
+
+A JSON body is re-serialized, so its numbers are printed from their parsed value. Rift parses floats
+with correct rounding, so `{"n": 7e23}` is served as `7e23` and a 17-digit double such as
+`0.10018513143495411` keeps its digits. Only a number wider than a 64-bit integer, or with more
+significant digits than a double holds, is served rounded; send such a value as a string body if
+it must be exact.
+
 ```json
 {
   "is": {
@@ -193,7 +218,7 @@ substituted text*, and logs a `rift::template` warning naming what it removed. T
 carries `port`, `stub` (the stub's index) and `stub_id` alongside `removed`, so on a server
 running many imposters you can grep straight back to the stub that produced it. A horizontal tab and
 any non-ASCII character are legal in a header value and are kept byte-exact. The same repair covers
-every other way substituted text reaches a header: the `{{ }}` templating grammar and the text the
+every other way substituted text reaches a header: the `{% raw %}{{ }}{% endraw %}` templating grammar and the text the
 `copy` and `lookup` behaviors splice in.
 
 The repair is deliberately narrow: it covers only the substituted value, never the literal text you
@@ -485,7 +510,12 @@ Control how recorded stubs are created:
 }
 ```
 
-### Adding Behaviors to Proxied Responses
+### Adding Behaviors to Recorded Stubs
+
+`addDecorateBehavior` is copied onto the stubs a `proxyOnce` or `proxyAlways` recording saves, and
+`addWaitBehavior: true` gives each saved response a `wait` equal to the upstream's observed latency,
+so both take effect when the recorded stubs are replayed. See
+[Proxy Mode]({{ site.baseurl }}/mountebank/proxy/).
 
 ```json
 {
@@ -500,7 +530,8 @@ Control how recorded stubs are created:
 
 ## Injection Responses
 
-Generate dynamic responses using JavaScript:
+Generate dynamic responses using JavaScript. An `inject` response requires the server to be started
+with `--allowInjection`; without it the imposter is refused.
 
 ```json
 {
@@ -523,9 +554,13 @@ Available properties in injection function:
 request.method    // "GET", "POST", etc.
 request.path      // "/api/users/123"
 request.query     // { page: "1" }
-request.headers   // { "content-type": "application/json" }
-request.body      // Request body (string or parsed JSON)
+request.headers   // { "content-type": "application/json" } - one value per name, the first sent
+request.body      // Request body as a string; call JSON.parse yourself for JSON
 ```
+
+Rift also accepts Mountebank's current `function (config) { ... }` form: `config.request`,
+`config.state` and `config.logger` hold the same objects, and the request fields are copied onto
+`config` itself, which is why the legacy `function (request, state, logger)` form keeps working.
 
 ### State Object
 
@@ -561,8 +596,8 @@ function(request, state, logger) {
 
 EJS tags in a config file are expanded once, when the file loads, and never see a request. To put
 request values into a response, use the `${request.…}` tokens in
-[Request Interpolation](#request-interpolation). For the current date or a date offset from it, use
-[date templates]({{ site.baseurl }}/features/date-templates/).
+[Request Interpolation](#request-interpolation), or the opt-in `_rift.templated` `{% raw %}{{ }}{% endraw %}` grammar and
+the date tokens described in [Response Templates]({{ site.baseurl }}/features/date-templates/).
 
 ```json
 {
@@ -644,6 +679,23 @@ Some tools include `"proxy": null` alongside an `is` response. This is accepted 
   }]
 }
 ```
+
+### Flat response (no `is` wrapper)
+
+Recorded and migrated mocks often put `statusCode`, `headers`, `body` and `_mode` directly on the
+response. Rift serves that exactly like the same fields inside `is`; `statusCode` defaults to `200`.
+
+```json
+{
+  "responses": [{
+    "statusCode": 404,
+    "headers": { "Content-Type": "application/json" },
+    "body": { "error": "not found" }
+  }]
+}
+```
+
+`is` wins when both are present. `GET /imposters` returns the response in the `is` form.
 
 ### Combined Alternative Format
 

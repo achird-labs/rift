@@ -44,8 +44,9 @@ cargo build --release --bin rift-tui
 rift-tui [OPTIONS]
 
 Options:
-  -a, --admin-url <URL>  Admin API URL [default: http://localhost:2525]
-  -h, --help             Print help
+  -a, --admin-url <ADMIN_URL>    Admin API URL [env: RIFT_ADMIN_URL] [default: http://localhost:2525]
+  -r, --refresh-ms <REFRESH_MS>  Refresh interval in milliseconds [default: 1000]
+  -h, --help                     Print help
   -V, --version          Print version
 ```
 
@@ -64,8 +65,10 @@ Options:
 | `Tab` | Switch focus between panes |
 | `r` | Refresh data |
 | `/` | Search / Filter |
+| `T` | Cycle theme (Default / Dark / Light / Nord / Dracula) |
+| `L` | Show recent errors and warnings |
 | `?` | Toggle help |
-| `q` | Quit (from main view) |
+| `q` | Quit (from main view); go back elsewhere |
 
 ### Imposter List
 
@@ -76,6 +79,7 @@ Options:
 | `d` | Delete selected imposter |
 | `t` | Toggle enable/disable |
 | `m` | View metrics dashboard |
+| `C` | View server config (`GET /config`) |
 | `i` | Import from file |
 | `I` | Import from folder |
 | `e` | Export all to file |
@@ -88,6 +92,8 @@ Options:
 | `a` | Add new stub |
 | `e` | Edit selected stub |
 | `d` | Delete selected stub |
+| `D` | Duplicate selected stub |
+| `[` / `]` | Move selected stub up / down |
 | `y` | Copy stub as curl command |
 | `t` | Toggle imposter enable/disable |
 | `c` | Clear recorded requests |
@@ -102,6 +108,7 @@ Options:
 |:----|:-------|
 | `e` | Edit stub |
 | `d` | Delete stub |
+| `D` | Duplicate stub |
 | `y` | Copy as curl command |
 
 ### JSON Editor
@@ -110,6 +117,7 @@ Options:
 |:----|:-------|
 | `Ctrl+S` | Save changes |
 | `Ctrl+F` | Format JSON |
+| `Ctrl+L` | Show full lint results |
 | `Ctrl+A` | Select all |
 | `Ctrl+C` | Copy selection |
 | `Ctrl+X` | Cut selection |
@@ -127,6 +135,16 @@ Options:
 | `Enter` | Confirm search |
 | `Esc` | Cancel search |
 | `Ctrl+U` | Clear search query |
+| `Ctrl+V` | Paste into search |
+
+### Export Overlay
+
+| Key | Action |
+|:----|:-------|
+| `s` | Save to file |
+| `c` | Copy to clipboard |
+| `j` / `k`, `↑` / `↓`, `PgUp` / `PgDn` | Scroll |
+| `Esc` | Close |
 
 ---
 
@@ -260,7 +278,7 @@ Press `m` to view the metrics dashboard:
 - Total request count across all imposters
 - Per-imposter request counts
 - Visual bar charts showing relative traffic
-- Auto-refresh every second
+- Auto-refresh at the `--refresh-ms` interval (default every second)
 
 ---
 

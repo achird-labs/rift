@@ -49,6 +49,9 @@ curl -X POST http://localhost:2525/imposters \
   }'
 ```
 
+Omit `key` and `cert` and Rift serves a generated self-signed certificate. Certificates, mutual TLS
+and the related fields are covered in [TLS/HTTPS](../features/tls.md).
+
 ---
 
 ## Imposter Configuration
@@ -56,19 +59,27 @@ curl -X POST http://localhost:2525/imposters \
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
 | `port` | number | No | Port to listen on (auto-assigned if omitted, `null` or `0`) |
+| `host` | string | No | Address to bind (default `0.0.0.0`; use `127.0.0.1` for local-only) |
 | `protocol` | string | No | `http` or `https` (default: `http`) |
 | `name` | string | No | Human-readable name |
 | `stubs` | array | No | Request/response mappings |
 | `defaultResponse` | object | No | Response when no stub matches |
-| `recordRequests` | boolean | No | Store requests for verification |
+| `defaultForward` | string | No | Rift extension: forward an unmatched request to this base URL (takes precedence over `defaultResponse`) |
+| `recordRequests` | boolean | No | Store requests for verification (default `false`) |
+| `recordMatches` | boolean | No | Record which stub matched each request (default `false`) |
 | `allowCORS` | boolean | No | Enable CORS headers and handle preflight requests |
-| `service_name` | string | No | Service identifier for documentation |
-| `service_info` | object | No | Additional service metadata |
-| `key` | string | HTTPS only | PEM-encoded private key |
-| `cert` | string | HTTPS only | PEM-encoded certificate |
-| `mutualAuth` | boolean | No | Request and **require** a client certificate (`https` only) |
+| `strictBehaviors` | boolean | No | Rift extension: a failing behavior returns `500` instead of a fallback (see [Behaviors](behaviors.md#error-semantics)) |
+| `service_name` / `serviceName` | string | No | Service identifier for documentation |
+| `service_info` / `serviceInfo` | object | No | Additional service metadata |
+| `_rift` | object | No | Rift extensions (flow state, scripts, faults, metrics) |
+| `key` | string | No | PEM private key (`https` only; paired with `cert`) |
+| `cert` | string | No | PEM certificate (`https` only; paired with `key`) |
+| `mutualAuth` | boolean | No | Request and **require** a client certificate (`https` only; `true` on `http` is refused) |
 | `rejectUnauthorized` | boolean | No | Validate the client certificate against `ca`; requires `ca` |
 | `ca` | string or array | No | PEM trust anchor(s) client certificates must chain to |
+
+The five TLS fields are described in full in [TLS/HTTPS](../features/tls.md). Note that
+`mutualAuth` is stricter than Mountebank: a client that presents no certificate fails the handshake.
 
 ### HTTP/2 and h2c
 
@@ -97,7 +108,9 @@ removing a fault or script stub through the admin API changes what the *next* co
 
 ### Auto-Port Assignment
 
-If you omit the `port` field, Rift will automatically assign an available port from the dynamic range (49152-65535):
+If you omit the `port` field (or set it to `null` or `0`), Rift assigns the first free port from the
+dynamic range (49152-65535). This holds at every door — `POST /imposters`, `PUT /imposters`,
+`--configfile`, reload and the C-ABI — so a document may hold several port-less imposters:
 
 ```bash
 curl -X POST http://localhost:2525/imposters \
@@ -143,9 +156,15 @@ Each stub contains predicates (matching rules) and responses:
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
 | `id` | string | No | Unique identifier (Rift extension) |
-| `predicates` | array | No | Conditions to match requests |
+| `predicates` | array | No | Conditions to match requests (`rules` is accepted as an alias) |
 | `responses` | array | Yes | Responses to return |
 | `scenarioName` | string | No | Identifier for test scenarios |
+| `requiredScenarioState` / `newScenarioState` | string | No | Rift extension: scenario state gate and transition (see [Scenarios](../features/scenarios.md)) |
+| `space` | string | No | Rift extension: only eligible for requests whose flow id equals this (see [Spaces](../features/spaces.md)) |
+| `routePattern` | string | No | Rift extension: route such as `/users/:id` that fills `request.pathParams` |
+| `delayRange` | array | No | Stub-level latency `[{"min": 50, "max": 100}]`, applied as a `wait` on each response |
+| `recordedFrom` | string | No | Upstream a recorded stub came from (written by proxy recording) |
+| `_verify` | object | No | Ignored by the engine; read by `rift-verify` |
 
 The `id` field is a **Rift extension** that allows you to identify stubs by name rather than index:
 
@@ -232,15 +251,24 @@ curl http://localhost:2525/imposters/4545
 {
   "requests": [
     {
+      "requestFrom": "127.0.0.1:53412",
       "method": "GET",
       "path": "/api/users",
+      "query": {},
       "headers": {...},
-      "body": "",
-      "timestamp": "2024-01-15T10:30:00.000Z"
+      "timestamp": "2024-01-15T10:30:00.000Z",
+      "status": 200,
+      "latencyMs": 0
     }
   ]
 }
 ```
+
+`body` is omitted when the request had none. `status` and `latencyMs` are the status that went
+back and how long the imposter took to produce it, in whole milliseconds. Both are **absent**, never
+`0`, when the outcome was not observed (for example an `X-Rift-Debug` request, or one that errored
+before a response existed); a present `latencyMs` of `0` is an ordinary sub-millisecond answer.
+`matchOutcome` (which stub matched, or why none did) may also appear.
 
 Each header name maps to the **list** of values the client sent, in order, so a header sent twice
 is recorded as `{"X-Test": ["first", "second"]}` rather than collapsing to one value.
@@ -531,6 +559,10 @@ curl http://localhost:2525/imposters/4545
 | `potentially_shadowed` | Stub may be unreachable due to earlier stub |
 | `catch_all` | Stub with empty predicates matches all requests |
 | `catch_all_not_last` | Catch-all stub is not at the end of the list |
+| `state_ops_never_runs` | `_rift.stateOps` is on a response shape that never runs it |
+| `truncated` | More warnings were produced than are retained |
+
+See [Stub Analysis](../features/stub-analysis.md) for details.
 
 **Note**: Mountebank does NOT provide overlap detection. These warnings are a Rift extension.
 
