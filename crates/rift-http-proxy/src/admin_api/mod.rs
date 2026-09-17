@@ -16,6 +16,9 @@ pub mod authz;
 mod handlers;
 mod request_filter;
 mod router;
+/// The admin listener's route table (issue #1145), for an embedder that must account for every
+/// route it fronts without re-parsing the router.
+mod routes;
 mod server;
 pub mod types;
 
@@ -23,6 +26,7 @@ pub use handlers::imposters::{filter_proxy_responses, filter_proxy_stubs};
 /// The space-stub shape guard (issue #336), for an embedder that terminates
 /// `POST /imposters/:port/spaces/:flowId/stubs` itself rather than proxying to the handler here.
 pub use handlers::scenarios::not_a_stub_reason;
+pub use routes::{ADMIN_ROUTES, AdminRoute, RouteFamily};
 pub use server::{
     AdminApiServer, AdminExposurePolicy, RunningAdminApi, check_admin_exposure,
     check_intercept_exposure, validate_admin_api_key,

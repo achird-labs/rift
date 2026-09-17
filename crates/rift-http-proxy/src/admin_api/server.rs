@@ -672,7 +672,13 @@ async fn accept_loop(
                         // `/imposters/{port}/savedRequests/stream` alias. Runs AFTER the auth gate
                         // above, and BEFORE the `Full<Bytes>` router so the streaming body type never
                         // touches the router or its handlers.
-                        if let Some(forced_port) = events::stream_target(req.uri().path()) {
+                        //
+                        // `GET` only (issue #1145): a stream is a read, and every other method used
+                        // to open one too, which made the set of served routes wider than anything
+                        // documented. Other methods fall through to the router's 404.
+                        if req.method() == hyper::Method::GET
+                            && let Some(forced_port) = events::stream_target(req.uri().path())
+                        {
                             return Ok::<_, hyper::Error>(events::handle_stream(
                                 &manager,
                                 req.uri().query(),

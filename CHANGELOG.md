@@ -11,7 +11,18 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **The admin listener's route table is public** (#1145). `rift_http_proxy::admin_api::ADMIN_ROUTES`
+  lists every `(method, path)` the admin API dispatches, with a `RouteFamily` per entry, so an
+  embedder fronting the admin API can account for every route without re-parsing the router. See
+  `docs/embedding/spi.md`.
+
 ### Fixed
+
+- **The admin event streams answer `GET` only** (#1145). `/events` and
+  `/imposters/{port}/savedRequests/stream` opened a stream for any method; any method other than
+  `GET` now gets the admin API's ordinary `404`, as the API reference already described.
 
 - **A bare IPv6 bind host works on every door** (#1137). The admin plane, the intercept listener and
   the C-ABI built their bind address by parsing `"{host}:{port}"`, and `"::1:2525"` reads the port as

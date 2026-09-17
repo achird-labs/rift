@@ -474,6 +474,39 @@ because `classify` calls the router's own parser and matches its route enum exha
 exactly the property a hand-written copy gives up. `SCOPE_HEADER` likewise spares you a copied
 header literal.
 
+#### Which routes exist: `ADMIN_ROUTES`
+
+`classify` answers "what is this request". A front that terminates some routes and forwards the rest
+also needs "what requests exist", so it can check that every one is handled on one side.
+`rift_http_proxy::admin_api::ADMIN_ROUTES` is that set: every `(method, path)` pair the admin
+listener dispatches, with each path parameter named as `classify` reports it in
+`AuthzTarget::params` (`{port}`, `{space}`, `{stubIndex}`, `{stubId}`, `{scenario}`, `{key}`). The two
+event streams (`/events` and `/imposters/{port}/savedRequests/stream`) are `GET` only.
+
+```rust
+use rift_http_proxy::admin_api::{ADMIN_ROUTES, RouteFamily};
+
+// Intercept routes are served only by a listener built `with_intercept`.
+let served = ADMIN_ROUTES
+    .iter()
+    .filter(|route| route.family != RouteFamily::Intercept);
+for route in served {
+    assert!(
+        i_handle(&route.method, route.path) || i_forward(&route.method, route.path),
+        "{} {} is served upstream and accounted for nowhere here",
+        route.method,
+        route.path,
+    );
+}
+```
+
+Upstream's tests hold the table to the listener: every per-imposter route variant and every
+authorization action must appear, every entry must be dispatched by a live listener, and every
+method the table does not list on a listed path must not be. A new route on an existing path, or a
+new per-imposter route, therefore reaches you as a new entry. A wholly new top-level path is the one
+addition those tests cannot see on their own, so it is a review rule upstream. The gateway
+(`/__rift/...`) is not in the table, for the same reason `classify` answers `None` for it.
+
 ## Backend errors and annotations
 
 A custom backend signals unavailability by attaching `BackendUnavailable` to a failed operation's
