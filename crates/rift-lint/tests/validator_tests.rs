@@ -2878,3 +2878,149 @@ fn imposters_in_yields_each_shape_with_its_prefix() {
     assert!(imposters_in(&json!({"imposters": []})).is_empty());
     assert!(imposters_in(&json!([])).is_empty());
 }
+
+// ─── W015: a binary-mode body the engine cannot decode (issue #1151) ────────────────────────
+//
+// A warning, not an error: the engine *serves* these — it falls back to the raw body with
+// `x-rift-binary-error: true`, or answers 500 under `strictBehaviors` — so the file is valid, it
+// just will not do what its author meant. The decode must be the engine's exact one
+// (`base64::engine::general_purpose::STANDARD`), not a regex approximation.
+
+#[test]
+fn w015_fires_for_an_undecodable_binary_is_body() {
+    let imposter = json!({
+        "port": 4545, "protocol": "http",
+        "stubs": [{ "responses": [{ "is": {
+            "statusCode": 200, "body": "not!valid!base64!", "_mode": "binary"
+        } }] }]
+    });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &imposter, &mut r, &opts());
+    assert!(has_code(&r, "W015"), "got {:?}", codes(&r));
+}
+
+// The linter did not inspect `defaultResponse` at all before this — its first rule there.
+#[test]
+fn w015_fires_for_an_undecodable_binary_default_response() {
+    let imposter = json!({
+        "port": 4545, "protocol": "http", "stubs": [],
+        "defaultResponse": { "statusCode": 200, "body": "not!valid!base64!", "_mode": "binary" }
+    });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &imposter, &mut r, &opts());
+    assert!(has_code(&r, "W015"), "got {:?}", codes(&r));
+}
+
+// A non-string body is serialized to JSON text before the decode, so in binary mode it can never
+// decode — and is served as that JSON text.
+#[test]
+fn w015_fires_for_a_non_string_binary_body() {
+    let imposter = json!({
+        "port": 4545, "protocol": "http", "stubs": [],
+        "defaultResponse": { "statusCode": 200, "body": { "a": 1 }, "_mode": "binary" }
+    });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &imposter, &mut r, &opts());
+    assert!(has_code(&r, "W015"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn w015_is_silent_for_valid_base64() {
+    let imposter = json!({
+        "port": 4545, "protocol": "http",
+        "stubs": [{ "responses": [{ "is": { "statusCode": 200, "body": "aGVsbG8=", "_mode": "binary" } }] }],
+        "defaultResponse": { "statusCode": 200, "body": "aGVsbG8=", "_mode": "binary" }
+    });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &imposter, &mut r, &opts());
+    assert!(!has_code(&r, "W015"), "got {:?}", codes(&r));
+}
+
+// Text mode never decodes, so an arbitrary body there is not this rule's business.
+#[test]
+fn w015_is_silent_in_text_mode() {
+    let imposter = json!({
+        "port": 4545, "protocol": "http", "stubs": [],
+        "defaultResponse": { "statusCode": 200, "body": "not!valid!base64!", "_mode": "text" }
+    });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &imposter, &mut r, &opts());
+    assert!(!has_code(&r, "W015"), "got {:?}", codes(&r));
+}
+
+// The flat response form (issue #304) — no `is` wrapper — is decoded by the engine identically, so
+// it must be linted identically. The first cut only checked inside `is` and missed it.
+#[test]
+fn w015_fires_for_an_undecodable_flat_form_response() {
+    let imposter = json!({
+        "port": 4545, "protocol": "http",
+        "stubs": [{ "responses": [{
+            "statusCode": 200, "body": "not!valid!base64!", "_mode": "binary"
+        }] }]
+    });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &imposter, &mut r, &opts());
+    assert!(has_code(&r, "W015"), "got {:?}", codes(&r));
+}
+
+// A body the engine rewrites before decoding is not what gets decoded, so a non-base64 placeholder
+// there can be correct. A warning that fires on a correct file is worse than silence.
+#[test]
+fn w015_stands_down_when_templating_rewrites_the_body() {
+    let imposter = json!({
+        "port": 4545, "protocol": "http",
+        "stubs": [{ "responses": [{
+            "is": { "statusCode": 200, "body": "{{ placeholder }}", "_mode": "binary" },
+            "_rift": { "templated": true }
+        }] }]
+    });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &imposter, &mut r, &opts());
+    assert!(!has_code(&r, "W015"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn w015_stands_down_when_a_behavior_rewrites_the_body() {
+    let imposter = json!({
+        "port": 4545, "protocol": "http",
+        "stubs": [{ "responses": [{
+            "is": { "statusCode": 200, "body": "${placeholder}", "_mode": "binary" },
+            "_behaviors": { "copy": { "from": "path", "into": "${placeholder}", "using": { "method": "regex", "selector": ".*" } } }
+        }] }]
+    });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &imposter, &mut r, &opts());
+    assert!(!has_code(&r, "W015"), "got {:?}", codes(&r));
+}
+
+// A behavior that does NOT touch the body (a `wait`) must not switch the rule off.
+#[test]
+fn w015_still_fires_alongside_a_behavior_that_does_not_rewrite_the_body() {
+    let imposter = json!({
+        "port": 4545, "protocol": "http",
+        "stubs": [{ "responses": [{
+            "is": { "statusCode": 200, "body": "not!valid!base64!", "_mode": "binary" },
+            "_behaviors": { "wait": 100 }
+        }] }]
+    });
+    let mut r = LintResult::new();
+    validate_imposter(path(), &imposter, &mut r, &opts());
+    assert!(has_code(&r, "W015"), "got {:?}", codes(&r));
+}
+
+// The engine reads a null or absent body as "", which decodes to empty bytes — valid. Pinned so a
+// refactor cannot turn the early return into a false positive.
+#[test]
+fn w015_is_silent_for_a_null_or_absent_binary_body() {
+    for default in [
+        json!({ "statusCode": 204, "body": null, "_mode": "binary" }),
+        json!({ "statusCode": 204, "_mode": "binary" }),
+    ] {
+        let imposter = json!({
+            "port": 4545, "protocol": "http", "stubs": [], "defaultResponse": default
+        });
+        let mut r = LintResult::new();
+        validate_imposter(path(), &imposter, &mut r, &opts());
+        assert!(!has_code(&r, "W015"), "for {default}: got {:?}", codes(&r));
+    }
+}

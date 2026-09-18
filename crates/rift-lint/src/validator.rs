@@ -115,6 +115,71 @@ pub fn validate_imposter(
             validate_stub(file, stub, idx, result, options, &registry);
         }
     }
+
+    if let Some(default) = imposter.get("defaultResponse") {
+        check_binary_body(file, default, "defaultResponse", result);
+    }
+}
+
+/// Whether something runs on this response's body *before* the binary decode — templating, or a
+/// behavior that rewrites the body. The engine decodes what those produce, not what is written, so a
+/// written body that is not base64 can be perfectly correct (a placeholder rendered at serve time).
+/// A W-rule that fires on a correct file is worse than silence, so W015 stands down here.
+fn body_rewritten_before_decode(response: &Value) -> bool {
+    const REWRITING: [&str; 4] = ["decorate", "copy", "lookup", "shellTransform"];
+    let templated = response
+        .get("_rift")
+        .and_then(|rift| rift.get("templated"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let behavior_rewrites = |block: &Value| match block {
+        Value::Object(map) => REWRITING.iter().any(|k| map.contains_key(*k)),
+        Value::Array(entries) => entries
+            .iter()
+            .any(|e| REWRITING.iter().any(|k| e.get(*k).is_some())),
+        _ => false,
+    };
+    templated
+        || response.get("_behaviors").is_some_and(behavior_rewrites)
+        || response.get("behaviors").is_some_and(behavior_rewrites)
+}
+
+/// W015: a `_mode: "binary"` body the engine cannot decode (issue #1151).
+///
+/// A warning because the engine serves it: it falls back to the raw body with
+/// `x-rift-binary-error: true`, or answers 500 under `strictBehaviors`. The decode is the engine's
+/// exact one — `base64::engine::general_purpose::STANDARD` — because a regex approximation would
+/// disagree with it at the edges (padding, the URL-safe alphabet, embedded newlines) and then the
+/// linter would pass a body the engine rejects, or the reverse.
+fn check_binary_body(file: &Path, response: &Value, location: &str, result: &mut LintResult) {
+    use base64::Engine as _;
+
+    if response.get("_mode").and_then(Value::as_str) != Some("binary") {
+        return;
+    }
+    let decodes = match response.get("body") {
+        None | Some(Value::Null) => return,
+        Some(Value::String(body)) => base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .is_ok(),
+        // Serialized to JSON text before the decode, so it can never be valid base64.
+        Some(_) => false,
+    };
+    if decodes {
+        return;
+    }
+    result.add_issue(
+        LintIssue::warning(
+            "W015",
+            "Binary-mode body is not valid base64: it is served as raw text with \
+             `x-rift-binary-error: true` (500 under `strictBehaviors`)",
+            file.to_path_buf(),
+        )
+        .with_location(format!("{location}.body"))
+        .with_suggestion(
+            "Base64-encode the body, or use `\"_mode\": \"text\"` if it is not binary data",
+        ),
+    );
 }
 
 /// Infer a script's effective engine: explicit `engine`, else inferred from a `file` path's
@@ -918,6 +983,29 @@ pub fn validate_response(
     let has_inject = response.get("inject").is_some();
     let has_fault = response.get("fault").is_some();
     let has_rift = response.get("_rift").is_some();
+
+    // W015 lives here rather than in `validate_is_response`, because it needs the whole response:
+    // the body may be in an `is` wrapper or at the top level (the flat form, issue #304, which the
+    // engine decodes identically), and a sibling block can rewrite the body before it reaches the
+    // decoder — in which case what is written is not what is decoded, and the linter cannot tell
+    // what will be (issue #1151).
+    let body_holder = if has_is {
+        response.get("is")
+    } else if !(has_proxy || has_inject || has_fault) {
+        Some(response)
+    } else {
+        None
+    };
+    if let Some(holder) = body_holder
+        && !body_rewritten_before_decode(response)
+    {
+        let loc = if has_is {
+            format!("{location}.is")
+        } else {
+            location.to_string()
+        };
+        check_binary_body(file, holder, &loc, result);
+    }
 
     if has_rift {
         result.add_issue(

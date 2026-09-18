@@ -711,6 +711,23 @@ record.
 
 ### Fixed
 
+- **A binary `defaultResponse` that fails to decode is flagged instead of served silently** (#1151).
+  `defaultResponse` with `_mode: "binary"` and a body that is not valid base64 was served as the raw
+  text of that body behind only a `warn!` — a `200` carrying bytes nobody asked for, with no signal
+  a client could see. A stub `is` body in the same state has carried `x-rift-binary-error: true`
+  since #323 and answered `500` under `strictBehaviors` since #375; `defaultResponse` re-implemented
+  the decode inline and had picked up neither.
+  - Both sites now share one decode, so the default response gets the same contract: the header in
+    lenient mode, a `500` under `strictBehaviors` / `RIFT_STRICT_BEHAVIORS`. The `is` path is
+    unchanged — the three tests pinning #323/#375 still pass untouched.
+  - The fix is deliberately parity, not a refusal at the config door: no binary body is validated
+    there, the `is` contract is documented and pinned, and refusing only `defaultResponse` would
+    make the two inconsistent.
+  - A non-string `body` in binary mode is serialized to JSON text first and so can never decode; it
+    was served as that JSON text with no signal, and is now flagged the same way.
+  - `rift-lint` reports an undecodable or non-string binary body as **W015**, on `is` responses and
+    — its first rule there — on `defaultResponse`, using the engine's own decoder.
+
 - **A `wait` range with `min` greater than `max` is refused instead of panicking the worker**
   (#1148). The draw is `gen_range(min..=max)`, which asserts a non-empty range; it runs on the
   request task with no `catch_unwind`, so an inverted range killed the worker on **every** request
