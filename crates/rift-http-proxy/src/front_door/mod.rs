@@ -31,5 +31,5 @@ pub type FrontDoorRoutes = std::sync::Arc<arc_swap::ArcSwap<CompiledRoutes>>;
 
 /// Said when a config file declares `routes` but no front door is running to serve them — at startup
 /// (a log line) and in a reload's `warnings` (issue #1160).
-pub(crate) const ROUTES_WITHOUT_FRONT_DOOR: &str = "the config file's `routes` block needs `--front-door` and was ignored; no front door is \
-     running to serve it";
+pub(crate) const ROUTES_WITHOUT_FRONT_DOOR: &str = "the config file's `routes` block needs `--front-door` and was ignored; no front door's \
+     route table is wired to this server";

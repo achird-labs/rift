@@ -525,6 +525,57 @@ mod tests {
 
     // Issue #316: a partial apply failure returns 500 with the full report, so the client
     // can tell what state the server is now in.
+    /// Issue #1160, the embedder door: a `Legacy` file source with a front door table wired in. The
+    /// reload replaces a table the embedder populated, rather than leaving it or merging into it.
+    #[tokio::test]
+    async fn a_legacy_reload_replaces_a_wired_front_door_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        std::fs::write(
+            &path,
+            r#"{"imposters":[],"routes":{"routes":[
+                {"id":"new","match":{"host":"new.test"},"target":{"port":19479}}
+            ]}}"#,
+        )
+        .expect("write config");
+        let source = crate::sources::ReloadSource::Legacy(Arc::new(
+            crate::config_loader::ConfigSource::File {
+                path,
+                no_parse: false,
+            },
+        ));
+        let old: crate::front_door::RouteTable = serde_json::from_str(
+            r#"{"routes":[{"id":"old","match":{"host":"old.test"},"target":{"port":19479}}]}"#,
+        )
+        .expect("table");
+        let table: crate::front_door::FrontDoorRoutes = Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::front_door::CompiledRoutes::new(&old),
+        ));
+
+        let resp = handle_reload(
+            Arc::new(ImposterManager::new()),
+            Some(source),
+            Some(&table),
+            false,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let routes = table.load();
+        let route_for = |host| {
+            routes
+                .resolve(
+                    Some(host),
+                    &hyper::Method::GET,
+                    "/",
+                    &hyper::HeaderMap::new(),
+                )
+                .map(|r| r.id.clone())
+        };
+        assert_eq!(route_for("new.test").as_deref(), Some("new"));
+        assert_eq!(route_for("old.test"), None);
+    }
+
     #[tokio::test]
     async fn test_handle_reload_partial_failure_returns_report() {
         use http_body_util::BodyExt;
