@@ -16,6 +16,7 @@
 //! - `manager`: ImposterManager for lifecycle management
 //! - `core`: Core Imposter struct and implementation
 
+mod behavior_pipeline;
 mod core;
 mod datadir_file;
 pub mod events;
