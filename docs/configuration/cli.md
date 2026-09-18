@@ -414,6 +414,14 @@ rift --configfile imposters.json --datadir ./mb-data
 `POST /admin/reload`) every `*.json` file in the directory is loaded back. Other extensions are
 ignored.
 
+A file is never rewritten in place. Each write goes to `<port>.json.tmp` beside it, is synced to
+disk, and is then renamed over `<port>.json`, so a crash, a full disk or a reload reading at the same
+moment sees either the old document or the new one, never a partial one. A write that fails leaves
+the old file as it was, and the admin call returns `503`. A leftover `<port>.json.tmp` means a
+process died mid-write. It is never loaded, and the next start removes it with a `WARN` line.
+Because each write creates a new file, a mode or ownership set by hand on `<port>.json`, or a hard
+link to it, does not carry over to the next write.
+
 The directory is keyed by port, so each file is held to that:
 
 - It holds **one imposter object** (not an `{"imposters": [...]}` wrapper), as plain JSON. EJS tags
