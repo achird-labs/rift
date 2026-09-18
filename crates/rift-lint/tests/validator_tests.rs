@@ -1000,7 +1000,10 @@ fn e051_not_fired_for_well_formed_behaviors() {
     ] {
         let mut r = LintResult::new();
         validate_behavior(path(), &behavior, "loc", &mut r, &opts());
-        assert!(r.issues.is_empty(), "{behavior}: {:?}", codes(&r));
+        // I004 is the build saying it has no JavaScript checker (`--no-default-features`), not a
+        // finding about this block.
+        let findings: Vec<&str> = codes(&r).into_iter().filter(|c| *c != "I004").collect();
+        assert!(findings.is_empty(), "{behavior}: {findings:?}");
     }
 }
 
