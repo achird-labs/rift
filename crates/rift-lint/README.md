@@ -151,16 +151,22 @@ The full table, with an example for every code, is in
 ## Feature Flags
 
 - `cli` (default) - Enables CLI binary with clap
-- `javascript` - Enables JavaScript syntax validation with boa_engine
+- `javascript` (default) - JavaScript syntax validation with boa_engine (E028, E040). On by default
+  since #1156: without it E040 has no fallback at all. A build that opts out reports `I004` once per
+  run, so a clean result is never mistaken for a checked one.
 
 ```toml
-# Library only (no CLI dependencies)
+# Everything (the default: CLI + JavaScript validation)
+[dependencies]
+rift-lint = { path = "../rift-lint" }
+
+# Library only, with JavaScript validation
+[dependencies]
+rift-lint = { path = "../rift-lint", default-features = false, features = ["javascript"] }
+
+# Library only, no JavaScript engine — JS sources are not syntax-checked, and I004 says so
 [dependencies]
 rift-lint = { path = "../rift-lint", default-features = false }
-
-# With JavaScript validation
-[dependencies]
-rift-lint = { path = "../rift-lint", features = ["javascript"] }
 ```
 
 ## License

@@ -88,6 +88,32 @@ mod js_validator {
     }
 }
 
+/// Say, once per run, that a JavaScript source was not syntax-checked because this build omits the
+/// `javascript` feature (issue #1156). The silent `Ok(())` above used to be the whole story, so an
+/// opt-out build reported a clean run for a script it never looked at.
+///
+/// Once per [`LintResult`] here; `LintResult::merge`/`absorb` keep it to one across documents.
+#[cfg(not(feature = "javascript"))]
+fn disclose_unchecked_javascript(file: &Path, result: &mut LintResult) {
+    if result.issues.iter().any(|i| i.code == "I004") {
+        return;
+    }
+    result.add_issue(
+        LintIssue::info(
+            "I004",
+            "JavaScript syntax checks (E028, E040) are not compiled into this build; this run's \
+             JavaScript was not syntax-checked",
+            file.to_path_buf(),
+        )
+        .with_suggestion(
+            "Use a build with the `javascript` feature — the default, and what every release ships",
+        ),
+    );
+}
+
+#[cfg(feature = "javascript")]
+fn disclose_unchecked_javascript(_file: &Path, _result: &mut LintResult) {}
+
 /// Validate a complete imposter configuration.
 pub fn validate_imposter(
     file: &Path,
@@ -221,6 +247,9 @@ fn check_script_syntax(
     location: &str,
     result: &mut LintResult,
 ) {
+    if engine == "javascript" || engine == "js" {
+        disclose_unchecked_javascript(file, result);
+    }
     if (engine == "javascript" || engine == "js")
         && let Err(e) = js_validator::validate_javascript(code)
     {
@@ -558,7 +587,7 @@ fn check_port_range(file: &Path, imposter: &Value, result: &mut LintResult) {
 }
 
 /// Best-effort resolve of a `{ engine?, code?, file?, ref? }` script object's source text, for the
-/// E042 heuristic below. Unlike [`validate_script_source`] this doesn't itself report issues on a
+/// W014 heuristic below. Unlike [`validate_script_source`] this doesn't itself report issues on a
 /// resolution failure (unreadable file, unknown ref) — those are already reported elsewhere by the
 /// real validation pass; here an unresolvable script is simply skipped.
 fn resolve_script_text(config_file: &Path, script: &Value, registry: &Value) -> Option<String> {
@@ -616,7 +645,7 @@ fn check_state_without_flow_state(file: &Path, imposter: &Value, result: &mut Li
             {
                 result.add_issue(
                     LintIssue::warning(
-                        "E042",
+                        "W014",
                         "Script uses ctx.state (or flow_store) but no _rift.flowState is configured",
                         file.to_path_buf(),
                     )
@@ -637,7 +666,7 @@ fn check_state_without_flow_state(file: &Path, imposter: &Value, result: &mut Li
             {
                 result.add_issue(
                     LintIssue::warning(
-                        "E042",
+                        "W014",
                         "_rift.stateOps is used but no _rift.flowState is configured",
                         file.to_path_buf(),
                     )
@@ -1702,6 +1731,30 @@ pub fn validate_behavior(
 /// `config =>` convention and bare Rhai — to its script engine (`apply_js_or_rhai_decorate`), so
 /// the "should be a function expression" nudge (W009) must not fire there (issues #248/#257). For
 /// JS-only behaviors (`wait`) it stays off, and a non-function script still warns.
+/// Whether the engine runs a `decorate` script as **JavaScript** rather than Rhai.
+///
+/// Mirrors the engine's routing in `rift_mock_core::imposter::response::apply_js_or_rhai_decorate`:
+/// the Mountebank `config` convention (`rift_mock_core::behaviors::is_js_config_decorate`) or a
+/// script starting with `function`; anything else runs as Rhai. `rift-lint` does not depend on the
+/// engine, so this is a copy of that rule — and a copy of a routing rule is exactly what drifts, so
+/// `crates/rift-http-proxy/tests/issue_1156_decorate_routing.rs` pins the two against each other.
+///
+/// Issue #1156: the linter used to Boa-parse **every** decorate. That never shipped only because
+/// releases lacked the `javascript` feature; turning it on by default made valid Rhai fail E028.
+#[must_use]
+pub fn is_javascript_decorate(script: &str) -> bool {
+    let t = script.trim_start();
+    let config_convention = t.starts_with("config =>")
+        || t.starts_with("config=>")
+        || t.starts_with("(config) =>")
+        || t.starts_with("(config)=>")
+        || t.starts_with("function(config)")
+        || t.starts_with("function (config)")
+        || t.contains("config.request.")
+        || t.contains("config.response.");
+    config_convention || script.trim().starts_with("function")
+}
+
 fn validate_javascript_behavior(
     file: &Path,
     script: &str,
@@ -1750,6 +1803,13 @@ fn validate_javascript_behavior(
         );
     }
 
+    // A behavior that also accepts Rhai (`decorate`) is only JavaScript when the engine routes it
+    // there; Boa would reject valid Rhai. The brace and parenthesis checks above still apply — they
+    // are as wrong in Rhai as in JavaScript.
+    if allow_rhai && !is_javascript_decorate(script) {
+        return;
+    }
+
     #[cfg(feature = "javascript")]
     {
         if let Err(e) = js_validator::validate_javascript(script) {
@@ -1763,6 +1823,7 @@ fn validate_javascript_behavior(
             );
         }
     }
+    disclose_unchecked_javascript(file, result);
 }
 
 /// Check whether a wait value is a valid {min, max} range object.

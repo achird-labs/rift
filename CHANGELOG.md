@@ -322,6 +322,25 @@ record.
 
 ### Changed
 
+- **`rift-lint` code `E042` is now `W014`** (#1156). It had always been reported with warning
+  severity, so a consumer filtering on the `E` prefix and one filtering on severity saw different
+  rules. It could not be raised to an error instead: flow state is auto-provisioned in memory, so
+  the config works — that is the documented design. `E042` is retired and never reused, like `E012`,
+  and a new test holds every code's letter to its severity.
+- **`rift-lint`'s `javascript` feature is on by default** (#1156), so `cargo install rift-lint`, the
+  source image and the release matrix all agree without each remembering a flag. The binary grows
+  from 2.3 MB to 7.8 MB; `boa_engine` was already in the release graph through the main `rift`
+  binary, so the dependency surface does not change. `rift-tui` depends with
+  `default-features = false` and does not grow. A build that opts out reports **`I004`** once per
+  run, so a clean result is never mistaken for a checked one. A `decorate` is parsed as JavaScript
+  only when the engine would run it as JavaScript — a `function…` or the Mountebank `config`
+  convention; a Rhai decorate is left alone, since Boa cannot parse valid Rhai.
+- **`rift-lint` library additions** (#1156): `PortUses` (the run-wide port collector),
+  `lint_document_in_run` (lint one document of a multi-document run without its own `E002`),
+  `LintResult::absorb` (merge without counting files), `RUN_SCOPED_CODES`, and
+  `is_javascript_decorate` (the engine's JavaScript-or-Rhai routing for `decorate`, pinned against
+  the engine by a test).
+
 - **`extensions::template::RequestData.query` is a `FastMap`** instead of a std `HashMap` (#1153),
   so the shared query parser's map is used directly without a re-hash. Nothing outside the workspace
   constructs or reads `RequestData`; this rides the same minor bump as the removal above.
@@ -715,6 +734,20 @@ record.
     `errors[0].detail` instead.
 
 ### Fixed
+
+- **`rift-lint` reports port conflicts from every entry point, and checks JavaScript in released
+  builds** (#1156).
+  - **E002 was computed only by the CLI.** No library entry point had an equivalent, so every
+    `lint_directory` caller — including the sdk-conformance corpus gate — and every caller handing a
+    multi-imposter document to `lint_json` / `lint_yaml` / `lint_value` / `lint_file` silently lost
+    the check. One collector, `PortUses`, now serves the library and the CLI: single-document entry
+    points report a port repeated inside the document, and `lint_directory` reports ports shared
+    across its files. `lint_directory` now walks its files in sorted order, so a conflict is always
+    reported against the same file; before, `read_dir` order made that vary from run to run.
+  - **Released artifacts had no JavaScript syntax checking.** They were built without the
+    `javascript` feature, so `E028` fell back to brace counting and **`E040` had no fallback at all**:
+    a JavaScript `_rift.script` got no syntax check whatsoever in any release binary, Docker image or
+    brew install, and nothing said so. The feature is now on by default (see **Changed**).
 
 - **A template renders a repeated query key the way a predicate matched it** (#1153).
   `${request.query.color}` and `{{ request.query.color }}` parsed the query with an orphaned copy of
