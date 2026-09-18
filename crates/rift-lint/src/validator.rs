@@ -51,8 +51,6 @@ mod js_validator {
     }
 
     pub fn validate_javascript(script: &str) -> Result<(), super::JsSyntaxError> {
-        let mut context = Context::default();
-
         // Mountebank inject/decorate scripts are anonymous function *expressions*
         // (`function(args){…}` or `function (args){…}`), which are a syntax error when Boa parses
         // them as a top-level statement (a function *declaration* needs a name). Wrap them as an
@@ -73,10 +71,23 @@ mod js_validator {
         // runtime behaviour; a parse failure is by definition a real syntax problem, so it is
         // surfaced unconditionally rather than filtered by matching the error message against
         // `"SyntaxError"`/`"unexpected"` (which silently passed anything else).
-        match Script::parse(Source::from_bytes(&wrapped), None, &mut context) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(super::JsSyntaxError(e.to_string())),
-        }
+        parse(&wrapped)
+    }
+
+    /// Parse an `inject` script exactly as the engine wraps it before running it:
+    /// `var __injectFn = <script>;` (`rift_mock_core::scripting::js_engine`, issue #1170). Any
+    /// expression is valid there — an arrow, an `async` or named function — and a trailing `;` or
+    /// `// comment` is harmless, which `validate_javascript`'s parenthesised wrapper would reject.
+    /// Parse only, never run (#553).
+    pub fn validate_javascript_expression(script: &str) -> Result<(), super::JsSyntaxError> {
+        parse(&format!("var __injectFn = {script};"))
+    }
+
+    fn parse(source: &str) -> Result<(), super::JsSyntaxError> {
+        let mut context = Context::default();
+        Script::parse(Source::from_bytes(source), None, &mut context)
+            .map(|_| ())
+            .map_err(|e| super::JsSyntaxError(e.to_string()))
     }
 }
 
@@ -84,6 +95,11 @@ mod js_validator {
 mod js_validator {
     #[allow(dead_code)]
     pub fn validate_javascript(_script: &str) -> Result<(), super::JsSyntaxError> {
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn validate_javascript_expression(_script: &str) -> Result<(), super::JsSyntaxError> {
         Ok(())
     }
 }
@@ -969,12 +985,19 @@ pub fn validate_stub(
         }
     }
 
-    if let Some(predicates) = stub.get("predicates").and_then(|v| v.as_array()) {
+    // `rules` is the engine's alias for `predicates`, read when `predicates` is empty or absent.
+    let non_empty = |key: &'static str| {
+        stub.get(key)
+            .and_then(Value::as_array)
+            .filter(|a| !a.is_empty())
+            .map(|a| (key, a))
+    };
+    if let Some((key, predicates)) = non_empty("predicates").or_else(|| non_empty("rules")) {
         for (pred_idx, predicate) in predicates.iter().enumerate() {
             validate_predicate(
                 file,
                 predicate,
-                &format!("{location}.predicates[{pred_idx}]"),
+                &format!("{location}.{key}[{pred_idx}]"),
                 result,
                 options,
             );
@@ -1091,6 +1114,16 @@ pub fn validate_predicate(
 
     if let Some(matches) = predicate.get("matches") {
         validate_regex_patterns(file, matches, location, result, options);
+    }
+
+    if let Some(script) = predicate.get("inject").and_then(Value::as_str) {
+        validate_javascript_behavior(
+            file,
+            script,
+            &format!("{location}.inject"),
+            result,
+            ScriptSite::Inject,
+        );
     }
 
     // Recursively validate nested predicates
@@ -1300,6 +1333,22 @@ pub fn validate_response(
 
     if let Some(is_response) = response.get("is") {
         validate_is_response(file, is_response, &format!("{location}.is"), result);
+    }
+
+    // The engine picks `is`, then `proxy`, then `inject` (a `null` is absent), so an `inject` beside
+    // either of the others never runs and is not checked as this response's script.
+    let present = |key: &str| response.get(key).is_some_and(|v| !v.is_null());
+    if !present("is")
+        && !present("proxy")
+        && let Some(script) = response.get("inject").and_then(Value::as_str)
+    {
+        validate_javascript_behavior(
+            file,
+            script,
+            &format!("{location}.inject"),
+            result,
+            ScriptSite::Inject,
+        );
     }
 
     if let Some(proxy) = response.get("proxy")
@@ -1733,6 +1782,20 @@ pub fn validate_proxy_response(
         validate_single_valued_headers(file, headers, &format!("{location}.injectHeaders"), result);
     }
 
+    if let Some(generators) = proxy.get("predicateGenerators").and_then(Value::as_array) {
+        for (idx, generator) in generators.iter().enumerate() {
+            if let Some(script) = generator.get("inject").and_then(Value::as_str) {
+                validate_javascript_behavior(
+                    file,
+                    script,
+                    &format!("{location}.predicateGenerators[{idx}].inject"),
+                    result,
+                    ScriptSite::Inject,
+                );
+            }
+        }
+    }
+
     if let Some(to) = proxy.get("to") {
         if let Some(url) = to.as_str() {
             if !url.starts_with("http://") && !url.starts_with("https://") {
@@ -1804,7 +1867,7 @@ pub fn validate_behavior(
     behavior: &Value,
     location: &str,
     result: &mut LintResult,
-    options: &LintOptions,
+    _options: &LintOptions,
 ) {
     let Some(obj) = behavior.as_object() else {
         return;
@@ -1820,8 +1883,7 @@ pub fn validate_behavior(
                 script,
                 &format!("{location}.wait"),
                 result,
-                options,
-                false,
+                ScriptSite::Wait,
             );
         } else if wait.is_u64() {
             // fixed millisecond delay — valid. Only a non-negative integer: the engine's `u64`
@@ -1839,8 +1901,7 @@ pub fn validate_behavior(
                 script,
                 &format!("{location}.wait.inject"),
                 result,
-                options,
-                false,
+                ScriptSite::Wait,
             );
         } else {
             result.add_issue(
@@ -1910,8 +1971,7 @@ pub fn validate_behavior(
             script,
             &format!("{location}.decorate"),
             result,
-            options,
-            true,
+            ScriptSite::Decorate,
         );
     }
 
@@ -1943,11 +2003,6 @@ pub fn validate_behavior(
     }
 }
 
-/// Validate JavaScript in a behavior. `allow_rhai` is set for behaviors that also accept a Rhai
-/// script (`decorate`): the engine routes any non-function decorate body — including the Mountebank
-/// `config =>` convention and bare Rhai — to its script engine (`apply_js_or_rhai_decorate`), so
-/// the "should be a function expression" nudge (W009) must not fire there (issues #248/#257). For
-/// JS-only behaviors (`wait`) it stays off, and a non-function script still warns.
 /// Whether the engine runs a `decorate` script as **JavaScript** rather than Rhai.
 ///
 /// Mirrors the engine's routing in `rift_mock_core::imposter::response::apply_js_or_rhai_decorate`:
@@ -1972,17 +2027,36 @@ pub fn is_javascript_decorate(script: &str) -> bool {
     config_convention || script.trim().starts_with("function")
 }
 
+/// Where a script sits, which decides how the engine reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScriptSite {
+    /// A function `wait`: JavaScript only, called as a function, so a non-function warns (W009).
+    Wait,
+    /// A `decorate`: the engine routes any non-function body — the Mountebank `config =>`
+    /// convention, bare Rhai — to its script engine (`apply_js_or_rhai_decorate`), so W009 must
+    /// not fire, and only a body routed to JavaScript is parsed as JavaScript (issues #248/#257,
+    /// #1156).
+    Decorate,
+    /// An `inject` response, predicate or predicate generator: always JavaScript, assigned as an
+    /// expression, so any expression is valid and W009 does not apply (issue #1170).
+    Inject,
+}
+
+/// Validate JavaScript at `site`: E028 from a real parse when the build has the `javascript`
+/// feature; otherwise E026/E027 bracket counts, and I004 says once that nothing was parsed.
 fn validate_javascript_behavior(
     file: &Path,
     script: &str,
     location: &str,
     result: &mut LintResult,
-    _options: &LintOptions,
-    allow_rhai: bool,
+    site: ScriptSite,
 ) {
     let script_trimmed = script.trim();
 
-    if !allow_rhai && !script_trimmed.starts_with("function") && !script_trimmed.is_empty() {
+    if site == ScriptSite::Wait
+        && !script_trimmed.starts_with("function")
+        && !script_trimmed.is_empty()
+    {
         result.add_issue(
             LintIssue::warning(
                 "W009",
@@ -1992,6 +2066,31 @@ fn validate_javascript_behavior(
             .with_location(location)
             .with_suggestion("Wrap code in: function() { ... }"),
         );
+    }
+
+    // A Rhai `decorate` is not JavaScript: Boa would reject it, and it needs no I004.
+    let is_rhai = site == ScriptSite::Decorate && !is_javascript_decorate(script);
+
+    // A parse is authoritative and counting characters is not — counting also sees the `{` in a
+    // string literal or a comment. So E026/E027 are only the fallback: a build without the
+    // `javascript` feature, or a Rhai `decorate` (where they are as wrong as in JavaScript).
+    if cfg!(feature = "javascript") && !is_rhai {
+        let parsed = if site == ScriptSite::Inject {
+            js_validator::validate_javascript_expression(script)
+        } else {
+            js_validator::validate_javascript(script)
+        };
+        if let Err(e) = parsed {
+            result.add_issue(
+                LintIssue::error(
+                    "E028",
+                    format!("JavaScript syntax error: {e}"),
+                    file.to_path_buf(),
+                )
+                .with_location(location),
+            );
+        }
+        return;
     }
 
     let open_braces = script.chars().filter(|c| *c == '{').count();
@@ -2020,27 +2119,9 @@ fn validate_javascript_behavior(
         );
     }
 
-    // A behavior that also accepts Rhai (`decorate`) is only JavaScript when the engine routes it
-    // there; Boa would reject valid Rhai. The brace and parenthesis checks above still apply — they
-    // are as wrong in Rhai as in JavaScript.
-    if allow_rhai && !is_javascript_decorate(script) {
-        return;
+    if !is_rhai {
+        disclose_unchecked_javascript(file, result);
     }
-
-    #[cfg(feature = "javascript")]
-    {
-        if let Err(e) = js_validator::validate_javascript(script) {
-            result.add_issue(
-                LintIssue::error(
-                    "E028",
-                    format!("JavaScript syntax error: {e}"),
-                    file.to_path_buf(),
-                )
-                .with_location(location),
-            );
-        }
-    }
-    disclose_unchecked_javascript(file, result);
 }
 
 /// Check whether a wait value is a valid {min, max} range object.
@@ -2297,8 +2378,8 @@ fn validate_lookup_behavior(file: &Path, lookup: &Value, location: &str, result:
 
 #[cfg(test)]
 mod js_behavior_tests {
-    use super::validate_javascript_behavior;
-    use crate::types::{LintOptions, LintResult};
+    use super::{ScriptSite, validate_javascript_behavior};
+    use crate::types::LintResult;
     use std::path::Path;
 
     fn lint(script: &str) -> LintResult {
@@ -2308,8 +2389,7 @@ mod js_behavior_tests {
             script,
             "loc",
             &mut result,
-            &LintOptions::default(),
-            false,
+            ScriptSite::Wait,
         );
         result
     }
@@ -2385,7 +2465,7 @@ mod js_behavior_tests {
 
     #[test]
     fn w009_still_fired_for_non_function_junk() {
-        // `wait` is JS-only (allow_rhai=false): any non-function, non-empty script warns.
+        // `wait` is JS-only (`ScriptSite::Wait`): any non-function, non-empty script warns.
         for script in [
             "response.body = 'x';",
             "response.statusCode = config.statusCode;",
@@ -2405,8 +2485,7 @@ mod js_behavior_tests {
             script,
             "loc.decorate",
             &mut result,
-            &LintOptions::default(),
-            true,
+            ScriptSite::Decorate,
         );
         result
     }
