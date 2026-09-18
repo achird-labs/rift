@@ -343,6 +343,26 @@ pub fn bind_addr(host: &str, port: u16) -> Option<SocketAddr> {
     }
 }
 
+/// The host spelling that [`bind_addr`] reads back to `addr`'s IP **and scope** — the inverse of
+/// [`bind_addr`], for the doors that carry a host as a string rather than a [`SocketAddr`]
+/// (issue #1150).
+///
+/// `IpAddr`'s own `Display` cannot do this: the scope id lives on `SocketAddrV6`, so
+/// `addr.ip().to_string()` silently yields an unscoped spelling that rebinds the wrong interface.
+/// An unscoped address is spelled without a zone — never `%0` — because this string is handed to
+/// callers and shows up in API responses.
+///
+/// Flowinfo is **not** carried: a host string has nowhere to put it. That is lossless for every
+/// address [`bind_addr`] produces, since it always builds flowinfo 0 — but an address taken from a
+/// bound socket's `local_addr()` can carry one, and it will not survive this round trip.
+#[must_use]
+pub fn bind_host(addr: &SocketAddr) -> String {
+    match addr {
+        SocketAddr::V6(v6) if v6.scope_id() != 0 => format!("{}%{}", v6.ip(), v6.scope_id()),
+        _ => addr.ip().to_string(),
+    }
+}
+
 /// `ip` or `ip%scope` (numeric scope) as an IPv6 socket address.
 fn ipv6_scoped(host: &str, port: u16) -> Option<SocketAddr> {
     let (ip, scope_id) = match host.split_once('%') {
@@ -1079,7 +1099,7 @@ mod accept_error {
 }
 
 #[cfg(test)]
-mod bind_host {
+mod bind_host_spellings {
     use super::*;
     use std::net::Ipv4Addr;
 
@@ -1144,5 +1164,53 @@ mod bind_host {
             bind_addr("0.0.0.0", 2525),
             Some(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 2525)))
         );
+    }
+
+    // Issue #1150: `bind_host` is `bind_addr`'s inverse, and the scope id is the whole reason it
+    // exists — `IpAddr::to_string` cannot spell one, so anything that rebuilds a host string from
+    // `.ip()` silently drops it.
+    #[test]
+    fn bind_host_spells_the_scope_id() {
+        let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        assert_eq!(bind_host(&v6(link_local, 80, 2)), "fe80::1%2");
+        assert_eq!(bind_host(&v6(link_local, 80, 42)), "fe80::1%42");
+        assert_eq!(bind_host(&v6(link_local, 80, 1)), "fe80::1%1");
+    }
+
+    // An unscoped address must not grow a `%0`. `bind_addr` would read it back correctly, but the
+    // string is handed to `InterceptStartOptions.host` and shows up in API responses.
+    #[test]
+    fn bind_host_of_an_unscoped_address_has_no_zone() {
+        assert_eq!(bind_host(&v6(Ipv6Addr::LOCALHOST, 80, 0)), "::1");
+        assert_eq!(bind_host(&v6(Ipv6Addr::UNSPECIFIED, 80, 0)), "::");
+        assert_eq!(
+            bind_host(&SocketAddr::from((Ipv4Addr::LOCALHOST, 80))),
+            "127.0.0.1"
+        );
+        assert_eq!(
+            bind_host(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, 80))),
+            "0.0.0.0"
+        );
+    }
+
+    // The round trip, over exactly the addresses `bind_addr` can produce (it always builds
+    // flowinfo 0, so an address with flowinfo set is out of the property's domain).
+    #[test]
+    fn bind_host_round_trips_through_bind_addr() {
+        let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        for addr in [
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 2525)),
+            SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+            v6(Ipv6Addr::LOCALHOST, 2525, 0),
+            v6(Ipv6Addr::UNSPECIFIED, 80, 0),
+            v6(link_local, 2525, 2),
+            v6(link_local, 0, 1),
+        ] {
+            assert_eq!(
+                bind_addr(&bind_host(&addr), addr.port()),
+                Some(addr),
+                "round trip for {addr}"
+            );
+        }
     }
 }

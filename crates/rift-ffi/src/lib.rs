@@ -1894,6 +1894,19 @@ async fn build_admin_plane(
     result
 }
 
+/// The admin address with the port replaced — the metrics listener binds the same interface the
+/// admin plane does (issue #1150).
+///
+/// Moving the port on a copy is the only form that keeps an IPv6 scope id and flowinfo:
+/// `SocketAddr::new(addr.ip(), port)` rebuilds from an `IpAddr`, which carries neither, so a
+/// link-local admin bind produced a scope-0 metrics address that fails to bind — and a metrics
+/// bind failure aborts the whole `rift_serve_admin` call.
+fn metrics_bind_addr(admin_addr: SocketAddr, metrics_port: u16) -> SocketAddr {
+    let mut addr = admin_addr;
+    addr.set_port(metrics_port);
+    addr
+}
+
 async fn build_admin_plane_inner(
     handle: &RiftHandle,
     opts: &ServeOptions,
@@ -1921,7 +1934,7 @@ async fn build_admin_plane_inner(
             "host `{host}` is not an IP literal (IPv4, or IPv6 bare `::1` or bracketed `[::1]`)"
         )
     })?;
-    let metrics_addr = opts.metrics_port.map(|mp| SocketAddr::new(addr.ip(), mp));
+    let metrics_addr = opts.metrics_port.map(|mp| metrics_bind_addr(addr, mp));
 
     // Issue #863: judge the resolved admin address before any side effect, for the same reason the
     // blank-key check above is here — this is the one boundary every SDK reaches the admin plane
@@ -2553,5 +2566,53 @@ mod serve_option_capability_tests {
             "this fixture must exercise every advertised key"
         );
         serde_json::from_value::<ServeOptions>(full).expect("a full valid options document parses");
+    }
+}
+
+#[cfg(test)]
+mod metrics_bind_addr_tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV6};
+
+    // Issue #1150: the metrics listener is derived from the admin address, and #1144 derived it by
+    // rebuilding from `.ip()` — which cannot carry a scope id. A scope-0 bind of a link-local
+    // address fails (macOS `os error 49`), and the FFI treats a metrics bind failure as fatal, so
+    // `rift_serve_admin` returned NULL for a host it had just accepted.
+    #[test]
+    fn metrics_address_keeps_the_scope_id() {
+        let admin = SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+            2525,
+            0,
+            2,
+        ));
+        let metrics = metrics_bind_addr(admin, 9090);
+        let SocketAddr::V6(v6) = metrics else {
+            panic!("expected an IPv6 address, got {metrics}");
+        };
+        assert_eq!(v6.scope_id(), 2);
+        assert_eq!(v6.port(), 9090);
+        assert_eq!(*v6.ip(), Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+    }
+
+    // Flowinfo lives on `SocketAddrV6` too, and `.ip()` drops it for the same reason.
+    #[test]
+    fn metrics_address_keeps_the_flowinfo() {
+        let admin = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 2525, 7, 0));
+        let SocketAddr::V6(v6) = metrics_bind_addr(admin, 0) else {
+            panic!("expected an IPv6 address");
+        };
+        assert_eq!(v6.flowinfo(), 7);
+        assert_eq!(v6.port(), 0);
+    }
+
+    // `metricsPort: 0` is the common SDK call — an OS-assigned port, not "no metrics listener".
+    #[test]
+    fn metrics_address_carries_an_ephemeral_port_and_ipv4() {
+        let admin = SocketAddr::from((Ipv4Addr::LOCALHOST, 2525));
+        assert_eq!(
+            metrics_bind_addr(admin, 0),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
+        );
     }
 }

@@ -111,7 +111,7 @@ rift_free(result);
   `port: 0` binds an ephemeral port; `host` must be an IP literal — IPv4, or IPv6 bare (`::1`) or
   bracketed (`[::1]`), a numeric scope id (`fe80::1%2`) kept — and a DNS name such as `localhost` is
   refused (#1137; before that fix a bare IPv6 host could never bind). The metrics server, if asked
-  for, binds the same IP. `configFile` is loaded as the reload source (like `--configfile`);
+  for, binds the same IP **and the same scope id** (#1150). `configFile` is loaded as the reload source (like `--configfile`);
   `config` is an inline `{"imposters":[...]}`. `configFile` and `config` do not compose — pass one.
   Since 0.17.0 an **unknown key is a hard error** naming the key (`NULL` + `rift_last_error`), not a
   silent drop — so a typo fails loudly instead of leaving the option quietly inert.
@@ -170,6 +170,18 @@ rift_free(result);
 - **Returns** (caller frees): `{"adminPort":...,"adminUrl":"...","metricsPort":...}`, or `NULL` on
   error (bad JSON, bind failure, or already serving — one admin plane per handle). `adminUrl` is
   built from the bound address, so an IPv6 bind reads `http://[::1]:49321`.
+
+  **For a scoped bind (`fe80::1%2`) `adminUrl` — and `interceptUrl` on `rift_start_intercept` —
+  carry the socket-address spelling, `http://[fe80::1%2]:49321`, which is not a portable URL.**
+  No spelling is: Go's `url.Parse` rejects the raw `%`, Java's `URI` accepts it and rejects the
+  RFC 6874 `%25` form (it reads the zone as literal digits and connects to the wrong scope), and
+  the WHATWG parser Node uses rejects a zone id either way. RFC 6874 has itself since been
+  obsoleted (RFC 9844) for this reason. The engine therefore leaves the field as std's spelling
+  rather than picking a form that breaks a different runtime. For a scoped bind, build the URL
+  from `adminPort` / `interceptPort` plus the host you passed in, which you already have.
+
+  The `rift save` and `rift healthcheck` subcommands cannot reach a scoped host at all: they go
+  through `reqwest`, whose URL parser rejects a zone in either spelling.
 
 ### Detecting which options an engine accepts
 
