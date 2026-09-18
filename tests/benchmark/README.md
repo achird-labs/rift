@@ -43,12 +43,22 @@ python3 scripts/bench_direct.py --run-all \
     --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
 cat results/DIRECT_BENCHMARK_REPORT.md
 
-# Admin create/read
-python3 scripts/bench_admin.py --run-all \
+# Admin create/read (median of --rep rounds; each run writes under its own --tag)
+python3 scripts/bench_admin.py --run-all --rep 5 --tag m4 \
     --rift-bin ../../target/release/rift-http-proxy \
     --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
-cat results/ADMIN_BENCHMARK_REPORT.md
+cat results/ADMIN_BENCHMARK_REPORT_m4.md
+
+# Admin A/B of two Rift builds, Mountebank left out
+python3 scripts/bench_admin.py --run-all --rep 9 --engines rift \
+    --rift-bin old=/tmp/rift-old --rift-bin new=../../target/release/rift-http-proxy
 ```
+
+`bench_admin.py` discards a warm-up round, then measures every point `--rep` times (default 5),
+interleaving the arms within each round and rotating their order, and reports the median with its
+min–max and peak-to-peak spread. It also reports RSS (the least noisy number it produces) and the
+response body size, which should be equal across Rift builds. Raw samples go to
+`results/admin_samples_<tag>.json`, one engine log per measurement to `results/admin-<tag>/`.
 
 The default `--run-all` is the Rift-vs-Mountebank comparison and is unchanged
 (`results/DIRECT_BENCHMARK_REPORT.md`). `direct_rift.csv`/`direct_mb.csv` now carry
@@ -637,9 +647,12 @@ stub-overlap analysis, a Rift extension Mountebank does not perform.
 | distinct | 100 | 18.0 → 4.6 | 1.2 → 0.6 | 3.7 → 3.2 | 0 |
 | distinct | 1000 | 80.4 → 10.1 | 1.8 → 1.5 | 78.9 → 12.0 | 0 |
 
-M4, 2026-09-17, median of 4 runs (the harness takes one sample per run). The July table read
-Rift's 1,000-stub creates at 5–7 ms; they are ~10–11 ms here — worth a same-session A/B before
-calling it a regression, since the admin suite has no repetition support.
+M4, 2026-09-17, median of 4 runs taken before the harness had repetition support, one sample
+each. A single create sample is too noisy to compare across sessions: one binary, one shape and
+one session spans about 3–8 ms. A same-session A/B during #1157's triage found no 2x. The July
+build and this one both create 1,000 stubs in about 7–8 ms (median of 23 interleaved rounds),
+and the table's ~10–11 ms is host noise. The admin table is due to be re-measured with `--rep` on
+a quiet host.
 
 ### Key findings
 
