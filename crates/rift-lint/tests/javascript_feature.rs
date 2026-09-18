@@ -137,3 +137,17 @@ fn a_javascript_decorate_is_still_syntax_checked() {
         result.issues
     );
 }
+
+/// Issue #1170: an `inject` is JavaScript the engine runs, so an opt-out build must disclose that
+/// it did not check one — the fixture #1156 wanted and could not use.
+#[cfg(not(feature = "javascript"))]
+#[test]
+fn an_opt_out_build_discloses_an_unchecked_inject() {
+    let doc = json!({ "port": 4545, "protocol": "http", "stubs": [{
+        "predicates": [{ "inject": "function (config) { return true; }" }],
+        "responses": [{ "inject": "function (config) { return { statusCode: 200 }; }" }]
+    }] })
+    .to_string();
+    let result = lint_json(&doc, "a.json", &LintOptions::default());
+    assert_eq!(i004s(&result), 1, "{:?}", result.issues);
+}

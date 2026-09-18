@@ -1041,6 +1041,9 @@ fn w009_not_fired_for_function_expression() {
     assert!(!has_code(&r, "W009"), "unexpected W009: {:?}", codes(&r));
 }
 
+// E026/E027 are the fallback for a build that cannot parse (issue #1170); with the parser, the same
+// scripts are E028 — see `a_parse_replaces_the_bracket_counts` below.
+#[cfg(not(feature = "javascript"))]
 #[test]
 fn e026_unbalanced_braces_in_js() {
     let behavior = json!({ "decorate": "function(req, resp) { resp.body = 'hi';" });
@@ -1049,6 +1052,7 @@ fn e026_unbalanced_braces_in_js() {
     assert!(has_code(&r, "E026"));
 }
 
+#[cfg(not(feature = "javascript"))]
 #[test]
 fn e027_unbalanced_parens_in_js() {
     let behavior = json!({ "decorate": "function(req, resp) { foo(; }" });
@@ -3234,4 +3238,243 @@ fn w017_treats_null_as_absent_and_w014_skips_ignored_blocks() {
     validate_imposter(path(), &v, &mut r, &opts());
     assert!(has_code(&r, "W017"), "got {:?}", codes(&r));
     assert!(!has_code(&r, "W014"), "got {:?}", codes(&r));
+}
+
+// ─── Issue #1170: JavaScript in `inject` ─────────────────────────────────────
+//
+// The engine runs every `inject` on Boa as `var __injectFn = <script>;`, so a script Boa cannot
+// parse cannot serve on Rift. The linter parses it the same way, at all three sites.
+
+/// Balanced braces and parentheses, so the finding is the parser's (E028), not the counters'.
+const BROKEN_INJECT: &str = "function (config) { return 1 ]; }";
+
+fn inject_findings(result: &LintResult) -> Vec<(String, String)> {
+    result
+        .issues
+        .iter()
+        .filter(|i| i.code != "I004")
+        .map(|i| (i.code.clone(), i.location.clone().unwrap_or_default()))
+        .collect()
+}
+
+#[cfg(feature = "javascript")]
+#[test]
+fn e028_for_a_malformed_inject_response() {
+    let mut r = LintResult::new();
+    let resp = json!({ "inject": BROKEN_INJECT });
+    validate_response(path(), &resp, "loc", &mut r, &opts(), &Value::Null);
+    assert_eq!(
+        inject_findings(&r),
+        vec![finding("E028", "loc.inject")],
+        "{:?}",
+        r.issues
+    );
+}
+
+#[cfg(feature = "javascript")]
+#[test]
+fn e028_for_a_malformed_inject_predicate_at_any_depth() {
+    for (predicate, location) in [
+        (json!({ "inject": BROKEN_INJECT }), "loc.inject"),
+        (
+            json!({ "not": { "inject": BROKEN_INJECT } }),
+            "loc.not.inject",
+        ),
+        (
+            json!({ "or": [{ "equals": { "path": "/" } }, { "inject": BROKEN_INJECT }] }),
+            "loc.or[1].inject",
+        ),
+    ] {
+        let mut r = LintResult::new();
+        validate_predicate(path(), &predicate, "loc", &mut r, &opts());
+        assert_eq!(
+            inject_findings(&r),
+            vec![finding("E028", location)],
+            "{predicate}"
+        );
+    }
+}
+
+#[cfg(feature = "javascript")]
+#[test]
+fn e028_for_a_malformed_predicate_generator_inject() {
+    let proxy = json!({
+        "to": "http://localhost:9000",
+        "predicateGenerators": [{ "matches": { "path": true } }, { "inject": BROKEN_INJECT }]
+    });
+    let mut r = LintResult::new();
+    validate_proxy_response(path(), &proxy, "loc", &mut r);
+    assert_eq!(
+        inject_findings(&r),
+        vec![finding("E028", "loc.predicateGenerators[1].inject")],
+        "{:?}",
+        r.issues
+    );
+}
+
+/// Every form the engine's `var __injectFn = <script>;` wrapper accepts. None is a function
+/// *declaration* problem and none needs to start with `function`, so no W009 either.
+#[test]
+fn well_formed_inject_scripts_report_nothing() {
+    for script in [
+        "function (config) { return { statusCode: 200 }; }",
+        "function(config) { return { body: 'x' }; }",
+        "function (request, state, logger, callback) { callback({ body: 'x' }); }",
+        "function named(config) { return { body: 'x' }; }",
+        "async function (config) { return { body: 'x' }; }",
+        "(config) => { return { body: 'x' }; }",
+        "config => ({ body: `${config.request.path}` })",
+        "function (config) { return { body: config.request?.body ?? 'x' }; };",
+        "function (config) { return { body: 'x' }; } // trailing comment",
+        "function (config) {\n  var n = 1;\n  return { body: String(n) };\n}\n",
+    ] {
+        for (site, run) in [("response", 0), ("predicate", 1), ("generator", 2)] {
+            let mut r = LintResult::new();
+            match run {
+                0 => validate_response(
+                    path(),
+                    &json!({ "inject": script }),
+                    "loc",
+                    &mut r,
+                    &opts(),
+                    &Value::Null,
+                ),
+                1 => {
+                    validate_predicate(path(), &json!({ "inject": script }), "loc", &mut r, &opts())
+                }
+                _ => validate_proxy_response(
+                    path(),
+                    &json!({ "to": "http://h:1", "predicateGenerators": [{ "inject": script }] }),
+                    "loc",
+                    &mut r,
+                ),
+            }
+            assert_eq!(inject_findings(&r), vec![], "{site}: {script}");
+        }
+    }
+}
+
+/// The engine picks `is` before `inject`, so an `inject` beside an `is` never runs and is not
+/// parsed as the response.
+#[test]
+fn an_inject_shadowed_by_is_is_not_parsed() {
+    let mut r = LintResult::new();
+    let resp = json!({ "is": { "statusCode": 200 }, "inject": BROKEN_INJECT });
+    validate_response(path(), &resp, "loc", &mut r, &opts(), &Value::Null);
+    assert!(!has_code(&r, "E028"), "{:?}", codes(&r));
+}
+
+/// A non-string `inject` is a type error the engine refuses at parse; there is no script to check.
+#[test]
+fn a_non_string_inject_is_not_syntax_checked() {
+    let mut r = LintResult::new();
+    validate_predicate(path(), &json!({ "inject": 5 }), "loc", &mut r, &opts());
+    assert!(!has_code(&r, "E028"), "{:?}", codes(&r));
+}
+
+/// Cheap insurance against a Boa upgrade: every inject script this repo ships parses.
+#[test]
+fn shipped_fixtures_have_no_e028() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    for dir in ["sdk-conformance/corpus/imposters", "examples", "docs/demo"] {
+        for entry in std::fs::read_dir(root.join(dir)).expect("fixture dir exists") {
+            let p = entry.expect("dir entry").path();
+            if p.extension().is_some_and(|e| e == "json") {
+                files.push(p);
+            }
+        }
+    }
+    assert!(
+        files.len() > 10,
+        "fixture dirs moved? found {}",
+        files.len()
+    );
+    for file in files {
+        let r = lint_file(&file, &opts());
+        let e028: Vec<_> = r.issues.iter().filter(|i| i.code == "E028").collect();
+        assert!(e028.is_empty(), "{}: {e028:?}", file.display());
+    }
+}
+
+/// With the parser, an unbalanced script is the parser's E028 — never E026/E027 as well.
+#[cfg(feature = "javascript")]
+#[test]
+fn a_parse_replaces_the_bracket_counts() {
+    for script in [
+        "function(req, resp) { resp.body = 'hi';",
+        "function(req, resp) { foo(; }",
+    ] {
+        let mut r = LintResult::new();
+        validate_behavior(
+            path(),
+            &json!({ "decorate": script }),
+            "loc",
+            &mut r,
+            &opts(),
+        );
+        assert_eq!(codes(&r), vec!["E028"], "{script}");
+    }
+}
+
+/// Counting characters also counts the `{` or `(` inside a string or comment. A parser does not,
+/// so a valid script with one is clean — at an inject site, and at the older ones too.
+#[cfg(feature = "javascript")]
+#[test]
+fn a_quoted_brace_or_paren_is_not_an_error() {
+    let predicate =
+        json!({ "inject": "function (config) { return config.request.body.indexOf('{') === 0; }" });
+    let mut r = LintResult::new();
+    validate_predicate(path(), &predicate, "loc", &mut r, &opts());
+    assert!(r.issues.is_empty(), "{:?}", codes(&r));
+
+    let response = json!({ "inject": "function (config) { return { body: config.request.path.split('(')[0] }; } // )" });
+    let mut r = LintResult::new();
+    validate_response(path(), &response, "loc", &mut r, &opts(), &Value::Null);
+    assert!(r.issues.is_empty(), "{:?}", codes(&r));
+
+    let decorate = json!({ "decorate": "function (req, res) { res.body = '{' + res.body; }" });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &decorate, "loc", &mut r, &opts());
+    assert!(r.issues.is_empty(), "{:?}", codes(&r));
+}
+
+/// A Rhai `decorate` is not parsed as JavaScript, so the counts still apply to it in every build.
+#[test]
+fn a_rhai_decorate_still_gets_the_bracket_counts() {
+    let mut r = LintResult::new();
+    validate_behavior(
+        path(),
+        &json!({ "decorate": "response.body = foo(;" }),
+        "loc",
+        &mut r,
+        &opts(),
+    );
+    assert_eq!(codes(&r), vec!["E027"]);
+}
+
+#[test]
+fn an_inject_shadowed_by_proxy_is_not_parsed() {
+    let mut r = LintResult::new();
+    let resp = json!({ "proxy": { "to": "http://localhost:9000" }, "inject": BROKEN_INJECT });
+    validate_response(path(), &resp, "loc", &mut r, &opts(), &Value::Null);
+    assert!(!has_code(&r, "E028"), "{:?}", codes(&r));
+}
+
+/// `rules` is the engine's alias for `predicates`; it used to be linted not at all.
+#[cfg(feature = "javascript")]
+#[test]
+fn predicates_spelled_rules_are_linted() {
+    let stub = json!({
+        "rules": [{ "equals": { "path": "/" } }, { "inject": BROKEN_INJECT }],
+        "responses": [{ "is": { "statusCode": 200 } }]
+    });
+    let mut r = LintResult::new();
+    validate_stub(path(), &stub, 0, &mut r, &opts(), &Value::Null);
+    assert_eq!(
+        inject_findings(&r),
+        vec![finding("E028", "stubs[0].rules[1].inject")],
+        "{:?}",
+        r.issues
+    );
 }

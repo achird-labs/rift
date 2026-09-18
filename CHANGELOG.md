@@ -789,6 +789,22 @@ record.
 
 ### Fixed
 
+- **`rift-lint` now syntax-checks JavaScript in `inject`** (#1170) — an `inject` response, an
+  `inject` predicate (at any depth under `and`/`or`/`not`) and a `proxy.predicateGenerators[].inject`,
+  reported as E028. The linter checked `decorate` and function `wait` scripts only, so a malformed
+  inject linted clean. A config that linted clean can now report E028, but any such config already
+  failed on Rift: the admin API refuses a malformed inject response with a `400`, and through
+  `--configfile`, `--datadir` or reload the stub answered every request with `400 invalid injection`
+  — or, for a predicate, silently never matched. The script is parsed as the engine wraps it, so an
+  arrow, `async` or named function is accepted and does not draw W009. A build without the
+  `javascript` feature reports I004 for an inject as it does for other JavaScript. Predicates
+  spelled `rules` (the engine's alias for `predicates`) are now linted too; they were skipped.
+
+- **`rift-lint` no longer reports E026/E027 for a `{` or `(` inside a JavaScript string or comment**
+  (#1170). The bracket counts ran alongside the parser, so a valid script such as
+  `indexOf('{')` failed with an error the engine did not share. They are now only the fallback where
+  nothing is parsed — a build without the `javascript` feature, or a Rhai `decorate`.
+
 - **`POST /admin/reload` re-applies an edited `routes` block** (#1160). The reload parsed and
   validated the config file's route table and then dropped it: the front door kept serving the old
   table, and the `200` response said nothing. The reloaded table now replaces the old one in one
