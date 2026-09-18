@@ -1086,37 +1086,39 @@ mod allow_injection_tests {
         assert!(reject_if_injection_disallowed(&config, true).is_none());
     }
 
-    // AC 610-3: fail closed. A `wait` the gate cannot prove is a plain delay must classify as
-    // scripted rather than slipping through as "no script surface". Previously this was safe only
-    // because the executor's parser failed in lockstep — an invariant nothing tested, and one
-    // #608's new variant is exactly the kind of change to break.
+    // AC 610-3 / #1162: the gate fails closed on a `wait` it cannot prove is a plain delay, and the
+    // parser now refuses such a block before the gate is consulted, so no `ImposterConfig` carrying
+    // one can be built. The gate's own fail-closed table is in `injection_gate.rs`; this pins that
+    // the parser is the first of the two layers.
     #[test]
-    fn unrecognized_wait_shapes_fail_closed() {
+    fn unrecognized_wait_shapes_do_not_reach_the_gate() {
         for wait in [
             json!({ "bogus": true }),
             json!({ "inject": 42 }),
             json!({ "min": 1 }),
+            json!({ "min": "1", "max": "2" }),
             json!(true),
         ] {
-            let config = wait_cfg(wait.clone());
-            assert!(
-                reject_if_injection_disallowed(&config, false).is_some(),
-                "a wait the gate cannot prove is a plain delay must be treated as executable: {wait}"
-            );
+            let parsed = serde_json::from_value::<ImposterConfig>(json!({
+                "protocol": "http",
+                "stubs": [{
+                    "responses": [{ "is": { "statusCode": 200 }, "_behaviors": { "wait": wait } }]
+                }]
+            }));
+            assert!(parsed.is_err(), "the parser must refuse wait {wait}");
         }
     }
 
-    // Fail-closed must stay scoped to what the gate is actually for. A malformed block with NO
-    // script surface is not an injection problem: 400-ing `{"repeat": 2.0}` with "inject requires
-    // --allowInjection" diagnoses a float as a scripting attempt, and makes a config's validity
-    // depend on an unrelated security flag. Such blocks stay admitted (and are dropped loudly at
-    // construction, per #608) exactly as before this change.
+    // Fail-closed must stay scoped to what the gate is actually for: a block with no script surface
+    // is never an injection problem. (A malformed one such as `{"repeat": 2.0}` is refused by the
+    // parser since #1162, before this gate; the gate's verdict on it is pinned in `injection_gate.rs`.)
     #[test]
     fn script_free_behaviors_are_not_an_injection_problem() {
         let script_free = [
-            json!({ "repeat": 2.0 }),
-            json!({ "wait": 100.0 }),
             json!({ "repeat": 3 }),
+            json!({ "wait": 100, "repeat": 2 }),
+            json!({ "copy": { "from": "path", "into": "${P}",
+                              "using": { "method": "regex", "selector": ".*" } } }),
         ];
         for behaviors in script_free {
             let config = cfg(json!({
