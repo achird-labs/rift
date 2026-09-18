@@ -84,18 +84,30 @@ spec:
 ### Probes and `--api-key`
 
 With `MB_APIKEY` / `--api-key` set, every admin API path — `/health` included — answers `401`
-without the key, so an `httpGet` probe on the admin port fails. Probe the metrics port instead,
-which the key does not gate (unless `--local-only` has bound it to loopback):
+without the key, so a plain `httpGet` probe on the admin port fails. Use `rift healthcheck` as an
+`exec` probe instead: it presents the key the container already holds from `MB_APIKEY` (issue
+#1154), so the secret stays in the pod's environment rather than being copied into the manifest the
+way an `httpGet` `httpHeaders` entry would put it:
 
 ```yaml
           livenessProbe:
-            httpGet:
-              path: /metrics
-              port: metrics
+            exec:
+              command: ["rift", "healthcheck"]
+            timeoutSeconds: 3
+          readinessProbe:
+            exec:
+              command: ["rift", "healthcheck"]
+            timeoutSeconds: 3
 ```
 
-The image's own Docker `HEALTHCHECK` is ignored by Kubernetes; `rift healthcheck` can still be used
-as an `exec` probe (`command: ["rift", "healthcheck"]`), with the same `--api-key` caveat.
+Set `timeoutSeconds` explicitly: an `exec` probe defaults to 1s, while `rift healthcheck` waits up
+to 2s by default, so without it a slow `/health` is killed by the kubelet instead of being reported
+by the probe. The key must come from the pod's environment (`MB_APIKEY`, e.g. from a Secret) — the
+probe is a separate process and does not see the container's `args`.
+
+The image's own Docker `HEALTHCHECK` is ignored by Kubernetes, so declare the probe explicitly as
+above. Probing the metrics port with `httpGet` still works too, but it only proves the metrics
+listener is up, not that the admin API is healthy.
 
 ### Shutdown
 

@@ -322,6 +322,10 @@ record.
 
 ### Changed
 
+- **`bootstrap::save_imposters` and `save_imposters_async` take an `api_key: Option<&str>`** (#1154),
+  so an embedder saving from a keyed server can present the key. Pass `None` for an unkeyed server.
+  A signature change on 0.x, treated like the earlier pre-1.0 API edits.
+
 - **A `--datadir` file must be named `<port>.json` after the port it declares** (#1128). A file named
   anything else, `foo.json`, a copied-in `imposter-4545.json` export, or a `4545-orders.json` from
   `rift-tui`'s folder export, used to be served and then written again as `4545.json` beside the
@@ -710,6 +714,23 @@ record.
     `errors[0].detail` instead.
 
 ### Fixed
+
+- **`rift healthcheck` and `rift save` present the admin API key** (#1154). A server started with
+  `--api-key` / `MB_APIKEY` answers every admin path, `/health` included, with `401` until the key is
+  sent — and neither client ever sent it. So a container that set `MB_APIKEY`, the configuration the
+  images document for a locked-down deployment, reported **unhealthy forever** (orchestrators
+  restarted it, rolling deploys stalled), and `rift save` against a keyed server always failed.
+  - Both now send the key the process already holds. `api_key` is a top-level option bound to
+    `MB_APIKEY`, so every subcommand has it, and an rcfile `apiKey` is applied before either runs.
+    No new flag: one on the subcommand would duplicate the top-level option and invite putting a
+    secret in argv, where `docker inspect` shows it. No image change either.
+  - The healthcheck sends the key **only** to the address derived from `--host`/`--port`, never to
+    an explicit `--url`, which is an arbitrary target and commonly the unauthenticated metrics
+    listener. A `401` with no key configured now names the setting to add.
+  - The header is the raw token the admin API compares, marked sensitive so a debug log never prints
+    it. The documented workaround — probing the metrics port instead — is retired from the Docker
+    and CLI docs; the Kubernetes page now shows an `exec` probe, which keeps the key out of the
+    manifest.
 
 - **A binary `defaultResponse` that fails to decode is flagged instead of served silently** (#1151).
   `defaultResponse` with `_mode: "binary"` and a body that is not valid base64 was served as the raw

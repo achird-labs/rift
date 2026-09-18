@@ -799,13 +799,17 @@ Pass the same `--rcfile` the server was started with, or the probe knocks on the
 (issue #1133). An rcfile the server would refuse (a missing file, a wrong-typed key) refuses the
 probe too, and reports unhealthy: a server started with that file would not have started either.
 
-The probe sends no `Authorization` header. Against a server started with `--api-key` (or
-`MB_APIKEY`), the default `/health` probe gets `401` and reports **unhealthy**. Point it at the
-metrics listener instead, which the key does not gate:
+**A keyed server needs no extra configuration** (issue #1154). The probe presents the admin API
+key it already has — `MB_APIKEY`, `--api-key`, or an rcfile `apiKey`, all read exactly as the server
+reads them — so a container that sets `MB_APIKEY` keeps its built-in `HEALTHCHECK` healthy with no
+change to the image or the command. There is deliberately no key flag on the subcommand: it would
+duplicate the top-level one and invite putting a secret in argv, where `docker inspect` shows it.
 
-```bash
-rift healthcheck --url http://127.0.0.1:9090/metrics
-```
+The key goes **only** to the URL derived from `--host`/`--port`. An explicit `--url` is an arbitrary
+target — pointing it at the unauthenticated metrics listener is the common use — and attaching the
+admin secret to it would leak the key, so an explicit `--url` is never sent one. If you point `--url`
+at the admin API of a keyed server it gets `401` and reports unhealthy; drop `--url` instead. A `401`
+with no key configured says which setting to add.
 
 | Flag | Description | Default |
 |:-----|:------------|:--------|

@@ -82,14 +82,19 @@ TLS client loads the OS trust store at runtime. For a private CA, see
 
 ### Health checks and `--api-key`
 
-`rift healthcheck` sends no credential. If you set `MB_APIKEY` (or `--api-key`), the admin API
-answers the probe with `401` and the container is reported **unhealthy**. Probe the metrics listener,
-which the key does not gate, instead:
+**Set the key with `MB_APIKEY`, and the built-in `HEALTHCHECK` needs no change** (issue #1154): the
+probe is a separate process, but it runs with the container's environment, so it reads `MB_APIKEY`
+and presents it to the admin API's `/health`. It sends the key only to the address derived from
+`MB_HOST`/`MB_PORT`, never to an explicit `--url`.
 
-```yaml
-healthcheck:
-  test: ["CMD", "rift", "healthcheck", "--url", "http://127.0.0.1:9090/metrics"]
-```
+The other two spellings do **not** reach it on their own, for the reason above — the probe never
+sees the server's command line:
+
+- **`--api-key` as a `docker run` argument** is invisible to the probe, so the container reports
+  unhealthy. Switch to `-e MB_APIKEY=…`. Do not fix it by adding `--api-key` to the healthcheck
+  `test:` line — that puts the key in `docker inspect`.
+- **An rcfile `apiKey`** reaches the probe only if the healthcheck is given the same file, as in the
+  `--rcfile` override above: `["CMD", "rift", "--rcfile", "/etc/rift/rc.json", "healthcheck"]`.
 
 ### Stopping the container
 
