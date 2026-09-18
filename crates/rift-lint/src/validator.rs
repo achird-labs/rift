@@ -114,6 +114,86 @@ fn disclose_unchecked_javascript(file: &Path, result: &mut LintResult) {
 #[cfg(feature = "javascript")]
 fn disclose_unchecked_javascript(_file: &Path, _result: &mut LintResult) {}
 
+/// `_rift.scriptEngine.defaultEngine`, when the imposter sets one as a string.
+fn default_engine(imposter: &Value) -> Option<&str> {
+    imposter
+        .get("_rift")?
+        .get("scriptEngine")?
+        .get("defaultEngine")?
+        .as_str()
+}
+
+/// W016: a `defaultEngine` the engine cannot build a script with (issue #1159). A warning, not an
+/// error: it only fails once a script actually needs the default, and a config carrying a stale
+/// value but no engine-less script loads and serves.
+fn check_default_engine(file: &Path, imposter: &Value, result: &mut LintResult) {
+    let Some(engine) = default_engine(imposter) else {
+        return;
+    };
+    if matches!(engine, "rhai" | "javascript" | "js") {
+        return;
+    }
+    result.add_issue(
+        LintIssue::warning(
+            "W016",
+            format!(
+                "_rift.scriptEngine.defaultEngine '{engine}' is not an engine; a script that \
+                 names no engine, and whose file extension does not decide it, fails to build"
+            ),
+            file.to_path_buf(),
+        )
+        .with_location("_rift.scriptEngine.defaultEngine")
+        .with_suggestion("Use \"rhai\" or \"javascript\""),
+    );
+}
+
+/// The imposter as the engine resolves it for engine selection: every `_rift.script` (registry
+/// entries and responses) with no `engine`, no `ref`, and no `file` extension that decides it gets
+/// the imposter's `defaultEngine` written in — the same precedence and the same write-back the
+/// engine's resolver does. `None` when that changes nothing (no default, or `"rhai"`, which is what
+/// the checks assume for an engine-less script anyway).
+fn apply_default_engine(imposter: &Value) -> Option<Value> {
+    let engine = default_engine(imposter).filter(|engine| *engine != "rhai")?;
+    let fill = |script: &mut Value| {
+        let Some(script) = script.as_object_mut() else {
+            return;
+        };
+        let decided_by_extension = script
+            .get("file")
+            .and_then(Value::as_str)
+            .and_then(|f| Path::new(f).extension())
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e, "rhai" | "lua" | "js"));
+        if script.contains_key("engine") || script.contains_key("ref") || decided_by_extension {
+            return;
+        }
+        script.insert("engine".to_owned(), Value::String(engine.to_owned()));
+    };
+    let mut resolved = imposter.clone();
+    if let Some(scripts) = resolved
+        .get_mut("_rift")
+        .and_then(|rift| rift.get_mut("scripts"))
+        .and_then(Value::as_object_mut)
+    {
+        scripts.values_mut().for_each(fill);
+    }
+    if let Some(stubs) = resolved.get_mut("stubs").and_then(Value::as_array_mut) {
+        for response in stubs
+            .iter_mut()
+            .filter_map(|stub| stub.get_mut("responses").and_then(Value::as_array_mut))
+            .flatten()
+        {
+            if let Some(script) = response
+                .get_mut("_rift")
+                .and_then(|rift| rift.get_mut("script"))
+            {
+                fill(script);
+            }
+        }
+    }
+    Some(resolved)
+}
+
 /// Validate a complete imposter configuration.
 pub fn validate_imposter(
     file: &Path,
@@ -121,6 +201,12 @@ pub fn validate_imposter(
     result: &mut LintResult,
     options: &LintOptions,
 ) {
+    check_default_engine(file, imposter, result);
+    // Every script below is checked in the engine it will run in, which for an engine-less script
+    // is the imposter's `defaultEngine` (issue #1159).
+    let with_default = apply_default_engine(imposter);
+    let imposter = with_default.as_ref().unwrap_or(imposter);
+
     check_required_fields(file, imposter, result);
     check_protocol(file, imposter, result);
     check_port_range(file, imposter, result);

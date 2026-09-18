@@ -747,6 +747,18 @@ record.
 
 ### Fixed
 
+- **`_rift.scriptEngine.defaultEngine` is honoured** (#1159). It was parsed, documented and sent by
+  rift-java and rift-scala, but nothing read it: an inline `_rift.script` with no `engine` always ran
+  as Rhai, so `"defaultEngine": "javascript"` handed JavaScript to the Rhai compiler and failed. A
+  script's engine is now its own `engine`, else its `file` extension, else the imposter's
+  `defaultEngine`, else `rhai`. The rule is the same at every door: whole-imposter create, the stub
+  endpoints (where the stub carries no `_rift` block, so the running imposter's default is used), and
+  the C-ABI create, which does not resolve scripts. The only configs that change are those setting
+  a non-default value with an engine-less inline script, and those failed to compile before. An
+  unknown value (a stale `"lua"`) still loads and fails only a script that needs it, with the
+  existing #450 error. `rift-lint` checks an engine-less script in the imposter's default engine,
+  and reports **`W016`** for a `defaultEngine` that is not `rhai`, `javascript` or `js`.
+
 - **`SIGTERM` and `SIGINT` shut the server down gracefully** (#1155). The `rift` binary installed no
   signal handler, so both took their default disposition: outside a container the process died at
   once with no cleanup, and as a container's **PID 1** — where the kernel discards an unhandled

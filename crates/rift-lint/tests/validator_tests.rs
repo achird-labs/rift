@@ -3024,3 +3024,80 @@ fn w015_is_silent_for_a_null_or_absent_binary_body() {
         assert!(!has_code(&r, "W015"), "for {default}: got {:?}", codes(&r));
     }
 }
+
+// ─── #1159: `_rift.scriptEngine.defaultEngine` decides an engine-less script's engine ──────────
+
+fn default_engine_imposter(default: Option<&str>, script: Value) -> Value {
+    let mut imposter = json!({
+        "port": 4545, "protocol": "http",
+        "stubs": [{ "responses": [{ "_rift": { "script": script } }] }]
+    });
+    if let Some(default) = default {
+        imposter["_rift"] = json!({ "scriptEngine": { "defaultEngine": default } });
+    }
+    imposter
+}
+
+#[cfg(feature = "javascript")]
+#[test]
+fn an_engine_less_script_is_checked_in_the_default_engine() {
+    let broken = json!({ "code": "function respond(ctx) { return http(200, ; }" });
+    let mut r = LintResult::new();
+    validate_imposter(
+        path(),
+        &default_engine_imposter(Some("javascript"), broken.clone()),
+        &mut r,
+        &opts(),
+    );
+    assert!(has_code(&r, "E040"), "got {:?}", codes(&r));
+
+    // Without the default it is a Rhai script, which is not syntax-checked.
+    let mut r = LintResult::new();
+    validate_imposter(
+        path(),
+        &default_engine_imposter(None, broken),
+        &mut r,
+        &opts(),
+    );
+    assert!(!has_code(&r, "E040"), "got {:?}", codes(&r));
+}
+
+#[cfg(feature = "javascript")]
+#[test]
+fn an_explicit_engine_outranks_the_default_in_lint() {
+    let rhai = json!({ "engine": "rhai", "code": "fn respond(ctx) { http(200, \"x\") }" });
+    let mut r = LintResult::new();
+    validate_imposter(
+        path(),
+        &default_engine_imposter(Some("javascript"), rhai),
+        &mut r,
+        &opts(),
+    );
+    assert!(!has_code(&r, "E040"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn w016_flags_a_default_engine_that_is_not_an_engine() {
+    let script = json!({ "engine": "rhai", "code": "fn respond(ctx) { http(200, \"x\") }" });
+    for (default, expected) in [
+        ("lua", true),
+        ("python", true),
+        ("rhai", false),
+        ("javascript", false),
+        ("js", false),
+    ] {
+        let mut r = LintResult::new();
+        validate_imposter(
+            path(),
+            &default_engine_imposter(Some(default), script.clone()),
+            &mut r,
+            &opts(),
+        );
+        assert_eq!(
+            has_code(&r, "W016"),
+            expected,
+            "{default}: got {:?}",
+            codes(&r)
+        );
+    }
+}
