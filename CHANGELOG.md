@@ -747,6 +747,15 @@ record.
 
 ### Fixed
 
+- **`POST /admin/reload` re-applies an edited `routes` block** (#1160). The reload parsed and
+  validated the config file's route table and then dropped it: the front door kept serving the old
+  table, and the `200` response said nothing. The reloaded table now replaces the old one in one
+  step once the imposters have applied, and an absent block reloads to the empty table, as a
+  restart would. A failed reload leaves the old table serving. A `routes` block on a server started
+  without `--front-door`, which was discarded silently at startup, is now reported in the startup
+  log and in the reload response's `warnings`. `AdminApiServer::with_front_door_routes` hands an
+  embedder's front door table to the reload.
+
 - **`_rift.scriptEngine.defaultEngine` is honoured** (#1159). It was parsed, documented and sent by
   rift-java and rift-scala, but nothing read it: an inline `_rift.script` with no `engine` always ran
   as Rhai, so `"defaultEngine": "javascript"` handed JavaScript to the Rhai compiler and failed. A

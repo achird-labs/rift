@@ -219,9 +219,15 @@ fn port_declared_by_both(
 /// are touched, so a parse or semantic error (bad protocol, duplicate port) returns 500 with the
 /// running imposters left unchanged. Unchanged imposters keep all runtime state (recorded
 /// requests, scenario state, response cyclers); only changed ports are patched or replaced.
+///
+/// `front_door_routes` is the running front door's table, when there is one. A successful reload
+/// swaps the config file's `routes` block into it — an absent block becomes the empty table, as
+/// at startup — after the imposters are applied, so a new route never points at an imposter the
+/// same reload has not created yet (issue #1160). A failed reload leaves the old table serving.
 pub async fn handle_reload(
     manager: Arc<ImposterManager>,
     config_source: Option<crate::sources::ReloadSource>,
+    front_door_routes: Option<&crate::front_door::FrontDoorRoutes>,
     allow_injection: bool,
 ) -> Response<Full<Bytes>> {
     let Some(source) = config_source else {
@@ -236,12 +242,13 @@ pub async fn handle_reload(
     // `persisted` holds the imposters that belong to the datadir, `ephemeral` those re-read from a
     // source (issue #1122); the two are applied as one set, so neither store's sweep removes
     // what only the other declares.
-    let (persisted, ephemeral, intercept_declared, all_unchanged) = match source {
+    let (persisted, ephemeral, intercept_declared, routes, all_unchanged) = match source {
         crate::sources::ReloadSource::Legacy(source) => match read_blocking(source).await {
             Ok(loaded) => (
                 loaded.imposters,
                 Vec::new(),
                 loaded.intercept.is_some(),
+                loaded.routes,
                 false,
             ),
             Err(message) => {
@@ -280,12 +287,13 @@ pub async fn handle_reload(
                 }
                 None => Vec::new(),
             };
-            // Boot-only blocks; reload deliberately does not re-apply them, and the warning below
-            // is driven off `intercept` being present in the document.
+            // `intercept` is boot-only; reload deliberately does not re-apply it, and the warning
+            // below is driven off its presence. `routes` is re-applied (issue #1160).
             (
                 persisted,
                 merged.imposters,
                 merged.intercept.is_some(),
+                merged.routes,
                 unchanged,
             )
         }
@@ -314,15 +322,19 @@ pub async fn handle_reload(
     // server-side log is invisible to it (doubly so over FFI, where tracing may go nowhere) — so
     // the response body carries the warning and the log is a `warn!`, not an `info!`: the caller
     // asked for something that deliberately did not happen.
-    let warnings: Vec<String> = if intercept_declared {
+    let mut warnings: Vec<String> = Vec::new();
+    if intercept_declared {
         let warning = "the config file's `intercept` block is applied at startup only and was NOT \
                        re-applied; imposters were reloaded. Use /intercept/rules to change rules \
                        at runtime, or restart to re-read the block.";
         warn!("Reload: {warning}");
-        vec![warning.to_string()]
-    } else {
-        Vec::new()
-    };
+        warnings.push(warning.to_string());
+    }
+    // Same reasoning as `intercept`: the client asked for routes that will not serve.
+    if routes.is_some() && front_door_routes.is_none() {
+        warn!("Reload: {}", crate::front_door::ROUTES_WITHOUT_FRONT_DOOR);
+        warnings.push(crate::front_door::ROUTES_WITHOUT_FRONT_DOOR.to_string());
+    }
 
     // Each port belongs to exactly one store, the rule `SourceSet::fetch_all` already applies
     // between sources. Picking a winner would silently drop one of the operator's imposters, and a
@@ -351,6 +363,11 @@ pub async fn handle_reload(
         .collect();
     match manager.apply_desired(desired).await {
         Ok(report) if report.failed.is_empty() => {
+            if let Some(table) = front_door_routes {
+                table.store(Arc::new(crate::front_door::CompiledRoutes::new(
+                    &routes.unwrap_or_default(),
+                )));
+            }
             let mut body = serde_json::json!({
                 "message": format!("Reloaded {count} imposter(s)"),
                 "created": report.created,
@@ -502,12 +519,63 @@ mod tests {
     #[tokio::test]
     async fn test_handle_reload_no_source_is_noop() {
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager, None, false).await;
+        let resp = handle_reload(manager, None, None, false).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
     // Issue #316: a partial apply failure returns 500 with the full report, so the client
     // can tell what state the server is now in.
+    /// Issue #1160, the embedder door: a `Legacy` file source with a front door table wired in. The
+    /// reload replaces a table the embedder populated, rather than leaving it or merging into it.
+    #[tokio::test]
+    async fn a_legacy_reload_replaces_a_wired_front_door_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        std::fs::write(
+            &path,
+            r#"{"imposters":[],"routes":{"routes":[
+                {"id":"new","match":{"host":"new.test"},"target":{"port":19479}}
+            ]}}"#,
+        )
+        .expect("write config");
+        let source = crate::sources::ReloadSource::Legacy(Arc::new(
+            crate::config_loader::ConfigSource::File {
+                path,
+                no_parse: false,
+            },
+        ));
+        let old: crate::front_door::RouteTable = serde_json::from_str(
+            r#"{"routes":[{"id":"old","match":{"host":"old.test"},"target":{"port":19479}}]}"#,
+        )
+        .expect("table");
+        let table: crate::front_door::FrontDoorRoutes = Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::front_door::CompiledRoutes::new(&old),
+        ));
+
+        let resp = handle_reload(
+            Arc::new(ImposterManager::new()),
+            Some(source),
+            Some(&table),
+            false,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let routes = table.load();
+        let route_for = |host| {
+            routes
+                .resolve(
+                    Some(host),
+                    &hyper::Method::GET,
+                    "/",
+                    &hyper::HeaderMap::new(),
+                )
+                .map(|r| r.id.clone())
+        };
+        assert_eq!(route_for("new.test").as_deref(), Some("new"));
+        assert_eq!(route_for("old.test"), None);
+    }
+
     #[tokio::test]
     async fn test_handle_reload_partial_failure_returns_report() {
         use http_body_util::BodyExt;
@@ -530,7 +598,7 @@ mod tests {
         ));
 
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager.clone(), Some(source), false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
@@ -583,7 +651,7 @@ mod tests {
         let manager = Arc::new(ImposterManager::new());
 
         // Initial reload creates the imposter with the first script version resolved.
-        let resp = handle_reload(manager.clone(), Some(source.clone()), true).await;
+        let resp = handle_reload(manager.clone(), Some(source.clone()), None, true).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let script_code = |manager: &ImposterManager| {
             let imposter = manager.get_imposter(19479).expect("imposter exists");
@@ -603,7 +671,7 @@ mod tests {
         // Edit the referenced file (the configfile itself is untouched) and reload again.
         std::fs::write(&script_path, r#"fn respond(ctx) { http(503, "second") }"#)
             .expect("write script (second version)");
-        let resp = handle_reload(manager.clone(), Some(source), true).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, true).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             script_code(&manager).as_deref(),
@@ -650,7 +718,7 @@ mod tests {
         ));
 
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager.clone(), Some(source.clone()), false).await;
+        let resp = handle_reload(manager.clone(), Some(source.clone()), None, false).await;
         assert_eq!(resp.status(), StatusCode::OK, "clean config reloads");
         assert!(manager.get_imposter(19481).is_ok());
 
@@ -664,7 +732,7 @@ mod tests {
         )
         .expect("write scripted config");
 
-        let resp = handle_reload(manager.clone(), Some(source), false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
         assert_eq!(
             resp.status(),
             StatusCode::BAD_REQUEST,
@@ -714,7 +782,7 @@ mod tests {
         ));
 
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager.clone(), Some(source), true).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, true).await;
         assert_eq!(
             resp.status(),
             StatusCode::OK,
@@ -794,7 +862,7 @@ mod tests {
             format!("file:{}", file.display()),
             &datadir,
         );
-        let resp = handle_reload(manager.clone(), Some(source), false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
         let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -868,7 +936,7 @@ mod tests {
         let source = sources_and_datadir(registry, "unchanged:x".to_string(), &datadir);
 
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        let resp = handle_reload(manager.clone(), Some(source), false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(body["created"], serde_json::json!([23741]), "got: {body}");
@@ -896,7 +964,7 @@ mod tests {
             format!("file:{}", file.display()),
             &datadir,
         );
-        let resp = handle_reload(manager.clone(), Some(source), false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
         let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -929,7 +997,7 @@ mod tests {
             &datadir,
         );
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        let resp = handle_reload(manager.clone(), Some(source), false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(manager.get_imposter(23745).is_err());
 
@@ -952,7 +1020,7 @@ mod tests {
             &datadir,
         );
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        let resp = handle_reload(manager.clone(), Some(source), false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(manager.count(), 1);
         let written: Vec<_> = std::fs::read_dir(&datadir)
@@ -988,7 +1056,7 @@ mod tests {
         );
 
         for source in [legacy, both] {
-            let resp = handle_reload(manager.clone(), Some(source), false).await;
+            let resp = handle_reload(manager.clone(), Some(source), None, false).await;
             assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
             let body = body_json(resp).await;
             let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -1022,7 +1090,7 @@ mod tests {
         );
 
         for source in [legacy, both] {
-            let resp = handle_reload(manager.clone(), Some(source), false).await;
+            let resp = handle_reload(manager.clone(), Some(source), None, false).await;
             assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
             let body = body_json(resp).await;
             let message = body["errors"][0]["message"].as_str().unwrap_or_default();
