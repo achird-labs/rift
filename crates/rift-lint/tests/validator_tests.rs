@@ -1890,32 +1890,32 @@ fn e040_invalid_javascript_file_syntax_is_an_error() {
     assert!(has_code(&r, "E040"), "expected E040, got {:?}", codes(&r));
 }
 
-// ─── Issue #358: E042 — ctx.state used without _rift.flowState ──────────────
+// ─── Issue #358: W014 (was E042, #1156) — ctx.state used without _rift.flowState ─
 
 #[test]
-fn e042_fires_for_ctx_state_without_flow_state() {
+fn w014_fires_for_ctx_state_without_flow_state() {
     let v = make_imposter(json!([rift_script_stub(json!({
         "code": "fn respond(ctx) { let n = ctx.state.incr(\"attempts\"); http(200) }"
     }))]));
     let mut r = LintResult::new();
     validate_imposter(path(), &v, &mut r, &opts());
-    assert!(has_code(&r, "E042"), "expected E042, got {:?}", codes(&r));
+    assert!(has_code(&r, "W014"), "expected W014, got {:?}", codes(&r));
 }
 
-// E042's textual check also keys on the literal `flow_store` substring (kept for scripts that
+// W014's textual check also keys on the literal `flow_store` substring (kept for scripts that
 // still reference it), independent of whether the function is named `respond` or anything else.
 #[test]
-fn e042_fires_for_flow_store_text_without_flow_state() {
+fn w014_fires_for_flow_store_text_without_flow_state() {
     let v = make_imposter(json!([rift_script_stub(json!({
         "code": "fn legacy(ctx) { flow_store.increment(\"f\", \"k\"); }"
     }))]));
     let mut r = LintResult::new();
     validate_imposter(path(), &v, &mut r, &opts());
-    assert!(has_code(&r, "E042"), "expected E042, got {:?}", codes(&r));
+    assert!(has_code(&r, "W014"), "expected W014, got {:?}", codes(&r));
 }
 
 #[test]
-fn e042_does_not_fire_when_flow_state_is_configured() {
+fn w014_does_not_fire_when_flow_state_is_configured() {
     let mut v = make_imposter(json!([rift_script_stub(json!({
         "code": "fn respond(ctx) { let n = ctx.state.incr(\"attempts\"); http(200) }"
     }))]));
@@ -1923,36 +1923,36 @@ fn e042_does_not_fire_when_flow_state_is_configured() {
     let mut r = LintResult::new();
     validate_imposter(path(), &v, &mut r, &opts());
     assert!(
-        !has_code(&r, "E042"),
-        "flowState is configured, E042 must not fire, got {:?}",
+        !has_code(&r, "W014"),
+        "flowState is configured, W014 must not fire, got {:?}",
         codes(&r)
     );
 }
 
 #[test]
-fn e042_does_not_fire_for_scripts_that_never_touch_state() {
+fn w014_does_not_fire_for_scripts_that_never_touch_state() {
     let v = make_imposter(json!([rift_script_stub(json!({
         "code": "fn respond(ctx) { http(200) }"
     }))]));
     let mut r = LintResult::new();
     validate_imposter(path(), &v, &mut r, &opts());
     assert!(
-        !has_code(&r, "E042"),
-        "no ctx.state/flow_store usage, E042 must not fire, got {:?}",
+        !has_code(&r, "W014"),
+        "no ctx.state/flow_store usage, W014 must not fire, got {:?}",
         codes(&r)
     );
 }
 
 #[test]
-fn e042_does_not_fire_for_non_script_imposters() {
+fn w014_does_not_fire_for_non_script_imposters() {
     let v = make_imposter(json!([minimal_stub()]));
     let mut r = LintResult::new();
     validate_imposter(path(), &v, &mut r, &opts());
-    assert!(!has_code(&r, "E042"), "got {:?}", codes(&r));
+    assert!(!has_code(&r, "W014"), "got {:?}", codes(&r));
 }
 
 #[test]
-fn e042_resolves_file_backed_scripts() {
+fn w014_resolves_file_backed_scripts() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("stateful.rhai"),
@@ -1966,10 +1966,10 @@ fn e042_resolves_file_backed_scripts() {
     std::fs::write(&config_path, serde_json::to_string(&cfg).unwrap()).unwrap();
 
     let r = lint_file(&config_path, &opts());
-    assert!(has_code(&r, "E042"), "expected E042, got {:?}", codes(&r));
+    assert!(has_code(&r, "W014"), "expected W014, got {:?}", codes(&r));
 }
 
-// ─── Issue #969: E042 also fires for `_rift.stateOps` without `_rift.flowState` ─────────────
+// ─── Issue #969: W014 also fires for `_rift.stateOps` without `_rift.flowState` ─────────────
 
 fn state_ops_stub(ops: Value) -> Value {
     json!({
@@ -1978,29 +1978,29 @@ fn state_ops_stub(ops: Value) -> Value {
 }
 
 #[test]
-fn e042_fires_for_state_ops_without_flow_state() {
+fn w014_fires_for_state_ops_without_flow_state() {
     let v = make_imposter(json!([state_ops_stub(json!([
         { "op": "increment", "key": "hits" }
     ]))]));
     let mut r = LintResult::new();
     validate_imposter(path(), &v, &mut r, &opts());
-    assert!(has_code(&r, "E042"), "expected E042, got {:?}", codes(&r));
+    assert!(has_code(&r, "W014"), "expected W014, got {:?}", codes(&r));
 }
 
 #[test]
-fn e042_does_not_fire_for_empty_state_ops() {
+fn w014_does_not_fire_for_empty_state_ops() {
     let v = make_imposter(json!([state_ops_stub(json!([]))]));
     let mut r = LintResult::new();
     validate_imposter(path(), &v, &mut r, &opts());
     assert!(
-        !has_code(&r, "E042"),
-        "an empty stateOps array touches nothing, E042 must not fire, got {:?}",
+        !has_code(&r, "W014"),
+        "an empty stateOps array touches nothing, W014 must not fire, got {:?}",
         codes(&r)
     );
 }
 
 #[test]
-fn e042_does_not_fire_for_state_ops_when_flow_state_is_configured() {
+fn w014_does_not_fire_for_state_ops_when_flow_state_is_configured() {
     let mut v = make_imposter(json!([state_ops_stub(json!([
         { "op": "increment", "key": "hits" }
     ]))]));
@@ -2008,14 +2008,14 @@ fn e042_does_not_fire_for_state_ops_when_flow_state_is_configured() {
     let mut r = LintResult::new();
     validate_imposter(path(), &v, &mut r, &opts());
     assert!(
-        !has_code(&r, "E042"),
-        "flowState is configured, E042 must not fire, got {:?}",
+        !has_code(&r, "W014"),
+        "flowState is configured, W014 must not fire, got {:?}",
         codes(&r)
     );
 }
 
 #[test]
-fn e042_is_a_warning_not_an_error() {
+fn w014_is_a_warning_not_an_error() {
     let v = make_imposter(json!([rift_script_stub(json!({
         "code": "fn respond(ctx) { ctx.state.incr(\"n\"); http(200) }"
     }))]));
@@ -2024,12 +2024,12 @@ fn e042_is_a_warning_not_an_error() {
     let issue = r
         .issues
         .iter()
-        .find(|i| i.code == "E042")
-        .expect("E042 must fire");
+        .find(|i| i.code == "W014")
+        .expect("W014 must fire");
     assert_eq!(
         issue.severity,
         Severity::Warning,
-        "E042 must be a hint, not a hard error"
+        "W014 must be a hint, not a hard error"
     );
 }
 

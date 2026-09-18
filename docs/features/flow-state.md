@@ -77,7 +77,7 @@ An imposter with a `_rift.script` stub (which might call `ctx.state` at runtime)
 or a `_rift.stateOps` block, but **no** `flowState` block, gets a real in-memory store
 auto-provisioned at the default TTL (300s) — a `tracing::warn!` (target `rift::script` for a
 script stub, `rift::state_ops` for `stateOps`) is logged so this doesn't go unnoticed, and
-`rift-lint` flags the same condition statically as `E042`. State works out of the box; it just
+`rift-lint` flags the same condition statically as `W014`. State works out of the box; it just
 doesn't persist across restarts or get shared across a cluster the way an explicit `flowState`
 (especially `backend: "redis"`) would.
 
@@ -266,7 +266,7 @@ back as the number it looks like.
 
 Like a `_rift.script` stub, a `stateOps` block gets a real in-memory store auto-provisioned when no
 `_rift.flowState` is configured (see "auto-provisioned in-memory" above) — it does not silently fall
-through to the no-op store. `rift-lint`'s `E042` flags the same condition statically, so it's a
+through to the no-op store. `rift-lint`'s `W014` flags the same condition statically, so it's a
 deliberate choice rather than a surprise at scale.
 
 ---

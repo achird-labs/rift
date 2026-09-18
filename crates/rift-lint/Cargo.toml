@@ -40,7 +40,11 @@ boa_engine = { version = "0.20", optional = true }
 tempfile = "3"
 
 [features]
-default = ["cli"]
+# `javascript` is default-on (issue #1156): without it E040 has no fallback at all, and every
+# released binary, image and brew install was built with the defaults — so a JS `_rift.script`
+# got no syntax check whatsoever. `rift-tui` depends with `default-features = false`, so it does
+# not grow.
+default = ["cli", "javascript"]
 cli = ["dep:clap"]
 javascript = ["dep:boa_engine"]
 

@@ -50,7 +50,7 @@ The linter catches issues that would otherwise cause problems at runtime:
 - **Port conflicts**: Multiple imposters trying to use the same port
 - **Invalid headers**: Header values that aren't strings (arrays, numbers, booleans)
 - **Malformed predicates**: Invalid JSONPath selectors, bad regex patterns
-- **JavaScript mistakes**: Unbalanced braces or parentheses in wait/decorate/inject scripts (full syntax checking needs the optional `javascript` build feature — see [E028](#errors))
+- **JavaScript mistakes**: Syntax errors in function `wait` scripts (including the `{"inject": …}` spelling), JavaScript `decorate` scripts and JavaScript `_rift.script` bodies, parsed with the engine's own JavaScript engine (see [E028 and E040](#errors)). A Rhai `decorate` is not parsed as JavaScript; an `inject` response or predicate is not syntax-checked
 - **Missing fields**: Required configuration that's absent
 - **Engine refusals**: Shapes the engine rejects at load, such as a repeated header name in a single-valued header object, a non-object `_behaviors`, or an EJS tag the config loader does not evaluate
 
@@ -134,7 +134,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E025 | Invalid `wait` behavior value — a bare number must be a non-negative integer of milliseconds; anything else makes the engine ignore the block's behaviors (all but `repeat`) with only a log line. `null` counts as absent. A `behaviors` array is checked as the engine merges it, so only the last value for each key is checked and the finding names that element; `"_behaviors": null` falls back to `behaviors`. Also fires for a **`{min,max}` range with `min` greater than `max`**, and for an inverted stub-level `delayRange` entry (bounds may be numeric strings) — the engine refuses those outright. **The inverted-range check is the one exception to the merge rule above:** the engine validates every `behaviors` element and both blocks regardless of which it will evaluate, so the linter does too — an inverted range in a losing array element, or in a `behaviors` block shadowed by `_behaviors`, is still reported | `"wait": []`, `"wait": 500.5`, `"wait": {"min": 100, "max": 10}` |
 | E026 | Unbalanced braces in JavaScript | `function () { return 1;` |
 | E027 | Unbalanced parentheses in JavaScript | `function ( { return 1; }` |
-| E028 | JavaScript syntax error. Only reported by a build with the optional `javascript` Cargo feature; the released binaries, Docker image and a default `cargo install` do not enable it, so they check braces and parentheses (E026/E027) only | A malformed `inject` function |
+| E028 | JavaScript syntax error, found by parsing the script (never running it). Every release artifact includes this check; a build that opts out of the `javascript` feature falls back to brace and parenthesis counting (E026/E027) and says so with [I004](#info). Covers `decorate` and function `wait` scripts; an `inject` response or predicate is not syntax-checked | A malformed `decorate` function |
 | E029 | Copy behavior item missing `from` | `{"into": "${token}"}` |
 | E030 | Copy behavior item missing `into` | `{"from": "body"}` |
 | E031 | Lookup behavior missing `key` | Lookup with only `fromDataSource` |
@@ -146,7 +146,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E037 | Unknown script `ref` — no such entry in `_rift.scripts` | `"ref": "missing"` |
 | E038 | Script `file` (via `ref`) could not be read | `"file": "no-such.js"` |
 | E039 | A `_rift.scripts` entry uses `ref` itself (ref chains are not allowed) | `{"a": {"ref": "b"}}` |
-| E040 | JavaScript syntax error in a JavaScript `_rift.script` (inline, `file` or `ref`). Like E028, only reported by a build with the `javascript` feature | A malformed `_rift.script` body |
+| E040 | JavaScript syntax error in a JavaScript `_rift.script` (inline, `file` or `ref`). Every release artifact includes this check; a build without the `javascript` feature has no fallback for it and reports [I004](#info) instead | A malformed `_rift.script` body |
 | E041 | Malformed `_rift.fault.tcp`: not a fault-type string or an object; an object form without a numeric `probability` or a string `type`; or a `probability` outside 0.0–1.0 | `"probability": 1.5`, `{"type": "RESET"}` |
 | E043 | Single-valued header object names one header twice, in different case (`proxy.injectHeaders`, `_rift.fault.error.headers`) | `{"X-Id": "a", "x-id": "b"}` |
 | E044 | Single-valued header object names one header twice, byte-identically (`proxy.injectHeaders`, `_rift.fault.error.headers`). `is.headers` is excluded: a repeat there is merged into two header lines on purpose | `{"X-Id": "a", "X-Id": "b"}` |
@@ -174,8 +174,8 @@ Warnings indicate potential issues that may cause unexpected behavior.
 | W010 | Protocol `tcp` is not yet implemented and will fail at runtime | `"protocol": "tcp"` |
 | W011 | Unknown TCP fault type — the fault will not fire at runtime | `{"type": "NONSENSE"}` |
 | W012 | Number literal cannot be kept as written — the engine reads it as the nearest double (a `.yaml`/`.yml` file is not checked, even one holding JSON text) | `"body": {"big": 123456789012345678901234567890}` is served as `1.2345678901234568e29` |
-| E042 | Reported with **warning** severity despite its `E` code (so it fails a run only under `--strict`): a response's `_rift.script` uses `ctx.state` (or `flow_store`), or its `_rift.stateOps` is a non-empty array, but the imposter has no `_rift.flowState`. State is then auto-provisioned in memory — not persisted, not shared across a cluster | `ctx.state.get(...)` without `flowState` |
 | W013 | A `<%= process.env.VAR %>` tag cannot substitute its variable where `rift-lint` runs: the variable is unset and the tag has no default, so it renders empty, or it is set to a value that is not valid Unicode, so the tag renders its default or empty. The engine logs the same warning at load. The document is linted as rendered | `"port": <%= process.env.PORT %>` with `PORT` unset |
+| W014 | A response's `_rift.script` uses `ctx.state` (or `flow_store`), or its `_rift.stateOps` is a non-empty array, but the imposter has no `_rift.flowState`. State is then auto-provisioned in memory — not persisted, not shared across a cluster. Formerly `E042` (renumbered in #1156: it was always a warning, and the letter now matches) | `ctx.state.get(...)` without `flowState` |
 | W015 | A `_mode: "binary"` body — on an `is` response or on `defaultResponse` — that is not valid base64, or is not a string at all (a non-string body is serialized to JSON text first, so it can never decode). The engine serves it anyway, as the raw text with `x-rift-binary-error: true`, or as a `500` under `strictBehaviors`. Checked with the engine's own decoder, not an approximation | `"body": "not!valid!base64!", "_mode": "binary"` |
 
 ### Info
@@ -187,8 +187,14 @@ Informational messages about configuration patterns.
 | I001 | Mountebank slice notation detected (`[:0]`) |
 | I002 | Proxy targets localhost |
 | I003 | Response uses the Rift `_rift` extension (not Mountebank-compatible) |
+| I004 | This build omits the `javascript` feature, so the run's JavaScript was not syntax-checked (no E028/E040). Reported once per run, not per script. Every release artifact has the feature; only a source build that opts out with `--no-default-features` can report this |
 
 ---
+
+**Retired codes.** A code number is never reused. `E012` was never assigned. `E042` was renumbered
+to `W014` in #1156 — it had always been reported as a warning, and a consumer filtering on the `E`
+prefix saw a different rule set from one filtering on severity. A rule's letter now always matches
+its severity.
 
 ## Auto-Fix
 
@@ -368,9 +374,12 @@ The linter is also available as a Rust library for integration into other tools 
 
 Library entry points differ from the CLI in what they can see:
 
-- **E002** (port conflicts) is computed only by the `rift-lint` binary, across all the files it
-  scans. `lint_file`, `lint_json`, `lint_yaml`, `lint_directory` and `lint_value` never report it,
-  not even for a port repeated inside one document.
+- **E002** (port conflicts) is reported by every entry point (issue #1156). `lint_file`,
+  `lint_json`, `lint_yaml`, `lint_value` and `lint_document` report a port repeated inside the one
+  document they lint; `lint_directory` reports a port shared across its files, always against the
+  first in byte-wise sorted path order (case-sensitive, so `B.json` sorts before `a.json`). To lint several documents as one run yourself, record each in a
+  `PortUses` and report `PortUses::conflicts()` once — and lint them with `lint_document_in_run`,
+  which reports no `E002` of its own, so a within-file conflict is not reported twice.
 - **E044**, **E046** and **W012** need the raw text, so `lint_value` (which starts from an
   already-parsed value) cannot report them. `lint_file`, `lint_json`, `lint_yaml`, and
   `parse_document`/`parse_yaml_document` + `lint_document` can.

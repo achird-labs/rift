@@ -162,7 +162,7 @@ fn check_config(path: &Path, no_parse: bool) -> Result<CheckReport> {
 }
 
 /// One resolved `_rift.script` config: syntax + entrypoint (always `respond` — every
-/// `_rift.script` here is response-position), and state-without-flowState (rift-lint E042's
+/// `_rift.script` here is response-position), and state-without-flowState (rift-lint W014's
 /// check, re-implemented here against the typed config rather than the raw JSON `Value`
 /// rift-lint walks — see the module docs on why this crate doesn't pull in rift-lint itself).
 fn check_config_script(
@@ -657,7 +657,7 @@ mod tests {
         assert!(report.errors[0].contains("respond"));
     }
 
-    // Issue #360: state-used-without-flowState warning (rift-lint E042's check), reused here.
+    // Issue #360: state-used-without-flowState warning (rift-lint W014's check), reused here.
     #[test]
     fn check_config_warns_state_without_flow_state() {
         let dir = tempfile::tempdir().unwrap();
