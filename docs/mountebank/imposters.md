@@ -227,6 +227,13 @@ Configure a fallback response when no stub matches:
 }
 ```
 
+`defaultResponse` honours `"_mode": "binary"`, with the same contract as a stub's `is` body: a
+base64 `body` is decoded and served as bytes. If it does not decode, the raw text is served with
+`x-rift-binary-error: true` alongside `x-rift-default-response: true`, or a `500` under
+`strictBehaviors` — see [behavior failures]({{ site.baseurl }}/mountebank/behaviors/). A non-string
+`body` in binary mode can never decode, since it is serialized to JSON text first. `rift-lint`
+reports both cases as `W015`.
+
 ---
 
 ## Recording Requests

@@ -3426,6 +3426,7 @@ dependencies = [
 name = "rift-lint"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "boa_engine",
  "clap",
  "regex",

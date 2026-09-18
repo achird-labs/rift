@@ -176,6 +176,7 @@ Warnings indicate potential issues that may cause unexpected behavior.
 | W012 | Number literal cannot be kept as written — the engine reads it as the nearest double (a `.yaml`/`.yml` file is not checked, even one holding JSON text) | `"body": {"big": 123456789012345678901234567890}` is served as `1.2345678901234568e29` |
 | E042 | Reported with **warning** severity despite its `E` code (so it fails a run only under `--strict`): a response's `_rift.script` uses `ctx.state` (or `flow_store`), or its `_rift.stateOps` is a non-empty array, but the imposter has no `_rift.flowState`. State is then auto-provisioned in memory — not persisted, not shared across a cluster | `ctx.state.get(...)` without `flowState` |
 | W013 | A `<%= process.env.VAR %>` tag cannot substitute its variable where `rift-lint` runs: the variable is unset and the tag has no default, so it renders empty, or it is set to a value that is not valid Unicode, so the tag renders its default or empty. The engine logs the same warning at load. The document is linted as rendered | `"port": <%= process.env.PORT %>` with `PORT` unset |
+| W015 | A `_mode: "binary"` body — on an `is` response or on `defaultResponse` — that is not valid base64, or is not a string at all (a non-string body is serialized to JSON text first, so it can never decode). The engine serves it anyway, as the raw text with `x-rift-binary-error: true`, or as a `500` under `strictBehaviors`. Checked with the engine's own decoder, not an approximation | `"body": "not!valid!base64!", "_mode": "binary"` |
 
 ### Info
 
