@@ -153,9 +153,10 @@ A `routes` block is only read from the `{"imposters": [...], "routes": {...}}` w
 one on a single-imposter document is an error rather than a silent no-op — unknown fields are
 otherwise ignored, so the quiet version would be no routes, no diagnostic, and a green boot.
 
-The route table is applied **at startup only**. `POST /admin/reload` re-reads imposters but does not
-re-apply an edited `routes` block, and its response does not say so; restart to pick up route
-changes.
+`POST /admin/reload` re-applies an edited `routes` block, after the reloaded imposters, as a
+restart would. An invalid table refuses the reload and leaves the old table serving. Without
+`--front-door`, a `routes` block is ignored, and both the startup log and the reload response's
+`warnings` say so. See [Hot Reload](hot-reload.md).
 
 ---
 

@@ -4,6 +4,7 @@
 
 use crate::admin_api::handlers::{imposters, intercept, scenarios, stubs, system};
 use crate::admin_api::types::{error_response, get_base_url, not_found};
+use crate::front_door::FrontDoorRoutes;
 use crate::imposter::ImposterManager;
 use crate::intercept_control::InterceptControl;
 use crate::sources::ReloadSource;
@@ -76,6 +77,7 @@ pub async fn route_request(
     req: Request<Incoming>,
     manager: Arc<ImposterManager>,
     config_source: Option<ReloadSource>,
+    front_door_routes: Option<FrontDoorRoutes>,
     allow_injection: bool,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
@@ -118,6 +120,7 @@ pub async fn route_request(
         &base_url,
         manager,
         config_source,
+        front_door_routes,
         allow_injection,
         scripts_dir,
         config_snapshot,
@@ -149,6 +152,7 @@ async fn route_by_path(
     base_url: &str,
     manager: Arc<ImposterManager>,
     config_source: Option<ReloadSource>,
+    front_door_routes: Option<FrontDoorRoutes>,
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
     config_snapshot: system::ConfigSnapshot,
@@ -168,7 +172,13 @@ async fn route_by_path(
         }
         (&Method::GET, "/logs") => return system::handle_logs(query),
         (&Method::POST, "/admin/reload") => {
-            return system::handle_reload(manager, config_source, allow_injection).await;
+            return system::handle_reload(
+                manager,
+                config_source,
+                front_door_routes.as_ref(),
+                allow_injection,
+            )
+            .await;
         }
         (&Method::GET, "/metrics") => return system::handle_metrics(manager).await,
         _ => {}

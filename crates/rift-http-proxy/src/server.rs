@@ -724,10 +724,14 @@ impl ServerBuilder {
         // surprise, not a convenience. It still follows this function's "don't orphan an
         // already-bound listener on error" contract — only metrics is up at this point, so that's
         // all there is to unwind.
+        // The table's handle is kept for the admin server, so `POST /admin/reload` can swap in an
+        // edited `routes` block (issue #1160).
+        let mut front_door_routes = None;
         let front_door = match front_door_addr {
             Some(addr) => {
                 let table = routes_block.unwrap_or_default();
                 let routes = Arc::new(ArcSwap::from_pointee(CompiledRoutes::new(&table)));
+                front_door_routes = Some(Arc::clone(&routes));
                 match bind_front_door(addr, Arc::clone(&manager), routes).await {
                     Ok(running) => Some(running),
                     Err(e) => {
@@ -738,7 +742,12 @@ impl ServerBuilder {
                     }
                 }
             }
-            None => None,
+            None => {
+                if routes_block.is_some() {
+                    warn!("{}", crate::front_door::ROUTES_WITHOUT_FRONT_DOOR);
+                }
+                None
+            }
         };
 
         info!(
@@ -783,6 +792,9 @@ impl ServerBuilder {
         }
         if let Some(scripts_dir) = cli.scripts_dir {
             server = server.with_scripts_dir(scripts_dir);
+        }
+        if let Some(routes) = front_door_routes {
+            server = server.with_front_door_routes(routes);
         }
         // Reload re-runs whatever boot ran. A source set (`--imposters`, or `--configfile`
         // desugared into one) re-fetches every source; a bare `--datadir` keeps the original

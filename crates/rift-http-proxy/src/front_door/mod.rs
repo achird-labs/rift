@@ -24,3 +24,12 @@ pub use observer::RouteObserver;
 pub use route_table::{
     CompiledRoutes, HeaderMatch, Route, RouteMatch, RouteTable, RouteTableError, RouteTarget,
 };
+
+/// A running front door's route table: read per request, swapped whole by `POST /admin/reload`
+/// (issue #1160).
+pub type FrontDoorRoutes = std::sync::Arc<arc_swap::ArcSwap<CompiledRoutes>>;
+
+/// Said when a config file declares `routes` but no front door is running to serve them — at startup
+/// (a log line) and in a reload's `warnings` (issue #1160).
+pub(crate) const ROUTES_WITHOUT_FRONT_DOOR: &str = "the config file's `routes` block needs `--front-door` and was ignored; no front door is \
+     running to serve it";

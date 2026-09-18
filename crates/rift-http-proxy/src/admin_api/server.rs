@@ -5,6 +5,7 @@ use crate::admin_api::handlers::events::{self, AdminBody};
 use crate::admin_api::router::route_request;
 use crate::config_loader::ConfigSource;
 use crate::extensions::decorate::{ResponsePhase, with_annotation_scope};
+use crate::front_door::FrontDoorRoutes;
 use crate::imposter::ImposterManager;
 use crate::intercept_control::InterceptControl;
 use crate::sources::{ReloadSource, SourceSet};
@@ -40,6 +41,7 @@ pub struct AdminApiServer {
     manager: Arc<ImposterManager>,
     api_key: Option<Arc<String>>,
     config_source: Option<ReloadSource>,
+    front_door_routes: Option<FrontDoorRoutes>,
     allow_injection: bool,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
@@ -65,6 +67,7 @@ impl AdminApiServer {
             manager,
             api_key: api_key.map(Arc::new),
             config_source: None,
+            front_door_routes: None,
             allow_injection: false,
             intercept: None,
             scripts_dir: None,
@@ -162,6 +165,15 @@ impl AdminApiServer {
         self
     }
 
+    /// Hand `POST /admin/reload` the route table of the front door this server's process runs, so a
+    /// reload swaps in the config file's edited `routes` block, as a restart would (issue #1160).
+    /// Without it, a reloaded `routes` block is reported as ignored.
+    #[must_use]
+    pub fn with_front_door_routes(mut self, routes: FrontDoorRoutes) -> Self {
+        self.front_door_routes = Some(routes);
+        self
+    }
+
     /// Set whether JS injection is allowed, reported by `GET /config` (issue #342). Threaded
     /// explicitly so an embedder can set it without mutating the process environment.
     #[must_use]
@@ -251,6 +263,7 @@ impl AdminApiServer {
                 self.manager,
                 self.api_key,
                 self.config_source,
+                self.front_door_routes,
                 self.allow_injection,
                 self.intercept,
                 self.scripts_dir,
@@ -467,6 +480,7 @@ async fn accept_loop(
     manager: Arc<ImposterManager>,
     api_key: Option<Arc<String>>,
     config_source: Option<ReloadSource>,
+    front_door_routes: Option<FrontDoorRoutes>,
     allow_injection: bool,
     intercept: Option<InterceptControl>,
     scripts_dir: Option<Arc<PathBuf>>,
@@ -582,6 +596,7 @@ async fn accept_loop(
         let manager = Arc::clone(&manager);
         let api_key = api_key.clone();
         let config_source = config_source.clone();
+        let front_door_routes = front_door_routes.clone();
         let intercept = intercept.clone();
         let authorizer = authorizer.clone();
         let scripts_dir = scripts_dir.clone();
@@ -595,6 +610,7 @@ async fn accept_loop(
                 let manager = Arc::clone(&manager);
                 let api_key = api_key.clone();
                 let config_source = config_source.clone();
+                let front_door_routes = front_door_routes.clone();
                 let intercept = intercept.clone();
                 let authorizer = authorizer.clone();
                 let scripts_dir = scripts_dir.clone();
@@ -694,6 +710,7 @@ async fn accept_loop(
                                 req,
                                 manager,
                                 config_source,
+                                front_door_routes,
                                 allow_injection,
                                 intercept,
                                 scripts_dir,
