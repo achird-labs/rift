@@ -231,6 +231,62 @@ fn build_failure_response(e: &hyper::http::Error, log_context: &str) -> Response
     )
 }
 
+/// Whether a requested response behavior that fails should serve a 500 rather than its fallback
+/// (issue #375): per imposter (`strictBehaviors`) or process-wide (`RIFT_STRICT_BEHAVIORS`).
+///
+/// One definition, read by every site that serves a behavior-dependent body, because the defect
+/// in issue #1151 was a site that had never picked this up — it lived as a local in the
+/// matched-stub block and the default-response site could not see it.
+fn strict_behaviors_for(config: &super::types::ImposterConfig) -> bool {
+    config.strict_behaviors || crate::util::strict_behaviors_env()
+}
+
+/// Outcome of decoding a `_mode: "binary"` body (issues #323 / #375 / #1151).
+///
+/// A variant rather than a `bool` so the lenient failure cannot be served without the caller
+/// seeing it: `RawFallback` exists precisely so the site must decide what to attach, and the
+/// contract is that it attaches `x-rift-binary-error: true`. The two sites that decode a binary
+/// body drifted apart once already — one had the header and the strict path, the other had
+/// neither — and a shared helper returning a plain `Bytes` would let that happen again.
+enum BinaryBody {
+    Decoded(Bytes),
+    /// The body did not decode; these are its raw (still-encoded) bytes, served under the lenient
+    /// #269/#323 contract.
+    RawFallback(Bytes),
+}
+
+/// Decode a binary-mode body. `Err` carries the ready-made strict-mode 500 — the failure is
+/// already a response by then, so the caller returns it as-is. Boxed because a `Response` is large
+/// and this is the rare path; the `Ok` path stays small.
+fn decode_binary_body(
+    body: String,
+    strict: bool,
+) -> Result<BinaryBody, Box<Response<Full<Bytes>>>> {
+    match base64::engine::general_purpose::STANDARD.decode(&body) {
+        Ok(decoded) => Ok(BinaryBody::Decoded(Bytes::from(decoded))),
+        Err(e) if strict => {
+            warn!("Failed to decode base64 body: {e}; failing loud (strictBehaviors)");
+            Err(Box::new(build_response_with_headers(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [
+                    ("x-rift-imposter", "true"),
+                    ("x-rift-binary-error", "true"),
+                    ("content-type", "application/json"),
+                ],
+                crate::response::error_body_typed(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    crate::response::ErrorKind::BehaviorError,
+                    &format!("binary base64 decode failed (strictBehaviors): {e}"),
+                ),
+            )))
+        }
+        Err(e) => {
+            warn!("Failed to decode base64 body: {e}, using raw body");
+            Ok(BinaryBody::RawFallback(Bytes::from(body)))
+        }
+    }
+}
+
 /// Map a matcher error (`find_matching_stub_with_client`) to its response.
 ///
 /// A predicate-`inject` failure (issue #440 — an object-build failure or the script itself
@@ -1573,8 +1629,7 @@ async fn handle_request_inner(
             // (still carrying the #323 signal header) instead of the fallback body. Enabled
             // per-imposter (`strictBehaviors`) or process-wide (`RIFT_STRICT_BEHAVIORS`). Default
             // false preserves the lenient #269/#323 contract in the Err arms below.
-            let strict_behaviors =
-                imposter.config.strict_behaviors || crate::util::strict_behaviors_env();
+            let strict_behaviors = strict_behaviors_for(&imposter.config);
 
             // Declarative response templating (issue #359): opt-in via `_rift.templated`. This
             // `{{ }}` render runs FIRST — on the *config-authored* body/headers — and BEFORE the
@@ -1894,47 +1949,19 @@ async fn handle_request_inner(
 
             response = response.header("x-rift-imposter", "true");
 
-            // Handle binary mode - decode base64 body if _mode is "binary"
-            let mut binary_decode_failed = false;
             let body_bytes = match response_mode {
-                ResponseMode::Binary => {
-                    // Decode base64-encoded body
-                    match base64::engine::general_purpose::STANDARD.decode(&body) {
-                        Ok(decoded) => Bytes::from(decoded),
-                        Err(e) => {
-                            if strict_behaviors {
-                                warn!(
-                                    "Failed to decode base64 body: {e}; failing loud (strictBehaviors)"
-                                );
-                                return Ok(build_response_with_headers(
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    [
-                                        ("x-rift-imposter", "true"),
-                                        ("x-rift-binary-error", "true"),
-                                        ("content-type", "application/json"),
-                                    ],
-                                    crate::response::error_body_typed(
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        crate::response::ErrorKind::BehaviorError,
-                                        &format!(
-                                            "binary base64 decode failed (strictBehaviors): {e}"
-                                        ),
-                                    ),
-                                ));
-                            }
-                            warn!("Failed to decode base64 body: {e}, using raw body");
-                            binary_decode_failed = true;
-                            Bytes::from(body)
-                        }
+                ResponseMode::Binary => match decode_binary_body(body, strict_behaviors) {
+                    Ok(BinaryBody::Decoded(bytes)) => bytes,
+                    // Signal a failed decode so serving the raw (still-encoded) body isn't silent (#323).
+                    Ok(BinaryBody::RawFallback(bytes)) => {
+                        response = response.header("x-rift-binary-error", "true");
+                        bytes
                     }
-                }
+                    Err(strict_failure) => return Ok(*strict_failure),
+                },
                 // Expand serve-time date templates ({{DAYS+N}}/{{MONTHS+N}}/{{NOW}}, issue #195).
                 ResponseMode::Text => Bytes::from(crate::extensions::apply_date_templates(&body)),
             };
-            // Signal a failed binary decode so serving the raw (still-encoded) body isn't silent (#323).
-            if binary_decode_failed {
-                response = response.header("x-rift-binary-error", "true");
-            }
 
             // Declarative post-response state writes (issue #969): opt-in via `_rift.stateOps`.
             // Deliberately LAST — after templating and behaviors have rendered `body`/`headers`
@@ -2058,17 +2085,27 @@ async fn handle_request_inner(
             })
             .unwrap_or_default();
 
-        // Handle binary mode for default response
+        // The same decode — and so the same contract — as a stub's `is` body (issue #1151). This
+        // site used to re-implement it inline, without the #323 header and without #375's strict
+        // path, so a bad binary default body was served as its own raw text with only a log line.
+        let mut binary_decode_failed = false;
         let body_bytes = match default.mode {
             ResponseMode::Binary => {
-                match base64::engine::general_purpose::STANDARD.decode(&body_str) {
-                    Ok(decoded) => Bytes::from(decoded),
-                    Err(e) => {
-                        warn!(
-                            "Failed to decode base64 default body: {}, using raw body",
-                            e
+                match decode_binary_body(body_str, strict_behaviors_for(&imposter.config)) {
+                    Ok(BinaryBody::Decoded(bytes)) => bytes,
+                    Ok(BinaryBody::RawFallback(bytes)) => {
+                        binary_decode_failed = true;
+                        bytes
+                    }
+                    // Mark it, so a client or operator can tell a failing default response from a
+                    // failing stub: the shared helper builds the same 500 for both.
+                    Err(strict_failure) => {
+                        let mut strict_failure = *strict_failure;
+                        strict_failure.headers_mut().insert(
+                            "x-rift-default-response",
+                            hyper::header::HeaderValue::from_static("true"),
                         );
-                        Bytes::from(body_str)
+                        return Ok(strict_failure);
                     }
                 }
             }
@@ -2076,6 +2113,9 @@ async fn handle_request_inner(
         };
 
         let mut response = Response::builder().status(default.status_code);
+        if binary_decode_failed {
+            response = response.header("x-rift-binary-error", "true");
+        }
         for (k, values) in &default.headers {
             for v in values {
                 response = response.header(k, v);
@@ -3991,5 +4031,59 @@ mod fsm_offload_tests {
             "the transition must still be applied — skipping the offload must not mean \
              skipping the write"
         );
+    }
+}
+
+#[cfg(test)]
+mod decode_binary_body_tests {
+    use super::*;
+
+    // Issue #1151: the three outcomes of the one decode both binary sites now share.
+
+    #[test]
+    fn a_valid_body_decodes() {
+        let Ok(BinaryBody::Decoded(bytes)) = decode_binary_body("aGVsbG8=".to_string(), false)
+        else {
+            panic!("valid base64 must decode");
+        };
+        assert_eq!(bytes.as_ref(), b"hello");
+    }
+
+    // Lenient: the raw bytes come back as a *distinct* variant, so the caller cannot serve them
+    // without having to decide what to attach — that is what keeps the #323 header from being
+    // forgotten at a site again.
+    #[test]
+    fn a_bad_body_is_a_raw_fallback_when_lenient() {
+        let Ok(BinaryBody::RawFallback(bytes)) =
+            decode_binary_body("not!valid!base64!".to_string(), false)
+        else {
+            panic!("an undecodable body must be a RawFallback in lenient mode");
+        };
+        assert_eq!(bytes.as_ref(), b"not!valid!base64!");
+    }
+
+    #[test]
+    fn a_bad_body_is_a_ready_made_500_when_strict() {
+        let Err(response) = decode_binary_body("not!valid!base64!".to_string(), true) else {
+            panic!("strict mode must refuse an undecodable body");
+        };
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-rift-binary-error")
+                .and_then(|v| v.to_str().ok()),
+            Some("true"),
+            "the strict 500 still carries the #323 signal header"
+        );
+    }
+
+    // Strict mode must not turn a *valid* body into a failure.
+    #[test]
+    fn a_valid_body_decodes_under_strict_too() {
+        assert!(matches!(
+            decode_binary_body("aGVsbG8=".to_string(), true),
+            Ok(BinaryBody::Decoded(_))
+        ));
     }
 }

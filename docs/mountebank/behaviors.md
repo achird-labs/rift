@@ -621,7 +621,7 @@ normal status, and a header flags what failed:
 |:---------|:---------------|
 | `decorate` | `x-rift-decorate-error: true` |
 | `shellTransform` | `x-rift-shelltransform-error: true` |
-| `binary` (base64) | `x-rift-binary-error: true` |
+| `binary` (base64) — an `is` body **or** a `defaultResponse` body | `x-rift-binary-error: true` |
 
 **Strict mode.** Set the per-imposter `strictBehaviors` flag (or the `RIFT_STRICT_BEHAVIORS`
 environment variable, truthy: `1`/`true`/`yes`/`on`) to turn a behavior failure into a
