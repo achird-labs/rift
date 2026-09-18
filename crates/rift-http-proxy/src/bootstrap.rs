@@ -323,7 +323,25 @@ pub fn stop_for_restart(pidfile: &Path) -> Result<(), anyhow::Error> {
 /// The unix arm inspects `kill`'s errno to make that distinction; the Windows arm only checks
 /// whether `taskkill` succeeded (it does not map "no such process" back onto the stale-pidfile
 /// policy — that exit code is undocumented-ish and untested here).
+///
+/// Waits up to five seconds for the process to exit, above this server's own shutdown bound. An
+/// embedder whose server takes longer to leave on SIGTERM calls [`stop_server_within`] instead.
 pub fn stop_server(pidfile: &Path) -> Result<(), anyhow::Error> {
+    stop_server_within(pidfile, STOP_WAIT)
+}
+
+/// [`stop_server`] with the exit wait chosen by the caller.
+///
+/// `ceiling` bounds how long the stop waits, after SIGTERM, for the process to be gone; a process
+/// still alive past it is an error and its PID file is kept. It exists for an embedder whose server
+/// does more than this crate's on SIGTERM — a drain window or a cluster departure — and so
+/// legitimately outlives [`stop_server`]'s fixed five seconds: with that ceiling its `stop` reported
+/// failure, and its `restart` never started, for every graceful shutdown. Unused on Windows, where
+/// `taskkill /F` does not wait on the process's own shutdown.
+pub fn stop_server_within(
+    pidfile: &Path,
+    #[cfg_attr(not(unix), allow(unused_variables))] ceiling: std::time::Duration,
+) -> Result<(), anyhow::Error> {
     if !pidfile.exists() {
         return Err(anyhow::anyhow!("PID file not found: {pidfile:?}"));
     }
@@ -355,10 +373,10 @@ pub fn stop_server(pidfile: &Path) -> Result<(), anyhow::Error> {
             // down gracefully. The ceiling sits above the server's roughly three-second bound; a
             // process still alive past it (an old, handler-less PID-1 server, say) is reported
             // rather than assumed gone, and its PID file is kept.
-            if !wait_for_exit(pid, STOP_WAIT, STOP_POLL) {
+            if !wait_for_exit(pid, ceiling, STOP_POLL) {
                 return Err(anyhow::anyhow!(
-                    "process {pid} did not exit within {}s of SIGTERM; leaving PID file in place",
-                    STOP_WAIT.as_secs()
+                    "process {pid} did not exit within {ceiling:?} of SIGTERM; leaving PID file in \
+                     place"
                 ));
             }
         }
@@ -411,7 +429,6 @@ pub fn stop_server(pidfile: &Path) -> Result<(), anyhow::Error> {
 }
 
 /// How long `rift stop` waits for the process to exit — above the server's shutdown bound.
-#[cfg(unix)]
 const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(unix)]
 const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(50);

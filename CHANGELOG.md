@@ -13,6 +13,12 @@ record.
 
 ### Added
 
+- **`bootstrap::stop_server_within(pidfile, ceiling)`** (#1178) — `stop_server` with the exit wait chosen by
+  the caller. Since #1155 `stop_server` waits a fixed five seconds for the process to exit and fails
+  otherwise, which is right for this server but made `stop` report failure — and `restart` never
+  start — for an embedder whose server drains or leaves a cluster on SIGTERM for longer than that.
+  `stop_server` is unchanged and delegates with its five seconds.
+
 - **The admin listener's route table is public** (#1145). `rift_http_proxy::admin_api::ADMIN_ROUTES`
   lists every `(method, path)` the admin API dispatches, with a `RouteFamily` per entry, so an
   embedder fronting the admin API can account for every route without re-parsing the router. See
