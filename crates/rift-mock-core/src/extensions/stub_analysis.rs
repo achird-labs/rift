@@ -95,28 +95,29 @@ fn ignored_rift_shape(response: &StubResponse) -> Option<&'static str> {
     }
 }
 
-/// The shape of a response that carries a behaviors block no behavior runs on (issue #1181).
-/// Behaviors run on an `is` response only.
+/// The shape of a response whose behaviors block holds something no behavior runs on (issue #1181).
+/// Behaviors run on `is` and `inject` responses; `repeat` applies to every response (#1188), so a
+/// block that sets nothing else is not ignored.
 fn ignored_behaviors_shape(response: &StubResponse) -> Option<&'static str> {
-    match response {
+    let (shape, block) = match response {
         StubResponse::Proxy {
-            ignored_behaviors: Some(_),
+            ignored_behaviors: Some(block),
             ..
-        } => Some("proxy"),
-        StubResponse::Inject {
-            ignored_behaviors: Some(_),
-            ..
-        } => Some("inject"),
+        } => ("proxy", block),
         StubResponse::Fault {
-            ignored_behaviors: Some(_),
+            ignored_behaviors: Some(block),
             ..
-        } => Some("fault"),
+        } => ("fault", block),
         StubResponse::RiftScript {
-            ignored_behaviors: Some(_),
+            ignored_behaviors: Some(block),
             ..
-        } => Some("_rift"),
-        _ => None,
-    }
+        } => ("_rift", block),
+        _ => return None,
+    };
+    let sets_more_than_repeat = block
+        .as_object()
+        .is_some_and(|b| b.iter().any(|(k, v)| k != "repeat" && !v.is_null()));
+    sets_more_than_repeat.then_some(shape)
 }
 
 /// The stubs with a response `shape_of` classifies as `shape`: the first index, and the indices as
@@ -204,22 +205,25 @@ pub fn ignored_config_keys(config: &ImposterConfig, stubs: &[Stub]) -> Vec<StubW
         (
             "proxy",
             "a `proxy` response",
-            "; Mountebank applies them, Rift does not yet",
+            "Mountebank applies the rest, Rift does not yet",
         ),
         (
-            "inject",
-            "an `inject` response",
-            "; Mountebank applies them, Rift does not yet",
+            "fault",
+            "a `fault` response",
+            "the rest do not apply to a fault, as in Mountebank",
         ),
-        ("fault", "a `fault` response", ", as in Mountebank"),
-        ("_rift", "a `_rift`-only response", ""),
+        (
+            "_rift",
+            "a `_rift`-only response",
+            "the rest do not apply to a script response",
+        ),
     ] {
         if let Some((first, listed)) = stubs_with_shape(stubs, shape, ignored_behaviors_shape) {
             warnings.push(per_shape(
                 first,
                 format!(
-                    "A behaviors block on {noun} has no effect: behaviors apply to `is` \
-                     responses only{why} (stubs {listed})"
+                    "A behaviors block on {noun} has no effect except `repeat`: {why} \
+                     (stubs {listed})"
                 ),
             ));
         }

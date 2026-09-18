@@ -13,6 +13,14 @@ record.
 
 ### Added
 
+- **Behaviors run on `inject` responses, and `repeat` on every response type** (#1188, part of
+  #1184). Mountebank applies a response's `_behaviors` to what an `inject` function returns, and
+  honours `repeat` on `proxy`, `fault` and every other response; Rift applied both to `is` responses
+  only, so a migrated `{"inject": …, "_behaviors": {"decorate": …}}` served undecorated and a
+  `repeat` on anything but `is` served once. A function that throws still runs no behavior, as in
+  Mountebank. `config_key_ignored` and `rift-lint` `W017` no longer report an `inject` response's
+  block, or a block that sets only `repeat`.
+
 - **`bootstrap::stop_server_within(pidfile, ceiling)`** (#1178) — `stop_server` with the exit wait chosen by
   the caller. Since #1155 `stop_server` waits a fixed five seconds for the process to exit and fails
   otherwise, which is right for this server but made `stop` report failure — and `restart` never
@@ -798,6 +806,12 @@ record.
     `errors[0].detail` instead.
 
 ### Fixed
+
+- **A top-level `repeat` was silently ignored** (#1188). Mountebank stores `repeat` on the response
+  (`{"is": …, "repeat": 3}`) — the form `mb save` writes — and Rift read it only inside
+  `_behaviors`, so such a response served once and cycled on. It is now read on every response type,
+  wins over a `repeat` in the block as in Mountebank, and is validated like one: a value that is not
+  a whole number within 32 bits is refused, and `rift-lint` reports it as `E035`.
 
 - **Creating an imposter or adding a stub no longer runs its `inject` script** (#1183). The admin API's check of an
   `inject` response evaluated it, inline on the request task and with no loop or time budget, so an

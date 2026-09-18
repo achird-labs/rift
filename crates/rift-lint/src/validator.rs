@@ -186,8 +186,8 @@ fn check_ignored_keys(file: &Path, imposter: &Value, result: &mut LintResult) {
                     result,
                     format!("stubs[{stub_idx}].responses[{resp_idx}].{key}"),
                     format!(
-                        "`{key}` on a `{shape}` response is parsed but has no effect: behaviors \
-                         apply to `is` responses only"
+                        "`{key}` on a `{shape}` response has no effect except `repeat`: other \
+                         behaviors apply to `is` and `inject` responses only"
                     ),
                 );
             }
@@ -208,11 +208,32 @@ fn ignored_rift_shape(response: &Value) -> Option<&'static str> {
         .find(|shape| present(shape))
 }
 
-/// A behaviors block the engine keeps but never runs (issue #1181): the key it reads, and the
-/// response shape it sits on. Mirrors the engine's parse: `_behaviors` wins over `behaviors` unless
-/// it is `null`, the array form folds its objects into one, and an empty block is no block. The
-/// shapes are `proxy`, `inject`, `fault`, and `_rift` for a `_rift`-only response — every one but
-/// `is`, which the engine picks first, and the flat and bare forms, which it reads as `is`.
+/// E035: the engine reads `repeat` as a `u32` and refuses the file for anything else (#1162); `0`
+/// is admitted there and served once, and flagged here as never what the author meant.
+fn check_repeat(file: &Path, repeat: &Value, location: &str, result: &mut LintResult) {
+    let valid = repeat
+        .as_u64()
+        .is_some_and(|n| n > 0 && u32::try_from(n).is_ok());
+    if !valid {
+        result.add_issue(
+            LintIssue::error(
+                "E035",
+                "Repeat behavior must be a positive integer",
+                file.to_path_buf(),
+            )
+            .with_location(location.to_string())
+            .with_suggestion("Use a positive integer, e.g. \"repeat\": 3"),
+        );
+    }
+}
+
+/// A behaviors block holding something the engine keeps but never runs (issue #1181): the key it
+/// reads, and the response shape it sits on. Mirrors the engine's parse: `_behaviors` wins over
+/// `behaviors` unless it is `null`, the array form folds its objects into one (a later element
+/// wins), and a `null` key is absent. Behaviors run on `is` and `inject` responses, and `repeat`
+/// on every response (issue #1188), so the shapes are `proxy`, `fault`, and `_rift` for a
+/// `_rift`-only response, and only a block setting a key other than `repeat` is reported. `is` and
+/// `inject` are matched first only because the engine picks them over the shapes after them.
 fn ignored_behaviors(response: &Value) -> Option<(&'static str, &'static str)> {
     let present = |key: &str| response.get(key).is_some_and(|v| !v.is_null());
     if present("is") {
@@ -221,19 +242,26 @@ fn ignored_behaviors(response: &Value) -> Option<(&'static str, &'static str)> {
     let shape = ["proxy", "inject", "fault", "_rift"]
         .into_iter()
         .find(|shape| present(shape))?;
+    if shape == "inject" {
+        return None;
+    }
     let key = if present("_behaviors") {
         "_behaviors"
     } else {
         "behaviors"
     };
-    let non_empty = match response.get(key)? {
-        Value::Object(block) => !block.is_empty(),
-        Value::Array(items) => items
-            .iter()
-            .any(|item| item.as_object().is_some_and(|o| !o.is_empty())),
-        _ => false,
-    };
-    non_empty.then_some((key, shape))
+    let mut folded: HashMap<&str, &Value> = HashMap::new();
+    match response.get(key)? {
+        Value::Object(block) => folded.extend(block.iter().map(|(k, v)| (k.as_str(), v))),
+        Value::Array(items) => {
+            for block in items.iter().filter_map(Value::as_object) {
+                folded.extend(block.iter().map(|(k, v)| (k.as_str(), v)));
+            }
+        }
+        _ => return None,
+    }
+    let sets_more_than_repeat = folded.iter().any(|(k, v)| *k != "repeat" && !v.is_null());
+    sets_more_than_repeat.then_some((key, shape))
 }
 
 /// I005 (issue #1152): carrier fields. The engine keeps and returns them, by design, and does not
@@ -1419,6 +1447,11 @@ fn validate_response_behaviors(
 ) {
     let present = |key: &str| response.get(key).filter(|v| !v.is_null());
 
+    // Mountebank's canonical top-level `repeat` (issue #1188), held to the rule the block's is.
+    if let Some(repeat) = present("repeat") {
+        check_repeat(file, repeat, &format!("{location}.repeat"), result);
+    }
+
     // The engine refuses an inverted wait range wherever it sits, including in a block it will
     // never evaluate, so sweep the one the precedence arms below will not descend into (issue
     // #1148). The winning block's own `wait` is reported by `validate_behavior`; sweeping only the
@@ -1954,21 +1987,7 @@ pub fn validate_behavior(
     }
 
     if let Some(repeat) = present("repeat") {
-        // The engine reads `repeat` as a `u32` and refuses the file for anything larger (#1162).
-        let valid = repeat
-            .as_u64()
-            .is_some_and(|n| n > 0 && u32::try_from(n).is_ok());
-        if !valid {
-            result.add_issue(
-                LintIssue::error(
-                    "E035",
-                    "Repeat behavior must be a positive integer",
-                    file.to_path_buf(),
-                )
-                .with_location(format!("{location}.repeat"))
-                .with_suggestion("Use a positive integer, e.g. \"repeat\": 3"),
-            );
-        }
+        check_repeat(file, repeat, &format!("{location}.repeat"), result);
     }
 
     // The engine refuses the file for a non-string `decorate`, or a `shellTransform` that is not a
@@ -2801,7 +2820,7 @@ mod ignored_behaviors_tests {
             at("_behaviors")
         );
         assert_eq!(
-            w017(json!({"inject": "function () {}", "behaviors": [{"wait": 1}]})),
+            w017(json!({"fault": "CONNECTION_RESET_BY_PEER", "behaviors": [{"wait": 1}]})),
             at("behaviors")
         );
         assert_eq!(
@@ -2838,6 +2857,12 @@ mod ignored_behaviors_tests {
             json!({"proxy": proxy, "_behaviors": {}}),
             json!({"proxy": proxy, "behaviors": []}),
             json!({"proxy": proxy, "behaviors": [{}]}),
+            // Issue #1188: behaviors run on an inject response, and `repeat` on every response.
+            json!({"inject": "function () {}", "behaviors": [{"wait": 1}]}),
+            json!({"proxy": proxy, "_behaviors": {"repeat": 2}}),
+            json!({"fault": "CONNECTION_RESET_BY_PEER", "behaviors": [{"repeat": 2}]}),
+            json!({"proxy": proxy, "_behaviors": {"repeat": 2, "wait": null}}),
+            json!({"proxy": proxy, "behaviors": [{"wait": 1}, {"wait": null}]}),
         ] {
             assert_eq!(w017(response.clone()), Vec::<String>::new(), "{response}");
         }

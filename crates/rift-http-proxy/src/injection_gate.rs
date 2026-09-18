@@ -100,9 +100,9 @@ pub(crate) fn predicate_has_inject(predicate: &Predicate) -> bool {
 /// True if `response` uses any script surface: an inject response, a decorate behavior, a
 /// shellTransform behavior, a JS-function `wait` behavior, or `_rift.script`.
 ///
-/// A behaviors block on a `proxy`, `inject`, `fault` or `_rift`-only response is classified too,
-/// although no behavior runs there (issue #1181): Mountebank runs them on `proxy` and `inject`, and
-/// the gate must already be closed on the day Rift does.
+/// A behaviors block on a `proxy`, `fault` or `_rift`-only response is classified too, although
+/// only its `repeat` takes effect there (issues #1181, #1188): Mountebank runs the rest on `proxy`,
+/// and the gate must already be closed on the day Rift does.
 fn response_has_script_surface(response: &StubResponse) -> bool {
     match response {
         StubResponse::Inject { .. } => true,
