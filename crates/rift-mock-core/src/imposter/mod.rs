@@ -17,6 +17,7 @@
 //! - `core`: Core Imposter struct and implementation
 
 mod core;
+mod datadir_file;
 pub mod events;
 pub mod fault_io;
 mod handler;
@@ -58,6 +59,7 @@ pub use journal::{
 };
 
 pub use core::Imposter;
+pub use datadir_file::sweep_interrupted_writes;
 // Builds a `proxy`-stub upstream client under a trust policy (issue #974), so the binary and any
 // embedder share one timeout/pooling configuration.
 pub use core::build_upstream_client;

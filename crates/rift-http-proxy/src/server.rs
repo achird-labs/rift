@@ -1809,6 +1809,27 @@ fn read_and_parse_datadir(
     Ok((parsed, skipped))
 }
 
+/// Remove the `{port}.json.tmp` files a previous process left when it died mid-write (issue #1158).
+///
+/// Only at startup, before this server's load creates anything — a reload runs beside live writers,
+/// whose temp files this would unlink. An embedder that injects a manager must not have it writing
+/// to the same datadir while the server starts. A leftover is inert either way (no loader reads it), so failing to sweep is
+/// reported and startup continues.
+fn sweep_interrupted_writes(datadir: &Path) {
+    match rift_mock_core::imposter::sweep_interrupted_writes(datadir) {
+        Ok(removed) => {
+            for path in removed {
+                warn!(
+                    ?path,
+                    "removed an interrupted datadir write; the imposter's .json beside it is its \
+                     last complete state"
+                );
+            }
+        }
+        Err(e) => warn!(error = %e, ?datadir, "could not sweep interrupted datadir writes"),
+    }
+}
+
 /// Parse and gate every file in `datadir`, creating the directory when it is missing. Creates no
 /// imposter; unparseable and gated files come back as skipped, never fatal.
 fn read_and_gate_datadir(
@@ -1821,6 +1842,8 @@ fn read_and_gate_datadir(
         std::fs::create_dir_all(datadir)?;
         return Ok((Vec::new(), Vec::new()));
     }
+
+    sweep_interrupted_writes(datadir);
 
     // `file:`/`ref:` scripts in a datadir-loaded imposter resolve relative to the datadir itself,
     // escape-checked: these `{port}.json` files can be network-authored (persisted from an
@@ -3323,5 +3346,38 @@ mod tests {
                 .is_none(),
             "a serve body that merely looks like JS is inert data, not an injection"
         );
+    }
+
+    /// Issue #1158: startup removes the `{port}.json.tmp` a crashed write left, keeps the complete
+    /// `{port}.json` beside it and loads that, and leaves a `.json.tmp` that is not port-named.
+    #[test]
+    fn startup_sweeps_interrupted_writes_and_loads_the_last_complete_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_json(
+            &dir.path().join("4545.json"),
+            serde_json::json!({"port": 4545, "protocol": "http", "stubs": []}),
+        );
+        std::fs::write(dir.path().join("4545.json.tmp"), "{ truncated").expect("write");
+        std::fs::write(dir.path().join("notes.json.tmp"), "operator's").expect("write");
+
+        let (parsed, skipped) = read_and_gate_datadir(dir.path(), false).expect("listable");
+
+        assert_eq!(parsed.len(), 1);
+        assert!(skipped.is_empty(), "{} file(s) skipped", skipped.len());
+        assert!(!dir.path().join("4545.json.tmp").exists());
+        assert!(dir.path().join("4545.json").exists());
+        assert!(dir.path().join("notes.json.tmp").exists());
+    }
+
+    /// The sweep is not what keeps a temp file out of the load: the `json` extension filter is.
+    /// Pinned directly, so widening it to `*.json*` fails here.
+    #[test]
+    fn the_datadir_parser_never_reads_a_temp_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("4545.json.tmp"), "{ truncated").expect("write");
+        let base = ScriptBaseDir::DatadirRelative(dir.path().to_path_buf());
+        let (parsed, skipped) = read_and_parse_datadir(dir.path(), &base).expect("listable");
+        assert!(parsed.is_empty());
+        assert!(skipped.is_empty(), "{} file(s) skipped", skipped.len());
     }
 }
