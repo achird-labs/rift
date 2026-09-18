@@ -155,6 +155,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E047 | `port` is present but not a non-negative integer — the engine refuses the file at load (`expected u16`), and an integral float such as `3000.0` is no exception. `null` is reported as E003 instead, because the engine reads it as absent and auto-assigns a port | `"port": "3000"`, `"port": 3000.5` |
 | E048 | A response's behaviors block has a shape the engine does not read: a `_behaviors` that is not an object, or a `behaviors` that is neither an object nor an array, is refused at load; a non-object, non-null element of a `behaviors` array is skipped | `"_behaviors": [null, null, null, null, "cmd"]`, `"behaviors": "wait"`, `"behaviors": [5]` |
 | E049 | The engine would refuse to preprocess the file: an EJS tag it does not evaluate, or an `include`/`stringify` file that cannot be read. The message is the engine's own | `"body": "<% for (x) %>"`, `<% include 'missing.json' %>` |
+| E050 | A config file's `intercept` block sets `returnCaKey: true`. The engine refuses the file, because a config file has no response to return the generated CA key in | `"intercept": {"returnCaKey": true}` |
 
 ### Warnings
 
@@ -178,6 +179,7 @@ Warnings indicate potential issues that may cause unexpected behavior.
 | W014 | A response's `_rift.script` uses `ctx.state` (or `flow_store`), or its `_rift.stateOps` is a non-empty array, but the imposter has no `_rift.flowState`. State is then auto-provisioned in memory — not persisted, not shared across a cluster. Formerly `E042` (renumbered in #1156: it was always a warning, and the letter now matches) | `ctx.state.get(...)` without `flowState` |
 | W015 | A `_mode: "binary"` body — on an `is` response or on `defaultResponse` — that is not valid base64, or is not a string at all (a non-string body is serialized to JSON text first, so it can never decode). The engine serves it anyway, as the raw text with `x-rift-binary-error: true`, or as a `500` under `strictBehaviors`. Checked with the engine's own decoder, not an approximation | `"body": "not!valid!base64!", "_mode": "binary"` |
 | W016 | `_rift.scriptEngine.defaultEngine` is not `rhai`, `javascript` or `js`. A script that names no engine, and whose `file` extension does not decide it, fails to build with it. The rest of the imposter loads, so a stale value with no such script is only a warning | `"defaultEngine": "lua"` |
+| W017 | A key the engine parses and does not act on: `_rift.metrics`, `_rift.proxy`, `recordMatches: true`, or `_rift` on a `proxy`, `inject` or `fault` response. The engine reports the same keys as `config_key_ignored` in `_rift.warnings` | `"recordMatches": true` |
 
 ### Info
 
@@ -189,6 +191,7 @@ Informational messages about configuration patterns.
 | I002 | Proxy targets localhost |
 | I003 | Response uses the Rift `_rift` extension (not Mountebank-compatible) |
 | I004 | This build omits the `javascript` feature, so the run's JavaScript was not syntax-checked (no E028/E040). Reported once per run, not per script. Every release artifact has the feature; only a source build that opts out with `--no-default-features` can report this |
+| I005 | `_rift.dataset` or `_rift.sequencing`: a carrier field that round-trips through the admin API for an embedder's extension. The standalone engine does not read it |
 
 ---
 

@@ -176,12 +176,12 @@ Options:
       --metrics-port <PORT>        Prometheus metrics port [default: 9090]
       --front-door <ADDR>          Serve every imposter from one address, routed by host/path/header (see Features -> Front Door)
       --ip-whitelist <IPS>         Comma-separated allowed IPs (accepted for Mountebank compatibility; NOT enforced)
-      --mock                       Accepted for Mountebank compatibility; no effect
+      --mock                       Accepted for Mountebank compatibility; no effect — set `recordRequests: true` per imposter
       --debug                      Enable debug mode (same as RIFT_DEBUG=1; also sets the log level to debug unless RUST_LOG is set)
       --nologfile                  Do not write the --log file (stdout only)
       --log <FILE>                 Also write logs to this file (off unless set)
       --pidfile <FILE>             Write the server's PID here (off unless set; stop/restart read ./rift.pid when omitted)
-      --origin <ORIGIN>            Accepted for Mountebank compatibility; no effect (use the imposter's `allowCORS` field)
+      --origin <ORIGIN>            Accepted for Mountebank compatibility; NOT implemented — the admin API sends no CORS headers
       --api-key <TOKEN>            Require this token in the Authorization header for all admin API requests
       --rcfile <FILE>              RC file with default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/apiKey/datadir/configfile/noParse); one that cannot be read or applied aborts startup
       --default-tls-cert <FILE>    Default TLS certificate (PEM) for HTTPS imposters without their own
@@ -209,8 +209,10 @@ variable is unset (and has no `|| 'default'`) renders empty and logs a `WARN` na
 and where the tag is; if the rendered document then fails to parse, the error names it too.
 
 `--formatter`, `--protofile`, `--ip-whitelist`, `--origin` and `--mock` are accepted for Mountebank
-command-line compatibility but have no effect in Rift. The first three log a warning when given;
-`--origin` and `--mock` are silently ignored.
+command-line compatibility but have no effect in Rift. Each logs a warning when given. `--origin`
+sets the admin API's CORS origin in Mountebank; Rift's admin API sends no CORS headers (an
+imposter's own `allowCORS` is unrelated). Mountebank deprecated `--mock`; set `recordRequests: true`
+on each imposter instead.
 
 ### `--ip-whitelist` does not filter anything
 

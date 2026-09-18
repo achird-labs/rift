@@ -3025,6 +3025,38 @@ fn w015_is_silent_for_a_null_or_absent_binary_body() {
     }
 }
 
+// ─── #1152: keys the engine parses and ignores (W017), carriers (I005), returnCaKey (E050) ──────
+
+#[test]
+fn w017_does_not_fire_on_an_is_response_carrying_rift() {
+    let v = json!({"port": 4545, "protocol": "http", "stubs": [{"responses": [
+        {"is": {"statusCode": 200}, "_rift": {"templated": true}}
+    ]}]});
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(!has_code(&r, "W017"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn i005_names_the_carrier_fields() {
+    let v = json!({"port": 4545, "protocol": "http", "stubs": [],
+        "_rift": {"dataset": {"rows": []}, "sequencing": {"mode": "x"}}});
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    let infos: Vec<_> = r.issues.iter().filter(|i| i.code == "I005").collect();
+    assert_eq!(infos.len(), 2, "got {:?}", codes(&r));
+}
+
+#[test]
+fn e050_refuses_return_ca_key_in_a_config_file_and_only_when_true() {
+    let doc =
+        |value: bool| format!(r#"{{"imposters": [], "intercept": {{"returnCaKey": {value}}}}}"#);
+    let r = rift_lint::lint_json(&doc(true), "c.json", &opts());
+    assert!(has_code(&r, "E050"), "got {:?}", codes(&r));
+    let r = rift_lint::lint_json(&doc(false), "c.json", &opts());
+    assert!(!has_code(&r, "E050"), "got {:?}", codes(&r));
+}
+
 // ─── #1159: `_rift.scriptEngine.defaultEngine` decides an engine-less script's engine ──────────
 
 fn default_engine_imposter(default: Option<&str>, script: Value) -> Value {
@@ -3100,4 +3132,17 @@ fn w016_flags_a_default_engine_that_is_not_an_engine() {
             codes(&r)
         );
     }
+}
+
+/// `"is": null` is absent to the engine, so `_rift` on the `proxy` beside it is ignored there — and
+/// W014 does not fire for state on a block that never runs.
+#[test]
+fn w017_treats_null_as_absent_and_w014_skips_ignored_blocks() {
+    let v = json!({"port": 4545, "protocol": "http", "stubs": [{"responses": [
+        {"is": null, "proxy": {"to": "http://x"}, "_rift": {"stateOps": [{"op": "incr"}]}}
+    ]}]});
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(has_code(&r, "W017"), "got {:?}", codes(&r));
+    assert!(!has_code(&r, "W014"), "got {:?}", codes(&r));
 }

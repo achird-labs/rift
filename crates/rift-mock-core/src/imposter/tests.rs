@@ -348,7 +348,7 @@ fn test_imposter_config_with_add_decorate_behavior() {
     let config: ImposterConfig = serde_json::from_str(json).unwrap();
     assert_eq!(config.stubs.len(), 1);
 
-    if let StubResponse::Proxy { proxy } = &config.stubs[0].responses[0] {
+    if let StubResponse::Proxy { proxy, .. } = &config.stubs[0].responses[0] {
         println!("Deserialized proxy: {proxy:?}");
         assert!(
             proxy.add_decorate_behavior.is_some(),
@@ -541,7 +541,7 @@ fn test_proxy_only_response() {
     }"#;
 
     let response: StubResponse = serde_json::from_str(json).unwrap();
-    if let StubResponse::Proxy { proxy } = response {
+    if let StubResponse::Proxy { proxy, .. } = response {
         assert_eq!(proxy.to, "http://example.com");
         assert_eq!(proxy.mode, "proxyTransparent");
     } else {

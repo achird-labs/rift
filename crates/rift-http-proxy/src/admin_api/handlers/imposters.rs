@@ -409,7 +409,12 @@ pub async fn handle_get(
             // the `removeProxies` view (the warnings are advisory).
             let warnings = imposter.stub_warnings();
             if !warnings.is_empty() {
-                for warning in warnings.iter() {
+                // Ignored config keys were logged once, when the imposter loaded (issue #1152);
+                // re-logging them on every read would repeat them for as long as it exists.
+                for warning in warnings.iter().filter(|w| {
+                    w.warning_type
+                        != crate::extensions::stub_analysis::WarningType::ConfigKeyIgnored
+                }) {
                     warn!(
                         port = port,
                         warning_type = ?warning.warning_type,

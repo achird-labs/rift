@@ -1119,6 +1119,7 @@ async fn handle_request_inner(
         // Check if this is a proxy response
         if let Some(StubResponse::Proxy {
             proxy: proxy_config,
+            ..
         }) = response
         {
             // Per-request entry announcement — `trace!` so it compiles out of release (issue #706);
@@ -1172,7 +1173,10 @@ async fn handle_request_inner(
 
         // Check if this is an inject response (JavaScript function)
         #[cfg(feature = "javascript")]
-        if let Some(StubResponse::Inject { inject: inject_fn }) = response {
+        if let Some(StubResponse::Inject {
+            inject: inject_fn, ..
+        }) = response
+        {
             trace!("Handling inject response");
 
             // Build request for inject function

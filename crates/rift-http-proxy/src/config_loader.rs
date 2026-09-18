@@ -120,6 +120,19 @@ fn parse_document(content: &str, base: &ScriptBaseDir) -> anyhow::Result<LoadedC
                     .map(|block| serde_json::from_value(block.clone()))
                     .transpose()
                     .map_err(|e| anyhow::anyhow!("invalid `intercept` block: {e}"))?;
+                // `returnCaKey` asks for the generated CA key in the start *response*. A config file
+                // has no response to put it in, so the key was minted and dropped (issue #1152).
+                if intercept
+                    .as_ref()
+                    .is_some_and(|block: &InterceptStartOptions| block.return_ca_key == Some(true))
+                {
+                    anyhow::bail!(
+                        "invalid `intercept` block: `returnCaKey` cannot be honoured from a config \
+                         file, because there is no response to return the key in. Start the \
+                         listener with `POST /intercept` to receive a generated CA key, or supply \
+                         `caCertPath`/`caKeyPath`."
+                    );
+                }
                 // Same wrapper-only rule, same reasoning, for the front door's route
                 // table (issue #19). Validated here rather than at first request: a
                 // table that cannot route is a startup error, not a runtime surprise.
@@ -1385,5 +1398,21 @@ mod tests {
         let loaded = load_dir(dir.path()).expect("the partial temp file is not read");
         assert_eq!(loaded.len(), 1);
         assert!(dir.path().join("4545.json.tmp").exists());
+    }
+
+    /// Issue #1152: `returnCaKey` asks for the generated key in the start response, and a config
+    /// file has none — the key used to be minted and dropped. Refused, naming the key; `false`
+    /// still loads.
+    #[test]
+    fn a_config_file_intercept_block_cannot_ask_for_the_ca_key() {
+        let doc = |value: bool| {
+            format!(r#"{{"imposters": [], "intercept": {{"returnCaKey": {value}}}}}"#)
+        };
+        let err = parse_document(&doc(true), &ScriptBaseDir::Unconfigured)
+            .expect_err("returnCaKey: true is refused");
+        assert!(format!("{err:#}").contains("returnCaKey"), "{err:#}");
+        let loaded =
+            parse_document(&doc(false), &ScriptBaseDir::Unconfigured).expect("false loads");
+        assert!(loaded.intercept.is_some());
     }
 }

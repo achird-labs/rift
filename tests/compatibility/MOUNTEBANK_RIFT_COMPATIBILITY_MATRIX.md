@@ -356,8 +356,8 @@ This matches Mountebank's behavior for automatic port assignment.
 | `--pidfile` | ✅ Yes | ✅ Yes | ✅ **Complete** | PID file location |
 | `--debug` | ✅ Yes | ✅ Yes | ✅ **Complete** | Enable debug mode |
 | `--ipWhitelist` | ✅ Yes | ⚠️ Accepted | ⚠️ **Accepted, not enforced** | Parsed but never applied (issue #879); use a network policy/firewall, `--local-only`, or `--api-key` |
-| `--mock` | ✅ Yes | ✅ Yes | ✅ **Complete** | Mock mode flag |
-| `--origin` | ✅ Yes | ✅ Yes | ✅ **Complete** | CORS allowed origin |
+| `--mock` | ✅ Yes | ⚠️ Accepted | ❌ **Not implemented** | Deprecated upstream; logs a warning — use per-imposter `recordRequests` |
+| `--origin` | ✅ Yes | ⚠️ Accepted | ❌ **Not implemented** | Admin API sends no CORS headers; logs a warning |
 
 **`--allowInjection` on config-file load — same gate, stricter exit (issue #612):**
 

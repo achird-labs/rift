@@ -109,7 +109,7 @@ fn response_has_script_surface(response: &StubResponse) -> bool {
             let behavior_is_scripted = behaviors.as_ref().is_some_and(raw_behaviors_are_scripted);
             behavior_is_scripted || rift.as_ref().is_some_and(|r| r.script.is_some())
         }
-        StubResponse::Proxy { proxy } => {
+        StubResponse::Proxy { proxy, .. } => {
             proxy.add_decorate_behavior.is_some()
                 || proxy
                     .predicate_generators

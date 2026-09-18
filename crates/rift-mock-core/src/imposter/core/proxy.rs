@@ -249,7 +249,7 @@ impl Imposter {
                     s.stub
                         .responses
                         .iter()
-                        .any(|r| matches!(r, StubResponse::Proxy { proxy } if proxy.to == proxy_to))
+                        .any(|r| matches!(r, StubResponse::Proxy { proxy, .. } if proxy.to == proxy_to))
                 })
                 .unwrap_or(stubs.len());
 

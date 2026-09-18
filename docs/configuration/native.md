@@ -148,7 +148,9 @@ Besides `flowState`, the imposter-level `_rift` block accepts these settings. On
 ### `metrics`
 
 **Accepted, no effect.** Metrics are always served by the process-wide listener on
-`--metrics-port`; this block does not enable, disable or move them.
+`--metrics-port`; this block does not enable, disable or move them. The engine says so: a
+`config_key_ignored` entry in the imposter's `_rift.warnings`, a `WARN` line at load, and
+`rift-lint` `W017`.
 
 ```json
 "_rift": {
@@ -164,7 +166,7 @@ Besides `flowState`, the imposter-level `_rift` block accepts these settings. On
 ### `proxy`
 
 **Accepted, no effect.** A `proxy` response's upstream is its own `to` field, and connection pooling
-is not configurable per imposter.
+is not configurable per imposter. Reported the same way as `metrics` above.
 
 ```json
 "_rift": {
