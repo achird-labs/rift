@@ -9,7 +9,7 @@ use clap::Parser;
 use rift_http_proxy::intercept_control::{
     InterceptControl, InterceptStartError, InterceptStartOptions,
 };
-use rift_http_proxy::server::{Cli, ServerBuilder, admin_bind_addr};
+use rift_http_proxy::server::{Cli, ServerBuilder, admin_bind_addr, intercept_flag_options};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 fn cli(argv: &[&str]) -> Cli {
@@ -191,4 +191,52 @@ async fn intercept_start_refuses_a_name_saying_what_it_takes() {
         other => panic!("expected InvalidAddr, got {other:?}"),
     }
     assert!(control.status().is_none(), "a refused start binds nothing");
+}
+
+// Issue #1150: `--intercept-port` inherits the admin host as a *string*, and #1144 built that
+// string with `admin_addr.ip().to_string()` — which cannot spell a scope id. The listener then
+// re-parsed it as scope 0 and the bind failed, aborting startup. Asserted at the options level:
+// binding a link-local interface is not something CI can rely on.
+#[test]
+fn the_intercept_flag_inherits_the_admin_scope_id() {
+    let cli = cli(&[
+        "rift",
+        "--host",
+        "[fe80::1%2]",
+        "--port",
+        "2525",
+        "--intercept-port",
+        "8443",
+    ]);
+    let admin_addr = admin_bind_addr(&cli).expect("a scoped IPv6 literal must resolve");
+    let options =
+        intercept_flag_options(&cli, admin_addr, None).expect("--intercept-port yields options");
+    assert_eq!(options.host.as_deref(), Some("fe80::1%2"));
+    assert_eq!(options.port, Some(8443));
+}
+
+// An unscoped host must not grow a `%0` on the way through.
+#[test]
+fn the_intercept_flag_inherits_an_unscoped_host_verbatim() {
+    let cli = cli(&[
+        "rift",
+        "--host",
+        "::1",
+        "--port",
+        "2525",
+        "--intercept-port",
+        "8443",
+    ]);
+    let admin_addr = admin_bind_addr(&cli).expect("`::1` must resolve");
+    let options =
+        intercept_flag_options(&cli, admin_addr, None).expect("--intercept-port yields options");
+    assert_eq!(options.host.as_deref(), Some("::1"));
+}
+
+// No `--intercept-port` means no flag-derived listener, scope id or not.
+#[test]
+fn no_intercept_flag_yields_no_options() {
+    let cli = cli(&["rift", "--host", "[fe80::1%2]", "--port", "2525"]);
+    let admin_addr = admin_bind_addr(&cli).expect("a scoped IPv6 literal must resolve");
+    assert!(intercept_flag_options(&cli, admin_addr, None).is_none());
 }

@@ -731,6 +731,18 @@ record.
   - A scoped link-local literal (`[fe80::1%2]`) keeps its scope id on every door. The startup log no
     longer prints a malformed metrics URL built from `--host`; the metrics listener already logs the
     address it bound.
+  - Three doors derived one address from another by rebuilding it from `.ip()`, which drops the
+    scope id and flowinfo — they live on `SocketAddrV6`, not `Ipv6Addr` — so a scoped `--host` was
+    accepted and then reached them unscoped (#1150). The C-ABI metrics listener got a scope-0
+    address, and since a metrics bind failure is fatal, `rift_serve_admin` returned `NULL` for a
+    host it had just accepted; `--intercept-port` inherited the admin host as an unscoped *string*
+    and aborted startup when its listener could not bind. All three now move the port on a copy of
+    the address, and the string door renders the host with `proxy::bind_host`, the inverse of
+    `bind_addr`.
+  - `adminUrl` and `interceptUrl` deliberately keep std's socket-address spelling for a scoped
+    bind (`http://[fe80::1%2]:2525`) rather than percent-encoding the zone: no spelling parses in
+    Go, Java and Node alike, and encoding it breaks the one runtime where the field works today.
+    `docs/embedding/ffi.md` says so, and points at `adminPort` plus the caller's own host.
 
 - **An unrecognised `--loglevel` and an unparseable `RUST_LOG` are refused instead of silently
   downgraded** (#1134). Two reads in `main.rs` discarded a failure and fell back to a level nobody

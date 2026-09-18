@@ -2942,3 +2942,30 @@ fn ffi_unreadable_upstream_ca_file_fails_the_serve() {
         rift_stop(h);
     }
 }
+
+/// Issue #1150: a scoped link-local host must survive to the *metrics* door too. Before the fix the
+/// metrics address was rebuilt from `.ip()`, losing the scope; the bind then failed and the FFI
+/// treats a metrics bind failure as fatal, so this call returned NULL for a host it had accepted.
+///
+/// macOS `lo0` carries `fe80::1%1`; Linux `lo` has no link-local address at all, so this probes
+/// first and skips rather than failing where the interface does not exist.
+#[test]
+fn ffi_metrics_door_keeps_a_scoped_link_local_host() {
+    if std::net::TcpListener::bind("[fe80::1%1]:0").is_err() {
+        eprintln!("skipping: this host has no link-local address on scope 1");
+        return;
+    }
+    unsafe {
+        let h = rift_start();
+        let info = serve_admin(h, r#"{"host":"fe80::1%1","port":0,"metricsPort":0}"#);
+        assert!(
+            info["adminPort"].as_u64().is_some_and(|p| p != 0),
+            "admin listener must have bound: {info}"
+        );
+        assert!(
+            info["metricsPort"].as_u64().is_some_and(|p| p != 0),
+            "metrics listener must have bound on the scoped host: {info}"
+        );
+        rift_stop(h);
+    }
+}

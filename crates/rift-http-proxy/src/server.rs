@@ -503,11 +503,16 @@ impl ServerBuilder {
             && let Some(intercept_port) = cli.intercept_port
         {
             crate::admin_api::check_intercept_exposure(
-                SocketAddr::new(admin_addr.ip(), intercept_port),
+                intercept_bind_addr(admin_addr, intercept_port),
                 cli_intercept_auth.is_some(),
                 crate::admin_api::AdminExposurePolicy::Refuse,
             )?;
         }
+        // Read out of `cli` here, while it is still whole: startup moves `api_key` and `datadir`
+        // out of it further down, after which `cli` can no longer be borrowed. Eager rather than
+        // lazy is free — supplying both an `intercept` block and `--intercept-port` is already
+        // refused at config load, so at most one of the two arms ever has a value.
+        let intercept_flag_opts = intercept_flag_options(&cli, admin_addr, cli_intercept_auth);
         // Validate `--front-door` before anything else binds (issue #19 / U-11): a malformed
         // address is then a clean, fast failure that never has to unwind an already-bound
         // listener behind it.
@@ -708,26 +713,7 @@ impl ServerBuilder {
         let intercept = InterceptControl::default()
             .with_exposure_policy(cli.require_admin_auth.into())
             .with_outbound_tls(outbound_tls.clone());
-        let start_options = intercept_block.or_else(|| {
-            cli.intercept_port
-                .map(|intercept_port| InterceptStartOptions {
-                    host: Some(admin_addr.ip().to_string()),
-                    port: Some(intercept_port),
-                    ca_cert_path: cli
-                        .intercept_ca_cert
-                        .as_deref()
-                        .map(|p| p.to_string_lossy().into_owned()),
-                    ca_key_path: cli
-                        .intercept_ca_key
-                        .as_deref()
-                        .map(|p| p.to_string_lossy().into_owned()),
-                    ca_cert_pem: cli.intercept_ca_cert_pem.clone(),
-                    ca_key_pem: cli.intercept_ca_key_pem.clone(),
-                    auth: cli_intercept_auth,
-                    // Cloned (not moved) because `cli` is borrowed for the rest of startup.
-                    ..Default::default()
-                })
-        });
+        let start_options = intercept_block.or(intercept_flag_opts);
         if let Some(options) = start_options {
             let seeded_rules = options.rules.len();
             if let Err(e) = intercept.start(options).await {
@@ -897,6 +883,52 @@ fn admin_bind_host(cli: &Cli) -> &str {
     } else {
         &cli.host
     }
+}
+
+/// The intercept listener's address on the admin interface — the admin address with the intercept
+/// port (issue #1150).
+///
+/// Moving the port on a copy rather than rebuilding from `.ip()` is what keeps an IPv6 scope id:
+/// `IpAddr` cannot carry one. This address only feeds `check_intercept_exposure` today, which
+/// judges `to_canonical().is_loopback()` and so cannot tell the difference — it is written this
+/// way so the lossy form does not get copied to a door where it does matter.
+fn intercept_bind_addr(admin_addr: SocketAddr, intercept_port: u16) -> SocketAddr {
+    let mut addr = admin_addr;
+    addr.set_port(intercept_port);
+    addr
+}
+
+/// The `--intercept-port` arm of the intercept start options: the flag spelling inherits the admin
+/// `host`, where a config-file `intercept` block declares its own.
+///
+/// `None` when `--intercept-port` was not given. The host is rendered with
+/// [`rift_mock_core::proxy::bind_host`] rather than `admin_addr.ip().to_string()` because
+/// `InterceptStartOptions.host` is a string that `InterceptControl::start` re-parses, and an
+/// `IpAddr` cannot spell an IPv6 scope id — the scope was dropped there, so a link-local
+/// `--host` could not start an intercept listener at all (issue #1150).
+#[must_use]
+pub fn intercept_flag_options(
+    cli: &Cli,
+    admin_addr: SocketAddr,
+    auth: Option<InterceptAuth>,
+) -> Option<InterceptStartOptions> {
+    cli.intercept_port
+        .map(|intercept_port| InterceptStartOptions {
+            host: Some(rift_mock_core::proxy::bind_host(&admin_addr)),
+            port: Some(intercept_port),
+            ca_cert_path: cli
+                .intercept_ca_cert
+                .as_deref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            ca_key_path: cli
+                .intercept_ca_key
+                .as_deref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            ca_cert_pem: cli.intercept_ca_cert_pem.clone(),
+            ca_key_pem: cli.intercept_ca_key_pem.clone(),
+            auth,
+            ..Default::default()
+        })
 }
 
 /// The address the admin plane binds under this CLI: `--local-only` pins loopback, otherwise
@@ -1880,6 +1912,40 @@ mod tests {
 
         assert_eq!(parsed.len(), 1);
         assert!(skipped.is_empty(), "no summary when every file is valid");
+    }
+
+    // Issue #1150: the exposure check's address is derived from the admin address, and rebuilding
+    // it from `.ip()` dropped the scope id and flowinfo. `check_intercept_exposure` judges
+    // `to_canonical().is_loopback()` and so cannot tell the difference today — this pins the
+    // non-lossy form anyway, because the address is interpolated into the refusal message and
+    // because the lossy form is exactly what must not get copied to a door where it does matter.
+    #[test]
+    fn intercept_bind_addr_keeps_the_scope_id_and_flowinfo() {
+        let admin = SocketAddr::V6(std::net::SocketAddrV6::new(
+            std::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+            2525,
+            7,
+            2,
+        ));
+        let SocketAddr::V6(v6) = intercept_bind_addr(admin, 8443) else {
+            panic!("expected an IPv6 address");
+        };
+        assert_eq!(v6.scope_id(), 2);
+        assert_eq!(v6.flowinfo(), 7);
+        assert_eq!(v6.port(), 8443);
+        assert_eq!(
+            *v6.ip(),
+            std::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)
+        );
+    }
+
+    #[test]
+    fn intercept_bind_addr_moves_the_port_on_ipv4() {
+        let admin = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 2525));
+        assert_eq!(
+            intercept_bind_addr(admin, 8443),
+            SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 8443))
+        );
     }
 
     #[test]
