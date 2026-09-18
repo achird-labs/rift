@@ -2,7 +2,8 @@
 
 use crate::admin_api::handlers::imposters::handle_get as handle_get_imposter;
 use crate::admin_api::handlers::imposters::{
-    admin_script_base, imposter_script_registry, reject_stubs_if_injection_disallowed,
+    admin_script_base, imposter_default_script_engine, imposter_script_registry,
+    reject_stubs_if_injection_disallowed,
 };
 use crate::admin_api::types::{
     AddStubRequest, ReplaceStubsRequest, StubWithLinks, collect_body, error_response,
@@ -30,8 +31,9 @@ fn resolve_admin_stubs(
     scripts_dir: &Option<Arc<PathBuf>>,
 ) -> Option<Response<Full<Bytes>>> {
     let registry = imposter_script_registry(manager, port);
+    let default_engine = imposter_default_script_engine(manager, port);
     let base = admin_script_base(scripts_dir);
-    match resolve_stub_scripts(stubs, &registry, &base) {
+    match resolve_stub_scripts(stubs, &registry, &default_engine, &base) {
         Ok(()) => None,
         Err(e) => Some(error_response(
             StatusCode::BAD_REQUEST,

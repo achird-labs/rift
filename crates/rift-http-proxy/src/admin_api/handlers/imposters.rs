@@ -48,6 +48,16 @@ pub(crate) fn imposter_script_registry(
         .unwrap_or_default()
 }
 
+/// The live imposter's `_rift.scriptEngine.defaultEngine`, for a stub door: the stub arrives without
+/// its imposter's `_rift` block, so the default must come from the running config (issue #1159).
+/// `"rhai"` when there is no such imposter — the door then answers `404` anyway.
+pub(crate) fn imposter_default_script_engine(manager: &ImposterManager, port: u16) -> String {
+    manager.get_imposter(port).map_or_else(
+        |_| "rhai".to_owned(),
+        |imposter| imposter.config.default_script_engine().to_owned(),
+    )
+}
+
 /// Reject a set of stubs carrying a Mountebank scripting surface when `--allowInjection` is off,
 /// mirroring Mountebank's gate (issue #355 Item 4). `None` when the stubs are allowed through.
 /// Shared by the imposter CRUD handlers and the stub sub-resource handlers (B3) so the gate can't

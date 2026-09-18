@@ -4963,3 +4963,31 @@ mod tcp_fault_carrier_seam {
         assert_eq!(header, None, "an ordinary response carries no fault marker");
     }
 }
+
+/// Issue #1159: a door that resolves nothing (the C-ABI create hands the config straight to the
+/// manager) must still run an engine-less script in the imposter's `defaultEngine`.
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn an_unresolved_engine_less_script_runs_in_the_default_engine() {
+    let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+        "port": 19591,
+        "protocol": "http",
+        "_rift": { "scriptEngine": { "defaultEngine": "javascript" } },
+        "stubs": [{
+            "responses": [{ "_rift": { "script": {
+                "code": "function respond(ctx) { return http(200, 'from-js'); }"
+            } } }]
+        }]
+    }))
+    .expect("config");
+    let manager = ImposterManager::new();
+    manager
+        .create_imposter(config)
+        .await
+        .expect("create imposter");
+    let response = reqwest::get("http://127.0.0.1:19591/").await.expect("GET");
+    let status = response.status();
+    let body = response.text().await.expect("body");
+    let _ = manager.delete_imposter(19591).await;
+    assert_eq!((status.as_u16(), body.as_str()), (200, "from-js"));
+}
