@@ -407,18 +407,29 @@ fn save_url(host: &str, port: u16, remove_proxies: bool) -> String {
 /// `savefile`. This is the form to call from an embedder's own async runtime — it awaits rather
 /// than driving a nested runtime, so it is safe on an async worker thread. Sync callers (the `save`
 /// subcommand) should use [`save_imposters`], which wraps this.
+///
+/// `api_key` is presented as the raw `Authorization` value when the server is keyed (issue #1154) —
+/// without it `rift save` against a server started with `--api-key` / `MB_APIKEY` was a 401.
 pub async fn save_imposters_async(
     host: &str,
     port: u16,
     savefile: &Path,
     remove_proxies: bool,
+    api_key: Option<&str>,
 ) -> Result<(), anyhow::Error> {
     let client = reqwest::Client::new();
     let url = save_url(host, port, remove_proxies);
 
+    let mut request = client.get(&url);
+    if let Some(key) = api_key {
+        request = request.header(
+            reqwest::header::AUTHORIZATION,
+            crate::healthcheck::sensitive_header(key)?,
+        );
+    }
     // `error_for_status` before `.text()` so a 401/500 response is a value error, not a body
     // silently written to the user's savefile. The error carries the status and URL.
-    let response = client.get(&url).send().await?.error_for_status()?;
+    let response = request.send().await?.error_for_status()?;
     let content = response.text().await?;
 
     // `tokio::fs::write` so the shared body never blocks a caller's async worker thread.
@@ -439,9 +450,16 @@ pub fn save_imposters(
     port: u16,
     savefile: &Path,
     remove_proxies: bool,
+    api_key: Option<&str>,
 ) -> Result<(), anyhow::Error> {
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(save_imposters_async(host, port, savefile, remove_proxies))
+    runtime.block_on(save_imposters_async(
+        host,
+        port,
+        savefile,
+        remove_proxies,
+        api_key,
+    ))
 }
 
 #[cfg(test)]

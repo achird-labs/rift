@@ -470,7 +470,7 @@ async fn save_imposters_writes_the_replayable_config() {
     let savefile = dir.path().join("imposters.json");
     let (host, port) = (addr.ip().to_string(), addr.port());
     let saved = tokio::task::spawn_blocking(move || {
-        bootstrap::save_imposters(&host, port, &savefile, false).map(|()| savefile)
+        bootstrap::save_imposters(&host, port, &savefile, false, None).map(|()| savefile)
     })
     .await
     .expect("save task joins");
@@ -523,7 +523,7 @@ async fn save_imposters_async_works_from_async_context() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let savefile = dir.path().join("imposters.json");
-    bootstrap::save_imposters_async(&addr.ip().to_string(), addr.port(), &savefile, false)
+    bootstrap::save_imposters_async(&addr.ip().to_string(), addr.port(), &savefile, false, None)
         .await
         .expect("save_imposters_async succeeds from an async context");
 
@@ -583,7 +583,7 @@ async fn save_imposters_async_remove_proxies_strips_proxy_stubs() {
 
     // remove_proxies=false: the proxy stub survives.
     let with_proxy = dir.path().join("with-proxy.json");
-    bootstrap::save_imposters_async(&host, port, &with_proxy, false)
+    bootstrap::save_imposters_async(&host, port, &with_proxy, false, None)
         .await
         .expect("save without removeProxies");
     let with_proxy_raw = std::fs::read_to_string(&with_proxy).expect("read with-proxy");
@@ -594,7 +594,7 @@ async fn save_imposters_async_remove_proxies_strips_proxy_stubs() {
 
     // remove_proxies=true: the proxy-only stub is stripped, the normal stub stays.
     let stripped = dir.path().join("stripped.json");
-    bootstrap::save_imposters_async(&host, port, &stripped, true)
+    bootstrap::save_imposters_async(&host, port, &stripped, true, None)
         .await
         .expect("save with removeProxies");
     let stripped_raw = std::fs::read_to_string(&stripped).expect("read stripped");
@@ -605,6 +605,40 @@ async fn save_imposters_async_remove_proxies_strips_proxy_stubs() {
     assert!(
         stripped_raw.contains("/kept"),
         "removeProxies=true must keep the non-proxy stub, got: {stripped_raw}"
+    );
+
+    server.shutdown().await;
+}
+
+// Issue #1154: `rift save` never sent the key it held, so against a server started with `--api-key`
+// / `MB_APIKEY` it was always a 401. With the key it must succeed and write the savefile.
+#[tokio::test]
+async fn save_imposters_presents_the_api_key_to_a_keyed_server() {
+    let manager = Arc::new(ImposterManager::new());
+    let mut guarded = cli(&["--host", "127.0.0.1", "--port", "0"]);
+    guarded.api_key = Some("secret".to_string());
+    let server = ServerBuilder::from_cli(guarded)
+        .manager(Arc::clone(&manager))
+        .start()
+        .await
+        .expect("admin API starts");
+    let addr = server.admin_addr();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let savefile = dir.path().join("imposters.json");
+    bootstrap::save_imposters_async(
+        &addr.ip().to_string(),
+        addr.port(),
+        &savefile,
+        false,
+        Some("secret"),
+    )
+    .await
+    .expect("with the key, a keyed server must answer and the save must succeed");
+    let saved = std::fs::read_to_string(&savefile).expect("savefile written");
+    assert!(
+        saved.contains("\"imposters\""),
+        "the savefile must hold the imposter document, got: {saved}"
     );
 
     server.shutdown().await;
@@ -628,10 +662,15 @@ async fn save_imposters_rejects_non_2xx_and_writes_nothing() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let savefile = dir.path().join("imposters.json");
-    let err =
-        bootstrap::save_imposters_async(&addr.ip().to_string(), addr.port(), &savefile, false)
-            .await
-            .expect_err("a non-2xx admin response must be an error");
+    let err = bootstrap::save_imposters_async(
+        &addr.ip().to_string(),
+        addr.port(),
+        &savefile,
+        false,
+        None,
+    )
+    .await
+    .expect_err("a non-2xx admin response must be an error");
     assert!(
         err.to_string().contains("401"),
         "the error should carry the HTTP status, got: {err}"

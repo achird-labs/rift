@@ -387,7 +387,7 @@ pub enum Commands {
     /// This is the container HEALTHCHECK: the `-static` image is `FROM scratch`, so there is no
     /// shell and no curl to probe with.
     Healthcheck {
-        /// URL to probe (default: the admin API's /health on --host/--port)
+        /// URL to probe (default: the admin API's /health on --host/--port). An explicit URL is never sent the admin API key
         #[arg(long, value_name = "URL")]
         url: Option<String>,
 
