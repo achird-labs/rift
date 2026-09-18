@@ -348,6 +348,20 @@ pub fn stop_server(pidfile: &Path) -> Result<(), anyhow::Error> {
         // SAFETY: kill(2) with a plain PID and signal number touches no memory; failure is
         // reported via errno, which we read immediately below.
         let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+        if rc == 0 {
+            // Wait for the process to actually go (issue #1155). `stop` used to return the moment
+            // the signal was sent — reporting success while the server was still running, which
+            // made `restart` race its own rebind into EADDRINUSE once the server started shutting
+            // down gracefully. The ceiling sits above the server's roughly three-second bound; a
+            // process still alive past it (an old, handler-less PID-1 server, say) is reported
+            // rather than assumed gone, and its PID file is kept.
+            if !wait_for_exit(pid, STOP_WAIT, STOP_POLL) {
+                return Err(anyhow::anyhow!(
+                    "process {pid} did not exit within {}s of SIGTERM; leaving PID file in place",
+                    STOP_WAIT.as_secs()
+                ));
+            }
+        }
         if rc == -1 {
             let err = std::io::Error::last_os_error();
             match err.raw_os_error() {
@@ -384,10 +398,75 @@ pub fn stop_server(pidfile: &Path) -> Result<(), anyhow::Error> {
         }
     }
 
-    // Remove PID file (success path, and the ESRCH stale-pidfile path).
-    std::fs::remove_file(pidfile)?;
+    // Remove PID file (success path, and the ESRCH stale-pidfile path). Already gone is success:
+    // since issue #1155 a server removes its own PID file on the way out, so it usually gets there
+    // before we do, and a bare `remove_file(..)?` would turn a clean stop into a spurious failure.
+    match std::fs::remove_file(pidfile) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
 
     Ok(())
+}
+
+/// How long `rift stop` waits for the process to exit — above the server's shutdown bound.
+#[cfg(unix)]
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(unix)]
+const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Poll until `pid` has exited or `ceiling` passes. `true` when it exited.
+#[cfg(unix)]
+fn wait_for_exit(pid: i32, ceiling: std::time::Duration, poll: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + ceiling;
+    loop {
+        if has_exited(pid) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+/// Whether `pid` has exited — including when it is the **caller's own child** that has not been
+/// reaped yet.
+///
+/// Signal 0 is the ordinary probe: `ESRCH` means gone; `EPERM` means it exists but belongs to someone
+/// else, so it is still running. But a child that has exited and not been reaped is a zombie, and a
+/// zombie still answers signal 0 — so a caller that is the target's parent (an embedder that spawned
+/// the server and calls [`stop_server`] in-process) would wait out the whole ceiling for a process
+/// that is already dead. `waitid` with `WNOWAIT` reports that exit **without reaping it**, so the
+/// owner's own `wait` still gets the exit status. For a process that is not our child it answers
+/// `ECHILD`, and the signal-0 probe decides.
+#[cfg(unix)]
+fn has_exited(pid: i32) -> bool {
+    // SAFETY: kill(2) with signal 0 only checks that the process exists; it touches no memory.
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        return true;
+    }
+    let Ok(id) = libc::id_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: a zeroed `siginfo_t` is a valid out-parameter; waitid(2) writes into it and reads
+    // nothing else. WNOHANG keeps it non-blocking and WNOWAIT leaves the child waitable.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            id,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    // SAFETY: `info` is a zero-initialised `siginfo_t`, so reading `si_pid` is defined whatever
+    // waitid did. With WNOHANG and no exited child, POSIX leaves `si_pid` unspecified in principle;
+    // Linux and macOS leave the buffer untouched, so the zero-init is what makes it read as pid 0 —
+    // never `pid` — and correctness rests on that initialisation.
+    rc == 0 && unsafe { info.si_pid() } == pid
 }
 
 /// The replayable-imposters endpoint of the admin API at `host:port`.

@@ -440,6 +440,37 @@ fn stop_server_signals_the_process_and_removes_the_pidfile() {
     );
 }
 
+// Issue #1155: `stop_server` now waits for the process to exit. A target that ignores SIGTERM — an
+// old, handler-less server running as a container's PID 1 — must be reported, not assumed stopped,
+// and its PID file kept, since the process it names is still alive.
+#[cfg(unix)]
+#[test]
+fn stop_server_reports_a_process_that_ignores_sigterm_and_keeps_the_pidfile() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
+        .spawn()
+        .expect("spawn a stand-in that ignores SIGTERM");
+    // Let the shell install its trap before we signal it.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let pidfile = dir.path().join("server.pid");
+    std::fs::write(&pidfile, child.id().to_string()).expect("write pidfile");
+
+    let err =
+        bootstrap::stop_server(&pidfile).expect_err("a process that ignores SIGTERM survives");
+    assert!(
+        err.to_string().contains("did not exit"),
+        "the error must say the process is still running, got: {err}"
+    );
+    assert!(
+        pidfile.exists(),
+        "the PID file names a live process and must be kept"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 // AC7: save_imposters fetches the replayable config from a live admin API and writes it.
 #[tokio::test]
 async fn save_imposters_writes_the_replayable_config() {

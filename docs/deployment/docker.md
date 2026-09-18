@@ -98,10 +98,12 @@ sees the server's command line:
 
 ### Stopping the container
 
-`rift` installs no signal handlers, and as the container's PID 1 it therefore ignores `SIGTERM`:
-`docker stop` waits out its timeout (10s by default) and then kills it. Add an init process so the
-signal is acted on at once — `docker run --init`, or `init: true` in Compose. Shutdown is immediate
-either way; in-flight requests are not drained.
+`docker stop` is prompt: `rift` handles `SIGTERM` itself, including as the container's PID 1, so no
+init process is needed (issue #1155). It stops accepting, gives in-flight admin connections a
+bounded grace of about three seconds at most, closes imposter connections, leaves any `--datadir`
+state in place, and exits `0`. Before this, `rift` had no signal handler — the kernel discards an
+unhandled `SIGTERM` to PID 1 — so `docker stop` waited out its full timeout and killed it, exit
+`137`; running under an init process was the workaround and is no longer needed.
 
 ---
 
@@ -136,7 +138,6 @@ docker buildx imagetools inspect zainalpour/rift-proxy:latest-static \
 ```bash
 docker run -d \
   --name rift \
-  --init \
   -p 2525:2525 \
   -p 9090:9090 \
   -e MB_PORT=2525 \
@@ -169,7 +170,6 @@ services:
   rift:
     image: zainalpour/rift-proxy:latest
     container_name: rift
-    init: true
     ports:
       - "2525:2525"    # Admin API
       - "4545:4545"    # Imposter port

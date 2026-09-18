@@ -130,7 +130,7 @@ Rift includes features not in Mountebank:
 | Metrics | Third-party | Built-in Prometheus |
 | Admin UI | Built-in web UI | No web UI; a terminal UI (`rift-tui`) ships with the binaries |
 | `mb replay` | Switches a running server's proxies to replay | `rift replay --configfile <file>` starts a server with that file loaded |
-| Shutdown | — | No signal handler: `SIGTERM` ends the process immediately; in a container, run with `--init` |
+| Shutdown | — | `SIGTERM`/`SIGINT` shut down gracefully and exit `0`, as Mountebank does; no `--init` needed in a container (#1155) |
 
 ### Known HTTP Behavior Differences
 
@@ -193,7 +193,6 @@ docker run \
 services:
   rift:
     image: zainalpour/rift-proxy:latest
-    init: true           # rift ignores SIGTERM as PID 1 without it
     ports:
       - "2525:2525"      # Admin API
       - "4545:4545"      # Imposter port
