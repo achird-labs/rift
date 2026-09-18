@@ -33,8 +33,14 @@ using any of them is refused unless the server was started with `--allowInjectio
 `wait`, `repeat`, `copy` and `lookup` need no flag. A behavior key set to `null` is treated as
 absent everywhere, including by that check.
 
-Behaviors apply to `is` responses (and the flat response form). On a `proxy`, `inject` or `fault`
-response they are ignored.
+Behaviors apply to `is` responses (and the flat response form, and a response that is only a
+behaviors block). On a `proxy`, `inject`, `fault` or `_rift`-only response they are not applied —
+Mountebank does apply them to `proxy` and `inject` responses, which is tracked in
+[#1184](https://github.com/achird-labs/rift/issues/1184). Such a block is not dropped, though: it
+is kept and returned by `GET /imposters/:port`, `rift save` and `--datadir` (as Mountebank's
+`behaviors` array), it is reported once per response shape as `config_key_ignored` in
+`_rift.warnings` and per response by `rift-lint` `W017`, and a scripted one (`decorate`,
+`shellTransform`, a function `wait`) still needs `--allowInjection`.
 
 ### Alternative Format: behaviors (without underscore)
 

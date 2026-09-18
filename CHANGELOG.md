@@ -328,6 +328,16 @@ record.
 
 ### Changed
 
+- **A scripted behaviors block on a `proxy`, `inject`, `fault` or `_rift`-only response now needs
+  `--allowInjection`** (#1181). Rift does not run behaviors on those responses yet, so the gate did
+  not look at them — but Mountebank runs them on `proxy` and `inject`, and a gate that is open on
+  the day Rift starts to would be a hole. A `decorate`, a `shellTransform` or a function `wait` there
+  is now refused without the flag, as it is on an `is` response; a plain `wait`, `repeat`, `copy` or
+  `lookup` needs none. A response that is *only* a behaviors block (`{"_behaviors": {…}}`) now runs
+  it, as an empty `is` response: a scripted one there needs `--allowInjection` too, and a `repeat`
+  there now takes effect. **Library API:** `StubResponse::Proxy`, `Inject`, `Fault` and `RiftScript`
+  gain an `ignored_behaviors` field.
+
 - **A behaviors block the engine cannot read now fails the config instead of being ignored**
   (#1162). A `wait` with numeric-string bounds (`{"min": "100", "max": "200"}`), a fractional or
   negative `wait`, `"repeat": 2.0`, a `copy` with no `using` and similar shapes used to load, and
@@ -788,6 +798,15 @@ record.
     `errors[0].detail` instead.
 
 ### Fixed
+
+- **A behaviors block on a `proxy`, `inject`, `fault` or `_rift`-only response is no longer erased**
+  (#1181). It was validated, then dropped: `GET /imposters/:port`, `rift save` and the `--datadir`
+  file came back without it, so a restart lost config the author wrote, and nothing said the block
+  was not applied. It is now kept and returned (as Mountebank's `behaviors` array), is reported per shape as `config_key_ignored` in
+  `_rift.warnings` (and logged at load), and `rift-lint` reports it as `W017`. Applying it, as
+  Mountebank does for `proxy` and `inject`, is #1184. A response that is only a behaviors block
+  (`{"_behaviors": {"wait": 500}}`) now serves its empty `200` with the block applied, instead of
+  without it.
 
 - **`rift-lint` now syntax-checks JavaScript in `inject`** (#1170) — an `inject` response, an
   `inject` predicate (at any depth under `and`/`or`/`not`) and a `proxy.predicateGenerators[].inject`,

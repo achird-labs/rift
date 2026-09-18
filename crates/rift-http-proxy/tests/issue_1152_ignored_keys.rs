@@ -66,10 +66,52 @@ fn fixtures(port: u16) -> Vec<(&'static str, Value)> {
                 "_rift": {"templated": true}
             }]}]})),
         ),
+        // Issue #1181: a behaviors block on a response no behavior runs on.
+        (
+            "stubs[0].responses[0]._behaviors",
+            base(json!({"stubs": [{"responses": [{
+                "proxy": {"to": "http://127.0.0.1:1"},
+                "_behaviors": {"wait": 500}
+            }]}]})),
+        ),
+        (
+            "stubs[0].responses[0]._behaviors",
+            base(json!({"stubs": [{"responses": [{
+                "inject": "function (config) { return {}; }",
+                "_behaviors": {"wait": 500}
+            }]}]})),
+        ),
+        (
+            "stubs[0].responses[0]._behaviors",
+            base(json!({"stubs": [{"responses": [{
+                "fault": "CONNECTION_RESET_BY_PEER",
+                "_behaviors": {"wait": 500}
+            }]}]})),
+        ),
+        (
+            "stubs[0].responses[0]._behaviors",
+            base(json!({"stubs": [{"responses": [{
+                "_rift": {"script": {"engine": "rhai", "code": "fn respond(ctx) { http(200, \"x\") }"}},
+                "_behaviors": {"wait": 500}
+            }]}]})),
+        ),
+        (
+            "stubs[0].responses[0].behaviors",
+            base(json!({"stubs": [{"responses": [{
+                "proxy": {"to": "http://127.0.0.1:1"},
+                "behaviors": [{"wait": 500}]
+            }]}]})),
+        ),
     ]
 }
 
 async fn start_admin() -> (reqwest::Client, String, Arc<ImposterManager>) {
+    start_admin_with(true).await
+}
+
+async fn start_admin_with(
+    allow_injection: bool,
+) -> (reqwest::Client, String, Arc<ImposterManager>) {
     let manager = Arc::new(ImposterManager::new());
     let admin_port = free_port();
     let server = AdminApiServer::new(
@@ -77,7 +119,7 @@ async fn start_admin() -> (reqwest::Client, String, Arc<ImposterManager>) {
         manager.clone(),
         None,
     )
-    .with_allow_injection(true);
+    .with_allow_injection(allow_injection);
     tokio::spawn(server.run());
     let admin = format!("http://127.0.0.1:{admin_port}");
     let client = reqwest::Client::new();
@@ -128,7 +170,13 @@ async fn the_engine_and_the_linter_report_the_same_ignored_keys() {
         assert_eq!(from_create.len(), 1, "{location}: {created}");
         let message = from_create[0]["message"].as_str().expect("message");
         let key = location.rsplit('.').next().expect("key");
-        assert!(message.contains(key), "{location}: {message}");
+        // The engine cannot tell which spelling a behaviors block was written in, so it names neither.
+        let named = if key.ends_with("behaviors") {
+            "A behaviors block"
+        } else {
+            key
+        };
+        assert!(message.contains(named), "{location}: {message}");
         if location.starts_with("stubs[0]") {
             assert_eq!(from_create[0]["stubIndex"], 0, "{location}");
         }
@@ -163,7 +211,15 @@ async fn an_imposter_with_no_ignored_key_gets_no_such_warning() {
         .post(format!("{admin}/imposters"))
         .json(
             &json!({"port": port, "protocol": "http", "recordMatches": false,
-            "stubs": [{"responses": [{"is": {"statusCode": 200}}]}]}),
+            "stubs": [
+                {"responses": [{"is": {"statusCode": 200}}]},
+                // Behaviors run on an `is` response (and on the flat form), so they are not ignored.
+                {"responses": [{"is": {"statusCode": 200}, "_behaviors": {"wait": 1}}]},
+                {"responses": [{"statusCode": 200, "behaviors": [{"wait": 1}]}]},
+                // An empty or null block on a proxy is nothing to report.
+                {"responses": [{"proxy": {"to": "http://127.0.0.1:1"}, "_behaviors": {}}]},
+                {"responses": [{"proxy": {"to": "http://127.0.0.1:1"}, "_behaviors": null}]}
+            ]}),
         )
         .send()
         .await
@@ -255,4 +311,126 @@ fn the_binary_logs_ignored_keys_and_flags() {
     for w in wanted {
         assert!(text.contains(w), "missing {w:?} in: {text}");
     }
+}
+
+/// Issue #1181: the same one-entry-per-shape bound for behaviors, with the indices it names.
+#[tokio::test]
+async fn many_ignored_behaviors_collapse_into_one_warning_per_shape() {
+    let (client, admin, manager) = start_admin().await;
+    let port = free_port();
+    let mut stubs: Vec<Value> = vec![json!({"responses": [{"is": {"statusCode": 200}}]})];
+    stubs.extend((0..12).map(
+        |_| json!({"responses": [{"proxy": {"to": "http://127.0.0.1:1"}, "_behaviors": {"wait": 1}}]}),
+    ));
+    let created: Value = client
+        .post(format!("{admin}/imposters"))
+        .json(&json!({"port": port, "protocol": "http", "stubs": stubs}))
+        .send()
+        .await
+        .expect("POST")
+        .json()
+        .await
+        .expect("json");
+    let ignored = ignored_warnings(&created);
+    assert_eq!(ignored.len(), 1, "{created}");
+    assert_eq!(ignored[0]["stubIndex"], 1);
+    assert_eq!(
+        ignored[0]["message"],
+        "A behaviors block on a `proxy` response has no effect: behaviors apply to `is` \
+         responses only; Mountebank applies them, Rift does not yet (stubs 1, 2, 3, 4, 5, 6, 7, \
+         8, 9, 10 and 2 more)"
+    );
+    let _ = manager.delete_imposter(port).await;
+}
+
+/// Issue #1181: a scripted behavior on a proxy response is a script surface even though Rift does
+/// not run it yet — Mountebank does, so the gate must not be open the day Rift starts to.
+#[tokio::test]
+async fn a_scripted_behavior_on_a_proxy_response_needs_allow_injection() {
+    let imposter = |port: u16, behaviors: Value| {
+        json!({"port": port, "protocol": "http", "stubs": [{"responses": [{
+            "proxy": {"to": "http://127.0.0.1:1"}, "_behaviors": behaviors
+        }]}]})
+    };
+    let decorate = json!({"decorate": "function (request, response) { response.body = 'x'; }"});
+
+    let (client, admin, manager) = start_admin_with(false).await;
+    let port = free_port();
+    let refused = client
+        .post(format!("{admin}/imposters"))
+        .json(&imposter(port, decorate.clone()))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(refused.status().as_u16(), 400);
+    let plain = client
+        .post(format!("{admin}/imposters"))
+        .json(&imposter(port, json!({"wait": 500})))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(plain.status().as_u16(), 201);
+    let _ = manager.delete_imposter(port).await;
+
+    let (client, admin, manager) = start_admin_with(true).await;
+    let port = free_port();
+    let admitted = client
+        .post(format!("{admin}/imposters"))
+        .json(&imposter(port, decorate))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(admitted.status().as_u16(), 201);
+    let _ = manager.delete_imposter(port).await;
+}
+
+/// Issue #1181: each shape says what is true of it — Mountebank applies behaviors on `proxy` and
+/// `inject`, ignores them on `fault`, and has no `_rift`-only response.
+#[tokio::test]
+async fn each_ignored_behaviors_shape_has_its_own_message() {
+    let (client, admin, manager) = start_admin().await;
+    let port = free_port();
+    let with = |response: Value| {
+        let mut response = response;
+        response["_behaviors"] = json!({"wait": 1});
+        json!({"responses": [response]})
+    };
+    let stubs = vec![
+        with(json!({"inject": "function (config) { return {}; }"})),
+        with(json!({"fault": "CONNECTION_RESET_BY_PEER"})),
+        with(
+            json!({"_rift": {"script": {"engine": "rhai", "code": "fn respond(ctx) { http(200, \"x\") }"}}}),
+        ),
+    ];
+    let created: Value = client
+        .post(format!("{admin}/imposters"))
+        .json(&json!({"port": port, "protocol": "http", "stubs": stubs}))
+        .send()
+        .await
+        .expect("POST")
+        .json()
+        .await
+        .expect("json");
+    let messages: Vec<Value> = ignored_warnings(&created)
+        .into_iter()
+        .map(|w| w["message"].clone())
+        .collect();
+    assert_eq!(
+        messages,
+        vec![
+            json!(
+                "A behaviors block on an `inject` response has no effect: behaviors apply to `is` \
+                 responses only; Mountebank applies them, Rift does not yet (stubs 0)"
+            ),
+            json!(
+                "A behaviors block on a `fault` response has no effect: behaviors apply to `is` \
+                 responses only, as in Mountebank (stubs 1)"
+            ),
+            json!(
+                "A behaviors block on a `_rift`-only response has no effect: behaviors apply to \
+                 `is` responses only (stubs 2)"
+            ),
+        ]
+    );
+    let _ = manager.delete_imposter(port).await;
 }

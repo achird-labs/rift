@@ -120,7 +120,7 @@ fn response_script_mut(response: &mut StubResponse) -> Option<&mut RiftScriptCon
         StubResponse::Is {
             rift: Some(rift), ..
         } => rift.script.as_mut(),
-        StubResponse::RiftScript { rift } => rift.script.as_mut(),
+        StubResponse::RiftScript { rift, .. } => rift.script.as_mut(),
         _ => None,
     }
 }
@@ -326,6 +326,7 @@ mod tests {
                     templated: false,
                     state_ops: Vec::new(),
                 },
+                ignored_behaviors: None,
             }],
             scenario_name: None,
             required_scenario_state: None,
@@ -338,7 +339,7 @@ mod tests {
 
     fn extract_script(config: &ImposterConfig) -> &RiftScriptConfig {
         match &config.stubs[0].responses[0] {
-            StubResponse::RiftScript { rift } => rift.script.as_ref().unwrap(),
+            StubResponse::RiftScript { rift, .. } => rift.script.as_ref().unwrap(),
             other => panic!("expected RiftScript, got {other:?}"),
         }
     }

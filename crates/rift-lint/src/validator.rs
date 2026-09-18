@@ -171,17 +171,26 @@ fn check_ignored_keys(file: &Path, imposter: &Value, result: &mut LintResult) {
             continue;
         };
         for (resp_idx, response) in responses.iter().enumerate() {
-            let Some(shape) = ignored_rift_shape(response) else {
-                continue;
-            };
-            ignored(
-                result,
-                format!("stubs[{stub_idx}].responses[{resp_idx}]._rift"),
-                format!(
-                    "`_rift` on a `{shape}` response is parsed but has no effect: no `_rift` \
-                     feature applies to a `{shape}` response"
-                ),
-            );
+            if let Some(shape) = ignored_rift_shape(response) {
+                ignored(
+                    result,
+                    format!("stubs[{stub_idx}].responses[{resp_idx}]._rift"),
+                    format!(
+                        "`_rift` on a `{shape}` response is parsed but has no effect: no `_rift` \
+                         feature applies to a `{shape}` response"
+                    ),
+                );
+            }
+            if let Some((key, shape)) = ignored_behaviors(response) {
+                ignored(
+                    result,
+                    format!("stubs[{stub_idx}].responses[{resp_idx}].{key}"),
+                    format!(
+                        "`{key}` on a `{shape}` response is parsed but has no effect: behaviors \
+                         apply to `is` responses only"
+                    ),
+                );
+            }
         }
     }
 }
@@ -197,6 +206,34 @@ fn ignored_rift_shape(response: &Value) -> Option<&'static str> {
     ["proxy", "inject", "fault"]
         .into_iter()
         .find(|shape| present(shape))
+}
+
+/// A behaviors block the engine keeps but never runs (issue #1181): the key it reads, and the
+/// response shape it sits on. Mirrors the engine's parse: `_behaviors` wins over `behaviors` unless
+/// it is `null`, the array form folds its objects into one, and an empty block is no block. The
+/// shapes are `proxy`, `inject`, `fault`, and `_rift` for a `_rift`-only response — every one but
+/// `is`, which the engine picks first, and the flat and bare forms, which it reads as `is`.
+fn ignored_behaviors(response: &Value) -> Option<(&'static str, &'static str)> {
+    let present = |key: &str| response.get(key).is_some_and(|v| !v.is_null());
+    if present("is") {
+        return None;
+    }
+    let shape = ["proxy", "inject", "fault", "_rift"]
+        .into_iter()
+        .find(|shape| present(shape))?;
+    let key = if present("_behaviors") {
+        "_behaviors"
+    } else {
+        "behaviors"
+    };
+    let non_empty = match response.get(key)? {
+        Value::Object(block) => !block.is_empty(),
+        Value::Array(items) => items
+            .iter()
+            .any(|item| item.as_object().is_some_and(|o| !o.is_empty())),
+        _ => false,
+    };
+    non_empty.then_some((key, shape))
 }
 
 /// I005 (issue #1152): carrier fields. The engine keeps and returns them, by design, and does not
@@ -2731,5 +2768,78 @@ mod regex_static_tests {
             "15000"
         );
         assert!(!PROXY_PORT_RE.is_match("http://localhost/path"));
+    }
+}
+
+// Issue #1181: W017 for a behaviors block on a response the engine runs no behavior on.
+#[cfg(test)]
+mod ignored_behaviors_tests {
+    use super::check_ignored_keys;
+    use crate::types::LintResult;
+    use serde_json::{Value, json};
+    use std::path::Path;
+
+    /// The W017 locations for a single-response imposter.
+    fn w017(response: Value) -> Vec<String> {
+        let mut result = LintResult::new();
+        let imposter = json!({"port": 4545, "stubs": [{"responses": [response]}]});
+        check_ignored_keys(Path::new("test.json"), &imposter, &mut result);
+        result
+            .issues
+            .iter()
+            .filter(|i| i.code == "W017")
+            .map(|i| i.location.clone().unwrap_or_default())
+            .collect()
+    }
+
+    #[test]
+    fn a_block_on_each_ignored_shape_is_reported_at_the_key_the_engine_reads() {
+        let at = |key: &str| vec![format!("stubs[0].responses[0].{key}")];
+        let proxy = json!({"to": "http://127.0.0.1:1"});
+        assert_eq!(
+            w017(json!({"proxy": proxy, "_behaviors": {"wait": 1}})),
+            at("_behaviors")
+        );
+        assert_eq!(
+            w017(json!({"inject": "function () {}", "behaviors": [{"wait": 1}]})),
+            at("behaviors")
+        );
+        assert_eq!(
+            w017(json!({"fault": "CONNECTION_RESET_BY_PEER", "_behaviors": {"wait": 1}})),
+            at("_behaviors")
+        );
+        assert_eq!(
+            w017(
+                json!({"_rift": {"script": {"engine": "rhai", "code": "1"}}, "_behaviors": {"wait": 1}})
+            ),
+            at("_behaviors")
+        );
+        // `_behaviors` shadows `behaviors`, as in the engine: the block it reads is the one named.
+        assert_eq!(
+            w017(json!({"proxy": proxy, "_behaviors": {"wait": 1}, "behaviors": [{"wait": 2}]})),
+            at("_behaviors")
+        );
+        // A null `_behaviors` is absent, so the engine falls through to `behaviors`.
+        assert_eq!(
+            w017(json!({"proxy": proxy, "_behaviors": null, "behaviors": [{"wait": 2}]})),
+            at("behaviors")
+        );
+    }
+
+    #[test]
+    fn a_block_the_engine_runs_or_that_is_empty_is_not_reported() {
+        let proxy = json!({"to": "http://127.0.0.1:1"});
+        for response in [
+            json!({"is": {}, "_behaviors": {"wait": 1}}),
+            json!({"is": {}, "proxy": proxy, "_behaviors": {"wait": 1}}),
+            json!({"statusCode": 200, "behaviors": [{"wait": 1}]}),
+            json!({"_behaviors": {"wait": 1}}),
+            json!({"proxy": proxy, "_behaviors": null}),
+            json!({"proxy": proxy, "_behaviors": {}}),
+            json!({"proxy": proxy, "behaviors": []}),
+            json!({"proxy": proxy, "behaviors": [{}]}),
+        ] {
+            assert_eq!(w017(response.clone()), Vec::<String>::new(), "{response}");
+        }
     }
 }

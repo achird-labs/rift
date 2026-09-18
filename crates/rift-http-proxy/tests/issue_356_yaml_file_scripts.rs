@@ -26,7 +26,7 @@ fn script_config(
     config: &rift_http_proxy::imposter::ImposterConfig,
 ) -> rift_http_proxy::imposter::RiftScriptConfig {
     match &config.stubs[0].responses[0] {
-        StubResponse::RiftScript { rift } => rift.script.clone().expect("script present"),
+        StubResponse::RiftScript { rift, .. } => rift.script.clone().expect("script present"),
         other => panic!("expected a RiftScript response, got {other:?}"),
     }
 }

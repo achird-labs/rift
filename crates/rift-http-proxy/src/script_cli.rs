@@ -199,7 +199,7 @@ fn response_script(response: &StubResponse) -> Option<&RiftScriptConfig> {
         StubResponse::Is {
             rift: Some(rift), ..
         } => rift.script.as_ref(),
-        StubResponse::RiftScript { rift } => rift.script.as_ref(),
+        StubResponse::RiftScript { rift, .. } => rift.script.as_ref(),
         _ => None,
     }
 }

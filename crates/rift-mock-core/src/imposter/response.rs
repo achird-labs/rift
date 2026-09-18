@@ -97,7 +97,7 @@ pub fn create_response_preview(response: &StubResponse) -> DebugResponsePreview 
             headers: None,
             body_preview: Some(format!("Fault: {fault}")),
         },
-        StubResponse::RiftScript { rift } => {
+        StubResponse::RiftScript { rift, .. } => {
             // RiftScript uses the _rift extension namespace
             let script_info = if rift.script.is_some() {
                 "Rift script response"
@@ -315,7 +315,7 @@ impl PreparedResponse {
 /// Get RiftScript config if the response is a RiftScript type
 pub fn get_rift_script_config(response: &StubResponse) -> Option<RiftScriptConfig> {
     match response {
-        StubResponse::RiftScript { rift } => rift.script.clone(),
+        StubResponse::RiftScript { rift, .. } => rift.script.clone(),
         _ => None,
     }
 }

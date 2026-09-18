@@ -2340,6 +2340,34 @@ mod tests {
         manager.delete_imposter(19501).await.unwrap();
     }
 
+    // Issue #1181: a behaviors block on a proxy response used to be erased from the persisted file,
+    // so a restart silently lost config the author wrote.
+    #[tokio::test]
+    async fn a_behaviors_block_on_a_proxy_response_survives_the_datadir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        let config = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "port": 19587,
+            "stubs": [{"responses": [{
+                "proxy": {"to": "http://127.0.0.1:1"},
+                "_behaviors": {"wait": 500}
+            }]}]
+        }))
+        .expect("config");
+
+        manager.create_imposter(config).await.expect("create");
+        let content = std::fs::read_to_string(dir.path().join("19587.json")).expect("file");
+        let json: serde_json::Value = serde_json::from_str(&content).expect("json");
+        assert_eq!(
+            json["stubs"][0]["responses"][0]["behaviors"],
+            serde_json::json!([{"wait": 500}]),
+            "{json}"
+        );
+
+        manager.delete_imposter(19587).await.expect("delete");
+    }
+
     #[tokio::test]
     async fn test_delete_imposter_removes_from_datadir() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -95,6 +95,57 @@ fn ignored_rift_shape(response: &StubResponse) -> Option<&'static str> {
     }
 }
 
+/// The shape of a response that carries a behaviors block no behavior runs on (issue #1181).
+/// Behaviors run on an `is` response only.
+fn ignored_behaviors_shape(response: &StubResponse) -> Option<&'static str> {
+    match response {
+        StubResponse::Proxy {
+            ignored_behaviors: Some(_),
+            ..
+        } => Some("proxy"),
+        StubResponse::Inject {
+            ignored_behaviors: Some(_),
+            ..
+        } => Some("inject"),
+        StubResponse::Fault {
+            ignored_behaviors: Some(_),
+            ..
+        } => Some("fault"),
+        StubResponse::RiftScript {
+            ignored_behaviors: Some(_),
+            ..
+        } => Some("_rift"),
+        _ => None,
+    }
+}
+
+/// The stubs with a response `shape_of` classifies as `shape`: the first index, and the indices as
+/// a warning lists them — at most ten, then "and N more".
+fn stubs_with_shape(
+    stubs: &[Stub],
+    shape: &str,
+    shape_of: fn(&StubResponse) -> Option<&'static str>,
+) -> Option<(usize, String)> {
+    const LISTED: usize = 10;
+    let indices: Vec<usize> = stubs
+        .iter()
+        .enumerate()
+        .filter(|(_, stub)| stub.responses.iter().any(|r| shape_of(r) == Some(shape)))
+        .map(|(index, _)| index)
+        .collect();
+    let &first = indices.first()?;
+    let mut listed = indices
+        .iter()
+        .take(LISTED)
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if indices.len() > LISTED {
+        listed.push_str(&format!(" and {} more", indices.len() - LISTED));
+    }
+    Some((first, listed))
+}
+
 /// Every key in `config` that this engine parses and does not act on — the single list behind the
 /// load-time log line, the `_rift.warnings` entries and the docs (issue #1152). `stubs` are the
 /// imposter's current stubs, which a stub mutation may have changed since `config` was built.
@@ -131,40 +182,47 @@ pub fn ignored_config_keys(config: &ImposterConfig, stubs: &[Stub]) -> Vec<StubW
     }
     // One entry per shape, however many stubs carry it: a generated imposter can put `_rift` on
     // every response, and one entry per response would undo the MAX_STUB_WARNINGS bound (#423).
+    let per_shape = |first: usize, message: String| StubWarning {
+        warning_type: WarningType::ConfigKeyIgnored,
+        message,
+        stub_index: Some(first),
+        stub_id: stubs[first].id.clone(),
+        shadowed_by_index: None,
+    };
     for shape in ["proxy", "inject", "fault"] {
-        let indices: Vec<usize> = stubs
-            .iter()
-            .enumerate()
-            .filter(|(_, stub)| {
-                stub.responses
-                    .iter()
-                    .any(|response| ignored_rift_shape(response) == Some(shape))
-            })
-            .map(|(index, _)| index)
-            .collect();
-        let Some(&first) = indices.first() else {
-            continue;
-        };
-        const LISTED: usize = 10;
-        let mut listed = indices
-            .iter()
-            .take(LISTED)
-            .map(usize::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        if indices.len() > LISTED {
-            listed.push_str(&format!(" and {} more", indices.len() - LISTED));
+        if let Some((first, listed)) = stubs_with_shape(stubs, shape, ignored_rift_shape) {
+            warnings.push(per_shape(
+                first,
+                format!(
+                    "`_rift` on a `{shape}` response has no effect: no `_rift` feature applies to \
+                     a `{shape}` response (stubs {listed})"
+                ),
+            ));
         }
-        warnings.push(StubWarning {
-            warning_type: WarningType::ConfigKeyIgnored,
-            message: format!(
-                "`_rift` on a `{shape}` response has no effect: no `_rift` feature applies to a \
-                 `{shape}` response (stubs {listed})"
-            ),
-            stub_index: Some(first),
-            stub_id: stubs[first].id.clone(),
-            shadowed_by_index: None,
-        });
+    }
+    for (shape, noun, why) in [
+        (
+            "proxy",
+            "a `proxy` response",
+            "; Mountebank applies them, Rift does not yet",
+        ),
+        (
+            "inject",
+            "an `inject` response",
+            "; Mountebank applies them, Rift does not yet",
+        ),
+        ("fault", "a `fault` response", ", as in Mountebank"),
+        ("_rift", "a `_rift`-only response", ""),
+    ] {
+        if let Some((first, listed)) = stubs_with_shape(stubs, shape, ignored_behaviors_shape) {
+            warnings.push(per_shape(
+                first,
+                format!(
+                    "A behaviors block on {noun} has no effect: behaviors apply to `is` \
+                     responses only{why} (stubs {listed})"
+                ),
+            ));
+        }
     }
     warnings
 }
@@ -261,7 +319,7 @@ pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
         // drop `_rift` entirely during parsing, so the only reachable shape here is `RiftScript`
         // (which also covers the bare-`_rift` "flat" form — see `WarningType::StateOpsNeverRuns`).
         for response in &stub.responses {
-            if let StubResponse::RiftScript { rift } = response
+            if let StubResponse::RiftScript { rift, .. } = response
                 && !rift.state_ops.is_empty()
             {
                 push(
@@ -913,7 +971,10 @@ mod tests {
             id: None,
             route_pattern: None,
             predicates: vec![],
-            responses: vec![StubResponse::RiftScript { rift }],
+            responses: vec![StubResponse::RiftScript {
+                rift,
+                ignored_behaviors: None,
+            }],
             scenario_name: None,
             required_scenario_state: None,
             new_scenario_state: None,
@@ -945,7 +1006,10 @@ mod tests {
             id: None,
             route_pattern: None,
             predicates: vec![],
-            responses: vec![StubResponse::RiftScript { rift }],
+            responses: vec![StubResponse::RiftScript {
+                rift,
+                ignored_behaviors: None,
+            }],
             scenario_name: None,
             required_scenario_state: None,
             new_scenario_state: None,

@@ -99,25 +99,43 @@ pub(crate) fn predicate_has_inject(predicate: &Predicate) -> bool {
 
 /// True if `response` uses any script surface: an inject response, a decorate behavior, a
 /// shellTransform behavior, a JS-function `wait` behavior, or `_rift.script`.
+///
+/// A behaviors block on a `proxy`, `inject`, `fault` or `_rift`-only response is classified too,
+/// although no behavior runs there (issue #1181): Mountebank runs them on `proxy` and `inject`, and
+/// the gate must already be closed on the day Rift does.
 fn response_has_script_surface(response: &StubResponse) -> bool {
     match response {
         StubResponse::Inject { .. } => true,
-        StubResponse::RiftScript { rift } => rift.script.is_some(),
+        StubResponse::RiftScript {
+            rift,
+            ignored_behaviors,
+        } => rift.script.is_some() || behaviors_are_scripted(ignored_behaviors.as_ref()),
         StubResponse::Is {
             behaviors, rift, ..
         } => {
-            let behavior_is_scripted = behaviors.as_ref().is_some_and(raw_behaviors_are_scripted);
-            behavior_is_scripted || rift.as_ref().is_some_and(|r| r.script.is_some())
+            behaviors_are_scripted(behaviors.as_ref())
+                || rift.as_ref().is_some_and(|r| r.script.is_some())
         }
-        StubResponse::Proxy { proxy, .. } => {
+        StubResponse::Proxy {
+            proxy,
+            ignored_behaviors,
+            ..
+        } => {
             proxy.add_decorate_behavior.is_some()
                 || proxy
                     .predicate_generators
                     .iter()
                     .any(|g| g.get("inject").and_then(|v| v.as_str()).is_some())
+                || behaviors_are_scripted(ignored_behaviors.as_ref())
         }
-        StubResponse::Fault { .. } => false,
+        StubResponse::Fault {
+            ignored_behaviors, ..
+        } => behaviors_are_scripted(ignored_behaviors.as_ref()),
     }
+}
+
+fn behaviors_are_scripted(behaviors: Option<&serde_json::Value>) -> bool {
+    behaviors.is_some_and(raw_behaviors_are_scripted)
 }
 
 /// True if a raw `_behaviors` block carries a scripting surface: `decorate` (JS/Rhai),
@@ -243,6 +261,38 @@ mod tests {
             json!({"wait": 100.0}),
         ] {
             assert!(!raw_behaviors_are_scripted(&block), "{block}");
+        }
+    }
+
+    // Issue #1181: a scripted block on a response no behavior runs on is still a script surface,
+    // so the day those responses start running it the gate is already closed. A plain delay is not.
+    #[test]
+    fn a_scripted_behaviors_block_on_any_response_is_gated() {
+        use super::stubs_contain_script_surface;
+        use crate::imposter::Stub;
+        let gated = |response: serde_json::Value| {
+            let stub: Stub =
+                serde_json::from_value(json!({"responses": [response]})).expect("stub");
+            stubs_contain_script_surface(&[stub])
+        };
+        let decorate = json!({"decorate": "function (req, res) {}"});
+        let shell = json!({"shellTransform": "cat"});
+        for shape in [
+            json!({"proxy": {"to": "http://127.0.0.1:1"}}),
+            json!({"fault": "CONNECTION_RESET_BY_PEER"}),
+            json!({"_rift": {}}),
+        ] {
+            for block in [&decorate, &shell] {
+                let mut response = shape.clone();
+                response["_behaviors"] = block.clone();
+                assert!(gated(response.clone()), "{response}");
+            }
+            let mut plain = shape.clone();
+            plain["_behaviors"] = json!({"wait": 500});
+            assert!(!gated(plain.clone()), "{plain}");
+            let mut array = shape.clone();
+            array["behaviors"] = json!([decorate.clone()]);
+            assert!(gated(array.clone()), "{array}");
         }
     }
 }

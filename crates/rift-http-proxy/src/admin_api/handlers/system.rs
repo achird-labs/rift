@@ -657,7 +657,7 @@ mod tests {
             let imposter = manager.get_imposter(19479).expect("imposter exists");
             let stubs = imposter.get_stubs();
             match &stubs[0].responses[0] {
-                StubResponse::RiftScript { rift } => {
+                StubResponse::RiftScript { rift, .. } => {
                     rift.script.as_ref().and_then(|s| s.code.clone())
                 }
                 other => panic!("expected RiftScript response, got {other:?}"),
