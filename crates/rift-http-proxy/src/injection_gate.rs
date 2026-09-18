@@ -100,9 +100,9 @@ pub(crate) fn predicate_has_inject(predicate: &Predicate) -> bool {
 /// True if `response` uses any script surface: an inject response, a decorate behavior, a
 /// shellTransform behavior, a JS-function `wait` behavior, or `_rift.script`.
 ///
-/// A behaviors block on a `proxy`, `fault` or `_rift`-only response is classified too, although
-/// only its `repeat` takes effect there (issues #1181, #1188): Mountebank runs the rest on `proxy`,
-/// and the gate must already be closed on the day Rift does.
+/// A behaviors block on a `fault` or `_rift`-only response is classified too, although only its
+/// `repeat` takes effect there (issues #1181, #1188): the gate judges what a file asks for, not
+/// what this engine happens to run.
 fn response_has_script_surface(response: &StubResponse) -> bool {
     match response {
         StubResponse::Inject { .. } => true,
@@ -117,16 +117,14 @@ fn response_has_script_surface(response: &StubResponse) -> bool {
                 || rift.as_ref().is_some_and(|r| r.script.is_some())
         }
         StubResponse::Proxy {
-            proxy,
-            ignored_behaviors,
-            ..
+            proxy, behaviors, ..
         } => {
             proxy.add_decorate_behavior.is_some()
                 || proxy
                     .predicate_generators
                     .iter()
                     .any(|g| g.get("inject").and_then(|v| v.as_str()).is_some())
-                || behaviors_are_scripted(ignored_behaviors.as_ref())
+                || behaviors_are_scripted(behaviors.as_ref())
         }
         StubResponse::Fault {
             ignored_behaviors, ..

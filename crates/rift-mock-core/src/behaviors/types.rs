@@ -50,6 +50,19 @@ pub struct ResponseBehaviors {
     pub decorate: Option<String>,
 }
 
+impl ResponseBehaviors {
+    /// Whether any behavior here acts on the response itself. `repeat` alone does not: the response
+    /// cycler reads it, and nothing is run on the response.
+    #[must_use]
+    pub fn transforms_response(&self) -> bool {
+        self.wait.is_some()
+            || !self.copy.is_empty()
+            || !self.lookup.is_empty()
+            || self.decorate.is_some()
+            || !self.shell_transform.is_empty()
+    }
+}
+
 /// Deserialize shellTransform accepting a single string or an array of strings.
 fn deserialize_shell_transforms<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where

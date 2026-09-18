@@ -488,16 +488,10 @@ async fn a_behaviors_block_is_reported_only_where_something_in_it_is_ignored() {
         .collect();
     assert_eq!(
         messages,
-        vec![
-            json!(
-                "A behaviors block on a `proxy` response has no effect except `repeat`: \
-                 Mountebank applies the rest, Rift does not yet (stubs 5)"
-            ),
-            json!(
-                "A behaviors block on a `fault` response has no effect except `repeat`: the \
+        vec![json!(
+            "A behaviors block on a `fault` response has no effect except `repeat`: the \
                  rest do not apply to a fault, as in Mountebank (stubs 4)"
-            ),
-        ],
+        ),],
         "{body}"
     );
     let _ = manager.delete_imposter(port).await;
@@ -515,10 +509,7 @@ async fn a_behaviors_block_is_reported_only_where_something_in_it_is_ignored() {
         .collect();
     assert_eq!(
         w017,
-        vec![
-            "stubs[4].responses[0]._behaviors".to_string(),
-            "stubs[5].responses[0]._behaviors".to_string(),
-        ],
+        vec!["stubs[4].responses[0]._behaviors".to_string(),],
         "{:?}",
         lint.issues
     );

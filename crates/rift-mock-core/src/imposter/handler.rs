@@ -5,6 +5,7 @@
 
 use super::behavior_pipeline::{BehaviorOutcome, BehaviorRun, ServedParts};
 use super::core::Imposter;
+use super::core::{ProxiedResponse, ProxyOutcome};
 use super::headers::sanitize_header_value;
 use super::predicates::parse_query_string;
 use super::response::{execute_stub_response_with_rift, get_rift_script_config};
@@ -243,7 +244,7 @@ fn strict_behaviors_for(config: &super::types::ImposterConfig) -> bool {
 /// contract is that it attaches `x-rift-binary-error: true`. The two sites that decode a binary
 /// body drifted apart once already — one had the header and the strict path, the other had
 /// neither — and a shared helper returning a plain `Bytes` would let that happen again.
-enum BinaryBody {
+pub(super) enum BinaryBody {
     Decoded(Bytes),
     /// The body did not decode; these are its raw (still-encoded) bytes, served under the lenient
     /// #269/#323 contract.
@@ -253,7 +254,7 @@ enum BinaryBody {
 /// Decode a binary-mode body. `Err` carries the ready-made strict-mode 500 — the failure is
 /// already a response by then, so the caller returns it as-is. Boxed because a `Response` is large
 /// and this is the rare path; the `Ok` path stays small.
-fn decode_binary_body(
+pub(super) fn decode_binary_body(
     body: String,
     strict: bool,
 ) -> Result<BinaryBody, Box<Response<Full<Bytes>>>> {
@@ -1114,9 +1115,27 @@ async fn handle_request_inner(
         // Check if this is a proxy response
         if let Some(StubResponse::Proxy {
             proxy: proxy_config,
+            behaviors_parsed,
             ..
         }) = response
         {
+            // A `repeat`-only block transforms nothing, so the upstream response is relayed as is —
+            // headers in order, `content-length` kept.
+            let run = behaviors_parsed
+                .as_deref()
+                .filter(|parsed| parsed.transforms_response())
+                .map(|parsed| BehaviorRun {
+                    behaviors: parsed,
+                    method: &method,
+                    uri: &uri,
+                    request_headers: &request_headers,
+                    request_body: body_string.as_deref(),
+                    script_state_key: imposter.script_state_key(),
+                    stub: stub_ref(&imposter, stub_index, &stub_state.stub),
+                    csv_cache: csv_cache(),
+                    script_timeout,
+                    strict: strict_behaviors_for(&imposter.config),
+                });
             // Per-request entry announcement — `trace!` so it compiles out of release (issue #706);
             // the outcome (status/latency) is captured by metrics and the response's x-rift-* headers.
             trace!("Handling proxy request to {}", proxy_config.to);
@@ -1127,10 +1146,17 @@ async fn handle_request_inner(
                     &uri,
                     &request_headers,
                     body_string.as_deref(),
+                    run.as_ref(),
                 )
                 .await
             {
-                Ok((status, response_headers, body, latency)) => {
+                Ok(ProxyOutcome::StrictFailure(response)) => return Ok(response),
+                Ok(ProxyOutcome::Served(ProxiedResponse {
+                    status,
+                    headers: response_headers,
+                    body,
+                    latency_ms: latency,
+                })) => {
                     let mut response = Response::builder().status(status);
 
                     for (k, v) in &response_headers {
@@ -1895,10 +1921,18 @@ async fn handle_request_inner(
                 &uri,
                 &request_headers,
                 body_string.as_deref(),
+                None,
             )
             .await
         {
-            Ok((status, response_headers, body, _latency)) => {
+            // No stub response, so no behaviors: a strict failure cannot happen here.
+            Ok(ProxyOutcome::StrictFailure(response)) => Ok(response),
+            Ok(ProxyOutcome::Served(ProxiedResponse {
+                status,
+                headers: response_headers,
+                body,
+                ..
+            })) => {
                 let mut response = Response::builder().status(status);
                 for (k, v) in &response_headers {
                     if !crate::util::is_hop_by_hop_header(k) {

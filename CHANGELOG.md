@@ -13,6 +13,17 @@ record.
 
 ### Added
 
+- **Behaviors run on `proxy` responses, and the transformed response is what gets recorded**
+  (#1189, closes #1184). Mountebank runs a proxy response's `_behaviors` on the upstream's response
+  before recording it; Rift ran none, so a migrated `{"proxy": …, "_behaviors": {"wait": 500}}`
+  served without the delay. The client, the proxy recording and the stub `predicateGenerators`
+  generates now all get the transformed response. The generated stub holds the result, not the
+  behaviors, and a `proxyOnce` replay is not transformed again, so nothing runs twice. A `wait` is not
+  counted in the latency `addWaitBehavior` records. If a behavior fails, nothing is recorded and the
+  next request goes upstream again. `config_key_ignored` and `rift-lint` `W017` no longer report a
+  proxy response's block. The proxy docs also no longer claim `addDecorateBehavior` transforms the
+  response before recording: it runs when the generated stub replays.
+
 - **Behaviors run on `inject` responses, and `repeat` on every response type** (#1188, part of
   #1184). Mountebank applies a response's `_behaviors` to what an `inject` function returns, and
   honours `repeat` on `proxy`, `fault` and every other response; Rift applied both to `is` responses
