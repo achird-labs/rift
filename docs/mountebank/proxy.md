@@ -226,9 +226,40 @@ present, `is` takes precedence.
 
 ## Modifying Proxied Responses
 
+### Behaviors on the proxy response
+
+A `_behaviors` (or `behaviors`) block on a proxy response runs on the upstream's response before
+anything is recorded, as in Mountebank. The client, the proxy recording and the stub
+`predicateGenerators` generates all get the transformed response:
+
+```json
+{
+  "proxy": { "to": "https://api.example.com", "mode": "proxyOnce" },
+  "_behaviors": {
+    "decorate": "function(request, response) { response.headers['X-Proxied-By'] = 'Rift'; }"
+  }
+}
+```
+
+- The generated stub holds the transformed body, not the behaviors, so a replay does not run them
+  again. It carries only what `addWaitBehavior` and `addDecorateBehavior` add.
+- A `proxyOnce` replay served from the recording is likewise not transformed a second time.
+- A `wait` delays the live response, after the upstream's latency is measured, so it is not
+  counted in what `addWaitBehavior` records.
+- If a behavior fails, nothing is recorded and the next matching request goes upstream again. The
+  failed response is served as usual: lenient by default (with the `x-rift-<behavior>-error`
+  header), or a `500` under `strictBehaviors` (a `504` with `x-rift-script-timeout` when a
+  `decorate` runs out of time). Recording it would replay a response the
+  configuration did not ask for.
+- A body that is not UTF-8 reaches the behaviors base64-encoded, as a `_mode: "binary"` body
+  does, and is decoded before it is served.
+- The upstream's `content-length` is dropped when behaviors run, since they can change the body's
+  length; the served length is computed from the body.
+
 ### addDecorateBehavior
 
-Transform proxied responses before recording:
+Add a `decorate` behavior to the stub the proxy generates. It runs when that stub replays, not on
+the live proxied response, as in Mountebank:
 
 ```json
 {

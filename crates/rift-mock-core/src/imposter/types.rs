@@ -510,16 +510,18 @@ pub enum StubResponse {
         #[serde(skip)]
         prepared: Option<std::sync::Arc<crate::imposter::response::PreparedResponse>>,
     },
+    /// Built only through [`StubResponse::new_proxy`], which keeps `behaviors_parsed` in step with
+    /// `behaviors`.
     Proxy {
         proxy: ProxyResponse,
         /// A `_rift` block written on this response. No `_rift` feature applies to a `proxy` response, so
         /// it is kept only to be reported (`config_key_ignored`, issue #1152) and to round-trip.
         ignored_rift: Option<RiftResponseExtension>,
-        /// A behaviors block written on this response. Only its `repeat` takes effect on a `proxy`
-        /// response (issue #1188); the rest is kept only to be reported (`config_key_ignored`, issue
-        /// #1181), to round-trip, and for the `--allowInjection` gate to classify. `None` for an
-        /// absent or empty block.
-        ignored_behaviors: Option<serde_json::Value>,
+        /// The behaviors block, run on the upstream response before it is recorded, as Mountebank
+        /// does (issue #1189). `None` for an absent or empty block.
+        behaviors: Option<serde_json::Value>,
+        /// `behaviors`, parsed once at construction (issue #479).
+        behaviors_parsed: Option<std::sync::Arc<crate::behaviors::ResponseBehaviors>>,
     },
     /// Built only through [`StubResponse::new_inject`], which keeps `behaviors_parsed` in step
     /// with `behaviors`.
@@ -593,6 +595,22 @@ impl StubResponse {
         }
     }
 
+    /// Build a `Proxy` response, parsing its behaviors block once (issue #479). The only place a
+    /// `Proxy` variant should be constructed.
+    pub(crate) fn new_proxy(
+        proxy: ProxyResponse,
+        ignored_rift: Option<RiftResponseExtension>,
+        behaviors: Option<serde_json::Value>,
+    ) -> StubResponse {
+        let behaviors_parsed = parse_behaviors(behaviors.as_ref());
+        StubResponse::Proxy {
+            proxy,
+            ignored_rift,
+            behaviors,
+            behaviors_parsed,
+        }
+    }
+
     /// Build an `Inject` response, parsing its behaviors block once (issue #479). The only place an
     /// `Inject` variant should be constructed.
     pub(crate) fn new_inject(
@@ -613,13 +631,10 @@ impl StubResponse {
     /// from (issue #1188).
     pub(crate) fn behaviors_block(&self) -> Option<&serde_json::Value> {
         match self {
-            StubResponse::Is { behaviors, .. } | StubResponse::Inject { behaviors, .. } => {
-                behaviors.as_ref()
-            }
-            StubResponse::Proxy {
-                ignored_behaviors, ..
-            }
-            | StubResponse::Fault {
+            StubResponse::Is { behaviors, .. }
+            | StubResponse::Inject { behaviors, .. }
+            | StubResponse::Proxy { behaviors, .. } => behaviors.as_ref(),
+            StubResponse::Fault {
                 ignored_behaviors, ..
             }
             | StubResponse::RiftScript {
@@ -974,11 +989,7 @@ impl TryFrom<StubResponseRaw> for StubResponse {
                 raw.rift,
             )
         } else if let Some(proxy) = raw.proxy {
-            StubResponse::Proxy {
-                proxy,
-                ignored_rift: raw.rift,
-                ignored_behaviors: non_empty_behaviors(behaviors),
-            }
+            StubResponse::new_proxy(proxy, raw.rift, non_empty_behaviors(behaviors))
         } else if let Some(inject) = raw.inject {
             StubResponse::new_inject(inject, raw.rift, non_empty_behaviors(behaviors))
         } else if let Some(fault) = raw.fault {
@@ -1048,13 +1059,14 @@ impl From<StubResponse> for StubResponseOut {
             StubResponse::Proxy {
                 proxy,
                 ignored_rift,
-                ignored_behaviors,
+                behaviors,
+                ..
             } => StubResponseOut {
                 is: None,
                 proxy: Some(proxy),
                 inject: None,
                 fault: None,
-                behaviors: ignored_behaviors.and_then(behaviors_to_array),
+                behaviors: behaviors.and_then(behaviors_to_array),
                 rift: ignored_rift,
             },
             StubResponse::Inject {

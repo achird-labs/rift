@@ -2,7 +2,7 @@
 //! shellTransform, applied to a response's status, headers and body.
 //!
 //! One function so every response type that carries behaviors runs the same pipeline with the
-//! same failure contract (issue #1184). The `is` and `inject` serve paths call it.
+//! same failure contract (issue #1184): the `is`, `inject` and `proxy` serve paths call it.
 
 use super::handler::SCRIPT_TIMEOUT_HEADER;
 use super::headers::StubRef;
@@ -38,17 +38,7 @@ pub(crate) enum BehaviorOutcome {
     /// The response to serve. `degraded` is true when a behavior failed under the lenient
     /// contract (#269/#323): the response is served, but carries a signal header and is not the
     /// response the configuration asked for.
-    Applied {
-        parts: ServedParts,
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "the proxy path reads it to skip recording (#1189)"
-            )
-        )]
-        degraded: bool,
-    },
+    Applied { parts: ServedParts, degraded: bool },
     /// A behavior failed under `strictBehaviors` (#375): serve this error response instead.
     StrictFailure(Response<Full<Bytes>>),
 }

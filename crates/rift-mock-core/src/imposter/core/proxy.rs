@@ -3,6 +3,7 @@
 //! Part of the `Imposter` implementation; see `core/mod.rs` for the struct definition.
 
 use super::*;
+use crate::imposter::behavior_pipeline::{BehaviorOutcome, BehaviorRun, ServedParts};
 use crate::imposter::predicates::regex_cache::cached_regex;
 use crate::recording::{ClaimToken, ProxyStoreError, StubPlacement, StubPublication};
 use std::hash::BuildHasher;
@@ -10,6 +11,93 @@ use std::hash::BuildHasher;
 /// Parts read from a successful upstream proxy response, before recording:
 /// `(status, headers, body, latency_ms)`.
 type ForwardedResponse = (u16, Vec<(String, String)>, bytes::Bytes, u64);
+
+/// A proxied response ready to serve: the upstream's, or a recorded one replayed.
+#[derive(Debug)]
+pub(crate) struct ProxiedResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    /// The upstream latency, when `addWaitBehavior` asked for it.
+    pub latency_ms: Option<u64>,
+}
+
+/// What proxying a request produced.
+#[derive(Debug)]
+#[must_use]
+pub(crate) enum ProxyOutcome {
+    Served(ProxiedResponse),
+    /// A behavior on the proxy response failed under `strictBehaviors` (#375): serve this instead.
+    StrictFailure(hyper::Response<http_body_util::Full<bytes::Bytes>>),
+}
+
+/// The upstream response after the proxy response's own behaviors ran on it (issue #1189).
+enum Transformed {
+    Applied(u16, Vec<(String, String)>, bytes::Bytes),
+    /// A behavior failed under the lenient contract: serve these parts, record nothing.
+    Degraded(u16, Vec<(String, String)>, bytes::Bytes),
+    StrictFailure(hyper::Response<http_body_util::Full<bytes::Bytes>>),
+}
+
+/// Run `run`'s behaviors on an upstream response. A body that is not UTF-8 goes through as base64
+/// and is decoded afterwards, as a binary `is` body is. `content-length` is dropped because the
+/// body may have changed length; the server derives it from the body served.
+async fn transform_upstream<SH: BuildHasher>(
+    run: &BehaviorRun<'_, SH>,
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: bytes::Bytes,
+) -> Transformed {
+    let (text, binary) = match String::from_utf8(body.to_vec()) {
+        Ok(text) => (text, false),
+        Err(_) => {
+            use base64::Engine;
+            (
+                base64::engine::general_purpose::STANDARD.encode(&body),
+                true,
+            )
+        }
+    };
+    let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+    for (k, v) in headers {
+        grouped.entry(k).or_default().push(v);
+    }
+    let (parts, mut degraded) = match run
+        .apply(ServedParts {
+            status,
+            headers: grouped,
+            body: text,
+        })
+        .await
+    {
+        BehaviorOutcome::Applied { parts, degraded } => (parts, degraded),
+        BehaviorOutcome::StrictFailure(response) => return Transformed::StrictFailure(response),
+    };
+    let mut headers: Vec<(String, String)> = parts
+        .headers
+        .into_iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case("content-length"))
+        .flat_map(|(k, values)| values.into_iter().map(move |v| (k.clone(), v)))
+        .collect();
+    let body = if binary {
+        match crate::imposter::handler::decode_binary_body(parts.body, run.strict) {
+            Ok(crate::imposter::handler::BinaryBody::Decoded(bytes)) => bytes,
+            Ok(crate::imposter::handler::BinaryBody::RawFallback(bytes)) => {
+                headers.push(("x-rift-binary-error".to_string(), "true".to_string()));
+                degraded = true;
+                bytes
+            }
+            Err(strict_failure) => return Transformed::StrictFailure(*strict_failure),
+        }
+    } else {
+        bytes::Bytes::from(parts.body)
+    };
+    if degraded {
+        Transformed::Degraded(parts.status, headers, body)
+    } else {
+        Transformed::Applied(parts.status, headers, body)
+    }
+}
 
 impl Imposter {
     /// Generate predicates from request based on predicateGenerators config.
@@ -344,15 +432,22 @@ impl Imposter {
         }
     }
 
-    /// Forward a request through proxy and optionally record the response
-    pub async fn handle_proxy_request<SH>(
+    /// Forward a request through proxy and optionally record the response.
+    ///
+    /// `behaviors` are the proxy response's own behaviors. They run on the upstream response before
+    /// anything is recorded, so the client, the recording and the generated stub all get the
+    /// transformed response, as in Mountebank's `proxyAndRecord` (issue #1189). A replay of a
+    /// recording runs none of them — it was recorded transformed. A behavior that failed records
+    /// nothing.
+    pub(crate) async fn handle_proxy_request<SH>(
         &self,
         proxy_config: &ProxyResponse,
         method: &str,
         uri: &hyper::Uri,
         headers: &HashMap<String, Vec<String>, SH>,
         body: Option<&str>,
-    ) -> anyhow::Result<(u16, Vec<(String, String)>, Vec<u8>, Option<u64>)>
+        behaviors: Option<&BehaviorRun<'_, SH>>,
+    ) -> anyhow::Result<ProxyOutcome>
     where
         // `Clone + Send + 'static`: an inject predicateGenerator clones `headers` into a
         // `spawn_blocking` `'static` closure below.
@@ -403,12 +498,12 @@ impl Imposter {
             Ok(ClaimOutcome::AlreadyRecorded) => {
                 if let Some(recorded) = self.proxy_store.lookup(port, &signature) {
                     debug!("Returning recorded proxy response (proxyOnce mode)");
-                    return Ok((
-                        recorded.status,
-                        recorded.headers,
-                        recorded.body,
-                        recorded.latency_ms,
-                    ));
+                    return Ok(ProxyOutcome::Served(ProxiedResponse {
+                        status: recorded.status,
+                        headers: recorded.headers,
+                        body: recorded.body,
+                        latency_ms: recorded.latency_ms,
+                    }));
                 }
                 // AlreadyRecorded but nothing to replay: a race (concurrent clear) or a
                 // misbehaving backend. Forward without recording rather than fail, but leave
@@ -516,13 +611,42 @@ impl Imposter {
         }
         .await;
 
-        let (status, mut response_headers, body_bytes, latency_ms) = match forwarded {
+        let (status, response_headers, body_bytes, latency_ms) = match forwarded {
             Ok(parts) => parts,
             Err(e) => {
                 if let Some(token) = claim_token {
                     self.proxy_store.release_claim(port, &signature, token);
                 }
                 return Err(e);
+            }
+        };
+        let recorded_latency = proxy_config.add_wait_behavior.then_some(latency_ms);
+
+        // After the forward, so a `wait` never counts toward the latency `addWaitBehavior` records;
+        // before the recording, so what is recorded is what the client got.
+        let (status, mut response_headers, body_bytes) = match behaviors {
+            None => (status, response_headers, body_bytes),
+            Some(run) => {
+                match transform_upstream(run, status, response_headers, body_bytes).await {
+                    Transformed::Applied(status, headers, body) => (status, headers, body),
+                    Transformed::Degraded(status, headers, body) => {
+                        if let Some(token) = claim_token {
+                            self.proxy_store.release_claim(port, &signature, token);
+                        }
+                        return Ok(ProxyOutcome::Served(ProxiedResponse {
+                            status,
+                            headers,
+                            body: body.to_vec(),
+                            latency_ms: recorded_latency,
+                        }));
+                    }
+                    Transformed::StrictFailure(response) => {
+                        if let Some(token) = claim_token {
+                            self.proxy_store.release_claim(port, &signature, token);
+                        }
+                        return Ok(ProxyOutcome::StrictFailure(response));
+                    }
+                }
             }
         };
 
@@ -536,7 +660,7 @@ impl Imposter {
                     status,
                     headers: response_headers.clone(),
                     body: body_bytes.to_vec(),
-                    latency_ms: proxy_config.add_wait_behavior.then_some(latency_ms),
+                    latency_ms: recorded_latency,
                     timestamp_secs: crate::util::unix_timestamp(),
                 },
             )
@@ -613,18 +737,17 @@ impl Imposter {
 
             match generation {
                 Ok(predicates) => {
-                    let latency_for_stub = proxy_config.add_wait_behavior.then_some(latency_ms);
-
-                    // Note: addDecorateBehavior is added to the SAVED stub's behaviors,
-                    // not applied to the first (live proxy) response. This matches Mountebank's
-                    // behavior. The decoration will be applied when the saved stub is used for
-                    // subsequent requests.
+                    // `addDecorateBehavior` is written into the SAVED stub's behaviors and not
+                    // applied to this live response, as in Mountebank; it runs when the saved
+                    // stub replays. The proxy response's own behaviors already ran above, and the
+                    // stub holds their result — never the behaviors themselves, so nothing runs
+                    // twice (Mountebank's `newIsResponse`).
                     let new_stub = create_stub_from_proxy_response(
                         predicates,
                         status,
                         &response_headers,
                         &body_bytes,
-                        latency_for_stub,
+                        recorded_latency,
                         proxy_config.add_decorate_behavior.clone(),
                         Some(proxy_config.to.clone()),
                     );
@@ -692,12 +815,12 @@ impl Imposter {
             self.settle_proxy_claim(port, &signature, token, resp, None);
         }
 
-        Ok((
+        Ok(ProxyOutcome::Served(ProxiedResponse {
             status,
-            response_headers,
-            body_bytes.to_vec(),
-            proxy_config.add_wait_behavior.then_some(latency_ms),
-        ))
+            headers: response_headers,
+            body: body_bytes.to_vec(),
+            latency_ms: recorded_latency,
+        }))
     }
 }
 

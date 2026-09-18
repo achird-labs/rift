@@ -688,6 +688,7 @@ mod matching;
 mod stub_index;
 use stub_index::StubSnapshot;
 mod proxy;
+pub(crate) use proxy::{ProxiedResponse, ProxyOutcome};
 mod recording;
 mod responses;
 mod verify;

@@ -187,7 +187,7 @@ fn check_ignored_keys(file: &Path, imposter: &Value, result: &mut LintResult) {
                     format!("stubs[{stub_idx}].responses[{resp_idx}].{key}"),
                     format!(
                         "`{key}` on a `{shape}` response has no effect except `repeat`: other \
-                         behaviors apply to `is` and `inject` responses only"
+                         behaviors apply to `is`, `proxy` and `inject` responses only"
                     ),
                 );
             }
@@ -230,10 +230,10 @@ fn check_repeat(file: &Path, repeat: &Value, location: &str, result: &mut LintRe
 /// A behaviors block holding something the engine keeps but never runs (issue #1181): the key it
 /// reads, and the response shape it sits on. Mirrors the engine's parse: `_behaviors` wins over
 /// `behaviors` unless it is `null`, the array form folds its objects into one (a later element
-/// wins), and a `null` key is absent. Behaviors run on `is` and `inject` responses, and `repeat`
-/// on every response (issue #1188), so the shapes are `proxy`, `fault`, and `_rift` for a
-/// `_rift`-only response, and only a block setting a key other than `repeat` is reported. `is` and
-/// `inject` are matched first only because the engine picks them over the shapes after them.
+/// wins), and a `null` key is absent. Behaviors run on `is`, `proxy` and `inject` responses
+/// (issues #1188, #1189), and `repeat` on every response, so the shapes are `fault` and `_rift`
+/// for a `_rift`-only response, and only a block setting a key other than `repeat` is reported.
+/// `is`, `proxy` and `inject` are matched first only because the engine picks them over the rest.
 fn ignored_behaviors(response: &Value) -> Option<(&'static str, &'static str)> {
     let present = |key: &str| response.get(key).is_some_and(|v| !v.is_null());
     if present("is") {
@@ -242,7 +242,7 @@ fn ignored_behaviors(response: &Value) -> Option<(&'static str, &'static str)> {
     let shape = ["proxy", "inject", "fault", "_rift"]
         .into_iter()
         .find(|shape| present(shape))?;
-    if shape == "inject" {
+    if shape == "proxy" || shape == "inject" {
         return None;
     }
     let key = if present("_behaviors") {
@@ -2814,18 +2814,10 @@ mod ignored_behaviors_tests {
     #[test]
     fn a_block_on_each_ignored_shape_is_reported_at_the_key_the_engine_reads() {
         let at = |key: &str| vec![format!("stubs[0].responses[0].{key}")];
-        let proxy = json!({"to": "http://127.0.0.1:1"});
+        let fault = json!("CONNECTION_RESET_BY_PEER");
         assert_eq!(
-            w017(json!({"proxy": proxy, "_behaviors": {"wait": 1}})),
-            at("_behaviors")
-        );
-        assert_eq!(
-            w017(json!({"fault": "CONNECTION_RESET_BY_PEER", "behaviors": [{"wait": 1}]})),
+            w017(json!({"fault": fault, "behaviors": [{"wait": 1}]})),
             at("behaviors")
-        );
-        assert_eq!(
-            w017(json!({"fault": "CONNECTION_RESET_BY_PEER", "_behaviors": {"wait": 1}})),
-            at("_behaviors")
         );
         assert_eq!(
             w017(
@@ -2835,12 +2827,12 @@ mod ignored_behaviors_tests {
         );
         // `_behaviors` shadows `behaviors`, as in the engine: the block it reads is the one named.
         assert_eq!(
-            w017(json!({"proxy": proxy, "_behaviors": {"wait": 1}, "behaviors": [{"wait": 2}]})),
+            w017(json!({"fault": fault, "_behaviors": {"wait": 1}, "behaviors": [{"wait": 2}]})),
             at("_behaviors")
         );
         // A null `_behaviors` is absent, so the engine falls through to `behaviors`.
         assert_eq!(
-            w017(json!({"proxy": proxy, "_behaviors": null, "behaviors": [{"wait": 2}]})),
+            w017(json!({"fault": fault, "_behaviors": null, "behaviors": [{"wait": 2}]})),
             at("behaviors")
         );
     }
@@ -2863,6 +2855,9 @@ mod ignored_behaviors_tests {
             json!({"fault": "CONNECTION_RESET_BY_PEER", "behaviors": [{"repeat": 2}]}),
             json!({"proxy": proxy, "_behaviors": {"repeat": 2, "wait": null}}),
             json!({"proxy": proxy, "behaviors": [{"wait": 1}, {"wait": null}]}),
+            // Issue #1189: behaviors run on a proxy response too.
+            json!({"proxy": proxy, "_behaviors": {"wait": 1}}),
+            json!({"proxy": proxy, "_behaviors": {"decorate": "function () {}"}}),
         ] {
             assert_eq!(w017(response.clone()), Vec::<String>::new(), "{response}");
         }

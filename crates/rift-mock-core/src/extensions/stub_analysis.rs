@@ -96,14 +96,10 @@ fn ignored_rift_shape(response: &StubResponse) -> Option<&'static str> {
 }
 
 /// The shape of a response whose behaviors block holds something no behavior runs on (issue #1181).
-/// Behaviors run on `is` and `inject` responses; `repeat` applies to every response (#1188), so a
+/// Behaviors run on `is`, `inject` and `proxy` responses; `repeat` applies to every response (#1188), so a
 /// block that sets nothing else is not ignored.
 fn ignored_behaviors_shape(response: &StubResponse) -> Option<&'static str> {
     let (shape, block) = match response {
-        StubResponse::Proxy {
-            ignored_behaviors: Some(block),
-            ..
-        } => ("proxy", block),
         StubResponse::Fault {
             ignored_behaviors: Some(block),
             ..
@@ -202,11 +198,6 @@ pub fn ignored_config_keys(config: &ImposterConfig, stubs: &[Stub]) -> Vec<StubW
         }
     }
     for (shape, noun, why) in [
-        (
-            "proxy",
-            "a `proxy` response",
-            "Mountebank applies the rest, Rift does not yet",
-        ),
         (
             "fault",
             "a `fault` response",

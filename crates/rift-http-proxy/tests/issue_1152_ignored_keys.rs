@@ -70,13 +70,6 @@ fn fixtures(port: u16) -> Vec<(&'static str, Value)> {
         (
             "stubs[0].responses[0]._behaviors",
             base(json!({"stubs": [{"responses": [{
-                "proxy": {"to": "http://127.0.0.1:1"},
-                "_behaviors": {"wait": 500}
-            }]}]})),
-        ),
-        (
-            "stubs[0].responses[0]._behaviors",
-            base(json!({"stubs": [{"responses": [{
                 "fault": "CONNECTION_RESET_BY_PEER",
                 "_behaviors": {"wait": 500}
             }]}]})),
@@ -91,7 +84,7 @@ fn fixtures(port: u16) -> Vec<(&'static str, Value)> {
         (
             "stubs[0].responses[0].behaviors",
             base(json!({"stubs": [{"responses": [{
-                "proxy": {"to": "http://127.0.0.1:1"},
+                "fault": "CONNECTION_RESET_BY_PEER",
                 "behaviors": [{"wait": 500}]
             }]}]})),
         ),
@@ -313,7 +306,7 @@ async fn many_ignored_behaviors_collapse_into_one_warning_per_shape() {
     let port = free_port();
     let mut stubs: Vec<Value> = vec![json!({"responses": [{"is": {"statusCode": 200}}]})];
     stubs.extend((0..12).map(
-        |_| json!({"responses": [{"proxy": {"to": "http://127.0.0.1:1"}, "_behaviors": {"wait": 1}}]}),
+        |_| json!({"responses": [{"fault": "CONNECTION_RESET_BY_PEER", "_behaviors": {"wait": 1}}]}),
     ));
     let created: Value = client
         .post(format!("{admin}/imposters"))
@@ -329,14 +322,14 @@ async fn many_ignored_behaviors_collapse_into_one_warning_per_shape() {
     assert_eq!(ignored[0]["stubIndex"], 1);
     assert_eq!(
         ignored[0]["message"],
-        "A behaviors block on a `proxy` response has no effect except `repeat`: Mountebank \
-         applies the rest, Rift does not yet (stubs 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 2 more)"
+        "A behaviors block on a `fault` response has no effect except `repeat`: the rest do not \
+         apply to a fault, as in Mountebank (stubs 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 2 more)"
     );
     let _ = manager.delete_imposter(port).await;
 }
 
-/// Issue #1181: a scripted behavior on a proxy response is a script surface even though Rift does
-/// not run it yet — Mountebank does, so the gate must not be open the day Rift starts to.
+/// Issue #1181: a scripted behavior on a proxy response is a script surface. Written before Rift ran
+/// it (#1189), so the gate was closed on the day it started to.
 #[tokio::test]
 async fn a_scripted_behavior_on_a_proxy_response_needs_allow_injection() {
     let imposter = |port: u16, behaviors: Value| {
@@ -376,9 +369,9 @@ async fn a_scripted_behavior_on_a_proxy_response_needs_allow_injection() {
     let _ = manager.delete_imposter(port).await;
 }
 
-/// Issue #1181: each shape says what is true of it — Mountebank applies behaviors on `proxy`,
-/// ignores them on `fault`, and has no `_rift`-only response. Since #1188 an `inject` response runs
-/// them, and `repeat` counts on all three.
+/// Issue #1181: each shape says what is true of it — Mountebank ignores behaviors on `fault`, and
+/// has no `_rift`-only response. Since #1188/#1189 `inject` and `proxy` responses run them, and
+/// `repeat` counts on every response.
 #[tokio::test]
 async fn each_ignored_behaviors_shape_has_its_own_message() {
     let (client, admin, manager) = start_admin().await;
@@ -390,6 +383,7 @@ async fn each_ignored_behaviors_shape_has_its_own_message() {
     };
     let stubs = vec![
         with(json!({"proxy": {"to": "http://127.0.0.1:1"}})),
+        with(json!({"inject": "function (config) { return {}; }"})),
         with(json!({"fault": "CONNECTION_RESET_BY_PEER"})),
         with(
             json!({"_rift": {"script": {"engine": "rhai", "code": "fn respond(ctx) { http(200, \"x\") }"}}}),
@@ -412,16 +406,12 @@ async fn each_ignored_behaviors_shape_has_its_own_message() {
         messages,
         vec![
             json!(
-                "A behaviors block on a `proxy` response has no effect except `repeat`: \
-                 Mountebank applies the rest, Rift does not yet (stubs 0)"
-            ),
-            json!(
                 "A behaviors block on a `fault` response has no effect except `repeat`: the rest \
-                 do not apply to a fault, as in Mountebank (stubs 1)"
+                 do not apply to a fault, as in Mountebank (stubs 2)"
             ),
             json!(
                 "A behaviors block on a `_rift`-only response has no effect except `repeat`: the \
-                 rest do not apply to a script response (stubs 2)"
+                 rest do not apply to a script response (stubs 3)"
             ),
         ]
     );
