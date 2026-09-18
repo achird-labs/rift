@@ -296,6 +296,10 @@ and `xpath` selectors apply to the value `from` picked.
 [Behaviors]({{ site.baseurl }}/mountebank/behaviors/) for `shellTransform`, `repeat` and the
 error semantics.
 
+Behaviors run on `is` responses only. A block on a `proxy`, `inject`, `fault` or `_rift`-only
+response is kept and returned, and reported as `config_key_ignored` in `_rift.warnings` and by
+`rift-lint` `W017` — see [Behaviors]({{ site.baseurl }}/mountebank/behaviors/).
+
 ---
 
 ## HTTPS Configuration

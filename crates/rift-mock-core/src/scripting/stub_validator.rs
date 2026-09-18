@@ -105,7 +105,7 @@ fn validate_response(
 ) -> Option<StubValidationError> {
     match response {
         // Rift script responses (_rift.script)
-        StubResponse::RiftScript { rift } => rift.script.as_ref().and_then(|script_config| {
+        StubResponse::RiftScript { rift, .. } => rift.script.as_ref().and_then(|script_config| {
             validate_rift_script_config(script_config, stub_id, response_index)
         }),
         // Is responses with optional _rift extension
@@ -273,6 +273,7 @@ mod tests {
                     templated: false,
                     state_ops: Vec::new(),
                 },
+                ignored_behaviors: None,
             }],
             scenario_name: None,
             required_scenario_state: None,
@@ -294,6 +295,7 @@ mod tests {
             responses: vec![StubResponse::Inject {
                 inject: code.to_string(),
                 ignored_rift: None,
+                ignored_behaviors: None,
             }],
             scenario_name: None,
             required_scenario_state: None,
@@ -391,6 +393,7 @@ mod tests {
                         templated: false,
                         state_ops: Vec::new(),
                     },
+                    ignored_behaviors: None,
                 }],
                 scenario_name: None,
                 required_scenario_state: None,
@@ -418,6 +421,7 @@ mod tests {
                         templated: false,
                         state_ops: Vec::new(),
                     },
+                    ignored_behaviors: None,
                 }],
                 scenario_name: None,
                 required_scenario_state: None,
