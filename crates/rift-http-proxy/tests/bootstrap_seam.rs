@@ -392,6 +392,74 @@ fn stop_server_stale_pid_is_cleaned_up_with_ok() {
     );
 }
 
+/// A child that takes `exit_after` to leave on SIGTERM, standing in for an embedder's server with a
+/// drain window. The trap runs between the loop's short sleeps, so the delay is the trap's own.
+#[cfg(unix)]
+fn slow_to_leave(exit_after: &str) -> std::process::Child {
+    let child = std::process::Command::new("sh")
+        .args([
+            "-c",
+            &format!("trap 'sleep {exit_after}; exit 0' TERM; while :; do sleep 0.05; done"),
+        ])
+        .spawn()
+        .expect("spawn a slow-to-leave process");
+    // Let the shell install its trap before anything signals it.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    child
+}
+
+// A ceiling above the process's shutdown is waited out: `stop_server_within` returns only once the
+// process is gone, and removes the pidfile. `stop_server`'s fixed five seconds would have failed
+// here had the delay been longer — that is the case the seam exists for.
+#[cfg(unix)]
+#[test]
+fn stop_server_within_waits_out_a_slow_shutdown() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut child = slow_to_leave("1");
+    let pidfile = dir.path().join("slow.pid");
+    std::fs::write(&pidfile, child.id().to_string()).expect("write pidfile");
+
+    let started = std::time::Instant::now();
+    bootstrap::stop_server_within(&pidfile, std::time::Duration::from_secs(10))
+        .expect("a ceiling above the shutdown must succeed");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(900),
+        "returned before the process left: {:?}",
+        started.elapsed()
+    );
+    assert!(!pidfile.exists(), "a completed stop removes the pidfile");
+    let status = child.wait().expect("reap");
+    assert!(
+        status.success(),
+        "the child left through its own trap: {status}"
+    );
+}
+
+// A ceiling below it is a reported failure, the pidfile is kept (the process is still running), and
+// the error names the ceiling the caller chose rather than a fixed one.
+#[cfg(unix)]
+#[test]
+fn stop_server_within_reports_a_process_that_outlives_the_ceiling() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut child = slow_to_leave("3");
+    let pidfile = dir.path().join("slow.pid");
+    std::fs::write(&pidfile, child.id().to_string()).expect("write pidfile");
+
+    let err = bootstrap::stop_server_within(&pidfile, std::time::Duration::from_millis(200))
+        .expect_err("a process alive past the ceiling is an error");
+    let message = err.to_string();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        message.contains("did not exit within 200ms"),
+        "the error names the caller's ceiling: {message}"
+    );
+    assert!(
+        pidfile.exists(),
+        "a process still running keeps its pidfile"
+    );
+}
+
 // AC5 (issue #816): signalling a process we do not own is EPERM — a real error, and the pidfile is
 // NOT ours to remove, so it stays. PID 1 (init) is never ours as an unprivileged user; skip when
 // running as root (containers), where the signal would not be denied.
