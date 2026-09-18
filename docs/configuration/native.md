@@ -195,7 +195,7 @@ Defaults for `_rift.script` execution.
 
 | Field | Type | Default | Notes |
 |:------|:-----|:--------|:------|
-| `defaultEngine` | string | `"rhai"` | **Accepted, no effect.** A script that omits `engine` uses the engine its `file` extension names (`.rhai`, `.js`), else `rhai`. |
+| `defaultEngine` | string | `"rhai"` | `rhai` or `javascript` (`js`). The engine for a script that omits `engine` and whose `file` extension (`.rhai`, `.js`) does not name one. An explicit `engine` and a file extension both take precedence. |
 | `timeoutMs` | integer | `5000` | Per-script wall-clock timeout, also applied to `decorate`. |
 
 ### `scripts`

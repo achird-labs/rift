@@ -551,11 +551,17 @@ predicate `inject`, and the `decorate` behavior — all of which run off the asy
 }
 ```
 
-A `_rift.script` block that omits `engine` runs on the engine inferred from its `file:`
-extension (`.rhai` -> `rhai`, `.js` -> `javascript`), and otherwise on **Rhai**. Set `engine` on
-each JavaScript block explicitly. `_rift.scriptEngine.defaultEngine` is accepted and round-trips
-through `GET /imposters`, but the current engine does not apply it — an inline block without
-`engine` runs on Rhai whatever it says.
+A `_rift.script` block's engine is decided in this order, first match wins:
+
+1. its own `engine`;
+2. its `file:` extension (`.rhai` -> `rhai`, `.js` -> `javascript`);
+3. the imposter's `_rift.scriptEngine.defaultEngine`;
+4. `rhai`.
+
+So with `"defaultEngine": "javascript"`, inline blocks without `engine` run as JavaScript, while a
+`.rhai` file stays Rhai. This applies to stubs added later through the stub endpoints too. The
+chosen engine is written into the script, so `GET /imposters` shows it. An unknown
+`defaultEngine` fails only a script that actually needs it; `rift-lint` flags it as `W016`.
 
 ## Flow-Store Error Semantics
 

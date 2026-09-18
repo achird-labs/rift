@@ -1331,6 +1331,18 @@ impl Default for ImposterConfig {
 }
 
 impl ImposterConfig {
+    /// The engine for a script that names none and whose `file` extension does not decide it:
+    /// `_rift.scriptEngine.defaultEngine`, else `"rhai"` (issue #1159). The value is not checked
+    /// here — an unknown one is refused where a script is actually built with it, so a config that
+    /// carries a stale `"lua"` but no engine-less script still loads.
+    #[must_use]
+    pub fn default_script_engine(&self) -> &str {
+        self.rift
+            .as_ref()
+            .and_then(|rift| rift.script_engine.as_ref())
+            .map_or("rhai", |engine| engine.default_engine.as_str())
+    }
+
     /// The port the author pinned, if any. `Some(0)` reads as absent: `0` is the "any free port"
     /// idiom and is auto-assigned at creation (issue #637), so every door that asks whether a port
     /// is explicit — creation, `apply_config`, cross-source claims — agrees on it (issue #1104).
@@ -1480,7 +1492,8 @@ fn default_idle_timeout() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RiftScriptEngineConfig {
-    /// Default script engine: "rhai" or "javascript"
+    /// Engine for a script that names none and has no `.rhai`/`.js`/`.lua` file extension:
+    /// "rhai" or "javascript" (issue #1159). See [`ImposterConfig::default_script_engine`].
     #[serde(default = "default_script_engine")]
     pub default_engine: String,
     /// Script execution timeout in milliseconds

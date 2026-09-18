@@ -64,6 +64,7 @@ pub fn resolve_scripts(
     config: &mut ImposterConfig,
     base: &ScriptBaseDir,
 ) -> Result<(), ScriptResolveError> {
+    let default_engine = config.default_script_engine().to_owned();
     // Resolve the named registry first so response-level `ref:` lookups see fully-resolved
     // entries (populated `code` + `engine`, never another `ref`).
     if let Some(rift) = &mut config.rift {
@@ -72,7 +73,7 @@ pub fn resolve_scripts(
                 return Err(ScriptResolveError::RefChain(name.clone()));
             }
             validate_source_count(script)?;
-            resolve_leaf(script, base)?;
+            resolve_leaf(script, &default_engine, base)?;
         }
     }
 
@@ -84,7 +85,7 @@ pub fn resolve_scripts(
         .map(|r| r.scripts.clone())
         .unwrap_or_default();
 
-    resolve_stub_scripts(&mut config.stubs, &registry, base)
+    resolve_stub_scripts(&mut config.stubs, &registry, &default_engine, base)
 }
 
 /// Resolve `_rift.script` sources in a set of stubs against an already-resolved `registry`
@@ -93,16 +94,19 @@ pub fn resolve_scripts(
 /// escape-check — `file:`/`ref:` at WRITE time, before persisting, exactly like whole-imposter
 /// create. `registry` is the target imposter's `_rift.scripts` (its entries must themselves be
 /// already resolved — `code` populated, `file`/`ref` cleared — which they are once the imposter
-/// was created).
+/// was created). `default_engine` is the target imposter's
+/// [`ImposterConfig::default_script_engine`]: a stub arrives without its imposter's `_rift` block,
+/// so a door that passed `"rhai"` here would ignore the imposter's `defaultEngine` (issue #1159).
 pub fn resolve_stub_scripts(
     stubs: &mut [Stub],
     registry: &HashMap<String, RiftScriptConfig>,
+    default_engine: &str,
     base: &ScriptBaseDir,
 ) -> Result<(), ScriptResolveError> {
     for stub in stubs {
         for response in &mut stub.responses {
             if let Some(script) = response_script_mut(response) {
-                resolve_response_script(script, registry, base)?;
+                resolve_response_script(script, registry, default_engine, base)?;
             }
         }
     }
@@ -136,6 +140,7 @@ fn validate_source_count(script: &RiftScriptConfig) -> Result<(), ScriptResolveE
 fn resolve_response_script(
     script: &mut RiftScriptConfig,
     registry: &HashMap<String, RiftScriptConfig>,
+    default_engine: &str,
     base: &ScriptBaseDir,
 ) -> Result<(), ScriptResolveError> {
     validate_source_count(script)?;
@@ -151,12 +156,13 @@ fn resolve_response_script(
         script.ref_name = None;
         return Ok(());
     }
-    resolve_leaf(script, base)
+    resolve_leaf(script, default_engine, base)
 }
 
 /// Resolve a leaf script config (`code:` or `file:`, never `ref:`): load `file:` content into
-/// `code` if needed, then normalize `engine` to the effective value (explicit, else inferred
-/// from the file extension, else the legacy "rhai" default).
+/// `code` if needed, then normalize `engine` to the effective value: explicit, else inferred from
+/// the file extension, else the imposter's `defaultEngine` (issue #1159). Writing it back keeps a
+/// persisted or replayed imposter unambiguous.
 ///
 /// `file` is cleared once its content is loaded into `code` — resolution is meant to collapse
 /// every source down to a plain `code`/`engine` pair, so everything downstream (validation,
@@ -164,10 +170,11 @@ fn resolve_response_script(
 /// `source_count()` check (post-resolution) still sees exactly one source.
 fn resolve_leaf(
     script: &mut RiftScriptConfig,
+    default_engine: &str,
     base: &ScriptBaseDir,
 ) -> Result<(), ScriptResolveError> {
     if script.engine.is_none() {
-        script.engine = Some(infer_engine(script.file.as_deref()));
+        script.engine = Some(infer_engine(script.file.as_deref(), default_engine));
     }
     if let Some(file) = script.file.take() {
         script.code = Some(read_script_file(&file, base)?);
@@ -175,9 +182,10 @@ fn resolve_leaf(
     Ok(())
 }
 
-/// Infer the engine from a `file:` path's extension; `.rhai`/`.lua`/`.js` map to their engines,
-/// anything else (or no `file`, i.e. inline `code:`) falls back to the legacy "rhai" default.
-fn infer_engine(file: Option<&str>) -> String {
+/// Infer the engine from a `file:` path's extension; `.rhai`/`.lua`/`.js` map to their engines, and
+/// anything else (or no `file`, i.e. inline `code:`) takes `default_engine`. The extension outranks
+/// the default on purpose: a `.rhai` file under `defaultEngine: "javascript"` is still Rhai.
+fn infer_engine(file: Option<&str>, default_engine: &str) -> String {
     let ext = file
         .and_then(|f| Path::new(f).extension())
         .and_then(|e| e.to_str());
@@ -185,7 +193,7 @@ fn infer_engine(file: Option<&str>) -> String {
         Some("rhai") => "rhai",
         Some("lua") => "lua",
         Some("js") => "javascript",
-        _ => "rhai",
+        _ => default_engine,
     }
     .to_string()
 }
@@ -349,6 +357,120 @@ mod tests {
         let resolved = extract_script(&config);
         assert_eq!(resolved.code.as_deref(), Some("fn respond() {}"));
         assert_eq!(resolved.engine.as_deref(), Some("rhai"));
+    }
+
+    fn with_default_engine(config: &mut ImposterConfig, engine: &str) {
+        config.rift = Some(
+            serde_json::from_value(serde_json::json!({
+                "scriptEngine": { "defaultEngine": engine }
+            }))
+            .expect("rift config"),
+        );
+    }
+
+    /// Issue #1159: the imposter's `defaultEngine` was parsed and never read; inline code always
+    /// resolved to Rhai.
+    #[test]
+    fn inline_code_takes_the_imposters_default_engine() {
+        let mut config = ImposterConfig {
+            stubs: vec![stub_with_script(script(
+                Some("function respond() {}"),
+                None,
+                None,
+            ))],
+            ..Default::default()
+        };
+        with_default_engine(&mut config, "javascript");
+        resolve_scripts(&mut config, &ScriptBaseDir::Unconfigured).unwrap();
+        assert_eq!(
+            extract_script(&config).engine.as_deref(),
+            Some("javascript")
+        );
+    }
+
+    #[test]
+    fn an_explicit_engine_outranks_the_default() {
+        let mut explicit = script(Some("fn respond() {}"), None, None);
+        explicit.engine = Some("rhai".to_owned());
+        let mut config = ImposterConfig {
+            stubs: vec![stub_with_script(explicit)],
+            ..Default::default()
+        };
+        with_default_engine(&mut config, "javascript");
+        resolve_scripts(&mut config, &ScriptBaseDir::Unconfigured).unwrap();
+        assert_eq!(extract_script(&config).engine.as_deref(), Some("rhai"));
+    }
+
+    #[test]
+    fn a_file_extension_outranks_the_default() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("s.rhai"), "fn respond() {}").expect("write");
+        let mut config = ImposterConfig {
+            stubs: vec![stub_with_script(script(None, Some("s.rhai"), None))],
+            ..Default::default()
+        };
+        with_default_engine(&mut config, "javascript");
+        resolve_scripts(
+            &mut config,
+            &ScriptBaseDir::ScriptsDir(root.path().to_path_buf()),
+        )
+        .unwrap();
+        assert_eq!(extract_script(&config).engine.as_deref(), Some("rhai"));
+    }
+
+    #[test]
+    fn a_file_without_a_known_extension_takes_the_default() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("s.txt"), "function respond() {}").expect("write");
+        let mut config = ImposterConfig {
+            stubs: vec![stub_with_script(script(None, Some("s.txt"), None))],
+            ..Default::default()
+        };
+        with_default_engine(&mut config, "javascript");
+        resolve_scripts(
+            &mut config,
+            &ScriptBaseDir::ScriptsDir(root.path().to_path_buf()),
+        )
+        .unwrap();
+        assert_eq!(
+            extract_script(&config).engine.as_deref(),
+            Some("javascript")
+        );
+    }
+
+    /// The stub doors pass the live imposter's default; this is the seam they call.
+    #[test]
+    fn stub_resolution_uses_the_default_it_is_given() {
+        let mut stubs = vec![stub_with_script(script(Some("x"), None, None))];
+        resolve_stub_scripts(
+            &mut stubs,
+            &HashMap::new(),
+            "javascript",
+            &ScriptBaseDir::Unconfigured,
+        )
+        .unwrap();
+        let config = ImposterConfig {
+            stubs,
+            ..Default::default()
+        };
+        assert_eq!(
+            extract_script(&config).engine.as_deref(),
+            Some("javascript")
+        );
+    }
+
+    /// A stale `"lua"` default with no engine-less script is never used, so it is not refused at
+    /// resolution — such configs load today and must keep loading.
+    #[test]
+    fn an_unused_unknown_default_is_not_refused() {
+        let mut explicit = script(Some("fn respond() {}"), None, None);
+        explicit.engine = Some("rhai".to_owned());
+        let mut config = ImposterConfig {
+            stubs: vec![stub_with_script(explicit)],
+            ..Default::default()
+        };
+        with_default_engine(&mut config, "lua");
+        resolve_scripts(&mut config, &ScriptBaseDir::Unconfigured).unwrap();
     }
 
     #[test]

@@ -1279,10 +1279,12 @@ async fn handle_request_inner(
                     ),
                 ));
             };
+            // Resolution writes the engine into every script it sees; a door that does not resolve
+            // (the C-ABI create) reaches here engine-less, and gets the same default (#1159).
             let engine = script_config
                 .engine
                 .clone()
-                .unwrap_or_else(|| "rhai".to_string());
+                .unwrap_or_else(|| imposter.config.default_script_engine().to_owned());
             trace!("Handling Rift script response (engine: {})", engine);
 
             // Build script request. Expose headers with lowercase keys so scripts can read
