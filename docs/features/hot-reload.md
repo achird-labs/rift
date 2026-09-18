@@ -119,8 +119,9 @@ A successful reload returns `200` with the change set:
 }
 ```
 
-Reload applies **imposters only**. If the config file also declares an
-[`intercept` block](intercept-proxy.md#declare-it-in-the-config-file), it is *not* re-applied —
+Reload applies the imposters and the [`routes` block](front-door.md). If the config file also
+declares an [`intercept` block](intercept-proxy.md#declare-it-in-the-config-file), that block is
+*not* re-applied —
 re-seeding would duplicate or clobber rules added at runtime, and rebinding the listener is a
 lifecycle change reload does not own. So that an edit to the block never *looks* applied, the
 response says so explicitly (the field is absent otherwise):
@@ -138,8 +139,13 @@ response says so explicitly (the field is absent otherwise):
 Change intercept rules at runtime with `POST`/`DELETE /intercept/rules`, or restart to re-read the
 block.
 
-A [`routes` block](front-door.md) is likewise applied at startup only, but reload does **not** warn
-about it: an edited route table is silently left as it was until the next restart.
+A [`routes` block](front-door.md) **is** re-applied. After the imposters apply successfully, the
+front door switches to the reloaded table in one step: requests after the reload use the new
+routes, and no listener is rebound. Removing the block reloads to an empty table, as a restart
+would. An invalid table refuses the whole reload, and a reload that fails leaves the old table
+serving. A config file with a `routes` block on a server started without `--front-door` has
+nothing to apply it to. The block is ignored, and the startup log and every reload response's
+`warnings` say so.
 
 If some ports apply and others fail, the call returns `500` and reports both sides — the ports that
 did apply and the ones that failed:
