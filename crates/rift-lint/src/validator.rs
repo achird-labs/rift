@@ -1825,7 +1825,7 @@ pub fn validate_behavior(
             );
         } else if wait.is_u64() {
             // fixed millisecond delay — valid. Only a non-negative integer: the engine's `u64`
-            // rejects `500.5` and `-1`, and then ignores the block's parsed behaviors.
+            // rejects `500.5` and `-1`, and refuses the file (issue #1162).
         } else if is_valid_wait_range(wait) {
             // {min, max} range object — valid Rift extension, but an inverted one has no delay to
             // draw from and the engine refuses the whole imposter (issue #1148). Folded into E025
@@ -1856,7 +1856,10 @@ pub fn validate_behavior(
     }
 
     if let Some(repeat) = present("repeat") {
-        let valid = repeat.as_u64().map(|n| n > 0).unwrap_or(false);
+        // The engine reads `repeat` as a `u32` and refuses the file for anything larger (#1162).
+        let valid = repeat
+            .as_u64()
+            .is_some_and(|n| n > 0 && u32::try_from(n).is_ok());
         if !valid {
             result.add_issue(
                 LintIssue::error(
@@ -1868,6 +1871,35 @@ pub fn validate_behavior(
                 .with_suggestion("Use a positive integer, e.g. \"repeat\": 3"),
             );
         }
+    }
+
+    // The engine refuses the file for a non-string `decorate`, or a `shellTransform` that is not a
+    // command or a list of commands (issue #1162).
+    if let Some(decorate) = present("decorate")
+        && !decorate.is_string()
+    {
+        report_malformed_behavior(
+            file,
+            &format!("{location}.decorate"),
+            "`decorate` must be a script string",
+            result,
+        );
+    }
+    let shell_is_well_formed = |shell: &Value| {
+        shell.is_string()
+            || shell
+                .as_array()
+                .is_some_and(|commands| commands.iter().all(Value::is_string))
+    };
+    if let Some(shell) = present("shellTransform")
+        && !shell_is_well_formed(shell)
+    {
+        report_malformed_behavior(
+            file,
+            &format!("{location}.shellTransform"),
+            "`shellTransform` must be a command string or an array of command strings",
+            result,
+        );
     }
 
     if let Some(decorate) = present("decorate")
@@ -2026,68 +2058,239 @@ fn wait_inject_script(wait: &Value) -> Option<&str> {
     wait.as_object()?.get("inject")?.as_str()
 }
 
-/// Validate copy behavior.
+/// E051 (issue #1162): a behavior value the engine refuses the file for, beyond what the older
+/// per-key codes cover.
+fn report_malformed_behavior(file: &Path, location: &str, message: &str, result: &mut LintResult) {
+    result.add_issue(
+        LintIssue::error(
+            "E051",
+            format!("{message}; the engine refuses the file"),
+            file.to_path_buf(),
+        )
+        .with_location(location),
+    );
+}
+
+/// `copy` and `lookup` take one object or an array of them; yields each item with its location.
+fn one_or_many<'a>(value: &'a Value, location: &str) -> Vec<(&'a Value, String)> {
+    match value.as_array() {
+        Some(items) => items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| (item, format!("{location}[{idx}]")))
+            .collect(),
+        None => vec![(value, location.to_string())],
+    }
+}
+
+/// What the engine's `ExtractionMethod` refuses in a `using` block: it is tagged by `method`, every
+/// method needs a string `selector`, and regex `options` flags are booleans (`null` is not absent
+/// there — they are plain `bool`s with a serde default).
+fn extraction_problem(using: &Value) -> Option<&'static str> {
+    let Some(obj) = using.as_object() else {
+        return Some("`using` must be an object");
+    };
+    let method = obj.get("method").and_then(Value::as_str);
+    if !matches!(method, Some("regex" | "jsonpath" | "xpath")) {
+        return Some("`using.method` must be \"regex\", \"jsonpath\" or \"xpath\"");
+    }
+    if !obj.get("selector").is_some_and(Value::is_string) {
+        return Some("`using.selector` must be a string");
+    }
+    if method == Some("regex")
+        && let Some(options) = obj.get("options").filter(|o| !o.is_null())
+    {
+        let flags_ok = options.as_object().is_some_and(|o| {
+            ["ignoreCase", "multiline"]
+                .iter()
+                .all(|flag| o.get(*flag).is_none_or(Value::is_boolean))
+        });
+        if !flags_ok {
+            return Some("`using.options` must be an object of boolean `ignoreCase`/`multiline`");
+        }
+    }
+    None
+}
+
+/// The engine's `CopySource`: a field name, or a map of names (`{"query": "q"}`).
+fn copy_source_is_well_formed(from: &Value) -> bool {
+    from.is_string()
+        || from
+            .as_object()
+            .is_some_and(|o| o.values().all(Value::is_string))
+}
+
+/// Validate copy behavior. E029/E030 report a missing `from`/`into`; E051 everything else the
+/// engine's `CopyBehavior` refuses (issue #1162).
 fn validate_copy_behavior(file: &Path, copy: &Value, location: &str, result: &mut LintResult) {
-    if let Some(arr) = copy.as_array() {
-        for (idx, item) in arr.iter().enumerate() {
-            if let Some(obj) = item.as_object() {
-                if obj.get("from").is_none() {
-                    result.add_issue(
-                        LintIssue::error(
-                            "E029",
-                            "Copy behavior item missing 'from' field",
-                            file.to_path_buf(),
-                        )
-                        .with_location(format!("{location}[{idx}]")),
-                    );
-                }
-                if obj.get("into").is_none() {
-                    result.add_issue(
-                        LintIssue::error(
-                            "E030",
-                            "Copy behavior item missing 'into' field",
-                            file.to_path_buf(),
-                        )
-                        .with_location(format!("{location}[{idx}]")),
-                    );
-                }
-            }
+    if !(copy.is_object() || copy.is_array()) {
+        report_malformed_behavior(
+            file,
+            location,
+            "`copy` must be an object or an array of objects",
+            result,
+        );
+        return;
+    }
+    for (item, item_location) in one_or_many(copy, location) {
+        let Some(obj) = item.as_object() else {
+            report_malformed_behavior(
+                file,
+                &item_location,
+                "Copy behavior item must be an object",
+                result,
+            );
+            continue;
+        };
+        match obj.get("from") {
+            None => result.add_issue(
+                LintIssue::error(
+                    "E029",
+                    "Copy behavior item missing 'from' field",
+                    file.to_path_buf(),
+                )
+                .with_location(item_location.clone()),
+            ),
+            Some(from) if !copy_source_is_well_formed(from) => report_malformed_behavior(
+                file,
+                &item_location,
+                "Copy `from` must be a field name or an object of names",
+                result,
+            ),
+            Some(_) => {}
+        }
+        match obj.get("into") {
+            None => result.add_issue(
+                LintIssue::error(
+                    "E030",
+                    "Copy behavior item missing 'into' field",
+                    file.to_path_buf(),
+                )
+                .with_location(item_location.clone()),
+            ),
+            Some(into) if !into.is_string() => report_malformed_behavior(
+                file,
+                &item_location,
+                "Copy `into` must be a string",
+                result,
+            ),
+            Some(_) => {}
+        }
+        let using_problem = match obj.get("using") {
+            None => Some("Copy behavior item missing 'using' field"),
+            Some(using) => extraction_problem(using),
+        };
+        if let Some(message) = using_problem {
+            report_malformed_behavior(file, &item_location, message, result);
         }
     }
 }
 
-/// Validate lookup behavior.
+/// The engine's `DataSource`: a `csv` object with string `path` and `keyColumn`, and an optional
+/// one-character `delimiter`.
+fn data_source_problem(source: &Value) -> Option<&'static str> {
+    let Some(csv) = source.get("csv").and_then(Value::as_object) else {
+        return Some("`fromDataSource` must hold a `csv` object");
+    };
+    if !csv.get("path").is_some_and(Value::is_string) {
+        return Some("`fromDataSource.csv.path` must be a string");
+    }
+    if !csv.get("keyColumn").is_some_and(Value::is_string) {
+        return Some("`fromDataSource.csv.keyColumn` must be a string");
+    }
+    if let Some(delimiter) = csv.get("delimiter")
+        && !delimiter.as_str().is_some_and(|d| d.chars().count() == 1)
+    {
+        return Some("`fromDataSource.csv.delimiter` must be a single character");
+    }
+    None
+}
+
+/// Validate lookup behavior. E031–E033 report a missing `key`/`fromDataSource`/`into`; E051
+/// everything else the engine's `LookupBehavior` refuses (issue #1162).
 fn validate_lookup_behavior(file: &Path, lookup: &Value, location: &str, result: &mut LintResult) {
-    if let Some(obj) = lookup.as_object() {
-        if obj.get("key").is_none() {
-            result.add_issue(
+    if !(lookup.is_object() || lookup.is_array()) {
+        report_malformed_behavior(
+            file,
+            location,
+            "`lookup` must be an object or an array of objects",
+            result,
+        );
+        return;
+    }
+    for (item, item_location) in one_or_many(lookup, location) {
+        let Some(obj) = item.as_object() else {
+            report_malformed_behavior(
+                file,
+                &item_location,
+                "Lookup behavior item must be an object",
+                result,
+            );
+            continue;
+        };
+        match obj.get("key") {
+            None => result.add_issue(
                 LintIssue::error(
                     "E031",
                     "Lookup behavior missing 'key' field",
                     file.to_path_buf(),
                 )
-                .with_location(location),
-            );
+                .with_location(item_location.clone()),
+            ),
+            Some(key) => {
+                let key_location = format!("{item_location}.key");
+                let problem = match key.as_object() {
+                    None => Some("Lookup `key` must be an object"),
+                    Some(k) => match (k.get("from"), k.get("using")) {
+                        (None, _) => Some("Lookup behavior key missing 'from' field"),
+                        (Some(from), _) if !copy_source_is_well_formed(from) => {
+                            Some("Lookup `key.from` must be a field name or an object of names")
+                        }
+                        (_, None) => Some("Lookup behavior key missing 'using' field"),
+                        (_, Some(using)) => extraction_problem(using),
+                    },
+                };
+                if let Some(message) = problem {
+                    report_malformed_behavior(file, &key_location, message, result);
+                }
+            }
         }
-        if obj.get("fromDataSource").is_none() {
-            result.add_issue(
+        match obj.get("fromDataSource") {
+            None => result.add_issue(
                 LintIssue::error(
                     "E032",
                     "Lookup behavior missing 'fromDataSource' field",
                     file.to_path_buf(),
                 )
-                .with_location(location),
-            );
+                .with_location(item_location.clone()),
+            ),
+            Some(source) => {
+                if let Some(message) = data_source_problem(source) {
+                    report_malformed_behavior(
+                        file,
+                        &format!("{item_location}.fromDataSource"),
+                        message,
+                        result,
+                    );
+                }
+            }
         }
-        if obj.get("into").is_none() {
-            result.add_issue(
+        match obj.get("into") {
+            None => result.add_issue(
                 LintIssue::error(
                     "E033",
                     "Lookup behavior missing 'into' field",
                     file.to_path_buf(),
                 )
-                .with_location(location),
-            );
+                .with_location(item_location.clone()),
+            ),
+            Some(into) if !into.is_string() => report_malformed_behavior(
+                file,
+                &item_location,
+                "Lookup `into` must be a string",
+                result,
+            ),
+            Some(_) => {}
         }
     }
 }

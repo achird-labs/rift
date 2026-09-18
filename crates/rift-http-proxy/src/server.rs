@@ -2059,6 +2059,39 @@ mod tests {
         assert!(skipped[0].reason.contains("invalid imposter JSON"));
     }
 
+    // Issue #1162: a behaviors block the engine cannot read is refused at parse, so at startup the
+    // file is skipped and reported like any other unparseable one (#532) — not loaded degraded.
+    #[test]
+    fn read_and_parse_datadir_skips_a_file_with_an_unparseable_behaviors_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("4501.json"),
+            r#"{"port": 4501, "protocol": "http", "stubs": []}"#,
+        )
+        .expect("write valid");
+        std::fs::write(
+            dir.path().join("4502.json"),
+            r#"{"port": 4502, "protocol": "http", "stubs": [{"responses": [
+                {"is": {"statusCode": 200}, "_behaviors": {"wait": {"min": "1", "max": "2"}}}
+            ]}]}"#,
+        )
+        .expect("write unparseable block");
+
+        let base = ScriptBaseDir::DatadirRelative(dir.path().to_path_buf());
+        let (parsed, skipped) =
+            read_and_parse_datadir(dir.path(), &base).expect("read_and_parse must not abort");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].1.port, Some(4501));
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].path.ends_with("4502.json"));
+        assert!(
+            skipped[0].reason.contains("`wait` must be"),
+            "{}",
+            skipped[0].reason
+        );
+    }
+
     #[test]
     fn read_and_parse_datadir_collects_unresolvable_script() {
         let dir = tempfile::tempdir().expect("tempdir");

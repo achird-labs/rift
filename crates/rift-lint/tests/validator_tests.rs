@@ -920,6 +920,90 @@ fn null_behavior_keys_are_absent() {
     }
 }
 
+// Issue #1162: the engine refuses a behaviors block it cannot parse, so each shape it refuses has
+// to be a lint error — otherwise a file lints clean and then fails to load.
+#[test]
+fn e035_repeat_beyond_u32_is_invalid() {
+    let behavior = json!({ "repeat": 4_294_967_296_u64 });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &behavior, "loc", &mut r, &opts());
+    assert_eq!(codes(&r), vec!["E035"]);
+    let mut r = LintResult::new();
+    validate_behavior(
+        path(),
+        &json!({ "repeat": 4_294_967_295_u64 }),
+        "loc",
+        &mut r,
+        &opts(),
+    );
+    assert!(r.issues.is_empty(), "u32::MAX is valid: {:?}", codes(&r));
+}
+
+#[test]
+fn copy_in_the_single_object_form_is_checked() {
+    let behavior =
+        json!({ "copy": { "into": "${P}", "using": { "method": "regex", "selector": ".*" } } });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &behavior, "loc", &mut r, &opts());
+    assert_eq!(codes(&r), vec!["E029"]);
+    assert_eq!(r.issues[0].location.as_deref(), Some("loc.copy"));
+}
+
+#[test]
+fn e051_copy_or_lookup_key_without_using() {
+    let copy = json!({ "copy": [{ "from": "path", "into": "${P}" }] });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &copy, "loc", &mut r, &opts());
+    assert_eq!(codes(&r), vec!["E051"]);
+    assert_eq!(r.issues[0].location.as_deref(), Some("loc.copy[0]"));
+
+    let lookup = json!({ "lookup": {
+        "key": { "from": "path" },
+        "fromDataSource": { "csv": { "path": "x.csv", "keyColumn": "id" } },
+        "into": "${R}"
+    } });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &lookup, "loc", &mut r, &opts());
+    assert_eq!(codes(&r), vec!["E051"]);
+    assert_eq!(r.issues[0].location.as_deref(), Some("loc.lookup.key"));
+}
+
+#[test]
+fn e051_decorate_or_shell_transform_of_the_wrong_type() {
+    for (behavior, location) in [
+        (json!({ "decorate": 5 }), "loc.decorate"),
+        (json!({ "decorate": ["function () {}"] }), "loc.decorate"),
+        (json!({ "shellTransform": 5 }), "loc.shellTransform"),
+        (
+            json!({ "shellTransform": ["echo a", 1] }),
+            "loc.shellTransform",
+        ),
+    ] {
+        let mut r = LintResult::new();
+        validate_behavior(path(), &behavior, "loc", &mut r, &opts());
+        assert_eq!(codes(&r), vec!["E051"], "{behavior}");
+        assert_eq!(
+            r.issues[0].location.as_deref(),
+            Some(location),
+            "{behavior}"
+        );
+    }
+}
+
+#[test]
+fn e051_not_fired_for_well_formed_behaviors() {
+    for behavior in [
+        json!({ "copy": { "from": "path", "into": "${P}", "using": { "method": "regex", "selector": ".*" } } }),
+        json!({ "shellTransform": ["echo a", "echo b"] }),
+        json!({ "shellTransform": "echo a" }),
+        json!({ "decorate": "function (r, s) {}" }),
+    ] {
+        let mut r = LintResult::new();
+        validate_behavior(path(), &behavior, "loc", &mut r, &opts());
+        assert!(r.issues.is_empty(), "{behavior}: {:?}", codes(&r));
+    }
+}
+
 #[test]
 fn w008_shell_transform_dangerous_command() {
     let behavior = json!({ "shellTransform": "rm -rf /tmp/foo" });
@@ -1265,10 +1349,12 @@ fn behaviors_array_folds_copy_lookup_and_shell_transform_too() {
     let resp = json!({
         "is": { "statusCode": 200 },
         "behaviors": [
-            { "copy": [{ "into": "a" }] },
-            { "lookup": { "key": "k", "into": "y" } },
+            { "copy": [{ "into": "a", "using": { "method": "regex", "selector": ".*" } }] },
+            { "lookup": { "key": { "from": "path", "using": { "method": "regex", "selector": ".*" } },
+                          "into": "y" } },
             { "shellTransform": "sudo reboot" },
-            { "copy": [{ "from": "body", "into": "b" }, { "into": "c" }] }
+            { "copy": [{ "from": "body", "into": "b", "using": { "method": "regex", "selector": ".*" } },
+                       { "into": "c", "using": { "method": "regex", "selector": ".*" } }] }
         ]
     });
     assert_eq!(

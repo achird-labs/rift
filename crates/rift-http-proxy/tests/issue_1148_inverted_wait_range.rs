@@ -105,7 +105,7 @@ async fn post_stubs_refuses_an_inverted_wait_range() {
 
     let response = client
         .post(format!("{base}/imposters/{port}/stubs"))
-        .json(&inverted_wait_stub())
+        .json(&json!({ "stub": inverted_wait_stub() }))
         .send()
         .await
         .expect("POST stubs");
@@ -113,6 +113,13 @@ async fn post_stubs_refuses_an_inverted_wait_range() {
         response.status(),
         400,
         "the stub door must refuse it as well as the imposter door"
+    );
+    // The route takes `{"stub": …}`; without the wrapper this 400s on the envelope, and the test
+    // passed without ever reaching the range check (found by #1162).
+    let body = response.text().await.expect("body");
+    assert!(
+        body.contains("100") && body.contains('7'),
+        "the refusal names both bounds: {body}"
     );
     running.shutdown().await;
 }

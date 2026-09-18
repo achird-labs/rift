@@ -322,6 +322,23 @@ record.
 
 ### Changed
 
+- **A behaviors block the engine cannot read now fails the config instead of being ignored**
+  (#1162). A `wait` with numeric-string bounds (`{"min": "100", "max": "200"}`), a fractional or
+  negative `wait`, `"repeat": 2.0`, a `copy` with no `using` and similar shapes used to load, and
+  the stub then served with every behavior except `repeat` missing and only a server-side log line
+  to say so. With `--allowInjection` off, a non-numeric `wait` was refused instead, but with an
+  *injection* error. Now `POST`/`PUT /imposters`, the stub endpoints, `--configfile` and
+  `POST /admin/reload` refuse the config with a `400` or a load error naming the key, on any
+  response type. At startup a `--datadir` file holding such a block is **skipped** and listed in the
+  startup error summary, as any unparseable datadir file is — so that imposter no longer comes up.
+  Only the block the engine uses is checked: a value a later `behaviors` array element overrides, or
+  a `behaviors` shadowed by `_behaviors`, still loads. Run `rift-lint` first — it reports these as
+  E025, E035 and the new **E051** (a `copy` or `lookup` value the engine cannot read: a missing or
+  malformed `using`, a `from` that is neither a field name nor a name map, a malformed
+  `fromDataSource`, a non-string `into`, a non-object item; a non-string `decorate`; a malformed
+  `shellTransform`). E035 now also flags a `repeat` above 4294967295, and the single-object `copy`
+  and array `lookup` forms are now checked.
+
 - **Keys and flags the engine accepts but ignores now say so** (#1152). They used to read back
   unchanged with nothing said anywhere, so nothing distinguished honoured from dropped.
   - `_rift.metrics`, `_rift.proxy`, `recordMatches: true`, and a `_rift` block on a `proxy`,

@@ -484,7 +484,7 @@ pub use rift_types::{Predicate, PredicateOperation, PredicateParameters, Predica
 
 /// Response within a stub - wrapper type that handles various formats
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(from = "StubResponseRaw", into = "StubResponseOut")]
+#[serde(try_from = "StubResponseRaw", into = "StubResponseOut")]
 pub enum StubResponse {
     Is {
         is: IsResponse,
@@ -544,8 +544,9 @@ impl StubResponse {
         rift: Option<RiftResponseExtension>,
     ) -> StubResponse {
         // A block that won't parse can't be cached, so it is dropped — but never silently
-        // (issue #608). Dropping it quietly meant a config using an unsupported shape started
-        // clean and served with its behaviors gone: no wait, no repeat, no signal anywhere.
+        // (issue #608). No config door reaches this since #1162: the parser refuses such a block
+        // (`refuse_unparseable_behaviors`). It stays for programmatic callers, which can pass
+        // anything.
         let behaviors_parsed = behaviors
             .as_ref()
             .and_then(|v| {
@@ -762,6 +763,42 @@ fn refuse_inverted_waits_in_block(block: &serde_json::Value) -> Result<(), Strin
     Ok(())
 }
 
+/// The block `new_is` is about to parse must parse (issue #1162). `new_is` cannot fail, so a block
+/// it could not read used to be admitted and served with every behavior but `repeat` ignored and
+/// only a log line to say so. Checked on the block the engine will use — `_behaviors`, else the
+/// merged `behaviors` array — so a value a later element overrides, or a `behaviors` shadowed by
+/// `_behaviors`, is not refused: it configures nothing, and rift-lint reads the array the same way.
+fn refuse_unparseable_behaviors(block: Option<&serde_json::Value>) -> Result<(), String> {
+    let Some(block @ serde_json::Value::Object(keys)) = block else {
+        // A non-object block never gets here: the field deserializers above refuse it.
+        return Ok(());
+    };
+    if crate::behaviors::ResponseBehaviors::deserialize(block).is_ok() {
+        return Ok(());
+    }
+    // serde's message names nothing the author wrote ("did not match any variant of untagged enum
+    // WaitBehavior"), so find the key. The behaviors are independent fields, so one key parses or
+    // fails on its own exactly as it does inside the block.
+    for (key, value) in keys {
+        let alone = serde_json::json!({ key.as_str(): value });
+        let Err(e) = crate::behaviors::ResponseBehaviors::deserialize(&alone) else {
+            continue;
+        };
+        return Err(if key == "wait" {
+            format!(
+                "`wait` must be a non-negative integer of milliseconds, a {{\"min\", \"max\"}} pair \
+                 of non-negative integers, a function string or {{\"inject\": \"function() {{ ... }}\"}}; \
+                 got {value}"
+            )
+        } else {
+            format!("`{key}` behavior is malformed: {e}")
+        });
+    }
+    // Every key parses alone, so the failure is in no single key; report the block as a whole
+    // rather than admit it.
+    Err("behaviors block is malformed".to_string())
+}
+
 fn deserialize_underscore_behaviors<'de, D>(
     deserializer: D,
 ) -> Result<Option<serde_json::Value>, D::Error>
@@ -819,15 +856,19 @@ fn unexpected_json(value: &serde_json::Value) -> serde::de::Unexpected<'_> {
     }
 }
 
-impl From<StubResponseRaw> for StubResponse {
-    fn from(raw: StubResponseRaw) -> Self {
+impl TryFrom<StubResponseRaw> for StubResponse {
+    type Error = String;
+
+    fn try_from(raw: StubResponseRaw) -> Result<Self, Self::Error> {
+        // Merge behaviors: prefer _behaviors, fall back to behaviors (array form folded to an
+        // object). Checked before the response type is chosen, so a block on a `proxy`, `inject`
+        // or `fault` response is held to the same rule rift-lint applies to every response.
+        let behaviors = raw
+            .underscore_behaviors
+            .or_else(|| raw.behaviors.and_then(normalize_behaviors));
+        refuse_unparseable_behaviors(behaviors.as_ref())?;
         // Priority: is > proxy > inject > fault > rift-script-only
-        if let Some(is_raw) = raw.is {
-            // Merge behaviors: prefer _behaviors, fall back to behaviors
-            let behaviors = raw.underscore_behaviors.or_else(|| {
-                // Convert array format to object format if needed
-                raw.behaviors.and_then(normalize_behaviors)
-            });
+        Ok(if let Some(is_raw) = raw.is {
             StubResponse::new_is(
                 IsResponse {
                     status_code: is_raw.status_code,
@@ -859,9 +900,6 @@ impl From<StubResponseRaw> for StubResponse {
         } else if raw.status_code.is_some() || raw.body.is_some() || !raw.headers.is_empty() {
             // Flat / recorded response form (issue #304): top-level statusCode/headers/body with
             // no `is` wrapper is rendered exactly like `is: { … }`. statusCode defaults to 200.
-            let behaviors = raw
-                .underscore_behaviors
-                .or_else(|| raw.behaviors.and_then(normalize_behaviors));
             StubResponse::new_is(
                 IsResponse {
                     status_code: raw.status_code.unwrap_or_else(default_status_code),
@@ -884,7 +922,7 @@ impl From<StubResponseRaw> for StubResponse {
                 None,
                 None,
             )
-        }
+        })
     }
 }
 
@@ -1895,16 +1933,22 @@ mod tests {
     }
 
     // AC 608-4 (#608): a `_behaviors` block that fails to parse is still dropped — the parse-once
-    // cache has nowhere to put it — but it must never be dropped *silently*. Before this, a config
-    // using a documented-but-unsupported shape served with its behaviors gone and no signal at all.
+    // cache has nowhere to put it — but it must never be dropped *silently*. Since #1162 no config
+    // door reaches this (the parser refuses the block), so it is driven through `new_is` directly:
+    // the programmatic path is the one that can still hand it anything.
     #[test]
     #[tracing_test::traced_test]
     fn unparseable_behaviors_are_dropped_loudly() {
-        let resp: StubResponse = serde_json::from_value(json!({
-            "is": { "statusCode": 200 },
-            "_behaviors": { "wait": { "bogus": true } }
-        }))
-        .expect("the stub itself still constructs");
+        let resp = StubResponse::new_is(
+            IsResponse {
+                status_code: 200,
+                headers: HashMap::new(),
+                body: None,
+                mode: ResponseMode::default(),
+            },
+            Some(json!({ "wait": { "bogus": true } })),
+            None,
+        );
 
         match &resp {
             StubResponse::Is {
@@ -2899,6 +2943,162 @@ mod tests {
             behaviors.as_ref().expect("behaviors").get("wait"),
             Some(&json!({ "min": 250, "max": 250 }))
         );
+    }
+
+    fn response_error(response: serde_json::Value) -> String {
+        serde_json::from_value::<StubResponse>(response.clone())
+            .expect_err(&format!("must not deserialize: {response}"))
+            .to_string()
+    }
+
+    // Issue #1162: a behaviors block the executor cannot parse used to be admitted and served with
+    // everything but `repeat` ignored. It is refused at parse now, and the refusal names the key
+    // the author wrote rather than serde's "did not match any variant of untagged enum".
+    #[test]
+    fn an_unparseable_wait_is_refused_naming_the_key() {
+        for wait in [
+            json!({ "min": "100", "max": "200" }),
+            json!(500.5),
+            json!(-1),
+            json!({ "min": 1 }),
+            json!({ "bogus": true }),
+            json!(true),
+            json!([]),
+        ] {
+            let msg = response_error(json!({
+                "is": { "statusCode": 200 },
+                "_behaviors": { "wait": wait, "repeat": 2 }
+            }));
+            assert!(msg.contains("`wait` must be"), "wait {wait}: {msg}");
+            assert!(
+                !msg.contains("untagged enum"),
+                "the message names the key, not serde's enum: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unparseable_non_wait_key_is_refused_naming_the_key() {
+        for (block, key) in [
+            (json!({ "repeat": 2.0 }), "`repeat`"),
+            (json!({ "repeat": 4_294_967_296_u64 }), "`repeat`"),
+            (
+                json!({ "copy": [{ "from": "path", "into": "${P}" }] }),
+                "`copy`",
+            ),
+            (
+                json!({ "copy": { "from": "path", "into": "${P}" } }),
+                "`copy`",
+            ),
+            (json!({ "lookup": { "into": "${R}" } }), "`lookup`"),
+            (json!({ "decorate": 5 }), "`decorate`"),
+            (json!({ "shellTransform": [1] }), "`shellTransform`"),
+        ] {
+            let msg = response_error(json!({ "is": { "statusCode": 200 }, "_behaviors": block }));
+            assert!(msg.contains(key), "{block}: {msg}");
+        }
+    }
+
+    // Every spelling that reaches `new_is` is checked: `behaviors` as an object, as an array (after
+    // the merge), and the flat response form with no `is` wrapper.
+    #[test]
+    fn an_unparseable_block_is_refused_in_every_spelling() {
+        let bad_wait = json!({ "min": "1", "max": "2" });
+        for response in [
+            json!({ "is": {}, "behaviors": { "wait": bad_wait } }),
+            json!({ "is": {}, "behaviors": [{ "repeat": 2 }, { "wait": bad_wait }] }),
+            json!({ "statusCode": 200, "_behaviors": { "wait": bad_wait } }),
+            json!({ "statusCode": 200, "behaviors": [{ "wait": bad_wait }] }),
+        ] {
+            let msg = response_error(response.clone());
+            assert!(msg.contains("`wait` must be"), "{response}: {msg}");
+        }
+    }
+
+    // The block is checked before the response type is chosen: rift-lint validates behaviors on
+    // every response, so a `proxy`/`inject`/`fault` response is held to the same rule.
+    #[test]
+    fn an_unparseable_block_is_refused_on_every_response_type() {
+        for response in [
+            json!({ "proxy": { "to": "http://localhost:1" }, "_behaviors": { "repeat": 2.0 } }),
+            json!({ "inject": "function (c) { return {}; }", "_behaviors": { "repeat": 2.0 } }),
+            json!({ "fault": "CONNECTION_RESET_BY_PEER", "behaviors": [{ "repeat": 2.0 }] }),
+        ] {
+            let msg = response_error(response.clone());
+            assert!(msg.contains("`repeat`"), "{response}: {msg}");
+        }
+    }
+
+    // The array form is merged before it is parsed (last key wins), and rift-lint validates it the
+    // same way, so a bad value a later element overrides configures nothing and must still load.
+    #[test]
+    fn an_overridden_bad_value_in_a_behaviors_array_still_loads() {
+        for later in [json!({ "wait": 50 }), json!({ "wait": null })] {
+            let response = json!({ "is": {}, "behaviors": [
+                { "wait": { "min": "1", "max": "2" }, "repeat": 2.5 },
+                later,
+                { "repeat": 3 }
+            ] });
+            let resp: StubResponse = serde_json::from_value(response.clone())
+                .unwrap_or_else(|e| panic!("{response}: {e}"));
+            let StubResponse::Is {
+                behaviors_parsed, ..
+            } = resp
+            else {
+                panic!("expected an Is response");
+            };
+            let parsed = behaviors_parsed.expect("the merged block parses");
+            assert_eq!(parsed.repeat, Some(3));
+        }
+    }
+
+    // A block the engine does not use is not what this refusal is about: `_behaviors` shadows
+    // `behaviors`, which is never parsed.
+    #[test]
+    fn a_shadowed_behaviors_block_is_not_parsed() {
+        let resp: StubResponse = serde_json::from_value(json!({
+            "is": {},
+            "_behaviors": { "wait": 10 },
+            "behaviors": { "wait": { "min": "1", "max": "2" } }
+        }))
+        .expect("the shadowed block is not the one the engine uses");
+        let StubResponse::Is {
+            behaviors_parsed, ..
+        } = resp
+        else {
+            panic!("expected an Is response");
+        };
+        assert!(matches!(
+            behaviors_parsed.expect("parsed").wait,
+            Some(crate::behaviors::WaitBehavior::Fixed(10))
+        ));
+    }
+
+    #[test]
+    fn every_valid_wait_spelling_and_null_keys_still_load() {
+        for block in [
+            json!({ "wait": 0 }),
+            json!({ "wait": { "min": 1, "max": 9 } }),
+            json!({ "wait": "function() { return 5; }" }),
+            json!({ "wait": { "inject": "function() { return 5; }" } }),
+            json!({ "wait": null, "repeat": null, "copy": null, "lookup": null,
+                    "decorate": null, "shellTransform": null }),
+            json!({ "someFutureKey": 1, "wait": 5 }),
+        ] {
+            let response = json!({ "is": { "statusCode": 200 }, "_behaviors": block });
+            let resp: StubResponse = serde_json::from_value(response.clone())
+                .unwrap_or_else(|e| panic!("{response}: {e}"));
+            assert!(
+                matches!(
+                    resp,
+                    StubResponse::Is {
+                        behaviors_parsed: Some(_),
+                        ..
+                    }
+                ),
+                "{response}"
+            );
+        }
     }
 
     #[test]

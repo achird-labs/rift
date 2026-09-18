@@ -189,6 +189,12 @@ mod tests {
             json!({"wait": "function() { return 1; }"}),
             json!({"wait": {"inject": "function() { return 1; }"}}),
             json!({"wait": true}),
+            // Moved from the handler tests when the parser began refusing these (issue #1162):
+            // the gate must still close on them without leaning on the parser.
+            json!({"wait": {"bogus": true}}),
+            json!({"wait": {"inject": 42}}),
+            json!({"wait": {"min": 1}}),
+            json!({"wait": {"min": "1", "max": "2"}}),
             json!({"decorate": "response.body = 'x';"}),
             json!({"decorate": 1}),
             json!({"shellTransform": "echo hi"}),
@@ -231,6 +237,10 @@ mod tests {
             json!({"wait": 100}),
             json!({"wait": {"min": 1, "max": 5}}),
             json!({"repeat": 2}),
+            // Malformed but script-free: the parser refuses these (issue #1162), and the gate must
+            // not misdiagnose them as injection if one ever reaches it.
+            json!({"repeat": 2.0}),
+            json!({"wait": 100.0}),
         ] {
             assert!(!raw_behaviors_are_scripted(&block), "{block}");
         }
