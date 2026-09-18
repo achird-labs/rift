@@ -160,6 +160,15 @@ pub struct WorkerSet {
     runtime_handles: Vec<tokio::runtime::Handle>,
 }
 
+/// How long a runtime's shutdown waits for its blocking tasks before leaving them behind (issue
+/// #1155).
+///
+/// tokio's `BlockingPool::drop` waits for every `spawn_blocking` task with no limit. A `decorate`
+/// script runs there, and Boa cannot be interrupted, so one that never finishes would hold an
+/// implicitly-dropped runtime — and so a graceful shutdown — for ever. Past this bound the threads are
+/// abandoned, and the process's exit ends them.
+pub const BLOCKING_DRAIN: std::time::Duration = std::time::Duration::from_millis(500);
+
 impl WorkerSet {
     /// Spawn `workers` threads. `pin` requests core affinity (RFC-712 D4; effective on Linux,
     /// advisory/no-op elsewhere — pinning failure is logged, never fatal: an unpinned worker is
@@ -240,6 +249,9 @@ impl WorkerSet {
                         );
                         std::process::abort();
                     }
+                    // Bounded, not an implicit drop: see `BLOCKING_DRAIN`. `WorkerSet::shutdown`
+                    // joins this thread, so an unbounded drain here would hang it too.
+                    runtime.shutdown_timeout(BLOCKING_DRAIN);
                 })?;
             match handle_rx.recv_timeout(std::time::Duration::from_secs(10)) {
                 Ok(rt_handle) => runtime_handles.push(rt_handle),

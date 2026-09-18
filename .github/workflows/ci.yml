@@ -447,6 +447,24 @@ jobs:
             || { echo "[fail] admin API did not answer from the static image" >&2; exit 1; }
           echo "[pass] admin API serves from scratch"
 
+      # Issue #1155: the binary installed no SIGTERM handler, and the kernel discards an unhandled
+      # SIGTERM sent to PID 1 — so `docker stop` waited out its whole timeout, SIGKILLed, and the
+      # container exited 137. PID-1 behaviour can only be proven in a real container; the scratch
+      # image has no init process, so this is the configuration where it matters most.
+      - name: docker stop is prompt and exits 0
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          docker stop rift-static
+          elapsed=$(( $(date +%s) - start ))
+          code=$(docker inspect -f '{{.State.ExitCode}}' rift-static)
+          echo "docker stop took ${elapsed}s; exit code ${code}"
+          [ "$elapsed" -lt 5 ] \
+            || { echo "[fail] docker stop took ${elapsed}s: SIGTERM ignored as PID 1?" >&2; docker logs rift-static; exit 1; }
+          [ "$code" = "0" ] \
+            || { echo "[fail] exit code ${code}, want 0 (137 means it was SIGKILLed)" >&2; docker logs rift-static; exit 1; }
+          echo "[pass] docker stop is prompt and clean"
+
       - name: Stop the container
         if: always()
         run: docker rm -f rift-static || true
