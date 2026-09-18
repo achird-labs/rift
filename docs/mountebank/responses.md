@@ -190,7 +190,7 @@ substitutes them into the response **body** and **header values** before any beh
 | `${request.path}` | Request path |
 | `${request.method}` | HTTP method |
 | `${request.body}` | Raw request body |
-| `${request.query.<name>}` | Query parameter `<name>` |
+| `${request.query.<name>}` | Query parameter `<name>`. A key repeated in the URL renders **comma-joined, in order** — `?color=red&color=green` gives `red,green` — the same value a `query` predicate matches against |
 | `${request.headers.<name>}` | Request header `<name>` (case-insensitive) |
 | `${request.pathParams.<name>}` | Path parameter `<name>` captured from the stub's `routePattern` |
 

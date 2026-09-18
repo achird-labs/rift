@@ -322,6 +322,10 @@ record.
 
 ### Changed
 
+- **`extensions::template::RequestData.query` is a `FastMap`** instead of a std `HashMap` (#1153),
+  so the shared query parser's map is used directly without a re-hash. Nothing outside the workspace
+  constructs or reads `RequestData`; this rides the same minor bump as the removal above.
+
 - **A `--datadir` file must be named `<port>.json` after the port it declares** (#1128). A file named
   anything else, `foo.json`, a copied-in `imposter-4545.json` export, or a `4545-orders.json` from
   `rift-tui`'s folder export, used to be served and then written again as `4545.json` beside the
@@ -545,17 +549,18 @@ record.
 
 ### Removed
 
-- **The dead header half of `predicate::deep_equals`** (#1048). Three public items go, all
-  unreachable: `CompiledDeepEquals::matches_headers`, and the `headers` field on both `DeepEquals`
-  and `CompiledDeepEquals`. Nothing in the repo called or constructed them — the live `deepEquals`
-  predicate is `PredicateOperation::DeepEquals`, matched by `imposter::predicates::fields` against
-  the collected header map, and `{"deepEquals": {"headers": …}}` in a user config is unaffected.
-  They are removed rather than fixed because the function decoded with `to_str().unwrap_or("")`,
-  handing any embedder that called it directly the exact blanking #1025 removed from the served
-  path: a request that sent raw bytes would have matched
-  `{"deepEquals": {"headers": {"X-Bin": ""}}}`. The query half of both types is unchanged, as is
-  `parse_query_string`. An embedder constructing `DeepEquals { headers: …, query: … }` as a struct
-  literal will need to drop that field. Public-API removal on 0.x → minor bump, same as #975.
+- **`rift_mock_core::predicate`, and its re-export `rift_http_proxy::predicate`** (#1153). The
+  module was the matcher for the Rift-native reverse-proxy rule schema; it lost every consumer when
+  #979 removed that mode and could not evaluate a request at all (`CompiledRequestPredicate` has
+  `compile()` and no `matches()`). It survived because rustc's `dead_code` lint never fires on a
+  library's public API. No consumer was found across the consumer repos, searched by every exported
+  type name. Public-API removal on 0.x is a minor bump, per the #975 / #1048 precedent. The one
+  function anything used, `parse_query_string`, now lives in `rift_mock_core::util` — the public path
+  `rift_mock_core::imposter::parse_query_string` is unchanged. This subsumes #1048, which earlier
+  in this cycle removed only the module's header half (it decoded header values with
+  `to_str().unwrap_or("")`, the blanking #1025 removed from the served path); the whole module now
+  goes, so there is no partial type to migrate to. `{"deepEquals": …}` in a config is unaffected —
+  the live predicate never used this module.
 
 - **Neither library crate silences the dead-code detector any more** (#1000). A crate-wide
   `#![allow(dead_code)]` is why #975 could leave thousands of unreachable lines for nine months
@@ -710,6 +715,14 @@ record.
     `errors[0].detail` instead.
 
 ### Fixed
+
+- **A template renders a repeated query key the way a predicate matched it** (#1153).
+  `${request.query.color}` and `{{ request.query.color }}` parsed the query with an orphaned copy of
+  the parser that kept the **last** value, while predicates, the recorded request, scripts and the
+  proxy used the live parser, which comma-joins every value in order (Mountebank's `stringify`). So
+  on `?color=red&color=green` a stub could match `color = "red,green"` and then echo `green`. There
+  is now one query parser for every surface, and a template renders `red,green`. A template reading a
+  key that appears **once** is unaffected.
 
 - **A binary `defaultResponse` that fails to decode is flagged instead of served silently** (#1151).
   `defaultResponse` with `_mode: "binary"` and a body that is not valid base64 was served as the raw
@@ -1111,7 +1124,8 @@ record.
   - This is the same rule #1041 applied to upstream *response* headers, so the two collectors no
     longer disagree: a non-ASCII header is now matched, forwarded and recorded consistently rather
     than relayed by the proxy but invisible to a predicate.
-  - The dead header half of `predicate::deep_equals` is removed with it — see **Removed** above.
+  - The dead header half of `predicate::deep_equals` was removed with it; the whole module has since
+    gone (#1153) — see **Removed** above.
 
 - **An HTTP/2 connection that went silent after the preface was pinned indefinitely** (#1044).
   #1030 bounded the protocol-detection window, and `RIFT_HTTP_HEADER_TIMEOUT` bounds an HTTP/1
