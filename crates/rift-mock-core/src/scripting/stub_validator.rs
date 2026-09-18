@@ -220,17 +220,14 @@ fn validate_inject_script(
 ) -> Option<StubValidationError> {
     #[cfg(feature = "javascript")]
     {
-        // For inject scripts, we validate by wrapping as a variable assignment
-        // This matches how the inject is executed at runtime: var __injectFn = {inject_fn};
-        use boa_engine::{Context, Source};
+        use boa_engine::{Context, Script, Source};
 
+        // Parse only, never evaluate (issue #1183): this runs inline on the admin request task, and
+        // evaluating ran user code there with no loop or time budget. The wrapper is the one
+        // `execute_mountebank_inject` runs, so what parses here is what the engine will compile.
+        let wrapper = format!("var __injectFn = {code};");
         let mut context = Context::default();
-
-        // Wrap the inject function in a variable assignment to validate it
-        // This is the same pattern used at runtime
-        let wrapper = format!("var __validateFn = {code};");
-
-        match context.eval(Source::from_bytes(wrapper.as_bytes())) {
+        match Script::parse(Source::from_bytes(wrapper.as_bytes()), None, &mut context) {
             Ok(_) => None,
             Err(e) => Some(StubValidationError {
                 stub_id: stub_id.to_string(),
@@ -284,7 +281,7 @@ mod tests {
         }
     }
 
-    /// Both callers are `javascript`-gated, so this helper is too — it is otherwise dead in a
+    /// Its callers are all `javascript`-gated, so this helper is too — it is otherwise dead in a
     /// `--no-default-features` test build (issue #1000).
     #[cfg(feature = "javascript")]
     fn make_inject_stub(code: &str) -> Stub {
@@ -370,6 +367,54 @@ mod tests {
         );
         let result = validate_stub(&stub, 0);
         assert!(!result.is_valid(), "Invalid inject syntax should fail");
+    }
+
+    // Issue #1183: validation parses, it does not run. A throw is the non-hanging stand-in for
+    // `while(true){}`: before the fix this ran at the admin door and was refused with "ran".
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn an_inject_is_not_executed_by_validation() {
+        let stub = make_inject_stub("(function(){ throw new Error('ran'); })()");
+        let result = validate_stub(&stub, 0);
+        assert!(result.is_valid(), "{:?}", result.errors);
+    }
+
+    // Issue #1183: a top-level loop used to run on the admin request task (17 s for this shape at
+    // 5M iterations); parse-only is effectively instant. Kept modest so a regression fails, not hangs.
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn a_top_level_loop_in_an_inject_does_not_run_at_validation() {
+        let stub = make_inject_stub(
+            "(function(){ for (var i = 0; i < 2000000; i++) { Math.sqrt(i); } \
+             return function (c) { return {}; }; })()",
+        );
+        let started = std::time::Instant::now();
+        let result = validate_stub(&stub, 0);
+        assert!(result.is_valid(), "{:?}", result.errors);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    // Issue #1183: what only evaluation would catch is admitted, and fails per request instead —
+    // as `42` always did.
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn a_syntactically_valid_non_function_inject_is_admitted() {
+        for code in ["undefinedIdentifier", "42"] {
+            let result = validate_stub(&make_inject_stub(code), 0);
+            assert!(result.is_valid(), "{code}: {:?}", result.errors);
+        }
+    }
+
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn a_syntax_error_in_an_inject_is_reported_as_one() {
+        let result = validate_stub(&make_inject_stub("function (config) { return 1 ]; }"), 0);
+        let message = &result.errors.first().expect("refused").message;
+        assert!(message.starts_with("Syntax error: "), "{message}");
     }
 
     #[test]

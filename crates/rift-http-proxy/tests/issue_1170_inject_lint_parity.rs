@@ -50,6 +50,11 @@ fn the_linter_reports_e028_exactly_when_the_engine_refuses_an_inject() {
         "function (config) { return {}; };",
         "function (config) { return {}; } // trailing comment",
         "function (config) {\n  return { body: `${config.request.path}` };\n}\n",
+        // accepted since #1183: the engine parses, it does not run, so what only evaluation would
+        // catch fails per request instead
+        "undefinedIdentifier",
+        "42",
+        "(function(){ throw new Error('ran'); })()",
         // refused
         "function (config) { return 1 ]; }",
         "function (config) { return { statusCode: ",
