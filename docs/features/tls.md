@@ -350,12 +350,15 @@ The anchor is **appended** to the OS store, so public origins keep working. The 
 several certificates. It is read and checked at startup, so a missing file, or one containing no
 usable certificate, stops the server there rather than failing the first proxied request.
 
-The standalone binary uses this trust for every outbound TLS connection it makes: `proxy` stub
-upstreams, `--configfile https://…`, and the intercept listener's
+This trust covers every outbound TLS connection the engine makes: `proxy` stub upstreams,
+`--configfile https://…`, and the intercept listener's
 [WebSocket passthrough]({{ site.baseurl }}/features/intercept-proxy/#websocket-passthrough).
 Embedders set the same policy on `rift_serve_admin` with `upstreamCaFile` (a path), `upstreamCaPem`
 (the PEM text; not both) and `upstreamTlsSkipVerify` — see
-[FFI]({{ site.baseurl }}/embedding/ffi/).
+[FFI]({{ site.baseurl }}/embedding/ffi/) — and since issue #1149 it reaches the intercept relay
+there too, so an embedded listener trusts exactly what an embedded `proxy` stub trusts. A listener
+builds its origin trust when it binds, so start the intercept listener **after** the
+`rift_serve_admin` that sets the trust; one already running keeps what it was born with.
 
 To check the setup end to end, proxy to an origin that only your CA vouches for:
 

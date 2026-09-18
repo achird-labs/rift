@@ -174,16 +174,30 @@ This is a *separate* credential from the admin `--api-key`, on purpose. `Proxy-A
 hop-by-hop and is consumed by the proxy; `Authorization` is end-to-end and would be forwarded to
 every intercepted origin, handing your admin key to the very servers you are intercepting.
 
-`--require-admin-auth` covers this listener too, at **every** door on the standalone binary — the
-flag, the config block, and a listener started at runtime over `POST /intercept` (which answers
-`403` rather than starting an exposed keyless one). A non-loopback bind with no credential warns by
-default and refuses under the flag. `--intercept-auth` without `--intercept-port` is a startup
-error: the credential would guard nothing, and a listener started later over `POST /intercept`
-would be open (pass `auth` in that body instead).
+`--require-admin-auth` covers this listener too, at **every** door — the flag, the config block, and
+a listener started at runtime over `POST /intercept` (which answers `403` rather than starting an
+exposed keyless one). A non-loopback bind with no credential warns by default and refuses under the
+flag. `--intercept-auth` without `--intercept-port` is a startup error: the credential would guard
+nothing, and a listener started later over `POST /intercept` would be open (pass `auth` in that body
+instead).
 
-Embedders driving `rift_start_intercept` over the C-ABI get the **warning** but not the refusal: the
-policy travels on the process's `InterceptControl`, which the standalone binary sets from the flag
-and an embedded host currently does not. Set `auth` explicitly if you bind off-host.
+**Embedded hosts get the refusal too, from `rift_serve_admin`'s `requireAdminAuth` (issue #1149).**
+The policy lives on the process's `InterceptControl` and is shared across its clones, so the C-ABI
+can state it after the control already exists. Three consequences worth knowing:
+
+- **Order matters: call `rift_serve_admin` before `rift_start_intercept`.** The policy is whatever
+  the most recent `rift_serve_admin` stated, so a listener started before the first serve is judged
+  under the default (warn).
+- **A serve is refused if an already-running listener is exposed.** If a listener came up under the
+  default and you then serve with `requireAdminAuth`, `rift_serve_admin` returns `NULL` naming the
+  listener rather than reporting a strictness it is not delivering. It does **not** stop that
+  listener — stop it yourself, or give it `auth`, and serve again.
+- **A serve that omits `requireAdminAuth` returns the policy to warn.** It is the current
+  configuration, not a high-water mark.
+
+A handle that never calls `rift_serve_admin` has no way to state the policy, and that is fine: with
+no admin plane and no config file, the only caller that can start a listener is the embedder's own
+code, which can pass `auth`.
 
 To expose the `/intercept` routes over the admin API, build the admin server
 `with_intercept(control)` where `control: InterceptControl` is the shared lifecycle slot (see

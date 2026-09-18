@@ -2969,3 +2969,209 @@ fn ffi_metrics_door_keeps_a_scoped_link_local_host() {
         rift_stop(h);
     }
 }
+
+// ─── Issue #1149: requireAdminAuth reaches the intercept listener too ────────────────────────
+//
+// `rift_start()` builds the `InterceptControl` before any options exist, so the FFI could not use
+// the binary's consuming `with_exposure_policy` builder and the listener stayed on the default
+// `Warn`. Every SDK reaches the engine through this door, so an SDK user who set `requireAdminAuth`
+// got an intercept listener that was open when they had asked for it to be closed.
+
+/// The main gap: serve with `requireAdminAuth`, then an off-host, credential-less intercept start
+/// must be refused rather than merely warned about.
+#[test]
+fn ffi_require_admin_auth_refuses_a_credential_less_off_host_intercept() {
+    unsafe {
+        let h = rift_start();
+        serve_admin(
+            h,
+            r#"{"host": "127.0.0.1", "port": 0, "apiKey": "s3cr3t", "requireAdminAuth": true}"#,
+        );
+
+        let refused = rift_start_intercept(h, cstr(r#"{"host":"0.0.0.0","port":0}"#).as_ptr());
+        assert!(
+            refused.is_null(),
+            "an exposed intercept start must be refused once requireAdminAuth is set"
+        );
+        let err = rift_last_error();
+        assert!(!err.is_null(), "the refusal must record last_error");
+        let msg = take_json(err);
+        assert!(
+            msg.contains("refused"),
+            "the refusal must say so, got: {msg}"
+        );
+
+        rift_stop(h);
+    }
+}
+
+/// The same policy, satisfied: a credential makes the off-host start legitimate. Without this the
+/// fix could be "refuse every off-host intercept", which is not what the option promises.
+#[test]
+fn ffi_require_admin_auth_accepts_an_off_host_intercept_with_a_credential() {
+    unsafe {
+        let h = rift_start();
+        serve_admin(
+            h,
+            r#"{"host": "127.0.0.1", "port": 0, "apiKey": "s3cr3t", "requireAdminAuth": true}"#,
+        );
+
+        let started = take_json(rift_start_intercept(
+            h,
+            cstr(r#"{"host":"0.0.0.0","port":0,"auth":{"username":"u","password":"p"}}"#).as_ptr(),
+        ));
+        let started: serde_json::Value =
+            serde_json::from_str(&started).expect("a credentialled off-host start must succeed");
+        assert!(started["interceptPort"].as_u64().is_some_and(|p| p > 0));
+
+        rift_stop(h);
+    }
+}
+
+/// The default must not change. Without `requireAdminAuth` an off-host start is still a warning,
+/// not a refusal — this is the regression guard for every embedder that does not set the option.
+#[test]
+fn ffi_without_require_admin_auth_an_off_host_intercept_still_starts() {
+    unsafe {
+        let h = rift_start();
+        serve_admin(h, r#"{"host": "127.0.0.1", "port": 0}"#);
+
+        let started = rift_start_intercept(h, cstr(r#"{"host":"0.0.0.0","port":0}"#).as_ptr());
+        assert!(
+            !started.is_null(),
+            "the default policy is Warn; an off-host start must still succeed"
+        );
+        take_json(started);
+
+        rift_stop(h);
+    }
+}
+
+/// Fail closed on a listener that is already up: it was judged under `Warn`, and serving anyway
+/// would leave `requireAdminAuth`'s promise false for a listener that is exposed right now. The
+/// listener is deliberately left running — `build_admin_plane` only unwinds what it started.
+#[test]
+fn ffi_serve_is_refused_when_an_already_running_intercept_is_exposed() {
+    unsafe {
+        let h = rift_start();
+        let started = take_json(rift_start_intercept(
+            h,
+            cstr(r#"{"host":"0.0.0.0","port":0}"#).as_ptr(),
+        ));
+        let started: serde_json::Value =
+            serde_json::from_str(&started).expect("an off-host start under the default Warn");
+        let intercept_port = started["interceptPort"].as_u64().expect("interceptPort");
+
+        let opts =
+            cstr(r#"{"host": "127.0.0.1", "port": 0, "apiKey": "k", "requireAdminAuth": true}"#);
+        assert!(
+            rift_serve_admin(h, opts.as_ptr()).is_null(),
+            "serving must be refused while an exposed listener is already running"
+        );
+        let msg = take_json(rift_last_error());
+        assert!(
+            msg.contains("exposed") || msg.contains("intercept"),
+            "the refusal must name the listener, got: {msg}"
+        );
+
+        // Liveness without a status symbol: the CA is readable only while a listener occupies the
+        // slot, so a non-null CA proves the refused serve left it running.
+        let ca = rift_intercept_ca_pem(h);
+        assert!(
+            !ca.is_null(),
+            "the refused serve must leave the running listener alone"
+        );
+        take_json(ca);
+        assert!(intercept_port > 0, "sanity: the listener bound a port");
+
+        rift_stop(h);
+    }
+}
+
+/// The admin-server clone. `rift_serve_admin` builds the admin plane `with_intercept(clone)`, and a
+/// `POST /intercept` goes through that clone rather than through `handle.intercept` directly — so
+/// this is the door a by-value fix applied in the wrong order would pass the other tests and still
+/// miss. It is also the one reachable by a *remote* caller on the embedded admin plane.
+#[test]
+fn ffi_embedded_admin_plane_refuses_an_exposed_intercept_post() {
+    unsafe {
+        let h = rift_start();
+        let info = serve_admin(
+            h,
+            r#"{"host": "127.0.0.1", "port": 0, "apiKey": "s3cr3t", "requireAdminAuth": true}"#,
+        );
+        let admin_port = info["adminPort"].as_u64().expect("adminPort");
+
+        rt().block_on(async move {
+            let client = reqwest::Client::new();
+            let refused = client
+                .post(format!("http://127.0.0.1:{admin_port}/intercept"))
+                .header("Authorization", "s3cr3t")
+                .json(&serde_json::json!({ "host": "0.0.0.0", "port": 0 }))
+                .send()
+                .await
+                .expect("POST /intercept");
+            assert_eq!(
+                refused.status(),
+                403,
+                "the embedded admin plane must refuse an exposed keyless start under \
+                 requireAdminAuth"
+            );
+
+            // The same call with a credential is allowed — the gate is authentication.
+            let allowed = client
+                .post(format!("http://127.0.0.1:{admin_port}/intercept"))
+                .header("Authorization", "s3cr3t")
+                .json(&serde_json::json!({
+                    "host": "0.0.0.0",
+                    "port": 0,
+                    "auth": { "username": "u", "password": "p" }
+                }))
+                .send()
+                .await
+                .expect("POST /intercept with auth");
+            assert!(
+                allowed.status().is_success(),
+                "a credentialled start must still be allowed, got {}",
+                allowed.status()
+            );
+        });
+
+        rift_stop(h);
+    }
+}
+
+/// The config-file door. The policy must be set *before* the `configFile` intercept block is
+/// started, or a block declaring an exposed keyless listener would be brought up by the very call
+/// that was asked to be strict.
+#[test]
+fn ffi_config_file_intercept_block_is_judged_under_require_admin_auth() {
+    unsafe {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("exposed-intercept.json");
+        std::fs::write(
+            &path,
+            r#"{"imposters": [], "intercept": { "host": "0.0.0.0", "port": 0 }}"#,
+        )
+        .expect("write config");
+        let path_json = serde_json::json!(path.to_str().expect("utf8 path")).to_string();
+
+        let h = rift_start();
+        let opts = cstr(&format!(
+            r#"{{"host": "127.0.0.1", "port": 0, "apiKey": "k", "requireAdminAuth": true, "configFile": {path_json}}}"#
+        ));
+        assert!(
+            rift_serve_admin(h, opts.as_ptr()).is_null(),
+            "a config-file intercept block that is exposed and keyless must refuse the serve"
+        );
+
+        // Nothing left bound: the CA is readable only while a listener occupies the slot.
+        let ca = rift_intercept_ca_pem(h);
+        assert!(
+            ca.is_null(),
+            "a refused config-file block must leave no listener behind"
+        );
+
+        rift_stop(h);
+    }
+}

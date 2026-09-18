@@ -137,6 +137,14 @@ rift_free(result);
   *authentication*, not on the address — a real `apiKey` satisfies it on any bind. Under a refusal
   `rift_serve_admin` returns `NULL` with the reason in `rift_last_error`, and nothing has been bound.
 
+  Since issue #1149 it also covers the **intercept listener**: after this call, `rift_start_intercept`
+  and a `POST /intercept` on the embedded admin plane refuse an off-host bind with no `auth` instead
+  of only warning. Call `rift_serve_admin` first — the policy is whatever the most recent serve
+  stated, and a serve that omits the key returns the handle to warn-only. If an exposed listener is
+  **already** running when you serve with `requireAdminAuth`, the serve is refused naming that
+  listener rather than reporting a strictness it cannot deliver; the listener is left running for you
+  to stop or re-start with `auth`.
+
   **Feature-detect it** — see *Detecting which options an engine accepts* below. Against an engine
   released before 0.17.0 this field is silently ignored and the keyless off-host admin plane is
   served anyway, with a normal `{"adminPort":…}` and nothing to catch.
@@ -144,6 +152,17 @@ rift_free(result);
   The default `Warn` posture writes through the `tracing` facade. `rift-ffi` installs **no**
   subscriber — correct for a library, but it means an embedding host that has not installed one of
   its own sees nothing at all. Install a `tracing` subscriber if you want the warning to be visible.
+- **`upstreamCaFile` / `upstreamCaPem`** (default `null`): an extra trust anchor for every outbound
+  TLS connection this engine makes — `proxy` stub upstreams, an `https://` `configFile`, and the
+  intercept listener's WebSocket relay. A path or the PEM text; supplying both is refused, since an
+  embedder setting both has not decided which is authoritative. Appended to the OS trust store, not
+  replacing it. Read and checked during this call, so a bad anchor fails here rather than surfacing
+  later as a per-request proxy error.
+- **`upstreamTlsSkipVerify`** (default `false`): accept any upstream certificate. Development only;
+  it logs a warning whenever a client is built with it.
+
+  The relay reads the trust when the listener **binds**, so start the intercept listener after the
+  `rift_serve_admin` that sets it.
 - **`allowInjection`** (default `false`): whether Rift admits script/`inject` imposters
   (`inject`/`decorate`/`shellTransform`/JS-function `wait`/`_rift.script`), mirroring the
   `--allowInjection` CLI flag. Leave it `false` unless you intend to permit them.

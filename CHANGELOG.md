@@ -1448,6 +1448,30 @@ record.
 
 ### Security
 
+- **`requireAdminAuth` and the outbound TLS trust now reach the C-ABI's intercept listener**
+  (#1149). `InterceptControl` carried both policies **by value**, settable only through consuming
+  builders. The standalone binary can obey that because it parses the CLI before it builds the
+  control; the C-ABI cannot — `rift_start()` builds the control and hands clones to the admin server
+  long before `rift_serve_admin` learns the options. So an embedder who set `requireAdminAuth` got
+  an intercept listener still on the default warn-only policy: `rift_start_intercept` on `0.0.0.0`
+  with no `auth` logged a warning where the binary refuses. Every SDK reaches the engine through
+  this door. The outbound trust (`upstreamCaFile` / `upstreamCaPem` / `upstreamTlsSkipVerify`) was
+  dropped the same way, so the relay could not trust a private CA the embedder had configured.
+  - Both policies are now shared state on the control, so configure-vs-clone order no longer
+    matters, and the "clone-before-configure would lose it" caveat is gone from both builders.
+  - `rift_serve_admin` sets the exposure policy on **every** call, so a serve that omits the option
+    returns the handle to warn-only — the policy is the current configuration, not a high-water mark.
+  - **Fail closed on a listener that is already up:** one started before the policy was stated was
+    judged under warn-only, so serving with `requireAdminAuth` while it is exposed now returns `NULL`
+    naming that listener, rather than reporting a strictness it is not delivering. The listener is
+    left running — a serve only unwinds listeners it started itself.
+  - Ordering: call `rift_serve_admin` before `rift_start_intercept`. The relay reads the outbound
+    trust when it binds, so a listener already running keeps the trust it was born with; that half
+    is documented rather than hot-swapped.
+  - No new serve option and no new symbol — this makes the C-ABI honour keys it already accepted and
+    already advertised in `rift_build_info().serveOptions`. `docs/features/intercept-proxy.md` had
+    recorded the gap as a known limitation since #878; it no longer exists.
+
 - **An `--rcfile` that cannot be read or applied now aborts startup** (#1114). It used to be
   skipped with a warning and the server started with none of its keys, so a mistyped
   `"requireAdminAuth": "true"` served the admin plane off-host with no authentication. A missing file,
