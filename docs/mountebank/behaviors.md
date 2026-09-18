@@ -76,6 +76,36 @@ When using array format, behaviors are merged into a single object. If the same 
 
 `_behaviors` must be an object; the array form is only accepted under `behaviors`, and each of its elements must be an object (a non-object element is skipped). Any other shape — an array or scalar `_behaviors`, or a scalar `behaviors` — is refused: `POST /imposters` returns `400` and a config file fails to load. This holds with `--allowInjection` on too.
 
+### How Rift writes behaviors back
+
+`GET /imposters/:port`, `rift save` and `--datadir` always write the array form, in the grammar
+Mountebank loads, so a saved file can be posted to Mountebank as is:
+
+```json
+{
+  "repeat": 3,
+  "behaviors": [
+    { "wait": 500 },
+    { "copy": { "from": "path", "into": "${P}", "using": { "method": "regex", "selector": ".+" } } },
+    { "shellTransform": "echo x" }
+  ],
+  "is": { "statusCode": 200, "body": "Hello ${P}" }
+}
+```
+
+- `repeat` is written on the response, never as an element — Mountebank refuses a `{"repeat": n}`
+  element. A `repeat` of `0` is not written; Rift serves it as `1`, like an absent `repeat`.
+- Elements come in execution order: `wait`, `copy`, `lookup`, `decorate`, `shellTransform`.
+- A `copy`, `lookup` or `shellTransform` holding one item is written bare, as above.
+- A `null` or empty behavior is not written.
+
+Two shapes still do not load in Mountebank: a `copy`, `lookup` or `shellTransform` holding **more
+than one** item is written as a list, which Mountebank refuses (it spells them one element each,
+which Rift does not yet read that way —
+[#1195](https://github.com/achird-labs/rift/issues/1195)); a `wait` written as a
+`{"min", "max"}` range or `{"inject": …}` object is a Rift extension; and a key that is not a
+behavior at all is kept and written back, and Mountebank refuses it as `Unrecognized behavior`.
+
 ---
 
 ## wait
@@ -494,7 +524,8 @@ Mountebank itself stores `repeat` on the response rather than in the block, and 
 
 It is held to the same rule as the block's — a value that is not a whole number within 32 bits
 refuses the imposter, and `rift-lint` reports that and a `0` as `E035` — and when both are written
-the top-level one wins, as in Mountebank. Rift returns it inside the `behaviors` array.
+the top-level one wins, as in Mountebank. Rift writes it back the same way — on the response, not
+in the `behaviors` array — see [How Rift writes behaviors back](#how-rift-writes-behaviors-back).
 
 ### Per-Response Repeat
 

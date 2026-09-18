@@ -321,8 +321,8 @@ async fn top_level_repeat_cycles_an_is_response() {
         .await
         .expect("json");
     assert_eq!(
-        fetched["stubs"][0]["responses"][0]["behaviors"],
-        json!([{"repeat": 2}]),
+        fetched["stubs"][0]["responses"][0]["repeat"],
+        json!(2),
         "{fetched}"
     );
     let _ = manager.delete_imposter(port).await;
@@ -362,8 +362,8 @@ async fn top_level_repeat_cycles_an_inject_and_a_fault_response() {
             .await
             .expect("json");
         assert_eq!(
-            fetched["stubs"][0]["responses"][0]["behaviors"],
-            json!([{"repeat": 2}]),
+            fetched["stubs"][0]["responses"][0]["repeat"],
+            json!(2),
             "{fetched}"
         );
         let _ = manager.delete_imposter(port).await;

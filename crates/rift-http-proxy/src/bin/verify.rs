@@ -1049,8 +1049,8 @@ fn check_if_dynamic(responses: &[serde_json::Value]) -> (bool, Option<String>) {
     // Behaviors whose output depends on the request or external state can't be predicted from
     // the stub alone (repeat=stateful; decorate/copy/lookup/shellTransform=dynamic body/headers).
     // A rift engine's GET /imposters emits the block it already selected and folded (issue #1103):
-    // `behaviors` as an array of single-key objects, never `_behaviors`, so scanning elements is the
-    // engine's own view. The `_behaviors` object form is still read for other admin APIs.
+    // `behaviors` as an array of single-key objects, never `_behaviors`, with `repeat` lifted to the
+    // response (#1191), so scanning elements is the engine's own view. The `_behaviors` object form is still read for other admin APIs.
     let label = |k: &str| match k {
         "repeat" => "repeat behavior (stateful)",
         "decorate" => "decorate behavior (dynamic)",
@@ -1071,6 +1071,11 @@ fn check_if_dynamic(responses: &[serde_json::Value]) -> (bool, Option<String>) {
             _ => true,
         })
     };
+    // A rift engine writes `repeat` on the response, as Mountebank does (issue #1191); the block
+    // forms below are read for older engines and other admin APIs.
+    if first.get("repeat").is_some_and(|r| !r.is_null()) {
+        return (true, Some(label("repeat").to_string()));
+    }
     if let Some(obj) = first.get("_behaviors").and_then(|v| v.as_object()) {
         for k in DYNAMIC_BEHAVIORS {
             if has(obj, k) {
@@ -2645,6 +2650,16 @@ mod verify_tests {
             check_if_dynamic(&empty_list_survives_the_round_trip),
             (false, None)
         );
+
+        // Issue #1191: an engine writes `repeat` on the response, as Mountebank does.
+        let top_level = |repeat: serde_json::Value| {
+            check_if_dynamic(&[serde_json::json!({"is": {"statusCode": 200}, "repeat": repeat})])
+        };
+        assert_eq!(
+            top_level(serde_json::json!(2)),
+            (true, Some("repeat behavior (stateful)".to_string()))
+        );
+        assert_eq!(top_level(serde_json::Value::Null), (false, None));
 
         let object_form = wire(serde_json::json!({"responses": [
             {"is": {"statusCode": 200}, "behaviors": {"repeat": 2}}
