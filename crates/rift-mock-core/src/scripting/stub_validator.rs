@@ -289,11 +289,7 @@ mod tests {
             id: Some("inject-stub".to_string()),
             route_pattern: None,
             predicates: vec![],
-            responses: vec![StubResponse::Inject {
-                inject: code.to_string(),
-                ignored_rift: None,
-                ignored_behaviors: None,
-            }],
+            responses: vec![StubResponse::new_inject(code.to_string(), None, None)],
             scenario_name: None,
             required_scenario_state: None,
             new_scenario_state: None,

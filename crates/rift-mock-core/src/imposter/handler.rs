@@ -1169,7 +1169,9 @@ async fn handle_request_inner(
         // Check if this is an inject response (JavaScript function)
         #[cfg(feature = "javascript")]
         if let Some(StubResponse::Inject {
-            inject: inject_fn, ..
+            inject: inject_fn,
+            behaviors_parsed,
+            ..
         }) = response
         {
             trace!("Handling inject response");
@@ -1204,17 +1206,49 @@ async fn handle_request_inner(
             .await
             {
                 Ok(inject_response) => {
-                    let mut response = Response::builder().status(inject_response.status_code);
+                    let mut parts = ServedParts {
+                        status: inject_response.status_code,
+                        headers: inject_response
+                            .headers
+                            .into_iter()
+                            .map(|(k, v)| (k, vec![v]))
+                            .collect(),
+                        body: inject_response.body,
+                    };
+                    // Mountebank runs a response's behaviors on the injected response too
+                    // (issue #1188). A failed inject never gets here, so it runs none of them —
+                    // as in Mountebank, which throws before executing behaviors.
+                    if let Some(parsed_behaviors) = behaviors_parsed {
+                        let run = BehaviorRun {
+                            behaviors: parsed_behaviors,
+                            method: &method,
+                            uri: &uri,
+                            request_headers: &request_headers,
+                            request_body: body_string.as_deref(),
+                            script_state_key: imposter.script_state_key(),
+                            stub: stub_ref(&imposter, stub_index, &stub_state.stub),
+                            csv_cache: csv_cache(),
+                            script_timeout,
+                            strict: strict_behaviors_for(&imposter.config),
+                        };
+                        match run.apply(parts).await {
+                            BehaviorOutcome::Applied { parts: applied, .. } => parts = applied,
+                            BehaviorOutcome::StrictFailure(response) => return Ok(response),
+                        }
+                    }
 
-                    for (k, v) in &inject_response.headers {
-                        response = response.header(k, v);
+                    let mut response = Response::builder().status(parts.status);
+                    for (k, values) in &parts.headers {
+                        for v in values {
+                            response = response.header(k, v);
+                        }
                     }
 
                     response = response.header("x-rift-imposter", "true");
                     response = response.header("x-rift-inject", "true");
 
                     return Ok(response
-                        .body(Full::new(Bytes::from(inject_response.body)))
+                        .body(Full::new(Bytes::from(parts.body)))
                         .unwrap_or_else(|e| {
                             build_failure_response(
                                 &e,

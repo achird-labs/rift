@@ -34,13 +34,15 @@ using any of them is refused unless the server was started with `--allowInjectio
 absent everywhere, including by that check.
 
 Behaviors apply to `is` responses (and the flat response form, and a response that is only a
-behaviors block). On a `proxy`, `inject`, `fault` or `_rift`-only response they are not applied —
-Mountebank does apply them to `proxy` and `inject` responses, which is tracked in
-[#1184](https://github.com/achird-labs/rift/issues/1184). Such a block is not dropped, though: it
+behaviors block) and to `inject` responses, where they run on the response the function returned —
+a function that throws runs none of them, as in Mountebank. `repeat` applies to every response
+type. The other behaviors are not applied on a `proxy`, `fault` or `_rift`-only response; Mountebank
+does apply them to `proxy` responses, which is tracked in
+[#1189](https://github.com/achird-labs/rift/issues/1189). Such a block is not dropped, though: it
 is kept and returned by `GET /imposters/:port`, `rift save` and `--datadir` (as Mountebank's
-`behaviors` array), it is reported once per response shape as `config_key_ignored` in
-`_rift.warnings` and per response by `rift-lint` `W017`, and a scripted one (`decorate`,
-`shellTransform`, a function `wait`) still needs `--allowInjection`.
+`behaviors` array), a block setting anything besides `repeat` is reported once per response shape
+as `config_key_ignored` in `_rift.warnings` and per response by `rift-lint` `W017`, and a scripted
+one (`decorate`, `shellTransform`, a function `wait`) still needs `--allowInjection`.
 
 ### Alternative Format: behaviors (without underscore)
 
@@ -479,6 +481,19 @@ The first response is returned 3 times before advancing to the second:
 - Request 4 → "Second response"
 - Requests 5-7 → "First response" (cycles back)
 - Request 8 → "Second response"
+
+`repeat` works on every response type — `is`, `inject`, `proxy`, `fault` and `_rift`-only.
+
+Mountebank itself stores `repeat` on the response rather than in the block, and that is the form
+`mb save` writes; Rift reads it too:
+
+```json
+{ "is": { "statusCode": 200, "body": "First response" }, "repeat": 3 }
+```
+
+It is held to the same rule as the block's — a value that is not a whole number within 32 bits
+refuses the imposter, and `rift-lint` reports that and a `0` as `E035` — and when both are written
+the top-level one wins, as in Mountebank. Rift returns it inside the `behaviors` array.
 
 ### Per-Response Repeat
 

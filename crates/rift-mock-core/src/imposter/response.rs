@@ -31,18 +31,14 @@ pub(crate) fn truncate_with_ellipsis(text: &str, max_len: usize) -> String {
     format!("{}...", &text[..end])
 }
 
-// Implement HasRepeatBehavior for StubResponse
+/// `repeat` applies to every response type, as in Mountebank (issue #1188). A top-level `repeat`
+/// was merged into the block at parse, so the block is the one place to read it.
 impl HasRepeatBehavior for StubResponse {
     fn get_repeat(&self) -> Option<u32> {
-        match self {
-            StubResponse::Is { behaviors, .. } => behaviors
-                .as_ref()
-                .and_then(|b| b.get("repeat"))
-                .and_then(|r| r.as_u64())
-                .map(|r| r as u32),
-            StubResponse::RiftScript { .. } => None,
-            _ => None,
-        }
+        self.behaviors_block()
+            .and_then(|b| b.get("repeat"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|r| u32::try_from(r).ok())
     }
 }
 

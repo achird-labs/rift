@@ -77,13 +77,6 @@ fn fixtures(port: u16) -> Vec<(&'static str, Value)> {
         (
             "stubs[0].responses[0]._behaviors",
             base(json!({"stubs": [{"responses": [{
-                "inject": "function (config) { return {}; }",
-                "_behaviors": {"wait": 500}
-            }]}]})),
-        ),
-        (
-            "stubs[0].responses[0]._behaviors",
-            base(json!({"stubs": [{"responses": [{
                 "fault": "CONNECTION_RESET_BY_PEER",
                 "_behaviors": {"wait": 500}
             }]}]})),
@@ -336,9 +329,8 @@ async fn many_ignored_behaviors_collapse_into_one_warning_per_shape() {
     assert_eq!(ignored[0]["stubIndex"], 1);
     assert_eq!(
         ignored[0]["message"],
-        "A behaviors block on a `proxy` response has no effect: behaviors apply to `is` \
-         responses only; Mountebank applies them, Rift does not yet (stubs 1, 2, 3, 4, 5, 6, 7, \
-         8, 9, 10 and 2 more)"
+        "A behaviors block on a `proxy` response has no effect except `repeat`: Mountebank \
+         applies the rest, Rift does not yet (stubs 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 2 more)"
     );
     let _ = manager.delete_imposter(port).await;
 }
@@ -384,8 +376,9 @@ async fn a_scripted_behavior_on_a_proxy_response_needs_allow_injection() {
     let _ = manager.delete_imposter(port).await;
 }
 
-/// Issue #1181: each shape says what is true of it — Mountebank applies behaviors on `proxy` and
-/// `inject`, ignores them on `fault`, and has no `_rift`-only response.
+/// Issue #1181: each shape says what is true of it — Mountebank applies behaviors on `proxy`,
+/// ignores them on `fault`, and has no `_rift`-only response. Since #1188 an `inject` response runs
+/// them, and `repeat` counts on all three.
 #[tokio::test]
 async fn each_ignored_behaviors_shape_has_its_own_message() {
     let (client, admin, manager) = start_admin().await;
@@ -396,7 +389,7 @@ async fn each_ignored_behaviors_shape_has_its_own_message() {
         json!({"responses": [response]})
     };
     let stubs = vec![
-        with(json!({"inject": "function (config) { return {}; }"})),
+        with(json!({"proxy": {"to": "http://127.0.0.1:1"}})),
         with(json!({"fault": "CONNECTION_RESET_BY_PEER"})),
         with(
             json!({"_rift": {"script": {"engine": "rhai", "code": "fn respond(ctx) { http(200, \"x\") }"}}}),
@@ -419,16 +412,16 @@ async fn each_ignored_behaviors_shape_has_its_own_message() {
         messages,
         vec![
             json!(
-                "A behaviors block on an `inject` response has no effect: behaviors apply to `is` \
-                 responses only; Mountebank applies them, Rift does not yet (stubs 0)"
+                "A behaviors block on a `proxy` response has no effect except `repeat`: \
+                 Mountebank applies the rest, Rift does not yet (stubs 0)"
             ),
             json!(
-                "A behaviors block on a `fault` response has no effect: behaviors apply to `is` \
-                 responses only, as in Mountebank (stubs 1)"
+                "A behaviors block on a `fault` response has no effect except `repeat`: the rest \
+                 do not apply to a fault, as in Mountebank (stubs 1)"
             ),
             json!(
-                "A behaviors block on a `_rift`-only response has no effect: behaviors apply to \
-                 `is` responses only (stubs 2)"
+                "A behaviors block on a `_rift`-only response has no effect except `repeat`: the \
+                 rest do not apply to a script response (stubs 2)"
             ),
         ]
     );

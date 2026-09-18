@@ -2,7 +2,7 @@
 //! shellTransform, applied to a response's status, headers and body.
 //!
 //! One function so every response type that carries behaviors runs the same pipeline with the
-//! same failure contract (issue #1184). Today only the `is` serve path calls it.
+//! same failure contract (issue #1184). The `is` and `inject` serve paths call it.
 
 use super::handler::SCRIPT_TIMEOUT_HEADER;
 use super::headers::StubRef;
