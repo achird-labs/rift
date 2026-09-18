@@ -588,6 +588,67 @@ fn check_state_without_flow_state(file: &Path, imposter: &Value, result: &mut Li
 }
 
 /// Validate a single stub.
+/// E025 for a `{min,max}` wait range with `min` greater than `max` (issue #1148).
+///
+/// Separate from `validate_behavior` because the engine refuses such a range **wherever it sits** —
+/// it validates every `behaviors` array element and both `_behaviors` and `behaviors`, regardless of
+/// which one it will go on to evaluate. The linter's normal path is precedence-aware and only
+/// inspects the winning value, so without this the linter would pass files the engine then refuses:
+/// an inverted range in a non-last array element, or in a `behaviors` block shadowed by
+/// `_behaviors`. A rule whose whole claim is "the engine refuses this" has to match the engine.
+fn report_inverted_wait_range(file: &Path, wait: &Value, location: &str, result: &mut LintResult) {
+    let (Some(min), Some(max)) = (
+        wait.get("min").and_then(Value::as_u64),
+        wait.get("max").and_then(Value::as_u64),
+    ) else {
+        return;
+    };
+    if min <= max {
+        return;
+    }
+    result.add_issue(
+        LintIssue::error(
+            "E025",
+            format!(
+                "Wait range has min {min} greater than max {max}; the engine refuses this imposter"
+            ),
+            file.to_path_buf(),
+        )
+        .with_location(location.to_string())
+        .with_suggestion("Set min to a value no greater than max"),
+    );
+}
+
+/// Every `wait` in a behaviors block the precedence-aware path will not reach — an object's own
+/// `wait`, or every element of the array form.
+fn report_inverted_wait_ranges_in_block(
+    file: &Path,
+    block: &Value,
+    location: &str,
+    result: &mut LintResult,
+) {
+    match block {
+        Value::Object(_) => {
+            if let Some(wait) = block.get("wait") {
+                report_inverted_wait_range(file, wait, &format!("{location}.wait"), result);
+            }
+        }
+        Value::Array(entries) => {
+            for (idx, entry) in entries.iter().enumerate() {
+                if let Some(wait) = entry.get("wait") {
+                    report_inverted_wait_range(
+                        file,
+                        wait,
+                        &format!("{location}[{idx}].wait"),
+                        result,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn validate_stub(
     file: &Path,
     stub: &Value,
@@ -597,6 +658,37 @@ pub fn validate_stub(
     registry: &Value,
 ) {
     let location = format!("stubs[{idx}]");
+
+    // `delayRange` is a second spelling of a `{min,max}` wait — the engine rewrites it into one —
+    // so an inverted entry is refused at the same door and gets the same E025 (issue #1148). The
+    // linter did not read `delayRange` at all before this. Bounds may be numbers or numeric
+    // strings, mirroring the engine's `de_u64_or_string`; every entry is checked, not just the
+    // first one the engine uses, because an inverted range is wrong wherever it sits.
+    if let Some(ranges) = stub.get("delayRange").and_then(|v| v.as_array()) {
+        for (range_idx, range) in ranges.iter().enumerate() {
+            let bound = |key: &str| {
+                range.get(key).and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                })
+            };
+            if let (Some(min), Some(max)) = (bound("min"), bound("max"))
+                && min > max
+            {
+                result.add_issue(
+                    LintIssue::error(
+                        "E025",
+                        format!(
+                            "delayRange has min {min} greater than max {max}; the engine refuses this imposter"
+                        ),
+                        file.to_path_buf(),
+                    )
+                    .with_location(format!("{location}.delayRange[{range_idx}]"))
+                    .with_suggestion("Set min to a value no greater than max"),
+                );
+            }
+        }
+    }
 
     if let Some(predicates) = stub.get("predicates").and_then(|v| v.as_array()) {
         for (pred_idx, predicate) in predicates.iter().enumerate() {
@@ -938,6 +1030,22 @@ fn validate_response_behaviors(
     options: &LintOptions,
 ) {
     let present = |key: &str| response.get(key).filter(|v| !v.is_null());
+
+    // The engine refuses an inverted wait range wherever it sits, including in a block it will
+    // never evaluate, so sweep the one the precedence arms below will not descend into (issue
+    // #1148). The winning block's own `wait` is reported by `validate_behavior`; sweeping only the
+    // shadowed one keeps each finding to a single issue.
+    if present("_behaviors").is_some()
+        && let Some(shadowed) = present("behaviors")
+    {
+        report_inverted_wait_ranges_in_block(
+            file,
+            shadowed,
+            &format!("{location}.behaviors"),
+            result,
+        );
+    }
+
     match (present("_behaviors"), present("behaviors")) {
         (Some(block @ Value::Object(_)), _) => {
             validate_behavior(
@@ -1012,6 +1120,18 @@ fn validate_response_behaviors(
                     .filter(|(key, _)| winner.get(key.as_str()) == Some(&idx))
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect();
+                // An element whose `wait` lost to a later one is never validated below, but the
+                // engine still refuses an inverted range there (issue #1148).
+                if winner.get("wait") != Some(&idx)
+                    && let Some(wait) = obj.get("wait")
+                {
+                    report_inverted_wait_range(
+                        file,
+                        wait,
+                        &format!("{location}.behaviors[{idx}].wait"),
+                        result,
+                    );
+                }
                 if !won.is_empty() {
                     validate_behavior(
                         file,
@@ -1405,7 +1525,10 @@ pub fn validate_behavior(
             // fixed millisecond delay — valid. Only a non-negative integer: the engine's `u64`
             // rejects `500.5` and `-1`, and then ignores the block's parsed behaviors.
         } else if is_valid_wait_range(wait) {
-            // {min, max} range object — valid Rift extension
+            // {min, max} range object — valid Rift extension, but an inverted one has no delay to
+            // draw from and the engine refuses the whole imposter (issue #1148). Folded into E025
+            // rather than given a new code, the treatment #1090 gave the fractional case.
+            report_inverted_wait_range(file, wait, &format!("{location}.wait"), result);
         } else if let Some(script) = wait_inject_script(wait) {
             // {inject: "function(){...}"} — the object spelling of a function wait (issue #608);
             // validate the inner script exactly as the bare-string form.
