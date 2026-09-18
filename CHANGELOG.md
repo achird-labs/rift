@@ -799,6 +799,14 @@ record.
 
 ### Fixed
 
+- **Creating an imposter or adding a stub no longer runs its `inject` script** (#1183). The admin API's check of an
+  `inject` response evaluated it, inline on the request task and with no loop or time budget, so an
+  inject written as an expression that runs at top level (`(function(){ while (true) {} })()`) hung
+  the create request for good. The check now only parses, like every other script validator and
+  like `rift-lint` E028. An inject that parses but is not a function and throws when evaluated
+  (`undefinedIdentifier`) is now accepted at creation and fails per request instead, as `42` always
+  did; genuine syntax errors are still refused with `Syntax error: …`.
+
 - **A behaviors block on a `proxy`, `inject`, `fault` or `_rift`-only response is no longer erased**
   (#1181). It was validated, then dropped: `GET /imposters/:port`, `rift save` and the `--datadir`
   file came back without it, so a restart lost config the author wrote, and nothing said the block
