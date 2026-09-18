@@ -153,3 +153,80 @@ fn the_scan_reaches_the_codes_that_live_outside_the_validator() {
         "E002 is not a validator code; if it is now, this test's premise needs revisiting"
     );
 }
+
+/// Every code handed to a `LintIssue` constructor, paired with the constructor's severity.
+///
+/// The code is the first string literal after `LintIssue::error(` / `warning(` / `info(`, which may
+/// sit on the next line (rustfmt splits long calls).
+fn constructed_codes(source: &str) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    for (kind, ctor) in [
+        ("error", "LintIssue::error("),
+        ("warning", "LintIssue::warning("),
+        ("info", "LintIssue::info("),
+    ] {
+        let mut rest = source;
+        while let Some(at) = rest.find(ctor) {
+            rest = &rest[at + ctor.len()..];
+            let arg = rest.trim_start();
+            if let Some(stripped) = arg.strip_prefix('"')
+                && let Some(end) = stripped.find('"')
+            {
+                out.push((kind, stripped[..end].to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Issue #1156: `E042` was born as `LintIssue::warning("E042", …)` — an error code with warning
+/// severity — so a consumer filtering on the `E` prefix and one filtering on severity saw different
+/// rules. It was the only mismatch. This makes the invariant structural: the letter IS the severity.
+#[test]
+fn every_code_prefix_matches_its_constructor_severity() {
+    let mut mismatched = Vec::new();
+    let mut seen = 0;
+    for (file, src) in EMITTING_SOURCES {
+        for (kind, code) in constructed_codes(src) {
+            seen += 1;
+            let want = match kind {
+                "error" => 'E',
+                "warning" => 'W',
+                _ => 'I',
+            };
+            if !code.starts_with(want) {
+                mismatched.push(format!("{file}: LintIssue::{kind}(\"{code}\")"));
+            }
+        }
+    }
+    assert!(
+        seen > 20,
+        "found only {seen} constructor calls — the scan is broken, not the code"
+    );
+    assert!(
+        mismatched.is_empty(),
+        "a code's letter must match its severity (E=error, W=warning, I=info): {mismatched:?}"
+    );
+}
+
+/// Retired numbers are never reused, so a stale reference or a revived number is caught: `E012` was
+/// never assigned, and `E042` was renumbered to `W014` (issue #1156). Neither may appear as an
+/// emitted code or as a documented rule.
+#[test]
+fn retired_codes_are_neither_emitted_nor_documented() {
+    for retired in ["E012", "E042"] {
+        let emitted: Vec<&str> = EMITTING_SOURCES
+            .iter()
+            .filter(|(_, src)| codes_in(src, 'E').contains(&retired.to_string()))
+            .map(|(file, _)| *file)
+            .collect();
+        assert!(
+            emitted.is_empty(),
+            "{retired} is retired but still emitted by {emitted:?}"
+        );
+        assert!(
+            !is_documented(retired),
+            "{retired} is retired but still has a rule row in linting.md"
+        );
+    }
+}

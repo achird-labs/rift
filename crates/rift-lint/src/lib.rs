@@ -29,12 +29,13 @@ use std::path::Path;
 
 // Re-export public types
 pub use number_fidelity::LossyNumber;
-pub use types::{LintIssue, LintOptions, LintResult, Severity};
+pub use types::{LintIssue, LintOptions, LintResult, RUN_SCOPED_CODES, Severity};
 
 // Re-export validation functions for advanced usage
 pub use validator::{
-    validate_behavior, validate_headers, validate_imposter, validate_is_response,
-    validate_predicate, validate_proxy_response, validate_response, validate_stub,
+    is_javascript_decorate, validate_behavior, validate_headers, validate_imposter,
+    validate_is_response, validate_predicate, validate_proxy_response, validate_response,
+    validate_stub,
 };
 
 /// The two document formats `rift-lint` understands (issue #1071).
@@ -55,6 +56,98 @@ fn format_of(path: &Path) -> Format {
             Format::Yaml
         }
         _ => Format::Json,
+    }
+}
+
+/// Every explicit port seen in one lint run, with the document and imposter slot that declared it
+/// (issue #1156). Feed it each document once with [`record`](Self::record), then ask for the
+/// conflicts once with [`conflicts`](Self::conflicts).
+///
+/// This is the one implementation of `E002`. It used to live only in the CLI, so every library
+/// entry point — and `lint_directory` in particular — lost the check the binary performs.
+///
+/// Only a port the engine would bind counts: an integer that fits in `u16` and is not `0`. An
+/// absent, `null` or `0` port is auto-assigned by the engine and can never conflict (#1104); an
+/// out-of-range one is `E005`'s to report and is skipped here rather than wrapped onto a real port
+/// (#1091). Every imposter slot [`imposters_in`] finds counts, not just a top-level `port` (#1094).
+#[derive(Debug, Default)]
+pub struct PortUses(std::collections::BTreeMap<u16, Vec<(std::path::PathBuf, String)>>);
+
+impl PortUses {
+    /// Record every port `document` declares, attributing each to `source`.
+    ///
+    /// Call in a stable order across documents: `E002` is reported against the first declaration.
+    pub fn record(&mut self, source: &Path, document: &serde_json::Value) {
+        for (prefix, slot) in imposters_in(document) {
+            if let Some(port) = slot
+                .get("port")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|p| u16::try_from(p).ok())
+                .filter(|p| *p != 0)
+            {
+                self.0
+                    .entry(port)
+                    .or_default()
+                    .push((source.to_path_buf(), prefix));
+            }
+        }
+    }
+
+    /// One `E002` per port declared more than once, in ascending port order, each reported against
+    /// the port's first declaration.
+    #[must_use]
+    pub fn conflicts(&self) -> Vec<LintIssue> {
+        let mut issues = Vec::new();
+        for (port, uses) in &self.0 {
+            let [(first_file, first_prefix), _, ..] = uses.as_slice() else {
+                continue;
+            };
+
+            // Group consecutive slots of the same file; `uses` is in file order, then slot order.
+            let mut by_file: Vec<(&Path, Vec<&str>)> = Vec::new();
+            for (file, prefix) in uses {
+                let slot = prefix.strip_suffix('.').unwrap_or(prefix);
+                match by_file.last_mut() {
+                    Some((last, slots)) if *last == file.as_path() => slots.push(slot),
+                    _ => by_file.push((file.as_path(), vec![slot])),
+                }
+            }
+            let named: Vec<String> = by_file
+                .iter()
+                .map(|(file, slots)| {
+                    let name = file.file_name().unwrap_or_default().to_string_lossy();
+                    let slots: Vec<&str> =
+                        slots.iter().copied().filter(|s| !s.is_empty()).collect();
+                    if slots.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{name} ({})", slots.join(", "))
+                    }
+                })
+                .collect();
+
+            issues.push(
+                LintIssue::error(
+                    "E002",
+                    format!(
+                        "Port {port} is used by {} imposters: {}",
+                        uses.len(),
+                        named.join(", ")
+                    ),
+                    first_file.clone(),
+                )
+                .with_location(format!("{first_prefix}port"))
+                .with_suggestion(match port.checked_add(1) {
+                    Some(next) => {
+                        format!(
+                            "Assign unique ports to each imposter. Consider using ports {next}+"
+                        )
+                    }
+                    None => "Assign unique ports to each imposter".to_string(),
+                }),
+            );
+        }
+        issues
     }
 }
 
@@ -181,7 +274,24 @@ pub fn parse_yaml_document(text: &str) -> Result<Document, serde_yaml::Error> {
 /// Prefer this over [`lint_value`] wherever the raw text is available: it is the only entry point
 /// that can see a byte-identical duplicate key.
 pub fn lint_document(doc: &Document, source_name: &str, options: &LintOptions) -> LintResult {
-    lint_document_at(doc, Path::new(source_name), options)
+    lint_document_at(doc, Path::new(source_name), options, None)
+}
+
+/// [`lint_document`] for a caller that lints **several** documents as one run and owns the
+/// port-conflict report (issue #1156): no `E002` is emitted here. Record each document with
+/// [`PortUses::record`] and report [`PortUses::conflicts`] once, or a port repeated inside one file
+/// is reported twice. The `rift-lint` binary does exactly this.
+pub fn lint_document_in_run(
+    doc: &Document,
+    source_name: &str,
+    options: &LintOptions,
+) -> LintResult {
+    lint_document_at(
+        doc,
+        Path::new(source_name),
+        options,
+        Some(&mut PortUses::default()),
+    )
 }
 
 /// The `&Path`-taking core of [`lint_document`].
@@ -189,7 +299,12 @@ pub fn lint_document(doc: &Document, source_name: &str, options: &LintOptions) -
 /// [`lint_file`] has a real `&Path` in hand and must not round-trip it through `to_string_lossy`:
 /// on a filesystem that allows non-UTF-8 filenames that substitutes U+FFFD, and every finding then
 /// names a path that no longer matches the file it came from.
-fn lint_document_at(doc: &Document, path: &Path, options: &LintOptions) -> LintResult {
+fn lint_document_at(
+    doc: &Document,
+    path: &Path,
+    options: &LintOptions,
+    ports: Option<&mut PortUses>,
+) -> LintResult {
     let mut result = LintResult::new();
     result.files_checked = 1;
 
@@ -260,6 +375,20 @@ fn lint_document_at(doc: &Document, path: &Path, options: &LintOptions) -> LintR
     }
 
     validate_config(path, &doc.value, &mut result, options);
+
+    // E002 (issue #1156). Who reports it depends on who owns the run: a caller linting several
+    // documents together passes its own collector and reports the conflicts once, at the end, so
+    // a within-file conflict is not reported again here.
+    match ports {
+        Some(run) => run.record(path, &doc.value),
+        None => {
+            let mut own = PortUses::default();
+            own.record(path, &doc.value);
+            for issue in own.conflicts() {
+                result.add_issue(issue);
+            }
+        }
+    }
     result
 }
 
@@ -345,6 +474,11 @@ pub fn imposters_in(value: &serde_json::Value) -> Vec<(String, &serde_json::Valu
 ///
 /// Returns a `LintResult` containing all issues found.
 pub fn lint_file(path: &Path, options: &LintOptions) -> LintResult {
+    lint_file_in(path, options, None)
+}
+
+/// [`lint_file`] with an optional run-wide port collector — see [`lint_document_at`].
+fn lint_file_in(path: &Path, options: &LintOptions, ports: Option<&mut PortUses>) -> LintResult {
     let mut result = LintResult::new();
     result.files_checked = 1;
 
@@ -362,7 +496,7 @@ pub fn lint_file(path: &Path, options: &LintOptions) -> LintResult {
 
     // Through the text path rather than parsing here, so a file gets E044 too — and with the real
     // `&Path`, so a non-UTF-8 filename still names itself exactly in every finding.
-    lint_text(&content, path, format_of(path), options)
+    lint_text(&content, path, format_of(path), options, ports)
 }
 
 /// Lint all JSON files in a directory (non-recursive).
@@ -383,20 +517,32 @@ pub fn lint_directory(path: &Path, options: &LintOptions) -> LintResult {
         }
     };
 
-    for entry in entries.flatten() {
-        let file_path = entry.path();
-        let is_imposter_file = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|ext| {
-                ext.eq_ignore_ascii_case("json")
-                    || ext.eq_ignore_ascii_case("yaml")
-                    || ext.eq_ignore_ascii_case("yml")
-            });
-        if is_imposter_file {
-            let file_result = lint_file(&file_path, options);
-            result.merge(file_result);
-        }
+    // Sorted: `read_dir` order is unspecified, and `E002` is reported against the first declaration
+    // of a port, so an unsorted walk would name a different file from run to run (issue #1156).
+    let mut files: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|file_path| {
+            file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("json")
+                        || ext.eq_ignore_ascii_case("yaml")
+                        || ext.eq_ignore_ascii_case("yml")
+                })
+        })
+        .collect();
+    files.sort();
+
+    // One collector for the whole directory, reported once: each file records into it rather than
+    // reporting its own within-file conflicts, which would then be reported a second time here.
+    let mut ports = PortUses::default();
+    for file_path in &files {
+        result.merge(lint_file_in(file_path, options, Some(&mut ports)));
+    }
+    for issue in ports.conflicts() {
+        result.add_issue(issue);
     }
 
     result
@@ -406,7 +552,7 @@ pub fn lint_directory(path: &Path, options: &LintOptions) -> LintResult {
 ///
 /// Returns a `LintResult` containing all issues found.
 pub fn lint_json(json: &str, source_name: &str, options: &LintOptions) -> LintResult {
-    lint_text(json, Path::new(source_name), Format::Json, options)
+    lint_text(json, Path::new(source_name), Format::Json, options, None)
 }
 
 /// Lint a YAML string directly (useful for in-memory validation) (issue #1071).
@@ -414,7 +560,7 @@ pub fn lint_json(json: &str, source_name: &str, options: &LintOptions) -> LintRe
 /// Returns a `LintResult` containing all issues found, including `E046` when the document's root
 /// is not the sequence-of-imposters shape the engine's YAML path requires.
 pub fn lint_yaml(yaml: &str, source_name: &str, options: &LintOptions) -> LintResult {
-    lint_text(yaml, Path::new(source_name), Format::Yaml, options)
+    lint_text(yaml, Path::new(source_name), Format::Yaml, options, None)
 }
 
 /// A document's text as the engine parses it, and what rendering it found.
@@ -491,7 +637,13 @@ pub fn render_template<'a>(
 
 /// The `&Path`-taking core of [`lint_json`] and [`lint_yaml`]; see [`lint_document_at`] for why
 /// the path stays a path.
-fn lint_text(text: &str, path: &Path, format: Format, options: &LintOptions) -> LintResult {
+fn lint_text(
+    text: &str,
+    path: &Path,
+    format: Format,
+    options: &LintOptions,
+    ports: Option<&mut PortUses>,
+) -> LintResult {
     let rendered = match render_template(text, path, options) {
         Ok(rendered) => rendered,
         Err(issue) => {
@@ -501,7 +653,7 @@ fn lint_text(text: &str, path: &Path, format: Format, options: &LintOptions) -> 
             return result;
         }
     };
-    let mut result = lint_parsed_text(&rendered.text, path, format, options);
+    let mut result = lint_parsed_text(&rendered.text, path, format, options, ports);
     if rendered.was_rendered() {
         mark_rendered_positions(&mut result);
     }
@@ -530,10 +682,16 @@ pub fn mark_rendered_positions(result: &mut LintResult) {
     }
 }
 
-fn lint_parsed_text(text: &str, path: &Path, format: Format, options: &LintOptions) -> LintResult {
+fn lint_parsed_text(
+    text: &str,
+    path: &Path,
+    format: Format,
+    options: &LintOptions,
+    ports: Option<&mut PortUses>,
+) -> LintResult {
     match format {
         Format::Json => match parse_document(text) {
-            Ok(doc) => lint_document_at(&doc, path, options),
+            Ok(doc) => lint_document_at(&doc, path, options, ports),
             Err(e) => {
                 let mut result = LintResult::new();
                 result.files_checked = 1;
@@ -550,7 +708,7 @@ fn lint_parsed_text(text: &str, path: &Path, format: Format, options: &LintOptio
             }
         },
         Format::Yaml => match parse_yaml_document(text) {
-            Ok(doc) => lint_document_at(&doc, path, options),
+            Ok(doc) => lint_document_at(&doc, path, options, ports),
             Err(e) => {
                 let mut result = LintResult::new();
                 result.files_checked = 1;
@@ -585,5 +743,10 @@ pub fn lint_value(
 
     let path = Path::new(source_name);
     validate_config(path, value, &mut result, options);
+    let mut ports = PortUses::default();
+    ports.record(path, value);
+    for issue in ports.conflicts() {
+        result.add_issue(issue);
+    }
     result
 }

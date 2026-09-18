@@ -8,11 +8,11 @@
 
 use clap::Parser;
 use rift_lint::{
-    Document, LintIssue, LintOptions, LintResult, Severity, lint_document, parse_document,
-    parse_yaml_document, render_template,
+    Document, LintIssue, LintOptions, LintResult, Severity, parse_document, parse_yaml_document,
+    render_template,
 };
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -165,9 +165,10 @@ fn main() {
     result.files_checked = files.len();
 
     // First pass: Load all files and check for port conflicts
-    // Every explicit port, with the file and imposter slot that declares it. Files arrive sorted,
-    // so the first occurrence of a port — the one E002 is reported against — is deterministic.
-    let mut port_map: BTreeMap<u16, Vec<(PathBuf, String)>> = BTreeMap::new();
+    // Every explicit port, with the file and imposter slot that declares it — the library's one
+    // collector (issue #1156). Files arrive sorted, so the first occurrence of a port — the one
+    // E002 is reported against — is deterministic.
+    let mut ports = rift_lint::PortUses::default();
     let mut imposters: Vec<(PathBuf, Document)> = Vec::new();
     // Files whose text was rendered from EJS tags: `--fix` must never write the rendering back.
     let mut templated: HashSet<PathBuf> = HashSet::new();
@@ -186,25 +187,9 @@ fn main() {
                 for issue in template_issues {
                     result.add_issue(issue);
                 }
-                // Every imposter the document holds, not just a top-level `port`: a wrapper or a
-                // bare array used to contribute nothing to the map (issue #1094).
-                for (prefix, slot) in rift_lint::imposters_in(&imposter.value) {
-                    // Only the ports E005 accepts: an unchecked `as u16` wrapped 70000 onto 4464
-                    // and reported a conflict with a file that never used that port (issue #1091).
-                    // An absent, `null` or `0` port is auto-assigned by the engine and never
-                    // conflicts (issue #1104); a `0` is still E005's to report.
-                    if let Some(port) = slot
-                        .get("port")
-                        .and_then(Value::as_u64)
-                        .and_then(|p| u16::try_from(p).ok())
-                        .filter(|p| *p != 0)
-                    {
-                        port_map
-                            .entry(port)
-                            .or_default()
-                            .push((file.clone(), prefix));
-                    }
-                }
+                // The port rules (#1091 / #1094 / #1104) live in `PortUses::record`, shared with
+                // every library entry point.
+                ports.record(file, &imposter.value);
                 imposters.push((file.clone(), imposter));
             }
             Ok(Loaded::Unparsable {
@@ -228,20 +213,24 @@ fn main() {
     }
 
     // Check for port conflicts
-    check_port_conflicts(&port_map, &mut result);
+    for issue in ports.conflicts() {
+        result.add_issue(issue);
+    }
 
     // Second pass: Validate each parsed imposter using the library
     for (file, doc) in &imposters {
         // `lint_document`, not `lint_value`: the binary is the path that used to drop the raw text
         // and with it every duplicate key in the document (issue #1069).
-        let mut file_result = lint_document(doc, &file.to_string_lossy(), &options);
+        // `_in_run`: this binary owns the port-conflict report for the whole run (above), so the
+        // per-document one would report a port repeated inside one file a second time.
+        let mut file_result =
+            rift_lint::lint_document_in_run(doc, &file.to_string_lossy(), &options);
         if templated.contains(file) {
             rift_lint::mark_rendered_positions(&mut file_result);
         }
-        // Merge without double-counting files_checked (we already counted)
-        result.issues.extend(file_result.issues);
-        result.errors += file_result.errors;
-        result.warnings += file_result.warnings;
+        // `absorb`, not `merge`: files were already counted above. It also keeps a run-scoped
+        // finding (`I004`) to one per run however many files report it.
+        result.absorb(file_result);
     }
 
     // Print results
@@ -379,59 +368,6 @@ fn parse_failure(file: &Path, error: &LoadError) -> LintIssue {
         file.to_path_buf(),
     )
     .with_suggestion(format!("Check for {format_name} syntax errors"))
-}
-
-/// One E002 per port declared by more than one imposter, inside one file or across files, in
-/// ascending port order. It is reported against the first declaration, and the message names every
-/// file with the slots it uses (`a.json (imposters[0], imposters[1]), b.json`); a single-imposter
-/// file has no slot to name.
-fn check_port_conflicts(port_map: &BTreeMap<u16, Vec<(PathBuf, String)>>, result: &mut LintResult) {
-    for (port, uses) in port_map {
-        let [(first_file, first_prefix), _, ..] = uses.as_slice() else {
-            continue;
-        };
-
-        // Group consecutive slots of the same file; `uses` is in file order, then slot order.
-        let mut by_file: Vec<(&Path, Vec<&str>)> = Vec::new();
-        for (file, prefix) in uses {
-            let slot = prefix.strip_suffix('.').unwrap_or(prefix);
-            match by_file.last_mut() {
-                Some((last, slots)) if *last == file.as_path() => slots.push(slot),
-                _ => by_file.push((file.as_path(), vec![slot])),
-            }
-        }
-        let named: Vec<String> = by_file
-            .iter()
-            .map(|(file, slots)| {
-                let name = file.file_name().unwrap_or_default().to_string_lossy();
-                let slots: Vec<&str> = slots.iter().copied().filter(|s| !s.is_empty()).collect();
-                if slots.is_empty() {
-                    name.to_string()
-                } else {
-                    format!("{name} ({})", slots.join(", "))
-                }
-            })
-            .collect();
-
-        result.add_issue(
-            LintIssue::error(
-                "E002",
-                format!(
-                    "Port {port} is used by {} imposters: {}",
-                    uses.len(),
-                    named.join(", ")
-                ),
-                first_file.clone(),
-            )
-            .with_location(format!("{first_prefix}port"))
-            .with_suggestion(match port.checked_add(1) {
-                Some(next) => {
-                    format!("Assign unique ports to each imposter. Consider using ports {next}+")
-                }
-                None => "Assign unique ports to each imposter".to_string(),
-            }),
-        );
-    }
 }
 
 fn print_results_json(result: &LintResult) {

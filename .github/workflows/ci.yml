@@ -521,6 +521,15 @@ jobs:
       - name: Run clippy (no default features)
         run: cargo clippy -p rift-mock-core -p rift-ffi --all-targets --no-default-features -- -D warnings
 
+      # rift-lint without its `javascript` feature (issue #1156). Every other rift-lint job runs
+      # `--all-features`, which is neither the shipped configuration nor this one, so the opt-out
+      # path — where JavaScript is not syntax-checked and I004 must say so — would otherwise never
+      # be compiled or tested.
+      - name: Lint and test rift-lint (without javascript)
+        run: |
+          cargo clippy -p rift-lint --all-targets --no-default-features --features cli -- -D warnings
+          cargo test -p rift-lint --no-default-features --features cli
+
   build:
     name: Build
     runs-on: ubuntu-latest

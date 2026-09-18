@@ -101,6 +101,10 @@ impl LintIssue {
     }
 }
 
+/// Codes that describe the **build or the run**, not a document, and so are reported once per run
+/// however many documents trigger them (issue #1156).
+pub const RUN_SCOPED_CODES: &[&str] = &["I004"];
+
 /// Result of linting one or more files.
 #[derive(Debug, Default, Serialize)]
 pub struct LintResult {
@@ -147,10 +151,36 @@ impl LintResult {
 
     /// Merge another result into this one.
     pub fn merge(&mut self, other: LintResult) {
-        self.issues.extend(other.issues);
         self.files_checked += other.files_checked;
+        self.absorb(other);
+    }
+
+    /// [`merge`](Self::merge) without adding `other`'s `files_checked` — for a caller that has
+    /// already counted the files itself, as the CLI does.
+    ///
+    /// A finding in [`RUN_SCOPED_CODES`] describes the build rather than a document, so it is kept
+    /// once however many documents report it: two files with JavaScript in an opt-out build are one
+    /// `I004`, not two.
+    ///
+    /// The counters are summed, not recounted from the issues: `errors`/`warnings` are public, so a
+    /// caller may have set them directly, and `merge` has always added them as given. Only a dropped
+    /// duplicate's own contribution is taken back out.
+    pub fn absorb(&mut self, other: LintResult) {
         self.errors += other.errors;
         self.warnings += other.warnings;
+        for issue in other.issues {
+            let already_reported = RUN_SCOPED_CODES.contains(&issue.code.as_str())
+                && self.issues.iter().any(|i| i.code == issue.code);
+            if already_reported {
+                match issue.severity {
+                    Severity::Error => self.errors = self.errors.saturating_sub(1),
+                    Severity::Warning => self.warnings = self.warnings.saturating_sub(1),
+                    Severity::Info => {}
+                }
+            } else {
+                self.issues.push(issue);
+            }
+        }
     }
 }
 
