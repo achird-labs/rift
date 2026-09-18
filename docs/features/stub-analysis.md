@@ -196,9 +196,10 @@ execute (see [Flow State]({{ site.baseurl }}/features/flow-state/#is-responses-o
 A key the engine parses and does not act on (issue #1152). The value reads back unchanged, so
 nothing else would distinguish "honoured" from "dropped". Reported for `_rift.metrics`,
 `_rift.proxy` and `recordMatches: true` (imposter-level, no `stubIndex`), and for a `_rift` block on
-a `proxy`, `inject` or `fault` response (with `stubIndex`). The same list is logged at `WARN` when
-the imposter loads, for doors that never see a response (`--configfile`, `--datadir`, the C-ABI),
-and `rift-lint` flags it as `W017`:
+a `proxy`, `inject` or `fault` response (one entry per shape, naming the stubs, with the first as
+`stubIndex`). The imposter-level keys and the stubs present when the imposter is created are also
+logged at `WARN` then, for doors that never see a response (`--configfile`, `--datadir`, the C-ABI);
+a stub added later is reported in `_rift.warnings` only. `rift-lint` flags the same keys as `W017`:
 
 ```json
 {

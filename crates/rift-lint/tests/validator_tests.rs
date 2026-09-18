@@ -3133,3 +3133,16 @@ fn w016_flags_a_default_engine_that_is_not_an_engine() {
         );
     }
 }
+
+/// `"is": null` is absent to the engine, so `_rift` on the `proxy` beside it is ignored there — and
+/// W014 does not fire for state on a block that never runs.
+#[test]
+fn w017_treats_null_as_absent_and_w014_skips_ignored_blocks() {
+    let v = json!({"port": 4545, "protocol": "http", "stubs": [{"responses": [
+        {"is": null, "proxy": {"to": "http://x"}, "_rift": {"stateOps": [{"op": "incr"}]}}
+    ]}]});
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    assert!(has_code(&r, "W017"), "got {:?}", codes(&r));
+    assert!(!has_code(&r, "W014"), "got {:?}", codes(&r));
+}

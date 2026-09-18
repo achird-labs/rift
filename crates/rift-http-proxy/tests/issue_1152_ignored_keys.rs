@@ -52,6 +52,20 @@ fn fixtures(port: u16) -> Vec<(&'static str, Value)> {
                 "_rift": {"templated": true}
             }]}]})),
         ),
+        (
+            "stubs[0].responses[0]._rift",
+            base(json!({"stubs": [{"responses": [{
+                "proxy": {"to": "http://127.0.0.1:1"},
+                "_rift": {"templated": true}
+            }]}]})),
+        ),
+        (
+            "stubs[0].responses[0]._rift",
+            base(json!({"stubs": [{"responses": [{
+                "fault": "CONNECTION_RESET_BY_PEER",
+                "_rift": {"templated": true}
+            }]}]})),
+        ),
     ]
 }
 
@@ -95,7 +109,8 @@ fn ignored_warnings(body: &Value) -> Vec<Value> {
 
 /// Engine and linter agree on every ignored key: each fixture draws exactly one
 /// `config_key_ignored` from the engine (on create and on GET) and exactly one W017 from the
-/// linter, at the location the fixture names. A key added to one list and not the other fails here.
+/// linter, at the location the fixture names. The fixtures are the list both are held to — a key
+/// added to either side needs a fixture here, or this test cannot see it.
 #[tokio::test]
 async fn the_engine_and_the_linter_report_the_same_ignored_keys() {
     let (client, admin, manager) = start_admin().await;
@@ -157,6 +172,31 @@ async fn an_imposter_with_no_ignored_key_gets_no_such_warning() {
         .await
         .expect("json");
     assert!(ignored_warnings(&created).is_empty(), "{created}");
+    let _ = manager.delete_imposter(port).await;
+}
+
+/// A generated imposter can put `_rift` on every response; the report stays one entry per shape,
+/// so it cannot outgrow the stub-analysis bound (#423).
+#[tokio::test]
+async fn many_ignored_blocks_collapse_into_one_warning_per_shape() {
+    let (client, admin, manager) = start_admin().await;
+    let port = free_port();
+    let stubs: Vec<Value> = (0..150)
+        .map(|_| json!({"responses": [{"proxy": {"to": "http://127.0.0.1:1"}, "_rift": {}}]}))
+        .collect();
+    let created: Value = client
+        .post(format!("{admin}/imposters"))
+        .json(&json!({"port": port, "protocol": "http", "stubs": stubs}))
+        .send()
+        .await
+        .expect("POST")
+        .json()
+        .await
+        .expect("json");
+    let ignored = ignored_warnings(&created);
+    assert_eq!(ignored.len(), 1, "{created}");
+    let message = ignored[0]["message"].as_str().expect("message");
+    assert!(message.contains("and 140 more"), "{message}");
     let _ = manager.delete_imposter(port).await;
 }
 

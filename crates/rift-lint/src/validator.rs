@@ -155,15 +155,7 @@ fn check_ignored_keys(file: &Path, imposter: &Value, result: &mut LintResult) {
             continue;
         };
         for (resp_idx, response) in responses.iter().enumerate() {
-            // Same precedence as the engine's parse: `is` wins, then proxy > inject > fault. Only
-            // the last three drop `_rift`.
-            if response.get("is").is_some() || response.get("_rift").is_none_or(Value::is_null) {
-                continue;
-            }
-            let Some(shape) = ["proxy", "inject", "fault"]
-                .into_iter()
-                .find(|shape| response.get(*shape).is_some())
-            else {
+            let Some(shape) = ignored_rift_shape(response) else {
                 continue;
             };
             ignored(
@@ -176,6 +168,19 @@ fn check_ignored_keys(file: &Path, imposter: &Value, result: &mut LintResult) {
             );
         }
     }
+}
+
+/// The shape of a response whose `_rift` block the engine keeps but never applies: `proxy`,
+/// `inject` or `fault`, in the engine's parse precedence (`is` first, then those three in order).
+/// A `null` value is absent, as serde reads it.
+fn ignored_rift_shape(response: &Value) -> Option<&'static str> {
+    let present = |key: &str| response.get(key).is_some_and(|v| !v.is_null());
+    if present("is") || !present("_rift") {
+        return None;
+    }
+    ["proxy", "inject", "fault"]
+        .into_iter()
+        .find(|shape| present(shape))
 }
 
 /// I005 (issue #1152): carrier fields. The engine keeps and returns them, by design, and does not
@@ -814,6 +819,10 @@ fn check_state_without_flow_state(file: &Path, imposter: &Value, result: &mut Li
             let Some(rift) = response.get("_rift") else {
                 continue;
             };
+            // A `_rift` block that never runs cannot provision state; W017 reports it instead.
+            if ignored_rift_shape(response).is_some() {
+                continue;
+            }
 
             if let Some(script) = rift.get("script")
                 && let Some(code) = resolve_script_text(file, script, &registry)

@@ -326,11 +326,13 @@ record.
   unchanged with nothing said anywhere, so nothing distinguished honoured from dropped.
   - `_rift.metrics`, `_rift.proxy`, `recordMatches: true`, and a `_rift` block on a `proxy`,
     `inject` or `fault` response each add a `config_key_ignored` entry to the imposter's
-    `_rift.warnings`, which is returned on create and GET. The same list is logged at `WARN` when
-    the imposter loads, for `--configfile`, `--datadir` and C-ABI users. That log line replaces
-    #999's metrics-only one. The keys are kept, not refused, because the SDKs emit them. A `_rift`
-    block on those three response shapes now round-trips through `GET /imposters` instead of
-    vanishing at parse.
+    `_rift.warnings`, which is returned on create and GET. Stub-level entries collapse to one per
+    shape, so they stay within the stub-analysis bound. The keys present at creation are logged
+    once at `WARN`, for `--configfile`, `--datadir` and C-ABI users; that line replaces #999's
+    metrics-only one. The keys are kept, not refused, because the SDKs emit them. A `_rift` block
+    on those three response shapes now round-trips through `GET /imposters` instead of vanishing
+    at parse. **Library API:** `StubResponse::Proxy`, `Inject` and `Fault` gain an `ignored_rift`
+    field, so a pattern that names every field needs a `..`.
   - `--origin` and `--mock` log a warning at startup, as `--ip-whitelist` already did. Their help
     text said "CORS allowed origin" and "run in mock mode", and neither flag has ever done either.
   - `intercept.returnCaKey: true` in a config file is now refused, naming the key. The generated

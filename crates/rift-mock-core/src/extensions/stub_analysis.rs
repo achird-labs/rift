@@ -76,6 +76,25 @@ pub enum WarningType {
     ConfigKeyIgnored,
 }
 
+/// The shape of a response that carries a `_rift` block no feature applies to.
+fn ignored_rift_shape(response: &StubResponse) -> Option<&'static str> {
+    match response {
+        StubResponse::Proxy {
+            ignored_rift: Some(_),
+            ..
+        } => Some("proxy"),
+        StubResponse::Inject {
+            ignored_rift: Some(_),
+            ..
+        } => Some("inject"),
+        StubResponse::Fault {
+            ignored_rift: Some(_),
+            ..
+        } => Some("fault"),
+        _ => None,
+    }
+}
+
 /// Every key in `config` that this engine parses and does not act on — the single list behind the
 /// load-time log line, the `_rift.warnings` entries and the docs (issue #1152). `stubs` are the
 /// imposter's current stubs, which a stub mutation may have changed since `config` was built.
@@ -110,34 +129,42 @@ pub fn ignored_config_keys(config: &ImposterConfig, stubs: &[Stub]) -> Vec<StubW
              `recordRequests` and GET /imposters/:port to see the requests",
         ));
     }
-    for (index, stub) in stubs.iter().enumerate() {
-        for response in &stub.responses {
-            let shape = match response {
-                StubResponse::Proxy {
-                    ignored_rift: Some(_),
-                    ..
-                } => "proxy",
-                StubResponse::Inject {
-                    ignored_rift: Some(_),
-                    ..
-                } => "inject",
-                StubResponse::Fault {
-                    ignored_rift: Some(_),
-                    ..
-                } => "fault",
-                _ => continue,
-            };
-            warnings.push(StubWarning {
-                warning_type: WarningType::ConfigKeyIgnored,
-                message: format!(
-                    "`_rift` on a `{shape}` response has no effect: no `_rift` feature applies to \
-                     a `{shape}` response"
-                ),
-                stub_index: Some(index),
-                stub_id: stub.id.clone(),
-                shadowed_by_index: None,
-            });
+    // One entry per shape, however many stubs carry it: a generated imposter can put `_rift` on
+    // every response, and one entry per response would undo the MAX_STUB_WARNINGS bound (#423).
+    for shape in ["proxy", "inject", "fault"] {
+        let indices: Vec<usize> = stubs
+            .iter()
+            .enumerate()
+            .filter(|(_, stub)| {
+                stub.responses
+                    .iter()
+                    .any(|response| ignored_rift_shape(response) == Some(shape))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let Some(&first) = indices.first() else {
+            continue;
+        };
+        const LISTED: usize = 10;
+        let mut listed = indices
+            .iter()
+            .take(LISTED)
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if indices.len() > LISTED {
+            listed.push_str(&format!(" and {} more", indices.len() - LISTED));
         }
+        warnings.push(StubWarning {
+            warning_type: WarningType::ConfigKeyIgnored,
+            message: format!(
+                "`_rift` on a `{shape}` response has no effect: no `_rift` feature applies to a \
+                 `{shape}` response (stubs {listed})"
+            ),
+            stub_index: Some(first),
+            stub_id: stubs[first].id.clone(),
+            shadowed_by_index: None,
+        });
     }
     warnings
 }
