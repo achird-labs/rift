@@ -374,6 +374,31 @@ fn lint_document_at(
         );
     }
 
+    // E050 (issue #1152). The engine refuses this block at the same door: a config file has no
+    // response to return a generated CA key in.
+    if doc
+        .value
+        .get("imposters")
+        .and(doc.value.get("intercept"))
+        .and_then(|block| block.get("returnCaKey"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        result.add_issue(
+            LintIssue::error(
+                "E050",
+                "intercept.returnCaKey cannot be honoured from a config file: there is no response \
+                 to return the generated CA key in, so the engine refuses the file",
+                path.to_path_buf(),
+            )
+            .with_location("intercept.returnCaKey")
+            .with_suggestion(
+                "Start the listener with POST /intercept to receive a generated CA key, or supply \
+                 caCertPath/caKeyPath",
+            ),
+        );
+    }
+
     validate_config(path, &doc.value, &mut result, options);
 
     // E002 (issue #1156). Who reports it depends on who owns the run: a caller linting several

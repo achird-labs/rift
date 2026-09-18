@@ -1,0 +1,218 @@
+//! Issue #1152: keys and flags the engine parsed and then ignored, with nothing said at any level.
+//! The value read back unchanged, so nothing distinguished "honoured" from "dropped".
+//!
+//! Imposter keys are now reported where the author sees them — `_rift.warnings` on create and GET,
+//! plus a load-time log line for the doors with no response — and `rift-lint` flags the same keys.
+//! The engine's list and the linter's are kept together by the sync test below, because the linter
+//! works on raw JSON and cannot call the engine.
+
+mod support;
+
+use std::net::TcpListener;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use rift_http_proxy::admin_api::AdminApiServer;
+use rift_http_proxy::imposter::ImposterManager;
+use serde_json::{Value, json};
+
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("bind")
+        .local_addr()
+        .expect("addr")
+        .port()
+}
+
+/// One fixture per ignored key, each with the location the linter reports it at.
+fn fixtures(port: u16) -> Vec<(&'static str, Value)> {
+    let base = |extra: Value| {
+        let mut imposter = json!({"port": port, "protocol": "http", "stubs": [
+            {"responses": [{"is": {"statusCode": 200}}]}
+        ]});
+        for (k, v) in extra.as_object().expect("object") {
+            imposter[k] = v.clone();
+        }
+        imposter
+    };
+    vec![
+        (
+            "_rift.metrics",
+            base(json!({"_rift": {"metrics": {"enabled": true}}})),
+        ),
+        (
+            "_rift.proxy",
+            base(json!({"_rift": {"proxy": {"upstream": {"host": "x", "port": 1}}}})),
+        ),
+        ("recordMatches", base(json!({"recordMatches": true}))),
+        (
+            "stubs[0].responses[0]._rift",
+            base(json!({"stubs": [{"responses": [{
+                "inject": "function (config) { return {}; }",
+                "_rift": {"templated": true}
+            }]}]})),
+        ),
+    ]
+}
+
+async fn start_admin() -> (reqwest::Client, String, Arc<ImposterManager>) {
+    let manager = Arc::new(ImposterManager::new());
+    let admin_port = free_port();
+    let server = AdminApiServer::new(
+        format!("127.0.0.1:{admin_port}").parse().expect("addr"),
+        manager.clone(),
+        None,
+    )
+    .with_allow_injection(true);
+    tokio::spawn(server.run());
+    let admin = format!("http://127.0.0.1:{admin_port}");
+    let client = reqwest::Client::new();
+    for _ in 0..100 {
+        if client
+            .get(format!("{admin}/imposters"))
+            .send()
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    (client, admin, manager)
+}
+
+fn ignored_warnings(body: &Value) -> Vec<Value> {
+    body["_rift"]["warnings"]
+        .as_array()
+        .map(|w| {
+            w.iter()
+                .filter(|w| w["warningType"] == "config_key_ignored")
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Engine and linter agree on every ignored key: each fixture draws exactly one
+/// `config_key_ignored` from the engine (on create and on GET) and exactly one W017 from the
+/// linter, at the location the fixture names. A key added to one list and not the other fails here.
+#[tokio::test]
+async fn the_engine_and_the_linter_report_the_same_ignored_keys() {
+    let (client, admin, manager) = start_admin().await;
+    for (location, imposter) in fixtures(free_port()) {
+        let port = imposter["port"].as_u64().expect("port");
+        let created = client
+            .post(format!("{admin}/imposters"))
+            .json(&imposter)
+            .send()
+            .await
+            .expect("POST");
+        assert_eq!(created.status().as_u16(), 201, "{location}");
+        let created: Value = created.json().await.expect("json");
+        let from_create = ignored_warnings(&created);
+        assert_eq!(from_create.len(), 1, "{location}: {created}");
+        let message = from_create[0]["message"].as_str().expect("message");
+        let key = location.rsplit('.').next().expect("key");
+        assert!(message.contains(key), "{location}: {message}");
+        if location.starts_with("stubs[0]") {
+            assert_eq!(from_create[0]["stubIndex"], 0, "{location}");
+        }
+
+        let fetched: Value = client
+            .get(format!("{admin}/imposters/{port}"))
+            .send()
+            .await
+            .expect("GET")
+            .json()
+            .await
+            .expect("json");
+        assert_eq!(ignored_warnings(&fetched), from_create, "{location}");
+        let _ = manager.delete_imposter(port as u16).await;
+
+        let lint = rift_lint::lint_json(
+            &imposter.to_string(),
+            "fixture.json",
+            &rift_lint::LintOptions::default(),
+        );
+        let w017: Vec<_> = lint.issues.iter().filter(|i| i.code == "W017").collect();
+        assert_eq!(w017.len(), 1, "{location}: {:?}", lint.issues);
+        assert_eq!(w017[0].location.as_deref(), Some(location));
+    }
+}
+
+#[tokio::test]
+async fn an_imposter_with_no_ignored_key_gets_no_such_warning() {
+    let (client, admin, manager) = start_admin().await;
+    let port = free_port();
+    let created: Value = client
+        .post(format!("{admin}/imposters"))
+        .json(
+            &json!({"port": port, "protocol": "http", "recordMatches": false,
+            "stubs": [{"responses": [{"is": {"statusCode": 200}}]}]}),
+        )
+        .send()
+        .await
+        .expect("POST")
+        .json()
+        .await
+        .expect("json");
+    assert!(ignored_warnings(&created).is_empty(), "{created}");
+    let _ = manager.delete_imposter(port).await;
+}
+
+/// The doors that never see an API response — `--configfile` here — still get a log line, from
+/// the same list; and the two Mountebank flags that do nothing now say so at startup.
+#[test]
+fn the_binary_logs_ignored_keys_and_flags() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = dir.path().join("imposters.json");
+    let imposter_port = free_port();
+    std::fs::write(
+        &config,
+        json!({"imposters": [{"port": imposter_port, "protocol": "http",
+            "_rift": {"metrics": {"enabled": true}}, "stubs": []}]})
+        .to_string(),
+    )
+    .expect("write");
+    let log = dir.path().join("rift.log");
+    let admin_port = free_port();
+    let mut child = std::process::Command::new(support::server_bin())
+        .args([
+            "--port",
+            &admin_port.to_string(),
+            "--host",
+            "127.0.0.1",
+            "--metrics-port",
+            "0",
+            "--configfile",
+            config.to_str().expect("utf8"),
+            "--log",
+            log.to_str().expect("utf8"),
+            "--origin",
+            "http://example.test",
+            "--mock",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let wanted = [
+        "`_rift.metrics` has no effect",
+        "--origin is accepted",
+        "--mock is accepted",
+    ];
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut text = String::new();
+    while Instant::now() < deadline {
+        text = std::fs::read_to_string(&log).unwrap_or_default();
+        if wanted.iter().all(|w| text.contains(w)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    for w in wanted {
+        assert!(text.contains(w), "missing {w:?} in: {text}");
+    }
+}

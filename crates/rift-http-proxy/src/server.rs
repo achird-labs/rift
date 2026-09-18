@@ -127,11 +127,11 @@ pub struct Cli {
     #[arg(long, value_name = "FILE", global = true)]
     pub pidfile: Option<PathBuf>,
 
-    /// CORS allowed origin
+    /// Accepted for Mountebank compatibility; NOT implemented — the admin API sends no CORS headers
     #[arg(long)]
     pub origin: Option<String>,
 
-    /// Run in mock mode (all imposters are mocks)
+    /// Accepted for Mountebank compatibility; no effect — set `recordRequests: true` per imposter
     #[arg(long)]
     pub mock: bool,
 
@@ -764,6 +764,22 @@ impl ServerBuilder {
                 "--ip-whitelist is accepted for Mountebank compatibility but is NOT enforced; no \
                  IP filtering is applied. Use a network policy/firewall, or --local-only, \
                  --api-key and --require-admin-auth to restrict access."
+            );
+        }
+        // Issue #1152: the same silence, two flags over. Mountebank's `--origin` sets the admin
+        // API's CORS origin; Rift's admin API sends no CORS headers at all.
+        if cli.origin.is_some() {
+            warn!(
+                "--origin is accepted for Mountebank compatibility but is NOT implemented; the \
+                 admin API sends no CORS headers. Put a proxy that adds them in front of it if a \
+                 browser must call it."
+            );
+        }
+        // Mountebank deprecated `--mock` in favour of the per-imposter key Rift already honours.
+        if cli.mock {
+            warn!(
+                "--mock is accepted for Mountebank compatibility but has no effect; set \
+                 `recordRequests: true` on each imposter to record its requests."
             );
         }
 

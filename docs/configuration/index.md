@@ -45,7 +45,7 @@ docker run -v $(pwd)/imposters.json:/imposters.json \
 | Key | Purpose |
 |---|---|
 | `imposters` | The imposters to create — the Mountebank format above. |
-| `intercept` | *Optional, Rift extension.* Declares the [HTTPS intercept listener]({{ site.baseurl }}/features/intercept-proxy/#declare-it-in-the-config-file) and its rules, so a container needs no post-boot admin call to install them. Its keys are `host`, `port`, the CA pair (`caCertPath`/`caKeyPath` **or** `caCertPem`/`caKeyPem`), `returnCaKey`, `rules`, and `auth`; any other key is a startup error. |
+| `intercept` | *Optional, Rift extension.* Declares the [HTTPS intercept listener]({{ site.baseurl }}/features/intercept-proxy/#declare-it-in-the-config-file) and its rules, so a container needs no post-boot admin call to install them. Its keys are `host`, `port`, the CA pair (`caCertPath`/`caKeyPath` **or** `caCertPem`/`caKeyPem`), `rules`, and `auth`; any other key is a startup error. `returnCaKey: true` is refused too: a config file has no response to return a generated key in, so use `POST /intercept` for that. |
 | `routes` | *Optional, Rift extension.* The [front door]({{ site.baseurl }}/features/front-door/) route table, as `{"routes": [ ... ]}`. Validated at load, so a table that cannot route is a startup error. It only takes effect with `--front-door`. |
 
 `intercept.auth` (issue #878) is `{"username": "…", "password": "…"}` and requires

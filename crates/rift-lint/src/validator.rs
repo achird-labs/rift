@@ -114,6 +114,94 @@ fn disclose_unchecked_javascript(file: &Path, result: &mut LintResult) {
 #[cfg(feature = "javascript")]
 fn disclose_unchecked_javascript(_file: &Path, _result: &mut LintResult) {}
 
+/// W017 (issue #1152): keys the engine parses and does not act on. Mirrors the engine's
+/// `ignored_config_keys`; `crates/rift-http-proxy/tests/issue_1152_ignored_keys.rs` holds the two
+/// lists together, since rift-lint cannot depend on the engine.
+fn check_ignored_keys(file: &Path, imposter: &Value, result: &mut LintResult) {
+    let ignored = |result: &mut LintResult, location: String, message: String| {
+        result.add_issue(
+            LintIssue::warning("W017", message, file.to_path_buf())
+                .with_location(location)
+                .with_suggestion("Remove the key; the engine reports it in `_rift.warnings` too"),
+        );
+    };
+    let rift = imposter.get("_rift");
+    for (key, instead) in [
+        ("metrics", "metrics are process-wide, on --metrics-port"),
+        ("proxy", "a proxy response's upstream is its own `proxy.to`"),
+    ] {
+        if rift.and_then(|r| r.get(key)).is_some_and(|v| !v.is_null()) {
+            ignored(
+                result,
+                format!("_rift.{key}"),
+                format!("`_rift.{key}` is parsed but has no effect: {instead}"),
+            );
+        }
+    }
+    if imposter.get("recordMatches").and_then(Value::as_bool) == Some(true) {
+        ignored(
+            result,
+            "recordMatches".to_owned(),
+            "`recordMatches` is parsed but has no effect: per-stub `matches` are not recorded; \
+             use `recordRequests`"
+                .to_owned(),
+        );
+    }
+    let Some(stubs) = imposter.get("stubs").and_then(Value::as_array) else {
+        return;
+    };
+    for (stub_idx, stub) in stubs.iter().enumerate() {
+        let Some(responses) = stub.get("responses").and_then(Value::as_array) else {
+            continue;
+        };
+        for (resp_idx, response) in responses.iter().enumerate() {
+            // Same precedence as the engine's parse: `is` wins, then proxy > inject > fault. Only
+            // the last three drop `_rift`.
+            if response.get("is").is_some() || response.get("_rift").is_none_or(Value::is_null) {
+                continue;
+            }
+            let Some(shape) = ["proxy", "inject", "fault"]
+                .into_iter()
+                .find(|shape| response.get(*shape).is_some())
+            else {
+                continue;
+            };
+            ignored(
+                result,
+                format!("stubs[{stub_idx}].responses[{resp_idx}]._rift"),
+                format!(
+                    "`_rift` on a `{shape}` response is parsed but has no effect: no `_rift` \
+                     feature applies to a `{shape}` response"
+                ),
+            );
+        }
+    }
+}
+
+/// I005 (issue #1152): carrier fields. The engine keeps and returns them, by design, and does not
+/// read them — an embedder's own extension reads them. Said so a file does not look configured.
+fn disclose_carrier_fields(file: &Path, imposter: &Value, result: &mut LintResult) {
+    let Some(rift) = imposter.get("_rift") else {
+        return;
+    };
+    for key in ["dataset", "sequencing"] {
+        if rift.get(key).is_some_and(|v| !v.is_null()) {
+            result.add_issue(
+                LintIssue::info(
+                    "I005",
+                    format!(
+                        "`_rift.{key}` is a carrier field: it round-trips through the admin API \
+                         for an embedder's extension to read, and the standalone engine does not \
+                         read it"
+                    ),
+                    file.to_path_buf(),
+                )
+                .with_location(format!("_rift.{key}")),
+            );
+        }
+    }
+}
+
 /// Validate a complete imposter configuration.
 pub fn validate_imposter(
     file: &Path,
@@ -125,6 +213,8 @@ pub fn validate_imposter(
     check_protocol(file, imposter, result);
     check_port_range(file, imposter, result);
     check_state_without_flow_state(file, imposter, result);
+    check_ignored_keys(file, imposter, result);
+    disclose_carrier_fields(file, imposter, result);
 
     // Named script registry (`_rift.scripts`, issue #356): validated once up front (each entry
     // must be a `code:`/`file:` leaf, not a `ref:`), then handed to every response so a

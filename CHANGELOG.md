@@ -322,6 +322,23 @@ record.
 
 ### Changed
 
+- **Keys and flags the engine accepts but ignores now say so** (#1152). They used to read back
+  unchanged with nothing said anywhere, so nothing distinguished honoured from dropped.
+  - `_rift.metrics`, `_rift.proxy`, `recordMatches: true`, and a `_rift` block on a `proxy`,
+    `inject` or `fault` response each add a `config_key_ignored` entry to the imposter's
+    `_rift.warnings`, which is returned on create and GET. The same list is logged at `WARN` when
+    the imposter loads, for `--configfile`, `--datadir` and C-ABI users. That log line replaces
+    #999's metrics-only one. The keys are kept, not refused, because the SDKs emit them. A `_rift`
+    block on those three response shapes now round-trips through `GET /imposters` instead of
+    vanishing at parse.
+  - `--origin` and `--mock` log a warning at startup, as `--ip-whitelist` already did. Their help
+    text said "CORS allowed origin" and "run in mock mode", and neither flag has ever done either.
+  - `intercept.returnCaKey: true` in a config file is now refused, naming the key. The generated
+    CA key was minted with no response to return it in, and dropped. `false` or absent still loads.
+  - `rift-lint`: **`W017`** for the ignored keys (a test keeps it in step with the engine's list),
+    **`I005`** for the carrier fields `_rift.dataset` and `_rift.sequencing`, and **`E050`** for
+    `returnCaKey: true` in a config file.
+
 - **`rift stop` (and so `rift restart`) waits for the server to exit** (#1155), up to 5 seconds. It
   used to send `SIGTERM` and return at once, reporting success while the server was still running —
   which made `restart` race its own rebind into `EADDRINUSE` once shutdown became graceful. A process

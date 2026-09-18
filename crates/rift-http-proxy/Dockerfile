@@ -211,12 +211,12 @@ ENV RIFT_METRICS_PORT=9090
 #   --local-only            Localhost only [env: MB_LOCAL_ONLY]
 #   --loglevel <LEVEL>      Log level [env: MB_LOGLEVEL] [default: info]
 #   --metrics-port <PORT>   Metrics port [env: RIFT_METRICS_PORT] [default: 9090]
-#   --mock                  Run in mock mode
+#   --mock                  Accepted for Mountebank compatibility; no effect (issue #1152)
 #   --debug                 Enable debug mode
 #   --nologfile             Disable log file (stdout only)
 #   --log <FILE>            Log file path
 #   --pidfile <FILE>        PID file path
-#   --origin <ORIGIN>       CORS allowed origin
+#   --origin <ORIGIN>       Accepted for Mountebank compatibility; NOT implemented (issue #1152)
 #   --ip-whitelist <IPS>    Accepted for Mountebank compatibility; NOT enforced (issue #879)
 
 ENTRYPOINT ["/usr/local/bin/rift"]

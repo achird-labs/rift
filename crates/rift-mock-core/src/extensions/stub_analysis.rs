@@ -11,8 +11,8 @@
 //! detection or warnings. It silently uses first-match-wins semantics.
 //! These features are Rift extensions for improved developer experience.
 
-use crate::imposter::Stub;
 use crate::imposter::StubResponse;
+use crate::imposter::{ImposterConfig, Stub};
 use crate::imposter::{Predicate, PredicateOperation};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -65,11 +65,81 @@ pub enum WarningType {
     Truncated,
     /// `_rift.stateOps` (issue #969) declared on a response shape that never runs it — `stateOps`
     /// executes only after an `is` response is rendered (see `extensions::state_ops`'s module
-    /// doc). A `proxy` or `inject` response cannot carry this warning: parsing
-    /// (`StubResponse::from<StubResponseRaw>`) drops `_rift` entirely for those two shapes, so the
-    /// only reachable case is a `RiftScript` response — which also covers the bare-`_rift`
-    /// "flat" form (no `is`/`proxy`/`inject`/`fault`), since that too parses to `RiftScript`.
+    /// doc). A `proxy`, `inject` or `fault` response does not get this warning: no part of its
+    /// `_rift` block applies, and the whole block is reported as `ConfigKeyIgnored` instead. The
+    /// reachable case is a `RiftScript` response — which also covers the bare-`_rift` "flat" form
+    /// (no `is`/`proxy`/`inject`/`fault`), since that too parses to `RiftScript`.
     StateOpsNeverRuns,
+    /// A key this engine parses and does not act on (issue #1152). The value reads back unchanged,
+    /// so without this nothing distinguishes "honoured" from "dropped". See
+    /// [`ignored_config_keys`] for the list.
+    ConfigKeyIgnored,
+}
+
+/// Every key in `config` that this engine parses and does not act on — the single list behind the
+/// load-time log line, the `_rift.warnings` entries and the docs (issue #1152). `stubs` are the
+/// imposter's current stubs, which a stub mutation may have changed since `config` was built.
+///
+/// The keys are kept, not refused: the SDKs emit several of them (`metrics`, `proxyPool`,
+/// `recordMatches`), and a refusal would break every SDK user who touched those builders.
+pub fn ignored_config_keys(config: &ImposterConfig, stubs: &[Stub]) -> Vec<StubWarning> {
+    let imposter_level = |message: &str| StubWarning {
+        warning_type: WarningType::ConfigKeyIgnored,
+        message: message.to_owned(),
+        stub_index: None,
+        stub_id: None,
+        shadowed_by_index: None,
+    };
+    let mut warnings = Vec::new();
+    let rift = config.rift.as_ref();
+    if rift.is_some_and(|r| r.metrics.is_some()) {
+        warnings.push(imposter_level(
+            "`_rift.metrics` has no effect: metrics are process-wide, served on --metrics-port \
+             (default 9090), and not configurable per imposter",
+        ));
+    }
+    if rift.is_some_and(|r| r.proxy.is_some()) {
+        warnings.push(imposter_level(
+            "`_rift.proxy` has no effect: a proxy response's upstream is its own `proxy.to`, and \
+             connection pooling is not configurable per imposter",
+        ));
+    }
+    if config.record_matches {
+        warnings.push(imposter_level(
+            "`recordMatches` has no effect: this engine does not record per-stub `matches`; use \
+             `recordRequests` and GET /imposters/:port to see the requests",
+        ));
+    }
+    for (index, stub) in stubs.iter().enumerate() {
+        for response in &stub.responses {
+            let shape = match response {
+                StubResponse::Proxy {
+                    ignored_rift: Some(_),
+                    ..
+                } => "proxy",
+                StubResponse::Inject {
+                    ignored_rift: Some(_),
+                    ..
+                } => "inject",
+                StubResponse::Fault {
+                    ignored_rift: Some(_),
+                    ..
+                } => "fault",
+                _ => continue,
+            };
+            warnings.push(StubWarning {
+                warning_type: WarningType::ConfigKeyIgnored,
+                message: format!(
+                    "`_rift` on a `{shape}` response has no effect: no `_rift` feature applies to \
+                     a `{shape}` response"
+                ),
+                stub_index: Some(index),
+                stub_id: stub.id.clone(),
+                shadowed_by_index: None,
+            });
+        }
+    }
+    warnings
 }
 
 /// Result of stub analysis

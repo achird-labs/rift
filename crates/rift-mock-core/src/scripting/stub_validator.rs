@@ -115,7 +115,9 @@ fn validate_response(
             })
         }),
         // JavaScript inject responses
-        StubResponse::Inject { inject } => validate_inject_script(inject, stub_id, response_index),
+        StubResponse::Inject { inject, .. } => {
+            validate_inject_script(inject, stub_id, response_index)
+        }
         // Proxy and Fault responses don't have inline scripts to validate
         StubResponse::Proxy { .. } | StubResponse::Fault { .. } => None,
     }
@@ -291,6 +293,7 @@ mod tests {
             predicates: vec![],
             responses: vec![StubResponse::Inject {
                 inject: code.to_string(),
+                ignored_rift: None,
             }],
             scenario_name: None,
             required_scenario_state: None,

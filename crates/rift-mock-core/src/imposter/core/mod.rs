@@ -306,21 +306,14 @@ impl Imposter {
             .map(|stub| Arc::new(StubState::new(stub.clone())))
             .collect();
         // Extract proxy mode from stubs (use first proxy response's mode)
-        // Issue #999: `_rift.metrics` parses but has no reader — metrics are process-wide on
-        // `--metrics-port`. The field is KEPT rather than deleted: `RiftConfig` has no
-        // `deny_unknown_fields`, so removing it would turn a known-ignored key into an
-        // unknown-ignored one, which is strictly worse for the operator. Warn instead, so a
-        // config that silently did nothing now says so.
-        if config
-            .rift
-            .as_ref()
-            .and_then(|r| r.metrics.as_ref())
-            .is_some()
+        // Keys parsed but not acted on (issues #999, #1152). They are KEPT rather than deleted:
+        // `RiftConfig` has no `deny_unknown_fields`, so removing one would turn a known-ignored key
+        // into an unknown-ignored one, which is strictly worse for the operator. Logged here for
+        // the doors that never see an API response (`--configfile`, `--datadir`, the C-ABI); the
+        // admin API also returns the same list in `_rift.warnings`.
+        for ignored in crate::extensions::stub_analysis::ignored_config_keys(&config, &config.stubs)
         {
-            tracing::warn!(
-                "_rift.metrics is parsed but not implemented; metrics are process-wide on \
-                 --metrics-port (default 9090) and are not configurable per imposter"
-            );
+            tracing::warn!(port = ?config.port, "{}", ignored.message);
         }
 
         let proxy_mode = Self::extract_proxy_mode(&config.stubs);
@@ -445,7 +438,11 @@ impl Imposter {
         if let Some(cached) = self.stub_warnings.load_full() {
             return cached;
         }
-        let warnings = crate::extensions::stub_analysis::analyze_stubs(&self.get_stubs()).warnings;
+        let stubs = self.get_stubs();
+        // Ignored keys first: there are few of them, and the analysis below caps its own share.
+        let mut warnings =
+            crate::extensions::stub_analysis::ignored_config_keys(&self.config, &stubs);
+        warnings.extend(crate::extensions::stub_analysis::analyze_stubs(&stubs).warnings);
         let arc = Arc::new(warnings);
         self.stub_warnings.store(Some(Arc::clone(&arc)));
         arc
@@ -632,7 +629,7 @@ impl Imposter {
             .iter()
             .flat_map(|s| &s.stub.responses)
             .any(|resp| match resp {
-                StubResponse::Fault { fault } => TcpFaultKind::parse(fault).is_some(),
+                StubResponse::Fault { fault, .. } => TcpFaultKind::parse(fault).is_some(),
                 StubResponse::Is { rift: Some(r), .. } => rift_has_tcp(r),
                 // A script may call `reset()` at runtime, so conservatively force H1-only.
                 StubResponse::RiftScript { .. } => true,
@@ -671,7 +668,7 @@ impl Imposter {
     fn extract_proxy_mode(stubs: &[Stub]) -> ProxyMode {
         for stub in stubs {
             for response in &stub.responses {
-                if let StubResponse::Proxy { proxy } = response {
+                if let StubResponse::Proxy { proxy, .. } = response {
                     return match proxy.mode.to_lowercase().as_str() {
                         "proxyonce" => ProxyMode::ProxyOnce,
                         "proxyalways" => ProxyMode::ProxyAlways,

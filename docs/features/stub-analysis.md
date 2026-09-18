@@ -191,6 +191,22 @@ execute (see [Flow State]({{ site.baseurl }}/features/flow-state/#is-responses-o
 }
 ```
 
+### config_key_ignored
+
+A key the engine parses and does not act on (issue #1152). The value reads back unchanged, so
+nothing else would distinguish "honoured" from "dropped". Reported for `_rift.metrics`,
+`_rift.proxy` and `recordMatches: true` (imposter-level, no `stubIndex`), and for a `_rift` block on
+a `proxy`, `inject` or `fault` response (with `stubIndex`). The same list is logged at `WARN` when
+the imposter loads, for doors that never see a response (`--configfile`, `--datadir`, the C-ABI),
+and `rift-lint` flags it as `W017`:
+
+```json
+{
+  "warningType": "config_key_ignored",
+  "message": "`recordMatches` has no effect: this engine does not record per-stub `matches`; use `recordRequests` and GET /imposters/:port to see the requests"
+}
+```
+
 ### truncated
 
 Analysis retains at most 100 warnings per imposter. If more are produced (e.g. hundreds of

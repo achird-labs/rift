@@ -49,7 +49,7 @@ No field is strictly required.
 | `stubs` | array | Request/response mappings |
 | `defaultResponse` | object | Response when no stub matches |
 | `recordRequests` | boolean | Store requests for verification |
-| `recordMatches` | boolean | Record which stub matched each request |
+| `recordMatches` | boolean | **Accepted, no effect**: per-stub `matches` are not recorded. `true` is reported as `config_key_ignored` in `_rift.warnings` and by `rift-lint` `W017`; use `recordRequests` |
 | `allowCORS` | boolean | Add CORS headers to responses |
 | `key` | string | PEM private key (HTTPS) |
 | `cert` | string | PEM certificate (HTTPS) |

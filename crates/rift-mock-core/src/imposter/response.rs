@@ -186,7 +186,7 @@ pub fn execute_stub_response_with_rift(
                 false,
             ))
         }
-        StubResponse::Fault { fault } => Some((
+        StubResponse::Fault { fault, .. } => Some((
             0,
             HashMap::new(),
             fault.clone(),
