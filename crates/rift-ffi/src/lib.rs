@@ -1946,6 +1946,23 @@ async fn build_admin_plane_inner(
         opts.require_admin_auth.unwrap_or(false).into(),
     )?;
 
+    // The same policy must reach the intercept listener, which is a door through this handle just
+    // as much as the admin bind is (issue #1149). Set unconditionally, so a later `rift_serve_admin`
+    // that omits the option returns the handle to `Warn` — the policy is whatever the most recent
+    // serve stated, not a high-water mark. Before the `configFile` intercept start further down, so
+    // a block in that file is judged under it.
+    handle
+        .intercept
+        .set_exposure_policy(opts.require_admin_auth.unwrap_or(false).into());
+
+    // A listener started by `rift_start_intercept` *before* this call was judged under the default
+    // `Warn`. Refusing to serve is the only way `requireAdminAuth` can mean what it says for one
+    // that is exposed right now; returning success would leave the option's promise false. The
+    // listener is left running — `build_admin_plane` only unwinds listeners it started itself.
+    handle.intercept.check_running_exposure().context(
+        "an intercept listener started earlier is exposed under the requested requireAdminAuth",
+    )?;
+
     // Outbound TLS trust policy (issue #974), before any imposter exists: imposters read the
     // client when they are created, and a bad anchor must fail this call rather than surface later
     // as a per-request proxy error. Both spellings of the anchor are accepted, but not together —
@@ -1972,6 +1989,16 @@ async fn build_admin_plane_inner(
             rift_mock_core::imposter::build_upstream_client(&outbound_tls)
                 .context("applying the outbound TLS options")?,
         );
+        // The intercept listener's WebSocket relay is the other thing that dials a real origin, so
+        // it trusts exactly what a `proxy` stub trusts (issue #1149). Divergent per-client trust is
+        // what #974 was filed to remove. Only affects listeners started after this point: origin TLS
+        // is built at bind.
+        //
+        // Conditional, unlike `set_exposure_policy` above, and deliberately so: it tracks the
+        // upstream client on the line before, which is also only replaced when trust is
+        // configured. Keeping the two in lockstep is what guarantees the relay and `proxy` stubs
+        // never disagree; resetting one without the other would reintroduce #974's split.
+        handle.intercept.set_outbound_tls(outbound_tls.clone());
     }
 
     // configFile: apply the loaded set via apply_config, mirroring the inline `config` path and

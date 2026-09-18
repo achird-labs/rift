@@ -427,3 +427,72 @@ async fn listener_shutdown_terminates_a_live_relay() {
         "a live relay outlived the listener that owned it"
     );
 }
+
+/// Issue #1149: the relay must use the trust set on the **control**, including when it was set
+/// after a clone was taken — which is the C-ABI's shape (`rift_start()` builds the control and
+/// hands clones to the admin server long before `rift_serve_admin` supplies `upstreamCaPem`).
+///
+/// This is the substantive half of that fix. Asserting `outbound_tls()` reads back only proves the
+/// getter; the thing that matters is whether a real `wss` handshake to a private-CA origin
+/// completes through a listener started from the stale clone. With the policy still held by value,
+/// that clone keeps `OutboundTls::default()` — system roots — and this fails at the TLS handshake.
+#[tokio::test]
+async fn the_relay_uses_outbound_trust_set_after_a_clone_was_taken() {
+    use rift_http_proxy::intercept_control::{InterceptControl, InterceptStartOptions};
+
+    let (cert_pem, key_pem) = origin_cert();
+    spawn_wss_echo_origin(23020, cert_pem.clone(), key_pem, 1);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let control = InterceptControl::default();
+    // Taken BEFORE the trust is configured — the whole point.
+    let clone_taken_early = control.clone();
+    control.set_outbound_tls(OutboundTls {
+        ca_pem: Some(cert_pem),
+        skip_verify: false,
+    });
+
+    clone_taken_early
+        .start(InterceptStartOptions {
+            host: Some("127.0.0.1".to_string()),
+            port: Some(0),
+            ..Default::default()
+        })
+        .await
+        .expect("the stale clone must still start a listener");
+    let proxy = clone_taken_early.status().expect("a bound listener");
+    let ca_pem = clone_taken_early
+        .state()
+        .expect("intercept state")
+        .ca
+        .ca_cert_pem()
+        .to_string();
+
+    let outcome = tokio::time::timeout(BUDGET, async {
+        let tunnel = connect_through_proxy(proxy, "localhost:23020", &ca_pem).await;
+        let (mut ws, response) =
+            tokio_tungstenite::client_async("ws://localhost:23020/chat", tunnel)
+                .await
+                .expect("websocket handshake through the tunnel");
+        assert_eq!(response.status(), 101);
+
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            "hello".to_string(),
+        ))
+        .await
+        .expect("client -> origin");
+
+        ws.next()
+            .await
+            .expect("a reply")
+            .expect("not an error")
+            .into_text()
+            .expect("text")
+    })
+    .await;
+
+    assert_eq!(
+        outcome.expect("the relay must reach a private-CA origin it was configured to trust"),
+        "echo:hello"
+    );
+}

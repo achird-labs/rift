@@ -35,6 +35,19 @@ fn warn_intercept_start_failure(e: &anyhow::Error, what: &str) {
 pub struct InterceptPlane {
     pub listener: InterceptListener,
     pub state: InterceptState,
+    /// Whether this listener demands a credential. Kept so a policy stated *after* the listener came
+    /// up can still be applied to it (issue #1149) — see
+    /// [`InterceptControl::check_running_exposure`].
+    pub has_auth: bool,
+}
+
+/// Why [`InterceptControl::install`] would not take the slot. Carries the listener back so the
+/// caller can shut it down — a bound listener must never be dropped without being stopped.
+enum InstallRefused {
+    /// Another start won the race for the slot.
+    AlreadyRunning(InterceptListener),
+    /// The exposure policy became `Refuse` while this listener was binding (issue #1149).
+    Exposed(InterceptListener, String),
 }
 
 /// Shared, mutable slot for the process's (or FFI handle's) single intercept plane. Cheap to clone
@@ -43,18 +56,25 @@ pub struct InterceptPlane {
 #[derive(Clone, Default)]
 pub struct InterceptControl {
     plane: Arc<Mutex<Option<InterceptPlane>>>,
+    /// Shared like `plane`, and for a reason the by-value form could not satisfy (issue #1149): the
+    /// FFI builds the control in `rift_start()` and hands clones to the admin server long before
+    /// `rift_serve_admin` learns `requireAdminAuth`, so a policy stored per clone would be fixed at
+    /// its default before the operator ever stated one.
+    policy: Arc<Mutex<InterceptPolicy>>,
+}
+
+/// The operator's deployment policy for this control's listener.
+///
+/// Both fields are the operator's call rather than the caller's, which is why they live here and
+/// not on [`InterceptStartOptions`] — that struct is also the `POST /intercept` request body, and
+/// putting the policy in it would let the very caller being judged turn the judgement off.
+#[derive(Debug, Clone, Default)]
+struct InterceptPolicy {
     /// What to do when a start would expose this listener off-host with no credential (issue #878).
-    ///
-    /// Deployment policy, so it lives on the control rather than on [`InterceptStartOptions`] — it
-    /// is the operator's call, not the caller's, and putting it in the request body would let the
-    /// very caller being judged turn the judgement off.
     exposure: AdminExposurePolicy,
-    /// Trust policy for connections this listener makes *outbound*, to a real origin (issue #997).
-    ///
-    /// Same reasoning as `exposure`: it is the operator's configuration, not the caller's, so it
-    /// travels with the control rather than with `InterceptStartOptions`. Defaulting to the
-    /// untouched `OutboundTls` means system roots only, which is what a listener started before
-    /// this field existed effectively had.
+    /// Trust for connections this listener makes *outbound*, to a real origin (issue #997). The
+    /// untouched default means system roots only, which is what a listener started before this
+    /// existed effectively had.
     outbound_tls: OutboundTls,
 }
 
@@ -246,12 +266,22 @@ impl InterceptControl {
     /// (issue #878). The standalone binary threads `--require-admin-auth` in here, so a listener
     /// brought up at runtime over `POST /intercept` gets the same answer as one asked for at boot.
     ///
-    /// Clone-before-configure would lose it: set this on the control **before** handing clones to
-    /// the admin server.
+    /// The policy is shared across clones (issue #1149), so the order of configure-vs-clone does
+    /// not matter.
     #[must_use]
-    pub fn with_exposure_policy(mut self, policy: AdminExposurePolicy) -> Self {
-        self.exposure = policy;
+    pub fn with_exposure_policy(self, policy: AdminExposurePolicy) -> Self {
+        self.set_exposure_policy(policy);
         self
+    }
+
+    /// Replace the exposure policy every later [`start`](Self::start) through this control — and
+    /// through every clone of it — is judged by.
+    ///
+    /// The setter form exists for callers that only ever hold a clone, which is the FFI's shape: the
+    /// control is created in `rift_start()` and the policy is not known until `rift_serve_admin`
+    /// (issue #1149).
+    pub fn set_exposure_policy(&self, policy: AdminExposurePolicy) {
+        self.policy_lock().exposure = policy;
     }
 
     /// Set the outbound TLS trust every listener started through this control uses when it relays
@@ -262,11 +292,35 @@ impl InterceptControl {
     /// private-CA origin — the common case for the systems an intercept proxy is pointed at —
     /// works only if this is shared rather than re-derived.
     ///
-    /// Same clone-before-configure caveat as [`with_exposure_policy`](Self::with_exposure_policy).
+    /// Shared across clones, like the exposure policy.
     #[must_use]
-    pub fn with_outbound_tls(mut self, outbound_tls: OutboundTls) -> Self {
-        self.outbound_tls = outbound_tls;
+    pub fn with_outbound_tls(self, outbound_tls: OutboundTls) -> Self {
+        self.set_outbound_tls(outbound_tls);
         self
+    }
+
+    /// Replace the outbound trust every later [`start`](Self::start) through this control uses.
+    ///
+    /// Only affects listeners started afterwards: a listener builds its origin TLS config at bind,
+    /// so one already running keeps the trust it was born with (issue #1149).
+    pub fn set_outbound_tls(&self, outbound_tls: OutboundTls) {
+        self.policy_lock().outbound_tls = outbound_tls;
+    }
+
+    /// The outbound trust currently configured on this control.
+    #[must_use]
+    pub fn outbound_tls(&self) -> OutboundTls {
+        self.policy_lock().outbound_tls.clone()
+    }
+
+    fn policy_lock(&self) -> std::sync::MutexGuard<'_, InterceptPolicy> {
+        self.policy.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A copy of the policy, taken in a short sync scope so the (`!Send`) `std` guard never spans an
+    /// `.await` — the same rule [`lock`](Self::lock) follows.
+    fn policy(&self) -> InterceptPolicy {
+        self.policy_lock().clone()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<InterceptPlane>> {
@@ -281,10 +335,28 @@ impl InterceptControl {
 
     /// Install a freshly-bound plane, or hand the listener back if the slot filled in the meantime
     /// (a concurrent start won the race). Sync so the guard is confined to this frame.
-    fn install(&self, plane: InterceptPlane) -> Result<(), InterceptListener> {
+    /// Take the slot, re-judging the exposure policy **under the lock**.
+    ///
+    /// `start` snapshots the policy before it `.await`s the bind, which leaves a window exactly as
+    /// wide as that bind: a concurrent `set_exposure_policy(Refuse)` — `rift_serve_admin` on another
+    /// thread, which the SDKs really do drive concurrently — would see an empty slot in
+    /// [`check_running_exposure`], report success, and then this listener would install anyway. That
+    /// is the posture issue #1149 exists to prevent, so the last word is taken here rather than at
+    /// the snapshot.
+    ///
+    /// Lock order is `plane` then `policy`, and nothing takes them the other way round: every other
+    /// `policy_lock()` is a statement-scoped temporary, and `check_running_exposure` copies the
+    /// policy out before it touches `plane`.
+    fn install(&self, plane: InterceptPlane) -> Result<(), InstallRefused> {
         let mut slot = self.lock();
         if slot.is_some() {
-            return Err(plane.listener);
+            return Err(InstallRefused::AlreadyRunning(plane.listener));
+        }
+        let exposure = self.policy_lock().exposure;
+        if let Err(e) =
+            check_intercept_exposure(plane.listener.local_addr(), plane.has_auth, exposure)
+        {
+            return Err(InstallRefused::Exposed(plane.listener, format!("{e:#}")));
         }
         *slot = Some(plane);
         Ok(())
@@ -318,6 +390,7 @@ impl InterceptControl {
         if let Some(ref auth) = auth {
             auth.validate().map_err(InterceptStartError::InvalidAuth)?;
         }
+        let auth_required = auth.is_some();
 
         // Judge the exposure here, at the one point all four doors converge, rather than only at
         // the CLI ones (issue #878). `POST /intercept` and `rift_start_intercept` can bring up a
@@ -325,7 +398,8 @@ impl InterceptControl {
         // `--require-admin-auth` still end up with an open MITM proxy on `0.0.0.0`, which is
         // precisely the assurance that flag is supposed to give. Before any side effect, so a
         // refusal never has to unwind a bound listener.
-        check_intercept_exposure(addr, auth.is_some(), self.exposure)
+        let policy = self.policy();
+        check_intercept_exposure(addr, auth.is_some(), policy.exposure)
             .map_err(|e| InterceptStartError::Exposed(format!("{e:#}")))?;
 
         // Resolve the single CA source (validating both-or-neither + pair exclusion) before binding.
@@ -371,31 +445,33 @@ impl InterceptControl {
         })?;
 
         let resolver = Arc::new(SniCertResolver::new(ca.clone()));
-        let listener = InterceptListener::bind(
-            addr,
-            resolver,
-            rules.clone(),
-            auth,
-            self.outbound_tls.clone(),
-        )
-        .await
-        .map_err(|e| {
-            warn_intercept_start_failure(&e, "bind failed");
-            InterceptStartError::Bind(e)
-        })?;
+        let listener =
+            InterceptListener::bind(addr, resolver, rules.clone(), auth, policy.outbound_tls)
+                .await
+                .map_err(|e| {
+                    warn_intercept_start_failure(&e, "bind failed");
+                    InterceptStartError::Bind(e)
+                })?;
         let bound = listener.local_addr();
 
         match self.install(InterceptPlane {
             listener,
             state: InterceptState { rules, ca },
+            has_auth: auth_required,
         }) {
             Ok(()) => Ok(StartedIntercept {
                 addr: bound,
                 ca_export,
             }),
-            Err(listener) => {
+            Err(InstallRefused::AlreadyRunning(listener)) => {
                 listener.shutdown().await;
                 Err(InterceptStartError::AlreadyRunning)
+            }
+            // The policy turned strict while this listener was binding. Shut it down and report the
+            // refusal the caller would have got had the policy been set a moment earlier.
+            Err(InstallRefused::Exposed(listener, reason)) => {
+                listener.shutdown().await;
+                Err(InterceptStartError::Exposed(reason))
             }
         }
     }
@@ -417,6 +493,31 @@ impl InterceptControl {
     /// Bound address of the running listener, if any.
     pub fn status(&self) -> Option<SocketAddr> {
         self.lock().as_ref().map(|p| p.listener.local_addr())
+    }
+
+    /// Re-judge a listener that is **already running** against the current exposure policy
+    /// (issue #1149).
+    ///
+    /// A listener started before the policy was stated was judged under the default `Warn`. If the
+    /// operator then states `requireAdminAuth`, returning success would make that option's promise
+    /// false for a listener that is exposed right now. `Ok(())` when nothing is running, when the
+    /// policy is not `Refuse`, or when the running listener passes.
+    ///
+    /// Deliberately does **not** stop the listener: unwinding is reserved for a listener the failing
+    /// call started itself.
+    pub fn check_running_exposure(&self) -> anyhow::Result<()> {
+        let exposure = self.policy_lock().exposure;
+        if exposure != AdminExposurePolicy::Refuse {
+            return Ok(());
+        }
+        let Some((addr, has_auth)) = self
+            .lock()
+            .as_ref()
+            .map(|p| (p.listener.local_addr(), p.has_auth))
+        else {
+            return Ok(());
+        };
+        check_intercept_exposure(addr, has_auth, exposure)
     }
 
     /// A clone of the running plane's [`InterceptState`] for the rules/CA/truststore handlers.
@@ -824,5 +925,191 @@ mod tests {
             .expect_err("path and PEM are mutually exclusive");
         assert!(matches!(err, InterceptStartError::Ca(_)));
         assert!(control.status().is_none());
+    }
+
+    // Issue #1149: the policy used to live by value on the control, so a clone taken before it was
+    // configured kept the default `Warn` for ever. That is exactly the FFI's shape — `rift_start()`
+    // builds the control and hands clones to the admin server long before `rift_serve_admin` learns
+    // `requireAdminAuth` — so the policy has to be shared state, not a field on each clone.
+    #[tokio::test]
+    async fn a_clone_taken_before_the_policy_is_set_still_refuses_an_exposed_start() {
+        let control = InterceptControl::default();
+        let clone_taken_early = control.clone();
+
+        control.set_exposure_policy(AdminExposurePolicy::Refuse);
+
+        let err = clone_taken_early
+            .start(InterceptStartOptions {
+                host: Some("0.0.0.0".to_string()),
+                port: Some(0),
+                ..Default::default()
+            })
+            .await
+            .expect_err("an off-host start with no credential must be refused under Refuse");
+        assert!(
+            matches!(err, InterceptStartError::Exposed(_)),
+            "expected Exposed, got {err:?}"
+        );
+        assert!(
+            clone_taken_early.status().is_none(),
+            "a refused start must leave nothing bound"
+        );
+    }
+
+    // The policy is whatever was set most recently, not a high-water mark. Pinned because "sticky"
+    // is the other plausible reading, and it would let a refusal outlive the configuration that
+    // asked for it — the FFI sets this on every `rift_serve_admin`, including ones that omit the
+    // option (issue #1149).
+    #[tokio::test]
+    async fn setting_the_policy_back_to_warn_takes_effect() {
+        let control = InterceptControl::default();
+        control.set_exposure_policy(AdminExposurePolicy::Refuse);
+        control.set_exposure_policy(AdminExposurePolicy::Warn);
+
+        let started = control
+            .start(InterceptStartOptions {
+                host: Some("0.0.0.0".to_string()),
+                port: Some(0),
+                ..Default::default()
+            })
+            .await
+            .expect("Warn only warns; the start must succeed");
+        assert!(started.addr.port() > 0);
+        assert!(control.status().is_some());
+    }
+
+    // A listener that came up under `Warn` is re-judged when the policy later becomes `Refuse` —
+    // the retrofit that makes `requireAdminAuth` mean something for an already-running listener.
+    #[tokio::test]
+    async fn check_running_exposure_refuses_a_listener_started_before_the_policy() {
+        let control = InterceptControl::default();
+        control
+            .start(InterceptStartOptions {
+                host: Some("0.0.0.0".to_string()),
+                port: Some(0),
+                ..Default::default()
+            })
+            .await
+            .expect("an exposed start under the default Warn");
+        assert!(
+            control.check_running_exposure().is_ok(),
+            "under Warn there is nothing to refuse"
+        );
+
+        control.set_exposure_policy(AdminExposurePolicy::Refuse);
+        assert!(
+            control.check_running_exposure().is_err(),
+            "an exposed listener must be refused once the policy says Refuse"
+        );
+        assert!(
+            control.status().is_some(),
+            "checking must not stop the listener"
+        );
+    }
+
+    // A credentialled listener passes the same re-judgement: the gate is authentication, not the
+    // address.
+    #[tokio::test]
+    async fn check_running_exposure_accepts_a_credentialled_listener() {
+        let control = InterceptControl::default();
+        control
+            .start(InterceptStartOptions {
+                host: Some("0.0.0.0".to_string()),
+                port: Some(0),
+                auth: Some(InterceptAuth {
+                    username: "u".to_string(),
+                    password: "p".to_string(),
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("a credentialled off-host start");
+
+        control.set_exposure_policy(AdminExposurePolicy::Refuse);
+        assert!(control.check_running_exposure().is_ok());
+    }
+
+    // Nothing running is nothing to judge.
+    #[tokio::test]
+    async fn check_running_exposure_is_ok_with_no_listener() {
+        let control = InterceptControl::default();
+        control.set_exposure_policy(AdminExposurePolicy::Refuse);
+        assert!(control.check_running_exposure().is_ok());
+    }
+
+    /// An exposed, credential-less plane bound on `0.0.0.0`, built the way `start` builds one but
+    /// without going through `start` — so a test can hand it to `install` at a moment of its choosing.
+    async fn exposed_plane() -> InterceptPlane {
+        let ca = Arc::new(CertificateAuthority::generate().expect("generate CA"));
+        let rules = InterceptRules::new();
+        let listener = InterceptListener::bind(
+            "0.0.0.0:0".parse().expect("addr"),
+            Arc::new(SniCertResolver::new(ca.clone())),
+            rules.clone(),
+            None,
+            OutboundTls::default(),
+        )
+        .await
+        .expect("bind");
+        InterceptPlane {
+            listener,
+            state: InterceptState { rules, ca },
+            has_auth: false,
+        }
+    }
+
+    // The TOCTOU window (issue #1149). `start` snapshots the policy before it awaits the bind, so a
+    // concurrent `set_exposure_policy(Refuse)` — `rift_serve_admin` on another thread — would see an
+    // empty slot, pass `check_running_exposure`, and report success while this listener installed
+    // itself anyway. Racing a real bind is not deterministic, so this reproduces the interleaving
+    // directly: the plane is bound under `Warn`, the policy turns strict, *then* install runs.
+    #[tokio::test]
+    async fn install_refuses_an_exposed_plane_if_the_policy_turned_strict_during_the_bind() {
+        let control = InterceptControl::default();
+        let plane = exposed_plane().await;
+
+        control.set_exposure_policy(AdminExposurePolicy::Refuse);
+
+        match control.install(plane) {
+            Err(InstallRefused::Exposed(listener, _)) => listener.shutdown().await,
+            Err(InstallRefused::AlreadyRunning(listener)) => {
+                listener.shutdown().await;
+                panic!("the slot was empty; this must be refused as exposed, not as a race");
+            }
+            Ok(()) => panic!("an exposed plane must not install once the policy is Refuse"),
+        }
+        assert!(
+            control.status().is_none(),
+            "a refused install must leave the slot empty"
+        );
+    }
+
+    // And the same plane installs fine while the policy is still `Warn` — so the guard above is
+    // about the policy, not about the plane.
+    #[tokio::test]
+    async fn install_accepts_an_exposed_plane_under_warn() {
+        let control = InterceptControl::default();
+        let plane = exposed_plane().await;
+        assert!(control.install(plane).is_ok());
+        assert!(control.status().is_some());
+        control.stop().await;
+    }
+
+    // The outbound trust is shared the same way and for the same reason.
+    #[tokio::test]
+    async fn a_clone_sees_outbound_tls_set_after_it_was_taken() {
+        let control = InterceptControl::default();
+        let clone_taken_early = control.clone();
+        assert!(!clone_taken_early.outbound_tls().is_configured());
+
+        control.set_outbound_tls(OutboundTls {
+            ca_pem: Some("-----BEGIN CERTIFICATE-----".to_string()),
+            skip_verify: false,
+        });
+
+        assert!(
+            clone_taken_early.outbound_tls().is_configured(),
+            "the clone must see the trust the control was given afterwards"
+        );
     }
 }
