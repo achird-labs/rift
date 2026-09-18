@@ -98,6 +98,34 @@ pub fn decode_or_raw(value: &str) -> String {
         .unwrap_or_else(|_| value.to_string())
 }
 
+/// Parse a raw query string into a map. The one query parser: predicates, the recorded request,
+/// scripts and templates all read a request's query through this, so they cannot disagree about it
+/// (issue #1153 — templates used to parse with a different function and saw `?c=a&c=b` as `b`
+/// while every other surface saw `a,b`).
+///
+/// URL-decodes keys and values with [`decode_or_raw`]. A bare parameter with no `=` (`?flag`) is a
+/// key with an empty value. A **repeated key is comma-joined in order** — Mountebank's `stringify`
+/// behaviour — so `?color=red&color=green` gives `color => "red,green"`.
+#[must_use]
+pub fn parse_query_string(query: &str) -> FastMap<String, String> {
+    let mut map = FastMap::default();
+    for pair in query.split('&').filter(|s| !s.is_empty()) {
+        let (key, value) = match pair.split_once('=') {
+            Some((k, v)) => (k, v),
+            None => (pair, ""),
+        };
+        let decoded_key = decode_or_raw(key);
+        let decoded_value = decode_or_raw(value);
+        map.entry(decoded_key)
+            .and_modify(|existing: &mut String| {
+                existing.push(',');
+                existing.push_str(&decoded_value);
+            })
+            .or_insert(decoded_value);
+    }
+    map
+}
+
 /// The terminal fallback for the builders below: a 500 assembled without the builder, so it cannot
 /// itself fail. `Response::new` defaults to **200**, so the status must be set explicitly —
 /// answering 200 with an error string is the failure-masking shape issue #611 sweeps out.
@@ -287,5 +315,52 @@ mod tests {
         ] {
             assert!(!rift_debug_from(off), "{off:?} should keep debug mode off");
         }
+    }
+}
+
+#[cfg(test)]
+mod parse_query_string_tests {
+    use super::parse_query_string;
+
+    // Ported from the deleted `crate::predicate` module (issue #1153). The #611 and #614 contracts
+    // below were pinned against that copy and against the inline copy in `behaviors/request.rs`, but
+    // never against this function directly — and this is now the one parser everything uses.
+
+    // Issue #611: an undecodable percent-sequence passes through raw rather than blanking the value a
+    // predicate matches on.
+    #[test]
+    fn an_undecodable_value_passes_through_raw() {
+        let params = parse_query_string("k=%FF");
+        assert_eq!(params.get("k").map(String::as_str), Some("%FF"));
+    }
+
+    // Issue #614: the key is decoded on the same terms as the value — Mountebank decodes both — and an
+    // undecodable key stays raw rather than collapsing to an empty key that would then comma-join
+    // unrelated values.
+    #[test]
+    fn an_encoded_key_is_decoded_and_an_undecodable_one_stays_raw() {
+        let params = parse_query_string("first%20name=bob");
+        assert_eq!(params.get("first name").map(String::as_str), Some("bob"));
+
+        let undecodable = parse_query_string("%FF=v");
+        assert_eq!(undecodable.get("%FF").map(String::as_str), Some("v"));
+    }
+
+    // Issue #614: a bare parameter's key is decoded like a valued one.
+    #[test]
+    fn a_bare_parameter_key_is_decoded() {
+        let params = parse_query_string("first%20name");
+        assert_eq!(params.get("first name").map(String::as_str), Some(""));
+    }
+
+    // The behaviour issue #1153 unifies on: a repeated key is comma-joined in order, which is what
+    // templates now render instead of the last value.
+    #[test]
+    fn a_repeated_key_is_comma_joined_in_order() {
+        let params = parse_query_string("color=red&color=green&color=blue");
+        assert_eq!(
+            params.get("color").map(String::as_str),
+            Some("red,green,blue")
+        );
     }
 }

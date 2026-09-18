@@ -109,7 +109,7 @@ def _set_url_path(out, key, value):
 def _apply_equals_like(op, fields, out, strict_body):
     for field, value in fields.items():
         # `deepEquals` means "these key/value pairs and NO others" (see rift's own
-        # predicate/deep_equals.rs). WireMock's `queryParameters`/`headers` are *subset* matchers
+        # imposter/predicates, PredicateOperation::DeepEquals). WireMock's `queryParameters`/`headers` are *subset* matchers
         # with no way to say "and nothing else", so there is no faithful translation — and an
         # unfaithful one is worse than none here, because it would also be strictly *cheaper* than
         # the exact-set check the other engines run, quietly flattering WireMock. The body branch
