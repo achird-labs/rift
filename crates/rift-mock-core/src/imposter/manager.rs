@@ -4,6 +4,7 @@
 //! each running on its own port.
 
 use super::core::Imposter;
+use super::datadir_file;
 use super::fault_io::{FaultCell, FaultIo, TcpFaultKind};
 use super::handler::handle_imposter_request_decorated;
 use super::reconcile::{
@@ -313,7 +314,12 @@ pub struct ImposterManager {
     /// Serializes datadir writes against a delete's unlink-then-remove (issue #1124), so a write
     /// cannot land between the two and bring back the file of an imposter being deleted. Taken only
     /// by admin mutations that persist, never by request handling.
-    persist_lock: tokio::sync::Mutex<()>,
+    ///
+    /// `Arc` so a write can hand an owned guard to its blocking thread: the lock is then held until
+    /// the write's rename is done, even when the admin request that started it is dropped mid-write
+    /// (issue #1158) — otherwise a second write could share its temp file, or a delete could run
+    /// before its late rename.
+    persist_lock: Arc<tokio::sync::Mutex<()>>,
     /// TLS defaults for HTTPS imposters (issue #206)
     tls_defaults: TlsDefaults,
     /// Observer for config mutations (issue #316)
@@ -381,7 +387,7 @@ impl ImposterManager {
             imposters: PortTable::new(),
             shutdown_tx,
             datadir: datadir.map(Arc::new),
-            persist_lock: tokio::sync::Mutex::new(()),
+            persist_lock: Arc::new(tokio::sync::Mutex::new(())),
             tls_defaults: TlsDefaults::default(),
             event_listener: None,
             response_decorator: None,
@@ -936,11 +942,9 @@ impl ImposterManager {
         // running" for every caller (create_for_apply / replace_imposter rely on that).
         if let Err(e) = self.persist_imposter_checked(&imposter).await {
             self.imposters.remove(port);
-            // A write that failed partway (e.g. ENOSPC) can leave a truncated {port}.json; drop it
-            // so a later restart doesn't try to load a corrupt file for a create that never took.
-            if let Err(cleanup) = self.remove_persisted_imposter(&imposter).await {
-                error!("rolling back a create that could not be persisted: {cleanup}");
-            }
+            // No file to clean up: a failed persist leaves `{port}.json` exactly as it was (issue
+            // #1158). The unlink that used to be here, for a truncated file, also deleted a reload's
+            // own input file, and could delete a concurrent create's freshly persisted one.
             let _ = shutdown_tx.send(());
             return Err(e);
         }
@@ -1862,7 +1866,7 @@ impl ImposterManager {
                 if requested.is_none()
                     && persistence == Persistence::Datadir
                     && !matches!(e, ImposterError::PortInUse(_))
-                    && let Err(cleanup) = self.remove_persisted_file(port).await
+                    && let Err(cleanup) = self.remove_persisted_file_if_vacant(port).await
                 {
                     report.failed.push((port, cleanup));
                 }
@@ -2040,7 +2044,7 @@ impl ImposterManager {
         let Some(port) = imposter.config.port else {
             return Ok(());
         };
-        let _persist = self.persist_lock.lock().await;
+        let persist = Arc::clone(&self.persist_lock).lock_owned().await;
         // A delete that ran first has removed both the file and the imposter; writing now would bring
         // back, on the next restart, an imposter that no longer exists (issue #1124).
         if !self
@@ -2056,18 +2060,21 @@ impl ImposterManager {
         // boot value. Snapshot the flag so every persist path (stub CRUD
         // included) writes the operator's current decision.
         snapshot.enabled = imposter.is_enabled();
-        let path = datadir.join(format!("{port}.json"));
         let json = serde_json::to_string_pretty(&snapshot).map_err(|e| {
             ImposterError::PersistError(
                 anyhow::Error::new(e).context(format!("Failed to serialize imposter {port}")),
             )
         })?;
-        tokio::fs::write(&path, json).await.map_err(|e| {
-            ImposterError::PersistError(
-                anyhow::Error::new(e)
-                    .context(format!("Failed to write imposter {port} to {path:?}")),
-            )
-        })
+        // Replaced, never rewritten in place: a failure leaves the previous file whole (#1158).
+        datadir_file::write_replacing(datadir, port, json.into_bytes(), persist)
+            .await
+            .map_err(|e| {
+                let path = datadir_file::data_path(datadir, port);
+                ImposterError::PersistError(
+                    anyhow::Error::new(e)
+                        .context(format!("Failed to write imposter {port} to {path:?}")),
+                )
+            })
     }
 
     /// Remove an imposter's file from datadir (if configured and the imposter belongs there).
@@ -2084,24 +2091,49 @@ impl ImposterManager {
         }
     }
 
-    /// Remove `{port}.json` from the datadir (if configured), whatever store the imposter was in.
+    /// Remove `{port}.json` from the datadir (if configured), whatever store the imposter was in,
+    /// and any `{port}.json.tmp` a crash left beside it, so a deleted imposter leaves nothing behind.
+    ///
+    /// Callers must hold `persist_lock`: unlocked, the temp removal could land inside a concurrent
+    /// write and fail its rename.
     async fn remove_persisted_file(&self, port: u16) -> Result<(), ImposterError> {
         let Some(ref datadir) = self.datadir else {
             return Ok(());
         };
-        let path = datadir.join(format!("{port}.json"));
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            // An absent file is the desired end state, not a failure: the imposter may never
-            // have been persisted, or the file was already removed. Handling NotFound here
-            // (rather than pre-checking `exists()`) also closes the TOCTOU window between
-            // check and unlink.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(ImposterError::PersistError(
-                anyhow::Error::new(e)
-                    .context(format!("Failed to remove imposter {port} file {path:?}")),
-            )),
+        // The leftover first: if it cannot be removed, the delete fails with `{port}.json` still in
+        // place, so `Err` keeps meaning "not deleted" (issue #1124).
+        for path in [
+            datadir_file::temp_path(datadir, port),
+            datadir_file::data_path(datadir, port),
+        ] {
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                // An absent file is the desired end state, not a failure: the imposter may never
+                // have been persisted, or the file was already removed. Handling NotFound here
+                // (rather than pre-checking `exists()`) also closes the TOCTOU window between
+                // check and unlink.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(ImposterError::PersistError(anyhow::Error::new(e).context(
+                        format!("Failed to remove imposter {port} file {path:?}"),
+                    )));
+                }
+            }
         }
+        Ok(())
+    }
+
+    /// `remove_persisted_file`, unless the port has been taken again by the time the lock is held.
+    ///
+    /// For a rollback after a failed create: the failed imposter is already out of the map, so a
+    /// concurrent create on the same port can have persisted its own `{port}.json` since — and an
+    /// unlocked, unconditional unlink would then delete it, silently.
+    async fn remove_persisted_file_if_vacant(&self, port: u16) -> Result<(), ImposterError> {
+        let _persist = self.persist_lock.lock().await;
+        if self.imposters.get(port).is_some() {
+            return Ok(());
+        }
+        self.remove_persisted_file(port).await
     }
 }
 
@@ -2399,6 +2431,165 @@ mod tests {
         assert_eq!(json["stubs"].as_array().unwrap().len(), 1);
 
         manager.delete_imposter(19702).await.unwrap();
+    }
+
+    fn datadir_config(port: u16) -> ImposterConfig {
+        serde_json::from_value(serde_json::json!({"protocol": "http", "port": port, "stubs": []}))
+            .expect("config")
+    }
+
+    /// Issue #1158: `{port}.json` was rewritten in place, so a reader — a `POST /admin/reload`, or
+    /// the next start after a kill — could see it empty or half-written. Every read must parse.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_concurrent_reader_never_sees_a_partial_datadir_file() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        manager
+            .create_imposter(datadir_config(19581))
+            .await
+            .expect("create");
+
+        let file = dir.path().join("19581.json");
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let stop = Arc::clone(&stop);
+            tokio::task::spawn_blocking(move || {
+                let (mut reads, mut partial) = (0u32, Vec::new());
+                while !stop.load(Ordering::Relaxed) {
+                    let bytes = std::fs::read(&file).expect("the file is always there");
+                    reads += 1;
+                    if serde_json::from_slice::<ImposterConfig>(&bytes).is_err() {
+                        partial.push(bytes.len());
+                    }
+                }
+                (reads, partial)
+            })
+        };
+        // Large enough that each write takes long enough to be caught mid-way.
+        let body = "x".repeat(32 * 1024);
+        for _ in 0..100 {
+            let stub: Stub = serde_json::from_value(serde_json::json!({
+                "responses": [{"is": {"statusCode": 200, "body": body}}]
+            }))
+            .expect("stub");
+            manager.add_stub(19581, stub, None).await.expect("add_stub");
+        }
+        stop.store(true, Ordering::Relaxed);
+        let (reads, partial) = reader.await.expect("reader");
+        manager.delete_imposter(19581).await.expect("delete");
+
+        assert!(reads > 0, "the reader must have read");
+        assert!(
+            partial.is_empty(),
+            "{} of {reads} reads saw a partial document (sizes {:?})",
+            partial.len(),
+            &partial[..partial.len().min(5)]
+        );
+    }
+
+    /// A failed persist answers the client with an error — and that must mean the previous state
+    /// survived, not that the file was truncated on the way to failing (issue #1158).
+    #[tokio::test]
+    async fn a_failed_persist_leaves_the_previous_file_intact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        manager
+            .create_imposter(datadir_config(19582))
+            .await
+            .expect("create");
+        let file = dir.path().join("19582.json");
+        let before = std::fs::read(&file).expect("persisted");
+
+        std::fs::create_dir(dir.path().join("19582.json.tmp")).expect("block the temp path");
+        let stub: Stub = serde_json::from_value(serde_json::json!({
+            "responses": [{"is": {"statusCode": 200}}]
+        }))
+        .expect("stub");
+        let err = manager
+            .add_stub(19582, stub, None)
+            .await
+            .expect_err("the write cannot happen");
+        assert!(matches!(err, ImposterError::PersistError(_)), "{err:?}");
+        assert_eq!(std::fs::read(&file).expect("still there"), before);
+
+        std::fs::remove_dir(dir.path().join("19582.json.tmp")).expect("unblock");
+        manager.delete_imposter(19582).await.expect("delete");
+    }
+
+    /// A create whose persist fails used to unlink `{port}.json` to clear a truncated write. With
+    /// nothing truncated there is nothing to clear, and the file already there — a reload's own
+    /// input, in the case that mattered — must survive the failed create.
+    #[tokio::test]
+    async fn a_create_that_cannot_persist_leaves_an_existing_file_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("19583.json");
+        std::fs::write(&file, "operator's file").expect("seed");
+        std::fs::create_dir(dir.path().join("19583.json.tmp")).expect("block the temp path");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+
+        let err = manager
+            .create_imposter(datadir_config(19583))
+            .await
+            .expect_err("the create cannot persist");
+        assert!(matches!(err, ImposterError::PersistError(_)), "{err:?}");
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("kept"),
+            "operator's file"
+        );
+        assert!(
+            manager.get_imposter(19583).is_err(),
+            "and nothing is serving"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_persist_leaves_no_temp_file_and_a_delete_removes_a_leftover() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        manager
+            .create_imposter(datadir_config(19584))
+            .await
+            .expect("create");
+        assert_eq!(datadir_files(dir.path()), vec!["19584.json".to_string()]);
+
+        // What a crash between the temp write and the rename leaves behind.
+        std::fs::write(dir.path().join("19584.json.tmp"), "{ trunc").expect("leftover");
+        manager.delete_imposter(19584).await.expect("delete");
+        assert!(
+            datadir_files(dir.path()).is_empty(),
+            "{:?}",
+            datadir_files(dir.path())
+        );
+    }
+
+    /// A delete whose leftover temp file cannot be removed must fail before touching `{port}.json`:
+    /// `Err` means "not deleted" (issue #1124), and a restart must still find the imposter.
+    #[tokio::test]
+    async fn a_delete_that_cannot_clear_the_temp_file_keeps_the_imposter_and_its_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+        manager
+            .create_imposter(datadir_config(19585))
+            .await
+            .expect("create");
+        // A non-empty directory at the temp path cannot be removed as a file.
+        let blocker = dir.path().join("19585.json.tmp");
+        std::fs::create_dir(&blocker).expect("block");
+        std::fs::write(blocker.join("x"), "").expect("fill");
+
+        manager
+            .delete_imposter(19585)
+            .await
+            .expect_err("the leftover cannot be removed");
+        assert!(
+            dir.path().join("19585.json").exists(),
+            "the file must survive"
+        );
+        assert!(manager.get_imposter(19585).is_ok(), "and the imposter too");
+
+        std::fs::remove_dir_all(&blocker).expect("unblock");
+        manager.delete_imposter(19585).await.expect("delete");
     }
 
     fn datadir_files(dir: &std::path::Path) -> Vec<String> {

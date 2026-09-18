@@ -67,7 +67,9 @@ keeps its own imposters:
   in a `PUT /imposters` cannot be matched to a running one, so it is created and persisted like any
   other admin-API imposter.
 - An imposter created with `POST /imposters` is written to `<datadir>/<port>.json` and survives a
-  reload. Remove its file, or delete the imposter, to drop it.
+  reload. Remove its file, or delete the imposter, to drop it. The file is replaced atomically, so
+  a reload never reads a half-written one. A `<port>.json.tmp` beside it is an interrupted write.
+  A reload neither reads nor removes it, and the next start deletes it with a warning.
 - A port declared by both the config file and a file in the data directory **refuses the reload**
   with a `500`, and the running imposters are left unchanged. Remove one of the two declarations.
 - Every file in the data directory must load. A malformed file, one that declares no `port`, or one

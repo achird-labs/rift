@@ -1370,4 +1370,20 @@ mod tests {
             "{err:#}"
         );
     }
+
+    /// Issue #1158: an interrupted write leaves `{port}.json.tmp`, possibly partial. A reload must
+    /// neither read it nor remove it — removing it could fail a live writer's rename.
+    #[test]
+    fn a_reload_ignores_and_keeps_an_interrupted_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("4545.json"),
+            r#"{"port":4545,"protocol":"http","stubs":[]}"#,
+        )
+        .expect("write");
+        std::fs::write(dir.path().join("4545.json.tmp"), "{ truncated").expect("write");
+        let loaded = load_dir(dir.path()).expect("the partial temp file is not read");
+        assert_eq!(loaded.len(), 1);
+        assert!(dir.path().join("4545.json.tmp").exists());
+    }
 }

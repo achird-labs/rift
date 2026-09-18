@@ -316,11 +316,11 @@ python3 scripts/bench_direct.py --run-all \
     --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
 cat results/DIRECT_BENCHMARK_REPORT.md
 
-# Admin create/read (imposter creation + overlap analysis)
-python3 scripts/bench_admin.py --run-all \
+# Admin create/read (imposter creation + overlap analysis), median of 5 rounds
+python3 scripts/bench_admin.py --run-all --rep 5 --tag m4 \
     --rift-bin ../../target/release/rift-http-proxy \
     --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
-cat results/ADMIN_BENCHMARK_REPORT.md
+cat results/ADMIN_BENCHMARK_REPORT_m4.md
 ```
 
 > `oha` reads the macOS keychain to initialise TLS even for plain-HTTP targets —
