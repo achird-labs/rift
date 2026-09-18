@@ -1479,6 +1479,13 @@ record.
 
 ### Security
 
+- **A `{:?}` of the parsed command line no longer prints its credentials** (#1166). `Cli` derived
+  `Debug`, so `--api-key`, `--intercept-auth` and `--intercept-ca-key-pem` would render verbatim in
+  any log line or error that formatted it. Nothing did yet, but an embedder that flattens `Cli` into
+  its own derived-`Debug` parser inherited the exposure with no way to fix it on its side. They now
+  render as `"<redacted>"` when set and `None` when not, and every other flag is still shown. The impl
+  names every field, so a new flag does not compile until it is given a rendering.
+
 - **`requireAdminAuth` and the outbound TLS trust now reach the C-ABI's intercept listener**
   (#1149). `InterceptControl` carried both policies **by value**, settable only through consuming
   builders. The standalone binary can obey that because it parses the CLI before it builds the

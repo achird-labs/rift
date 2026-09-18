@@ -43,7 +43,7 @@ pub const DEFAULT_HEALTHCHECK_TIMEOUT_SECS: u64 = 2;
 ///
 /// Rift starts an admin API on port 2525 (configurable) for creating imposters
 /// with advanced fault injection, scripting, and stateful testing capabilities.
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(name = "rift")]
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
@@ -250,6 +250,101 @@ pub struct Cli {
         conflicts_with = "intercept_ca_key"
     )]
     pub intercept_ca_key_pem: Option<String>,
+}
+
+/// Hand-written so that no credential a `Cli` carries ever reaches a log line: `api_key` (the admin
+/// bearer), `intercept_auth` (`user:pass`) and `intercept_ca_key_pem` (a CA private key) render as
+/// `"<redacted>"` when set. Paths to key files are not secrets and stay visible.
+///
+/// The destructuring below names every field with no `..`, so a new flag does not compile until it
+/// is given a rendering here — the impl cannot silently fall behind the struct.
+impl std::fmt::Debug for Cli {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const REDACTED: &str = "<redacted>";
+        let Self {
+            command,
+            port,
+            host,
+            configfile,
+            datadir,
+            imposters,
+            scripts_dir,
+            allow_injection,
+            local_only,
+            require_admin_auth,
+            loglevel,
+            runtime,
+            runtime_affinity,
+            nologfile,
+            log,
+            pidfile,
+            origin,
+            mock,
+            debug,
+            metrics_port,
+            front_door,
+            no_parse,
+            formatter,
+            protofile,
+            ip_whitelist,
+            api_key,
+            rcfile,
+            default_tls_cert,
+            default_tls_key,
+            no_self_signed_tls,
+            upstream_ca_file,
+            upstream_tls_skip_verify,
+            intercept_port,
+            intercept_auth,
+            intercept_ca_cert,
+            intercept_ca_key,
+            intercept_ca_cert_pem,
+            intercept_ca_key_pem,
+        } = self;
+        f.debug_struct("Cli")
+            .field("command", command)
+            .field("port", port)
+            .field("host", host)
+            .field("configfile", configfile)
+            .field("datadir", datadir)
+            .field("imposters", imposters)
+            .field("scripts_dir", scripts_dir)
+            .field("allow_injection", allow_injection)
+            .field("local_only", local_only)
+            .field("require_admin_auth", require_admin_auth)
+            .field("loglevel", loglevel)
+            .field("runtime", runtime)
+            .field("runtime_affinity", runtime_affinity)
+            .field("nologfile", nologfile)
+            .field("log", log)
+            .field("pidfile", pidfile)
+            .field("origin", origin)
+            .field("mock", mock)
+            .field("debug", debug)
+            .field("metrics_port", metrics_port)
+            .field("front_door", front_door)
+            .field("no_parse", no_parse)
+            .field("formatter", formatter)
+            .field("protofile", protofile)
+            .field("ip_whitelist", ip_whitelist)
+            .field("api_key", &api_key.as_ref().map(|_| REDACTED))
+            .field("rcfile", rcfile)
+            .field("default_tls_cert", default_tls_cert)
+            .field("default_tls_key", default_tls_key)
+            .field("no_self_signed_tls", no_self_signed_tls)
+            .field("upstream_ca_file", upstream_ca_file)
+            .field("upstream_tls_skip_verify", upstream_tls_skip_verify)
+            .field("intercept_port", intercept_port)
+            .field("intercept_auth", &intercept_auth.as_ref().map(|_| REDACTED))
+            .field("intercept_ca_cert", intercept_ca_cert)
+            .field("intercept_ca_key", intercept_ca_key)
+            .field("intercept_ca_cert_pem", intercept_ca_cert_pem)
+            .field(
+                "intercept_ca_key_pem",
+                &intercept_ca_key_pem.as_ref().map(|_| REDACTED),
+            )
+            .finish()
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -1729,6 +1824,49 @@ fn read_and_gate_datadir(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #1166: a `Cli` never renders a credential it carries, and still renders the flags
+    /// that are not secret — including the paths to key files, which are not keys. The credentials
+    /// are assigned rather than parsed so a developer's own `MB_APIKEY` or `RIFT_INTERCEPT_*`
+    /// cannot change what is being rendered (or make the parse conflict).
+    #[test]
+    fn cli_debug_never_renders_a_credential() {
+        let mut cli = Cli::try_parse_from(["rift", "--port", "4242"]).expect("parse");
+        cli.api_key = Some("leak-canary-admin-token".to_owned());
+        cli.intercept_auth = Some("leak-canary-user:leak-canary-pass".to_owned());
+        cli.intercept_ca_cert_pem = Some("cert-pem-is-public".to_owned());
+        cli.intercept_ca_key_pem = Some("leak-canary-private-key-pem".to_owned());
+        cli.default_tls_key = Some(PathBuf::from("/etc/rift/key-path-is-not-a-secret.pem"));
+        let rendered = format!("{cli:?}");
+        assert!(
+            !rendered.contains("leak-canary"),
+            "a credential leaked: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("\"<redacted>\"").count(),
+            3,
+            "got: {rendered}"
+        );
+        assert!(rendered.contains("port: 4242"), "got: {rendered}");
+        assert!(rendered.contains("cert-pem-is-public"), "got: {rendered}");
+        assert!(
+            rendered.contains("key-path-is-not-a-secret.pem"),
+            "got: {rendered}"
+        );
+    }
+
+    /// An unset credential renders as `None`, not as `"<redacted>"` — whether a key was configured
+    /// is exactly what a log line debugging an auth failure needs to show.
+    #[test]
+    fn cli_debug_shows_an_unset_credential_as_none() {
+        let mut cli = Cli::try_parse_from(["rift"]).expect("parse");
+        cli.api_key = None;
+        cli.intercept_auth = None;
+        cli.intercept_ca_key_pem = None;
+        let rendered = format!("{cli:?}");
+        assert!(rendered.contains("api_key: None"), "got: {rendered}");
+        assert!(!rendered.contains("<redacted>"), "got: {rendered}");
+    }
     // The CA load/generate logic now lives behind `InterceptControl::start`; these tests still
     // exercise `CertificateAuthority` directly (its contract is unchanged).
     use rift_mock_core::proxy::intercept_ca::CertificateAuthority;
