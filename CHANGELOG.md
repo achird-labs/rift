@@ -711,6 +711,33 @@ record.
 
 ### Fixed
 
+- **A `wait` range with `min` greater than `max` is refused instead of panicking the worker**
+  (#1148). The draw is `gen_range(min..=max)`, which asserts a non-empty range; it runs on the
+  request task with no `catch_unwind`, so an inverted range killed the worker on **every** request
+  to that stub — the client got no response at all and the connection was dropped, permanently,
+  while the server stayed up and reported healthy. Creation had returned `201`.
+  - Refused at the parse door, so every entry point reports it without per-door code: `POST`/`PUT
+    /imposters`, the stub endpoints, `--configfile`, `--datadir`, `POST /admin/reload` and the FFI.
+    The message names both bounds.
+  - Both spellings are covered. The stub-level **`delayRange`** is rewritten into a `{min,max}`
+    wait after parse, so it reached the identical draw; it is now validated at parse too, in every
+    entry rather than only the first one the engine uses.
+  - The draw itself is total regardless, clamping to `min` — `WaitBehavior` is a public enum with
+    public fields, so an embedder can build a `Range` without passing the door. Clamping, not
+    swapping: swapping would quietly honour a config the door rejects.
+  - `rift-lint` reports both spellings as **E025**, so the file says so before the engine runs.
+    The linter did not read `delayRange` at all before this. The range check deliberately ignores
+    the linter's usual last-value-wins merge rule, because the engine does: an inverted range in a
+    losing `behaviors` element, or in a block shadowed by `_behaviors`, is refused by the engine and
+    so is reported by the linter. A rule whose claim is "the engine refuses this" has to agree with
+    the engine, or a file lints clean in CI and then fails the deploy.
+  - An adjacent unchecked `u64` add in the regex fallback for a JavaScript wait
+    (`Math.floor(Math.random() * N) + M`) now saturates; it panicked in debug and wrapped to an
+    empty range — then panicked — in release.
+  - **Upgrade note:** a `--datadir` or `--configfile` that already holds an inverted range now
+    fails to load, where before it loaded a stub that dropped every connection. `min == max` stays
+    valid and unchanged.
+
 - **The admin event streams answer `GET` only** (#1145). `/events` and
   `/imposters/{port}/savedRequests/stream` opened a stream for any method; any method other than
   `GET` now gets the admin API's ordinary `404`, as the API reference already described.

@@ -59,7 +59,23 @@ impl WaitBehavior {
             WaitBehavior::Fixed(ms) => *ms,
             WaitBehavior::Range { min_ms, max_ms } => {
                 use rand::Rng;
-                rand::thread_rng().gen_range(*min_ms..=*max_ms)
+                // `gen_range` asserts a non-empty range, and this runs on the request task with no
+                // `catch_unwind` — an inverted range killed the worker on every request (#1148).
+                // The parse door refuses that shape, but this is a `pub` enum with `pub` fields, so
+                // the draw has to be total on its own. Clamp to `min` like the two sibling draw
+                // sites; swapping would quietly honour a config the door rejects.
+                if max_ms <= min_ms {
+                    if max_ms < min_ms {
+                        tracing::warn!(
+                            "wait range has min {min_ms} greater than max {max_ms}; clamping to \
+                             min. The parse door refuses this, so reaching it means the value was \
+                             built in-process rather than loaded"
+                        );
+                    }
+                    *min_ms
+                } else {
+                    rand::thread_rng().gen_range(*min_ms..=*max_ms)
+                }
             }
             // Both spellings of a JS-function wait run the identical path (issue #608): same Boa
             // execution, same cap, same loud fallback.
@@ -167,7 +183,9 @@ impl WaitBehavior {
                 if let Some(caps) = WAIT_FLOOR_OFFSET_RE.captures(&body) {
                     let range = caps.get(1)?.as_str().parse::<u64>().ok()?;
                     let offset = caps.get(2)?.as_str().parse::<u64>().ok()?;
-                    return Some(rand::thread_rng().gen_range(offset..=offset + range));
+                    return Some(
+                        rand::thread_rng().gen_range(offset..=offset.saturating_add(range)),
+                    );
                 }
 
                 // Simpler pattern: Math.random() * N
@@ -317,6 +335,50 @@ mod tests {
             let duration = wait.get_duration_ms();
             assert!((100..=200).contains(&duration));
         }
+    }
+
+    // Issue #1148: `gen_range` panics on an empty range, and this ran on the request task with no
+    // `catch_unwind` — so an inverted range killed the worker and dropped the connection on every
+    // request to that stub, permanently, while the server stayed healthy. The door refuses this
+    // shape now, but `WaitBehavior` is a `pub` enum with `pub` fields, so the draw must be total on
+    // its own. Clamp to `min` (what the two sibling draw sites already do), never swap: swapping
+    // would quietly honour a config the door rejects.
+    #[test]
+    fn an_inverted_range_clamps_to_min_instead_of_panicking() {
+        let wait = WaitBehavior::Range {
+            min_ms: 100,
+            max_ms: 10,
+        };
+        // Looped, because a single assertion does not distinguish clamping from *swapping*: a swap
+        // would draw from 10..=100 and land on 100 about 1 run in 91. The clamp is deterministic,
+        // so every iteration must be 100.
+        for _ in 0..200 {
+            assert_eq!(wait.get_duration_ms(), 100);
+        }
+    }
+
+    #[test]
+    fn an_equal_bound_range_is_that_value() {
+        let wait = WaitBehavior::Range {
+            min_ms: 250,
+            max_ms: 250,
+        };
+        assert_eq!(wait.get_duration_ms(), 250);
+    }
+
+    // Adjacent unchecked `u64` add on two `\d+` captures. Driven at the regex fallback directly:
+    // with the `javascript` feature on, Boa answers first and caps the result, so going through
+    // `get_duration_ms` would pass against the unfixed code and prove nothing. The fallback is the
+    // *sole* path in a build without that feature — which, per #1156, is every released artifact.
+    #[test]
+    fn the_regex_fallback_does_not_overflow_on_a_huge_multiplier() {
+        let js = "function() { return Math.floor(Math.random() * 18446744073709551615) + 5; }";
+        // The draw is random, so the discriminating assertion is that there *is* a value at all:
+        // before the fix `offset + range` overflowed, which panics in debug and wraps to an empty
+        // range — then panics inside `gen_range` — in release.
+        let ms = WaitBehavior::execute_js_wait_function_regex(js)
+            .expect("the fallback recognises the pattern");
+        assert!(ms >= 5, "the draw starts at the offset, got {ms}");
     }
 
     #[test]

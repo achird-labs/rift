@@ -71,6 +71,15 @@ For a simple random range with no JavaScript, use the range form instead:
 { "_behaviors": { "wait": { "min": 500, "max": 1500 } } }
 ```
 
+`min` must be **no greater than** `max`. An inverted range has no delay to draw from, so it is
+refused at every door — `POST`/`PUT /imposters`, the stub endpoints, `--configfile`, `--datadir`
+and `POST /admin/reload` — with a `400` naming both values; `rift-lint` reports it as `E025` before
+the engine ever sees the file. `min == max` is a valid inclusive range meaning a fixed delay. The
+stub-level `delayRange` is the same range in a different place and follows the same rule.
+
+*Upgrade note:* before Rift 0.18.0 an inverted range was accepted and then dropped every connection
+to that stub. A `--datadir` holding one now fails to load rather than serving a broken stub.
+
 ### Error Responses
 
 ```json

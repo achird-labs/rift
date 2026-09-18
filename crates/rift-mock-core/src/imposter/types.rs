@@ -355,11 +355,37 @@ struct StubRaw {
 /// A `delayRange` entry for stub-level latency configuration.
 /// Both `min` and `max` may be numbers or numeric strings.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "DelayRangeRaw")]
 struct DelayRange {
+    min: u64,
+    max: u64,
+}
+
+/// The wire shape. `DelayRange` is rewritten into a `wait` by an infallible `From<StubRaw>`, so an
+/// inverted range has to be refused here, at parse, or it reaches the draw and panics (issue #1148).
+#[derive(Debug, Deserialize)]
+struct DelayRangeRaw {
     #[serde(deserialize_with = "de_u64_or_string")]
     min: u64,
     #[serde(deserialize_with = "de_u64_or_string")]
     max: u64,
+}
+
+impl TryFrom<DelayRangeRaw> for DelayRange {
+    type Error = String;
+
+    fn try_from(raw: DelayRangeRaw) -> Result<Self, Self::Error> {
+        if raw.min > raw.max {
+            return Err(format!(
+                "`delayRange` has min {} greater than max {}",
+                raw.min, raw.max
+            ));
+        }
+        Ok(Self {
+            min: raw.min,
+            max: raw.max,
+        })
+    }
 }
 
 fn de_u64_or_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
@@ -690,6 +716,45 @@ pub(crate) fn default_status_code() -> u16 {
 /// so serde would also read a JSON array into it by position — wait, repeat, copy, lookup,
 /// shellTransform, decorate — and the `--allowInjection` gate, which classifies object keys, saw
 /// nothing to refuse. Refusing the shape here means no door can admit it. `null` stays absent (#1098).
+/// A `{min,max}` wait with `min > max` has no delay to draw from, and the draw used to panic the
+/// request worker (issue #1148). Refused here, at the same layer as #1109's shape checks, so every
+/// door reports it without per-door code. Looks only at the numeric range shape; every other `wait`
+/// spelling keeps its existing policy.
+fn refuse_inverted_wait(wait: &serde_json::Value) -> Result<(), String> {
+    let (Some(min), Some(max)) = (
+        wait.get("min").and_then(serde_json::Value::as_u64),
+        wait.get("max").and_then(serde_json::Value::as_u64),
+    ) else {
+        return Ok(());
+    };
+    if min > max {
+        return Err(format!("`wait` range has min {min} greater than max {max}"));
+    }
+    Ok(())
+}
+
+/// Every `wait` in a `behaviors` block, whichever spelling it takes. The array form normalizes to
+/// the last `wait` it finds, but an inverted range is wrong wherever it sits, so all of them are
+/// checked rather than only the one that would survive normalization.
+fn refuse_inverted_waits_in_block(block: &serde_json::Value) -> Result<(), String> {
+    match block {
+        serde_json::Value::Object(_) => {
+            if let Some(wait) = block.get("wait") {
+                refuse_inverted_wait(wait)?;
+            }
+        }
+        serde_json::Value::Array(entries) => {
+            for entry in entries {
+                if let Some(wait) = entry.get("wait") {
+                    refuse_inverted_wait(wait)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn deserialize_underscore_behaviors<'de, D>(
     deserializer: D,
 ) -> Result<Option<serde_json::Value>, D::Error>
@@ -697,7 +762,12 @@ where
     D: serde::Deserializer<'de>,
 {
     match Option::<serde_json::Value>::deserialize(deserializer)? {
-        block @ (None | Some(serde_json::Value::Object(_))) => Ok(block),
+        block @ (None | Some(serde_json::Value::Object(_))) => {
+            if let Some(inner) = &block {
+                refuse_inverted_waits_in_block(inner).map_err(serde::de::Error::custom)?;
+            }
+            Ok(block)
+        }
         Some(other) => Err(serde::de::Error::invalid_type(
             unexpected_json(&other),
             &"`_behaviors` to be an object (the array form is spelled `behaviors`)",
@@ -713,6 +783,9 @@ where
 {
     match Option::<serde_json::Value>::deserialize(deserializer)? {
         block @ (None | Some(serde_json::Value::Object(_) | serde_json::Value::Array(_))) => {
+            if let Some(inner) = &block {
+                refuse_inverted_waits_in_block(inner).map_err(serde::de::Error::custom)?;
+            }
             Ok(block)
         }
         Some(other) => Err(serde::de::Error::invalid_type(
@@ -2690,6 +2763,104 @@ mod tests {
         } else {
             panic!("expected Is response");
         }
+    }
+
+    // Issue #1148: an inverted range has no delay to draw from, and the draw used to panic the
+    // worker on every request to the stub. Refused at the parse door — the #1109 layer — so every
+    // entry point (admin API, --configfile, --datadir, reload, FFI) reports it without per-door
+    // code. `delayRange` is a second spelling of the same thing and is rewritten into a `wait`
+    // after parse, so it needs its own check.
+    #[test]
+    fn an_inverted_delay_range_is_refused() {
+        let stub_json = json!({
+            "predicates": [],
+            "delayRange": [{ "min": 100, "max": 7 }],
+            "responses": [{ "is": { "statusCode": 200 } }]
+        });
+        let err = serde_json::from_value::<Stub>(stub_json)
+            .expect_err("an inverted delayRange must not deserialize");
+        let msg = err.to_string();
+        // 7, not 10: "10" is a substring of "100", so a `contains("100") && contains("10")`
+        // assertion is satisfied by a message naming only `min`, and would pass on half a fix.
+        assert!(
+            msg.contains("100") && msg.contains('7'),
+            "the refusal names both bounds: {msg}"
+        );
+    }
+
+    // Only the first entry is used, but an inverted range is wrong wherever it sits.
+    #[test]
+    fn an_inverted_delay_range_is_refused_in_a_later_entry() {
+        let stub_json = json!({
+            "predicates": [],
+            "delayRange": [{ "min": 1, "max": 2 }, { "min": 100, "max": 10 }],
+            "responses": [{ "is": { "statusCode": 200 } }]
+        });
+        assert!(
+            serde_json::from_value::<Stub>(stub_json).is_err(),
+            "a later inverted delayRange entry must be refused too"
+        );
+    }
+
+    #[test]
+    fn an_inverted_underscore_behaviors_wait_is_refused() {
+        let stub_json = json!({
+            "predicates": [],
+            "responses": [{ "is": { "statusCode": 200 },
+                            "_behaviors": { "wait": { "min": 100, "max": 7 } } }]
+        });
+        let err = serde_json::from_value::<Stub>(stub_json)
+            .expect_err("an inverted _behaviors.wait must not deserialize");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("100") && msg.contains('7'),
+            "the refusal names both bounds: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_inverted_behaviors_object_wait_is_refused() {
+        let stub_json = json!({
+            "predicates": [],
+            "responses": [{ "is": { "statusCode": 200 },
+                            "behaviors": { "wait": { "min": 100, "max": 10 } } }]
+        });
+        assert!(serde_json::from_value::<Stub>(stub_json).is_err());
+    }
+
+    // The array form normalizes to the *last* wait it finds, so an inverted range in a non-last
+    // element is the case a check on the normalized block alone would miss.
+    #[test]
+    fn an_inverted_behaviors_array_wait_is_refused_in_a_non_last_element() {
+        let stub_json = json!({
+            "predicates": [],
+            "responses": [{ "is": { "statusCode": 200 },
+                            "behaviors": [{ "wait": { "min": 100, "max": 10 } },
+                                          { "wait": 50 }] }]
+        });
+        assert!(
+            serde_json::from_value::<Stub>(stub_json).is_err(),
+            "an inverted range must be refused wherever it sits in the array"
+        );
+    }
+
+    // Equal bounds are a valid inclusive range and must keep working — this is the form
+    // `delayRange` with min == max already produces.
+    #[test]
+    fn an_equal_bound_wait_range_still_parses() {
+        let stub_json = json!({
+            "predicates": [],
+            "responses": [{ "is": { "statusCode": 200 },
+                            "_behaviors": { "wait": { "min": 250, "max": 250 } } }]
+        });
+        let stub: Stub = serde_json::from_value(stub_json).expect("equal bounds are valid");
+        let StubResponse::Is { behaviors, .. } = &stub.responses[0] else {
+            panic!("expected Is response");
+        };
+        assert_eq!(
+            behaviors.as_ref().expect("behaviors").get("wait"),
+            Some(&json!({ "min": 250, "max": 250 }))
+        );
     }
 
     #[test]

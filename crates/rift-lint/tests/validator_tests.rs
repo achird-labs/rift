@@ -686,6 +686,122 @@ fn e025_not_fired_for_numeric_wait() {
     assert!(!has_code(&r, "E025"), "unexpected E025: {:?}", codes(&r));
 }
 
+// Issue #1148: an inverted range is not a *shape* error — `is_valid_wait_range` holds — but the
+// engine now refuses the imposter, and "the engine refuses it" is the bar for an E-rule. Folded
+// into E025 rather than given a new code, the treatment #1090 gave the fractional case.
+#[test]
+fn e025_fired_for_an_inverted_wait_range() {
+    let behavior = json!({ "wait": { "min": 100, "max": 7 } });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &behavior, "loc", &mut r, &opts());
+    assert!(
+        has_code(&r, "E025"),
+        "E025 must fire for an inverted wait range, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn e025_not_fired_for_an_equal_bound_wait_range() {
+    let behavior = json!({ "wait": { "min": 250, "max": 250 } });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &behavior, "loc", &mut r, &opts());
+    assert!(
+        !has_code(&r, "E025"),
+        "equal bounds are a valid inclusive range, got {:?}",
+        codes(&r)
+    );
+}
+
+// Issue #1148: the engine refuses an inverted range **wherever it sits**, so the linter has to
+// match it — otherwise a file lints clean in CI and then 400s on deploy, which is the exact thing
+// an E-rule exists to prevent. These three shapes all passed the linter before the fix.
+#[test]
+fn e025_fired_for_an_inverted_range_in_a_non_last_behaviors_element() {
+    let response = json!({
+        "is": { "statusCode": 200 },
+        "behaviors": [{ "wait": { "min": 100, "max": 7 } }, { "wait": 50 }]
+    });
+    let mut r = LintResult::new();
+    validate_response(path(), &response, "loc", &mut r, &opts(), &json!({}));
+    assert!(
+        has_code(&r, "E025"),
+        "the losing element still refuses in the engine, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn e025_fired_for_an_inverted_range_in_a_behaviors_block_shadowed_by_underscore_behaviors() {
+    let response = json!({
+        "is": { "statusCode": 200 },
+        "_behaviors": { "wait": 100 },
+        "behaviors": [{ "wait": { "min": 100, "max": 7 } }]
+    });
+    let mut r = LintResult::new();
+    validate_response(path(), &response, "loc", &mut r, &opts(), &json!({}));
+    assert!(
+        has_code(&r, "E025"),
+        "the engine validates both blocks even though it evaluates only one, got {:?}",
+        codes(&r)
+    );
+}
+
+// Each finding must be reported once: the winning block is reported by the normal precedence-aware
+// path, the shadowed one by the sweep, and neither should double up.
+#[test]
+fn e025_is_reported_once_for_a_single_inverted_range() {
+    let response = json!({
+        "is": { "statusCode": 200 },
+        "_behaviors": { "wait": { "min": 100, "max": 7 } }
+    });
+    let mut r = LintResult::new();
+    validate_response(path(), &response, "loc", &mut r, &opts(), &json!({}));
+    let hits = codes(&r).iter().filter(|c| **c == "E025").count();
+    assert_eq!(hits, 1, "expected exactly one E025, got {:?}", codes(&r));
+}
+
+#[test]
+fn e025_fired_for_an_inverted_delay_range() {
+    let stub = json!({
+        "predicates": [],
+        "delayRange": [{ "min": 100, "max": 7 }],
+        "responses": [{ "is": { "statusCode": 200 } }]
+    });
+    let mut r = LintResult::new();
+    validate_stub(path(), &stub, 0, &mut r, &opts(), &json!({}));
+    assert!(
+        has_code(&r, "E025"),
+        "E025 must fire for an inverted delayRange, got {:?}",
+        codes(&r)
+    );
+}
+
+// The bounds may be numeric strings, as the engine's `de_u64_or_string` accepts.
+#[test]
+fn e025_fired_for_an_inverted_delay_range_written_as_strings() {
+    let stub = json!({
+        "predicates": [],
+        "delayRange": [{ "min": "100", "max": "7" }],
+        "responses": [{ "is": { "statusCode": 200 } }]
+    });
+    let mut r = LintResult::new();
+    validate_stub(path(), &stub, 0, &mut r, &opts(), &json!({}));
+    assert!(has_code(&r, "E025"), "got {:?}", codes(&r));
+}
+
+#[test]
+fn e025_not_fired_for_a_valid_delay_range() {
+    let stub = json!({
+        "predicates": [],
+        "delayRange": [{ "min": 0, "max": 0 }, { "min": 10, "max": 100 }],
+        "responses": [{ "is": { "statusCode": 200 } }]
+    });
+    let mut r = LintResult::new();
+    validate_stub(path(), &stub, 0, &mut r, &opts(), &json!({}));
+    assert!(!has_code(&r, "E025"), "got {:?}", codes(&r));
+}
+
 #[test]
 fn e025_not_fired_for_wait_range_object() {
     let behavior = json!({ "wait": { "min": 100, "max": 500 } });
