@@ -747,6 +747,25 @@ record.
 
 ### Fixed
 
+- **A `--datadir` file can no longer be truncated by the write that updates it** (#1158). Every admin
+  mutation rewrote `<port>.json` in place — truncate, then write — so the file was empty or partial
+  for the length of the write. A full disk left it that way with a `503` that reported only the lost
+  change, not the lost imposter. A `POST /admin/reload` racing a stub mutation read the partial file
+  and refused the whole reload. A kill mid-write left it for the next start to skip. The file is now
+  written to `<port>.json.tmp`, synced, and renamed over the old one, so a reader or a crash sees one
+  complete document or the other. A failed write leaves the previous file as it was.
+  - The next start removes a leftover `<port>.json.tmp` with a `WARN` line; neither loader ever reads
+    one. A reload leaves it alone, since it can run beside a live write.
+  - A create whose write fails no longer unlinks `<port>.json`. That unlink existed to clear a
+    truncated file. It also deleted a reload's own input file when the re-create could not be
+    persisted, and could delete a concurrent create's newly written file. The rollback after a
+    failed apply re-create now checks under the persist lock that no other imposter has taken the
+    port before it unlinks. The persist lock is now held until a write's rename completes, even when
+    the admin client disconnects mid-write.
+  - Each persisted mutation costs one `fsync` of the file, about 5 ms on macOS (`F_FULLFSYNC`), on
+    the admin path only. `<port>.json` gets a new inode on every write, so a hand-set mode or owner,
+    or a hard link, does not survive the next write. These files are rift's own output.
+
 - **`SIGTERM` and `SIGINT` shut the server down gracefully** (#1155). The `rift` binary installed no
   signal handler, so both took their default disposition: outside a container the process died at
   once with no cleanup, and as a container's **PID 1** — where the kernel discards an unhandled
