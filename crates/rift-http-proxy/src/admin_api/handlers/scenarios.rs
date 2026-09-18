@@ -5,7 +5,8 @@
 //! flow (`resolve_flow_id` with no headers ⇒ the `imposter_port` flow) is used.
 
 use crate::admin_api::handlers::imposters::{
-    admin_script_base, imposter_script_registry, reject_stubs_if_injection_disallowed,
+    admin_script_base, imposter_default_script_engine, imposter_script_registry,
+    reject_stubs_if_injection_disallowed,
 };
 use crate::admin_api::types::{collect_body, error_response, json_response};
 use crate::extensions::decorate::backend_error_response;
@@ -355,8 +356,14 @@ pub async fn handle_add_space_stub(
     // unknown-ref / unconfigured `file:` → 400, nothing unresolved is ever stored.
     {
         let registry = imposter_script_registry(&manager, port);
+        let default_engine = imposter_default_script_engine(&manager, port);
         let base = admin_script_base(&scripts_dir);
-        if let Err(e) = resolve_stub_scripts(std::slice::from_mut(&mut stub), &registry, &base) {
+        if let Err(e) = resolve_stub_scripts(
+            std::slice::from_mut(&mut stub),
+            &registry,
+            &default_engine,
+            &base,
+        ) {
             return error_response(
                 StatusCode::BAD_REQUEST,
                 &format!("Script resolution failed: {e}"),
