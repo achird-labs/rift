@@ -55,24 +55,14 @@ impl RequestContext {
         headers: &HashMap<String, Vec<String>, SH>,
         body: Option<&str>,
     ) -> Self {
-        let mut query_map = HashMap::new();
-        if let Some(query) = uri.query() {
-            for pair in query.split('&').filter(|s| !s.is_empty()) {
-                let (key, value) = match pair.split_once('=') {
-                    Some((k, v)) => (k, v),
-                    None => (pair, ""),
-                };
-                let decoded_key = crate::util::decode_or_raw(key);
-                let decoded_value = crate::util::decode_or_raw(value);
-                query_map
-                    .entry(decoded_key)
-                    .and_modify(|existing: &mut String| {
-                        existing.push(',');
-                        existing.push_str(&decoded_value);
-                    })
-                    .or_insert(decoded_value);
-            }
-        }
+        // The shared parser (issue #1153) — this used to be an inline third copy of it. Collecting
+        // into the std map re-hashes it, which #704 otherwise avoids; accepted here because it runs
+        // only for a stub with behaviors on a map of a few entries, and removing it means changing
+        // the public `query` field's type.
+        let query_map: HashMap<String, String> = uri
+            .query()
+            .map(|q| crate::util::parse_query_string(q).into_iter().collect())
+            .unwrap_or_default();
 
         // First value, not last: this is the rule predicates state
         // (docs/mountebank/predicates.md), the rule `parse_form_data` applies to Content-Type

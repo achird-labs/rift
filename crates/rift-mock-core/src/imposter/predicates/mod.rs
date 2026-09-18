@@ -660,28 +660,9 @@ use fields::{check_predicate_fields, check_predicate_fields_regex};
 use json::check_exists_predicate;
 use regex_cache::cached_regex;
 
-/// Parse query string into HashMap (public helper)
-/// URL-decodes both keys and values to properly handle encoded characters.
-/// Bare params without `=` (e.g. `?flag`) are treated as key with empty value.
-/// Duplicate keys are joined with commas (Mountebank `stringify` behavior).
-pub fn parse_query_string(query: &str) -> FastMap<String, String> {
-    let mut map = FastMap::default();
-    for pair in query.split('&').filter(|s| !s.is_empty()) {
-        let (key, value) = match pair.split_once('=') {
-            Some((k, v)) => (k, v),
-            None => (pair, ""),
-        };
-        let decoded_key = crate::util::decode_or_raw(key);
-        let decoded_value = crate::util::decode_or_raw(value);
-        map.entry(decoded_key)
-            .and_modify(|existing: &mut String| {
-                existing.push(',');
-                existing.push_str(&decoded_value);
-            })
-            .or_insert(decoded_value);
-    }
-    map
-}
+/// Re-exported from [`crate::util`], its one home (issue #1153), so the long-standing public path
+/// `rift_mock_core::imposter::parse_query_string` keeps working.
+pub use crate::util::parse_query_string;
 
 #[cfg(test)]
 mod tests {
