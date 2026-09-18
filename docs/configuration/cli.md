@@ -629,20 +629,22 @@ not gated by the key.
 
 ## Signal Handling
 
-The `rift` binary installs no signal handlers. `SIGTERM` and `SIGINT` (Ctrl+C) take their default
-action and end the process immediately: in-flight requests are not drained, and imposters are not
-torn down first. (The graceful `shutdown` path exists for embedders — see
-[Embedding & SPI]({{ site.baseurl }}/embedding/).)
+`SIGTERM` and `SIGINT` (Ctrl+C) shut the server down gracefully (issue #1155):
+
+- it stops accepting on the admin API, the metrics listener and the front door, and gives
+  connections already in flight on them a short, bounded grace — about three seconds at worst;
+- imposter connections are closed rather than drained — a mock server has no in-flight work worth
+  holding a shutdown for, which is also what Mountebank does;
+- persisted imposters in `--datadir` are left exactly as they are, so the next start serves them;
+- the `--pidfile` it wrote is removed, and the `--log` file is flushed;
+- the process exits `0`.
 
 ```bash
 kill -TERM $(pidof rift)
 ```
 
-In a container this has one sharp edge: the kernel does not apply default signal actions to PID 1,
-so a `rift` that is the container's PID 1 ignores `SIGTERM`, and `docker stop` waits out its
-timeout before sending `SIGKILL`. Run it under an init process — `docker run --init`, or
-`init: true` in Compose — to stop promptly. Kubernetes has the same behaviour; there, lower
-`terminationGracePeriodSeconds` or add an init process to the image you deploy.
+This holds for a `rift` that is a container's PID 1, too, so `docker stop` and a Kubernetes pod
+termination are prompt, and no init process (`docker run --init`, `init: true`) is needed.
 
 ---
 
@@ -655,7 +657,7 @@ timeout before sending `SIGKILL`. Run it under an init process — `docker run -
 | `2` | The command line itself could not be parsed (unknown flag, missing value, conflicting flags) |
 
 The error is printed to stderr in every case; the exit code does not distinguish the cause further.
-A server ended by a signal has no exit code of its own — a shell reports `143` after `SIGTERM`.
+A server stopped by `SIGTERM` or `SIGINT` exits `0`: that is a clean shutdown, not a failure.
 
 ---
 
@@ -687,8 +689,11 @@ rift stop --pidfile /var/run/rift.pid
 rift stop
 ```
 
-`stop` sends `SIGTERM` (`taskkill /F` on Windows) and removes the PID file. A PID file whose process
-is already gone is treated as stale: it is removed and `stop` succeeds. A missing PID file, a
+`stop` sends `SIGTERM` (`taskkill /F` on Windows) and **waits for the process to exit** before it
+returns — up to 5 seconds, above the server's own shutdown bound — then removes the PID file (the
+server usually removes it first, which is fine). A process still running after that is reported as
+an error and its PID file is kept, rather than being assumed gone. A PID file whose process is
+already gone is treated as stale: it is removed and `stop` succeeds. A missing PID file, a
 non-positive PID, or a process `rift` is not permitted to signal is an error, and the file is left
 in place.
 

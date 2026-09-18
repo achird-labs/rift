@@ -41,6 +41,7 @@ const ACTIVE_ALLOCATOR: &str = "jemalloc";
 #[cfg(not(any(feature = "mimalloc", feature = "jemalloc")))]
 const ACTIVE_ALLOCATOR: &str = "system";
 
+use anyhow::Context as _;
 use clap::Parser;
 use rift_http_proxy::bootstrap::{
     DEFAULT_PIDFILE, apply_rcfile_defaults_reporting, log_filter, save_imposters, stop_for_restart,
@@ -114,20 +115,26 @@ fn main() -> Result<(), anyhow::Error> {
     // refused instead of being mistaken for an unset one.
     let env_filter = log_filter(&cli)?;
 
-    // Build optional file log layer when --log is set and --nologfile is not
+    // Build optional file log layer when --log is set and --nologfile is not.
+    //
+    // The worker guard is held here, in `main`, and dropped when `main` returns — on every path,
+    // `?` included — which is what flushes the non-blocking writer. It used to be `Box::leak`ed, so
+    // it never dropped, and lines still queued when the process ended could be lost (issue #1155).
+    let mut log_guard: Option<tracing_appender::non_blocking::WorkerGuard> = None;
     let file_layer: Option<Box<dyn Layer<_> + Send + Sync>> = if !cli.nologfile {
         cli.log.as_ref().and_then(|log_path| {
             let dir = log_path.parent().unwrap_or(std::path::Path::new("."));
             let filename = log_path.file_name()?.to_string_lossy().into_owned();
             let file_appender = tracing_appender::rolling::never(dir, filename);
             let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-            // Leak the guard so it lives for the process lifetime
-            Box::leak(Box::new(guard));
+            log_guard = Some(guard);
             Some(fmt::layer().with_writer(non_blocking).boxed())
         })
     } else {
         None
     };
+    // Named, not `_`: a `let _ =` binding would drop the guard immediately.
+    let _log_guard = log_guard;
 
     tracing_subscriber::registry()
         .with(fmt::layer())
@@ -219,7 +226,44 @@ fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
         std::fs::write(pidfile, pid.to_string())?;
         info!("Wrote PID {} to {:?}", pid, pidfile);
     }
+    // Remembered before `cli` moves into the builder: the server removes the PID file it wrote on
+    // the way out, on success and on error alike (issue #1155). It never used to, so a Ctrl+C, a
+    // plain `kill` or a `docker stop` all left a stale file behind.
+    let written_pidfile = cli.pidfile.clone();
+    let result = serve_topology(cli);
+    if let Some(pidfile) = written_pidfile {
+        remove_own_pidfile(&pidfile);
+    }
+    info!("stopped");
+    result
+}
 
+/// Remove the PID file this process wrote — but only while it still names this process. A second
+/// server started on the same `--pidfile` has overwritten it with its own PID by now, and deleting
+/// that would orphan the live server from `rift stop`. Already gone is success: `rift stop` may have
+/// got there first. Any other failure is logged, not turned into a changed exit code: the server
+/// did stop.
+fn remove_own_pidfile(pidfile: &std::path::Path) {
+    let ours = std::process::id().to_string();
+    match std::fs::read_to_string(pidfile) {
+        Ok(contents) if contents.trim() == ours => {}
+        Ok(_) => return,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::error!(error = %e, ?pidfile, "could not read the PID file to remove it");
+            return;
+        }
+    }
+    match std::fs::remove_file(pidfile) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::error!(error = %e, ?pidfile, "could not remove the PID file"),
+    }
+}
+
+/// Pick the runtime topology and serve on it until the admin plane exits or a termination signal
+/// arrives.
+fn serve_topology(cli: Cli) -> Result<(), anyhow::Error> {
     // Topology selection (RFC-712, issue #744). Clap already applied RIFT_RUNTIME env fallback
     // into `cli.runtime`, so resolve() only sees the merged value; the platform gate then
     // downgrades or rejects per RFC D5 (macOS falls back with a warning, Windows refuses).
@@ -237,7 +281,11 @@ fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(ServerBuilder::from_cli(cli).run())
+            let result = runtime.block_on(serve(ServerBuilder::from_cli(cli)));
+            // Bounded, not an implicit drop — a stuck `decorate` would otherwise hold the process
+            // after a graceful shutdown for ever. See `runtime::BLOCKING_DRAIN`.
+            runtime.shutdown_timeout(runtime::BLOCKING_DRAIN);
+            result
         }
         runtime::RuntimeTopology::PerCore { workers } => {
             // Control plane: admin API, metrics, savefile machinery, and imposter mutations
@@ -261,13 +309,85 @@ fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
             // Imposter accept loops fan out across the workers (issue #745): the builder
             // threads the runtime handles into the manager, which binds one SO_REUSEPORT
             // listener per worker per imposter port.
-            let result = control.block_on(
-                ServerBuilder::from_cli(cli)
-                    .accept_runtimes(workers.handles())
-                    .run(),
-            );
+            let result = control.block_on(serve(
+                ServerBuilder::from_cli(cli).accept_runtimes(workers.handles()),
+            ));
             workers.shutdown();
+            control.shutdown_timeout(runtime::BLOCKING_DRAIN);
             result
+        }
+    }
+}
+
+/// Serve until the admin plane exits or a termination signal arrives (issue #1155).
+///
+/// The binary no longer calls `ServerBuilder::run`, which consumed the server and so left nothing
+/// able to shut it down. Embedders own their process's signals, so `run` itself is unchanged; this
+/// arm is the binary's.
+///
+/// On a signal the shutdown is `RunningServer::shutdown`: stop accepting, give in-flight admin,
+/// metrics and front-door connections a bounded grace (about three seconds at worst), and exit 0 —
+/// Mountebank's behaviour. It is deliberately **not** the FFI's `rift_stop`, which also calls
+/// `ImposterManager::shutdown` and so deletes every imposter *and unlinks its `--datadir` file*:
+/// wired to SIGTERM, that would make every `docker stop` wipe the datadir.
+async fn serve(builder: ServerBuilder) -> anyhow::Result<()> {
+    // Installed before the server starts, so a signal that lands during startup is held rather
+    // than dropped — as PID 1, a SIGTERM with no handler is discarded by the kernel.
+    let mut signals =
+        TerminationSignals::install().context("installing the termination-signal handler")?;
+    let server = builder.start().await?;
+    tokio::select! {
+        // The admin plane died on its own: surface it, and exit non-zero as before.
+        result = server.wait() => return result,
+        name = signals.recv() => info!(signal = name, "shutting down"),
+    }
+    server.shutdown().await;
+    Ok(())
+}
+
+/// The termination signals the binary handles: SIGTERM and SIGINT on unix, Ctrl+C elsewhere.
+struct TerminationSignals {
+    #[cfg(unix)]
+    term: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    int: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    ctrl_c: tokio::signal::windows::CtrlC,
+}
+
+impl TerminationSignals {
+    /// Register the handlers now. A failed install is an error, never ignored: a server that
+    /// silently cannot be stopped gracefully is the defect being fixed.
+    fn install() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Ok(Self {
+                term: signal(SignalKind::terminate())?,
+                int: signal(SignalKind::interrupt())?,
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                ctrl_c: tokio::signal::windows::ctrl_c()?,
+            })
+        }
+    }
+
+    /// Resolve on the first signal, naming it for the log.
+    async fn recv(&mut self) -> &'static str {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = self.term.recv() => "SIGTERM",
+                _ = self.int.recv() => "SIGINT",
+            }
+        }
+        #[cfg(windows)]
+        {
+            self.ctrl_c.recv().await;
+            "Ctrl+C"
         }
     }
 }

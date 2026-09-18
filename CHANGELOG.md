@@ -322,6 +322,15 @@ record.
 
 ### Changed
 
+- **`rift stop` (and so `rift restart`) waits for the server to exit** (#1155), up to 5 seconds. It
+  used to send `SIGTERM` and return at once, reporting success while the server was still running —
+  which made `restart` race its own rebind into `EADDRINUSE` once shutdown became graceful. A process
+  still running after 5 seconds is now an error and its PID file is kept, so a stop against an older
+  server that ignores `SIGTERM` reports the truth instead of assuming it worked. A PID file the
+  server already removed is not an error. `bootstrap::stop_server` behaves the same, and detects an
+  exited process even when the caller is its parent and has not reaped it yet — without reaping it,
+  so the caller's own `wait` still gets the exit status.
+
 - **`bootstrap::save_imposters` and `save_imposters_async` take an `api_key: Option<&str>`** (#1154),
   so an embedder saving from a keyed server can present the key. Pass `None` for an unkeyed server.
   A signature change on 0.x, treated like the earlier pre-1.0 API edits.
@@ -719,6 +728,29 @@ record.
     `errors[0].detail` instead.
 
 ### Fixed
+
+- **`SIGTERM` and `SIGINT` shut the server down gracefully** (#1155). The `rift` binary installed no
+  signal handler, so both took their default disposition: outside a container the process died at
+  once with no cleanup, and as a container's **PID 1** — where the kernel discards an unhandled
+  `SIGTERM` — `docker stop` waited out its whole timeout and then killed it, exit `137`. The CLI docs
+  have always promised a graceful shutdown.
+  - The binary now stops accepting on the admin API, metrics and front door, gives in-flight
+    connections a bounded grace of about three seconds at most, closes imposter connections (as
+    Mountebank does), and exits `0`. `docker stop` and pod termination are prompt; `--init` /
+    `init: true` are no longer needed. A CI step now proves it against the scratch image.
+  - **Persisted imposters are left alone.** The issue proposed driving the embedder shutdown path,
+    but the C-ABI's `rift_stop` also deletes every imposter and unlinks its `--datadir` file — wired
+    to `SIGTERM`, every `docker stop` would have wiped the datadir. The binary uses the server's own
+    shutdown, which never touches imposters, and a test pins that the datadir survives.
+  - **A script that never finishes cannot hold the exit hostage.** A `decorate` runs on a blocking
+    thread that cannot be interrupted, and tokio's runtime teardown waits for blocking threads with
+    no limit — so one spinning script would have turned `SIGTERM` into a hang. Teardown now waits at
+    most 500ms for them, then exits regardless.
+  - The server removes the `--pidfile` it wrote on the way out, success and error alike — but only
+    while the file still names this process, so a second server that took the file over keeps it.
+    It never removed it, so any stop but `rift stop` left a stale file.
+  - The `--log` writer is flushed on exit. Its guard was leaked, so lines still queued when the
+    process ended could be lost.
 
 - **`rift healthcheck` and `rift save` present the admin API key** (#1154). A server started with
   `--api-key` / `MB_APIKEY` answers every admin path, `/health` included, with `401` until the key is

@@ -111,10 +111,10 @@ listener is up, not that the admin API is healthy.
 
 ### Shutdown
 
-`rift` installs no signal handlers, and as the container's PID 1 it ignores the `SIGTERM` the
-kubelet sends, so a pod takes the full `terminationGracePeriodSeconds` (30s by default) to stop and
-is then killed. Lower the grace period for mock servers, or run the binary under an init process in
-an image of your own.
+A pod stops promptly: `rift` handles the `SIGTERM` the kubelet sends, including as the container's
+PID 1 (issue #1155), so the default `terminationGracePeriodSeconds` is ample — the server's own
+shutdown is bounded at about three seconds. It exits `0` and leaves any `--datadir` state on its
+volume. No init process and no shortened grace period are needed.
 
 ---
 
