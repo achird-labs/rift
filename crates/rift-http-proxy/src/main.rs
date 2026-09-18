@@ -92,7 +92,7 @@ fn main() -> Result<(), anyhow::Error> {
     // server's PID file with the probe's own — but since #827 the PID file is written only on the
     // serving path, so a transient subcommand can no longer touch it.)
     if let Some(Commands::Healthcheck { url, timeout }) = cli.command.clone() {
-        return healthcheck::dispatch(url, &cli.host, cli.port, timeout);
+        return healthcheck::dispatch(url, &cli.host, cli.port, timeout, cli.api_key.as_deref());
     }
 
     // `--debug` is the server-flag spelling of debug mode (issue #360 Item 3); `RIFT_DEBUG` is
@@ -149,7 +149,13 @@ fn main() -> Result<(), anyhow::Error> {
             savefile,
             remove_proxies,
         }) => {
-            return save_imposters(&cli.host, cli.port, savefile, *remove_proxies);
+            return save_imposters(
+                &cli.host,
+                cli.port,
+                savefile,
+                *remove_proxies,
+                cli.api_key.as_deref(),
+            );
         }
         Some(Commands::Replay { configfile }) => {
             // Load the config file and start
@@ -167,7 +173,13 @@ fn main() -> Result<(), anyhow::Error> {
         // probe had paid for the whole server bootstrap, and (since issue #1133) had computed its
         // target from `--host`/`--port` before `--rcfile` could set them.
         Some(Commands::Healthcheck { url, timeout }) => {
-            return healthcheck::dispatch(url.clone(), &cli.host, cli.port, *timeout);
+            return healthcheck::dispatch(
+                url.clone(),
+                &cli.host,
+                cli.port,
+                *timeout,
+                cli.api_key.as_deref(),
+            );
         }
         Some(Commands::Start) | None => {
             // Default behavior - start in Mountebank mode

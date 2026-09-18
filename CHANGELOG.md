@@ -341,6 +341,10 @@ record.
   `is_javascript_decorate` (the engine's JavaScript-or-Rhai routing for `decorate`, pinned against
   the engine by a test).
 
+- **`bootstrap::save_imposters` and `save_imposters_async` take an `api_key: Option<&str>`** (#1154),
+  so an embedder saving from a keyed server can present the key. Pass `None` for an unkeyed server.
+  A signature change on 0.x, treated like the earlier pre-1.0 API edits.
+
 - **`extensions::template::RequestData.query` is a `FastMap`** instead of a std `HashMap` (#1153),
   so the shared query parser's map is used directly without a re-hash. Nothing outside the workspace
   constructs or reads `RequestData`; this rides the same minor bump as the removal above.
@@ -748,6 +752,23 @@ record.
     `javascript` feature, so `E028` fell back to brace counting and **`E040` had no fallback at all**:
     a JavaScript `_rift.script` got no syntax check whatsoever in any release binary, Docker image or
     brew install, and nothing said so. The feature is now on by default (see **Changed**).
+
+- **`rift healthcheck` and `rift save` present the admin API key** (#1154). A server started with
+  `--api-key` / `MB_APIKEY` answers every admin path, `/health` included, with `401` until the key is
+  sent — and neither client ever sent it. So a container that set `MB_APIKEY`, the configuration the
+  images document for a locked-down deployment, reported **unhealthy forever** (orchestrators
+  restarted it, rolling deploys stalled), and `rift save` against a keyed server always failed.
+  - Both now send the key the process already holds. `api_key` is a top-level option bound to
+    `MB_APIKEY`, so every subcommand has it, and an rcfile `apiKey` is applied before either runs.
+    No new flag: one on the subcommand would duplicate the top-level option and invite putting a
+    secret in argv, where `docker inspect` shows it. No image change either.
+  - The healthcheck sends the key **only** to the address derived from `--host`/`--port`, never to
+    an explicit `--url`, which is an arbitrary target and commonly the unauthenticated metrics
+    listener. A `401` with no key configured now names the setting to add.
+  - The header is the raw token the admin API compares, marked sensitive so a debug log never prints
+    it. The documented workaround — probing the metrics port instead — is retired from the Docker
+    and CLI docs; the Kubernetes page now shows an `exec` probe, which keeps the key out of the
+    manifest.
 
 - **A template renders a repeated query key the way a predicate matched it** (#1153).
   `${request.query.color}` and `{{ request.query.color }}` parsed the query with an orphaned copy of
@@ -1511,6 +1532,13 @@ record.
   instead of skipping. Both are fixed.
 
 ### Security
+
+- **A `{:?}` of the parsed command line no longer prints its credentials** (#1166). `Cli` derived
+  `Debug`, so `--api-key`, `--intercept-auth` and `--intercept-ca-key-pem` would render verbatim in
+  any log line or error that formatted it. Nothing did yet, but an embedder that flattens `Cli` into
+  its own derived-`Debug` parser inherited the exposure with no way to fix it on its side. They now
+  render as `"<redacted>"` when set and `None` when not, and every other flag is still shown. The impl
+  names every field, so a new flag does not compile until it is given a rendering.
 
 - **`requireAdminAuth` and the outbound TLS trust now reach the C-ABI's intercept listener**
   (#1149). `InterceptControl` carried both policies **by value**, settable only through consuming
