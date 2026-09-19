@@ -183,7 +183,7 @@ pub trait ProxyRecordingStore: Send + Sync {
     /// First caller per `(port, signature)` wins the right to record once.
     /// `Err` = backend unavailable (built-ins never fail).
     fn try_claim(&self, port: u16, sig: &RequestSignature) -> Result<ClaimOutcome>;
-    /// Release a claim after a failed upstream call so the signature is retryable.
+    /// Release a claim the engine will not settle, so the signature is retryable.
     fn release_claim(&self, port: u16, sig: &RequestSignature, token: ClaimToken);
     fn record(&self, /* port, sig, response, token */) -> Result<()>;
     /// Settle the claim once the generated stub exists, before it is published.
@@ -206,6 +206,14 @@ Its typed error is `ProxyStoreError`, `#[non_exhaustive]`. Inject with
 | `Refused(BackendUnavailable)` (issue #990) | **Fail the request without calling the upstream.** Use it when the store *is* the exactly-once arbiter (shared or clustered) and could not decide. Forwarding would let every request during the outage reach the upstream. Both the stub `proxy` and `defaultForward` answer `503` through `backend_error_response` (see [Backend errors](#backend-errors-and-annotations)). |
 
 `ClaimOutcome::InFlight` is unaffected: a claim was serialized, so that request still forwards.
+
+**`release_claim` can be called from a destructor.** The engine holds a won claim in a guard that
+releases it when the request is dropped — a client that disconnected mid-request, an imposter
+stopped while a request was in flight, a panic — as well as after a failed forward or a failed
+behavior (issue #1193). So `release_claim` runs synchronously on the dropping thread, possibly
+while the runtime is shutting down: it must not block for long, must not assume an async context,
+and must ignore a token whose claim is already settled or re-taken (the built-in store does). A
+store that releases over the network should hand the release off rather than wait for it.
 
 ### Publishing stubs from the store
 

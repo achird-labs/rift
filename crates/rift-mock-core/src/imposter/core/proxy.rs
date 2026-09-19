@@ -39,6 +39,79 @@ enum Transformed {
     StrictFailure(hyper::Response<http_body_util::Full<bytes::Bytes>>),
 }
 
+/// A won proxy-recording claim (issue #1193). It is released on drop unless settled — which covers
+/// the one exit no `return` can: the request future being dropped mid-await, when the client
+/// disconnects or the imposter stops. Before, such a claim stayed held for the life of the
+/// imposter, and every later identical request was forwarded as `InFlight` and never recorded.
+///
+/// Releasing from `Drop` is sound because `release_claim` is synchronous and token-checked: a
+/// guard whose claim was already re-taken frees nothing.
+struct HeldClaim<'a> {
+    store: &'a dyn ProxyRecordingStore,
+    port: u16,
+    signature: &'a RequestSignature,
+    /// `Some` until the claim is settled or released.
+    token: Option<ClaimToken>,
+}
+
+impl<'a> HeldClaim<'a> {
+    fn new(
+        store: &'a dyn ProxyRecordingStore,
+        port: u16,
+        signature: &'a RequestSignature,
+        token: ClaimToken,
+    ) -> Self {
+        Self {
+            store,
+            port,
+            signature,
+            token: Some(token),
+        }
+    }
+
+    /// Settle the claim, offering the generated stub when one exists.
+    ///
+    /// A failed settle releases the claim so the signature stays retryable instead of wedging as
+    /// Recorded with nothing behind it (issue #315, and the publication-failure case of #910).
+    /// The caller keeps its upstream response either way: the upstream call succeeded, only
+    /// recording failed.
+    fn settle(mut self, resp: RecordedResponse, publication: Option<&StubPublication<'_>>) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        // The path is named in the warn below: for a publishing store a `complete` failure is a
+        // failed *publication*, which an operator has to correlate differently from a plain
+        // recording failure.
+        let (path, settled) = match publication {
+            Some(publication) => (
+                "complete",
+                self.store
+                    .complete(self.port, self.signature.clone(), token, resp, publication),
+            ),
+            None => (
+                "record",
+                self.store
+                    .record(self.port, self.signature.clone(), token, resp),
+            ),
+        };
+        if let Err(e) = settled {
+            warn!(
+                "Failed to settle proxy recording via {path}(), releasing claim so it stays \
+                 retryable: {e}"
+            );
+            self.store.release_claim(self.port, self.signature, token);
+        }
+    }
+}
+
+impl Drop for HeldClaim<'_> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.store.release_claim(self.port, self.signature, token);
+        }
+    }
+}
+
 /// Run `run`'s behaviors on an upstream response. A body that is not UTF-8 goes through as base64
 /// and is decoded afterwards, as a binary `is` body is. `content-length` is dropped because the
 /// body may have changed length; the server derives it from the body served.
@@ -394,44 +467,6 @@ impl Imposter {
         });
     }
 
-    /// Settle a won proxy claim, offering the generated stub when one exists.
-    ///
-    /// A failed settle releases the claim so the signature stays retryable instead of wedging as
-    /// Recorded with nothing behind it (issue #315, and the publication-failure case of #910).
-    /// The caller keeps its upstream response either way: the upstream call succeeded, only
-    /// recording failed.
-    fn settle_proxy_claim(
-        &self,
-        port: u16,
-        signature: &RequestSignature,
-        token: ClaimToken,
-        resp: RecordedResponse,
-        publication: Option<&StubPublication<'_>>,
-    ) {
-        // The path is named in the warn below: for a publishing store a `complete` failure is a
-        // failed *publication*, which an operator has to correlate differently from a plain
-        // recording failure.
-        let (path, settled) = match publication {
-            Some(publication) => (
-                "complete",
-                self.proxy_store
-                    .complete(port, signature.clone(), token, resp, publication),
-            ),
-            None => (
-                "record",
-                self.proxy_store
-                    .record(port, signature.clone(), token, resp),
-            ),
-        };
-        if let Err(e) = settled {
-            warn!(
-                "Failed to settle proxy recording via {path}(), releasing claim so it stays \
-                 retryable: {e}"
-            );
-            self.proxy_store.release_claim(port, signature, token);
-        }
-    }
-
     /// Forward a request through proxy and optionally record the response.
     ///
     /// `behaviors` are the proxy response's own behaviors. They run on the upstream response before
@@ -494,7 +529,7 @@ impl Imposter {
         // Consult the proxy-recording gate. `AlreadyRecorded` replays; `Claimed` grants the
         // right to record; `InFlight` (a concurrent proxyOnce loser) and an unavailable
         // store proxy upstream without recording.
-        let claim_token = match self.proxy_store.try_claim(port, &signature) {
+        let claim = match self.proxy_store.try_claim(port, &signature) {
             Ok(ClaimOutcome::AlreadyRecorded) => {
                 if let Some(recorded) = self.proxy_store.lookup(port, &signature) {
                     debug!("Returning recorded proxy response (proxyOnce mode)");
@@ -514,7 +549,12 @@ impl Imposter {
                 None
             }
             Ok(ClaimOutcome::InFlight) => None,
-            Ok(ClaimOutcome::Claimed(token)) => Some(token),
+            Ok(ClaimOutcome::Claimed(token)) => Some(HeldClaim::new(
+                self.proxy_store.as_ref(),
+                port,
+                &signature,
+                token,
+            )),
             // The store arbitrates exactly-once and could not answer: fail the request rather
             // than forward it. Forwarding here would call the upstream while *nothing* is
             // serializing claims, so the duplicate is bounded by the outage, not by one racing
@@ -530,8 +570,9 @@ impl Imposter {
             }
         };
 
-        // Forward the request. Isolated so a failure releases the claim (issue #315): a
-        // proxyOnce signature must stay retryable, not wedge because the upstream call errored.
+        // Forward the request. Isolated so a failure returns early, dropping (releasing) the claim
+        // (issue #315): a proxyOnce signature must stay retryable, not wedge because the upstream
+        // call errored.
         let start = Instant::now();
         let forwarded: anyhow::Result<ForwardedResponse> = async {
             let mut request = match method.to_uppercase().as_str() {
@@ -613,12 +654,8 @@ impl Imposter {
 
         let (status, response_headers, body_bytes, latency_ms) = match forwarded {
             Ok(parts) => parts,
-            Err(e) => {
-                if let Some(token) = claim_token {
-                    self.proxy_store.release_claim(port, &signature, token);
-                }
-                return Err(e);
-            }
+            // Returning drops `claim`, which releases it: the signature stays retryable (#315).
+            Err(e) => return Err(e),
         };
         let recorded_latency = proxy_config.add_wait_behavior.then_some(latency_ms);
 
@@ -629,10 +666,8 @@ impl Imposter {
             Some(run) => {
                 match transform_upstream(run, status, response_headers, body_bytes).await {
                     Transformed::Applied(status, headers, body) => (status, headers, body),
+                    // A failed behavior records nothing; returning drops (releases) the claim.
                     Transformed::Degraded(status, headers, body) => {
-                        if let Some(token) = claim_token {
-                            self.proxy_store.release_claim(port, &signature, token);
-                        }
                         return Ok(ProxyOutcome::Served(ProxiedResponse {
                             status,
                             headers,
@@ -641,9 +676,6 @@ impl Imposter {
                         }));
                     }
                     Transformed::StrictFailure(response) => {
-                        if let Some(token) = claim_token {
-                            self.proxy_store.release_claim(port, &signature, token);
-                        }
                         return Ok(ProxyOutcome::StrictFailure(response));
                     }
                 }
@@ -653,9 +685,9 @@ impl Imposter {
         // Build the recording if we hold a claim, but do NOT settle the claim yet: a store that
         // publishes stubs must be able to make "Recorded" conditional on publishing the stub, and
         // the stub does not exist until predicate generation below has run (issue #910).
-        let mut recording = claim_token.map(|token| {
+        let mut recording = claim.map(|claim| {
             (
-                token,
+                claim,
                 RecordedResponse {
                     status,
                     headers: response_headers.clone(),
@@ -763,13 +795,13 @@ impl Imposter {
 
                     // Settle the claim now that the stub exists, and before it is published, so a
                     // publishing store can refuse to commit "Recorded" if publication fails.
-                    let settled = if let Some((token, resp)) = recording.take() {
+                    let settled = if let Some((claim, resp)) = recording.take() {
                         let publication = StubPublication {
                             stub: &new_stub,
                             placement: Self::placement_for_mode(mode),
                             proxy_to: &proxy_config.to,
                         };
-                        self.settle_proxy_claim(port, &signature, token, resp, Some(&publication));
+                        claim.settle(resp, Some(&publication));
                         true
                     } else {
                         false
@@ -811,8 +843,8 @@ impl Imposter {
 
         // No stub was generated — nothing configured to generate one, or generation failed — so
         // there is nothing to publish and the claim settles through `record` exactly as before.
-        if let Some((token, resp)) = recording {
-            self.settle_proxy_claim(port, &signature, token, resp, None);
+        if let Some((claim, resp)) = recording {
+            claim.settle(resp, None);
         }
 
         Ok(ProxyOutcome::Served(ProxiedResponse {
@@ -879,6 +911,81 @@ mod proxy_dedup_tests {
             stubs[1].responses.len(),
             2,
             "both recorded responses must land on the single matching stub"
+        );
+    }
+}
+
+/// Issue #1193: a won claim is released when the request future is dropped, and only then.
+#[cfg(test)]
+mod held_claim_tests {
+    use super::*;
+    use crate::recording::{LocalProxyStore, ProxyMode, ProxyRecordingStore};
+
+    fn signature() -> RequestSignature {
+        RequestSignature::new("GET", "/p", None, &[])
+    }
+
+    fn recorded() -> RecordedResponse {
+        RecordedResponse {
+            status: 200,
+            headers: vec![],
+            body: b"up".to_vec(),
+            latency_ms: None,
+            timestamp_secs: 0,
+        }
+    }
+
+    fn claim(store: &LocalProxyStore, sig: &RequestSignature) -> ClaimToken {
+        match store.try_claim(1, sig).expect("store answers") {
+            ClaimOutcome::Claimed(token) => token,
+            other => panic!("expected a claim, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dropping_a_held_claim_releases_it() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyOnce);
+        let sig = signature();
+        let held = HeldClaim::new(&store, 1, &sig, claim(&store, &sig));
+        assert_eq!(
+            store.try_claim(1, &sig).expect("answers"),
+            ClaimOutcome::InFlight
+        );
+        drop(held);
+        assert!(
+            matches!(
+                store.try_claim(1, &sig).expect("answers"),
+                ClaimOutcome::Claimed(_)
+            ),
+            "a dropped claim must be free to take again"
+        );
+    }
+
+    #[test]
+    fn settling_a_held_claim_records_it_and_releases_nothing() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyOnce);
+        let sig = signature();
+        HeldClaim::new(&store, 1, &sig, claim(&store, &sig)).settle(recorded(), None);
+        assert_eq!(
+            store.try_claim(1, &sig).expect("answers"),
+            ClaimOutcome::AlreadyRecorded
+        );
+        assert_eq!(store.lookup(1, &sig).map(|r| r.body), Some(b"up".to_vec()));
+    }
+
+    /// The store ignores a stale token, so a guard dropped after its claim was re-taken (e.g. by a
+    /// `clear`) cannot free the new holder.
+    #[test]
+    fn a_stale_guard_does_not_release_a_newer_claim() {
+        let store = LocalProxyStore::new(ProxyMode::ProxyOnce);
+        let sig = signature();
+        let stale = claim(&store, &sig);
+        store.release_claim(1, &sig, stale);
+        let _current = claim(&store, &sig);
+        drop(HeldClaim::new(&store, 1, &sig, stale));
+        assert_eq!(
+            store.try_claim(1, &sig).expect("answers"),
+            ClaimOutcome::InFlight
         );
     }
 }
