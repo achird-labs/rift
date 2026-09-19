@@ -175,12 +175,24 @@ pub(crate) fn process_template_mapped<F>(
 where
     F: Fn(String) -> String,
 {
-    get_template_regex()
-        .replace_all(template, |caps: &regex::Captures| {
-            let var_path = &caps[1];
-            map(request_data.get(var_path).unwrap_or_default())
-        })
-        .to_string()
+    let mut spliced = crate::behaviors::Spliced::authored(template.to_string());
+    process_template_spliced(&mut spliced, request_data, map);
+    spliced.into_text()
+}
+
+/// [`process_template_mapped`] over text that remembers what earlier passes inserted (issue
+/// #1203): a `${request.*}` lying wholly inside text a `{{ }}` pass substituted from the request is
+/// served as written, so a client cannot name a request header for the engine to reflect.
+pub(crate) fn process_template_spliced<F>(
+    template: &mut crate::behaviors::Spliced,
+    request_data: &RequestData,
+    map: F,
+) where
+    F: Fn(String) -> String,
+{
+    template.replace_regex(get_template_regex(), |caps| {
+        map(request_data.get(&caps[1]).unwrap_or_default())
+    });
 }
 
 /// Check if a string contains template variables

@@ -138,8 +138,10 @@ async fn transform_upstream<SH: BuildHasher>(
     let (parts, mut degraded) = match run
         .apply(ServedParts {
             status,
-            headers: grouped,
-            body: text,
+            // The upstream's body is the author's choice of text (issue #1203): a proxy `lookup`
+            // (#1189) exists to expand tokens the upstream returns.
+            headers: crate::behaviors::authored_headers(grouped),
+            body: crate::behaviors::Spliced::authored(text),
         })
         .await
     {
@@ -150,10 +152,10 @@ async fn transform_upstream<SH: BuildHasher>(
         .headers
         .into_iter()
         .filter(|(k, _)| !k.eq_ignore_ascii_case("content-length"))
-        .flat_map(|(k, values)| values.into_iter().map(move |v| (k.clone(), v)))
+        .flat_map(|(k, values)| values.into_iter().map(move |v| (k.clone(), v.into_text())))
         .collect();
     let body = if binary {
-        match crate::imposter::handler::decode_binary_body(parts.body, run.strict) {
+        match crate::imposter::handler::decode_binary_body(parts.body.into_text(), run.strict) {
             Ok(crate::imposter::handler::BinaryBody::Decoded(bytes)) => bytes,
             Ok(crate::imposter::handler::BinaryBody::RawFallback(bytes)) => {
                 headers.push(("x-rift-binary-error".to_string(), "true".to_string()));
@@ -163,7 +165,7 @@ async fn transform_upstream<SH: BuildHasher>(
             Err(strict_failure) => return Transformed::StrictFailure(*strict_failure),
         }
     } else {
-        bytes::Bytes::from(parts.body)
+        bytes::Bytes::from(parts.body.into_text())
     };
     if degraded {
         Transformed::Degraded(parts.status, headers, body)

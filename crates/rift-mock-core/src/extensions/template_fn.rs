@@ -109,8 +109,28 @@ pub(crate) fn render_templated_mapped<F>(
 where
     F: Fn(String) -> String,
 {
+    render_templated_spliced(input, ctx, debug, map).map(crate::behaviors::Spliced::into_text)
+}
+
+/// [`render_templated_mapped`], keeping which bytes each token substituted (issue #1203), so the
+/// `${request.*}`, `copy` and `lookup` passes that follow never expand a token the request carried
+/// in. The date pass runs first over the author's text and is treated as theirs.
+pub(crate) fn render_templated_spliced<F>(
+    input: &str,
+    ctx: &TemplateContext<'_>,
+    debug: bool,
+    map: F,
+) -> Result<crate::behaviors::Spliced, String>
+where
+    F: Fn(String) -> String,
+{
     let expanded = crate::extensions::template::apply_date_templates(input);
-    render(&expanded, ctx, debug, map)
+    render(
+        crate::behaviors::Spliced::authored(expanded),
+        ctx,
+        debug,
+        map,
+    )
 }
 
 /// The head word of every `{{ ... }}` expression in `input`, in order — `state.hits` for
@@ -166,43 +186,46 @@ pub fn reads_flow_state(input: &str) -> bool {
 /// nothing else — not the literal text between tokens, and not a failed token's empty replacement.
 /// That is what lets a caller repair a substitution without touching what the author wrote around
 /// it (issue #1073).
-fn render<F>(input: &str, ctx: &TemplateContext<'_>, debug: bool, map: F) -> Result<String, String>
+fn render<F>(
+    mut input: crate::behaviors::Spliced,
+    ctx: &TemplateContext<'_>,
+    debug: bool,
+    map: F,
+) -> Result<crate::behaviors::Spliced, String>
 where
     F: Fn(String) -> String,
 {
     let re = expr_regex();
     let mut first_error: Option<String> = None;
-    let rendered = re
-        .replace_all(input, |caps: &regex::Captures| {
-            if first_error.is_some() {
-                // Already failing in debug mode; the replacement text is discarded by the Err
-                // return below, so its exact content doesn't matter.
-                return String::new();
-            }
-            let raw = &caps[0];
-            let inner = caps[1].trim();
-            match evaluate(inner, ctx) {
-                Ok(value) => map(value),
-                Err(reason) => {
-                    if debug {
-                        first_error = Some(format!("template error in `{raw}`: {reason}"));
-                    } else {
-                        tracing::warn!(
-                            target: "rift::template",
-                            token = %raw,
-                            reason = %reason,
-                            "template token failed; substituting empty string"
-                        );
-                    }
-                    String::new()
+    input.replace_regex(re, |caps: &regex::Captures| {
+        if first_error.is_some() {
+            // Already failing in debug mode; the replacement text is discarded by the Err
+            // return below, so its exact content doesn't matter.
+            return String::new();
+        }
+        let raw = &caps[0];
+        let inner = caps[1].trim();
+        match evaluate(inner, ctx) {
+            Ok(value) => map(value),
+            Err(reason) => {
+                if debug {
+                    first_error = Some(format!("template error in `{raw}`: {reason}"));
+                } else {
+                    tracing::warn!(
+                        target: "rift::template",
+                        token = %raw,
+                        reason = %reason,
+                        "template token failed; substituting empty string"
+                    );
                 }
+                String::new()
             }
-        })
-        .into_owned();
+        }
+    });
 
     match first_error {
         Some(e) => Err(e),
-        None => Ok(rendered),
+        None => Ok(input),
     }
 }
 

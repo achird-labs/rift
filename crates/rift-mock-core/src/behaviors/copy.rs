@@ -2,6 +2,7 @@
 
 use super::extraction::ExtractionMethod;
 use super::request::RequestContext;
+use super::spliced::{Spliced, SplicedHeaders, authored_headers, plain_headers};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -56,7 +57,8 @@ impl CopySource {
     }
 }
 
-/// Apply copy behaviors to response body
+/// Apply copy behaviors to response body. Treats `body` and `headers` as authored text; the
+/// serve path uses [`apply_copy_spliced`] so text an earlier pass inserted is not re-scanned.
 pub fn apply_copy_behaviors(
     body: &str,
     headers: &mut HashMap<String, Vec<String>>,
@@ -64,8 +66,29 @@ pub fn apply_copy_behaviors(
     request: &RequestContext,
     stub: crate::imposter::headers::StubRef<'_>,
 ) -> String {
-    let mut result = body.to_string();
+    let mut spliced_body = Spliced::authored(body.to_string());
+    let mut spliced_headers = authored_headers(std::mem::take(headers));
+    apply_copy_spliced(
+        &mut spliced_body,
+        &mut spliced_headers,
+        behaviors,
+        request,
+        stub,
+    );
+    *headers = plain_headers(spliced_headers);
+    spliced_body.into_text()
+}
 
+/// Apply copy behaviors, replacing only tokens that are not wholly inside text an earlier pass
+/// inserted (issue #1203). What a copy inserts is recorded as inserted, so a later `lookup` never
+/// expands a token the client sent.
+pub(crate) fn apply_copy_spliced(
+    body: &mut Spliced,
+    headers: &mut SplicedHeaders,
+    behaviors: &[CopyBehavior],
+    request: &RequestContext,
+    stub: crate::imposter::headers::StubRef<'_>,
+) {
     for behavior in behaviors {
         // Extract value from request
         if let Some(source_value) = behavior.from.extract(request) {
@@ -74,7 +97,7 @@ pub fn apply_copy_behaviors(
             let replacement = extracted.unwrap_or_default();
 
             // Replace token in body
-            result = result.replace(&behavior.into, &replacement);
+            body.replace_token(&behavior.into, &replacement);
 
             // Also replace in headers — per value, so multi-value headers (e.g. multiple
             // Set-Cookie) keep their multiplicity (RFC 7230 §3.2.2 forbids folding Set-Cookie).
@@ -90,23 +113,21 @@ pub fn apply_copy_behaviors(
             if headers
                 .values()
                 .flatten()
-                .any(|v| v.contains(&behavior.into))
+                .any(|v| v.contains_authored(&behavior.into))
             {
                 let repaired = crate::imposter::headers::sanitize_header_value(&replacement, stub);
                 for value in headers.values_mut().flatten() {
-                    *value = value.replace(&behavior.into, &repaired);
+                    value.replace_token(&behavior.into, &repaired);
                 }
             }
         } else {
             // Source not found, replace with empty string
-            result = result.replace(&behavior.into, "");
+            body.replace_token(&behavior.into, "");
             for value in headers.values_mut().flatten() {
-                *value = value.replace(&behavior.into, "");
+                value.replace_token(&behavior.into, "");
             }
         }
     }
-
-    result
 }
 
 #[cfg(test)]

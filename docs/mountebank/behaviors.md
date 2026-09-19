@@ -635,11 +635,42 @@ array element that sets several, they run in Mountebank's order:
 4. **shellTransform** - Pipe the body through each command in turn
 5. **decorate** - Transform the response last
 
-Earlier Rift releases ran copy before lookup and decorate before shellTransform. Because lookup now
-runs first, text a copy inserts from the request is never expanded as a lookup token.
+Earlier Rift releases ran copy before lookup and decorate before shellTransform.
 
 To run them in another order, use the array form with one behavior per element. `repeat` is not a
 step here; it controls which response is chosen.
+
+### Substituted text is never re-scanned
+
+Text the engine substitutes into a response is never read as a token again: a token is expanded
+only if you wrote its first and last characters. This covers the `${request.…}` and
+`_rift.templated` `{% raw %}{{ }}{% endraw %}` passes, which run before behaviors, and `copy` and
+`lookup`, in body and header values alike. A client that sends `${R}[secret]` in a query parameter
+therefore gets `${R}[secret]` back, never the `secret` column of the row the lookup matched. Sending
+only part of a token does not help either. `${R}[secret` followed by a `]` you wrote, or
+`{R}[secret]` after a `$` you wrote, stays as sent. The same holds for a CSV cell that happens to
+contain another column's token.
+
+Only the middle of a token may be substituted. A token you split around a copy, such as
+`${R}[${COL}]` with a copy into `${COL}` followed by a lookup into `${R}`, is still expanded,
+because `${R}[` and `]` are yours. That is how to let the client choose the column when you mean
+to.
+
+Three sources count as your text, because they are configuration rather than request data:
+
+- **The output of a `decorate` or `shellTransform`.** The script can rewrite the response in any
+  way, so Rift cannot tell what came from the request. In `[{copy}, {decorate}, {lookup}]`, the
+  lookup expands whatever the decorate returned, including copied text.
+- **A proxied response body.** A `lookup` on a proxy response expands the tokens the upstream
+  returns, since the upstream is the one named in `proxy.to`.
+- **What an `inject` function returns.** Its behaviors treat the whole response as yours.
+
+The serve-time date tokens (`{% raw %}{{NOW}}{% endraw %}`, `{% raw %}{{DAYS+N}}{% endraw %}`,
+`{% raw %}{{MONTHS+N}}{% endraw %}`) are the one pass that still reads the finished body, so a
+client that sends `{% raw %}{{NOW}}{% endraw %}` gets a timestamp back. They expand only to a date.
+
+**Differs from Mountebank:** for `"behaviors": [{"copy": …}, {"lookup": …}]` Mountebank 2.9.1 expands
+a lookup token the client put in the copied field. Rift serves it as sent.
 
 ---
 

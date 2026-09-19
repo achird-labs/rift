@@ -17,6 +17,7 @@ mod cycler;
 mod extraction;
 mod lookup;
 mod request;
+mod spliced;
 mod transform;
 mod types;
 mod wait;
@@ -27,6 +28,7 @@ pub use copy::{CopyBehavior, CopySource, apply_copy_behaviors};
 pub use cycler::{HasRepeatBehavior, RuleCycler};
 
 pub mod sequencer;
+pub(crate) use copy::apply_copy_spliced;
 #[cfg(test)]
 pub(crate) use extraction::counters;
 #[allow(unused_imports)]
@@ -35,6 +37,7 @@ pub use extraction::{
     extract_xpath_with_ns,
 };
 pub(crate) use extraction::{LazyXmlDom, eval_xpath_on};
+pub(crate) use lookup::apply_lookup_spliced;
 #[allow(unused_imports)]
 pub use lookup::{
     CsvCache, CsvData, CsvDataSource, DataSource, DatasetBinding, LookupBehavior, LookupKey,
@@ -42,6 +45,7 @@ pub use lookup::{
 };
 pub use request::{RequestContext, header_to_title_case};
 pub use sequencer::{LocalSequencer, ResponseSequencer, SequenceKey};
+pub(crate) use spliced::{Spliced, SplicedHeaders, authored_headers, plain_headers};
 pub use transform::{
     DecorateError, apply_decorate, apply_shell_transform, is_js_config_decorate,
     rewrite_js_config_to_rhai,
