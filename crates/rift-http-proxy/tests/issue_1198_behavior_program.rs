@@ -325,9 +325,10 @@ async fn the_program_is_written_back_in_its_order() {
     admin.stop(port).await;
 }
 
-/// The object form's written shape is unchanged.
+/// The object form is written back in the order it runs (Mountebank's, since #1198 part B), with
+/// its lists grouped as before.
 #[tokio::test]
-async fn an_object_form_block_is_written_back_as_before() {
+async fn an_object_form_block_is_written_back_in_its_run_order() {
     let admin = Admin::start(true).await;
     let (ca, cb) = (copy_path_into("${A}"), copy_path_into("${B}"));
     let d = append("d");
@@ -341,7 +342,7 @@ async fn an_object_form_block_is_written_back_as_before() {
     assert_eq!(admin.post(&imposter).await.status().as_u16(), 201);
     assert_eq!(
         admin.saved_behaviors(port).await,
-        json!([{"wait": 1}, {"copy": [ca, cb]}, {"decorate": d}, {"shellTransform": "cat"}])
+        json!([{"wait": 1}, {"copy": [ca, cb]}, {"shellTransform": "cat"}, {"decorate": d}])
     );
     admin.stop(port).await;
 }

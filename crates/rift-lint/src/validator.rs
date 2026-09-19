@@ -1428,7 +1428,7 @@ pub fn validate_response(
 
 /// The behaviors that are steps of the program the engine runs; mirrors `CANONICAL_ORDER` in
 /// rift-mock-core's `behaviors/types.rs` (issue #1198). `repeat` is not a step.
-const STEP_BEHAVIORS: [&str; 5] = ["wait", "copy", "lookup", "decorate", "shellTransform"];
+const STEP_BEHAVIORS: [&str; 5] = ["wait", "lookup", "copy", "shellTransform", "decorate"];
 
 /// Validate the behaviors block the engine will actually read (issue #1099).
 ///
@@ -1573,8 +1573,8 @@ fn validate_response_behaviors(
                             "W018",
                             format!(
                                 "`behaviors[{idx}]` sets {steps} behaviors in one element; Rift runs \
-                                 them in its fixed order (wait, copy, lookup, decorate, \
-                                 shellTransform), not the order written, which Mountebank uses"
+                                 them in a fixed order (wait, lookup, copy, shellTransform, \
+                                 decorate), not the order written, which Mountebank uses"
                             ),
                             file.to_path_buf(),
                         )
