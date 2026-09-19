@@ -738,9 +738,13 @@ pub(crate) struct StubResponseRaw {
 /// Serialization type for stub responses - outputs Mountebank-compatible format
 /// Uses `behaviors` as array (Mountebank standard format)
 /// Field ordering matches Mountebank: behaviors, is, proxy
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StubResponseOut {
+    /// Mountebank's response-level `repeat` (issue #1191): Mountebank reads it only here, and
+    /// refuses a `{"repeat": n}` element in `behaviors`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<serde_json::Value>,
     /// Mountebank-style behaviors as array (standard Mountebank output format)
     /// Placed first to match Mountebank output ordering
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1036,109 +1040,131 @@ impl TryFrom<StubResponseRaw> for StubResponse {
 
 impl From<StubResponse> for StubResponseOut {
     fn from(response: StubResponse) -> Self {
-        match response {
+        let (out, block) = match response {
             StubResponse::Is {
                 is,
                 behaviors,
                 rift,
                 ..
-            } => StubResponseOut {
-                is: Some(IsResponseOut {
-                    status_code: is.status_code,
-                    headers: is.headers,
-                    body: is.body,
-                    mode: is.mode,
-                }),
-                proxy: None,
-                inject: None,
-                fault: None,
-                // Convert behaviors object to array format for Mountebank compatibility
-                behaviors: behaviors.and_then(behaviors_to_array),
-                rift,
-            },
+            } => (
+                StubResponseOut {
+                    is: Some(IsResponseOut {
+                        status_code: is.status_code,
+                        headers: is.headers,
+                        body: is.body,
+                        mode: is.mode,
+                    }),
+                    rift,
+                    ..StubResponseOut::default()
+                },
+                behaviors,
+            ),
             StubResponse::Proxy {
                 proxy,
                 ignored_rift,
                 behaviors,
                 ..
-            } => StubResponseOut {
-                is: None,
-                proxy: Some(proxy),
-                inject: None,
-                fault: None,
-                behaviors: behaviors.and_then(behaviors_to_array),
-                rift: ignored_rift,
-            },
+            } => (
+                StubResponseOut {
+                    proxy: Some(proxy),
+                    rift: ignored_rift,
+                    ..StubResponseOut::default()
+                },
+                behaviors,
+            ),
             StubResponse::Inject {
                 inject,
                 ignored_rift,
                 behaviors,
                 ..
-            } => StubResponseOut {
-                is: None,
-                proxy: None,
-                inject: Some(inject),
-                fault: None,
-                behaviors: behaviors.and_then(behaviors_to_array),
-                rift: ignored_rift,
-            },
+            } => (
+                StubResponseOut {
+                    inject: Some(inject),
+                    rift: ignored_rift,
+                    ..StubResponseOut::default()
+                },
+                behaviors,
+            ),
             StubResponse::Fault {
                 fault,
                 ignored_rift,
                 ignored_behaviors,
-            } => StubResponseOut {
-                is: None,
-                proxy: None,
-                inject: None,
-                fault: Some(fault),
-                behaviors: ignored_behaviors.and_then(behaviors_to_array),
-                rift: ignored_rift,
-            },
+            } => (
+                StubResponseOut {
+                    fault: Some(fault),
+                    rift: ignored_rift,
+                    ..StubResponseOut::default()
+                },
+                ignored_behaviors,
+            ),
             StubResponse::RiftScript {
                 rift,
                 ignored_behaviors,
-            } => StubResponseOut {
-                is: None,
-                proxy: None,
-                inject: None,
-                fault: None,
-                behaviors: ignored_behaviors.and_then(behaviors_to_array),
-                rift: Some(rift),
-            },
+            } => (
+                StubResponseOut {
+                    rift: Some(rift),
+                    ..StubResponseOut::default()
+                },
+                ignored_behaviors,
+            ),
+        };
+        let (repeat, behaviors) = block.map_or((None, None), behaviors_out);
+        StubResponseOut {
+            repeat,
+            behaviors,
+            ..out
         }
     }
 }
 
-/// Convert behaviors from object format to array format for Mountebank compatibility
-/// Mountebank outputs: `"behaviors": [{"wait": ...}, {"decorate": ...}]`
-/// Rift internally stores as object: `{"wait": ..., "decorate": ...}`
-fn behaviors_to_array(value: serde_json::Value) -> Option<Vec<serde_json::Value>> {
-    match value {
-        serde_json::Value::Object(obj) => {
-            if obj.is_empty() {
-                None
-            } else {
-                // Convert each key-value pair to a separate object in the array
-                let arr: Vec<serde_json::Value> = obj
-                    .into_iter()
-                    .map(|(k, v)| {
-                        let mut m = serde_json::Map::new();
-                        m.insert(k, v);
-                        serde_json::Value::Object(m)
-                    })
-                    .collect();
-                Some(arr)
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            if arr.is_empty() {
-                None
-            } else {
-                Some(arr)
-            }
-        }
-        _ => None,
-    }
+/// Behaviors in Mountebank's execution order, which is also Rift's (`behavior_pipeline`). In the
+/// array form Mountebank reads, element order *is* execution order.
+const BEHAVIOR_ORDER: [&str; 5] = ["wait", "copy", "lookup", "decorate", "shellTransform"];
+
+/// Write a behaviors block in the grammar Mountebank loads (issue #1191), returning the response's
+/// `repeat` and its `behaviors` array.
+///
+/// - `repeat` is a response field in Mountebank, and a `{"repeat": n}` element is refused. A `0`
+///   is not written: Mountebank refuses it, and Rift serves it as `1`, which is what an absent
+///   `repeat` means.
+/// - Elements come in execution order, then any other key alphabetically.
+/// - A one-item `copy`/`lookup`/`shellTransform` list is written bare, the only spelling Mountebank
+///   accepts inside an element. A longer list stays a list: Mountebank spells it as one element per
+///   item, but Rift's reader keeps only the last of repeated keys (#1195).
+/// - A `null` or empty-list behavior configures nothing and is not written.
+fn behaviors_out(
+    block: serde_json::Value,
+) -> (Option<serde_json::Value>, Option<Vec<serde_json::Value>>) {
+    let Some(serde_json::Value::Object(mut block)) = normalize_behaviors(block) else {
+        return (None, None);
+    };
+    let repeat = block
+        .remove("repeat")
+        .filter(|r| !r.is_null() && r.as_u64() != Some(0));
+    let mut keys: Vec<String> = BEHAVIOR_ORDER.iter().map(|k| (*k).to_string()).collect();
+    keys.extend(
+        block
+            .keys()
+            .filter(|k| !BEHAVIOR_ORDER.contains(&k.as_str()))
+            .cloned(),
+    );
+    let elements: Vec<serde_json::Value> = keys
+        .into_iter()
+        .filter_map(|key| {
+            let value = match block.remove(&key)? {
+                serde_json::Value::Null => return None,
+                serde_json::Value::Array(items) if items.is_empty() => return None,
+                serde_json::Value::Array(mut items)
+                    if items.len() == 1 && BEHAVIOR_ORDER.contains(&key.as_str()) =>
+                {
+                    items.pop()?
+                }
+                value => value,
+            };
+            Some(serde_json::json!({ key: value }))
+        })
+        .collect();
+    (repeat, (!elements.is_empty()).then_some(elements))
 }
 
 /// Normalize behaviors from array format to object format
@@ -3496,9 +3522,12 @@ mod tests {
                 let response: StubResponse =
                     serde_json::from_value(written.clone()).expect("parses");
                 let out = serde_json::to_value(StubResponseOut::from(response)).expect("json");
+                // Issue #1191: `repeat` is a response field in Mountebank's grammar, not a
+                // behavior; an element `{"repeat": 2}` makes Mountebank refuse the file.
+                assert_eq!(out["repeat"], json!(2), "{written} -> {out}");
                 assert_eq!(
                     out["behaviors"],
-                    json!([{"repeat": 2}, {"wait": 500}]),
+                    json!([{"wait": 500}]),
                     "{written} -> {out}"
                 );
             }
@@ -3540,5 +3569,182 @@ mod tests {
         );
         let out = serde_json::to_value(StubResponseOut::from(response)).expect("json");
         assert_eq!(out["behaviors"], json!([{"wait": 500}]));
+    }
+}
+
+/// Issue #1191: what `GET /imposters`, `rift save` and `--datadir` write must load in Mountebank.
+/// Each expectation below is Mountebank 2.9.1's own grammar, probed against a live `mb`.
+#[cfg(test)]
+mod mountebank_output_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn out(response: Value) -> Value {
+        let parsed: StubResponse = serde_json::from_value(response.clone())
+            .unwrap_or_else(|e| panic!("{response} does not parse: {e}"));
+        serde_json::to_value(StubResponseOut::from(parsed)).expect("json")
+    }
+
+    #[test]
+    fn repeat_is_a_top_level_field_on_every_response_shape() {
+        for shape in [
+            json!({"is": {"body": "a"}}),
+            json!({"proxy": {"to": "http://127.0.0.1:1"}}),
+            json!({"inject": "function (config) { return {}; }"}),
+            json!({"fault": "CONNECTION_RESET_BY_PEER"}),
+            json!({"_rift": {"script": {"engine": "rhai", "code": "1"}}}),
+        ] {
+            for (spelling, value) in [
+                ("_behaviors", json!({"repeat": 3, "wait": 500})),
+                ("behaviors", json!([{"wait": 500}, {"repeat": 3}])),
+            ] {
+                let mut written = shape.clone();
+                written[spelling] = value;
+                let saved = out(written.clone());
+                assert_eq!(saved["repeat"], json!(3), "{written} -> {saved}");
+                assert_eq!(
+                    saved["behaviors"],
+                    json!([{"wait": 500}]),
+                    "{written} -> {saved}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_repeat_only_block_writes_no_behaviors_array() {
+        let saved = out(json!({"is": {"body": "a"}, "_behaviors": {"repeat": 2}}));
+        assert_eq!(saved["repeat"], json!(2));
+        assert!(saved.get("behaviors").is_none(), "{saved}");
+        let saved = out(json!({"is": {"body": "a"}, "repeat": 2}));
+        assert_eq!(saved["repeat"], json!(2));
+        assert!(saved.get("behaviors").is_none(), "{saved}");
+    }
+
+    /// Mountebank refuses `repeat <= 0`; Rift serves `0` as `1`, which is what an absent `repeat` is.
+    #[test]
+    fn a_zero_or_null_repeat_is_not_written() {
+        for block in [
+            json!({"repeat": 0, "wait": 1}),
+            json!({"repeat": null, "wait": 1}),
+        ] {
+            let saved = out(json!({"is": {"body": "a"}, "_behaviors": block}));
+            assert!(saved.get("repeat").is_none(), "{block} -> {saved}");
+            assert_eq!(
+                saved["behaviors"],
+                json!([{"wait": 1}]),
+                "{block} -> {saved}"
+            );
+        }
+    }
+
+    /// In Mountebank's array form, element order is execution order; this is Rift's own order.
+    #[test]
+    fn behaviors_are_written_in_execution_order() {
+        let saved = out(json!({"is": {"body": "a"}, "_behaviors": {
+            "shellTransform": "cat",
+            "decorate": "function (req, res) {}",
+            "lookup": {"key": {"from": "path", "using": {"method": "regex", "selector": ".+"}},
+                       "fromDataSource": {"csv": {"path": "x.csv", "keyColumn": "k"}},
+                       "into": "${row}"},
+            "copy": {"from": "path", "into": "${P}", "using": {"method": "regex", "selector": ".+"}},
+            "wait": 5
+        }}));
+        let keys: Vec<String> = saved["behaviors"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|e| {
+                e.as_object()
+                    .expect("object")
+                    .keys()
+                    .next()
+                    .expect("key")
+                    .clone()
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            ["wait", "copy", "lookup", "decorate", "shellTransform"]
+        );
+    }
+
+    #[test]
+    fn a_single_item_list_is_written_bare_and_a_longer_one_is_kept() {
+        let copy_a =
+            json!({"from": "path", "into": "${A}", "using": {"method": "regex", "selector": ".+"}});
+        let copy_b =
+            json!({"from": "path", "into": "${B}", "using": {"method": "regex", "selector": ".+"}});
+        let lookup = json!({"key": {"from": "path", "using": {"method": "regex", "selector": ".+"}},
+                            "fromDataSource": {"csv": {"path": "x.csv", "keyColumn": "k"}},
+                            "into": "${row}"});
+        let saved = out(json!({"is": {"body": "a"}, "_behaviors": {
+            "copy": [copy_a.clone()],
+            "lookup": [lookup.clone()],
+            "shellTransform": ["echo x"]
+        }}));
+        assert_eq!(
+            saved["behaviors"],
+            json!([{"copy": copy_a.clone()}, {"lookup": lookup}, {"shellTransform": "echo x"}])
+        );
+        // Mountebank spells two copies as two elements, but Rift's reader keeps only the last of
+        // two `copy` elements (#1195) — so a longer list stays a list until that changes.
+        let saved = out(json!({"is": {"body": "a"}, "_behaviors": {
+            "copy": [copy_a.clone(), copy_b.clone()],
+            "shellTransform": ["echo x", "echo y"]
+        }}));
+        assert_eq!(
+            saved["behaviors"],
+            json!([{"copy": [copy_a, copy_b]}, {"shellTransform": ["echo x", "echo y"]}])
+        );
+    }
+
+    #[test]
+    fn empty_and_null_behaviors_are_not_written() {
+        let saved = out(json!({"is": {"body": "a"}, "_behaviors": {
+            "copy": [], "lookup": [], "shellTransform": [], "decorate": null, "wait": 7
+        }}));
+        assert_eq!(saved["behaviors"], json!([{"wait": 7}]));
+    }
+
+    /// The configuration a response's block parses to, and the `repeat` the cycler reads.
+    fn configured(response: &Value) -> (Value, Option<u32>) {
+        use crate::behaviors::HasRepeatBehavior;
+        let parsed: StubResponse = serde_json::from_value(response.clone()).expect("parses");
+        let block = parsed
+            .behaviors_block()
+            .map(|b| {
+                let behaviors: crate::behaviors::ResponseBehaviors =
+                    serde_json::from_value(b.clone()).expect("block parses");
+                serde_json::to_value(behaviors).expect("json")
+            })
+            .unwrap_or(Value::Null);
+        (block, parsed.get_repeat())
+    }
+
+    /// What is written must read back as the same configuration — compared as parsed behaviors,
+    /// because a one-item list is legitimately written bare.
+    #[test]
+    fn the_written_form_reads_back_to_the_same_behaviors() {
+        for written in [
+            json!({"is": {"body": "a"}, "_behaviors": {"repeat": 2, "wait": {"min": 1, "max": 5}}}),
+            json!({"is": {"body": "a"}, "_behaviors": {
+                "copy": [{"from": "path", "into": "${P}", "using": {"method": "regex", "selector": ".+"}}],
+                "shellTransform": ["echo x"], "decorate": "function (req, res) {}"
+            }}),
+            json!({"proxy": {"to": "http://127.0.0.1:1"}, "_behaviors": {"repeat": 4}}),
+        ] {
+            let saved = out(written.clone());
+            assert_eq!(
+                configured(&saved),
+                configured(&written),
+                "{written} -> {saved}"
+            );
+            assert_eq!(
+                out(saved.clone()),
+                saved,
+                "{written}: writing is not stable"
+            );
+        }
     }
 }

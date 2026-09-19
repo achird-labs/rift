@@ -347,6 +347,18 @@ record.
 
 ### Changed
 
+- **`GET /imposters`, `rift save` and `--datadir` write behaviors in Mountebank's grammar** (#1191).
+  `repeat` is written on the response (`{"repeat": 3, "behaviors": […], "is": …}`) instead of as a
+  `{"repeat": 3}` element; elements come in execution order (`wait`, `copy`, `lookup`, `decorate`,
+  `shellTransform`) instead of alphabetically; a one-item `copy`/`lookup`/`shellTransform` list is
+  written bare; `null`, empty and `repeat: 0` entries are not written. Rift reads both forms, so its
+  own files round-trip. A reader of the saved JSON that looked for `repeat` inside `behaviors` must
+  also read the response's `repeat` — `rift-verify` does. **Downgrade:** a `--datadir` written by
+  this release and loaded by v0.17.0 or older loses `repeat` (those releases ignore the
+  response-level key). A stub with no `id` and such a block also gets a new sequencing key, since the
+  key hashes the written stub, so during a rolling upgrade of a shared-state fleet its cycle position
+  restarts once.
+
 - **A scripted behaviors block on a `proxy`, `inject`, `fault` or `_rift`-only response now needs
   `--allowInjection`** (#1181). Rift does not run behaviors on those responses yet, so the gate did
   not look at them — but Mountebank runs them on `proxy` and `inject`, and a gate that is open on
@@ -817,6 +829,13 @@ record.
     `errors[0].detail` instead.
 
 ### Fixed
+
+- **A saved imposter with a `repeat`, `copy`/`lookup` or `shellTransform` was refused by Mountebank**
+  (#1191). Rift wrote `repeat` as a behaviors element, which Mountebank 2.9.1 rejects outright
+  (`Unrecognized behavior: "repeat"`), and wrote one-item lists Mountebank's validator refuses — so the
+  whole file failed to load, not just the behavior. It also wrote the elements alphabetically, so a
+  file that did load ran `decorate` before `lookup`, the reverse of Rift. See "Changed" for the new
+  shape.
 
 - **A top-level `repeat` was silently ignored** (#1188). Mountebank stores `repeat` on the response
   (`{"is": …, "repeat": 3}`) — the form `mb save` writes — and Rift read it only inside
