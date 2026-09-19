@@ -1,5 +1,5 @@
-//! The response behavior pipeline (`_behaviors`): wait → copy → lookup → decorate →
-//! shellTransform, applied to a response's status, headers and body.
+//! The response behavior pipeline: a response's behaviors program — every step, in order (issue
+//! #1198) — applied to its status, headers and body.
 //!
 //! One function so every response type that carries behaviors runs the same pipeline with the
 //! same failure contract (issue #1184): the `is`, `inject` and `proxy` serve paths call it.
@@ -8,8 +8,8 @@ use super::handler::SCRIPT_TIMEOUT_HEADER;
 use super::headers::StubRef;
 use super::response::apply_decorate_bounded;
 use crate::behaviors::{
-    CsvCache, RequestContext, ResponseBehaviors, apply_copy_behaviors, apply_lookup_behaviors,
-    apply_shell_transform,
+    BehaviorProgram, BehaviorStep, CsvCache, RequestContext, apply_copy_behaviors,
+    apply_lookup_behaviors, apply_shell_transform,
 };
 use crate::util::build_response_with_headers;
 use bytes::Bytes;
@@ -45,7 +45,7 @@ pub(crate) enum BehaviorOutcome {
 
 /// Everything the pipeline reads besides the response itself.
 pub(crate) struct BehaviorRun<'a, SH> {
-    pub behaviors: &'a ResponseBehaviors,
+    pub behaviors: &'a BehaviorProgram,
     pub method: &'a str,
     pub uri: &'a hyper::Uri,
     pub request_headers: &'a HashMap<String, Vec<String>, SH>,
@@ -58,22 +58,16 @@ pub(crate) struct BehaviorRun<'a, SH> {
 }
 
 impl<SH: BuildHasher> BehaviorRun<'_, SH> {
-    /// Run the pipeline over `parts`, in Mountebank's order.
+    /// Run the program's steps over `parts`, in order (issue #1198). A step that fails under the
+    /// lenient contract marks the response degraded and the next step still runs; under
+    /// `strictBehaviors` the first failure is the response.
     pub(crate) async fn apply(&self, parts: ServedParts) -> BehaviorOutcome {
         let ServedParts {
             mut status,
             mut headers,
             mut body,
         } = parts;
-        let behaviors = self.behaviors;
         let mut degraded = false;
-
-        if let Some(ref wait) = behaviors.wait {
-            let wait_ms = wait.get_duration_ms();
-            if wait_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-            }
-        }
 
         // Lazy request context (issue #561): only copy/lookup/decorate/shellTransform read
         // it, and `RequestContext::from_request` re-parses the query, clones a key and
@@ -99,173 +93,192 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
         // RFC 7230 §3.2.2 forbids folding Set-Cookie). decorate uses a single-value
         // JS/Rhai object model, so only that path collapses — and even there Set-Cookie
         // is held aside, never comma-folded.
-        if !behaviors.copy.is_empty() {
-            body = apply_copy_behaviors(
-                &body,
-                &mut headers,
-                &behaviors.copy,
-                request_context.get_or_init(build_request_context),
-                self.stub,
-            );
-        }
-        if !behaviors.lookup.is_empty() {
-            body = apply_lookup_behaviors(
-                &body,
-                &mut headers,
-                &behaviors.lookup,
-                request_context.get_or_init(build_request_context),
-                self.csv_cache,
-                self.stub,
-            );
-        }
-        if let Some(ref decorate_script) = behaviors.decorate {
-            // decorate uses a single-value JS/Rhai object model. Set-Cookie is held
-            // aside and never folded (RFC 7230 §3.2.2); other multi-value headers
-            // degrade to single-value for the script (issue #238 boundary) — warn so
-            // the collapse is not silent (e.g. WWW-Authenticate is also corrupted by
-            // comma-folding).
-            let is_set_cookie = |k: &str| k.eq_ignore_ascii_case("set-cookie");
-            let folded: Vec<&String> = headers
-                .iter()
-                .filter(|(k, v)| v.len() > 1 && !is_set_cookie(k))
-                .map(|(k, _)| k)
-                .collect();
-            if !folded.is_empty() {
-                warn!(
-                    "decorate uses a single-value object model; multi-value headers \
-                         {folded:?} are comma-folded (issue #238 boundary). Set-Cookie is \
-                         exempt; other headers that forbid list-folding will be corrupted."
-                );
-            }
-
-            let set_cookie: Vec<(String, Vec<String>)> = headers
-                .iter()
-                .filter(|(k, _)| is_set_cookie(k))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            let single: HashMap<String, String> = headers
-                .iter()
-                .filter(|(k, _)| !is_set_cookie(k))
-                .map(|(k, v)| (k.clone(), v.join(", ")))
-                .collect();
-            match apply_decorate_bounded(
-                decorate_script.clone(),
-                request_context.get_or_init(build_request_context).clone(),
-                body.clone(),
-                status,
-                single,
-                self.script_state_key,
-                self.stub.id.map(str::to_owned),
-                self.script_timeout,
-            )
-            .await
-            {
-                Ok((new_body, new_status, single)) => {
-                    body = new_body;
-                    status = new_status;
-                    // Restore the held-aside Set-Cookie lines unless the script set its
-                    // own (case-insensitively) — a script override wins deterministically.
-                    let script_set_cookie = single.keys().any(|k| is_set_cookie(k));
-                    headers = single.into_iter().map(|(k, v)| (k, vec![v])).collect();
-                    if !script_set_cookie {
-                        headers.extend(set_cookie);
+        for step in &self.behaviors.steps {
+            match step {
+                BehaviorStep::Wait(wait) => {
+                    let wait_ms = wait.get_duration_ms();
+                    if wait_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
                     }
                 }
-                // Behave as if decorate was absent: keep the original multi-value
-                // `headers` and pre-decorate body/status rather than serving a folded,
-                // undecorated response. Attach a visible signal so the skipped behavior
-                // isn't a silent success (issue #323); the body is still served (#269).
-                Err(e) => {
-                    warn!("Decorate script error: {e}");
-                    // A deadline miss (issue #499) carries `x-rift-script-timeout` and,
-                    // under strict mode, a 504 rather than the broken-script 500 — so a
-                    // retry-worthy timeout is distinguishable from a permanent failure.
-                    let timed_out = matches!(e, crate::behaviors::DecorateError::Timeout(_));
-                    if self.strict {
-                        let status = if timed_out {
-                            StatusCode::GATEWAY_TIMEOUT
-                        } else {
-                            StatusCode::INTERNAL_SERVER_ERROR
-                        };
-                        let mut hdrs = vec![
-                            ("x-rift-imposter", "true"),
-                            ("x-rift-decorate-error", "true"),
-                            ("content-type", "application/json"),
-                        ];
-                        if timed_out {
-                            hdrs.push((SCRIPT_TIMEOUT_HEADER, "true"));
+                BehaviorStep::Copy(copy) => {
+                    body = apply_copy_behaviors(
+                        &body,
+                        &mut headers,
+                        std::slice::from_ref(copy),
+                        request_context.get_or_init(build_request_context),
+                        self.stub,
+                    );
+                }
+                BehaviorStep::Lookup(lookup) => {
+                    body = apply_lookup_behaviors(
+                        &body,
+                        &mut headers,
+                        std::slice::from_ref(lookup),
+                        request_context.get_or_init(build_request_context),
+                        self.csv_cache,
+                        self.stub,
+                    );
+                }
+                BehaviorStep::Decorate(decorate_script) => {
+                    // decorate uses a single-value JS/Rhai object model. Set-Cookie is held
+                    // aside and never folded (RFC 7230 §3.2.2); other multi-value headers
+                    // degrade to single-value for the script (issue #238 boundary) — warn so
+                    // the collapse is not silent (e.g. WWW-Authenticate is also corrupted by
+                    // comma-folding).
+                    let is_set_cookie = |k: &str| k.eq_ignore_ascii_case("set-cookie");
+                    let folded: Vec<&String> = headers
+                        .iter()
+                        .filter(|(k, v)| v.len() > 1 && !is_set_cookie(k))
+                        .map(|(k, _)| k)
+                        .collect();
+                    if !folded.is_empty() {
+                        warn!(
+                            "decorate uses a single-value object model; multi-value headers \
+                                 {folded:?} are comma-folded (issue #238 boundary). Set-Cookie is \
+                                 exempt; other headers that forbid list-folding will be corrupted."
+                        );
+                    }
+
+                    let set_cookie: Vec<(String, Vec<String>)> = headers
+                        .iter()
+                        .filter(|(k, _)| is_set_cookie(k))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    let single: HashMap<String, String> = headers
+                        .iter()
+                        .filter(|(k, _)| !is_set_cookie(k))
+                        .map(|(k, v)| (k.clone(), v.join(", ")))
+                        .collect();
+                    match apply_decorate_bounded(
+                        decorate_script.clone(),
+                        request_context.get_or_init(build_request_context).clone(),
+                        body.clone(),
+                        status,
+                        single,
+                        self.script_state_key,
+                        self.stub.id.map(str::to_owned),
+                        self.script_timeout,
+                    )
+                    .await
+                    {
+                        Ok((new_body, new_status, single)) => {
+                            body = new_body;
+                            status = new_status;
+                            // Restore the held-aside Set-Cookie lines unless the script set its
+                            // own (case-insensitively) — a script override wins deterministically.
+                            let script_set_cookie = single.keys().any(|k| is_set_cookie(k));
+                            headers = single.into_iter().map(|(k, v)| (k, vec![v])).collect();
+                            if !script_set_cookie {
+                                headers.extend(set_cookie);
+                            }
                         }
-                        return BehaviorOutcome::StrictFailure(build_response_with_headers(
-                            status,
-                            hdrs,
-                            crate::response::error_body_typed(
-                                status,
-                                crate::response::ErrorKind::BehaviorError,
-                                &format!("decorate failed (strictBehaviors): {e}"),
-                            ),
-                        ));
-                    }
-                    degraded = true;
-                    headers.insert(
-                        "x-rift-decorate-error".to_string(),
-                        vec!["true".to_string()],
-                    );
-                    if timed_out {
-                        headers.insert(SCRIPT_TIMEOUT_HEADER.to_string(), vec!["true".to_string()]);
+                        // Behave as if decorate was absent: keep the original multi-value
+                        // `headers` and pre-decorate body/status rather than serving a folded,
+                        // undecorated response. Attach a visible signal so the skipped behavior
+                        // isn't a silent success (issue #323); the body is still served (#269).
+                        Err(e) => {
+                            warn!("Decorate script error: {e}");
+                            // A deadline miss (issue #499) carries `x-rift-script-timeout` and,
+                            // under strict mode, a 504 rather than the broken-script 500 — so a
+                            // retry-worthy timeout is distinguishable from a permanent failure.
+                            let timed_out =
+                                matches!(e, crate::behaviors::DecorateError::Timeout(_));
+                            if self.strict {
+                                let status = if timed_out {
+                                    StatusCode::GATEWAY_TIMEOUT
+                                } else {
+                                    StatusCode::INTERNAL_SERVER_ERROR
+                                };
+                                let mut hdrs = vec![
+                                    ("x-rift-imposter", "true"),
+                                    ("x-rift-decorate-error", "true"),
+                                    ("content-type", "application/json"),
+                                ];
+                                if timed_out {
+                                    hdrs.push((SCRIPT_TIMEOUT_HEADER, "true"));
+                                }
+                                return BehaviorOutcome::StrictFailure(
+                                    build_response_with_headers(
+                                        status,
+                                        hdrs,
+                                        crate::response::error_body_typed(
+                                            status,
+                                            crate::response::ErrorKind::BehaviorError,
+                                            &format!("decorate failed (strictBehaviors): {e}"),
+                                        ),
+                                    ),
+                                );
+                            }
+                            degraded = true;
+                            headers.insert(
+                                "x-rift-decorate-error".to_string(),
+                                vec!["true".to_string()],
+                            );
+                            if timed_out {
+                                headers.insert(
+                                    SCRIPT_TIMEOUT_HEADER.to_string(),
+                                    vec!["true".to_string()],
+                                );
+                            }
+                        }
                     }
                 }
-            }
-        }
-
-        // shellTransform (issue #269): pipe the body through external command(s);
-        // stdout becomes the new body. Runs independently of copy/lookup/decorate.
-        for cmd in &behaviors.shell_transform {
-            // Run the fork/exec/wait off the tokio worker (issue #478): a synchronous
-            // subprocess run inline would stall the worker for its whole lifetime,
-            // starving unrelated requests multiplexed on it.
-            let shell_result = {
-                let cmd = cmd.clone();
-                let rc = request_context.get_or_init(build_request_context).clone();
-                let body_in = body.clone();
-                // Plain `spawn_blocking`, not `spawn_blocking_annotated` (issue #987):
-                // `apply_shell_transform` is a fork/exec of an external command and never
-                // touches a `FlowStore`, so nothing here can annotate.
-                tokio::task::spawn_blocking(move || {
-                    apply_shell_transform(&cmd, &rc, &body_in, status)
-                })
-                .await
-                .unwrap_or_else(|e| {
-                    Err(std::io::Error::other(format!(
-                        "shellTransform task panicked: {e}"
-                    )))
-                })
-            };
-            match shell_result {
-                Ok(transformed) => body = transformed,
-                // Keep the body unchanged (issue #269) but signal the failure so it
-                // isn't a silent success (issue #323).
-                Err(e) => {
-                    warn!("shellTransform command {cmd:?} failed: {e}");
-                    if self.strict {
-                        return BehaviorOutcome::StrictFailure(build_response_with_headers(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            [
-                                ("x-rift-imposter", "true"),
-                                ("x-rift-shelltransform-error", "true"),
-                                ("content-type", "application/json"),
-                            ],
-                            crate::response::error_body_typed(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                crate::response::ErrorKind::BehaviorError,
-                                &format!("shellTransform failed (strictBehaviors): {e}"),
-                            ),
-                        ));
+                // shellTransform (issue #269): pipe the body through external command(s);
+                // stdout becomes the new body. Runs independently of copy/lookup/decorate.
+                BehaviorStep::ShellTransform(cmd) => {
+                    // Run the fork/exec/wait off the tokio worker (issue #478): a synchronous
+                    // subprocess run inline would stall the worker for its whole lifetime,
+                    // starving unrelated requests multiplexed on it.
+                    let shell_result = {
+                        let cmd = cmd.clone();
+                        let rc = request_context.get_or_init(build_request_context).clone();
+                        let body_in = body.clone();
+                        // Plain `spawn_blocking`, not `spawn_blocking_annotated` (issue #987):
+                        // `apply_shell_transform` is a fork/exec of an external command and never
+                        // touches a `FlowStore`, so nothing here can annotate.
+                        tokio::task::spawn_blocking(move || {
+                            apply_shell_transform(&cmd, &rc, &body_in, status)
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(std::io::Error::other(format!(
+                                "shellTransform task panicked: {e}"
+                            )))
+                        })
+                    };
+                    match shell_result {
+                        Ok(transformed) => body = transformed,
+                        // Keep the body unchanged (issue #269) but signal the failure so it
+                        // isn't a silent success (issue #323).
+                        Err(e) => {
+                            warn!("shellTransform command {cmd:?} failed: {e}");
+                            if self.strict {
+                                return BehaviorOutcome::StrictFailure(
+                                    build_response_with_headers(
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        [
+                                            ("x-rift-imposter", "true"),
+                                            ("x-rift-shelltransform-error", "true"),
+                                            ("content-type", "application/json"),
+                                        ],
+                                        crate::response::error_body_typed(
+                                            StatusCode::INTERNAL_SERVER_ERROR,
+                                            crate::response::ErrorKind::BehaviorError,
+                                            &format!(
+                                                "shellTransform failed (strictBehaviors): {e}"
+                                            ),
+                                        ),
+                                    ),
+                                );
+                            }
+                            degraded = true;
+                            headers.insert(
+                                "x-rift-shelltransform-error".to_string(),
+                                vec!["true".to_string()],
+                            );
+                        }
                     }
-                    degraded = true;
-                    headers.insert(
-                        "x-rift-shelltransform-error".to_string(),
-                        vec!["true".to_string()],
-                    );
                 }
             }
         }
@@ -293,8 +306,8 @@ mod tests {
         id: None,
     };
 
-    fn behaviors(block: serde_json::Value) -> ResponseBehaviors {
-        serde_json::from_value(block).expect("fixture block parses")
+    fn behaviors(block: serde_json::Value) -> BehaviorProgram {
+        BehaviorProgram::from_elements([&block]).expect("fixture block parses")
     }
 
     fn original() -> ServedParts {

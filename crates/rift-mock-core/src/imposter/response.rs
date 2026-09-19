@@ -32,11 +32,13 @@ pub(crate) fn truncate_with_ellipsis(text: &str, max_len: usize) -> String {
 }
 
 /// `repeat` applies to every response type, as in Mountebank (issue #1188). A top-level `repeat`
-/// was merged into the block at parse, so the block is the one place to read it.
+/// was merged into the compiled program at parse, as its `{"repeat": n}` element (issue #1198).
 impl HasRepeatBehavior for StubResponse {
     fn get_repeat(&self) -> Option<u32> {
-        self.behaviors_block()
-            .and_then(|b| b.get("repeat"))
+        self.behaviors_block()?
+            .as_array()?
+            .iter()
+            .find_map(|element| element.get("repeat"))
             .and_then(serde_json::Value::as_u64)
             .and_then(|r| u32::try_from(r).ok())
     }
@@ -133,7 +135,7 @@ pub fn execute_stub_response_with_rift(
     u16,
     HashMap<String, Vec<String>>,
     String,
-    Option<std::sync::Arc<crate::behaviors::ResponseBehaviors>>,
+    Option<std::sync::Arc<crate::behaviors::BehaviorProgram>>,
     Option<&RiftResponseExtension>,
     ResponseMode,
     bool,
@@ -989,9 +991,14 @@ mod tests {
 
         match &stub.responses[0] {
             StubResponse::Is { behaviors, .. } => {
-                let b = behaviors.as_ref().unwrap();
-                assert_eq!(b["wait"], 150);
-                assert_eq!(b["decorate"], "function(request, response) {}");
+                // Compiled into a program: the recorded latency first, then the decoration.
+                assert_eq!(
+                    behaviors.as_ref().unwrap(),
+                    &serde_json::json!([
+                        {"wait": 150},
+                        {"decorate": "function(request, response) {}"}
+                    ])
+                );
             }
             _ => panic!("Expected StubResponse::Is"),
         }

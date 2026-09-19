@@ -1790,7 +1790,7 @@ async fn handle_request_inner(
             }
 
             // Apply behaviors if present. Issue #479: `behaviors` is the precomputed
-            // `Option<Arc<ResponseBehaviors>>` (parsed once at stub construction, see
+            // `Option<Arc<BehaviorProgram>>` (parsed once at stub construction, see
             // `StubResponse::new_is`). Checked here, not inside the pipeline, so a response with
             // no behaviors never builds a `ServedParts`.
             if let Some(ref parsed_behaviors) = behaviors {

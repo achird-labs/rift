@@ -458,17 +458,26 @@ fn inject_wait_behavior(response: StubResponse, wait_val: serde_json::Value) -> 
             rift,
             ..
         } => {
-            let behaviors = Some(match behaviors {
-                Some(serde_json::Value::Object(mut obj)) => {
-                    // `"wait": null` is no wait (issue #1093), so the stub's delay still applies.
-                    if obj.get("wait").is_none_or(serde_json::Value::is_null) {
-                        obj.insert("wait".to_string(), wait_val);
-                    }
-                    serde_json::Value::Object(obj)
-                }
-                Some(other) => other,
-                None => serde_json::json!({ "wait": wait_val }),
-            });
+            // `behaviors` is a compiled program (`new_is` compiled it), where a `null` wait is
+            // already gone (issue #1093) — so "no wait step" is exactly "no explicit wait".
+            let mut program = match behaviors {
+                Some(serde_json::Value::Array(program)) => program,
+                _ => Vec::new(),
+            };
+            let has_wait = program
+                .iter()
+                .any(|element| program_element(element).is_some_and(|(k, _)| k == "wait"));
+            if !has_wait {
+                // The stub's delay runs first, where an object-form `wait` would.
+                let at = usize::from(
+                    program
+                        .first()
+                        .and_then(program_element)
+                        .is_some_and(|(k, _)| k == "repeat"),
+                );
+                program.insert(at, serde_json::json!({ "wait": wait_val }));
+            }
+            let behaviors = Some(serde_json::Value::Array(program));
             // Behaviors changed (the `wait` entry was injected) — recompute via `new_is` rather
             // than reusing the stale `behaviors_parsed`/`rendered_body` that were dropped above.
             StubResponse::new_is(is, behaviors, rift)
@@ -496,7 +505,7 @@ pub enum StubResponse {
         /// re-deserializes it. Not serde-driven (see the `from`/`into` attributes on this enum) —
         /// purely a precomputed cache alongside `behaviors`.
         #[serde(skip)]
-        behaviors_parsed: Option<std::sync::Arc<crate::behaviors::ResponseBehaviors>>,
+        behaviors_parsed: Option<std::sync::Arc<crate::behaviors::BehaviorProgram>>,
         /// Issue #479: pre-rendered JSON string for a non-string `is.body`, computed ONCE at
         /// construction so the request hot path never re-serializes it. `None` for a string body
         /// (served as-is) or no body at all.
@@ -521,7 +530,7 @@ pub enum StubResponse {
         /// does (issue #1189). `None` for an absent or empty block.
         behaviors: Option<serde_json::Value>,
         /// `behaviors`, parsed once at construction (issue #479).
-        behaviors_parsed: Option<std::sync::Arc<crate::behaviors::ResponseBehaviors>>,
+        behaviors_parsed: Option<std::sync::Arc<crate::behaviors::BehaviorProgram>>,
     },
     /// Built only through [`StubResponse::new_inject`], which keeps `behaviors_parsed` in step
     /// with `behaviors`.
@@ -534,7 +543,7 @@ pub enum StubResponse {
         /// `None` for an absent or empty block.
         behaviors: Option<serde_json::Value>,
         /// `behaviors`, parsed once at construction (issue #479).
-        behaviors_parsed: Option<std::sync::Arc<crate::behaviors::ResponseBehaviors>>,
+        behaviors_parsed: Option<std::sync::Arc<crate::behaviors::BehaviorProgram>>,
     },
     Fault {
         fault: String,
@@ -569,6 +578,7 @@ impl StubResponse {
         behaviors: Option<serde_json::Value>,
         rift: Option<RiftResponseExtension>,
     ) -> StubResponse {
+        let behaviors = behaviors.and_then(compile_behaviors);
         let behaviors_parsed = parse_behaviors(behaviors.as_ref());
         // Only a non-string body needs rendering; a string body is served as-is. Serializing a
         // `serde_json::Value` is infallible by construction, so this never defaults (issue #611).
@@ -602,6 +612,7 @@ impl StubResponse {
         ignored_rift: Option<RiftResponseExtension>,
         behaviors: Option<serde_json::Value>,
     ) -> StubResponse {
+        let behaviors = behaviors.and_then(compile_behaviors);
         let behaviors_parsed = parse_behaviors(behaviors.as_ref());
         StubResponse::Proxy {
             proxy,
@@ -618,6 +629,7 @@ impl StubResponse {
         ignored_rift: Option<RiftResponseExtension>,
         behaviors: Option<serde_json::Value>,
     ) -> StubResponse {
+        let behaviors = behaviors.and_then(compile_behaviors);
         let behaviors_parsed = parse_behaviors(behaviors.as_ref());
         StubResponse::Inject {
             inject,
@@ -627,8 +639,8 @@ impl StubResponse {
         }
     }
 
-    /// The behaviors block written on this response, whatever its type — the block `repeat` is read
-    /// from (issue #1188).
+    /// The compiled behaviors program on this response, whatever its type — also where `repeat` is
+    /// read from (issues #1188, #1198).
     pub(crate) fn behaviors_block(&self) -> Option<&serde_json::Value> {
         match self {
             StubResponse::Is { behaviors, .. }
@@ -644,45 +656,39 @@ impl StubResponse {
     }
 }
 
-/// Parse a behaviors block for the serve path (issue #479).
+/// Parse a compiled behaviors program for the serve path, once (issue #479).
 ///
-/// A block that won't parse can't be cached, so it is dropped — but never silently (issue #608). No
-/// config door reaches this since #1162: the parser refuses such a block
+/// A program that won't parse can't be cached, so it is dropped — but never silently (issue #608).
+/// No config door reaches this since #1162: the parser refuses such a block
 /// (`refuse_unparseable_behaviors`). It stays for programmatic callers, which can pass anything.
 fn parse_behaviors(
     behaviors: Option<&serde_json::Value>,
-) -> Option<std::sync::Arc<crate::behaviors::ResponseBehaviors>> {
-    behaviors
-        .and_then(|v| {
-            // Only an object is a behaviors block. Parsing anything else would read an array
-            // by field position (issue #1101); the deserializer refuses those shapes, and this
-            // keeps a programmatically built response from reaching the positional read.
-            if !v.is_object() {
-                if !v.is_null() {
-                    tracing::error!(
-                        behaviors = %v,
-                        "`_behaviors` block is not an object and will be ignored if this \
-                         response is served"
-                    );
-                }
-                return None;
-            }
-            match serde_json::from_value::<crate::behaviors::ResponseBehaviors>(v.clone()) {
-                Ok(parsed) => Some(parsed),
-                Err(e) => {
-                    // Deliberately does not claim the response will serve: construction runs
-                    // before the admin gate, so this config may still be rejected.
-                    tracing::error!(
-                        error = %e,
-                        behaviors = %v,
-                        "malformed `_behaviors` block could not be parsed and will be ignored \
-                         if this response is served"
-                    );
-                    None
-                }
-            }
-        })
-        .map(std::sync::Arc::new)
+) -> Option<std::sync::Arc<crate::behaviors::BehaviorProgram>> {
+    let program = behaviors?;
+    // Only a compiled program is parsed; every constructor compiles first, so this is a
+    // programmatically built value that `compile_behaviors` could not read (issue #1101 is why a
+    // bare array is never read positionally).
+    let Some(elements) = program.as_array() else {
+        tracing::error!(
+            behaviors = %program,
+            "behaviors block is not a compiled program and will be ignored if this response is served"
+        );
+        return None;
+    };
+    match crate::behaviors::BehaviorProgram::from_elements(elements) {
+        Ok(parsed) => Some(std::sync::Arc::new(parsed)),
+        Err(e) => {
+            // Deliberately does not claim the response will serve: construction runs before the
+            // admin gate, so this config may still be rejected.
+            tracing::error!(
+                error = %e,
+                behaviors = %program,
+                "malformed behaviors block could not be parsed and will be ignored if this \
+                 response is served"
+            );
+            None
+        }
+    }
 }
 
 /// Raw deserialization type that handles multiple JSON formats for stub responses
@@ -830,9 +836,9 @@ fn refuse_inverted_wait(wait: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Every `wait` in a `behaviors` block, whichever spelling it takes. The array form normalizes to
-/// the last `wait` it finds, but an inverted range is wrong wherever it sits, so all of them are
-/// checked rather than only the one that would survive normalization.
+/// Every `wait` in a `behaviors` block, whichever spelling it takes. A later `null` can remove a
+/// `wait` from the program that runs, but an inverted range is wrong wherever it sits, so all of
+/// them are checked rather than only the ones that survive compilation.
 fn refuse_inverted_waits_in_block(block: &serde_json::Value) -> Result<(), String> {
     match block {
         serde_json::Value::Object(_) => {
@@ -854,13 +860,24 @@ fn refuse_inverted_waits_in_block(block: &serde_json::Value) -> Result<(), Strin
 
 /// The block `new_is` is about to parse must parse (issue #1162). `new_is` cannot fail, so a block
 /// it could not read used to be admitted and served with every behavior but `repeat` ignored and
-/// only a log line to say so. Checked on the block the engine will use — `_behaviors`, else the
-/// merged `behaviors` array — so a scalar a later element overrides, a list item a later `null`
-/// clears, or a `behaviors` shadowed by `_behaviors`, is not refused: it configures nothing, and
-/// rift-lint reads the array the same way. A list item in an earlier element is live (#1195).
+/// only a log line to say so. Checked on the compiled program — every step that will run — so a
+/// step a later `null` removes, or a `behaviors` shadowed by `_behaviors`, is not refused: it
+/// configures nothing, and rift-lint reads the array the same way. Every other element is live
+/// (#1195, #1198), so a malformed earlier element is refused rather than overridden.
 fn refuse_unparseable_behaviors(block: Option<&serde_json::Value>) -> Result<(), String> {
-    let Some(block @ serde_json::Value::Object(keys)) = block else {
-        // A non-object block never gets here: the field deserializers above refuse it.
+    match block {
+        // A compiled program: every step runs, so every step must parse.
+        Some(serde_json::Value::Array(program)) => program
+            .iter()
+            .try_for_each(|element| refuse_unparseable_behaviors(Some(element))),
+        Some(object @ serde_json::Value::Object(_)) => refuse_unparseable_object(object),
+        // Nothing else reaches here: the field deserializers refuse other shapes.
+        _ => Ok(()),
+    }
+}
+
+fn refuse_unparseable_object(block: &serde_json::Value) -> Result<(), String> {
+    let Some(keys) = block.as_object() else {
         return Ok(());
     };
     if crate::behaviors::ResponseBehaviors::deserialize(block).is_ok() {
@@ -929,10 +946,11 @@ where
     }
 }
 
-/// A behaviors block worth keeping on a response that runs none: an empty block (`{}`, or a
-/// `behaviors: []` folded to nothing) says nothing, so there is nothing to report or round-trip.
+/// A compiled behaviors program worth keeping: one with nothing in it says nothing, so there is
+/// nothing to run, report or round-trip. `compile_behaviors` already returns `None` for it; this
+/// keeps a programmatically built empty array to the same rule.
 fn non_empty_behaviors(behaviors: Option<serde_json::Value>) -> Option<serde_json::Value> {
-    behaviors.filter(|b| b.as_object().is_some_and(|o| !o.is_empty()))
+    behaviors.filter(|b| b.as_array().is_some_and(|a| !a.is_empty()))
 }
 
 fn unexpected_json(value: &serde_json::Value) -> serde::de::Unexpected<'_> {
@@ -956,30 +974,26 @@ impl TryFrom<StubResponseRaw> for StubResponse {
     type Error = String;
 
     fn try_from(raw: StubResponseRaw) -> Result<Self, Self::Error> {
-        // Merge behaviors: prefer _behaviors, fall back to behaviors (array form folded to an
-        // object). Checked before the response type is chosen, so a block on a `proxy`, `inject`
-        // or `fault` response is held to the same rule rift-lint applies to every response.
+        // `_behaviors` when present, else `behaviors`, compiled into the program that runs
+        // (issue #1198). Checked before the response type is chosen, so a block on a `proxy`,
+        // `inject` or `fault` response is held to the same rule rift-lint applies to every response.
         let mut behaviors = raw
             .underscore_behaviors
-            .or_else(|| raw.behaviors.and_then(normalize_behaviors));
+            .or(raw.behaviors)
+            .and_then(compile_behaviors);
         // Both are checked before the merge, so a malformed `repeat` in the block is refused even
         // when the top-level one replaces it — the rule rift-lint applies to each.
         refuse_unparseable_behaviors(behaviors.as_ref())?;
         if let Some(repeat) = raw.repeat {
             let alone = serde_json::json!({ "repeat": repeat });
             refuse_unparseable_behaviors(Some(&alone))?;
-            match behaviors.get_or_insert_with(|| serde_json::json!({})) {
-                serde_json::Value::Object(block) => {
-                    block.insert("repeat".to_string(), repeat);
-                }
-                // The field deserializers admit only an object block, and `normalize_behaviors`
-                // only returns one.
-                _ => {
-                    return Err(
-                        "`repeat` cannot be merged into a non-object behaviors block".into(),
-                    );
-                }
-            }
+            // Appended, so it is the last `repeat` and wins, as it does in Mountebank.
+            let mut program = match behaviors {
+                Some(serde_json::Value::Array(program)) => program,
+                _ => Vec::new(),
+            };
+            program.push(alone);
+            behaviors = compile_behaviors(serde_json::Value::Array(program));
         }
         // Priority: is > proxy > inject > fault > rift-script-only
         Ok(if let Some(is_raw) = raw.is {
@@ -1118,10 +1132,6 @@ impl From<StubResponse> for StubResponseOut {
     }
 }
 
-/// Behaviors in Mountebank's execution order, which is also Rift's (`behavior_pipeline`). In the
-/// array form Mountebank reads, element order *is* execution order.
-const BEHAVIOR_ORDER: [&str; 5] = ["wait", "copy", "lookup", "decorate", "shellTransform"];
-
 /// Write a behaviors block in the grammar Mountebank loads (issue #1191), returning the response's
 /// `repeat` and its `behaviors` array.
 ///
@@ -1136,84 +1146,146 @@ const BEHAVIOR_ORDER: [&str; 5] = ["wait", "copy", "lookup", "decorate", "shellT
 fn behaviors_out(
     block: serde_json::Value,
 ) -> (Option<serde_json::Value>, Option<Vec<serde_json::Value>>) {
-    let Some(serde_json::Value::Object(mut block)) = normalize_behaviors(block) else {
+    use serde_json::Value;
+    fn group(key: String, mut items: Vec<Value>) -> Value {
+        let value = if items.len() == 1 {
+            items.pop().unwrap_or(Value::Null)
+        } else {
+            Value::Array(items)
+        };
+        serde_json::json!({ key: value })
+    }
+    let Some(Value::Array(program)) = compile_behaviors(block) else {
         return (None, None);
     };
-    let repeat = block
-        .remove("repeat")
-        .filter(|r| !r.is_null() && r.as_u64() != Some(0));
-    let mut keys: Vec<String> = BEHAVIOR_ORDER.iter().map(|k| (*k).to_string()).collect();
-    keys.extend(
-        block
-            .keys()
-            .filter(|k| !BEHAVIOR_ORDER.contains(&k.as_str()))
-            .cloned(),
-    );
-    let elements: Vec<serde_json::Value> = keys
-        .into_iter()
-        .filter_map(|key| {
-            let value = match block.remove(&key)? {
-                serde_json::Value::Null => return None,
-                serde_json::Value::Array(items) if items.is_empty() => return None,
-                serde_json::Value::Array(mut items)
-                    if items.len() == 1 && BEHAVIOR_ORDER.contains(&key.as_str()) =>
-                {
-                    items.pop()?
-                }
-                value => value,
-            };
-            Some(serde_json::json!({ key: value }))
-        })
-        .collect();
-    (repeat, (!elements.is_empty()).then_some(elements))
-}
-
-/// Keys `ResponseBehaviors` holds as lists. Mountebank spells several as one array element each
-/// and runs them all, so the fold appends these instead of replacing (issue #1195).
-const LIST_BEHAVIORS: [&str; 3] = ["copy", "lookup", "shellTransform"];
-
-/// Fold the array form `behaviors: [{"wait": ...}, {"copy": ...}]` into the object form
-/// `_behaviors` uses; an object is returned as-is.
-///
-/// A non-null `copy`, `lookup` or `shellTransform` appends its items to what earlier elements set,
-/// in element order. Every other key, and a `null` for any key, replaces what came before. A key
-/// set once is kept as written, so a bare item stays bare. Non-object elements are skipped.
-pub(crate) fn normalize_behaviors(value: serde_json::Value) -> Option<serde_json::Value> {
-    fn items(value: serde_json::Value) -> Vec<serde_json::Value> {
-        match value {
-            serde_json::Value::Array(items) => items,
-            item => vec![item],
-        }
-    }
-    match value {
-        serde_json::Value::Array(arr) => {
-            let mut merged = serde_json::Map::new();
-            for item in arr {
-                if let serde_json::Value::Object(obj) = item {
-                    for (k, v) in obj {
-                        let accumulates = LIST_BEHAVIORS.contains(&k.as_str()) && !v.is_null();
-                        match merged.get_mut(&k) {
-                            Some(held) if accumulates && !held.is_null() => {
-                                let mut list = items(held.take());
-                                list.extend(items(v));
-                                *held = serde_json::Value::Array(list);
-                            }
-                            _ => {
-                                merged.insert(k, v);
-                            }
-                        }
+    let mut repeat = None;
+    let mut elements = Vec::new();
+    // Adjacent steps of one list key are written as one element holding a list, which keeps the
+    // output for every config Rift accepted before #1198 byte-identical; #1199 writes them one
+    // element per item once rift-java reads that back.
+    let mut run: Option<(String, Vec<Value>)> = None;
+    for element in program {
+        let Value::Object(object) = element else {
+            continue;
+        };
+        for (key, value) in object {
+            if key == "repeat" {
+                repeat = Some(value).filter(|r| r.as_u64() != Some(0));
+                continue;
+            }
+            match &mut run {
+                Some((held, items)) if *held == key => items.push(value),
+                _ => {
+                    if let Some((held, items)) = run.take() {
+                        elements.push(group(held, items));
+                    }
+                    if LIST_BEHAVIORS.contains(&key.as_str()) {
+                        run = Some((key, vec![value]));
+                    } else {
+                        elements.push(serde_json::json!({ key: value }));
                     }
                 }
             }
-            if merged.is_empty() {
-                None
-            } else {
-                Some(serde_json::Value::Object(merged))
+        }
+    }
+    if let Some((held, items)) = run {
+        elements.push(group(held, items));
+    }
+    (repeat, (!elements.is_empty()).then_some(elements))
+}
+
+/// Keys `ResponseBehaviors` holds as lists: several of them are several steps.
+const LIST_BEHAVIORS: [&str; 3] = ["copy", "lookup", "shellTransform"];
+
+/// Compile a behaviors block into the ordered program Mountebank runs (issue #1198): a JSON array
+/// of single-key elements in execution order, with the response's `repeat` as a first
+/// `{"repeat": n}` element. This is the only shape stored on a `StubResponse`, so the parser, the
+/// `--allowInjection` gate, stub analysis and the writer all read the program that runs.
+///
+/// - The object form (`_behaviors`), and each element of the array form that sets several keys,
+///   contribute their keys in [`CANONICAL_ORDER`](crate::behaviors::CANONICAL_ORDER), then any
+///   other key alphabetically. Array elements contribute in array order.
+/// - A `copy`, `lookup` or `shellTransform` list is one step per item; an empty list is none.
+/// - A `null` for a key removes every earlier step of that key (issues #1093, #1098). The last
+///   `repeat` wins; a `null` one clears it.
+/// - Non-object array elements configure nothing and are skipped.
+///
+/// Idempotent: compiling a compiled program returns it unchanged. `None` when nothing is left.
+pub(crate) fn compile_behaviors(block: serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    fn push(
+        object: serde_json::Map<String, Value>,
+        steps: &mut Vec<(String, Value)>,
+        repeat: &mut Option<Value>,
+    ) {
+        let order = crate::behaviors::CANONICAL_ORDER;
+        let mut keys: Vec<&String> = object.keys().collect();
+        keys.sort_by_key(|k| {
+            (
+                order.iter().position(|o| o == k).unwrap_or(order.len()),
+                k.as_str(),
+            )
+        });
+        let keys: Vec<String> = keys.into_iter().cloned().collect();
+        let mut object = object;
+        for key in keys {
+            let Some(value) = object.remove(&key) else {
+                continue;
+            };
+            if key == "repeat" {
+                *repeat = (!value.is_null()).then_some(value);
+                continue;
+            }
+            let known = crate::behaviors::CANONICAL_ORDER.contains(&key.as_str());
+            match value {
+                Value::Null => steps.retain(|(k, _)| *k != key),
+                // A list of items is one step per item. An item that is itself a list or `null` is
+                // not one: the whole value stays one step, so the parser refuses it as before
+                // rather than this flattening or dropping it.
+                Value::Array(items)
+                    if LIST_BEHAVIORS.contains(&key.as_str())
+                        && items.iter().all(|i| !i.is_array() && !i.is_null()) =>
+                {
+                    steps.extend(items.into_iter().map(|item| (key.clone(), item)));
+                }
+                // An unknown key configures nothing; an empty one says nothing either.
+                Value::Array(items) if !known && items.is_empty() => {}
+                value => steps.push((key, value)),
             }
         }
-        serde_json::Value::Object(_) => Some(value),
-        _ => None,
     }
+    let mut steps = Vec::new();
+    let mut repeat = None;
+    match block {
+        Value::Object(object) => push(object, &mut steps, &mut repeat),
+        Value::Array(elements) => {
+            for element in elements {
+                match element {
+                    Value::Object(object) => push(object, &mut steps, &mut repeat),
+                    // A `null` element is absent, as a `null` key is (issues #1093, #1098).
+                    Value::Null => {}
+                    // Configures nothing: said, not silently dropped (issues #608, #1101).
+                    // rift-lint reports the same element as E048.
+                    other => tracing::warn!(
+                        element = %other,
+                        "`_behaviors`/`behaviors` element is not an object and configures nothing"
+                    ),
+                }
+            }
+        }
+        _ => return None,
+    }
+    let program: Vec<Value> = repeat
+        .map(|r| serde_json::json!({ "repeat": r }))
+        .into_iter()
+        .chain(steps.into_iter().map(|(k, v)| serde_json::json!({ k: v })))
+        .collect();
+    (!program.is_empty()).then_some(Value::Array(program))
+}
+
+/// The single key and value of a compiled program element.
+fn program_element(element: &serde_json::Value) -> Option<(&String, &serde_json::Value)> {
+    element.as_object().and_then(|o| o.iter().next())
 }
 
 /// Response mode for body handling (Mountebank compatible)
@@ -2187,6 +2259,18 @@ mod tests {
         }
     }
 
+    /// The value of the first `key` step of a compiled program.
+    fn step<'a>(
+        behaviors: &'a Option<serde_json::Value>,
+        key: &str,
+    ) -> Option<&'a serde_json::Value> {
+        behaviors
+            .as_ref()?
+            .as_array()?
+            .iter()
+            .find_map(|element| element.get(key))
+    }
+
     fn raw_behaviors_of(response: serde_json::Value) -> Option<serde_json::Value> {
         match serde_json::from_value::<StubResponse>(response).expect("response parses") {
             StubResponse::Is { behaviors, .. } => behaviors,
@@ -2197,21 +2281,22 @@ mod tests {
     // The refusal must not reach the shapes the engine documents.
     #[test]
     fn the_documented_behaviors_shapes_still_parse() {
+        // Stored as the compiled program (issue #1198).
         assert_eq!(
             raw_behaviors_of(json!({ "is": {}, "_behaviors": { "wait": 5 } })),
-            Some(json!({ "wait": 5 }))
+            Some(json!([{ "wait": 5 }]))
         );
         assert_eq!(
             raw_behaviors_of(json!({ "is": {}, "_behaviors": null, "behaviors": [{ "wait": 5 }] })),
-            Some(json!({ "wait": 5 }))
+            Some(json!([{ "wait": 5 }]))
         );
         assert_eq!(
             raw_behaviors_of(json!({ "is": {}, "behaviors": { "repeat": 2 } })),
-            Some(json!({ "repeat": 2 }))
+            Some(json!([{ "repeat": 2 }]))
         );
         assert_eq!(
             raw_behaviors_of(json!({ "is": {}, "behaviors": [{ "wait": 1 }, { "wait": 2 }] })),
-            Some(json!({ "wait": 2 }))
+            Some(json!([{ "wait": 1 }, { "wait": 2 }]))
         );
         assert_eq!(raw_behaviors_of(json!({ "is": {}, "behaviors": [] })), None);
         assert_eq!(
@@ -2968,7 +3053,7 @@ mod tests {
         let stub: Stub = serde_json::from_value(stub_json).unwrap();
         assert_eq!(stub.responses.len(), 1);
         if let StubResponse::Is { behaviors, .. } = &stub.responses[0] {
-            let wait = behaviors.as_ref().unwrap().get("wait").unwrap();
+            let wait = step(behaviors, "wait").expect("a wait step");
             // min != max → range object
             assert_eq!(wait.get("min").unwrap(), &json!(50u64));
             assert_eq!(wait.get("max").unwrap(), &json!(100u64));
@@ -2987,10 +3072,7 @@ mod tests {
         }))
         .unwrap();
         if let StubResponse::Is { behaviors, .. } = &stub.responses[0] {
-            assert_eq!(
-                behaviors.as_ref().unwrap().get("wait"),
-                Some(&json!(200u64))
-            );
+            assert_eq!(step(behaviors, "wait"), Some(&json!(200u64)));
         } else {
             panic!("expected Is response");
         }
@@ -3005,7 +3087,7 @@ mod tests {
         });
         let stub: Stub = serde_json::from_value(stub_json).unwrap();
         if let StubResponse::Is { behaviors, .. } = &stub.responses[0] {
-            let wait = behaviors.as_ref().unwrap().get("wait").unwrap();
+            let wait = step(behaviors, "wait").expect("a wait step");
             assert_eq!(wait, &json!(0u64));
         } else {
             panic!("expected Is response");
@@ -3075,8 +3157,8 @@ mod tests {
         assert!(serde_json::from_value::<Stub>(stub_json).is_err());
     }
 
-    // The array form normalizes to the *last* wait it finds, so an inverted range in a non-last
-    // element is the case a check on the normalized block alone would miss.
+    // A later `null` can remove an element's wait from the compiled program, so an inverted range
+    // there is the case a check on the compiled program alone would miss.
     #[test]
     fn an_inverted_behaviors_array_wait_is_refused_in_a_non_last_element() {
         let stub_json = json!({
@@ -3105,7 +3187,7 @@ mod tests {
             panic!("expected Is response");
         };
         assert_eq!(
-            behaviors.as_ref().expect("behaviors").get("wait"),
+            step(behaviors, "wait"),
             Some(&json!({ "min": 250, "max": 250 }))
         );
     }
@@ -3194,12 +3276,12 @@ mod tests {
         }
     }
 
-    // The array form is merged before it is parsed (a scalar key is last-wins), and rift-lint
-    // checks it the same way, so a bad value a later element overrides configures nothing and must
-    // still load.
+    // `repeat` is last-wins, so a bad one a later element overrides configures nothing and loads;
+    // a step a later `null` removes loads too. rift-lint checks the array the same way.
     #[test]
     fn an_overridden_bad_value_in_a_behaviors_array_still_loads() {
-        for later in [json!({ "wait": 50 }), json!({ "wait": null })] {
+        {
+            let later = json!({ "wait": null });
             let response = json!({ "is": {}, "behaviors": [
                 { "wait": { "min": "1", "max": "2" }, "repeat": 2.5 },
                 later,
@@ -3216,6 +3298,17 @@ mod tests {
             let parsed = behaviors_parsed.expect("the merged block parses");
             assert_eq!(parsed.repeat, Some(3));
         }
+    }
+
+    // Issue #1198: every step runs, so a bad `wait` a later `wait` follows is live and refused —
+    // it is no longer overridden.
+    #[test]
+    fn a_bad_step_followed_by_a_good_one_is_refused() {
+        let msg = response_error(json!({ "is": {}, "behaviors": [
+            { "wait": { "min": "1", "max": "2" } },
+            { "wait": 50 }
+        ] }));
+        assert!(msg.contains("`wait`"), "{msg}");
     }
 
     // A block the engine does not use is not what this refusal is about: `_behaviors` shadows
@@ -3235,8 +3328,28 @@ mod tests {
             panic!("expected an Is response");
         };
         assert!(matches!(
-            behaviors_parsed.expect("parsed").wait,
-            Some(crate::behaviors::WaitBehavior::Fixed(10))
+            behaviors_parsed.expect("parsed").steps.as_slice(),
+            [crate::behaviors::BehaviorStep::Wait(
+                crate::behaviors::WaitBehavior::Fixed(10)
+            )]
+        ));
+    }
+
+    /// An all-`null` block is no behaviors at all: it loads, with nothing to run.
+    #[test]
+    fn an_all_null_block_loads_as_no_behaviors() {
+        let response = json!({ "is": { "statusCode": 200 }, "_behaviors": {
+            "wait": null, "repeat": null, "copy": null, "lookup": null,
+            "decorate": null, "shellTransform": null
+        } });
+        let resp: StubResponse = serde_json::from_value(response).expect("loads");
+        assert!(matches!(
+            resp,
+            StubResponse::Is {
+                behaviors: None,
+                behaviors_parsed: None,
+                ..
+            }
         ));
     }
 
@@ -3247,8 +3360,6 @@ mod tests {
             json!({ "wait": { "min": 1, "max": 9 } }),
             json!({ "wait": "function() { return 5; }" }),
             json!({ "wait": { "inject": "function() { return 5; }" } }),
-            json!({ "wait": null, "repeat": null, "copy": null, "lookup": null,
-                    "decorate": null, "shellTransform": null }),
             json!({ "someFutureKey": 1, "wait": 5 }),
         ] {
             let response = json!({ "is": { "statusCode": 200 }, "_behaviors": block });
@@ -3583,13 +3694,15 @@ mod tests {
         else {
             panic!("expected Is, got {response:?}");
         };
-        let wait = behaviors_parsed
-            .as_ref()
-            .and_then(|b| b.wait.clone())
-            .expect("wait kept");
+        let steps = &behaviors_parsed.as_ref().expect("parsed").steps;
         assert!(
-            matches!(wait, crate::behaviors::WaitBehavior::Fixed(500)),
-            "{wait:?}"
+            matches!(
+                steps.as_slice(),
+                [crate::behaviors::BehaviorStep::Wait(
+                    crate::behaviors::WaitBehavior::Fixed(500)
+                )]
+            ),
+            "{steps:?}"
         );
         let out = serde_json::to_value(StubResponseOut::from(response)).expect("json");
         assert_eq!(out["behaviors"], json!([{"wait": 500}]));
@@ -3723,8 +3836,67 @@ mod mountebank_output_tests {
         );
     }
 
-    /// Issue #1195: repeated list elements are read as one list, so every item is written back.
-    /// Written as one list per key until #1199 moves the writer to one element per item.
+    /// Issue #1188/#1198: a top-level `repeat` wins over one in the block, whichever form the
+    /// block takes, and is what the cycler reads.
+    #[test]
+    fn a_top_level_repeat_wins_over_the_blocks() {
+        use crate::behaviors::HasRepeatBehavior;
+        for response in [
+            json!({"is": {}, "repeat": 4, "_behaviors": {"repeat": 2, "wait": 1}}),
+            json!({"is": {}, "repeat": 4, "behaviors": [{"repeat": 2}, {"wait": 1}]}),
+        ] {
+            let parsed: StubResponse = serde_json::from_value(response.clone()).expect("parses");
+            assert_eq!(parsed.get_repeat(), Some(4), "{response}");
+            assert_eq!(
+                parsed.behaviors_block(),
+                Some(&json!([{"repeat": 4}, {"wait": 1}])),
+                "{response}"
+            );
+        }
+    }
+
+    /// Issue #1198: compiling a compiled program changes nothing, so every constructor can
+    /// compile again without reshaping what the parser, the gate and the writer read.
+    #[test]
+    fn compiling_a_program_twice_changes_nothing() {
+        let copy = |t: &str| json!({"from": "path", "into": t, "using": {"method": "regex", "selector": ".+"}});
+        for block in [
+            json!({"repeat": 2, "wait": 1, "copy": [copy("${A}"), copy("${B}")], "decorate": "f",
+                   "shellTransform": ["x", "y"], "someFutureKey": 1}),
+            json!([{"decorate": "f"}, {"repeat": 3}, {"wait": 1}, {"decorate": "g"}, {"repeat": null}]),
+            json!([{"copy": copy("${A}")}, {"copy": null}, {"copy": [copy("${B}")]}]),
+            // Not a list of items: left whole, for the parser to refuse, and stable.
+            json!({"copy": [[copy("${A}")]]}),
+            json!({"shellTransform": ["x", null]}),
+        ] {
+            let once = compile_behaviors(block.clone());
+            let twice = once.clone().and_then(compile_behaviors);
+            assert_eq!(once, twice, "{block}");
+        }
+    }
+
+    /// A list item that is itself a list, or `null`, is not an item: the parser refuses the block,
+    /// as it did before #1198, instead of it being flattened or silently dropped.
+    #[test]
+    fn a_nested_or_null_list_item_is_still_refused() {
+        let copy =
+            json!({"from": "path", "into": "${A}", "using": {"method": "regex", "selector": ".+"}});
+        for block in [
+            json!({"copy": [[copy.clone()]]}),
+            json!({"copy": [copy.clone(), null]}),
+            json!({"shellTransform": [["a", "b"]]}),
+            json!({"shellTransform": ["echo x", null]}),
+        ] {
+            let response = json!({"is": {}, "_behaviors": block});
+            assert!(
+                serde_json::from_value::<StubResponse>(response.clone()).is_err(),
+                "{response} must be refused"
+            );
+        }
+    }
+
+    /// Issue #1195: every repeated list element is written back — and, since #1198, in the order it
+    /// runs, so elements that are not adjacent are not merged into one list.
     #[test]
     fn repeated_list_elements_are_all_written_back() {
         let copy_a =
@@ -3736,7 +3908,10 @@ mod mountebank_output_tests {
         ]}));
         assert_eq!(
             saved["behaviors"],
-            json!([{"copy": [copy_a, copy_b]}, {"shellTransform": ["echo x", "echo y"]}])
+            json!([
+                {"copy": copy_a}, {"shellTransform": "echo x"},
+                {"copy": copy_b}, {"shellTransform": "echo y"}
+            ])
         );
     }
 
@@ -3752,14 +3927,8 @@ mod mountebank_output_tests {
     fn configured(response: &Value) -> (Value, Option<u32>) {
         use crate::behaviors::HasRepeatBehavior;
         let parsed: StubResponse = serde_json::from_value(response.clone()).expect("parses");
-        let block = parsed
-            .behaviors_block()
-            .map(|b| {
-                let behaviors: crate::behaviors::ResponseBehaviors =
-                    serde_json::from_value(b.clone()).expect("block parses");
-                serde_json::to_value(behaviors).expect("json")
-            })
-            .unwrap_or(Value::Null);
+        // The compiled program is the configuration: compare it directly.
+        let block = parsed.behaviors_block().cloned().unwrap_or(Value::Null);
         (block, parsed.get_repeat())
     }
 

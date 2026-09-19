@@ -347,6 +347,18 @@ record.
 
 ### Changed
 
+- **A `behaviors` array runs as an ordered program, as in Mountebank** (#1198). Every element now
+  runs, in array order: two `decorate` elements both run, two `wait` elements both delay, and a
+  `decorate` written before a `copy` runs first. Before, the array was folded into one block — a
+  repeated `wait` or `decorate` ran once and the order was Rift's fixed one. A `null` still removes
+  the earlier steps of its behavior, and `repeat` is still last-wins. Consequences: an earlier
+  element with a malformed value is now refused instead of silently overridden by a later one; a
+  script `wait` followed by a numeric one now needs `--allowInjection` (the fold used to hide it
+  from the check while it would now run); and `GET /imposters` / `rift save` write the array back in
+  its order. The object form (`_behaviors`), and every array that sets each behavior once in Rift's
+  order, serve and save exactly as before. New `rift-lint` warning `W018`: an element that sets several behaviors, whose
+  order is Rift's rather than the one written.
+
 - **A `behaviors` array runs every `copy`, `lookup` and `shellTransform` element, as Mountebank
   does** (#1195). Mountebank spells two copies as two elements, `[{"copy": a}, {"copy": b}]`, and
   runs both; Rift kept only the last element for each key, so the first copy silently did nothing.

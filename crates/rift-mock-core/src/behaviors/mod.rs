@@ -46,6 +46,6 @@ pub use transform::{
     DecorateError, apply_decorate, apply_shell_transform, is_js_config_decorate,
     rewrite_js_config_to_rhai,
 };
-pub use types::ResponseBehaviors;
+pub use types::{BehaviorProgram, BehaviorStep, CANONICAL_ORDER, ResponseBehaviors};
 #[allow(unused_imports)]
 pub use wait::WaitBehavior;

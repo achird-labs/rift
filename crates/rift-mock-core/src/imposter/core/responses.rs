@@ -127,7 +127,7 @@ impl Imposter {
             u16,
             HashMap<String, Vec<String>>,
             String,
-            Option<std::sync::Arc<crate::behaviors::ResponseBehaviors>>,
+            Option<std::sync::Arc<crate::behaviors::BehaviorProgram>>,
             Option<RiftResponseExtension>,
             ResponseMode,
             bool,

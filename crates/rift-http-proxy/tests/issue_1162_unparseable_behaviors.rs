@@ -198,16 +198,16 @@ fn a_configfile_with_an_unparseable_block_fails_to_load() {
     assert!(message.contains("`repeat`"), "{message}");
 }
 
-/// A bad value that a later `behaviors` array element overrides configures nothing: the engine
-/// merges the array before parsing it, and rift-lint validates it the same way.
+/// A bad value that a later `null` removes configures nothing, so the file loads; rift-lint
+/// validates it the same way. Since #1198 a later *value* no longer hides it: every element runs.
 #[test]
-fn a_configfile_whose_bad_value_is_overridden_still_loads() {
+fn a_configfile_whose_bad_value_is_removed_still_loads() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("imposters.json");
     let config = json!({
         "imposters": [{ "port": 4547, "protocol": "http", "stubs": [{ "responses": [{
             "is": { "statusCode": 200 },
-            "behaviors": [{ "wait": { "min": "1", "max": "2" } }, { "wait": 5 }]
+            "behaviors": [{ "wait": { "min": "1", "max": "2" } }, { "wait": null }]
         }] }] }]
     });
     std::fs::write(&path, config.to_string()).expect("write configfile");
@@ -216,7 +216,29 @@ fn a_configfile_whose_bad_value_is_overridden_still_loads() {
         path,
         no_parse: false,
     })
-    .expect("an overridden value is not part of the block the engine parses");
+    .expect("a removed value is not part of the program the engine runs");
+}
+
+/// Issue #1198: every element of the array runs, so a bad value followed by a good one is live and
+/// the file is refused, instead of the bad one being silently overridden.
+#[test]
+fn a_configfile_with_a_bad_step_followed_by_a_good_one_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("imposters.json");
+    let config = json!({
+        "imposters": [{ "port": 4548, "protocol": "http", "stubs": [{ "responses": [{
+            "is": { "statusCode": 200 },
+            "behaviors": [{ "wait": { "min": "1", "max": "2" } }, { "wait": 5 }]
+        }] }] }]
+    });
+    std::fs::write(&path, config.to_string()).expect("write configfile");
+
+    let err = load_configs(&ConfigSource::File {
+        path,
+        no_parse: false,
+    })
+    .expect_err("a live bad step refuses the file");
+    assert!(format!("{err:#}").contains("`wait`"), "{err:#}");
 }
 
 #[tokio::test]

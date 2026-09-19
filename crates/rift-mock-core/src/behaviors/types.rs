@@ -5,6 +5,57 @@ use super::lookup::LookupBehavior;
 use super::wait::WaitBehavior;
 use serde::{Deserialize, Serialize};
 
+/// The behavior keys in the order Rift runs them when one object sets several — the object form
+/// (`_behaviors`) and a multi-key element of the array form. An array's elements otherwise run in
+/// array order (issue #1198).
+pub const CANONICAL_ORDER: [&str; 5] = ["wait", "copy", "lookup", "decorate", "shellTransform"];
+
+/// One behavior, as run: a response's behaviors are an ordered program of these (issue #1198).
+#[derive(Debug, Clone)]
+pub enum BehaviorStep {
+    Wait(WaitBehavior),
+    Copy(CopyBehavior),
+    Lookup(LookupBehavior),
+    Decorate(String),
+    ShellTransform(String),
+}
+
+/// A response's behaviors as Mountebank runs them: every step, in order, plus the `repeat` the
+/// response cycler reads.
+#[derive(Debug, Clone, Default)]
+pub struct BehaviorProgram {
+    pub repeat: Option<u32>,
+    pub steps: Vec<BehaviorStep>,
+}
+
+impl BehaviorProgram {
+    /// Parse a program from its elements, each a behaviors object; the steps of one element run in
+    /// [`CANONICAL_ORDER`], elements in the order given, and the last `repeat` set wins.
+    ///
+    /// # Errors
+    /// The first element that is not a valid behaviors object.
+    pub fn from_elements<'a>(
+        elements: impl IntoIterator<Item = &'a serde_json::Value>,
+    ) -> Result<Self, serde_json::Error> {
+        let mut program = Self::default();
+        for element in elements {
+            let behaviors = ResponseBehaviors::deserialize(element)?;
+            if behaviors.repeat.is_some() {
+                program.repeat = behaviors.repeat;
+            }
+            program.steps.extend(behaviors.into_steps());
+        }
+        Ok(program)
+    }
+
+    /// Whether any step acts on the response itself. `repeat` alone does not: the response cycler
+    /// reads it, and nothing is run on the response.
+    #[must_use]
+    pub fn transforms_response(&self) -> bool {
+        !self.steps.is_empty()
+    }
+}
+
 /// Response behaviors that modify how responses are generated
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -51,15 +102,19 @@ pub struct ResponseBehaviors {
 }
 
 impl ResponseBehaviors {
-    /// Whether any behavior here acts on the response itself. `repeat` alone does not: the response
-    /// cycler reads it, and nothing is run on the response.
+    /// This object's behaviors as steps, in [`CANONICAL_ORDER`]. `repeat` is not a step.
     #[must_use]
-    pub fn transforms_response(&self) -> bool {
-        self.wait.is_some()
-            || !self.copy.is_empty()
-            || !self.lookup.is_empty()
-            || self.decorate.is_some()
-            || !self.shell_transform.is_empty()
+    pub fn into_steps(self) -> Vec<BehaviorStep> {
+        let mut steps: Vec<BehaviorStep> = self.wait.into_iter().map(BehaviorStep::Wait).collect();
+        steps.extend(self.copy.into_iter().map(BehaviorStep::Copy));
+        steps.extend(self.lookup.into_iter().map(BehaviorStep::Lookup));
+        steps.extend(self.decorate.into_iter().map(BehaviorStep::Decorate));
+        steps.extend(
+            self.shell_transform
+                .into_iter()
+                .map(BehaviorStep::ShellTransform),
+        );
+        steps
     }
 }
 

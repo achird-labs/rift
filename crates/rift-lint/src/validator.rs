@@ -1426,23 +1426,23 @@ pub fn validate_response(
     validate_response_behaviors(file, response, location, result, options);
 }
 
-/// The behaviors the engine's fold accumulates across `behaviors` elements instead of replacing;
-/// mirrors `LIST_BEHAVIORS` in rift-mock-core's `imposter/types.rs` (issue #1195).
-const LIST_BEHAVIORS: [&str; 3] = ["copy", "lookup", "shellTransform"];
+/// The behaviors that are steps of the program the engine runs; mirrors `CANONICAL_ORDER` in
+/// rift-mock-core's `behaviors/types.rs` (issue #1198). `repeat` is not a step.
+const STEP_BEHAVIORS: [&str; 5] = ["wait", "copy", "lookup", "decorate", "shellTransform"];
 
 /// Validate the behaviors block the engine will actually read (issue #1099).
 ///
 /// The engine's raw response (`StubResponseRaw` in rift-mock-core's `imposter/types.rs`) takes
-/// `_behaviors` when it is present and not `null`, and otherwise `behaviors`: an object as-is, or an
-/// array folded into one object by `normalize_behaviors`. In the fold, `copy`, `lookup` and
-/// `shellTransform` accumulate across elements until a later `null` clears them (issue #1195);
-/// every other key is taken from the last element that sets it; non-object elements are skipped.
-/// Validating each array element on its own reported values a later element overrides, and a
-/// `null` `_behaviors` used to hide the array altogether.
+/// `_behaviors` when it is present and not `null`, and otherwise `behaviors`, and compiles it into
+/// the ordered program it runs (`compile_behaviors`, issue #1198). In an array every element's
+/// behaviors are steps and all of them run, unless a later `null` for the same key removes them;
+/// `repeat` is not a step, and the last element to set it wins; non-object elements are skipped.
+/// A `null` `_behaviors` used to hide the array altogether.
 ///
-/// Every key is checked independently by [`validate_behavior`], so the fold is validated one element
-/// at a time with only the keys that element contributes, and a finding names the element it came
-/// from.
+/// Every key is checked independently by [`validate_behavior`], so the array is validated one
+/// element at a time with only the keys that element contributes, and a finding names the element
+/// it came from. W018 flags an element that sets several steps: the engine runs them in its
+/// canonical order, not the order they were written in.
 ///
 /// E048 (issue #1101) reports the shapes outside that model: a non-object `_behaviors` or a scalar
 /// `behaviors`, which the engine refuses, and a non-object, non-null array element, which it skips.
@@ -1526,7 +1526,7 @@ fn validate_response_behaviors(
                 }
             }
             let contributes = |key: &str, idx: usize| {
-                if LIST_BEHAVIORS.contains(&key) {
+                if STEP_BEHAVIORS.contains(&key) {
                     last_null.get(key).is_none_or(|cleared| idx >= *cleared)
                 } else {
                     winner.get(key) == Some(&idx)
@@ -1561,9 +1561,32 @@ fn validate_response_behaviors(
                     .filter(|(key, _)| contributes(key, idx))
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect();
-                // An element whose `wait` lost to a later one is never validated below, but the
+                let steps = obj
+                    .iter()
+                    .filter(|(key, value)| {
+                        STEP_BEHAVIORS.contains(&key.as_str()) && !value.is_null()
+                    })
+                    .count();
+                if steps > 1 {
+                    result.add_issue(
+                        LintIssue::warning(
+                            "W018",
+                            format!(
+                                "`behaviors[{idx}]` sets {steps} behaviors in one element; Rift runs \
+                                 them in its fixed order (wait, copy, lookup, decorate, \
+                                 shellTransform), not the order written, which Mountebank uses"
+                            ),
+                            file.to_path_buf(),
+                        )
+                        .with_location(format!("{location}.behaviors[{idx}]"))
+                        .with_suggestion(
+                            "Put each behavior in its own element, in the order it should run",
+                        ),
+                    );
+                }
+                // An element whose `wait` a later `null` removed is never validated below, but the
                 // engine still refuses an inverted range there (issue #1148).
-                if winner.get("wait") != Some(&idx)
+                if !contributes("wait", idx)
                     && let Some(wait) = obj.get("wait")
                 {
                     report_inverted_wait_range(
