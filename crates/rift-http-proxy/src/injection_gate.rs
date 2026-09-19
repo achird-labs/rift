@@ -151,6 +151,17 @@ fn behaviors_are_scripted(behaviors: Option<&serde_json::Value>) -> bool {
 /// Fail-closed lives in `wait_is_plainly_numeric`: a `wait` is waved through only when it is
 /// provably a delay, never merely because it failed to parse.
 fn raw_behaviors_are_scripted(behaviors: &serde_json::Value) -> bool {
+    // A stored block is a compiled program (issue #1198): every element is a step that runs, so
+    // any scripted element makes the response scripted. A step a later `null` removed is already
+    // gone, and neither runs nor needs the flag.
+    if let Some(program) = behaviors.as_array() {
+        // A compiled program is never empty and holds only objects, so anything else is not one
+        // and fails closed (issue #1101).
+        return program.is_empty()
+            || program
+                .iter()
+                .any(|element| !element.is_object() || raw_behaviors_are_scripted(element));
+    }
     let Some(obj) = behaviors.as_object() else {
         // A non-object block has no keys to classify, and "it will not parse" is not proof it is
         // inert: serde reads a JSON array into `ResponseBehaviors` by field position, so its fifth
@@ -227,7 +238,8 @@ mod tests {
     // Issue #1101: the gate must not lean on the parser to stay closed. A non-object block was
     // classified inert on the premise it could not parse, but serde reads an array positionally,
     // so its fifth element ran as a shellTransform. The parser now refuses these shapes too; this
-    // is the second, independent layer.
+    // is the second, independent layer. Since #1198 a stored block is an array of step objects, so
+    // an array is classified element by element — and one that is not a program still fails closed.
     #[test]
     fn non_object_blocks_fail_closed() {
         for block in [
@@ -238,6 +250,25 @@ mod tests {
             json!(true),
         ] {
             assert!(raw_behaviors_are_scripted(&block), "{block}");
+        }
+    }
+
+    // Issue #1198: a compiled program is classified step by step, so a script step anywhere in it —
+    // not only in the last element of its key — needs the flag.
+    #[test]
+    fn a_program_is_scripted_when_any_step_is() {
+        for program in [
+            json!([{"wait": "function () { return 1; }"}, {"wait": 5}]),
+            json!([{"wait": 1}, {"decorate": "function (req, res) {}"}]),
+            json!([{"repeat": 2}, {"shellTransform": "cat"}]),
+        ] {
+            assert!(raw_behaviors_are_scripted(&program), "{program}");
+        }
+        for program in [
+            json!([{"wait": 5}, {"wait": {"min": 1, "max": 2}}]),
+            json!([{"repeat": 2}, {"copy": {"from": "path", "into": "${P}"}}]),
+        ] {
+            assert!(!raw_behaviors_are_scripted(&program), "{program}");
         }
     }
 

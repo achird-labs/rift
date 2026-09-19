@@ -389,7 +389,7 @@ fn test_alternative_response_format_with_behaviors_array() {
         assert_eq!(is.status_code, 200);
         assert!(behaviors.is_some());
         let behaviors = behaviors.unwrap();
-        assert_eq!(behaviors.get("wait").unwrap().as_u64(), Some(100));
+        assert_eq!(behaviors[0]["wait"].as_u64(), Some(100));
     } else {
         panic!("Expected Is response");
     }
@@ -430,44 +430,35 @@ fn test_status_code_as_number() {
     }
 }
 
+/// Issue #1198: an array compiles to the ordered program that runs — one element per step.
 #[test]
-fn test_behaviors_array_merged_to_object() {
-    // Test that behaviors array format is converted to object
-    let json = r#"{
-        "behaviors": [
-            {"wait": 50},
-            {"decorate": "function() {}"}
-        ],
-        "is": {
-            "statusCode": 200
-        }
-    }"#;
-
-    let response: StubResponse = serde_json::from_str(json).unwrap();
-    if let StubResponse::Is { behaviors, .. } = response {
-        let behaviors = behaviors.expect("behaviors should be present");
-        assert!(behaviors.get("wait").is_some());
-        assert!(behaviors.get("decorate").is_some());
-    } else {
-        panic!("Expected Is response");
-    }
+fn test_behaviors_array_compiles_to_an_ordered_program() {
+    let (block, program) = compiled(serde_json::json!([
+        {"wait": 50},
+        {"decorate": "function() {}"}
+    ]));
+    assert_eq!(
+        block,
+        serde_json::json!([{"wait": 50}, {"decorate": "function() {}"}])
+    );
+    assert_eq!(program.steps.len(), 2);
 }
 
-/// Issue #1099: the array fold is last-write-wins per key — the contract rift-lint mirrors.
+/// Issue #1198: every element is a step, so a repeated key runs twice; `repeat` is not a step and
+/// is hoisted to the front (it replaced #1099's last-write-wins fold).
 #[test]
-fn test_behaviors_array_duplicate_key_last_wins() {
-    let json = r#"{
-        "behaviors": [{"wait": 50}, {"repeat": 2}, {"wait": 5}],
-        "is": { "statusCode": 200 }
-    }"#;
-    let response: StubResponse = serde_json::from_str(json).unwrap();
-    let StubResponse::Is { behaviors, .. } = response else {
-        panic!("Expected Is response");
-    };
+fn test_behaviors_array_keeps_every_step_and_hoists_repeat() {
+    let (block, program) = compiled(serde_json::json!([
+        {"wait": 50},
+        {"repeat": 2},
+        {"wait": 5}
+    ]));
     assert_eq!(
-        behaviors.expect("behaviors should be present"),
-        serde_json::json!({"wait": 5, "repeat": 2})
+        block,
+        serde_json::json!([{"repeat": 2}, {"wait": 50}, {"wait": 5}])
     );
+    assert_eq!(program.repeat, Some(2));
+    assert_eq!(program.steps.len(), 2);
 }
 
 /// Issue #1099: an explicit `"_behaviors": null` is absent, so the `behaviors` array is read.
@@ -482,27 +473,15 @@ fn test_null_underscore_behaviors_falls_back_to_the_array() {
     let StubResponse::Is { behaviors, .. } = response else {
         panic!("Expected Is response");
     };
-    assert_eq!(behaviors, Some(serde_json::json!({"wait": 5})));
+    assert_eq!(behaviors, Some(serde_json::json!([{"wait": 5}])));
 }
 
-/// Issue #1099: a later `null` stays in the merged block and parses as the key absent.
+/// Issue #1099: a later `null` removes the key's earlier steps; nothing left is no program.
 #[test]
 fn test_behaviors_array_later_null_clears_the_key() {
-    let json = r#"{
-        "behaviors": [{"wait": 50}, {"wait": null}],
-        "is": { "statusCode": 200 }
-    }"#;
-    let response: StubResponse = serde_json::from_str(json).unwrap();
-    let StubResponse::Is {
-        behaviors,
-        behaviors_parsed,
-        ..
-    } = response
-    else {
-        panic!("Expected Is response");
-    };
-    assert_eq!(behaviors, Some(serde_json::json!({"wait": null})));
-    assert!(behaviors_parsed.expect("the block parses").wait.is_none());
+    let (block, program) = compile_only(serde_json::json!([{"wait": 50}, {"wait": null}]));
+    assert_eq!(block, None);
+    assert!(program.is_none());
 }
 
 fn copy_into(token: &str) -> serde_json::Value {
@@ -515,8 +494,13 @@ fn lookup_into(token: &str) -> serde_json::Value {
                        "into": token})
 }
 
-/// The folded block and its parse, for a `behaviors` array on an `is` response.
-fn folded(array: serde_json::Value) -> (serde_json::Value, crate::behaviors::ResponseBehaviors) {
+/// The compiled program and its parse, for a `behaviors` array on an `is` response.
+fn compile_only(
+    array: serde_json::Value,
+) -> (
+    Option<serde_json::Value>,
+    Option<crate::behaviors::BehaviorProgram>,
+) {
     let response: StubResponse =
         serde_json::from_value(serde_json::json!({"is": {}, "behaviors": array}))
             .expect("the response parses");
@@ -528,104 +512,110 @@ fn folded(array: serde_json::Value) -> (serde_json::Value, crate::behaviors::Res
     else {
         panic!("Expected Is response");
     };
-    let parsed = behaviors_parsed.expect("the block parses");
-    (behaviors.expect("a block"), (*parsed).clone())
+    (behaviors, behaviors_parsed.map(|p| (*p).clone()))
 }
 
-/// Issue #1195: Mountebank spells several copies as one element each and runs them all, so the
-/// fold appends `copy`, `lookup` and `shellTransform` across elements, in element order.
+fn compiled(array: serde_json::Value) -> (serde_json::Value, crate::behaviors::BehaviorProgram) {
+    let (block, program) = compile_only(array);
+    (
+        block.expect("a program"),
+        program.expect("the program parses"),
+    )
+}
+
+/// Issue #1195: Mountebank spells several copies as one element each and runs them all.
 #[test]
-fn test_behaviors_array_repeated_list_keys_accumulate() {
+fn test_behaviors_array_repeated_list_keys_are_each_a_step() {
     let (a, b) = (copy_into("${A}"), copy_into("${B}"));
-    let (block, parsed) = folded(serde_json::json!([{"copy": a.clone()}, {"copy": b.clone()}]));
-    assert_eq!(block, serde_json::json!({"copy": [a, b]}));
-    assert_eq!(parsed.copy.len(), 2);
-    assert_eq!(parsed.copy[0].into, "${A}");
-    assert_eq!(parsed.copy[1].into, "${B}");
+    let (block, program) = compiled(serde_json::json!([{"copy": a.clone()}, {"copy": b.clone()}]));
+    assert_eq!(block, serde_json::json!([{"copy": a}, {"copy": b}]));
+    assert_eq!(program.steps.len(), 2);
 
     let (x, y) = (lookup_into("${X}"), lookup_into("${Y}"));
-    let (block, parsed) =
-        folded(serde_json::json!([{"lookup": x.clone()}, {"wait": 5}, {"lookup": y.clone()}]));
-    assert_eq!(block, serde_json::json!({"lookup": [x, y], "wait": 5}));
-    assert_eq!(parsed.lookup.len(), 2);
-
-    let (block, parsed) =
-        folded(serde_json::json!([{"shellTransform": "echo x"}, {"shellTransform": "echo y"}]));
+    let (block, _) =
+        compiled(serde_json::json!([{"lookup": x.clone()}, {"wait": 5}, {"lookup": y.clone()}]));
     assert_eq!(
         block,
-        serde_json::json!({"shellTransform": ["echo x", "echo y"]})
+        serde_json::json!([{"lookup": x}, {"wait": 5}, {"lookup": y}])
     );
-    assert_eq!(parsed.shell_transform, vec!["echo x", "echo y"]);
+
+    let (block, _) =
+        compiled(serde_json::json!([{"shellTransform": "echo x"}, {"shellTransform": "echo y"}]));
+    assert_eq!(
+        block,
+        serde_json::json!([{"shellTransform": "echo x"}, {"shellTransform": "echo y"}])
+    );
 }
 
-/// Issue #1195: a list inside one element contributes every item, bare or not.
+/// Issue #1195: a list inside one element is one step per item, in order.
 #[test]
-fn test_behaviors_array_mixed_list_spellings_accumulate_in_order() {
+fn test_behaviors_array_list_items_are_steps_in_order() {
     let (a, b, c) = (copy_into("${A}"), copy_into("${B}"), copy_into("${C}"));
-    let (block, _) = folded(serde_json::json!([
+    let (block, _) = compiled(serde_json::json!([
         {"copy": [a.clone(), b.clone()]},
         {"copy": c.clone()}
     ]));
-    assert_eq!(block, serde_json::json!({"copy": [a, b, c]}));
+    assert_eq!(
+        block,
+        serde_json::json!([{"copy": a}, {"copy": b}, {"copy": c}])
+    );
 
-    let (_, parsed) = folded(serde_json::json!([
+    let (block, program) = compiled(serde_json::json!([
         {"shellTransform": "echo x"},
         {"shellTransform": ["echo y", "echo z"]}
     ]));
-    assert_eq!(parsed.shell_transform, vec!["echo x", "echo y", "echo z"]);
+    assert_eq!(
+        block,
+        serde_json::json!([
+            {"shellTransform": "echo x"},
+            {"shellTransform": "echo y"},
+            {"shellTransform": "echo z"}
+        ])
+    );
+    assert_eq!(program.steps.len(), 3);
 }
 
-/// Issue #1195: a single occurrence is folded as written, so a bare item stays bare.
+/// Issue #1195: a `null` removes every earlier step of its key; only what follows it survives.
 #[test]
-fn test_behaviors_array_single_list_key_is_folded_as_written() {
-    let a = copy_into("${A}");
-    let (block, _) = folded(serde_json::json!([{"copy": a.clone()}, {"wait": 1}]));
-    assert_eq!(block, serde_json::json!({"copy": a, "wait": 1}));
-}
-
-/// Issue #1195: a `null` still clears a list key; only what follows it survives.
-#[test]
-fn test_behaviors_array_null_clears_an_accumulated_list_key() {
+fn test_behaviors_array_null_removes_earlier_steps_of_its_key() {
     let (a, b) = (copy_into("${A}"), copy_into("${B}"));
 
-    let (block, parsed) = folded(serde_json::json!([{"copy": a.clone()}, {"copy": null}]));
-    assert_eq!(block, serde_json::json!({"copy": null}));
-    assert!(parsed.copy.is_empty());
+    let (block, _) = compile_only(serde_json::json!([{"copy": a.clone()}, {"copy": null}]));
+    assert_eq!(block, None);
 
-    let (block, _) = folded(serde_json::json!([{"copy": null}, {"copy": a.clone()}]));
-    assert_eq!(block, serde_json::json!({"copy": a.clone()}));
+    let (block, _) = compiled(serde_json::json!([{"copy": null}, {"copy": a.clone()}]));
+    assert_eq!(block, serde_json::json!([{"copy": a.clone()}]));
 
-    let (block, parsed) = folded(serde_json::json!([
+    let (block, _) = compiled(serde_json::json!([
         {"copy": a},
+        {"wait": 1},
         {"copy": null},
         {"copy": b.clone()}
     ]));
-    assert_eq!(block, serde_json::json!({"copy": b}));
-    assert_eq!(parsed.copy.len(), 1);
-    assert_eq!(parsed.copy[0].into, "${B}");
+    assert_eq!(block, serde_json::json!([{"wait": 1}, {"copy": b}]));
 
-    // Only the last `null` matters: what sits between two of them is cleared too.
-    let (block, _) = folded(serde_json::json!([
+    // Each `null` removes what came before it, so only the last run survives.
+    let (block, _) = compiled(serde_json::json!([
         {"copy": copy_into("${A}")},
         {"copy": null},
         {"copy": copy_into("${B}")},
         {"copy": null},
         {"copy": copy_into("${C}")}
     ]));
-    assert_eq!(block, serde_json::json!({"copy": copy_into("${C}")}));
+    assert_eq!(block, serde_json::json!([{"copy": copy_into("${C}")}]));
 }
 
-/// Issue #1195: an empty list appends nothing — it no longer clears what came before.
+/// Issue #1195: an empty list adds no step and removes none.
 #[test]
 fn test_behaviors_array_empty_list_does_not_clear() {
     let a = copy_into("${A}");
-    let (block, parsed) = folded(serde_json::json!([{"copy": a.clone()}, {"copy": []}]));
-    assert_eq!(block, serde_json::json!({"copy": [a]}));
-    assert_eq!(parsed.copy.len(), 1);
+    let (block, program) = compiled(serde_json::json!([{"copy": a.clone()}, {"copy": []}]));
+    assert_eq!(block, serde_json::json!([{"copy": a}]));
+    assert_eq!(program.steps.len(), 1);
 }
 
-/// Issue #1195: an earlier element is live now, so a malformed item in it refuses the response
-/// instead of being shadowed by a later element.
+/// Issues #1195/#1198: every element is live, so a malformed item in an earlier one refuses the
+/// response instead of being shadowed by a later element.
 #[test]
 fn test_behaviors_array_malformed_earlier_list_item_is_refused() {
     for array in [
@@ -640,9 +630,9 @@ fn test_behaviors_array_malformed_earlier_list_item_is_refused() {
         .to_string();
         assert!(err.contains("behavior is malformed"), "{array}: {err}");
     }
-    // Still shadowed, and still loads, when a later `null` clears it.
-    let (_, parsed) = folded(serde_json::json!([{"copy": 5}, {"copy": null}]));
-    assert!(parsed.copy.is_empty());
+    // Still removed, and still loads, when a later `null` clears it.
+    let (block, _) = compile_only(serde_json::json!([{"copy": 5}, {"copy": null}]));
+    assert_eq!(block, None);
 }
 
 /// Issue #1099: an empty `behaviors` array is no block at all.
@@ -656,7 +646,7 @@ fn test_empty_behaviors_array_is_no_block() {
     assert_eq!(behaviors, None);
 }
 
-/// Issue #1099: an object-valued `behaviors` is used as-is, not dropped.
+/// Issue #1099: an object-valued `behaviors` is used, not dropped — compiled like `_behaviors`.
 #[test]
 fn test_behaviors_object_form_is_used_as_is() {
     let json = r#"{
@@ -667,7 +657,7 @@ fn test_behaviors_object_form_is_used_as_is() {
     let StubResponse::Is { behaviors, .. } = response else {
         panic!("Expected Is response");
     };
-    assert_eq!(behaviors, Some(serde_json::json!({"wait": 5})));
+    assert_eq!(behaviors, Some(serde_json::json!([{"wait": 5}])));
 }
 
 #[test]

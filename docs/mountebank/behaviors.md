@@ -72,7 +72,7 @@ Behaviors can also be specified as an array of behavior objects:
 }
 ```
 
-When using array format, behaviors are merged into a single object. `copy`, `lookup` and `shellTransform` accumulate: two array elements that each hold a `copy` run both, in element order, as in Mountebank, and a list inside one element contributes every item. Any other behavior type that appears more than once is taken from the last element that sets it — Mountebank runs each repeated `wait` and `decorate`, which Rift does not yet do ([#1198](https://github.com/achird-labs/rift/issues/1198)). A `null` clears a behavior, including everything the elements before it accumulated; an empty list does not. `_behaviors` takes precedence over `behaviors` when both are present; `"_behaviors": null` counts as absent, so `behaviors` is used.
+The array form is a program, as in Mountebank: every element runs, in array order. Two `decorate` elements both run, two `wait` elements both delay, and a `decorate` written before a `copy` runs before it. A `copy`, `lookup` or `shellTransform` holding a list is one step per item. A `null` for a behavior removes every earlier step of that behavior; an empty list adds nothing and removes nothing. `repeat` is not a step: the last element to set it wins. An element that sets several behaviors runs them in the object form's order (see [Behavior Order](#behavior-order)), not the order written — `rift-lint` flags it as `W018`; give each behavior its own element. `_behaviors` takes precedence over `behaviors` when both are present; `"_behaviors": null` counts as absent, so `behaviors` is used.
 
 `_behaviors` must be an object; the array form is only accepted under `behaviors`, and each of its elements must be an object (a non-object element is skipped). Any other shape — an array or scalar `_behaviors`, or a scalar `behaviors` — is refused: `POST /imposters` returns `400` and a config file fails to load. This holds with `--allowInjection` on too.
 
@@ -95,8 +95,10 @@ Mountebank loads, so a saved file can be posted to Mountebank as is:
 
 - `repeat` is written on the response, never as an element — Mountebank refuses a `{"repeat": n}`
   element. A `repeat` of `0` is not written; Rift serves it as `1`, like an absent `repeat`.
-- Elements come in execution order: `wait`, `copy`, `lookup`, `decorate`, `shellTransform`.
-- A `copy`, `lookup` or `shellTransform` holding one item is written bare, as above.
+- Elements come in the order they run: an array's own order, and for the object form `wait`,
+  `copy`, `lookup`, `decorate`, `shellTransform`.
+- A `copy`, `lookup` or `shellTransform` holding one item is written bare, as above; adjacent
+  steps of one of them are written as one element holding the list.
 - A `null` or empty behavior is not written.
 
 Two shapes still do not load in Mountebank: a `copy`, `lookup` or `shellTransform` holding **more
@@ -627,7 +629,8 @@ Each response is returned once in sequence (standard cycling).
 
 ## Behavior Order
 
-When multiple behaviors are defined on an `is` response, they execute in this order:
+In the array form, behaviors run in array order. In the object form (`_behaviors`), and within an
+array element that sets several, they run in this order:
 
 1. **wait** - Delay first
 2. **copy** - Copy request values into response
@@ -635,7 +638,8 @@ When multiple behaviors are defined on an `is` response, they execute in this or
 4. **decorate** - Transform the response
 5. **shellTransform** - Pipe the body through each command in turn
 
-`repeat` is not a step here; it controls which response is chosen.
+To run them in another order, use the array form with one behavior per element. `repeat` is not a
+step here; it controls which response is chosen.
 
 ---
 

@@ -110,9 +110,13 @@ fn ignored_behaviors_shape(response: &StubResponse) -> Option<&'static str> {
         } => ("_rift", block),
         _ => return None,
     };
-    let sets_more_than_repeat = block
-        .as_object()
-        .is_some_and(|b| b.iter().any(|(k, v)| k != "repeat" && !v.is_null()));
+    // The block is a compiled program (issue #1198): one element per step, `null`s already applied.
+    let sets_more_than_repeat = block.as_array().is_some_and(|program| {
+        program
+            .iter()
+            .filter_map(serde_json::Value::as_object)
+            .any(|element| element.keys().any(|k| k != "repeat"))
+    });
     sets_more_than_repeat.then_some(shape)
 }
 

@@ -1270,19 +1270,66 @@ fn null_underscore_behaviors_falls_back_to_the_array() {
     );
 }
 
-/// The engine folds the array last-write-wins per key, so an earlier bad value that a later one
-/// overrides is never read.
+/// W018 (issue #1198): an element that sets several steps runs them in the engine's order, not the
+/// order written. One step per element, and `repeat` beside a step, are not flagged; nor is the
+/// object form, which has no written order to lose.
 #[test]
-fn behaviors_array_is_merged_last_write_wins() {
+fn w018_flags_an_element_with_several_steps() {
+    let w018 = |resp: Value| {
+        behavior_findings(&resp)
+            .into_iter()
+            .filter(|(code, _)| code == "W018")
+            .collect::<Vec<_>>()
+    };
+    let decorate = "function (req, res) {}";
+    assert_eq!(
+        w018(json!({"is": {}, "behaviors": [
+            { "wait": 1 },
+            { "decorate": decorate, "shellTransform": "cat" }
+        ]})),
+        vec![finding("W018", "loc.behaviors[1]")]
+    );
+    assert_eq!(
+        w018(json!({"is": {}, "behaviors": [{ "decorate": decorate, "wait": null }]})),
+        vec![]
+    );
+    assert_eq!(
+        w018(json!({"is": {}, "behaviors": [{ "wait": 1, "repeat": 2 }]})),
+        vec![]
+    );
+    assert_eq!(
+        w018(json!({"is": {}, "_behaviors": { "decorate": decorate, "shellTransform": "cat" }})),
+        vec![]
+    );
+}
+
+/// Every element of the array is a step the engine runs (issue #1198), so an earlier bad value is
+/// live — it is no longer overridden by a later one — and the engine refuses it.
+#[test]
+fn behaviors_array_every_step_is_validated() {
     let resp = json!({
         "is": { "statusCode": 200 },
         "behaviors": [{ "wait": true }, { "wait": 5 }]
     });
+    assert_eq!(
+        behavior_findings(&resp),
+        vec![finding("E025", "loc.behaviors[0].wait")]
+    );
+}
+
+/// `repeat` is not a step: the last element to set it wins, so an earlier bad one is never read.
+#[test]
+fn behaviors_array_repeat_is_last_write_wins() {
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "behaviors": [{ "repeat": 0.5 }, { "repeat": 2 }]
+    });
     assert_eq!(behavior_findings(&resp), vec![]);
 }
 
+/// Every element is a step (issue #1198), so only the malformed one is reported, at its own index.
 #[test]
-fn behaviors_array_reports_the_winning_element() {
+fn behaviors_array_reports_the_malformed_element() {
     let resp = json!({
         "is": { "statusCode": 200 },
         "behaviors": [{ "wait": 5 }, { "wait": 7 }, { "wait": true }]
@@ -1375,9 +1422,10 @@ fn behaviors_array_folds_copy_lookup_and_shell_transform_too() {
     );
 }
 
-/// A later `null` clears a list key in the engine's fold, so what it clears is never read (#1195).
+/// A later `null` removes every earlier step of its key, so what it removes is never read (#1195,
+/// #1198).
 #[test]
-fn behaviors_array_later_null_shadows_an_accumulated_list_key() {
+fn behaviors_array_later_null_removes_earlier_list_steps() {
     let bad = json!({ "into": "a", "using": { "method": "regex", "selector": ".*" } });
     let good =
         json!({ "from": "path", "into": "b", "using": { "method": "regex", "selector": ".*" } });
