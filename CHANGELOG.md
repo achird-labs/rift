@@ -830,6 +830,14 @@ record.
 
 ### Fixed
 
+- **A `proxyOnce` request abandoned mid-flight was never recorded again** (#1193). The recording claim
+  was given back only on paths that returned; a client that disconnected (or timed out), or an
+  imposter stopped, while the upstream call or a proxy behavior was in progress dropped the request
+  with the claim still held, and the built-in store never expires claims. Every later identical
+  request was then proxied upstream and none was recorded, for the life of the imposter. The claim is now released whenever
+  the request ends without recording — including when it is dropped. Custom `ProxyRecordingStore`
+  implementations: `release_claim` may now be called from a destructor (see `docs/embedding/spi.md`).
+
 - **A saved imposter with a `repeat`, `copy`/`lookup` or `shellTransform` was refused by Mountebank**
   (#1191). Rift wrote `repeat` as a behaviors element, which Mountebank 2.9.1 rejects outright
   (`Unrecognized behavior: "repeat"`), and wrote one-item lists Mountebank's validator refuses — so the

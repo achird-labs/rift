@@ -154,8 +154,11 @@ pub trait ProxyRecordingStore: Send + Sync {
     /// does **not** forward it. Built-ins never fail.
     fn try_claim(&self, port: u16, sig: &RequestSignature) -> Result<ClaimOutcome>;
 
-    /// Releases a claim after a failed upstream call so the signature is retryable.
-    /// Stale tokens (the claim expired and was re-taken) are ignored.
+    /// Releases a claim the engine will not settle, so the signature stays retryable: after a
+    /// failed forward or behavior, and when the request is dropped mid-flight (client disconnect,
+    /// imposter stop, panic — issue #1193). The last case calls it from a destructor, possibly
+    /// during runtime shutdown, so it must be synchronous and quick and must not assume an async
+    /// context. Stale tokens (the claim expired and was re-taken) are ignored.
     fn release_claim(&self, port: u16, sig: &RequestSignature, token: ClaimToken);
 
     /// Records the proxied response against the claim named by `token`. A stale token is
