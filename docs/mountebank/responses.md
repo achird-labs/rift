@@ -231,6 +231,14 @@ These `${request.…}` tokens are distinct from the free-form `${name}` placehol
 not collide, because only tokens beginning with `request.` are treated as request interpolation. On
 the proxy path, only the body is interpolated (not headers).
 
+What a token substitutes is served as the client sent it and is never read as a `${request.…}`,
+`copy` or `lookup` token again. With
+`_rift.templated`, a `{% raw %}{{request.query.q}}{% endraw %}` that renders `${request.headers.authorization}`
+stays that literal text: it does not reflect a request header the client named. Likewise a `copy` or
+`lookup` never expands a token that arrived inside interpolated text, even when your own text
+supplies its closing character. See
+[Substituted text is never re-scanned]({{ site.baseurl }}/mountebank/behaviors/#substituted-text-is-never-re-scanned).
+
 ---
 
 ## Response Cycling

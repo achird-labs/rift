@@ -13,15 +13,15 @@ use super::types::{
     DebugMatchResult, DebugRequest, DebugResponse, ProxyResponse, RecordedRequest, ResponseMode,
     StubResponse,
 };
-use crate::behaviors::{CsvCache, header_to_title_case};
+use crate::behaviors::{
+    CsvCache, Spliced, SplicedHeaders, authored_headers, header_to_title_case, plain_headers,
+};
 use crate::extensions::decorate::{
     ResponseDecorator, ResponsePhase, backend_error_response, with_annotation_scope,
 };
 use crate::extensions::exchange_inspector::{InspectRequest, InspectResponse, InspectVerdict};
 use crate::extensions::no_match::{NoMatchContext, NoMatchDirective};
-use crate::extensions::template::{
-    RequestData, has_template_variables, process_template, process_template_mapped,
-};
+use crate::extensions::template::{RequestData, has_template_variables, process_template_spliced};
 use crate::scripting::{
     FaultDecision, ScriptCtxExtras, ScriptRequest, ScriptStubContext, resolve_script_timeout_ms,
     should_inject_bounded_with_ctx, should_inject_bounded_with_ctx_traced,
@@ -576,9 +576,11 @@ fn inject_cors_headers(headers: &mut hyper::HeaderMap) {
 /// rather than one error channel the caller has to disambiguate by inspecting the message.
 #[derive(Debug)]
 enum TemplateRender {
+    /// Carries which bytes each token substituted (issue #1203), so the passes after it never
+    /// expand a token that arrived inside request text.
     Rendered {
-        body: String,
-        headers: HashMap<String, Vec<String>>,
+        body: Spliced,
+        headers: SplicedHeaders,
     },
     /// A `{{ }}` expression failed to render (debug mode). Carries the message
     /// `render_templated` produced.
@@ -598,7 +600,7 @@ fn render_template_parts(
     request_data: &RequestData,
     flow_id: &str,
     body: String,
-    mut headers: HashMap<String, Vec<String>>,
+    headers: HashMap<String, Vec<String>>,
     debug: bool,
     stub: super::headers::StubRef<'_>,
 ) -> TemplateRender {
@@ -609,13 +611,20 @@ fn render_template_parts(
         previous_value: None,
     };
 
-    let body = match crate::extensions::template_fn::render_templated(&body, &template_ctx, debug) {
+    let body = match crate::extensions::template_fn::render_templated_spliced(
+        &body,
+        &template_ctx,
+        debug,
+        |value| value,
+    ) {
         Ok(rendered) => rendered,
         Err(e) => return TemplateRender::Failed(e),
     };
 
-    for values in headers.values_mut() {
-        for v in values.iter_mut() {
+    let mut rendered_headers = SplicedHeaders::with_capacity(headers.len());
+    for (name, values) in headers {
+        let mut rendered_values = Vec::with_capacity(values.len());
+        for v in values {
             // Issue #359 B3 (header injection): a token can resolve to attacker-controlled request
             // data containing CR/LF, so what it substitutes is repaired before it ever reaches the
             // header map and a warning names what was removed.
@@ -625,19 +634,23 @@ fn render_template_parts(
             // authoring bug that must still fail the response — the same boundary `${request.*}`,
             // `copy` and `lookup` draw. Repairing it here would silently fix their typo and blame
             // the client for it in the log.
-            match crate::extensions::template_fn::render_templated_mapped(
-                v,
+            match crate::extensions::template_fn::render_templated_spliced(
+                &v,
                 &template_ctx,
                 debug,
                 |substituted| sanitize_header_value(&substituted, stub),
             ) {
-                Ok(rendered) => *v = rendered,
+                Ok(rendered) => rendered_values.push(rendered),
                 Err(e) => return TemplateRender::Failed(e),
             }
         }
+        rendered_headers.insert(name, rendered_values);
     }
 
-    TemplateRender::Rendered { body, headers }
+    TemplateRender::Rendered {
+        body,
+        headers: rendered_headers,
+    }
 }
 
 /// Render the `_rift.templated` body and header values (issue #359), off the tokio worker when the
@@ -1232,14 +1245,15 @@ async fn handle_request_inner(
             .await
             {
                 Ok(inject_response) => {
+                    // An inject's output is the author's text, like a decorate's (issue #1203).
                     let mut parts = ServedParts {
                         status: inject_response.status_code,
                         headers: inject_response
                             .headers
                             .into_iter()
-                            .map(|(k, v)| (k, vec![v]))
+                            .map(|(k, v)| (k, vec![crate::behaviors::Spliced::authored(v)]))
                             .collect(),
-                        body: inject_response.body,
+                        body: crate::behaviors::Spliced::authored(inject_response.body),
                     };
                     // Mountebank runs a response's behaviors on the injected response too
                     // (issue #1188). A failed inject never gets here, so it runs none of them —
@@ -1266,7 +1280,7 @@ async fn handle_request_inner(
                     let mut response = Response::builder().status(parts.status);
                     for (k, values) in &parts.headers {
                         for v in values {
-                            response = response.header(k, v);
+                            response = response.header(k, v.as_str());
                         }
                     }
 
@@ -1274,7 +1288,7 @@ async fn handle_request_inner(
                     response = response.header("x-rift-inject", "true");
 
                     return Ok(response
-                        .body(Full::new(Bytes::from(parts.body)))
+                        .body(Full::new(Bytes::from(parts.body.into_text())))
                         .unwrap_or_else(|e| {
                             build_failure_response(
                                 &e,
@@ -1701,63 +1715,83 @@ async fn handle_request_inner(
             // template-injection hole (an unauthenticated caller could reach `state.*`/force errors)
             // and would also break the module's "a literal `{{` is served verbatim" promise for
             // reflected text. Off by default so recorded fixtures with a literal `{{` are untouched.
-            if rift_ext.is_some_and(|r| r.templated) {
-                let request_data = RequestData::new(
-                    method_str,
-                    path_str,
-                    query_opt,
-                    &request_headers,
-                    body_string.as_deref(),
-                )
-                .with_route_pattern(stub_state.stub.route_pattern.as_deref());
-                // In debug mode (`RIFT_DEBUG`), a malformed/unknown/failed `{{ }}` token fails the
-                // request loudly instead of silently degrading to an empty string (issue #359 AC3).
-                let template_debug = crate::util::rift_debug_env();
-                // Offloaded when the store blocks (issue #971); inline on the in-memory default.
-                // `body`/`headers` move into the render and come back rendered, so they are taken
-                // here and reinstated from the outcome.
-                match render_templated_response(
-                    &imposter,
-                    request_data,
-                    scenario_flow_id.clone(),
-                    std::mem::take(&mut body),
-                    std::mem::take(&mut headers),
-                    template_debug,
-                    stub_ref(&imposter, stub_index, &stub_state.stub),
-                )
-                .await
-                {
-                    Ok(TemplateRender::Rendered {
-                        body: rendered_body,
-                        headers: rendered_headers,
-                    }) => {
-                        body = rendered_body;
-                        headers = rendered_headers;
-                    }
-                    Ok(TemplateRender::Failed(e)) => {
-                        warn!("Response template rendering failed: {e}");
-                        return Ok(template_error_response(&e));
-                    }
-                    // Not a template failure: the blocking task itself died, so this is the same
-                    // backend-transport door the FSM transition and `_rift.stateOps` use. Answering
-                    // `template_error_response` here would blame the config for an outage.
-                    Err(e) => return Ok(backend_error_response(&e)),
-                }
-            }
-
-            // Expand `${request.*}` request templates (issue #269) BEFORE behaviors — matching the
-            // proxy path's ordering so `shellTransform`/`decorate` operate on the expanded body.
-            // Header values are templated too (the static path's AC1 requirement; the proxy path
-            // templates only the body). Serve-time date templates ({{NOW}}/{{DAYS+N}}) are expanded
-            // later, at body finalization. Runs AFTER the `{{ }}` pass above (issue #359 B1): this
-            // pass only substitutes `${...}` and never re-scans for `{{ }}`, so reflected request
-            // data injected here is never templated.
-            {
-                let need_body = has_template_variables(&body);
-                let need_headers = headers
+            // Every pass below splices request text into the response, and each would otherwise
+            // search the previous one's output — so text the engine inserted carries its byte
+            // ranges (`Spliced`, issue #1203) and no later pass expands a token lying wholly inside
+            // it. Built only when a pass can run: a response with no templating and no behaviors
+            // never converts its headers.
+            let templated = rift_ext.is_some_and(|r| r.templated);
+            let reflects = has_template_variables(&body)
+                || headers
                     .values()
                     .flatten()
                     .any(|v| has_template_variables(v));
+            if templated || reflects || behaviors.is_some() {
+                // Declarative response templating (issue #359): opt-in via `_rift.templated`. This
+                // `{{ }}` render runs FIRST — on the *config-authored* body/headers — and BEFORE
+                // the `${request.*}` reflection substitution below (issue #359 B1, security).
+                // Because `${request.*}` injects reflected request data only *after* this pass, any
+                // `{{ }}` that arrives inside reflected request data is never scanned or evaluated
+                // here — it is served verbatim. Evaluating reflected `{{ }}` would be a
+                // template-injection hole (an unauthenticated caller could reach
+                // `state.*`/force errors). Off by default so recorded fixtures with a literal `{{`
+                // are untouched.
+                let (mut spliced_body, mut spliced_headers) = if templated {
+                    let request_data = RequestData::new(
+                        method_str,
+                        path_str,
+                        query_opt,
+                        &request_headers,
+                        body_string.as_deref(),
+                    )
+                    .with_route_pattern(stub_state.stub.route_pattern.as_deref());
+                    // In debug mode (`RIFT_DEBUG`), a malformed/unknown/failed `{{ }}` token fails
+                    // the request loudly instead of silently degrading to an empty string (issue
+                    // #359 AC3).
+                    let template_debug = crate::util::rift_debug_env();
+                    // Offloaded when the store blocks (issue #971); inline on the in-memory
+                    // default. `body`/`headers` move into the render and come back rendered.
+                    match render_templated_response(
+                        &imposter,
+                        request_data,
+                        scenario_flow_id.clone(),
+                        std::mem::take(&mut body),
+                        std::mem::take(&mut headers),
+                        template_debug,
+                        stub_ref(&imposter, stub_index, &stub_state.stub),
+                    )
+                    .await
+                    {
+                        Ok(TemplateRender::Rendered { body, headers }) => (body, headers),
+                        Ok(TemplateRender::Failed(e)) => {
+                            warn!("Response template rendering failed: {e}");
+                            return Ok(template_error_response(&e));
+                        }
+                        // Not a template failure: the blocking task itself died, so this is the
+                        // same backend-transport door the FSM transition and `_rift.stateOps` use.
+                        // Answering `template_error_response` here would blame the config for an
+                        // outage.
+                        Err(e) => return Ok(backend_error_response(&e)),
+                    }
+                } else {
+                    (
+                        Spliced::authored(std::mem::take(&mut body)),
+                        authored_headers(std::mem::take(&mut headers)),
+                    )
+                };
+
+                // Expand `${request.*}` request templates (issue #269) BEFORE behaviors, so
+                // `shellTransform`/`decorate` operate on the expanded body. Header values are
+                // templated too (the static path's AC1 requirement). Serve-time date templates
+                // ({{NOW}}/{{DAYS+N}}) are expanded later, at body finalization. Runs AFTER the
+                // `{{ }}` pass above, and skips any `${...}` lying wholly inside what that pass
+                // substituted (issue #1203): otherwise a client could send
+                // `${request.headers.<name>}` and read a header an ingress added.
+                let need_body = has_template_variables(spliced_body.as_str());
+                let need_headers = spliced_headers
+                    .values()
+                    .flatten()
+                    .any(|v| has_template_variables(v.as_str()));
                 if need_body || need_headers {
                     let request_data = RequestData::new(
                         method_str,
@@ -1768,59 +1802,60 @@ async fn handle_request_inner(
                     )
                     .with_route_pattern(stub_state.stub.route_pattern.as_deref());
                     if need_body {
-                        body = process_template(&body, &request_data);
+                        process_template_spliced(&mut spliced_body, &request_data, |value| value);
                     }
                     let stub_ref = stub_ref(&imposter, stub_index, &stub_state.stub);
-                    for values in headers.values_mut() {
+                    for values in spliced_headers.values_mut() {
                         for v in values.iter_mut() {
-                            if has_template_variables(v) {
+                            if has_template_variables(v.as_str()) {
                                 // Issue #1067: `request.query` is percent-decoded and
                                 // `request.body` is the raw body, so a client can substitute a
                                 // byte a header value cannot carry — without repair it reaches
                                 // `Builder::header` and 500s a stub the author cannot fix.
                                 // Only the substituted text is repaired; a control character the
                                 // author typed into the header itself is left to fail loudly.
-                                *v = process_template_mapped(v, &request_data, |substituted| {
+                                process_template_spliced(v, &request_data, |substituted| {
                                     sanitize_header_value(&substituted, stub_ref)
                                 });
                             }
                         }
                     }
                 }
-            }
 
-            // Apply behaviors if present. Issue #479: `behaviors` is the precomputed
-            // `Option<Arc<BehaviorProgram>>` (parsed once at stub construction, see
-            // `StubResponse::new_is`). Checked here, not inside the pipeline, so a response with
-            // no behaviors never builds a `ServedParts`.
-            if let Some(ref parsed_behaviors) = behaviors {
-                let run = BehaviorRun {
-                    behaviors: parsed_behaviors,
-                    method: &method,
-                    uri: &uri,
-                    request_headers: &request_headers,
-                    request_body: body_string.as_deref(),
-                    script_state_key: imposter.script_state_key(),
-                    stub: stub_ref(&imposter, stub_index, &stub_state.stub),
-                    csv_cache: csv_cache(),
-                    script_timeout,
-                    strict: strict_behaviors,
-                };
-                match run
-                    .apply(ServedParts {
-                        status,
-                        headers,
-                        body,
-                    })
-                    .await
-                {
-                    BehaviorOutcome::Applied { parts, .. } => {
-                        status = parts.status;
-                        headers = parts.headers;
-                        body = parts.body;
+                // Apply behaviors if present. Issue #479: `behaviors` is the precomputed
+                // `Option<Arc<BehaviorProgram>>` (parsed once at stub construction, see
+                // `StubResponse::new_is`).
+                if let Some(ref parsed_behaviors) = behaviors {
+                    let run = BehaviorRun {
+                        behaviors: parsed_behaviors,
+                        method: &method,
+                        uri: &uri,
+                        request_headers: &request_headers,
+                        request_body: body_string.as_deref(),
+                        script_state_key: imposter.script_state_key(),
+                        stub: stub_ref(&imposter, stub_index, &stub_state.stub),
+                        csv_cache: csv_cache(),
+                        script_timeout,
+                        strict: strict_behaviors,
+                    };
+                    match run
+                        .apply(ServedParts {
+                            status,
+                            headers: spliced_headers,
+                            body: spliced_body,
+                        })
+                        .await
+                    {
+                        BehaviorOutcome::Applied { parts, .. } => {
+                            status = parts.status;
+                            spliced_headers = parts.headers;
+                            spliced_body = parts.body;
+                        }
+                        BehaviorOutcome::StrictFailure(response) => return Ok(response),
                     }
-                    BehaviorOutcome::StrictFailure(response) => return Ok(response),
                 }
+                body = spliced_body.into_text();
+                headers = plain_headers(spliced_headers);
             }
             let mut response = Response::builder().status(status);
 
@@ -3412,7 +3447,9 @@ mod templated_offload_tests {
 
     fn rendered(outcome: TemplateRender) -> (String, HashMap<String, Vec<String>>) {
         match outcome {
-            TemplateRender::Rendered { body, headers } => (body, headers),
+            TemplateRender::Rendered { body, headers } => {
+                (body.into_text(), crate::behaviors::plain_headers(headers))
+            }
             TemplateRender::Failed(e) => panic!("expected a rendered response, got Failed({e})"),
         }
     }

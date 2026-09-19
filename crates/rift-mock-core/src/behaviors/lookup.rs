@@ -3,6 +3,7 @@
 use super::copy::CopySource;
 use super::extraction::ExtractionMethod;
 use super::request::RequestContext;
+use super::spliced::{Spliced, SplicedHeaders, authored_headers, plain_headers};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -223,7 +224,8 @@ impl CsvData {
     }
 }
 
-/// Apply lookup behaviors to response body
+/// Apply lookup behaviors to response body. Treats `body` and `headers` as authored text; the
+/// serve path uses [`apply_lookup_spliced`] so text an earlier pass inserted is not re-scanned.
 pub fn apply_lookup_behaviors(
     body: &str,
     headers: &mut HashMap<String, Vec<String>>,
@@ -232,8 +234,34 @@ pub fn apply_lookup_behaviors(
     csv_cache: &CsvCache,
     stub: crate::imposter::headers::StubRef<'_>,
 ) -> String {
-    let mut result = body.to_string();
+    let mut spliced_body = Spliced::authored(body.to_string());
+    let mut spliced_headers = authored_headers(std::mem::take(headers));
+    apply_lookup_spliced(
+        &mut spliced_body,
+        &mut spliced_headers,
+        behaviors,
+        request,
+        csv_cache,
+        stub,
+    );
+    *headers = plain_headers(spliced_headers);
+    spliced_body.into_text()
+}
 
+/// Apply lookup behaviors, replacing only tokens that are not wholly inside text an earlier pass
+/// inserted (issue #1203): request text a `${request.*}`, `{{ }}` or `copy` pass spliced in is
+/// never read as a lookup token, so a client cannot choose which column of the row is served.
+///
+/// Each cell is recorded as inserted too, so a cell holding another column's token is served as
+/// written — regardless of the order the row's columns are visited in.
+pub(crate) fn apply_lookup_spliced(
+    body: &mut Spliced,
+    headers: &mut SplicedHeaders,
+    behaviors: &[LookupBehavior],
+    request: &RequestContext,
+    csv_cache: &CsvCache,
+    stub: crate::imposter::headers::StubRef<'_>,
+) {
     for behavior in behaviors {
         // Extract key from request
         let key_value = behavior
@@ -254,7 +282,7 @@ pub fn apply_lookup_behaviors(
                 // Apply replacements
                 for (token, value) in replacements {
                     let full_token = format!("{}{}", behavior.into, token);
-                    result = result.replace(&full_token, &value);
+                    body.replace_token(&full_token, &value);
                     // Per value, so multi-value headers keep their multiplicity (RFC 7230 §3.2.2
                     // forbids folding Set-Cookie).
                     //
@@ -267,19 +295,21 @@ pub fn apply_lookup_behaviors(
                     // Skipped outright when no header uses this token — otherwise every CSV column
                     // of the matched row would run the repair, and warn, on every request even for
                     // a body-only stub.
-                    if headers.values().flatten().any(|v| v.contains(&full_token)) {
+                    if headers
+                        .values()
+                        .flatten()
+                        .any(|v| v.contains_authored(&full_token))
+                    {
                         let repaired =
                             crate::imposter::headers::sanitize_header_value(&value, stub);
                         for header_value in headers.values_mut().flatten() {
-                            *header_value = header_value.replace(&full_token, &repaired);
+                            header_value.replace_token(&full_token, &repaired);
                         }
                     }
                 }
             }
         }
     }
-
-    result
 }
 
 #[cfg(test)]

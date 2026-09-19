@@ -1782,6 +1782,26 @@ record.
 
 ### Security
 
+- **Text the engine substitutes into a response is never scanned for tokens again** (#1203). Every
+  substitution pass searched the output of the pass before it, so a client that sent a complete
+  token had it expanded:
+  - With a `lookup` into `${R}`, a request carrying `${R}[secret]` was served the `secret` column of
+    the matched CSV row when a config meant to expose only `name`. This happened through
+    `${request.query.q}` in the body or a header value, through a `_rift.templated`
+    `{{request.query.q}}`, or through a `copy` step that runs before the lookup.
+  - With `_rift.templated` and no behaviors at all, `{{request.query.q}}` rendering
+    `${request.headers.x-internal}` reflected that request header, including one an ingress or
+    sidecar added that the client never saw.
+
+  A token is now expanded only if the author wrote its first and last characters. A client can no
+  longer finish a token with a closing `}` or `]` the author wrote. `${R}[${COL}]` around a `copy`
+  into `${COL}` still lets the author hand the column choice to the client. A `decorate`,
+  `shellTransform` or `inject` output and a proxied body count as authored. The serve-time date
+  tokens (`{{NOW}}`) still expand in the finished body. A CSV cell holding
+  another column's token is now served as written; before, the result depended on hash order.
+  **Behavior change from Mountebank:** for `"behaviors": [{"copy": …}, {"lookup": …}]` Mountebank
+  2.9.1 expands a lookup token the client put in the copied field; Rift serves it as sent.
+
 - **A `{:?}` of the parsed command line no longer prints its credentials** (#1166). `Cli` derived
   `Debug`, so `--api-key`, `--intercept-auth` and `--intercept-ca-key-pem` would render verbatim in
   any log line or error that formatted it. Nothing did yet, but an embedder that flattens `Cli` into

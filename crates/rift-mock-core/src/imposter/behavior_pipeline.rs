@@ -8,8 +8,8 @@ use super::handler::SCRIPT_TIMEOUT_HEADER;
 use super::headers::StubRef;
 use super::response::apply_decorate_bounded;
 use crate::behaviors::{
-    BehaviorProgram, BehaviorStep, CsvCache, RequestContext, apply_copy_behaviors,
-    apply_lookup_behaviors, apply_shell_transform,
+    BehaviorProgram, BehaviorStep, CsvCache, RequestContext, Spliced, SplicedHeaders,
+    apply_copy_spliced, apply_lookup_spliced, apply_shell_transform,
 };
 use crate::util::build_response_with_headers;
 use bytes::Bytes;
@@ -22,12 +22,15 @@ use std::time::Duration;
 use tracing::warn;
 
 /// The parts of a response the pipeline reads and rewrites.
+///
+/// Body and header values carry which bytes the engine substituted in (issue #1203), so `copy` and
+/// `lookup` never expand a token that arrived inside request text.
 #[derive(Debug)]
 pub(crate) struct ServedParts {
     pub status: u16,
     /// Multi-value (issue #238): one entry per header name, one element per header line.
-    pub headers: HashMap<String, Vec<String>>,
-    pub body: String,
+    pub headers: SplicedHeaders,
+    pub body: Spliced,
 }
 
 /// What running the pipeline produced. A dropped `StrictFailure` would serve the response the
@@ -102,8 +105,8 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                     }
                 }
                 BehaviorStep::Copy(copy) => {
-                    body = apply_copy_behaviors(
-                        &body,
+                    apply_copy_spliced(
+                        &mut body,
                         &mut headers,
                         std::slice::from_ref(copy),
                         request_context.get_or_init(build_request_context),
@@ -111,8 +114,8 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                     );
                 }
                 BehaviorStep::Lookup(lookup) => {
-                    body = apply_lookup_behaviors(
-                        &body,
+                    apply_lookup_spliced(
+                        &mut body,
                         &mut headers,
                         std::slice::from_ref(lookup),
                         request_context.get_or_init(build_request_context),
@@ -140,7 +143,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                         );
                     }
 
-                    let set_cookie: Vec<(String, Vec<String>)> = headers
+                    let set_cookie: Vec<(String, Vec<Spliced>)> = headers
                         .iter()
                         .filter(|(k, _)| is_set_cookie(k))
                         .map(|(k, v)| (k.clone(), v.clone()))
@@ -148,12 +151,15 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                     let single: HashMap<String, String> = headers
                         .iter()
                         .filter(|(k, _)| !is_set_cookie(k))
-                        .map(|(k, v)| (k.clone(), v.join(", ")))
+                        .map(|(k, v)| {
+                            let lines: Vec<&str> = v.iter().map(Spliced::as_str).collect();
+                            (k.clone(), lines.join(", "))
+                        })
                         .collect();
                     match apply_decorate_bounded(
                         decorate_script.clone(),
                         request_context.get_or_init(build_request_context).clone(),
-                        body.clone(),
+                        body.as_str().to_string(),
                         status,
                         single,
                         self.script_state_key,
@@ -162,13 +168,18 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                     )
                     .await
                     {
+                        // A script's output is the author's text (issue #1203): ranges cannot
+                        // survive an arbitrary rewrite, and the script is configuration.
                         Ok((new_body, new_status, single)) => {
-                            body = new_body;
+                            body = Spliced::authored(new_body);
                             status = new_status;
                             // Restore the held-aside Set-Cookie lines unless the script set its
                             // own (case-insensitively) — a script override wins deterministically.
                             let script_set_cookie = single.keys().any(|k| is_set_cookie(k));
-                            headers = single.into_iter().map(|(k, v)| (k, vec![v])).collect();
+                            headers = single
+                                .into_iter()
+                                .map(|(k, v)| (k, vec![Spliced::authored(v)]))
+                                .collect();
                             if !script_set_cookie {
                                 headers.extend(set_cookie);
                             }
@@ -213,12 +224,12 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                             degraded = true;
                             headers.insert(
                                 "x-rift-decorate-error".to_string(),
-                                vec!["true".to_string()],
+                                vec![Spliced::authored("true".to_string())],
                             );
                             if timed_out {
                                 headers.insert(
                                     SCRIPT_TIMEOUT_HEADER.to_string(),
-                                    vec!["true".to_string()],
+                                    vec![Spliced::authored("true".to_string())],
                                 );
                             }
                         }
@@ -233,7 +244,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                     let shell_result = {
                         let cmd = cmd.clone();
                         let rc = request_context.get_or_init(build_request_context).clone();
-                        let body_in = body.clone();
+                        let body_in = body.as_str().to_string();
                         // Plain `spawn_blocking`, not `spawn_blocking_annotated` (issue #987):
                         // `apply_shell_transform` is a fork/exec of an external command and never
                         // touches a `FlowStore`, so nothing here can annotate.
@@ -248,7 +259,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                         })
                     };
                     match shell_result {
-                        Ok(transformed) => body = transformed,
+                        Ok(transformed) => body = Spliced::authored(transformed),
                         // Keep the body unchanged (issue #269) but signal the failure so it
                         // isn't a silent success (issue #323).
                         Err(e) => {
@@ -275,7 +286,7 @@ impl<SH: BuildHasher> BehaviorRun<'_, SH> {
                             degraded = true;
                             headers.insert(
                                 "x-rift-shelltransform-error".to_string(),
-                                vec!["true".to_string()],
+                                vec![Spliced::authored("true".to_string())],
                             );
                         }
                     }
@@ -313,11 +324,11 @@ mod tests {
     fn original() -> ServedParts {
         ServedParts {
             status: 201,
-            headers: HashMap::from([(
+            headers: crate::behaviors::authored_headers(HashMap::from([(
                 "set-cookie".to_string(),
                 vec!["a=1".to_string(), "b=2".to_string()],
-            )]),
-            body: "orig".to_string(),
+            )])),
+            body: Spliced::authored("orig".to_string()),
         }
     }
 
