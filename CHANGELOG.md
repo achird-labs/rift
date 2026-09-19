@@ -352,8 +352,9 @@ record.
   decorate before shellTransform while documenting that as Mountebank's order. Two combinations
   change: a `decorate` and a `shellTransform` on one response (the command now sees the body before
   the decoration, and the decoration sees the command's output), and a `copy` whose inserted text
-  contains a `lookup` token (it is no longer expanded — which also closes a hole: a client could put
-  `${row}[anyColumn]` in a copied field and be served any column of the matched CSV row). To keep
+  contains a `lookup` token (it is no longer expanded; before, a client could put `${row}[anyColumn]`
+  in a copied field and be served any other column of the matched CSV row — other routes by which
+  request text reaches a lookup are tracked separately). To keep
   the old order, write the array form, one behavior per element, in the order you want. `GET` and
   `rift save` write the object form's behaviors in the new order.
 
@@ -365,8 +366,9 @@ record.
   element with a malformed value is now refused instead of silently overridden by a later one; a
   script `wait` followed by a numeric one now needs `--allowInjection` (the fold used to hide it
   from the check while it would now run); and `GET /imposters` / `rift save` write the array back in
-  its order. The object form (`_behaviors`), and every array that sets each behavior once in Rift's
-  order, serve and save exactly as before. New `rift-lint` warning `W018`: an element that sets several behaviors, whose
+  its order. Every array that sets each behavior once, in the order Rift ran them before (wait, copy,
+  lookup, decorate, shellTransform), serves and saves as before; the object form's order changes, see
+  the entry above. New `rift-lint` warning `W018`: an element that sets several behaviors, whose
   order is Rift's rather than the one written.
 
 - **A `behaviors` array runs every `copy`, `lookup` and `shellTransform` element, as Mountebank

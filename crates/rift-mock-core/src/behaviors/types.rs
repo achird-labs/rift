@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 /// array order (issue #1198).
 ///
 /// This is Mountebank's order: its compatibility layer upcasts `_behaviors` in exactly this order
-/// (`compatibility.js`). It also means a lookup never re-scans text a copy inserted from the
-/// request, so a client cannot choose which column of a matched row is served.
+/// (`compatibility.js`). It also means a lookup never re-scans text a `copy` inserted from the
+/// request in the same block.
 pub const CANONICAL_ORDER: [&str; 5] = ["wait", "lookup", "copy", "shellTransform", "decorate"];
 
 /// One behavior, as run: a response's behaviors are an ordered program of these (issue #1198).
