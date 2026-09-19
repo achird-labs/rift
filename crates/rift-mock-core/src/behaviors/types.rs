@@ -8,7 +8,11 @@ use serde::{Deserialize, Serialize};
 /// The behavior keys in the order Rift runs them when one object sets several — the object form
 /// (`_behaviors`) and a multi-key element of the array form. An array's elements otherwise run in
 /// array order (issue #1198).
-pub const CANONICAL_ORDER: [&str; 5] = ["wait", "copy", "lookup", "decorate", "shellTransform"];
+///
+/// This is Mountebank's order: its compatibility layer upcasts `_behaviors` in exactly this order
+/// (`compatibility.js`). It also means a lookup never re-scans text a copy inserted from the
+/// request, so a client cannot choose which column of a matched row is served.
+pub const CANONICAL_ORDER: [&str; 5] = ["wait", "lookup", "copy", "shellTransform", "decorate"];
 
 /// One behavior, as run: a response's behaviors are an ordered program of these (issue #1198).
 #[derive(Debug, Clone)]
@@ -106,14 +110,14 @@ impl ResponseBehaviors {
     #[must_use]
     pub fn into_steps(self) -> Vec<BehaviorStep> {
         let mut steps: Vec<BehaviorStep> = self.wait.into_iter().map(BehaviorStep::Wait).collect();
-        steps.extend(self.copy.into_iter().map(BehaviorStep::Copy));
         steps.extend(self.lookup.into_iter().map(BehaviorStep::Lookup));
-        steps.extend(self.decorate.into_iter().map(BehaviorStep::Decorate));
+        steps.extend(self.copy.into_iter().map(BehaviorStep::Copy));
         steps.extend(
             self.shell_transform
                 .into_iter()
                 .map(BehaviorStep::ShellTransform),
         );
+        steps.extend(self.decorate.into_iter().map(BehaviorStep::Decorate));
         steps
     }
 }

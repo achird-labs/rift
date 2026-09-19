@@ -96,7 +96,7 @@ Mountebank loads, so a saved file can be posted to Mountebank as is:
 - `repeat` is written on the response, never as an element — Mountebank refuses a `{"repeat": n}`
   element. A `repeat` of `0` is not written; Rift serves it as `1`, like an absent `repeat`.
 - Elements come in the order they run: an array's own order, and for the object form `wait`,
-  `copy`, `lookup`, `decorate`, `shellTransform`.
+  `lookup`, `copy`, `shellTransform`, `decorate`.
 - A `copy`, `lookup` or `shellTransform` holding one item is written bare, as above; adjacent
   steps of one of them are written as one element holding the list.
 - A `null` or empty behavior is not written.
@@ -630,13 +630,16 @@ Each response is returned once in sequence (standard cycling).
 ## Behavior Order
 
 In the array form, behaviors run in array order. In the object form (`_behaviors`), and within an
-array element that sets several, they run in this order:
+array element that sets several, they run in Mountebank's order:
 
 1. **wait** - Delay first
-2. **copy** - Copy request values into response
-3. **lookup** - Perform data lookups
-4. **decorate** - Transform the response
-5. **shellTransform** - Pipe the body through each command in turn
+2. **lookup** - Perform data lookups
+3. **copy** - Copy request values into response
+4. **shellTransform** - Pipe the body through each command in turn
+5. **decorate** - Transform the response last
+
+Earlier Rift releases ran copy before lookup and decorate before shellTransform. Because lookup now
+runs first, text a copy inserts from the request is never expanded as a lookup token.
 
 To run them in another order, use the array form with one behavior per element. `repeat` is not a
 step here; it controls which response is chosen.

@@ -3775,7 +3775,8 @@ mod mountebank_output_tests {
         }
     }
 
-    /// In Mountebank's array form, element order is execution order; this is Rift's own order.
+    /// In Mountebank's array form, element order is execution order; the object form's is
+    /// Mountebank's upcast order (issue #1198).
     #[test]
     fn behaviors_are_written_in_execution_order() {
         let saved = out(json!({"is": {"body": "a"}, "_behaviors": {
@@ -3802,7 +3803,7 @@ mod mountebank_output_tests {
             .collect();
         assert_eq!(
             keys,
-            ["wait", "copy", "lookup", "decorate", "shellTransform"]
+            ["wait", "lookup", "copy", "shellTransform", "decorate"]
         );
     }
 
@@ -3822,7 +3823,7 @@ mod mountebank_output_tests {
         }}));
         assert_eq!(
             saved["behaviors"],
-            json!([{"copy": copy_a.clone()}, {"lookup": lookup}, {"shellTransform": "echo x"}])
+            json!([{"lookup": lookup}, {"copy": copy_a.clone()}, {"shellTransform": "echo x"}])
         );
         // Mountebank spells two copies as two elements. Rift reads that (#1195) but still writes a
         // longer list as a list until SDKs read it back (#1199).

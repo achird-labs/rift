@@ -347,6 +347,16 @@ record.
 
 ### Changed
 
+- **Breaking: the object form (`_behaviors`) runs in Mountebank's order** (#1198) — wait, lookup,
+  copy, shellTransform, decorate, which is how Mountebank upcasts it. Rift ran copy before lookup and
+  decorate before shellTransform while documenting that as Mountebank's order. Two combinations
+  change: a `decorate` and a `shellTransform` on one response (the command now sees the body before
+  the decoration, and the decoration sees the command's output), and a `copy` whose inserted text
+  contains a `lookup` token (it is no longer expanded — which also closes a hole: a client could put
+  `${row}[anyColumn]` in a copied field and be served any column of the matched CSV row). To keep
+  the old order, write the array form, one behavior per element, in the order you want. `GET` and
+  `rift save` write the object form's behaviors in the new order.
+
 - **A `behaviors` array runs as an ordered program, as in Mountebank** (#1198). Every element now
   runs, in array order: two `decorate` elements both run, two `wait` elements both delay, and a
   `decorate` written before a `copy` runs first. Before, the array was folded into one block — a
