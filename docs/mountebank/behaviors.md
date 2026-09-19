@@ -72,7 +72,7 @@ Behaviors can also be specified as an array of behavior objects:
 }
 ```
 
-When using array format, behaviors are merged into a single object. If the same behavior type appears multiple times, the last one replaces the earlier ones — two array elements that each hold a `copy` keep only the second; put both copies in one `copy` array instead. `_behaviors` takes precedence over `behaviors` when both are present; `"_behaviors": null` counts as absent, so `behaviors` is used.
+When using array format, behaviors are merged into a single object. `copy`, `lookup` and `shellTransform` accumulate: two array elements that each hold a `copy` run both, in element order, as in Mountebank, and a list inside one element contributes every item. Any other behavior type that appears more than once is taken from the last element that sets it — Mountebank runs each repeated `wait` and `decorate`, which Rift does not yet do ([#1198](https://github.com/achird-labs/rift/issues/1198)). A `null` clears a behavior, including everything the elements before it accumulated; an empty list does not. `_behaviors` takes precedence over `behaviors` when both are present; `"_behaviors": null` counts as absent, so `behaviors` is used.
 
 `_behaviors` must be an object; the array form is only accepted under `behaviors`, and each of its elements must be an object (a non-object element is skipped). Any other shape — an array or scalar `_behaviors`, or a scalar `behaviors` — is refused: `POST /imposters` returns `400` and a config file fails to load. This holds with `--allowInjection` on too.
 
@@ -100,9 +100,9 @@ Mountebank loads, so a saved file can be posted to Mountebank as is:
 - A `null` or empty behavior is not written.
 
 Two shapes still do not load in Mountebank: a `copy`, `lookup` or `shellTransform` holding **more
-than one** item is written as a list, which Mountebank refuses (it spells them one element each,
-which Rift does not yet read that way —
-[#1195](https://github.com/achird-labs/rift/issues/1195)); a `wait` written as a
+than one** item is written as a list, which Mountebank refuses (it spells them one element each;
+Rift reads that spelling but does not yet write it —
+[#1199](https://github.com/achird-labs/rift/issues/1199)); a `wait` written as a
 `{"min", "max"}` range or `{"inject": …}` object is a Rift extension; and a key that is not a
 behavior at all is kept and written back, and Mountebank refuses it as `Unrecognized behavior`.
 

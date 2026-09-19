@@ -230,7 +230,8 @@ fn check_repeat(file: &Path, repeat: &Value, location: &str, result: &mut LintRe
 /// A behaviors block holding something the engine keeps but never runs (issue #1181): the key it
 /// reads, and the response shape it sits on. Mirrors the engine's parse: `_behaviors` wins over
 /// `behaviors` unless it is `null`, the array form folds its objects into one (a later element
-/// wins), and a `null` key is absent. Behaviors run on `is`, `proxy` and `inject` responses
+/// wins; for a list key that holds for whether it is `null`, which is all this reads), and a
+/// `null` key is absent. Behaviors run on `is`, `proxy` and `inject` responses
 /// (issues #1188, #1189), and `repeat` on every response, so the shapes are `fault` and `_rift`
 /// for a `_rift`-only response, and only a block setting a key other than `repeat` is reported.
 /// `is`, `proxy` and `inject` are matched first only because the engine picks them over the rest.
@@ -1425,16 +1426,23 @@ pub fn validate_response(
     validate_response_behaviors(file, response, location, result, options);
 }
 
+/// The behaviors the engine's fold accumulates across `behaviors` elements instead of replacing;
+/// mirrors `LIST_BEHAVIORS` in rift-mock-core's `imposter/types.rs` (issue #1195).
+const LIST_BEHAVIORS: [&str; 3] = ["copy", "lookup", "shellTransform"];
+
 /// Validate the behaviors block the engine will actually read (issue #1099).
 ///
 /// The engine's raw response (`StubResponseRaw` in rift-mock-core's `imposter/types.rs`) takes
 /// `_behaviors` when it is present and not `null`, and otherwise `behaviors`: an object as-is, or an
-/// array folded into one object by `normalize_behaviors`, where the last element to set a key wins
-/// and non-object elements are skipped. Validating each array element on its own reported values a
-/// later element overrides, and a `null` `_behaviors` used to hide the array altogether.
+/// array folded into one object by `normalize_behaviors`. In the fold, `copy`, `lookup` and
+/// `shellTransform` accumulate across elements until a later `null` clears them (issue #1195);
+/// every other key is taken from the last element that sets it; non-object elements are skipped.
+/// Validating each array element on its own reported values a later element overrides, and a
+/// `null` `_behaviors` used to hide the array altogether.
 ///
 /// Every key is checked independently by [`validate_behavior`], so the fold is validated one element
-/// at a time with only the keys that element wins, and a finding names the element it came from.
+/// at a time with only the keys that element contributes, and a finding names the element it came
+/// from.
 ///
 /// E048 (issue #1101) reports the shapes outside that model: a non-object `_behaviors` or a scalar
 /// `behaviors`, which the engine refuses, and a non-object, non-null array element, which it skips.
@@ -1506,12 +1514,24 @@ fn validate_response_behaviors(
             );
         }
         (None, Some(Value::Array(elements))) => {
+            // The last element to set each key, and the last to set it to `null`.
             let mut winner: HashMap<&str, usize> = HashMap::new();
+            let mut last_null: HashMap<&str, usize> = HashMap::new();
             for (idx, element) in elements.iter().enumerate() {
-                for key in element.as_object().into_iter().flat_map(|obj| obj.keys()) {
+                for (key, value) in element.as_object().into_iter().flatten() {
                     winner.insert(key, idx);
+                    if value.is_null() {
+                        last_null.insert(key, idx);
+                    }
                 }
             }
+            let contributes = |key: &str, idx: usize| {
+                if LIST_BEHAVIORS.contains(&key) {
+                    last_null.get(key).is_none_or(|cleared| idx >= *cleared)
+                } else {
+                    winner.get(key) == Some(&idx)
+                }
+            };
             for (idx, element) in elements.iter().enumerate() {
                 let Some(obj) = element.as_object() else {
                     // A `null` element is absent, as a `null` key is (issues #1093, #1098).
@@ -1538,7 +1558,7 @@ fn validate_response_behaviors(
                 // Cloned: `validate_behavior` reads a behaviors object, and this one is assembled.
                 let won: serde_json::Map<String, Value> = obj
                     .iter()
-                    .filter(|(key, _)| winner.get(key.as_str()) == Some(&idx))
+                    .filter(|(key, _)| contributes(key, idx))
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect();
                 // An element whose `wait` lost to a later one is never validated below, but the

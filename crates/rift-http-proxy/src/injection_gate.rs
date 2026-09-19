@@ -262,6 +262,28 @@ mod tests {
         }
     }
 
+    // Issue #1195: the gate reads the folded block, so a `shellTransform` in an earlier element that
+    // the fold now keeps is gated, and one a later `null` clears — never run — is not.
+    #[test]
+    fn the_gate_sees_every_shell_transform_the_fold_keeps() {
+        use super::stubs_contain_script_surface;
+        use crate::imposter::Stub;
+        let gated = |behaviors: serde_json::Value| {
+            let stub: Stub = serde_json::from_value(
+                json!({"responses": [{"is": {"statusCode": 200}, "behaviors": behaviors}]}),
+            )
+            .expect("stub");
+            stubs_contain_script_surface(&[stub])
+        };
+        assert!(gated(
+            json!([{"shellTransform": "a"}, {"shellTransform": "b"}])
+        ));
+        assert!(gated(json!([{"shellTransform": "a"}, {"wait": 5}])));
+        assert!(!gated(
+            json!([{"shellTransform": "a"}, {"shellTransform": null}])
+        ));
+    }
+
     // Issue #1181: a scripted block on a response no behavior runs on is still a script surface,
     // so the day those responses start running it the gate is already closed. A plain delay is not.
     #[test]

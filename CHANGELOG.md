@@ -347,6 +347,16 @@ record.
 
 ### Changed
 
+- **A `behaviors` array runs every `copy`, `lookup` and `shellTransform` element, as Mountebank
+  does** (#1195). Mountebank spells two copies as two elements, `[{"copy": a}, {"copy": b}]`, and
+  runs both; Rift kept only the last element for each key, so the first copy silently did nothing.
+  These three keys now accumulate across elements in element order (a list inside one element
+  contributes every item); `wait`, `decorate` and `repeat` are still taken from the last element
+  that sets them. A later `null` still clears a key, but an empty list (`{"copy": []}`) no longer
+  clears the ones before it. A malformed `copy`, `lookup` or `shellTransform` in an earlier element
+  is no longer shadowed by a later one: the engine refuses the response (`400` at the admin API, a
+  load failure for a config file) and `rift-lint` reports it at that element.
+
 - **`GET /imposters`, `rift save` and `--datadir` write behaviors in Mountebank's grammar** (#1191).
   `repeat` is written on the response (`{"repeat": 3, "behaviors": […], "is": …}`) instead of as a
   `{"repeat": 3}` element; elements come in execution order (`wait`, `copy`, `lookup`, `decorate`,
