@@ -347,6 +347,14 @@ record.
 
 ### Changed
 
+- **A `copy`, `lookup` or `shellTransform` holding several items is written one element per item**
+  (#1199): `GET /imposters`, `rift save` and `--datadir` now write `[{"copy": a}, {"copy": b}]`
+  instead of `[{"copy": [a, b]}]`, which Mountebank refused (`copy behavior "from" field required`).
+  Saved files with such lists now load in Mountebank. Rift reads both spellings. **SDK note:**
+  rift-java up to 0.2.3 writes behaviors back as one object, keeping only the last of repeated keys,
+  so a GET → modify → PUT of such a response through it keeps only the last item until
+  achird-labs/rift-java#217 ships.
+
 - **Breaking: the object form (`_behaviors`) runs in Mountebank's order** (#1198) — wait, lookup,
   copy, shellTransform, decorate, which is how Mountebank upcasts it. Rift ran copy before lookup and
   decorate before shellTransform while documenting that as Mountebank's order. Two combinations

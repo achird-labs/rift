@@ -325,8 +325,8 @@ async fn the_program_is_written_back_in_its_order() {
     admin.stop(port).await;
 }
 
-/// The object form is written back in the order it runs (Mountebank's, since #1198 part B), with
-/// its lists grouped as before.
+/// The object form is written back in the order it runs (Mountebank's, since #1198 part B), one
+/// element per list item (#1199).
 #[tokio::test]
 async fn an_object_form_block_is_written_back_in_its_run_order() {
     let admin = Admin::start(true).await;
@@ -342,7 +342,7 @@ async fn an_object_form_block_is_written_back_in_its_run_order() {
     assert_eq!(admin.post(&imposter).await.status().as_u16(), 201);
     assert_eq!(
         admin.saved_behaviors(port).await,
-        json!([{"wait": 1}, {"copy": [ca, cb]}, {"shellTransform": "cat"}, {"decorate": d}])
+        json!([{"wait": 1}, {"copy": ca}, {"copy": cb}, {"shellTransform": "cat"}, {"decorate": d}])
     );
     admin.stop(port).await;
 }

@@ -1139,57 +1139,23 @@ impl From<StubResponse> for StubResponseOut {
 ///   is not written: Mountebank refuses it, and Rift serves it as `1`, which is what an absent
 ///   `repeat` means.
 /// - Elements come in execution order, then any other key alphabetically.
-/// - A one-item `copy`/`lookup`/`shellTransform` list is written bare, the only spelling Mountebank
-///   accepts inside an element. A longer list stays a list for now, although Mountebank spells it
-///   as one element per item and Rift reads that spelling (#1195): writing it waits on #1199.
+/// - Every step is its own element: a `copy`, `lookup` or `shellTransform` holding several items is
+///   written one element per item, the only spelling Mountebank accepts (issue #1199).
 /// - A `null` or empty-list behavior configures nothing and is not written.
 fn behaviors_out(
     block: serde_json::Value,
 ) -> (Option<serde_json::Value>, Option<Vec<serde_json::Value>>) {
     use serde_json::Value;
-    fn group(key: String, mut items: Vec<Value>) -> Value {
-        let value = if items.len() == 1 {
-            items.pop().unwrap_or(Value::Null)
-        } else {
-            Value::Array(items)
-        };
-        serde_json::json!({ key: value })
-    }
     let Some(Value::Array(program)) = compile_behaviors(block) else {
         return (None, None);
     };
     let mut repeat = None;
     let mut elements = Vec::new();
-    // Adjacent steps of one list key are written as one element holding a list, which keeps the
-    // output for every config Rift accepted before #1198 byte-identical; #1199 writes them one
-    // element per item once rift-java reads that back.
-    let mut run: Option<(String, Vec<Value>)> = None;
     for element in program {
-        let Value::Object(object) = element else {
-            continue;
-        };
-        for (key, value) in object {
-            if key == "repeat" {
-                repeat = Some(value).filter(|r| r.as_u64() != Some(0));
-                continue;
-            }
-            match &mut run {
-                Some((held, items)) if *held == key => items.push(value),
-                _ => {
-                    if let Some((held, items)) = run.take() {
-                        elements.push(group(held, items));
-                    }
-                    if LIST_BEHAVIORS.contains(&key.as_str()) {
-                        run = Some((key, vec![value]));
-                    } else {
-                        elements.push(serde_json::json!({ key: value }));
-                    }
-                }
-            }
+        match element.get("repeat") {
+            Some(value) => repeat = Some(value.clone()).filter(|r| r.as_u64() != Some(0)),
+            None => elements.push(element),
         }
-    }
-    if let Some((held, items)) = run {
-        elements.push(group(held, items));
     }
     (repeat, (!elements.is_empty()).then_some(elements))
 }
@@ -3808,7 +3774,7 @@ mod mountebank_output_tests {
     }
 
     #[test]
-    fn a_single_item_list_is_written_bare_and_a_longer_one_is_kept() {
+    fn a_list_is_written_one_element_per_item() {
         let copy_a =
             json!({"from": "path", "into": "${A}", "using": {"method": "regex", "selector": ".+"}});
         let copy_b =
@@ -3825,15 +3791,18 @@ mod mountebank_output_tests {
             saved["behaviors"],
             json!([{"lookup": lookup}, {"copy": copy_a.clone()}, {"shellTransform": "echo x"}])
         );
-        // Mountebank spells two copies as two elements. Rift reads that (#1195) but still writes a
-        // longer list as a list until SDKs read it back (#1199).
+        // Mountebank spells several items as one element each, and so does Rift (#1199); a list
+        // inside one element is refused by Mountebank (`copy behavior "from" field required`).
         let saved = out(json!({"is": {"body": "a"}, "_behaviors": {
             "copy": [copy_a.clone(), copy_b.clone()],
             "shellTransform": ["echo x", "echo y"]
         }}));
         assert_eq!(
             saved["behaviors"],
-            json!([{"copy": [copy_a, copy_b]}, {"shellTransform": ["echo x", "echo y"]}])
+            json!([
+                {"copy": copy_a}, {"copy": copy_b},
+                {"shellTransform": "echo x"}, {"shellTransform": "echo y"}
+            ])
         );
     }
 
@@ -3934,7 +3903,7 @@ mod mountebank_output_tests {
     }
 
     /// What is written must read back as the same configuration — compared as parsed behaviors,
-    /// because a one-item list is legitimately written bare.
+    /// because every list is written one element per item.
     #[test]
     fn the_written_form_reads_back_to_the_same_behaviors() {
         for written in [
@@ -3944,6 +3913,11 @@ mod mountebank_output_tests {
                 "shellTransform": ["echo x"], "decorate": "function (req, res) {}"
             }}),
             json!({"proxy": {"to": "http://127.0.0.1:1"}, "_behaviors": {"repeat": 4}}),
+            // Issue #1199: a list in the object form is written one element per item.
+            json!({"is": {"body": "a"}, "_behaviors": {"copy": [
+                {"from": "path", "into": "${A}", "using": {"method": "regex", "selector": ".+"}},
+                {"from": "method", "into": "${B}", "using": {"method": "regex", "selector": ".+"}}
+            ], "shellTransform": ["echo x", "echo y"]}}),
             // Issue #1195: Mountebank's one-element-per-item spelling.
             json!({"is": {"body": "a"}, "behaviors": [
                 {"copy": {"from": "path", "into": "${A}", "using": {"method": "regex", "selector": ".+"}}},
