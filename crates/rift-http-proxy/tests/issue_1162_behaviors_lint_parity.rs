@@ -132,6 +132,57 @@ fn blocks() -> Vec<Value> {
     ]
 }
 
+/// `behaviors` arrays whose verdict depends on the fold (issue #1195): `copy`, `lookup` and
+/// `shellTransform` accumulate across elements unless a later `null` clears them; every other key
+/// is last-wins.
+fn arrays() -> Vec<Value> {
+    let copy = json!({ "from": "path", "into": "${P}", "using": using() });
+    let no_from = json!({ "into": "${P}", "using": using() });
+    let lookup = json!({ "key": { "from": "path", "using": using() },
+                         "fromDataSource": csv(), "into": "${R}" });
+    vec![
+        json!([{ "copy": copy }, { "copy": copy }]),
+        json!([{ "copy": no_from }, { "copy": copy }]),
+        json!([{ "copy": copy }, { "copy": no_from }]),
+        json!([{ "copy": no_from }, { "copy": [] }]),
+        json!([{ "copy": no_from }, { "copy": null }]),
+        json!([{ "copy": no_from }, { "copy": null }, { "copy": copy }]),
+        json!([{ "copy": copy }, { "copy": null }, { "copy": no_from }, { "copy": null }, { "copy": copy }]),
+        json!([{ "copy": no_from }, { "copy": null }, { "copy": copy }, { "copy": null }, { "copy": no_from }]),
+        json!([{ "copy": "path" }, { "copy": copy }]),
+        json!([{ "copy": [copy, no_from] }, { "copy": copy }]),
+        json!([{ "lookup": [5] }, { "lookup": lookup }]),
+        json!([{ "lookup": lookup }, { "lookup": lookup }]),
+        json!([{ "shellTransform": 5 }, { "shellTransform": "echo a" }]),
+        json!([{ "shellTransform": ["echo a", 1] }, { "shellTransform": null }]),
+        json!([{ "shellTransform": "echo a" }, { "shellTransform": ["echo b"] }]),
+        // Scalars stay last-wins.
+        json!([{ "wait": true }, { "wait": 5 }]),
+        json!([{ "wait": 5 }, { "wait": true }]),
+        json!([{ "decorate": 5 }, { "decorate": "function (r, s) {}" }]),
+    ]
+}
+
+#[test]
+fn the_linter_errors_on_exactly_the_behaviors_arrays_the_engine_refuses() {
+    let mut disagreements = Vec::new();
+    for array in arrays() {
+        let response = json!({ "is": { "statusCode": 200 }, "behaviors": array });
+        let engine = engine_refuses(&response);
+        let lint = lint_errors(&response);
+        if engine != !lint.is_empty() {
+            disagreements.push(format!(
+                "{response}\n    engine refuses: {engine}, lint errors: {lint:?}"
+            ));
+        }
+    }
+    assert!(
+        disagreements.is_empty(),
+        "rift-lint and the engine disagree:\n  {}",
+        disagreements.join("\n  ")
+    );
+}
+
 #[test]
 fn the_linter_errors_on_exactly_the_behaviors_blocks_the_engine_refuses() {
     let mut disagreements = Vec::new();

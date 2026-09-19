@@ -855,8 +855,9 @@ fn refuse_inverted_waits_in_block(block: &serde_json::Value) -> Result<(), Strin
 /// The block `new_is` is about to parse must parse (issue #1162). `new_is` cannot fail, so a block
 /// it could not read used to be admitted and served with every behavior but `repeat` ignored and
 /// only a log line to say so. Checked on the block the engine will use — `_behaviors`, else the
-/// merged `behaviors` array — so a value a later element overrides, or a `behaviors` shadowed by
-/// `_behaviors`, is not refused: it configures nothing, and rift-lint reads the array the same way.
+/// merged `behaviors` array — so a scalar a later element overrides, a list item a later `null`
+/// clears, or a `behaviors` shadowed by `_behaviors`, is not refused: it configures nothing, and
+/// rift-lint reads the array the same way. A list item in an earlier element is live (#1195).
 fn refuse_unparseable_behaviors(block: Option<&serde_json::Value>) -> Result<(), String> {
     let Some(block @ serde_json::Value::Object(keys)) = block else {
         // A non-object block never gets here: the field deserializers above refuse it.
@@ -1129,8 +1130,8 @@ const BEHAVIOR_ORDER: [&str; 5] = ["wait", "copy", "lookup", "decorate", "shellT
 ///   `repeat` means.
 /// - Elements come in execution order, then any other key alphabetically.
 /// - A one-item `copy`/`lookup`/`shellTransform` list is written bare, the only spelling Mountebank
-///   accepts inside an element. A longer list stays a list: Mountebank spells it as one element per
-///   item, but Rift's reader keeps only the last of repeated keys (#1195).
+///   accepts inside an element. A longer list stays a list for now, although Mountebank spells it
+///   as one element per item and Rift reads that spelling (#1195): writing it waits on #1199.
 /// - A `null` or empty-list behavior configures nothing and is not written.
 fn behaviors_out(
     block: serde_json::Value,
@@ -1167,18 +1168,40 @@ fn behaviors_out(
     (repeat, (!elements.is_empty()).then_some(elements))
 }
 
-/// Normalize behaviors from array format to object format
-/// Some tools use `behaviors: [{"wait": ...}, {"decorate": ...}]` instead of
-/// `_behaviors: {"wait": ..., "decorate": ...}`
+/// Keys `ResponseBehaviors` holds as lists. Mountebank spells several as one array element each
+/// and runs them all, so the fold appends these instead of replacing (issue #1195).
+const LIST_BEHAVIORS: [&str; 3] = ["copy", "lookup", "shellTransform"];
+
+/// Fold the array form `behaviors: [{"wait": ...}, {"copy": ...}]` into the object form
+/// `_behaviors` uses; an object is returned as-is.
+///
+/// A non-null `copy`, `lookup` or `shellTransform` appends its items to what earlier elements set,
+/// in element order. Every other key, and a `null` for any key, replaces what came before. A key
+/// set once is kept as written, so a bare item stays bare. Non-object elements are skipped.
 pub(crate) fn normalize_behaviors(value: serde_json::Value) -> Option<serde_json::Value> {
+    fn items(value: serde_json::Value) -> Vec<serde_json::Value> {
+        match value {
+            serde_json::Value::Array(items) => items,
+            item => vec![item],
+        }
+    }
     match value {
         serde_json::Value::Array(arr) => {
-            // Convert array of behavior objects to a single merged object
             let mut merged = serde_json::Map::new();
             for item in arr {
                 if let serde_json::Value::Object(obj) = item {
                     for (k, v) in obj {
-                        merged.insert(k, v);
+                        let accumulates = LIST_BEHAVIORS.contains(&k.as_str()) && !v.is_null();
+                        match merged.get_mut(&k) {
+                            Some(held) if accumulates && !held.is_null() => {
+                                let mut list = items(held.take());
+                                list.extend(items(v));
+                                *held = serde_json::Value::Array(list);
+                            }
+                            _ => {
+                                merged.insert(k, v);
+                            }
+                        }
                     }
                 }
             }
@@ -3171,8 +3194,9 @@ mod tests {
         }
     }
 
-    // The array form is merged before it is parsed (last key wins), and rift-lint validates it the
-    // same way, so a bad value a later element overrides configures nothing and must still load.
+    // The array form is merged before it is parsed (a scalar key is last-wins), and rift-lint
+    // checks it the same way, so a bad value a later element overrides configures nothing and must
+    // still load.
     #[test]
     fn an_overridden_bad_value_in_a_behaviors_array_still_loads() {
         for later in [json!({ "wait": 50 }), json!({ "wait": null })] {
@@ -3687,12 +3711,29 @@ mod mountebank_output_tests {
             saved["behaviors"],
             json!([{"copy": copy_a.clone()}, {"lookup": lookup}, {"shellTransform": "echo x"}])
         );
-        // Mountebank spells two copies as two elements, but Rift's reader keeps only the last of
-        // two `copy` elements (#1195) — so a longer list stays a list until that changes.
+        // Mountebank spells two copies as two elements. Rift reads that (#1195) but still writes a
+        // longer list as a list until SDKs read it back (#1199).
         let saved = out(json!({"is": {"body": "a"}, "_behaviors": {
             "copy": [copy_a.clone(), copy_b.clone()],
             "shellTransform": ["echo x", "echo y"]
         }}));
+        assert_eq!(
+            saved["behaviors"],
+            json!([{"copy": [copy_a, copy_b]}, {"shellTransform": ["echo x", "echo y"]}])
+        );
+    }
+
+    /// Issue #1195: repeated list elements are read as one list, so every item is written back.
+    /// Written as one list per key until #1199 moves the writer to one element per item.
+    #[test]
+    fn repeated_list_elements_are_all_written_back() {
+        let copy_a =
+            json!({"from": "path", "into": "${A}", "using": {"method": "regex", "selector": ".+"}});
+        let copy_b = json!({"from": "method", "into": "${B}", "using": {"method": "regex", "selector": ".+"}});
+        let saved = out(json!({"is": {"body": "a"}, "behaviors": [
+            {"copy": copy_a.clone()}, {"shellTransform": "echo x"},
+            {"copy": copy_b.clone()}, {"shellTransform": "echo y"}
+        ]}));
         assert_eq!(
             saved["behaviors"],
             json!([{"copy": [copy_a, copy_b]}, {"shellTransform": ["echo x", "echo y"]}])
@@ -3733,6 +3774,12 @@ mod mountebank_output_tests {
                 "shellTransform": ["echo x"], "decorate": "function (req, res) {}"
             }}),
             json!({"proxy": {"to": "http://127.0.0.1:1"}, "_behaviors": {"repeat": 4}}),
+            // Issue #1195: Mountebank's one-element-per-item spelling.
+            json!({"is": {"body": "a"}, "behaviors": [
+                {"copy": {"from": "path", "into": "${A}", "using": {"method": "regex", "selector": ".+"}}},
+                {"copy": {"from": "method", "into": "${B}", "using": {"method": "regex", "selector": ".+"}}},
+                {"shellTransform": "echo x"}, {"shellTransform": "echo y"}
+            ]}),
         ] {
             let saved = out(written.clone());
             assert_eq!(

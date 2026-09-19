@@ -505,6 +505,146 @@ fn test_behaviors_array_later_null_clears_the_key() {
     assert!(behaviors_parsed.expect("the block parses").wait.is_none());
 }
 
+fn copy_into(token: &str) -> serde_json::Value {
+    serde_json::json!({"from": "path", "into": token, "using": {"method": "regex", "selector": ".+"}})
+}
+
+fn lookup_into(token: &str) -> serde_json::Value {
+    serde_json::json!({"key": {"from": "path", "using": {"method": "regex", "selector": ".+"}},
+                       "fromDataSource": {"csv": {"path": "x.csv", "keyColumn": "k"}},
+                       "into": token})
+}
+
+/// The folded block and its parse, for a `behaviors` array on an `is` response.
+fn folded(array: serde_json::Value) -> (serde_json::Value, crate::behaviors::ResponseBehaviors) {
+    let response: StubResponse =
+        serde_json::from_value(serde_json::json!({"is": {}, "behaviors": array}))
+            .expect("the response parses");
+    let StubResponse::Is {
+        behaviors,
+        behaviors_parsed,
+        ..
+    } = response
+    else {
+        panic!("Expected Is response");
+    };
+    let parsed = behaviors_parsed.expect("the block parses");
+    (behaviors.expect("a block"), (*parsed).clone())
+}
+
+/// Issue #1195: Mountebank spells several copies as one element each and runs them all, so the
+/// fold appends `copy`, `lookup` and `shellTransform` across elements, in element order.
+#[test]
+fn test_behaviors_array_repeated_list_keys_accumulate() {
+    let (a, b) = (copy_into("${A}"), copy_into("${B}"));
+    let (block, parsed) = folded(serde_json::json!([{"copy": a.clone()}, {"copy": b.clone()}]));
+    assert_eq!(block, serde_json::json!({"copy": [a, b]}));
+    assert_eq!(parsed.copy.len(), 2);
+    assert_eq!(parsed.copy[0].into, "${A}");
+    assert_eq!(parsed.copy[1].into, "${B}");
+
+    let (x, y) = (lookup_into("${X}"), lookup_into("${Y}"));
+    let (block, parsed) =
+        folded(serde_json::json!([{"lookup": x.clone()}, {"wait": 5}, {"lookup": y.clone()}]));
+    assert_eq!(block, serde_json::json!({"lookup": [x, y], "wait": 5}));
+    assert_eq!(parsed.lookup.len(), 2);
+
+    let (block, parsed) =
+        folded(serde_json::json!([{"shellTransform": "echo x"}, {"shellTransform": "echo y"}]));
+    assert_eq!(
+        block,
+        serde_json::json!({"shellTransform": ["echo x", "echo y"]})
+    );
+    assert_eq!(parsed.shell_transform, vec!["echo x", "echo y"]);
+}
+
+/// Issue #1195: a list inside one element contributes every item, bare or not.
+#[test]
+fn test_behaviors_array_mixed_list_spellings_accumulate_in_order() {
+    let (a, b, c) = (copy_into("${A}"), copy_into("${B}"), copy_into("${C}"));
+    let (block, _) = folded(serde_json::json!([
+        {"copy": [a.clone(), b.clone()]},
+        {"copy": c.clone()}
+    ]));
+    assert_eq!(block, serde_json::json!({"copy": [a, b, c]}));
+
+    let (_, parsed) = folded(serde_json::json!([
+        {"shellTransform": "echo x"},
+        {"shellTransform": ["echo y", "echo z"]}
+    ]));
+    assert_eq!(parsed.shell_transform, vec!["echo x", "echo y", "echo z"]);
+}
+
+/// Issue #1195: a single occurrence is folded as written, so a bare item stays bare.
+#[test]
+fn test_behaviors_array_single_list_key_is_folded_as_written() {
+    let a = copy_into("${A}");
+    let (block, _) = folded(serde_json::json!([{"copy": a.clone()}, {"wait": 1}]));
+    assert_eq!(block, serde_json::json!({"copy": a, "wait": 1}));
+}
+
+/// Issue #1195: a `null` still clears a list key; only what follows it survives.
+#[test]
+fn test_behaviors_array_null_clears_an_accumulated_list_key() {
+    let (a, b) = (copy_into("${A}"), copy_into("${B}"));
+
+    let (block, parsed) = folded(serde_json::json!([{"copy": a.clone()}, {"copy": null}]));
+    assert_eq!(block, serde_json::json!({"copy": null}));
+    assert!(parsed.copy.is_empty());
+
+    let (block, _) = folded(serde_json::json!([{"copy": null}, {"copy": a.clone()}]));
+    assert_eq!(block, serde_json::json!({"copy": a.clone()}));
+
+    let (block, parsed) = folded(serde_json::json!([
+        {"copy": a},
+        {"copy": null},
+        {"copy": b.clone()}
+    ]));
+    assert_eq!(block, serde_json::json!({"copy": b}));
+    assert_eq!(parsed.copy.len(), 1);
+    assert_eq!(parsed.copy[0].into, "${B}");
+
+    // Only the last `null` matters: what sits between two of them is cleared too.
+    let (block, _) = folded(serde_json::json!([
+        {"copy": copy_into("${A}")},
+        {"copy": null},
+        {"copy": copy_into("${B}")},
+        {"copy": null},
+        {"copy": copy_into("${C}")}
+    ]));
+    assert_eq!(block, serde_json::json!({"copy": copy_into("${C}")}));
+}
+
+/// Issue #1195: an empty list appends nothing — it no longer clears what came before.
+#[test]
+fn test_behaviors_array_empty_list_does_not_clear() {
+    let a = copy_into("${A}");
+    let (block, parsed) = folded(serde_json::json!([{"copy": a.clone()}, {"copy": []}]));
+    assert_eq!(block, serde_json::json!({"copy": [a]}));
+    assert_eq!(parsed.copy.len(), 1);
+}
+
+/// Issue #1195: an earlier element is live now, so a malformed item in it refuses the response
+/// instead of being shadowed by a later element.
+#[test]
+fn test_behaviors_array_malformed_earlier_list_item_is_refused() {
+    for array in [
+        serde_json::json!([{"copy": 5}, {"copy": copy_into("${A}")}]),
+        serde_json::json!([{"lookup": [5]}, {"lookup": lookup_into("${X}")}]),
+        serde_json::json!([{"shellTransform": 5}, {"shellTransform": "echo x"}]),
+    ] {
+        let err = serde_json::from_value::<StubResponse>(
+            serde_json::json!({"is": {}, "behaviors": array.clone()}),
+        )
+        .expect_err("a live malformed item is refused")
+        .to_string();
+        assert!(err.contains("behavior is malformed"), "{array}: {err}");
+    }
+    // Still shadowed, and still loads, when a later `null` clears it.
+    let (_, parsed) = folded(serde_json::json!([{"copy": 5}, {"copy": null}]));
+    assert!(parsed.copy.is_empty());
+}
+
 /// Issue #1099: an empty `behaviors` array is no block at all.
 #[test]
 fn test_empty_behaviors_array_is_no_block() {

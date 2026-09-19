@@ -1349,8 +1349,8 @@ fn a_live_underscore_behaviors_still_shadows_a_bad_array_at_its_own_location() {
     );
 }
 
-/// Every behavior key follows the fold, not just `wait`: `copy` from the last element that sets it,
-/// and `lookup` and `shellTransform` from the elements that set them once.
+/// `copy`, `lookup` and `shellTransform` accumulate across elements (issue #1195), so every element
+/// that sets one is validated at its own index — the first `copy` is no longer shadowed by the last.
 #[test]
 fn behaviors_array_folds_copy_lookup_and_shell_transform_too() {
     let resp = json!({
@@ -1367,10 +1367,33 @@ fn behaviors_array_folds_copy_lookup_and_shell_transform_too() {
     assert_eq!(
         behavior_findings(&resp),
         vec![
+            finding("E029", "loc.behaviors[0].copy[0]"),
             finding("E032", "loc.behaviors[1].lookup"),
             finding("W008", "loc.behaviors[2].shellTransform"),
             finding("E029", "loc.behaviors[3].copy[1]"),
         ]
+    );
+}
+
+/// A later `null` clears a list key in the engine's fold, so what it clears is never read (#1195).
+#[test]
+fn behaviors_array_later_null_shadows_an_accumulated_list_key() {
+    let bad = json!({ "into": "a", "using": { "method": "regex", "selector": ".*" } });
+    let good =
+        json!({ "from": "path", "into": "b", "using": { "method": "regex", "selector": ".*" } });
+    for behaviors in [
+        json!([{ "copy": bad.clone() }, { "copy": null }]),
+        json!([{ "copy": bad.clone() }, { "wait": 5 }, { "copy": null }, { "copy": good.clone() }]),
+    ] {
+        let resp = json!({ "is": { "statusCode": 200 }, "behaviors": behaviors });
+        assert_eq!(behavior_findings(&resp), vec![], "{resp}");
+    }
+    // An empty list is not a `null`: it appends nothing and clears nothing.
+    let resp = json!({ "is": { "statusCode": 200 },
+                       "behaviors": [{ "copy": bad }, { "copy": [] }] });
+    assert_eq!(
+        behavior_findings(&resp),
+        vec![finding("E029", "loc.behaviors[0].copy")]
     );
 }
 
