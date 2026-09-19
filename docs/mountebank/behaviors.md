@@ -97,16 +97,13 @@ Mountebank loads, so a saved file can be posted to Mountebank as is:
   element. A `repeat` of `0` is not written; Rift serves it as `1`, like an absent `repeat`.
 - Elements come in the order they run: an array's own order, and for the object form `wait`,
   `lookup`, `copy`, `shellTransform`, `decorate`.
-- A `copy`, `lookup` or `shellTransform` holding one item is written bare, as above; adjacent
-  steps of one of them are written as one element holding the list.
+- Every step is its own element: a `copy`, `lookup` or `shellTransform` holding several items is
+  written one element per item, in order, which is how Mountebank spells it.
 - A `null` or empty behavior is not written.
 
-Two shapes still do not load in Mountebank: a `copy`, `lookup` or `shellTransform` holding **more
-than one** item is written as a list, which Mountebank refuses (it spells them one element each;
-Rift reads that spelling but does not yet write it —
-[#1199](https://github.com/achird-labs/rift/issues/1199)); a `wait` written as a
-`{"min", "max"}` range or `{"inject": …}` object is a Rift extension; and a key that is not a
-behavior at all is kept and written back, and Mountebank refuses it as `Unrecognized behavior`.
+Two shapes still do not load in Mountebank: a `wait` written as a `{"min", "max"}` range or
+`{"inject": …}` object is a Rift extension; and a key that is not a behavior at all is kept and
+written back, and Mountebank refuses it as `Unrecognized behavior`.
 
 ---
 
