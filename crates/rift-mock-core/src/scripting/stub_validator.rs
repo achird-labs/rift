@@ -258,7 +258,7 @@ mod tests {
             route_pattern: None,
             predicates: vec![],
             responses: vec![StubResponse::RiftScript {
-                rift: RiftResponseExtension {
+                rift: Box::new(RiftResponseExtension {
                     dataset: None,
                     fault: None,
                     script: Some(RiftScriptConfig {
@@ -269,7 +269,7 @@ mod tests {
                     }),
                     templated: false,
                     state_ops: Vec::new(),
-                },
+                }),
                 ignored_behaviors: None,
             }],
             scenario_name: None,
@@ -422,7 +422,7 @@ mod tests {
                 route_pattern: None,
                 predicates: vec![],
                 responses: vec![StubResponse::RiftScript {
-                    rift: RiftResponseExtension {
+                    rift: Box::new(RiftResponseExtension {
                         dataset: None,
                         fault: None,
                         script: Some(RiftScriptConfig {
@@ -433,7 +433,7 @@ mod tests {
                         }),
                         templated: false,
                         state_ops: Vec::new(),
-                    },
+                    }),
                     ignored_behaviors: None,
                 }],
                 scenario_name: None,
@@ -448,7 +448,7 @@ mod tests {
                 route_pattern: None,
                 predicates: vec![],
                 responses: vec![StubResponse::RiftScript {
-                    rift: RiftResponseExtension {
+                    rift: Box::new(RiftResponseExtension {
                         dataset: None,
                         fault: None,
                         script: Some(RiftScriptConfig {
@@ -461,7 +461,7 @@ mod tests {
                         }),
                         templated: false,
                         state_ops: Vec::new(),
-                    },
+                    }),
                     ignored_behaviors: None,
                 }],
                 scenario_name: None,

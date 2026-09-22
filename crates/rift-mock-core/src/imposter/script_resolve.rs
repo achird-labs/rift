@@ -319,13 +319,13 @@ mod tests {
             route_pattern: None,
             predicates: vec![],
             responses: vec![StubResponse::RiftScript {
-                rift: RiftResponseExtension {
+                rift: Box::new(RiftResponseExtension {
                     dataset: None,
                     fault: None,
                     script: Some(script_config),
                     templated: false,
                     state_ops: Vec::new(),
-                },
+                }),
                 ignored_behaviors: None,
             }],
             scenario_name: None,
@@ -632,6 +632,67 @@ mod tests {
         let resolved = extract_script(&config);
         assert_eq!(resolved.code.as_deref(), Some("fn respond() {}"));
         assert_eq!(resolved.engine.as_deref(), Some("rhai"));
+    }
+
+    /// Issue #1209: `response_script_mut` has two arms, and every other test in this module goes
+    /// through `stub_with_script`, which only ever builds the `RiftScript` variant. This covers the
+    /// other one — a `_rift.script` written beside an `is` response — so the `Is` arm's resolution
+    /// is pinned rather than assumed to behave like its sibling.
+    #[test]
+    fn a_ref_resolves_on_a_script_written_beside_an_is_response() {
+        let mut scripts = HashMap::new();
+        scripts.insert(
+            "failTwice".to_string(),
+            script(Some("fn respond() {}"), None, None),
+        );
+        let is_with_script = Stub {
+            id: None,
+            route_pattern: None,
+            predicates: vec![],
+            responses: vec![StubResponse::new_is(
+                crate::imposter::types::IsResponse {
+                    status_code: 200,
+                    headers: Default::default(),
+                    body: None,
+                    mode: Default::default(),
+                },
+                None,
+                Some(Box::new(RiftResponseExtension {
+                    dataset: None,
+                    fault: None,
+                    script: Some(script(None, None, Some("failTwice"))),
+                    templated: false,
+                    state_ops: Vec::new(),
+                })),
+            )],
+            scenario_name: None,
+            required_scenario_state: None,
+            new_scenario_state: None,
+            space: None,
+            recorded_from: None,
+            verify: None,
+        };
+        let mut config = ImposterConfig {
+            rift: Some(RiftConfig {
+                scripts,
+                ..Default::default()
+            }),
+            stubs: vec![is_with_script],
+            ..Default::default()
+        };
+
+        resolve_scripts(&mut config, &ScriptBaseDir::Unconfigured).unwrap();
+
+        let StubResponse::Is {
+            rift: Some(rift), ..
+        } = &config.stubs[0].responses[0]
+        else {
+            panic!("a `_rift` block beside an `is` response must stay on the Is variant");
+        };
+        let resolved = rift.script.as_ref().expect("script present");
+        assert_eq!(resolved.code.as_deref(), Some("fn respond() {}"));
+        assert_eq!(resolved.engine.as_deref(), Some("rhai"));
+        assert_eq!(resolved.ref_name, None, "the ref must be consumed");
     }
 
     #[test]
