@@ -239,7 +239,7 @@ Download pre-built binaries from [GitHub Releases](https://github.com/achird-lab
 
 ```bash
 # Example for Linux x86_64 — set VERSION to the release you want
-VERSION=v0.17.0
+VERSION=v0.18.0
 TARGET=x86_64-unknown-linux-gnu
 
 curl -LO https://github.com/achird-labs/rift/releases/download/$VERSION/rift-$VERSION-$TARGET.tar.gz
@@ -365,7 +365,7 @@ changes by depending on it.
 
 ```bash
 go get github.com/achird-labs/rift-go
-go run github.com/achird-labs/rift-go/cmd/rift-fetch@latest -version v0.17.0
+go run github.com/achird-labs/rift-go/cmd/rift-fetch@latest -version v0.18.0
 ```
 
 ```go

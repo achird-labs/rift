@@ -8,4 +8,4 @@
 # This is NOT the same thing as `sync.yml`'s `release:`. That one records the last revision a human
 # actually reconciled the docs against, and is deliberately left alone by automation — bumping it
 # mechanically would assert a docs review that never happened.
-latest_release: v0.17.0
+latest_release: v0.18.0
