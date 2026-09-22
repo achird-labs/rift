@@ -37,7 +37,8 @@ processes (no Docker), each engine run alone. Every figure is the **median of 3 
 two hosts were measured on different dates and revisions, so compare the columns *within* a host,
 never a cell from one host against a cell from the other:
 
-- **M4:** Rift `master` @ `34a42cb`, measured 2026-09-17 (the pre-release rerun).
+- **M4:** Rift `master` @ `34a42cb`, measured 2026-09-17 (the pre-release rerun). The admin
+  create/read figures are newer — 2026-09-22 @ `55dcbf8`; see that paragraph.
 - **EPYC:** Rift `master` @ `924cf73`, measured 2026-07-20.
 
 Full method and reproduction:
@@ -107,9 +108,9 @@ collapses to ~110 RPS at the 100th pattern, so the gap widened from 515x to **1,
 — not because Mountebank got slower, but because Rift stopped having a slow path.
 
 On the admin control plane, creating 1,000 fully-overlapping stubs (the O(n²) case
-issue #423 fixed) takes Rift 11.0ms vs Mountebank's 77.3ms, and grows memory +11.7MB vs
-+71.7MB — while Rift additionally computes stub-overlap warnings Mountebank does not (M4, median of
-4 runs, 2026-09-17).
+issue #423 fixed) takes Rift 8.2ms vs Mountebank's 66.2ms, and grows memory +9.3MB vs
++66.9MB — while Rift additionally computes stub-overlap warnings Mountebank does not (M4, median of
+9 interleaved rounds, 2026-09-22).
 
 ---
 
@@ -316,8 +317,8 @@ python3 scripts/bench_direct.py --run-all \
     --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
 cat results/DIRECT_BENCHMARK_REPORT.md
 
-# Admin create/read (imposter creation + overlap analysis), median of 5 rounds
-python3 scripts/bench_admin.py --run-all --rep 5 --tag m4 \
+# Admin create/read (imposter creation + overlap analysis), median of 9 rounds
+python3 scripts/bench_admin.py --run-all --rep 9 --tag m4 \
     --rift-bin ../../target/release/rift-http-proxy \
     --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
 cat results/ADMIN_BENCHMARK_REPORT_m4.md

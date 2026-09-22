@@ -347,6 +347,17 @@ record.
 
 ### Changed
 
+- **The published admin create/read benchmark is re-measured, and its rows are now generated**
+  (#1208). The table in `tests/benchmark/README.md` was transcribed by hand from a run report,
+  which is how a header rewrite once re-dated figures it had not re-measured and sent a "~2x
+  regression" investigation (#1157) off a wrong baseline. `bench_admin.py` now emits a
+  `## README rows` section in the README's own format whenever a run has Mountebank and exactly
+  one Rift arm, so the table is pasted rather than copied by eye; it is omitted for a Rift-only
+  A/B, where there is no single build the row would speak for. The figures are republished from a
+  `--rep 9` run on a quiet host after #1206 and #1209, with a caption that says which column is
+  deterministic: Rift now creates 1,000 overlapping stubs in 8.2 ms against Mountebank's 66.2 ms
+  and grows RSS by 9.3 MB against 66.9 MB.
+
 - **Per-imposter memory: a stub's response is 248 bytes, down from 720** (#1206, #1209). Four
   rarely-written `_rift` payloads were stored inline, and because an enum is as large as its largest
   variant, every response paid for them — including the plain `is` responses that never carry one.
