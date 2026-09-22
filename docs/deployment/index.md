@@ -187,7 +187,7 @@ No setting is required; every one has a default.
 | `RIFT_REQUIRE_ADMIN_AUTH` | Refuse to start with a keyless, non-loopback admin API | `false` |
 | `MB_ALLOW_INJECTION` | Enable JavaScript injection and scripts | `false` |
 | `MB_LOGLEVEL` | Log level (`trace`/`debug`/`info`/`warn`/`error`) | `info` |
-| `RUST_LOG` | Full `tracing` filter; overrides `MB_LOGLEVEL` when set | unset |
+| `RUST_LOG` | Full `tracing` filter; overrides `MB_LOGLEVEL` when set. A value that does not parse is refused at startup | unset |
 | `RIFT_METRICS_PORT` | Metrics port | `9090` |
 | `RIFT_UPSTREAM_CA_FILE` | PEM CA file trusted for outbound TLS — proxy stubs and `--configfile` URLs. Appended to the image's trust store | |
 | `RIFT_UPSTREAM_TLS_SKIP_VERIFY` | Skip outbound certificate verification (development only) | `false` |
@@ -228,8 +228,10 @@ curl http://localhost:2525/health
 ```
 
 In a container, `rift healthcheck` makes the same probe without needing `curl`. With `--api-key`
-set, admin paths (this one included) answer `401` without the key; probe the metrics endpoint
-instead.
+set, admin paths (this one included) answer `401` without the key; `rift healthcheck` presents the
+key the process holds from `MB_APIKEY` (or an rcfile `apiKey`), so it stays healthy on a keyed
+server — see [Docker]({{ site.baseurl }}/deployment/docker/) and
+[Kubernetes]({{ site.baseurl }}/deployment/kubernetes/) for how to pass the key to the probe.
 
 ### Metrics Endpoint
 
@@ -254,3 +256,6 @@ readinessProbe:
   initialDelaySeconds: 5
   periodSeconds: 5
 ```
+
+With `--api-key` / `MB_APIKEY` set, an `httpGet` probe gets `401`; use an `exec` probe running
+`rift healthcheck` instead (see [Kubernetes]({{ site.baseurl }}/deployment/kubernetes/#probes-and---api-key)).

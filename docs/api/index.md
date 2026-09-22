@@ -611,7 +611,7 @@ data: {"engineVersion":"X.Y.Z","seq":42,"types":["requests","lifecycle"],"port":
 
 event: request
 id: 43
-data: {"port":3000,"flowId":"tenant-a","index":12,"request":{ …RecordedRequest, identical to savedRequests… }}
+data: {"port":3000,"flowId":"tenant-a","index":12,"request":{ …RecordedRequest, as recorded… }}
 
 event: imposter
 id: 44
@@ -625,6 +625,9 @@ data: {"missed":7}
 
 - **Request events require `recordRequests: true`** — the stream is a tail *of recorded requests*,
   exactly like `savedRequests`, not a tap of all traffic.
+- A request event is pushed **when the request is recorded**, before it is matched or answered, so
+  its `request` never carries `matchOutcome`, `status` or `latencyMs`. Fetch the entry from
+  `GET /savedRequests?since=<index − 1>` when you need them.
 - The `id:` is a monotonic sequence number spanning **both** event families. **v1 does not replay:**
   on reconnect, a gap in `id:` (or a `lagged` event, emitted when a slow consumer falls behind the
   bounded buffer) means "reconcile via `GET /savedRequests`". The stream is lossy-but-loud by

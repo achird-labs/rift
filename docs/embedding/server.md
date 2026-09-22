@@ -17,6 +17,10 @@ The server composition lives in the `rift_http_proxy::server` module (`Cli`, `Co
 `rift-mock-core` modules plus `TcpFaultKind`, `tcp_fault_carrier`, `default_flow_store_backends` and
 `install_default_crypto_provider`.
 
+`Cli`'s `Debug` output redacts its credentials: `--api-key`, `--intercept-auth` and
+`--intercept-ca-key-pem` render as `"<redacted>"` when set (issue #1166), so a host that flattens
+`Cli` into its own derived-`Debug` parser does not leak them into a log line.
+
 ---
 
 ## `ServerBuilder`

@@ -79,7 +79,7 @@ taken literally; there are no escape sequences. Filters chain left to right.
 |:---------|:-------|
 | `request.method` | The request method. |
 | `request.path` | The request path. |
-| `request.query.<name>` | A query parameter. |
+| `request.query.<name>` | A query parameter. A key repeated in the URL renders comma-joined, in order (`?color=red&color=green` gives `red,green`), the value a `query` predicate matches. |
 | `request.header '<Name>'` | A request header, matched case-insensitively. For a repeated header, the first value. |
 | `request.json '<path>'` | A value from the JSON request body. The path starts with `$` and uses `.key` and `[index]` segments only (`$.items[0].id`). Objects and arrays render as JSON. |
 | `now [offset='±N<unit>'] [format='<strftime>']` | The current UTC time. `offset` units are `s`, `m`, `h`, `d`; the default format is RFC 3339. |
@@ -121,6 +121,10 @@ taken literally; there are no escape sequences. Filters chain left to right.
 - The `{% raw %}{{ }}{% endraw %}` pass runs on the body and headers as written in the config, **before** `${request.*}`
   substitution. Text that arrives through `${request.*}` is therefore never evaluated, so a client
   cannot inject a template.
+- The reverse holds too (#1203): what a `{% raw %}{{ }}{% endraw %}` function renders is never read as a
+  `${request.*}`, `copy` or `lookup` token. A `{% raw %}{{ request.query.q }}{% endraw %}` whose value is
+  `${request.headers.authorization}` is served as that literal text, not the header. See
+  [Substituted text is never re-scanned]({{ site.baseurl }}/mountebank/behaviors/#substituted-text-is-never-re-scanned).
 - A header value is repaired per substitution: ASCII control characters other than tab (CR, LF,
   NUL, DEL, ...) are removed from what a token substituted, and a `rift::template` warning names
   the stub (`port`, `stub`, `stub_id`) and the removed characters. Non-ASCII text is kept. A control character the author wrote into the header literally still fails the

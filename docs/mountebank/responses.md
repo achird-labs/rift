@@ -74,8 +74,13 @@ Break the connection instead of answering, as Mountebank's `fault` response does
 
 ### Where behaviors and `_rift` apply
 
-`_behaviors`/`behaviors` and a response-level `_rift` block are read on an `is` response (and the
-flat form below). On a `proxy`, `inject` or `fault` response they are ignored.
+`_behaviors`/`behaviors` run on an `is` response (and the flat form below, and a response that is
+only a behaviors block, served as an empty `is`), on an `inject` response and on a `proxy`
+response; `repeat` applies to every response type — see
+[Behaviors]({{ site.baseurl }}/mountebank/behaviors/). A response-level `_rift` block is read on an
+`is` response only. On a `proxy`, `inject` or `fault` response it is kept and returned by
+`GET /imposters/:port`, but not acted on, and is reported as `config_key_ignored` in
+`_rift.warnings` and by `rift-lint` `W017`.
 
 ---
 
@@ -176,7 +181,10 @@ it must be exact.
 ```
 
 The `body` is standard base64 (with padding); `_mode: "binary"` tells Rift to decode it before
-serving. Omit `_mode` (or set `"text"`) for a normal text/JSON body.
+serving. Omit `_mode` (or set `"text"`) for a normal text/JSON body. A body that does not decode
+(or is not a string) is served as its raw text with `x-rift-binary-error: true`, or as a `500` under
+`strictBehaviors` — on an `is` response and a `defaultResponse` alike — and `rift-lint` reports it
+as `W015`.
 
 ---
 
@@ -540,6 +548,11 @@ so both take effect when the recorded stubs are replayed. See
 
 Generate dynamic responses using JavaScript. An `inject` response requires the server to be started
 with `--allowInjection`; without it the imposter is refused.
+
+Creating the imposter (or adding the stub) only parses the script, never runs it: a syntax error is
+refused with a `400` (`Syntax error: …`), while a script that parses but throws when it is called
+is accepted and fails per request. Before 0.18.0 the admin API ran the script at creation, so a
+top-level expression that never finished hung the request.
 
 ```json
 {

@@ -9,8 +9,8 @@ configuration files (JSON or YAML) before the server loads them.
 - **EJS rendering** with the same preprocessor the server uses, so a templated config is linted as it will load
 - **Header validation** - values must be strings; duplicate header names are reported
 - **Predicate validation** - JSONPath selectors, regex patterns, operators
-- **JavaScript validation** - syntax checking for wait/decorate behaviors
-- **Response validation** - status codes, proxy URLs, required fields, behaviors as the engine merges them
+- **JavaScript validation** - syntax checking for `wait`/`decorate` behaviors and JavaScript `_rift.script`s (on by default)
+- **Response validation** - status codes, proxy URLs, required fields, behaviors as the engine runs them
 - **Number fidelity** - warns when a JSON number literal would not be served as written
 - **Auto-fix** capability for common issues (refused when the rewrite would lose information)
 
@@ -50,8 +50,10 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rift-lint = { path = "../rift-lint", default-features = false }
+rift-lint = { path = "../rift-lint", default-features = false, features = ["javascript"] }
 ```
+
+Dropping `javascript` leaves JavaScript un-checked (see [Feature Flags](#feature-flags)).
 
 ## CLI Usage
 
@@ -107,8 +109,9 @@ if result.has_errors() {
 let json = r#"{"port": 4545, "protocol": "http", "stubs": []}"#;
 let result = lint_json(json, "inline", &LintOptions::default());
 
-// Lint a YAML string, or every imposter file in a directory
-let result = lint_yaml("port: 4545\nprotocol: http\n", "inline.yaml", &LintOptions::default());
+// Lint a YAML string (the root must be a sequence of imposters, else E046),
+// or every imposter file in a directory
+let result = lint_yaml("- port: 4545\n  protocol: http\n", "inline.yaml", &LintOptions::default());
 let result = lint_directory(Path::new("imposters/"), &LintOptions::default());
 
 // Lint already-parsed JSON
@@ -127,15 +130,19 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | E003 | Missing required field |
 | E004 | Invalid protocol |
 | E005 | Port out of range, or `0` (auto-assigned by the engine; a config file must pin its ports) |
-| E006-E048 | Structural errors in predicates, responses, behaviors, scripts and headers |
+| E006-E048 | Structural errors in predicates, responses, behaviors, scripts and headers (`E012` never assigned; `E042` retired, now `W014`) |
 | E049 | The engine would refuse to preprocess the file (unsupported EJS tag, unreadable include) |
+| E050 | A config file's `intercept` sets `returnCaKey: true` |
+| E051 | A `copy`, `lookup`, `decorate` or `shellTransform` value the engine cannot read |
 
 ### Warnings
 
 | Code | Description |
 |------|-------------|
 | W001 | Privileged port |
-| W002-W013 | Potential issues, including lossy number literals (W012) and unset EJS env vars (W013) |
+| W002-W016 | Potential issues, including lossy number literals (W012), unset EJS env vars (W013) and state used without `_rift.flowState` (W014) |
+| W017 | A key the engine accepts but ignores (`_rift.metrics`, `_rift.proxy`, `recordMatches: true`, ...) |
+| W018 | A `behaviors` array element that sets several behaviors, which run in a fixed order |
 
 ### Info
 
@@ -144,6 +151,8 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | I001 | Mountebank slice notation in JSONPath |
 | I002 | Proxy targets localhost |
 | I003 | Response uses the Rift `_rift` extension |
+| I004 | This build omits the `javascript` feature, so JavaScript was not syntax-checked |
+| I005 | A carrier field (`_rift.dataset`, `_rift.sequencing`) the standalone engine does not read |
 
 The full table, with an example for every code, is in
 [Configuration Linting](https://achird-labs.github.io/rift/features/linting/).

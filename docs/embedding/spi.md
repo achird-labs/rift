@@ -279,7 +279,7 @@ pub enum ImposterEvent {
     Replaced(u16),     // port replaced (imposter-level change)
     StubsChanged(u16), // in-place stub patch
     Deleted(u16),      // port deleted
-    AllDeleted,        // every imposter removed
+    AllDeleted,        // every imposter removed (a partial delete-all emits Deleted per port instead)
 }
 
 pub struct EventContext {
@@ -323,7 +323,10 @@ later attribution field is not another break — construct one in your own tests
 Three bounds worth knowing:
 
 - `AllDeleted` carries no port, so a fleet-wide delete records the actor but no per-resource
-  target. That is the shape, not a defect.
+  target. That is the shape, not a defect. It is emitted only when every imposter went: if one
+  could not be deleted (its `--datadir` file could not be removed), each port that was deleted gets
+  a `Deleted` instead, and `ImposterManager::delete_all` returns a `DeleteAllReport` listing the
+  `deleted` configs and the `failed` ports (#1124).
 - The principal travels as a `tokio` task-local scoped to the admin request. A mutation you drive
   from a `tokio::spawn`ed task of your own does not inherit that scope and will report `None`.
 - **Only this listener is attributed.** The admin SSE bus (`GET /events`) publishes the same

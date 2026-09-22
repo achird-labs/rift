@@ -153,7 +153,7 @@ Configure Rift behavior via environment variables:
 | `MB_LOGLEVEL` | Log level: `trace`, `debug`, `info`, `warn`, `error` | `info` |
 | `MB_APIKEY` | Admin API key | |
 | `RIFT_METRICS_PORT` | Prometheus metrics port | `9090` |
-| `RUST_LOG` | Full `tracing` filter; overrides `MB_LOGLEVEL` when set | unset |
+| `RUST_LOG` | Full `tracing` filter; overrides `MB_LOGLEVEL` when set. A value that does not parse is refused at startup | unset |
 
 This is the common subset; the full list — TLS, intercept, runtime and socket-tuning variables —
 is in the [CLI Reference]({{ site.baseurl }}/configuration/cli/#environment-variables).
