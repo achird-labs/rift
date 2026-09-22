@@ -347,16 +347,25 @@ record.
 
 ### Changed
 
-- **Per-imposter memory: a stub's response is 448 bytes again, down from 720** (#1206). Two
+- **Per-imposter memory: a stub's response is 248 bytes, down from 720** (#1206, #1209). Four
   rarely-written `_rift` payloads were stored inline, and because an enum is as large as its largest
   variant, every response paid for them — including the plain `is` responses that never carry one.
   The admin create path materializes each stub several times over, so this measured as +10.7 MB of
-  RSS per 4,000 stubs and ~20% on create latency since July; boxing the two payloads gives most of
-  it back. The JSON is unchanged in both directions. **Library API:** `RiftResponseExtension.dataset`
-  is now `Option<Box<DatasetBinding>>` and `StubResponse::{Proxy,Inject,Fault}`'s `ignored_rift` is
-  `Option<Box<RiftResponseExtension>>`, so an embedder that *constructs* one writes
-  `Some(Box::new(binding))`; reads are unaffected (`Box` derefs) and patterns that match `Some(_)`
-  or use `..` need no change.
+  RSS per 4,000 stubs and ~20% on create latency since July; boxing them gives most of it back.
+  #1206 boxed `_rift.dataset` and the blocks the proxy/inject/fault responses keep only to report
+  (720 → 448 bytes); #1209 boxed the two that remained — the `is` response's own `_rift` and the
+  script-only response's — which is what had been sizing the enum since (448 → 248 bytes, measured
+  at −1.8 MB of RSS per 1,000 stubs on both the overlapping and the distinct shape, medians of 9
+  interleaved rounds). Every `_rift` payload a response can carry is now behind a pointer, so the
+  next field added to one costs its own size and nothing per response. The serving fast path never
+  reads the block, and create latency and `GET /imposters` are unchanged. The JSON is unchanged in
+  both directions. **Library API:** `RiftResponseExtension.dataset` is now
+  `Option<Box<DatasetBinding>>`, `StubResponse::{Proxy,Inject,Fault}`'s `ignored_rift` is
+  `Option<Box<RiftResponseExtension>>`, `StubResponse::Is`'s `rift` is
+  `Option<Box<RiftResponseExtension>>` and `StubResponse::RiftScript`'s `rift` is
+  `Box<RiftResponseExtension>`, so an embedder that *constructs* one writes `Some(Box::new(ext))`
+  or `Box::new(ext)`; reads are unaffected (`Box` derefs) and patterns that match `Some(_)` or use
+  `..` need no change.
 
 - **A `copy`, `lookup` or `shellTransform` holding several items is written one element per item**
   (#1199): `GET /imposters`, `rift save` and `--datadir` now write `[{"copy": a}, {"copy": b}]`

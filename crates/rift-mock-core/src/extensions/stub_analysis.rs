@@ -971,7 +971,7 @@ mod tests {
             route_pattern: None,
             predicates: vec![],
             responses: vec![StubResponse::RiftScript {
-                rift,
+                rift: Box::new(rift),
                 ignored_behaviors: None,
             }],
             scenario_name: None,
@@ -1006,7 +1006,7 @@ mod tests {
             route_pattern: None,
             predicates: vec![],
             responses: vec![StubResponse::RiftScript {
-                rift,
+                rift: Box::new(rift),
                 ignored_behaviors: None,
             }],
             scenario_name: None,
@@ -1043,7 +1043,7 @@ mod tests {
                 mode: Default::default(),
             },
             None,
-            Some(rift),
+            Some(Box::new(rift)),
         );
         let stub = Stub {
             id: None,

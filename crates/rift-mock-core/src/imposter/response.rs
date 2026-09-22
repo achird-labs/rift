@@ -179,7 +179,7 @@ pub fn execute_stub_response_with_rift(
                 // Borrowed, not cloned (issue #561): the lifetime elides from `response`, and
                 // every caller only reads this on the hot path — an owned copy is materialized
                 // only where a caller genuinely needs one (see `execute_stub_with_rift`).
-                rift.as_ref(),
+                rift.as_deref(),
                 mode,
                 false,
             ))
@@ -1397,7 +1397,7 @@ mod prepared_response_tests {
         let resp = StubResponse::new_is(
             is_response(200, &[], Some(json!("x"))),
             None,
-            Some(templated),
+            Some(Box::new(templated)),
         );
         assert!(
             prepared_of(&resp).is_none(),
@@ -1409,8 +1409,11 @@ mod prepared_response_tests {
             fault: Some(crate::imposter::types::RiftFaultConfig::default()),
             ..Default::default()
         };
-        let resp =
-            StubResponse::new_is(is_response(200, &[], Some(json!("x"))), None, Some(faulted));
+        let resp = StubResponse::new_is(
+            is_response(200, &[], Some(json!("x"))),
+            None,
+            Some(Box::new(faulted)),
+        );
         assert!(
             prepared_of(&resp).is_none(),
             "_rift.fault must not be prepared"
@@ -1424,7 +1427,7 @@ mod prepared_response_tests {
         let resp = StubResponse::new_is(
             is_response(200, &[], Some(json!("x"))),
             None,
-            Some(scripted),
+            Some(Box::new(scripted)),
         );
         assert!(
             prepared_of(&resp).is_none(),
