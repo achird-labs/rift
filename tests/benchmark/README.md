@@ -566,7 +566,9 @@ Outputs land in `results/` and are gitignored (machine-specific — regenerate p
 ## Latest results
 
 **M4** measured 2026-09-17 with Rift `master` @ `34a42cb` (pre-release rerun); **EPYC**
-measured 2026-07-20 with Rift `master` @ `924cf73`. Mountebank `2.9.1`, `oha` at 50 keep-alive
+measured 2026-07-20 with Rift `master` @ `924cf73`. This provenance covers the **serving** tables
+below; **Admin create/read** was re-measured separately on 2026-09-22 @ `55dcbf8` and carries its
+own caption. Mountebank `2.9.1`, `oha` at 50 keep-alive
 connections, 20s/scenario after a 3s warmup, native processes (no Docker), each engine run alone.
 Compare columns within a host only — the two hosts are different dates and revisions. Fixture: 14 imposters, 1,512 stubs. Every figure
 is the **median of 3 repetitions** — reproduce with `--rep 1|2|3` then
@@ -642,17 +644,25 @@ stub-overlap analysis, a Rift extension Mountebank does not perform.
 
 | Shape | N | Create MB → Rift (ms) | GET MB → Rift (ms) | RSS Δ MB → Rift (MB) | Rift warnings |
 |---|--:|---|---|---|--:|
-| identical | 100 | 17.2 → 6.3 | 1.4 → 1.1 | 0.8 → 3.2 | 99 |
-| identical | 1000 | 77.3 → 11.0 | 1.8 → 2.0 | 71.7 → 11.7 | 101 |
-| distinct | 100 | 18.0 → 4.6 | 1.2 → 0.6 | 3.7 → 3.2 | 0 |
-| distinct | 1000 | 80.4 → 10.1 | 1.8 → 1.5 | 78.9 → 12.0 | 0 |
+| identical | 100 | 13.0 → 4.5 | 1.1 → 0.9 | 0.7 → 3.0 | 99 |
+| identical | 1000 | 66.2 → 8.2 | 1.9 → 1.8 | 66.9 → 9.3 | 101 |
+| distinct | 100 | 14.0 → 3.6 | 1.1 → 0.5 | 0.4 → 3.0 | 0 |
+| distinct | 1000 | 66.9 → 7.5 | 2.0 → 1.4 | 67.9 → 9.6 | 0 |
 
-M4, 2026-09-17, median of 4 runs taken before the harness had repetition support, one sample
-each. A single create sample is too noisy to compare across sessions: one binary, one shape and
-one session spans about 3–8 ms. A same-session A/B during #1157's triage found no 2x. The July
-build and this one both create 1,000 stubs in about 7–8 ms (median of 23 interleaved rounds),
-and the table's ~10–11 ms is host noise. The admin table is due to be re-measured with `--rep` on
-a quiet host.
+M4, 2026-09-22, Rift `master` @ `55dcbf8`, Mountebank `2.9.1`, `bench_admin.py --run-all --rep 9`.
+Every figure is the median of 9 rounds with the two engines interleaved within each round and
+their order rotated, after a discarded warm-up. Create is the noisy column — it spans 20–62%
+peak-to-peak even on a quiet host, so it does not support a cross-session comparison; RSS Δ is
+Rift's RSS Δ is the deterministic one — 1–2% spread here — and is what to compare across
+runs; Mountebank's stays around 26% even at 1,000 stubs. Rift's
+RSS at 1,000 stubs is down from the 11.7 MB this table used to publish, because #1206 and #1209
+boxed the `_rift` payloads every stub response carried inline. Take the size of that win from
+their own interleaved A/Bs, −1.6 MB and −1.8 MB at this size, not from the difference between
+these two published rows: those were measured in different sessions, and the drift between them
+is the same effect that makes the create column unusable across runs. Mountebank's RSS at N=100 is a fraction of a
+megabyte, so its spread there is large on a tiny base and the column is not meaningful at that
+size. These rows are emitted by `bench_admin.py` under `## README rows` — paste them rather than
+transcribing, and add the host and sha by hand.
 
 ### Key findings
 
@@ -673,7 +683,7 @@ a quiet host.
    scenario; Mountebank ranges from 3.4ms to 1.7 *seconds* depending on stub count,
    position, and predicate type.
 5. **Admin plane / overlap analysis.** Creating 1,000 fully-overlapping stubs, Rift
-   creates in **11.0ms vs Mountebank's 77.3ms** and grows RSS **+11.7MB vs +71.7MB**, while
+   creates in **8.2ms vs Mountebank's 66.2ms** and grows RSS **+9.3MB vs +66.9MB**, while
    still computing 101 stub-overlap warnings Mountebank never produces.
 
 ## Related

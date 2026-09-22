@@ -39,7 +39,7 @@ Usage:
   python3 bench_admin.py --run-all --rep 9 --engines rift \
       --rift-bin old=/tmp/rift-old --rift-bin new=../../../target/release/rift-http-proxy
 """
-import argparse, json, os, shutil, signal, subprocess, sys, time, urllib.request, urllib.error
+import argparse, json, math, os, shutil, signal, subprocess, sys, time, urllib.request, urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bench_direct import _median, _spread_pct  # noqa: E402
@@ -346,7 +346,64 @@ def render_report(stats, arm_labels, versions, rep, date):
                     f"{st['rss_delta_med_mb']:.2f} | {st['rss_delta_spread_pct']:.0f}% | "
                     f"{st['body_mb']:.3f} | {st['warnings']:g} |")
         lines.append("")
+    lines += readme_rows(stats, arm_labels, versions, rep, date)
     return "\n".join(lines)
+
+
+def readme_rows(stats, arm_labels, versions, rep, date):
+    """The four rows `tests/benchmark/README.md`'s admin table publishes, ready to paste.
+
+    Issue #1208: that table used to be transcribed by hand from this report, so a later header
+    rewrite re-dated figures it had not re-measured and a "~2x regression" investigation (#1157)
+    was opened against the wrong baseline. Emitting the rows in the README's own format removes
+    the transcription step.
+
+    Returns `[]` rather than a partial section whenever the run cannot speak for one Rift build:
+    with no `mb` arm there is nothing to compare against, and with two Rift arms there is no
+    single column the row is about.
+    """
+    rift_labels = [label for label in arm_labels if label != "mb"]
+    if "mb" not in arm_labels or len(rift_labels) != 1:
+        return []
+    rift = rift_labels[0]
+
+    lines = ["## README rows", "",
+             "| Shape | N | Create MB → Rift (ms) | GET MB → Rift (ms) | "
+             "RSS Δ MB → Rift (MB) | Rift warnings |",
+             "|---|--:|---|---|---|--:|"]
+    for shape, _ in SHAPES:
+        # The README's column says `identical`; this harness calls the shape `identical/overlap`.
+        label = shape.split("/")[0]
+        for n in SIZES:
+            mb_st, rift_st = stats.get(("mb", shape, n)), stats.get((rift, shape, n))
+            if mb_st is None or rift_st is None:
+                lines.append(f"| {label} | {n} | *not measured* | *not measured* | "
+                             "*not measured* | — |")
+                continue
+            cells = (mb_st["create_med_ms"], rift_st["create_med_ms"],
+                     mb_st["get_med_ms"], rift_st["get_med_ms"],
+                     mb_st["rss_delta_med_mb"], rift_st["rss_delta_med_mb"])
+            if not all(math.isfinite(v) for v in cells):
+                # `rss_mb` yields NaN when `ps` output will not parse, and `_median` picks by sort
+                # index, so a single bad read usually disappears into an ordinary-looking median
+                # instead of poisoning it. This section prints medians only — the spread column
+                # that would otherwise betray it is exactly what the paste format drops — so a row
+                # that cannot be vouched for says so rather than publishing a plausible number.
+                lines.append(f"| {label} | {n} | *measurement error — see the raw samples* | | | |")
+                continue
+            lines.append(
+                f"| {label} | {n} | "
+                f"{mb_st['create_med_ms']:.1f} → {rift_st['create_med_ms']:.1f} | "
+                f"{mb_st['get_med_ms']:.1f} → {rift_st['get_med_ms']:.1f} | "
+                f"{mb_st['rss_delta_med_mb']:.1f} → {rift_st['rss_delta_med_mb']:.1f} | "
+                f"{rift_st['warnings']:g} |")
+    lines += ["",
+              f"Provenance for the caption: {date}, `bench_admin.py --run-all --rep {rep}`, "
+              f"medians of {rep} interleaved rounds after a discarded warm-up, Mountebank "
+              f"{versions.get('mb', '?')}, {versions.get(rift, '?')}. Add the host and the "
+              "commit sha by hand.",
+              ""]
+    return lines
 
 
 def write_report(stats, arm_labels, versions, rep, out):
