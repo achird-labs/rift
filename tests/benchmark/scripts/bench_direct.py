@@ -7,8 +7,8 @@ load an identical set of imposters, warm up, then drive a curated set of
 scenarios with `oha`, capturing RPS and latency percentiles from oha's JSON.
 
 Fairness / correctness safeguards:
-  * engines run sequentially (never contend for CPU on a single machine),
-  * disjoint ports per engine (rift offset 0, mb offset +100),
+  * engines are measured one at a time (never contend for CPU on a single machine),
+  * disjoint ports per engine (rift offset 0, mb offset +100, further Rift arms +200, +400, ...),
   * each engine launched in its own process group and killed by group + lsof,
   * the engine's ports are asserted free before launch and after teardown,
   * every scenario asserts the HTTP status distribution (a mis-served stub
@@ -17,10 +17,23 @@ Fairness / correctness safeguards:
 Run everything (launches + stops both engines, writes the report):
     python3 bench_direct.py --run-all
 
+Interleaved rounds (issue #1211). Two sequential whole-suite runs of two builds do not compare the
+builds: over one ~2.5 minute pass the host drifts by ~8%, so whichever build ran first read faster
+and the sign of the difference followed the run order. `--rounds N` launches every arm once, runs
+a discarded warm-up round, then N measured rounds in which each point (scenario x connections) is
+measured on every arm back to back, with the leading arm rotated per round - the same schedule
+`bench_admin.py` uses. `--rift-bin` is repeatable as `label=path`, so an A/B of two builds is one
+command and lands in `DIRECT_AB_REPORT<suffix>.md` (per-point medians, spread, and each arm's delta
+against the first). Each round is also written as a `_repK` CSV, so `--aggregate-reps` and
+`--aggregate-comparison` read a `--rounds` run exactly as they read a `--rep` loop.
+
+    python3 bench_direct.py --run-all --engines rift --rounds 5 --duration 8s \
+        --rift-bin old=/tmp/rift-old --rift-bin new=../../../target/release/rift-http-proxy
+
 Must be run OUTSIDE the CLI sandbox (via the sidecar) because `oha` needs
 macOS keychain access to initialise TLS even for plain-HTTP targets.
 """
-import argparse, csv, glob, json, re, subprocess, sys, threading, time, urllib.request, urllib.error, os, signal, shutil
+import argparse, csv, glob, json, math, re, subprocess, sys, threading, time, urllib.request, urllib.error, os, signal, shutil
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "..", "results")
 
@@ -707,37 +720,71 @@ def bench(engine, admin_port, offset, duration, warmup, conn_list, rate=None, re
         sampler.start()
     try:
         for conns in conn_list:
-            for name, base_port, method, path, body, headers in scenarios:
-                url = f"http://localhost:{base_port + offset}{path}"
-                verify_body(engine, name, method, url, body, headers)   # prove the stub matched (not fall-through)
-                run_oha(url, method, body, headers, warmup, conns,
-                        prefix=oha_prefix)                             # warmup (discarded)
-                t0 = time.time()
-                m = metric(run_oha(url, method, body, headers, duration, conns, rate,
-                                   prefix=oha_prefix))
-                if sampler is not None:
-                    m["rss_mb_peak"], m["rss_mb_end"] = sampler.window(t0)
-                total = sum(m["codes"].values())
-                good = all(c.startswith("2") for c in m["codes"])
-                status = "ok" if good and total > 0 else f"BAD codes={m['codes']}"
-                print(f"  {name:20s} c={conns:<4d} {m['rps']:>10.1f} rps  "
-                      f"p50={m['p50_ms']}ms p99={m['p99_ms']}ms p999={m['p999_ms']}ms  {status}")
-                if not (good and total > 0):
-                    raise SystemExit(f"{engine}/{name}: unexpected status distribution {m['codes']} — aborting")
-                if name == RECORDING_SCENARIO[0]:
-                    assert_journal_filled(engine, admin, offset)
-                rows.append((name, conns, mode, m))
+            for scenario in scenarios:
+                m = measure_point(engine, admin, offset, scenario, conns, duration, warmup,
+                                  rate=rate, sampler=sampler, oha_prefix=oha_prefix)
+                rows.append((scenario[0], conns, mode, m))
     finally:
         if sampler is not None:
             sampler.stop()
     csv_path = write_results_csv(engine, csv_suffix, rows)
     print(f"[{engine}] wrote {csv_path}")
 
+def measure_point(engine, admin, offset, scenario, conns, duration, warmup, rate=None,
+                  sampler=None, oha_prefix=(), measure=True, tag=""):
+    """Verify the stub, run the discarded warmup, then (unless `measure` is False) take one
+    measurement and assert its status distribution. Returns the metric dict, or None for a
+    warm-up-only visit."""
+    name, base_port, method, path, body, headers = scenario
+    url = f"http://localhost:{base_port + offset}{path}"
+    verify_body(engine, name, method, url, body, headers)   # prove the stub matched (not fall-through)
+    run_oha(url, method, body, headers, warmup, conns, prefix=oha_prefix)   # warmup (discarded)
+    if not measure:
+        print(f"  {tag}{name:20s} c={conns:<4d} warm-up")
+        return None
+    t0 = time.time()
+    m = metric(run_oha(url, method, body, headers, duration, conns, rate, prefix=oha_prefix))
+    if sampler is not None:
+        m["rss_mb_peak"], m["rss_mb_end"] = sampler.window(t0)
+    total = sum(m["codes"].values())
+    good = all(c.startswith("2") for c in m["codes"])
+    status = "ok" if good and total > 0 else f"BAD codes={m['codes']}"
+    print(f"  {tag}{name:20s} c={conns:<4d} {m['rps']:>10.1f} rps  "
+          f"p50={m['p50_ms']}ms p99={m['p99_ms']}ms p999={m['p999_ms']}ms  {status}")
+    if not (good and total > 0):
+        raise SystemExit(f"{engine}/{name}: unexpected status distribution {m['codes']} — aborting")
+    if name == RECORDING_SCENARIO[0]:
+        assert_journal_filled(engine, admin, offset)
+    return m
+
 # ---- engine orchestration ----
 
+MB_OFFSET = 100
+METRICS_PORT = 9090          # rift-http-proxy's --metrics-port default
+RIFT_ARM_STEP = 200          # Rift arms sit at 0, 200, 400, ... so none lands on MB_OFFSET
+
+def rift_arm_offsets(n):
+    return [i * RIFT_ARM_STEP for i in range(n)]
+
 def engine_ports(offset):
+    # Every Rift process binds a metrics listener. Rift survives losing that bind (it logs and
+    # carries on), so an arm sharing another's metrics port would run degraded without failing.
+    metrics = [] if offset == MB_OFFSET else [METRICS_PORT + offset]
     return ([admin_port_for(offset)] + [p + offset for p, _, _ in IMPOSTERS]
-            + [RECORDING_PORT + offset] + ([9090] if offset == 0 else []))
+            + [RECORDING_PORT + offset] + metrics)
+
+def rift_launch_cmd(rift_bin, offset, runtime=None, prefix=()):
+    """The Rift engine argv for the arm at `offset`. Offset 0 keeps the argv every earlier run used;
+    other arms move the metrics listener off the default port along with everything else."""
+    cmd = list(prefix) + [rift_bin, "--port", str(admin_port_for(offset)), "--allow-injection",
+                          "--loglevel", "warn"]
+    if offset != 0:
+        cmd += ["--metrics-port", str(METRICS_PORT + offset)]
+    return cmd + runtime_launch_args(runtime)
+
+def mb_launch_cmd(node, mb_bin, prefix=()):
+    return list(prefix) + [node, mb_bin, "start", "--port", str(admin_port_for(MB_OFFSET)),
+                           "--allowInjection", "--loglevel", "warn"]
 
 def admin_port_for(offset):
     return 2525 + offset
@@ -1092,7 +1139,7 @@ def find_rep_files(base_suffix):
             matched.append((int(m.group(1)), p))
     return [p for _, p in sorted(matched)]
 
-def aggregate_comparison_reps(base_suffix, rift_ver, mb_ver, conns):
+def aggregate_comparison_reps(base_suffix, rift_ver, mb_ver, conns, rift_label="rift"):
     """Median-of-reps Rift-vs-Mountebank table, with per-engine spread.
 
     The comparison is the number people quote, so it must not rest on one sample of each engine —
@@ -1100,11 +1147,11 @@ def aggregate_comparison_reps(base_suffix, rift_ver, mb_ver, conns):
     published figure. Requires the same rep count for both engines; a mismatch is an error rather
     than a table silently comparing 3 Rift reps against 1 Mountebank rep."""
     per_engine = {}
-    for engine in ("rift", "mb"):
-        paths = sorted(glob.glob(os.path.join(RESULTS_DIR, f"direct_{engine}{base_suffix}_rep*.csv")))
+    for engine, label in (("rift", rift_label), ("mb", "mb")):
+        paths = sorted(glob.glob(os.path.join(RESULTS_DIR, f"direct_{label}{base_suffix}_rep*.csv")))
         if not paths:
             raise SystemExit(
-                f"no rep files for {engine} matching direct_{engine}{base_suffix}_rep*.csv")
+                f"no rep files for {engine} matching direct_{label}{base_suffix}_rep*.csv")
         reps = []
         for path in paths:
             with open(path) as fh:
@@ -1210,11 +1257,8 @@ def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, r
                                body_field_stubs)
     engine_prefix, oha_prefix = taskset_prefix(engine_cpus), taskset_prefix(gen_cpus)
     full_plan = [
-        ("rift", 0,   engine_prefix
-                      + [rift_bin, "--port", str(admin_port_for(0)), "--allow-injection", "--loglevel", "warn"]
-                      + runtime_launch_args(runtime)),
-        ("mb",   100, engine_prefix
-                      + [node, mb_bin, "start", "--port", str(admin_port_for(100)), "--allowInjection", "--loglevel", "warn"]),
+        ("rift", 0,         rift_launch_cmd(rift_bin, 0, runtime, engine_prefix)),
+        ("mb",   MB_OFFSET, mb_launch_cmd(node, mb_bin, engine_prefix)),
     ]
     plan = [p for p in full_plan if p[0] in engines]
     for engine, offset, cmd in plan:
@@ -1247,6 +1291,326 @@ def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, r
         # engines == ["mb"]: no comparison possible (needs Rift too) and no Rift-only report to write.
         print(f"[report] engines={engines}: benched only Mountebank; no report written "
               f"(the comparison needs both rift and mb)")
+
+# ---- interleaved A/B rounds (issue #1211) ----
+#
+# `parse_rift_bins` and `schedule` are shared with bench_admin.py (it imports them from here), so
+# one parser and one schedule, pinned by one set of tests, govern both harnesses' A/B runs.
+
+def parse_rift_bins(values):
+    """`--rift-bin` values → [(label, path)]. A bare path is labelled `rift`; `label=path` names an
+    arm. Labels must be unique and must not be `mb`, or two arms' samples would merge."""
+    values = values or [DEFAULT_RIFT_BIN]
+    arms = []
+    for v in values:
+        label, sep, path = v.partition("=")
+        if not sep:
+            label, path = "rift", v
+        if not label or not path:
+            raise ValueError(f"--rift-bin {v!r}: expected PATH or LABEL=PATH")
+        arms.append((label, os.path.abspath(os.path.expanduser(path))))
+    labels = [label for label, _ in arms]
+    if len(set(labels)) != len(labels) or "mb" in labels:
+        raise ValueError(f"--rift-bin labels must be unique and not 'mb': {labels}")
+    return arms
+
+def schedule(rounds, points, arms):
+    """Every (round, point, arm) measurement, in the order it runs.
+
+    Round 0 is the warm-up. Within a round each point runs every arm back to back, so the arms of a
+    point are measured close together in time; the arm order rotates by one per round, so no arm is
+    always first after a gap."""
+    order = []
+    for rnd in range(rounds):
+        k = rnd % len(arms)
+        rotated = arms[k:] + arms[:k]
+        for point in points:
+            for arm in rotated:
+                order.append((rnd, point, arm))
+    return order
+
+ARM_LABEL_RX = re.compile(r"[A-Za-z0-9.-]+")
+
+def resolve_arms(rift_bin_values, engines, rounds, rep, allocator, quamina):
+    """`--rift-bin` values → ([(label, path)], needs_build). With no `--rift-bin` the one arm goes
+    through `resolve_rift_bin`, so `--allocator`/`--quamina` still build their own binary. Raises
+    ValueError for a combination `validate_ab_args` refuses."""
+    arms = parse_rift_bins(rift_bin_values) if rift_bin_values else [("rift", None)]
+    validate_ab_args([label for label, _ in arms], engines, rounds, rep, allocator, quamina)
+    if len(arms) > 1:
+        return arms, False
+    rift_bin, needs_build = resolve_rift_bin(arms[0][1], allocator, quamina)
+    return [("rift", rift_bin)], needs_build
+
+def validate_ab_args(labels, engines, rounds, rep, allocator, quamina):
+    """Refuse the arm/round combinations that would produce a comparison nobody should read.
+    Raises ValueError; `labels` are the Rift arms' labels in `--rift-bin` order."""
+    if rounds is not None and rounds < 1:
+        raise ValueError(f"--rounds must be >= 1 (got {rounds})")
+    if rounds is not None and rep is not None:
+        raise ValueError("--rounds writes its own _rep1.._repN artefacts; drop --rep")
+    for label in labels:
+        # `_` is refused because the variant suffix starts with one: arm `a_x` with no suffix and
+        # arm `a` with suffix `_x` would write the same file.
+        if not ARM_LABEL_RX.fullmatch(label):
+            raise ValueError(f"--rift-bin label {label!r}: use letters, digits, '.' or '-'")
+    if len(labels) == 1:
+        if labels[0] != "rift":
+            raise ValueError(
+                f"--rift-bin label {labels[0]!r} names an arm of an A/B, and there is only one "
+                f"Rift build; pass a bare path so the artefacts keep the direct_rift name")
+        return
+    if "rift" not in engines:
+        raise ValueError(f"{len(labels)} --rift-bin arms given, but --engines excludes rift")
+    if rounds is None:
+        raise ValueError(
+            f"{len(labels)} --rift-bin arms need --rounds N: measuring one whole pass per build "
+            f"compares the run order, not the builds (issue #1211)")
+    if allocator or quamina:
+        raise ValueError(
+            "--allocator/--quamina build and label ONE binary; an A/B compares explicit "
+            "--rift-bin binaries. Build the variants first and pass them as arms")
+
+def collect_rounds(labels, points, rounds, measure_fn, mode, rows=None):
+    """Run `schedule(rounds + 1, points, labels)` through `measure_fn(label, point, rnd)` and keep
+    the measured rounds: {label: [rows of round 1, ..., rows of round N]}. A point is
+    `(connections, scenario)`; a row is `(scenario name, connections, mode, metric)`. Round 0 is
+    the warm-up — `measure_fn` is still called for it, and whatever it returns is discarded.
+    Pass `rows` to keep what was measured if `measure_fn` raises part-way."""
+    if rows is None:
+        rows = {}
+    rows.update({label: [[] for _ in range(rounds)] for label in labels})
+    for rnd, (conns, scenario), label in schedule(rounds + 1, points, labels):
+        m = measure_fn(label, (conns, scenario), rnd)
+        if rnd > 0:
+            rows[label][rnd - 1].append((scenario[0], conns, mode, m))
+    return rows
+
+def refuse_stale_reps(labels, csv_suffix, rounds):
+    """Refuse when a rep numbered beyond `rounds` already exists for an arm: every offline
+    aggregate globs `_rep*.csv`, so it would fold that leftover into this run's median with
+    nothing saying so. Needs nothing measured, so `run_rounds` calls it before launching."""
+    existing = os.listdir(RESULTS_DIR) if os.path.isdir(RESULTS_DIR) else []
+    stale = []
+    for label in labels:
+        rx = re.compile(re.escape(f"direct_{label}{csv_suffix}_rep") + r"(\d+)\.csv")
+        stale += [name for name in existing
+                  if (m := rx.fullmatch(name)) and int(m.group(1)) > rounds]
+    if stale:
+        raise SystemExit(
+            f"stale repetition files from a longer earlier run: {', '.join(sorted(stale))}. "
+            f"An aggregate would fold them into this run's median; move them away first.")
+
+def completed_rounds(rows_by_label, n_points):
+    """The leading rounds every arm finished, for saving what a run measured before it failed.
+    Rounds run in order, so the finished ones are a prefix."""
+    done = 0
+    while all(done < len(rounds) and len(rounds[done]) == n_points
+              for rounds in rows_by_label.values()):
+        done += 1
+    return {label: rounds[:done] for label, rounds in rows_by_label.items()}
+
+def write_round_csvs(rows_by_label, csv_suffix):
+    """One `direct_<label><suffix>_repK.csv` per arm and measured round — the files a `--rep` loop
+    would have produced, so the offline aggregators read them unchanged. Refuses stale higher reps
+    (see `refuse_stale_reps`) before writing anything."""
+    for label, rounds in rows_by_label.items():
+        refuse_stale_reps([label], csv_suffix, len(rounds))
+    return [write_results_csv(label, f"{csv_suffix}_rep{k}", rows)
+            for label, rounds in rows_by_label.items()
+            for k, rows in enumerate(rounds, 1)]
+
+def _finite(v):
+    return isinstance(v, (int, float)) and math.isfinite(v)
+
+def render_ab_report(agg_by_label, labels, versions, rounds, duration, warmup, scenarios, date,
+                     rate=None):
+    """The A/B report: per point, each arm's median RPS and spread, and every other arm's delta
+    against the first. `agg_by_label` maps label → `aggregate_reps` output.
+
+    A point an arm did not measure, or whose median is not a finite number, renders as
+    *not measured* and is left out of every delta: `_median` picks by sort index, so one NaN
+    sample can surface as an ordinary-looking median, and a delta computed from it would publish a
+    number nothing measured."""
+    base, others = labels[0], labels[1:]
+    lines = ["# Rift A/B — interleaved serving benchmark", "", f"- **Date:** {date}"]
+    lines += [f"- **{label}:** {versions.get(label, '?')}" for label in labels]
+    load = f"open loop at {rate} req/s" if rate is not None else "closed loop"
+    lines += [
+        f"- **Baseline:** {base}",
+        f"- **Method:** {rounds} measured round{'' if rounds == 1 else 's'} after a discarded warm-up round. Every arm stays "
+        "up for the whole run; each point (scenario × connections) is measured on every arm back "
+        "to back, and the leading arm rotates per round. "
+        f"oha, {load}, {duration} per point after a {warmup} warmup.",
+        "- Figures are medians over the rounds; `spread` is peak-to-peak RPS as a % of the mean. "
+        "Δ is an arm's median against the baseline's. The summary is the median Δ across points "
+        "and its range; a spread wider than the Δ means the rounds do not resolve it.",
+        ""]
+
+    def rps_of(label, key):
+        cell = agg_by_label.get(label, {}).get(key)
+        return cell["rps"] if cell is not None and _finite(cell["rps"]) else None
+
+    cols = sorted({(c, m) for agg in agg_by_label.values() for (_, c, m) in agg})
+    deltas = {label: [] for label in others}
+    total = 0
+    for conns, mode in cols:
+        header = ["Scenario"]
+        for label in labels:
+            header += [f"{label} rps", f"{label} spread"]
+        header += [f"Δ {label} vs {base}" for label in others]
+        header += [f"{label} p99 (ms)" for label in labels]
+        lines += [f"## c={conns} {mode}", "",
+                  "| " + " | ".join(header) + " |",
+                  "|---" + "|--:" * (len(header) - 1) + "|"]
+        for name in scenarios:
+            key = (name, conns, mode)
+            total += 1
+            cells, p99s = [name], []
+            for label in labels:
+                rps = rps_of(label, key)
+                if rps is None:
+                    cells += ["*not measured*", "—"]
+                    p99s.append("—")
+                    continue
+                cell = agg_by_label[label][key]
+                spread = cell.get("rps_spread_pct")
+                cells += [f"{rps:,.0f}", f"{spread:.1f}%" if _finite(spread) else "n/a"]
+                p99 = cell.get("p99_ms")
+                p99s.append(f"{float(p99):g}" if p99 not in (None, "") else "n/a")
+            base_rps = rps_of(base, key)
+            for label in others:
+                rps = rps_of(label, key)
+                if base_rps and rps is not None:
+                    d = (rps / base_rps - 1) * 100
+                    deltas[label].append(d)
+                    cells.append(f"{d:+.1f}%")
+                else:
+                    cells.append("—")
+            lines.append("| " + " | ".join(cells + p99s) + " |")
+        lines.append("")
+
+    lines += ["## Summary", ""]
+    for label in others:
+        ds = deltas[label]
+        if not ds:
+            lines.append(f"- **{label} vs {base}:** no point was measured on both arms")
+            continue
+        lines.append(f"- **{label} vs {base}:** median Δ {_median(ds):+.1f}% over {len(ds)} of "
+                     f"{total} points (range {min(ds):+.1f}% .. {max(ds):+.1f}%)")
+    lines.append("")
+    return "\n".join(lines)
+
+def _load_rounds(label, csv_suffix, rounds):
+    reps = []
+    for k in range(1, rounds + 1):
+        with open(results_csv_path(label, f"{csv_suffix}_rep{k}")) as f:
+            reps.append(load_rift_csv(f))
+    return reps
+
+def write_round_reports(rift_labels, has_mb, csv_suffix, rounds, versions, duration, warmup,
+                        conn_list, rate, scenarios):
+    """Pick the report a `--rounds` run can honestly support, from the CSVs it just wrote.
+
+    Two or more Rift arms → the A/B report. One Rift arm and Mountebank → the existing
+    median-of-reps comparison. One Rift arm alone → the existing median report. The comparison is
+    not written for several Rift arms, as there is no single build its Rift column would be."""
+    if len(rift_labels) >= 2:
+        agg = {label: aggregate_reps(_load_rounds(label, csv_suffix, rounds))
+               for label in rift_labels}
+        out = os.path.join(RESULTS_DIR, f"DIRECT_AB_REPORT{csv_suffix}.md")
+        with open(out, "w") as f:
+            f.write(render_ab_report(agg, rift_labels, versions, rounds, duration, warmup,
+                                     scenarios, time.strftime("%Y-%m-%d %H:%M:%S"), rate))
+        print(f"wrote {out}")
+        if has_mb:
+            print("note: the Mountebank comparison needs exactly one Rift arm; its _repK CSVs "
+                  "are written, and --aggregate-comparison can build it with a single arm's files")
+        return out
+    if len(rift_labels) == 1 and has_mb:
+        label = rift_labels[0]
+        return aggregate_comparison_reps(csv_suffix, versions[label], versions["mb"],
+                                         conn_list[0], rift_label=label)
+    if len(rift_labels) == 1:
+        return aggregate_reps_to_report(csv_suffix, versions[rift_labels[0]])
+    print("[report] Mountebank only: no report written (the comparison needs a Rift arm)")
+    return None
+
+def _version(cmd, fallback):
+    return subprocess.run(cmd + ["--version"], capture_output=True, text=True).stdout.strip() or fallback
+
+def run_rounds(arms, mb_bin, engines, rounds, duration, warmup, conn_list, rate=None,
+               recording=False, runtime=None, engine_cpus=None, gen_cpus=None, csv_suffix=""):
+    """`--rounds N`: every arm launched once and kept up, then `collect_rounds` over them. Only one
+    arm receives load at a time; the idle ones cost a parked runtime."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    node = shutil.which("node") or "node"
+    engine_prefix, oha_prefix = taskset_prefix(engine_cpus), taskset_prefix(gen_cpus)
+    rift_arms = arms if "rift" in engines else []
+    plan = [(label, offset, rift_launch_cmd(path, offset, runtime, engine_prefix))
+            for (label, path), offset in zip(rift_arms, rift_arm_offsets(len(rift_arms)))]
+    if "mb" in engines:
+        plan.append(("mb", MB_OFFSET, mb_launch_cmd(node, mb_bin, engine_prefix)))
+    scenarios = SCENARIOS + (DIMENSION_SCENARIOS + [RECORDING_SCENARIO] if recording else [])
+    points = [(conns, scenario) for conns in conn_list for scenario in scenarios]
+    refuse_stale_reps([label for label, _, _ in plan], csv_suffix, rounds)
+    offsets = {label: offset for label, offset, _ in plan}
+    procs, samplers, rows = {}, {}, {}
+    try:
+        for label, offset, cmd in plan:
+            ports = engine_ports(offset)
+            free_ports(ports)
+            if any(port_up(p) for p in ports):
+                raise SystemExit(f"{label}: ports not free before launch: {ports}")
+            print(f"[{label}] launching: {' '.join(cmd)}")
+            procs[label] = launch(cmd, os.path.join(RESULTS_DIR, f"{label}-engine.log"))
+        for label, offset, _ in plan:
+            if not wait_ready(admin_port_for(offset)):
+                raise SystemExit(f"{label}: admin API not ready on {admin_port_for(offset)}")
+            load_imposters(f"http://localhost:{admin_port_for(offset)}", offset,
+                           recording=recording and label != "mb")
+            if label != "mb":
+                samplers[label] = RssSampler(procs[label].pid)
+                samplers[label].start()
+        time.sleep(1)
+
+        def measure(label, point, rnd):
+            conns, scenario = point
+            if point == points[0]:
+                print(f"[{label}] {'warm-up round' if rnd == 0 else f'round {rnd}/{rounds}'}")
+            return measure_point(label, f"http://localhost:{admin_port_for(offsets[label])}",
+                                 offsets[label], scenario, conns, duration, warmup, rate=rate,
+                                 sampler=samplers.get(label), oha_prefix=oha_prefix,
+                                 measure=rnd > 0, tag=f"[{label}] ")
+
+        try:
+            collect_rounds([label for label, _, _ in plan], points, rounds, measure,
+                           mode_label(rate), rows)
+        except BaseException:
+            done = completed_rounds(rows, len(points))
+            if any(done.values()):
+                paths = write_round_csvs(done, csv_suffix)
+                print(f"run failed after {len(next(iter(done.values())))} complete round(s); "
+                      f"kept {', '.join(os.path.basename(p) for p in paths)}")
+            raise
+    finally:
+        for sampler in samplers.values():
+            sampler.stop()
+        stop_errors = []
+        for label, offset, _ in plan:
+            try:
+                stop(procs.get(label), engine_ports(offset))
+            except SystemExit as e:
+                print(f"[{label}] teardown: {e}")
+                stop_errors.append(str(e))
+    if stop_errors:
+        raise SystemExit("; ".join(stop_errors))
+    write_round_csvs(rows, csv_suffix)
+    versions = {label: _version([path], "local") for label, path in rift_arms}
+    if "mb" in engines:
+        versions["mb"] = _version([node, mb_bin], "2.9.1")
+    write_round_reports([label for label, _ in rift_arms], "mb" in engines, csv_suffix, rounds,
+                        versions, duration, warmup, conn_list, rate, [s[0] for s in scenarios])
 
 def rift_only_report(rift_ver, duration, conn_list, rate, recording, allocator=None,
                      runtime=None, csv_suffix="", engine_cpus=None, gen_cpus=None,
@@ -1361,10 +1725,12 @@ if __name__ == "__main__":
                          "Rift-only and override this to rift.")
     ap.add_argument("--run-all", action="store_true")
     ap.add_argument("--report", action="store_true")
-    ap.add_argument("--rift-bin", default=None,
+    ap.add_argument("--rift-bin", action="append", metavar="[LABEL=]PATH",
                     help="path to a prebuilt rift-http-proxy binary; overrides --allocator's "
                          "own build (default: target/release/rift-http-proxy, or "
-                         "target/alloc-<name>/release/rift-http-proxy when --allocator is set)")
+                         "target/alloc-<name>/release/rift-http-proxy when --allocator is set). "
+                         "Repeat as LABEL=PATH, with --rounds, for an interleaved A/B of builds "
+                         "(#1211); the first arm is the baseline")
     ap.add_argument("--mb-bin", default=os.path.expanduser("~/bench-mb/node_modules/mountebank/bin/mb"))
     ap.add_argument("--rift-version", default="local")
     ap.add_argument("--mb-version", default="2.9.1")
@@ -1401,6 +1767,12 @@ if __name__ == "__main__":
                          "sweep lands in its own file instead of overwriting the last. Re-running "
                          "the SAME rep overwrites it, with a printed note. Rift-only. Without "
                          "--rep the run writes the unsuffixed name as before.")
+    ap.add_argument("--rounds", type=int, metavar="N",
+                    help="in-process repetition (#1211): launch every arm once, run a discarded "
+                         "warm-up round, then N measured rounds with the arms interleaved per "
+                         "point and the leading arm rotated per round. Writes _rep1.._repN CSVs "
+                         "per arm plus a median report (DIRECT_AB_REPORT for two or more Rift "
+                         "arms). The only form that can compare two Rift builds; excludes --rep.")
     ap.add_argument("--aggregate-comparison", metavar="SUFFIX",
                     help="offline: median-of-reps Rift-vs-Mountebank table from "
                          "direct_{rift,mb}<SUFFIX>_rep*.csv, with per-engine spread. Refuses "
@@ -1446,7 +1818,12 @@ if __name__ == "__main__":
             engines = ["rift"]
         if engines != requested:
             print("note: sweep/open-loop/allocator is Rift-only; running --engines rift")
-        rift_bin, needs_build = resolve_rift_bin(a.rift_bin, a.allocator, a.quamina)
+        try:
+            arms, needs_build = resolve_arms(a.rift_bin, engines, a.rounds, a.rep,
+                                             a.allocator, a.quamina)
+        except ValueError as e:
+            raise SystemExit(str(e))
+        rift_bin = arms[0][1]
         if needs_build:
             if a.quamina:
                 build_quamina_binary(a.quamina)
@@ -1470,9 +1847,17 @@ if __name__ == "__main__":
         if a.runtime:
             # Probe under the same pinning: per-core self-reports `per-core xN`, so this is also
             # what proves the core budget actually reached the engine's worker sizing.
-            verify_runtime_marker(rift_bin, a.runtime, runtime_launch_args(a.runtime),
-                                  prefix=taskset_prefix(engine_cpus),
-                                  expected_workers=a.server_cores)
+            for _, path in arms:
+                verify_runtime_marker(path, a.runtime, runtime_launch_args(a.runtime),
+                                      prefix=taskset_prefix(engine_cpus),
+                                      expected_workers=a.server_cores)
+        if a.rounds is not None:
+            run_rounds(arms, a.mb_bin, engines, a.rounds, a.duration, a.warmup, conn_list,
+                       rate=rate, recording=recording, runtime=a.runtime,
+                       engine_cpus=engine_cpus, gen_cpus=gen_cpus,
+                       csv_suffix=result_suffix(a.allocator, a.runtime, a.server_cores, None,
+                                                a.quamina, a.stub_count, a.body_field_stubs))
+            sys.exit(0)
         run_all(a.duration, a.warmup, conn_list, rift_bin, a.mb_bin, engines,
                 rate=rate, recording=recording, allocator=a.allocator, runtime=a.runtime,
                 server_cpus=a.server_cores, engine_cpus=engine_cpus, gen_cpus=gen_cpus,

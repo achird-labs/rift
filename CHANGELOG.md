@@ -13,6 +13,17 @@ record.
 
 ### Added
 
+- **`bench_direct.py` can compare two Rift builds in one run** (#1211). `--rounds N` launches
+  every arm once, runs a discarded warm-up round, then measures each scenario on every arm back to
+  back for N rounds, rotating which arm goes first. `--rift-bin` is now repeatable as `label=path`.
+  Two sequential runs could not do this: the host drifts by about 8% over one pass, so the build
+  that ran first read faster and the sign of the difference followed the run order. The new
+  `DIRECT_AB_REPORT.md` gives per-scenario medians, spread and each arm's delta against the first.
+  Each round is also written as a `_repK` CSV, so `--aggregate-reps` and `--aggregate-comparison`
+  read it like a `--rep` loop. Extra Rift arms bind their own metrics port. Two arms without
+  `--rounds` are refused. A run without `--rounds` launches the same commands and writes the same
+  files as before.
+
 - **Behaviors run on `proxy` responses, and the transformed response is what gets recorded**
   (#1189, closes #1184). Mountebank runs a proxy response's `_behaviors` on the upstream's response
   before recording it; Rift ran none, so a migrated `{"proxy": …, "_behaviors": {"wait": 500}}`

@@ -12,11 +12,13 @@ import io
 import json
 import os
 import sys
+import tempfile
 import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
 import bench_direct as bd  # noqa: E402
+import bench_admin as ba  # noqa: E402
 
 
 class ParseConnList(unittest.TestCase):
@@ -1136,6 +1138,384 @@ class RssSamplerLifecycle(unittest.TestCase):
                     if type(sampler).__mro__[0] is bd.RssSampler
                     and a in sampler.__dict__ and hasattr(threading.Thread, a)]
         self.assertEqual(shadowed, [], f"Thread internals shadowed: {shadowed}")
+
+
+# ---- interleaved A/B of Rift builds (issue #1211) ----
+#
+# Two sequential whole-suite runs of two builds read the run order, not the binary: whichever ran
+# first was ~8% faster, so the sign of the "difference" followed the order. These pin the pieces
+# that make an in-process, interleaved comparison sound.
+
+
+
+class _TmpResults(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self._orig = bd.RESULTS_DIR
+        bd.RESULTS_DIR = self.tmp
+
+    def tearDown(self):
+        bd.RESULTS_DIR = self._orig
+        self._tmp.cleanup()
+
+
+def _m(rps, p99=1.0):
+    return {"rps": rps, "p50_ms": 0.5, "p90_ms": 0.8, "p99_ms": p99, "p999_ms": 3.0,
+            "avg_ms": 0.6, "codes": {"200": 1}}
+
+
+class ArmPorts(unittest.TestCase):
+    def test_rift_arms_step_over_the_mountebank_offset(self):
+        self.assertEqual(bd.rift_arm_offsets(3), [0, 200, 400])
+
+    def test_every_rift_arm_reserves_its_own_metrics_port(self):
+        self.assertIn(9090, bd.engine_ports(0))
+        self.assertIn(9290, bd.engine_ports(200))
+        self.assertIn(9490, bd.engine_ports(400))
+        self.assertNotIn(9190, bd.engine_ports(100))   # Mountebank has no metrics listener
+
+    def test_arm_port_sets_are_pairwise_disjoint(self):
+        sets = [set(bd.engine_ports(o)) for o in bd.rift_arm_offsets(5) + [100]]
+        for i, a in enumerate(sets):
+            for b in sets[i + 1:]:
+                self.assertEqual(a & b, set())
+
+    def test_first_arm_argv_is_unchanged(self):
+        self.assertEqual(bd.rift_launch_cmd("/x/rift", 0),
+                         ["/x/rift", "--port", "2525", "--allow-injection", "--loglevel", "warn"])
+
+    def test_second_arm_binds_its_own_metrics_port(self):
+        # Without this every extra arm collides on 9090, which Rift logs and survives, so the arm
+        # would run with a bind error in its log and nothing else saying so.
+        self.assertEqual(bd.rift_launch_cmd("/x/rift", 200),
+                         ["/x/rift", "--port", "2725", "--allow-injection", "--loglevel", "warn",
+                          "--metrics-port", "9290"])
+
+    def test_prefix_and_runtime_wrap_the_arm_command(self):
+        self.assertEqual(bd.rift_launch_cmd("/x/rift", 200, runtime="per-core",
+                                            prefix=["taskset", "-c", "0"]),
+                         ["taskset", "-c", "0", "/x/rift", "--port", "2725", "--allow-injection",
+                          "--loglevel", "warn", "--metrics-port", "9290", "--runtime", "per-core"])
+
+
+class SharedWithBenchAdmin(unittest.TestCase):
+    def test_both_harnesses_use_one_arm_parser_and_one_schedule(self):
+        self.assertIs(ba.parse_rift_bins, bd.parse_rift_bins)
+        self.assertIs(ba.schedule, bd.schedule)
+
+
+class ValidateAbArgs(unittest.TestCase):
+    @staticmethod
+    def check(**kw):
+        args = dict(labels=["rift"], engines=["rift"], rounds=None, rep=None,
+                    allocator=None, quamina=None)
+        args.update(kw)
+        bd.validate_ab_args(**args)
+
+    def test_default_single_arm_run_is_accepted(self):
+        self.check()
+        self.check(rounds=3)
+        self.check(engines=["rift", "mb"], rounds=3)
+
+    def test_two_arms_are_accepted_with_rounds(self):
+        self.check(labels=["old", "new"], rounds=3)
+
+    def test_two_arms_without_rounds_are_refused(self):
+        with self.assertRaises(ValueError) as cm:
+            self.check(labels=["old", "new"])
+        self.assertIn("--rounds", str(cm.exception))
+
+    def test_rounds_with_rep_is_refused(self):
+        with self.assertRaises(ValueError) as cm:
+            self.check(rounds=3, rep=1)
+        self.assertIn("--rep", str(cm.exception))
+
+    def test_non_positive_rounds_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.check(rounds=0)
+
+    def test_allocator_or_quamina_with_two_arms_is_refused(self):
+        for kw in ({"allocator": "jemalloc"}, {"quamina": "on"}):
+            with self.assertRaises(ValueError):
+                self.check(labels=["old", "new"], rounds=3, **kw)
+
+    def test_a_label_on_a_single_arm_is_refused(self):
+        # A label names an arm of an A/B. On one arm it would silently rename the artefacts that
+        # every existing reader looks for as direct_rift*.
+        with self.assertRaises(ValueError) as cm:
+            self.check(labels=["new"], rounds=3)
+        self.assertIn("new", str(cm.exception))
+
+    def test_a_label_that_could_collide_with_a_variant_suffix_is_refused(self):
+        # Suffixes start with `_`, so arm `a_x` would share arm `a`'s files under suffix `_x`.
+        for bad in ("a_x", "a/b", "a b"):
+            with self.assertRaises(ValueError):
+                self.check(labels=[bad, "new"], rounds=3)
+
+    def test_two_arms_with_rift_excluded_are_refused(self):
+        with self.assertRaises(ValueError):
+            self.check(labels=["old", "new"], engines=["mb"], rounds=3)
+
+
+def _scen(name):
+    return (name, 4549, "GET", "/" + name, None, {})
+
+
+class CollectRounds(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+
+        def measure(label, point, rnd):
+            self.calls.append((rnd, point[1][0], label))
+            return _m(-1.0 if rnd == 0 else 100.0 * rnd)
+
+        self.rows = bd.collect_rounds(["old", "new"], [(50, _scen("a")), (50, _scen("b"))], 3,
+                                      measure, "closed")
+
+    def test_every_round_including_the_warm_up_visits_every_point_on_every_arm(self):
+        self.assertEqual(len(self.calls), 4 * 2 * 2)
+
+    def test_arms_are_interleaved_per_point_and_rotated_per_round(self):
+        self.assertEqual(self.calls[:8], [
+            (0, "a", "old"), (0, "a", "new"), (0, "b", "old"), (0, "b", "new"),
+            (1, "a", "new"), (1, "a", "old"), (1, "b", "new"), (1, "b", "old")])
+
+    def test_the_warm_up_round_produces_no_row(self):
+        self.assertEqual(sorted(self.rows), ["new", "old"])
+        self.assertEqual(len(self.rows["old"]), 3)
+        rps = [m["rps"] for rounds in self.rows.values() for rnd in rounds for *_, m in rnd]
+        self.assertNotIn(-1.0, rps)
+
+    def test_rows_carry_the_point_and_mode(self):
+        self.assertEqual([(n, c, mode, m["rps"]) for n, c, mode, m in self.rows["new"][1]],
+                         [("a", 50, "closed", 200.0), ("b", 50, "closed", 200.0)])
+
+
+class WriteRoundCsvs(_TmpResults):
+    def rows(self, n=3):
+        return {label: [[("a", 50, "closed", _m(100.0))] for _ in range(n)]
+                for label in ("old", "new")}
+
+    def test_one_file_per_arm_and_round_and_nothing_else(self):
+        bd.write_round_csvs(self.rows(), "")
+        self.assertEqual(sorted(os.listdir(self.tmp)), [
+            "direct_new_rep1.csv", "direct_new_rep2.csv", "direct_new_rep3.csv",
+            "direct_old_rep1.csv", "direct_old_rep2.csv", "direct_old_rep3.csv"])
+
+    def test_variant_suffix_sits_before_the_rep(self):
+        bd.write_round_csvs(self.rows(1), "_per-core")
+        self.assertEqual(sorted(os.listdir(self.tmp)),
+                         ["direct_new_per-core_rep1.csv", "direct_old_per-core_rep1.csv"])
+
+    def test_a_stale_higher_rep_is_refused_before_anything_is_written(self):
+        # An offline aggregate globs _rep*.csv, so a leftover rep4 from an earlier, longer run
+        # would be folded into this run's median.
+        open(os.path.join(self.tmp, "direct_new_rep4.csv"), "w").close()
+        with self.assertRaises(SystemExit) as cm:
+            bd.write_round_csvs(self.rows(), "")
+        self.assertIn("direct_new_rep4.csv", str(cm.exception))
+        self.assertEqual(os.listdir(self.tmp), ["direct_new_rep4.csv"])
+
+    def test_an_existing_rep_within_range_is_overwritten(self):
+        open(os.path.join(self.tmp, "direct_old_rep2.csv"), "w").close()
+        bd.write_round_csvs(self.rows(), "")
+        with open(os.path.join(self.tmp, "direct_old_rep2.csv")) as f:
+            self.assertEqual(len(bd.load_rift_csv(f)), 1)
+
+    def test_another_variant_is_not_mistaken_for_a_stale_rep(self):
+        open(os.path.join(self.tmp, "direct_new_per-core_rep9.csv"), "w").close()
+        bd.write_round_csvs(self.rows(1), "")
+        self.assertIn("direct_new_rep1.csv", os.listdir(self.tmp))
+
+
+def _cell(rps, spread=2.0, p99=1.0):
+    return {"reps": 3, "rps": rps, "rps_spread_pct": spread, "p99_ms": p99}
+
+
+class RenderAbReport(unittest.TestCase):
+    def render(self, agg, labels=("old", "new"), scenarios=("a", "b")):
+        return bd.render_ab_report(agg, list(labels), {l: f"rift {l}" for l in labels}, 3,
+                                   "8s", "3s", list(scenarios), "2026-09-22 12:00:00")
+
+    def agg(self):
+        return {"old": {("a", 50, "closed"): _cell(100.0), ("b", 50, "closed"): _cell(200.0)},
+                "new": {("a", 50, "closed"): _cell(110.0, 1.0, 1.2),
+                        ("b", 50, "closed"): _cell(190.0, 4.5, "")}}
+
+    def test_rows_carry_each_arms_median_spread_and_the_delta(self):
+        text = self.render(self.agg())
+        self.assertIn("| Scenario | old rps | old spread | new rps | new spread | Δ new vs old "
+                      "| old p99 (ms) | new p99 (ms) |", text)
+        self.assertIn("| a | 100 | 2.0% | 110 | 1.0% | +10.0% | 1 | 1.2 |", text)
+        self.assertIn("| b | 200 | 2.0% | 190 | 4.5% | -5.0% | 1 | n/a |", text)
+
+    def test_summary_is_the_median_delta_and_its_range(self):
+        self.assertIn("**new vs old:** median Δ +2.5% over 2 of 2 points "
+                      "(range -5.0% .. +10.0%)", self.render(self.agg()))
+
+    def test_header_states_the_method_and_every_arm(self):
+        text = self.render(self.agg())
+        self.assertIn("- **old:** rift old", text)
+        self.assertIn("- **new:** rift new", text)
+        self.assertIn("3 measured rounds after a discarded warm-up round", text)
+        self.assertIn("## c=50 closed", text)
+
+    def test_a_point_missing_from_an_arm_says_so(self):
+        agg = self.agg()
+        del agg["new"][("b", 50, "closed")]
+        text = self.render(agg)
+        self.assertIn("| b | 200 | 2.0% | *not measured* | — | — | 1 | — |", text)
+        self.assertIn("median Δ +10.0% over 1 of 2 points", text)
+
+    def test_a_non_finite_median_is_not_published_as_a_number(self):
+        # _median picks by sort index, so a NaN can land in an ordinary-looking median; this table
+        # must not turn it into a delta.
+        agg = self.agg()
+        agg["new"][("a", 50, "closed")] = _cell(float("nan"), float("nan"))
+        agg["old"][("b", 50, "closed")] = _cell("")
+        text = self.render(agg)
+        self.assertIn("| a | 100 | 2.0% | *not measured* | — | — |", text)
+        self.assertIn("| b | *not measured* | — | 190 | 4.5% | — |", text)
+        self.assertIn("**new vs old:** no point was measured on both arms", text)
+        self.assertNotIn("nan", text.lower())
+
+    def test_a_third_arm_is_compared_against_the_same_baseline(self):
+        agg = self.agg()
+        agg["c"] = {("a", 50, "closed"): _cell(50.0)}
+        text = self.render(agg, labels=("old", "new", "c"), scenarios=("a",))
+        self.assertIn("Δ new vs old", text)
+        self.assertIn("Δ c vs old", text)
+        self.assertIn("**c vs old:** median Δ -50.0% over 1 of 1 points", text)
+
+
+class WriteRoundReports(_TmpResults):
+    def write(self, label, rps, n=3):
+        for k in range(1, n + 1):
+            bd.write_rift_csv(os.path.join(self.tmp, f"direct_{label}_rep{k}.csv"),
+                              [(name, 50, "closed", _m(rps)) for name, *_ in bd.SCENARIOS])
+
+    def report(self, rift_labels, has_mb):
+        return bd.write_round_reports(rift_labels, has_mb, "", 3,
+                                      {l: l for l in rift_labels + ["mb"]}, "8s", "3s", [50],
+                                      None, [s[0] for s in bd.SCENARIOS])
+
+    def test_two_rift_arms_write_the_ab_report(self):
+        self.write("old", 100.0)
+        self.write("new", 110.0)
+        self.report(["old", "new"], False)
+        with open(os.path.join(self.tmp, "DIRECT_AB_REPORT.md")) as f:
+            self.assertIn("median Δ +10.0% over 13 of 13 points", f.read())
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "DIRECT_BENCHMARK_REPORT_median.md")))
+
+    def test_one_rift_arm_and_mountebank_write_the_median_comparison(self):
+        self.write("rift", 100.0)
+        self.write("mb", 10.0)
+        self.report(["rift"], True)
+        with open(os.path.join(self.tmp, "DIRECT_BENCHMARK_REPORT_median.md")) as f:
+            self.assertIn("| simple_health | 10 | 100 | **10.0x** |", f.read())
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "DIRECT_AB_REPORT.md")))
+
+    def test_the_comparison_reads_the_single_arms_own_label(self):
+        self.write("new", 100.0)
+        self.write("mb", 10.0)
+        self.report(["new"], True)
+        with open(os.path.join(self.tmp, "DIRECT_BENCHMARK_REPORT_median.md")) as f:
+            self.assertIn("| simple_health | 10 | 100 | **10.0x** |", f.read())
+
+    def test_one_rift_arm_alone_writes_the_median_report(self):
+        self.write("rift", 100.0)
+        self.report(["rift"], False)
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, "DIRECT_RIFT_MEDIAN_REPORT.md")))
+
+    def test_the_ab_report_reads_only_this_runs_rounds(self):
+        # rep1..N are read by number, so an unrelated variant's files never enter the median.
+        self.write("old", 100.0)
+        self.write("new", 110.0)
+        bd.write_rift_csv(os.path.join(self.tmp, "direct_new_x_rep1.csv"),
+                          [(name, 50, "closed", _m(1.0)) for name, *_ in bd.SCENARIOS])
+        self.report(["old", "new"], False)
+        with open(os.path.join(self.tmp, "DIRECT_AB_REPORT.md")) as f:
+            self.assertIn("| simple_health | 100 | 0.0% | 110 | 0.0% | +10.0% |", f.read())
+
+
+class ResolveArms(unittest.TestCase):
+    def test_no_rift_bin_keeps_the_default_release_binary(self):
+        self.assertEqual(bd.resolve_arms(None, ["rift", "mb"], None, None, None, None),
+                         ([("rift", bd.DEFAULT_RIFT_BIN)], False))
+
+    def test_no_rift_bin_with_an_allocator_builds_that_variant(self):
+        arms, needs_build = bd.resolve_arms(None, ["rift"], None, None, "jemalloc", None)
+        self.assertEqual(arms, [("rift", bd.allocator_bin_path("jemalloc"))])
+        self.assertTrue(needs_build)
+
+    def test_one_bare_path_is_the_rift_arm_and_is_not_built(self):
+        self.assertEqual(bd.resolve_arms(["/x/rift"], ["rift"], None, None, "jemalloc", None),
+                         ([("rift", "/x/rift")], False))
+
+    def test_two_labelled_arms_keep_their_labels_and_order(self):
+        self.assertEqual(bd.resolve_arms(["old=/a", "new=/b"], ["rift"], 3, None, None, None),
+                         ([("old", "/a"), ("new", "/b")], False))
+
+    def test_a_refused_combination_raises(self):
+        with self.assertRaises(ValueError):
+            bd.resolve_arms(["old=/a", "new=/b"], ["rift"], None, None, None, None)
+
+
+class CompletedRounds(unittest.TestCase):
+    def test_only_rounds_every_arm_finished_are_kept(self):
+        row = ("a", 50, "closed", _m(1.0))
+        rows = {"old": [[row, row], [row, row], [row]],
+                "new": [[row, row], [row], []]}
+        self.assertEqual(bd.completed_rounds(rows, 2),
+                         {"old": [[row, row]], "new": [[row, row]]})
+
+    def test_nothing_finished_keeps_nothing(self):
+        self.assertEqual(bd.completed_rounds({"old": [[], []], "new": [[], []]}, 2),
+                         {"old": [], "new": []})
+
+    def test_collect_rounds_leaves_finished_rounds_in_the_callers_dict(self):
+        rows = {}
+
+        def measure(label, point, rnd):
+            if rnd == 2:
+                raise RuntimeError("oha failed")
+            return _m(1.0)
+
+        with self.assertRaises(RuntimeError):
+            bd.collect_rounds(["old", "new"], [(50, _scen("a"))], 3, measure, "closed", rows)
+        self.assertEqual({l: len(r) for l, r in bd.completed_rounds(rows, 1).items()},
+                         {"old": 1, "new": 1})
+
+
+class RunRoundsPreflight(_TmpResults):
+    def test_a_stale_rep_is_refused_before_any_engine_launches(self):
+        open(os.path.join(self.tmp, "direct_new_rep4.csv"), "w").close()
+        orig = bd.launch
+
+        def no_launch(*_):
+            raise AssertionError("an engine was launched before the stale check")
+
+        bd.launch = no_launch
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                bd.run_rounds([("old", "/a"), ("new", "/b")], "/mb", ["rift"], 3, "1s", "1s",
+                              [50])
+            self.assertIn("direct_new_rep4.csv", str(cm.exception))
+        finally:
+            bd.launch = orig
+
+
+class ComparisonRiftLabel(_TmpResults):
+    def test_comparison_reads_the_named_rift_arm(self):
+        for k in (1, 2):
+            bd.write_rift_csv(os.path.join(self.tmp, f"direct_new_rep{k}.csv"),
+                              [(n, 50, "closed", _m(100.0)) for n, *_ in bd.SCENARIOS])
+            bd.write_rift_csv(os.path.join(self.tmp, f"direct_mb_rep{k}.csv"),
+                              [(n, 50, "closed", _m(10.0)) for n, *_ in bd.SCENARIOS])
+        out = bd.aggregate_comparison_reps("", "0.1.0", "2.9.1", 50, rift_label="new")
+        with open(out) as f:
+            self.assertIn("| simple_health | 10 | 100 | **10.0x** |", f.read())
 
 
 if __name__ == "__main__":
