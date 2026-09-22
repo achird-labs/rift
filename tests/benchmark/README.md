@@ -52,7 +52,22 @@ cat results/ADMIN_BENCHMARK_REPORT_m4.md
 # Admin A/B of two Rift builds, Mountebank left out
 python3 scripts/bench_admin.py --run-all --rep 9 --engines rift \
     --rift-bin old=/tmp/rift-old --rift-bin new=../../target/release/rift-http-proxy
+
+# Serving A/B of two Rift builds, Mountebank left out
+python3 scripts/bench_direct.py --run-all --engines rift --rounds 5 --duration 8s \
+    --rift-bin old=/tmp/rift-old --rift-bin new=../../target/release/rift-http-proxy
+cat results/DIRECT_AB_REPORT.md
 ```
+
+**Compare two builds with `--rounds`, never with two runs.** Two sequential `bench_direct.py`
+runs do not compare the builds: the host drifts by about 8% over one pass, so whichever build ran
+first reads faster, and on issue #1211 the sign of the "difference" followed the run order.
+`--rounds N` launches every arm once and keeps it up. It runs a discarded warm-up round, then N
+measured rounds in which each scenario is measured on every arm back to back, with the leading arm
+rotated per round. The first `--rift-bin` is the baseline. `DIRECT_AB_REPORT.md` gives each arm's
+median and spread per scenario, each arm's delta against the baseline, and a summary line with the
+median delta and its range. A spread wider than the delta means the rounds did not resolve it. A
+run costs `(N+1) × arms × scenarios × warmup` plus `N × arms × scenarios × duration`.
 
 `bench_admin.py` discards a warm-up round, then measures every point `--rep` times (default 5),
 interleaving the arms within each round and rotating their order, and reports the median with its
@@ -535,8 +550,11 @@ whichever rep ran last — a canonical-looking artefact holding one unreplicated
 hypothetical: it produced a wrong, publicly-retracted number on issue #746, where the last rep
 happened to land on a degraded runner ~20% low (issue #773).
 
-With `--rep`, each repetition gets its own `_repN` artefact and nothing is overwritten. Collapse
-them into the decision artefact with:
+With `--rep`, each repetition gets its own `_repN` artefact and nothing is overwritten.
+`--rounds N` is the in-process form of the same loop: it writes `_rep1`..`_repN` itself, so the
+aggregation below reads its output unchanged, and it is the only form that can compare two Rift
+builds. It refuses to start if a higher-numbered rep from an earlier run is still in `results/`.
+Collapse the reps into the decision artefact with:
 
 ```bash
 python3 scripts/bench_direct.py --aggregate-reps "_per-core_cores8"
@@ -633,7 +651,8 @@ Reading notes:
   median of 3 and not a single sample.
 - **September vs July on the M4:** Rift medians moved -2% to -10%, and p99 rose ~0.1–0.3 ms.
   The biggest drops (`template` -10%, `header_route` -8%) sit at the edge of the noise band; a
-  same-session A/B against `924cf73` is the way to tell a regression from the host.
+  same-session A/B against `924cf73` (`--rounds` with two `--rift-bin` arms) is the way to tell a
+  regression from the host.
 
 ### Admin create/read
 

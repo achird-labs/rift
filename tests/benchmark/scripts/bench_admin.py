@@ -42,7 +42,7 @@ Usage:
 import argparse, json, math, os, shutil, signal, subprocess, sys, time, urllib.request, urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from bench_direct import _median, _spread_pct  # noqa: E402
+from bench_direct import _median, _spread_pct, parse_rift_bins, schedule  # noqa: E402,F401
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(HERE, "..", "results")
@@ -186,46 +186,13 @@ def measure(cmd, admin_port, extra_ports, shape_build, n, logpath):
 
 
 # ── arms, schedule, aggregation (pure; pinned by test_bench_admin.py) ───────
-def parse_rift_bins(values):
-    """`--rift-bin` values → [(label, path)]. A bare path is labelled `rift`; `label=path` names an
-    arm. Labels must be unique and must not be `mb`, or two arms' samples would merge."""
-    values = values or [os.path.join(HERE, "..", "..", "..", "target", "release", "rift-http-proxy")]
-    arms = []
-    for v in values:
-        label, sep, path = v.partition("=")
-        if not sep:
-            label, path = "rift", v
-        if not label or not path:
-            raise ValueError(f"--rift-bin {v!r}: expected PATH or LABEL=PATH")
-        arms.append((label, os.path.abspath(os.path.expanduser(path))))
-    labels = [label for label, _ in arms]
-    if len(set(labels)) != len(labels) or "mb" in labels:
-        raise ValueError(f"--rift-bin labels must be unique and not 'mb': {labels}")
-    return arms
-
-
+# `parse_rift_bins` and `schedule` live in bench_direct.py, shared with its --rounds A/B (#1211).
 def parse_engines(value):
     engines = [e.strip() for e in value.split(",") if e.strip()]
     unknown = [e for e in engines if e not in ENGINES]
     if not engines or unknown:
         raise ValueError(f"--engines {value!r}: expected a comma list of {', '.join(ENGINES)}")
     return engines
-
-
-def schedule(rounds, points, arms):
-    """Every (round, point, arm) measurement, in the order it runs.
-
-    Round 0 is the warm-up. Within a round each point runs every arm back to back, so the arms of a
-    point are measured close together in time; the arm order rotates by one per round, so no arm is
-    always first after a gap."""
-    order = []
-    for rnd in range(rounds):
-        k = rnd % len(arms)
-        rotated = arms[k:] + arms[:k]
-        for point in points:
-            for arm in rotated:
-                order.append((rnd, point, arm))
-    return order
 
 
 def aggregate(samples):
