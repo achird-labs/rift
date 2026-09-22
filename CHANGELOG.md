@@ -347,6 +347,17 @@ record.
 
 ### Changed
 
+- **Per-imposter memory: a stub's response is 448 bytes again, down from 720** (#1206). Two
+  rarely-written `_rift` payloads were stored inline, and because an enum is as large as its largest
+  variant, every response paid for them — including the plain `is` responses that never carry one.
+  The admin create path materializes each stub several times over, so this measured as +10.7 MB of
+  RSS per 4,000 stubs and ~20% on create latency since July; boxing the two payloads gives most of
+  it back. The JSON is unchanged in both directions. **Library API:** `RiftResponseExtension.dataset`
+  is now `Option<Box<DatasetBinding>>` and `StubResponse::{Proxy,Inject,Fault}`'s `ignored_rift` is
+  `Option<Box<RiftResponseExtension>>`, so an embedder that *constructs* one writes
+  `Some(Box::new(binding))`; reads are unaffected (`Box` derefs) and patterns that match `Some(_)`
+  or use `..` need no change.
+
 - **A `copy`, `lookup` or `shellTransform` holding several items is written one element per item**
   (#1199): `GET /imposters`, `rift save` and `--datadir` now write `[{"copy": a}, {"copy": b}]`
   instead of `[{"copy": [a, b]}]`, which Mountebank refused (`copy behavior "from" field required`).
