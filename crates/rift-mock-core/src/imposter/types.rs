@@ -525,7 +525,13 @@ pub enum StubResponse {
         proxy: ProxyResponse,
         /// A `_rift` block written on this response. No `_rift` feature applies to a `proxy` response, so
         /// it is kept only to be reported (`config_key_ignored`, issue #1152) and to round-trip.
-        ignored_rift: Option<RiftResponseExtension>,
+        ///
+        /// Boxed (issue #1206): an enum is as large as its largest variant, so carrying the
+        /// extension by value here sized *every* response — including the plain `is` responses that
+        /// never have one — at 720 bytes. The admin create path materializes each stub several
+        /// times over, so that landed as ~3 MB of RSS per 4,000 stubs. The `Inject` and `Fault`
+        /// variants below carry it for the same reason.
+        ignored_rift: Option<Box<RiftResponseExtension>>,
         /// The behaviors block, run on the upstream response before it is recorded, as Mountebank
         /// does (issue #1189). `None` for an absent or empty block.
         behaviors: Option<serde_json::Value>,
@@ -538,7 +544,7 @@ pub enum StubResponse {
         inject: String,
         /// A `_rift` block written on this response. No `_rift` feature applies to a `inject` response, so
         /// it is kept only to be reported (`config_key_ignored`, issue #1152) and to round-trip.
-        ignored_rift: Option<RiftResponseExtension>,
+        ignored_rift: Option<Box<RiftResponseExtension>>,
         /// The behaviors block, run on the injected response as Mountebank does (issue #1188).
         /// `None` for an absent or empty block.
         behaviors: Option<serde_json::Value>,
@@ -549,7 +555,7 @@ pub enum StubResponse {
         fault: String,
         /// A `_rift` block written on this response. No `_rift` feature applies to a `fault` response, so
         /// it is kept only to be reported (`config_key_ignored`, issue #1152) and to round-trip.
-        ignored_rift: Option<RiftResponseExtension>,
+        ignored_rift: Option<Box<RiftResponseExtension>>,
         /// A behaviors block written on this response. Only its `repeat` takes effect on a `fault`
         /// response (issue #1188); the rest is kept only to be reported (`config_key_ignored`, issue
         /// #1181), to round-trip, and for the `--allowInjection` gate to classify. `None` for an
@@ -609,7 +615,7 @@ impl StubResponse {
     /// `Proxy` variant should be constructed.
     pub(crate) fn new_proxy(
         proxy: ProxyResponse,
-        ignored_rift: Option<RiftResponseExtension>,
+        ignored_rift: Option<Box<RiftResponseExtension>>,
         behaviors: Option<serde_json::Value>,
     ) -> StubResponse {
         let behaviors = behaviors.and_then(compile_behaviors);
@@ -626,7 +632,7 @@ impl StubResponse {
     /// `Inject` variant should be constructed.
     pub(crate) fn new_inject(
         inject: String,
-        ignored_rift: Option<RiftResponseExtension>,
+        ignored_rift: Option<Box<RiftResponseExtension>>,
         behaviors: Option<serde_json::Value>,
     ) -> StubResponse {
         let behaviors = behaviors.and_then(compile_behaviors);
@@ -1008,13 +1014,21 @@ impl TryFrom<StubResponseRaw> for StubResponse {
                 raw.rift,
             )
         } else if let Some(proxy) = raw.proxy {
-            StubResponse::new_proxy(proxy, raw.rift, non_empty_behaviors(behaviors))
+            StubResponse::new_proxy(
+                proxy,
+                raw.rift.map(Box::new),
+                non_empty_behaviors(behaviors),
+            )
         } else if let Some(inject) = raw.inject {
-            StubResponse::new_inject(inject, raw.rift, non_empty_behaviors(behaviors))
+            StubResponse::new_inject(
+                inject,
+                raw.rift.map(Box::new),
+                non_empty_behaviors(behaviors),
+            )
         } else if let Some(fault) = raw.fault {
             StubResponse::Fault {
                 fault,
-                ignored_rift: raw.rift,
+                ignored_rift: raw.rift.map(Box::new),
                 ignored_behaviors: non_empty_behaviors(behaviors),
             }
         } else if let Some(rift) = raw.rift {
@@ -1082,7 +1096,7 @@ impl From<StubResponse> for StubResponseOut {
             } => (
                 StubResponseOut {
                     proxy: Some(proxy),
-                    rift: ignored_rift,
+                    rift: ignored_rift.map(|rift| *rift),
                     ..StubResponseOut::default()
                 },
                 behaviors,
@@ -1095,7 +1109,7 @@ impl From<StubResponse> for StubResponseOut {
             } => (
                 StubResponseOut {
                     inject: Some(inject),
-                    rift: ignored_rift,
+                    rift: ignored_rift.map(|rift| *rift),
                     ..StubResponseOut::default()
                 },
                 behaviors,
@@ -1107,7 +1121,7 @@ impl From<StubResponse> for StubResponseOut {
             } => (
                 StubResponseOut {
                     fault: Some(fault),
-                    rift: ignored_rift,
+                    rift: ignored_rift.map(|rift| *rift),
                     ..StubResponseOut::default()
                 },
                 ignored_behaviors,
@@ -1808,8 +1822,12 @@ pub struct RiftResponseExtension {
     /// one exactly as if it were absent. The field lives here so the declarative form survives a
     /// config round-trip — without it the block is dropped on parse and the binding cannot be
     /// stored at all. See [`crate::behaviors::DatasetBinding`].
+    ///
+    /// Boxed (issue #1206): this extension is embedded by value in the `Is` variant of
+    /// `StubResponse`, which sizes every response, so the binding's 192 bytes were charged to
+    /// every response whether or not one was written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dataset: Option<crate::behaviors::DatasetBinding>,
+    pub dataset: Option<Box<crate::behaviors::DatasetBinding>>,
 }
 
 /// Fault injection configuration for responses
@@ -3672,6 +3690,112 @@ mod tests {
         );
         let out = serde_json::to_value(StubResponseOut::from(response)).expect("json");
         assert_eq!(out["behaviors"], json!([{"wait": 500}]));
+    }
+
+    // Issue #1206: this enum's size is paid by **every** stub response, and the admin create path
+    // materializes each stub several times over (the parsed `config.stubs`, the `Arc<StubState>`
+    // clone, and the deep clone the 201 echo serializes), so a byte added here costs several per
+    // stub. The 192 inline bytes of `_rift.dataset` measured as +7.7 MB of RSS per 4,000 stubs.
+    // Both rarely-present `_rift` payloads are boxed; this pins the result so the next payload
+    // embedded by value fails here instead of shipping.
+    #[test]
+    fn stub_response_stays_small() {
+        let size = std::mem::size_of::<StubResponse>();
+        assert!(
+            size <= 448,
+            "StubResponse is {size} bytes, over its budget: box the payload rather than embedding \
+             it by value, or — if the growth is deliberate — raise this bound with the RSS \
+             measurement that justifies it (issue #1206)"
+        );
+    }
+
+    // Issue #1206: `ignored_rift` now lives behind a `Box`. The block is reported and round-tripped,
+    // never run, so the round trip is the whole contract — a `_rift` block that vanished on parse
+    // would take `config_key_ignored` (#1177) with it and read back as if it had never been written.
+    #[test]
+    fn a_rift_block_on_proxy_inject_and_fault_survives_the_round_trip() {
+        // The block carries a `dataset`, so both boxes — the extension and the binding inside it
+        // — are on the wire at once, which no other test exercises.
+        let rift = json!({
+            "templated": true,
+            "dataset": {
+                "name": "customers",
+                "key": { "from": { "query": "id" }, "using": { "method": "regex", "selector": ".*" } },
+                "keyColumn": "customer_id",
+                "into": "${row}"
+            }
+        });
+        for (written, shape) in [
+            (
+                json!({ "proxy": { "to": "http://upstream" }, "_rift": rift }),
+                "proxy",
+            ),
+            (
+                json!({ "inject": "function () { return {}; }", "_rift": rift }),
+                "inject",
+            ),
+            (
+                json!({ "fault": "CONNECTION_RESET_BY_PEER", "_rift": rift }),
+                "fault",
+            ),
+        ] {
+            let parsed: StubResponse = serde_json::from_value(written.clone()).expect("parses");
+            // The response must reach the variant its own key names — a `_rift` block that
+            // round-trips off the wrong variant would still pass the comparison below.
+            let (reached, carried) = match &parsed {
+                StubResponse::Proxy { ignored_rift, .. } => ("proxy", ignored_rift.is_some()),
+                StubResponse::Inject { ignored_rift, .. } => ("inject", ignored_rift.is_some()),
+                StubResponse::Fault { ignored_rift, .. } => ("fault", ignored_rift.is_some()),
+                StubResponse::Is { .. } => ("is", false),
+                StubResponse::RiftScript { .. } => ("riftScript", false),
+            };
+            assert_eq!(
+                reached, shape,
+                "{written}: parsed as the wrong response shape"
+            );
+            assert!(carried, "{written}: the _rift block was dropped on parse");
+            let read_back = serde_json::to_value(&parsed).expect("serializes");
+            assert_eq!(
+                read_back["_rift"], rift,
+                "{written}: _rift did not round-trip"
+            );
+        }
+    }
+
+    // Issue #1206: `_rift.dataset` moved behind a `Box` inside `RiftResponseExtension`. It is
+    // carried for `rift-cluster` and never executed here, so the only thing that can break is the
+    // round trip — and a binding that silently vanished could not be stored at all (#973).
+    #[test]
+    fn a_rift_dataset_block_survives_the_round_trip_on_a_response() {
+        let rift = json!({
+            "dataset": {
+                "name": "customers",
+                "key": { "from": { "query": "id" }, "using": { "method": "regex", "selector": ".*" } },
+                "keyColumn": "customer_id",
+                "into": "${row}"
+            }
+        });
+        let written = json!({ "is": { "statusCode": 200 }, "_rift": rift });
+
+        let parsed: StubResponse = serde_json::from_value(written.clone()).expect("parses");
+        let StubResponse::Is {
+            rift: Some(ext), ..
+        } = &parsed
+        else {
+            panic!("a `_rift` block beside an `is` response must reach the Is variant");
+        };
+        let binding = ext
+            .dataset
+            .as_ref()
+            .expect("the dataset binding was dropped on parse");
+        assert_eq!(binding.name, "customers");
+        assert_eq!(binding.key_column, "customer_id");
+        assert_eq!(binding.version, None);
+
+        // `templated: false` is written unconditionally by the extension's own serde shape, so the
+        // binding — the field this change moved — is what is compared.
+        let read_back = serde_json::to_value(&parsed).expect("serializes");
+        assert_eq!(read_back["_rift"]["dataset"], rift["dataset"]);
     }
 }
 
