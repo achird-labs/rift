@@ -54,7 +54,7 @@ Standalone deployment without containers:
 
 ```bash
 # Download (Linux x86_64; see Getting Started for the other platform triples)
-VERSION=v0.17.0
+VERSION=v0.18.0
 TARGET=x86_64-unknown-linux-gnu
 curl -LO https://github.com/achird-labs/rift/releases/download/$VERSION/rift-$VERSION-$TARGET.tar.gz
 tar -xzf rift-$VERSION-$TARGET.tar.gz

@@ -49,7 +49,7 @@ containing `rift`, `rift-lint`, `rift-tui`, and `rift-verify`.
 
 ```bash
 # macOS (Apple Silicon) — substitute your platform triple from the list below
-VERSION=v0.17.0
+VERSION=v0.18.0
 TARGET=aarch64-apple-darwin
 
 curl -LO https://github.com/achird-labs/rift/releases/download/$VERSION/rift-$VERSION-$TARGET.tar.gz
@@ -148,7 +148,7 @@ the native library once:
 
 ```bash
 go get github.com/achird-labs/rift-go
-go run github.com/achird-labs/rift-go/cmd/rift-fetch@latest -version v0.17.0
+go run github.com/achird-labs/rift-go/cmd/rift-fetch@latest -version v0.18.0
 ```
 
 Usage:
