@@ -419,8 +419,12 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rift-lint = { path = "../rift-lint", default-features = false }
+# Library only (no CLI), keeping JavaScript syntax checking (E028/E040)
+rift-lint = { path = "../rift-lint", default-features = false, features = ["javascript"] }
 ```
+
+Without `features = ["javascript"]`, JavaScript is not syntax-checked and the run reports
+[I004](#info).
 
 ---
 

@@ -24,7 +24,7 @@ Rift maintains full compatibility with Mountebank's HTTP/HTTPS protocol support:
 | All Predicates | Yes | Yes | equals, contains, matches, exists, etc. |
 | JSONPath | Yes | Yes | Same syntax |
 | XPath | Yes | Yes | Same syntax |
-| Behaviors | Yes | Yes | wait, decorate, copy, lookup |
+| Behaviors | Yes | Yes | wait, repeat, copy, lookup, decorate, shellTransform — on `is`, `inject` and `proxy` responses, in Mountebank's order |
 | Proxy Mode | Yes | Yes | Record and replay |
 | Injection | Yes | Yes | JavaScript functions |
 | TCP Protocol | Yes | No | `protocol` must be `http`/`https`; a `tcp` imposter is rejected |
@@ -131,6 +131,7 @@ Rift includes features not in Mountebank:
 | Admin UI | Built-in web UI | No web UI; a terminal UI (`rift-tui`) ships with the binaries |
 | `mb replay` | Switches a running server's proxies to replay | `rift replay --configfile <file>` starts a server with that file loaded |
 | Shutdown | — | `SIGTERM`/`SIGINT` shut down gracefully and exit `0`, as Mountebank does; no `--init` needed in a container (#1155) |
+| `mutualAuth` | Requests a client certificate (only with `rejectUnauthorized`) and never rejects one | **Requires** a client certificate; `rejectUnauthorized`/`ca` without `mutualAuth`, or `rejectUnauthorized` without `ca`, is refused with `400` — see [Mutual TLS]({{ site.baseurl }}/features/tls/#mutual-tls-mtls) (#977) |
 
 ### Known HTTP Behavior Differences
 

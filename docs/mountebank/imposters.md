@@ -59,7 +59,7 @@ and the related fields are covered in [TLS/HTTPS](../features/tls.md).
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
 | `port` | number | No | Port to listen on (auto-assigned if omitted, `null` or `0`) |
-| `host` | string | No | Address to bind (default `0.0.0.0`; use `127.0.0.1` for local-only) |
+| `host` | string | No | Address to bind (default `0.0.0.0`; use `127.0.0.1` for local-only). IPv4, IPv6 bare or bracketed (`::1`, `[::1]`), or a DNS name such as `localhost`, which is resolved |
 | `protocol` | string | No | `http` or `https` (default: `http`) |
 | `name` | string | No | Human-readable name |
 | `stubs` | array | No | Request/response mappings |
@@ -96,7 +96,8 @@ This is on by default and backward-compatible with HTTP/1 clients. Three things 
   connection-level abort is incompatible with HTTP/2 multiplexing;
 - an imposter with a **`_rift.script`** response, since a script may call `reset()` at runtime; and
 - setting the **`RIFT_DISABLE_HTTP2`** environment variable (truthy: `1`/`true`/`yes`/`on`), which
-  forces every listener — HTTP and HTTPS, imposter, admin, and metrics — down to HTTP/1.
+  forces every listener — HTTP and HTTPS, imposter, admin, metrics, front door and the intercept
+  tunnel — down to HTTP/1.
 
 On an **HTTPS** imposter this decision governs the ALPN offer as well as what is served: such an
 imposter advertises only `http/1.1` during the TLS handshake rather than offering `h2` it would not
@@ -162,7 +163,7 @@ Each stub contains predicates (matching rules) and responses:
 | `requiredScenarioState` / `newScenarioState` | string | No | Rift extension: scenario state gate and transition (see [Scenarios](../features/scenarios.md)) |
 | `space` | string | No | Rift extension: only eligible for requests whose flow id equals this (see [Spaces](../features/spaces.md)) |
 | `routePattern` | string | No | Rift extension: route such as `/users/:id` that fills `request.pathParams` |
-| `delayRange` | array | No | Stub-level latency `[{"min": 50, "max": 100}]`, applied as a `wait` on each response |
+| `delayRange` | array | No | Stub-level latency `[{"min": 50, "max": 100}]`, applied as a `wait` on each response. An entry with `min` greater than `max` is refused |
 | `recordedFrom` | string | No | Upstream a recorded stub came from (written by proxy recording) |
 | `_verify` | object | No | Ignored by the engine; read by `rift-verify` |
 

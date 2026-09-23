@@ -274,6 +274,9 @@ The block is the same shape as the `POST /intercept` body — `host`, `port`, th
   is the array form), have nowhere to put a block at all.
 - **One source of truth.** Supplying the block *and* any `--intercept-*` flag is a startup error
   rather than a silent precedence guess. Use one or the other.
+- **No `returnCaKey`.** A config file has no response to return a generated CA key in, so
+  `"returnCaKey": true` fails the load, naming the key (`rift-lint` `E050`); `false` or absent loads.
+  Bootstrap a CA over the admin API instead.
 - **Runtime rules still layer on top.** `POST /intercept/rules` adds to the config-seeded set and
   `DELETE /intercept/rules` clears it; `GET` lists both.
 - **`rules` works over the admin API and FFI too.** `POST /intercept` and `rift_start_intercept`

@@ -739,8 +739,10 @@ rift save --savefile mocks.json --remove-proxies
 | `--savefile <FILE>` | Output file | `mb.json` |
 | `--remove-proxies` | Request the `removeProxies=true` view | off |
 
-A non-2xx answer (for example `401` from a server started with `--api-key` — `save` sends no key)
-fails the command instead of writing the error body to the file.
+A keyed server needs no extra flag: `save` presents the admin API key the process already holds
+(`MB_APIKEY`, `--api-key`, or an rcfile `apiKey`), as `healthcheck` does (issue #1154). A non-2xx
+answer (for example `401` when no key or the wrong one is set) fails the command instead of writing
+the error body to the file.
 
 ### replay
 

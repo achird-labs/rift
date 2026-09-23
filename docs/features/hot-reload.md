@@ -165,11 +165,14 @@ A validation failure that is caught **before** any mutation returns `500` with a
 leaves every running imposter in place. An EJS tag the preprocessor does not evaluate is one such
 failure; the message names the tag and its line, for example
 ``Reload failed (imposters unchanged): unsupported EJS tag `<% if (x) { %>` at imposters.json:3, …``.
+A server started with `--no-parse` (or an embedded host with the `noParse` serve option) re-reads
+the file verbatim, so a literal `<%` reloads as written.
 
 When the failure is a source that could not be fetched, the message carries the whole cause chain,
 so it names the specific reason rather than a generic transport error — for example
 `Reload failed (imposters unchanged): fetching imposter source https://host/imposters.json: error
-following redirect for url (…): too many redirects`.
+following redirect for url (…): too many redirects (limit 10): https://host/loop`. The redirect cap
+is Rift's own (10 hops), and the message names the URL it gave up on.
 
 > Embedders can also observe the diff programmatically: an incremental apply emits imposter change
 > events (`Created` / `Replaced` / `StubsChanged` / `Deleted`) to any registered listener.

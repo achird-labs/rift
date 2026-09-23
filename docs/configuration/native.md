@@ -482,7 +482,7 @@ Besides `fault` and `script`, a response's `_rift` block accepts:
 |:----|:--------|
 | `templated` | `true` evaluates the function-grammar templates in the body and header values. See [Response Templates]({{ site.baseurl }}/features/date-templates/). |
 | `stateOps` | Declarative flow-state writes after an `is` response is rendered. See [Flow State]({{ site.baseurl }}/features/flow-state/). |
-| `dataset` | **Carried, not executed** by standalone Rift — a named `lookup` binding that Rift Cluster resolves per node. |
+| `dataset` | **Carried, not executed** by standalone Rift — a named `lookup` binding that Rift Cluster resolves per node: `name`, optional `version`, `key` (as in `lookup`), `keyColumn`, `into`, and the `digest` the binder pins. It round-trips through `GET /imposters`; a response carrying one is served as if it were absent. |
 
 ---
 

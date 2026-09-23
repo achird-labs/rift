@@ -367,6 +367,12 @@ Add headers to proxied requests:
 }
 ```
 
+`injectHeaders` holds one value per name. Naming a header twice (`X-Trace` and `x-trace`) is
+**rejected** — `400` from `POST /imposters`, a startup error from `--configfile` — rather than
+sending two header lines, and `rift-lint` reports it before deploy (`E043`/`E044`). This diverges
+from Mountebank, which keeps the last entry; see
+[Single-valued header objects]({{ site.baseurl }}/mountebank/imposters/#single-valued-header-objects-reject-a-repeated-name).
+
 ---
 
 ## Path Rewriting

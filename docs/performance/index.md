@@ -322,7 +322,18 @@ python3 scripts/bench_admin.py --run-all --rep 9 --tag m4 \
     --rift-bin ../../target/release/rift-http-proxy \
     --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
 cat results/ADMIN_BENCHMARK_REPORT_m4.md
+
+# Serving A/B of two Rift builds, interleaved in one run
+python3 scripts/bench_direct.py --run-all --engines rift --rounds 5 --duration 8s \
+    --rift-bin old=/tmp/rift-old --rift-bin new=../../target/release/rift-http-proxy
+cat results/DIRECT_AB_REPORT.md
 ```
+
+To compare two Rift builds, use `--rounds`, not two sequential runs: the host drifts by about 8%
+over one pass, so whichever build ran first reads faster. `--rounds N` keeps every arm up, discards
+a warm-up round, then measures each scenario on every arm back to back for N rounds, rotating which
+arm goes first. The first `--rift-bin` is the baseline; `DIRECT_AB_REPORT.md` gives per-scenario
+medians, spread and each arm's delta against it.
 
 > `oha` reads the macOS keychain to initialise TLS even for plain-HTTP targets —
 > run outside a restricted sandbox.

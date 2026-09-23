@@ -98,6 +98,10 @@ curl http://localhost:2525/imposters/4510/spaces/alice        # inspect the spac
 curl -X DELETE http://localhost:2525/imposters/4510/spaces/alice   # teardown
 ```
 
+The space route takes the **bare stub**, not the `{"stub": …}` envelope `POST /imposters/{port}/stubs`
+uses; a body with none of the stub fields is refused with `400` (see the
+[API reference]({{ site.baseurl }}/api/#post-impostersportspacesflowidstubs)).
+
 Spaces are addressed by a known flow id — there is no bare `GET /imposters/{port}/spaces` route to
 list or discover which spaces currently exist under an imposter. If you need an inventory of active
 flow ids, track them on the caller side (or derive them from recorded requests / stub `space`

@@ -76,6 +76,8 @@ The array form is a program, as in Mountebank: every element runs, in array orde
 
 `_behaviors` must be an object; the array form is only accepted under `behaviors`, and each of its elements must be an object (a non-object element is skipped). Any other shape — an array or scalar `_behaviors`, or a scalar `behaviors` — is refused: `POST /imposters` returns `400` and a config file fails to load. This holds with `--allowInjection` on too.
 
+A behavior value the engine cannot read is refused the same way, on any response type and in any array element: for example a `wait` with string bounds (`{"min": "100", "max": "200"}`) or a fractional or negative number, `"repeat": 2.0`, or a `copy` with no `using`. `POST`/`PUT /imposters`, the stub endpoints, `--configfile` and `POST /admin/reload` answer `400` or fail the load naming the key; a `--datadir` file holding one is skipped at startup and listed in the startup error summary. Before 0.18.0 such a block loaded and served without its behaviors. `rift-lint` reports these as `E025`, `E035` and `E051`. Only a step that will run is checked: a `behaviors` shadowed by `_behaviors`, or a step a later `null` removes, still loads — except an inverted `wait` range, which is refused wherever it is written.
+
 ### How Rift writes behaviors back
 
 `GET /imposters/:port`, `rift save` and `--datadir` always write the array form, in the grammar
@@ -105,6 +107,11 @@ Two shapes still do not load in Mountebank: a `wait` written as a `{"min", "max"
 `{"inject": …}` object is a Rift extension; and a key that is not a behavior at all is kept and
 written back, and Mountebank refuses it as `Unrecognized behavior`.
 
+Rift reads both its current and its pre-0.18.0 spelling (a `{"repeat": n}` element, a list inside
+one `copy`), so older saved files still load. The reverse does not hold: a `--datadir` written by
+0.18.0 and loaded by 0.17.0 or older loses `repeat`, which those releases do not read on the
+response.
+
 ---
 
 ## wait
@@ -125,7 +132,9 @@ Adds exactly 2000ms delay.
 
 ### Random Delay
 
-A `{min, max}` range picks a delay uniformly between the two, inclusive (Rift extension):
+A `{min, max}` range picks a delay uniformly between the two, inclusive (Rift extension). `min`
+must not be greater than `max`: an inverted range refuses the imposter at every entry point, and
+`rift-lint` reports it as `E025`:
 
 ```json
 {
