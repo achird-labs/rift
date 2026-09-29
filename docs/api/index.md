@@ -706,8 +706,9 @@ with `{"space", "stubs"}`.
 
 A body that has none of the recognised stub fields is refused with `400` (#932). Before that fix it
 created a stub with no predicates, which matched everything in the space. A body with a `stub` key
-gets a message that points to the envelope mistake. `{}` and `{"predicates": []}` are still
-accepted as a space-wide default.
+gets a message that points to the envelope mistake. An empty object `{}` names no stub field, so it
+is refused the same way. To author a space-wide default, name the field explicitly:
+`{"predicates": [], "responses": [...]}` is accepted and matches every request in the space.
 
 ### GET /imposters/{port}/spaces/{flowId}/stubs
 

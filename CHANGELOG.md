@@ -13,6 +13,13 @@ record.
 
 ### Fixed
 
+- **The docs no longer say `POST /imposters/{port}/spaces/{flowId}/stubs` accepts `{}`** (#1230).
+  Since #932 the route refuses any body that names no stub field, `{}` included, with `400`
+  `bad data`: that body is exactly the no-predicate, no-response stub the rule exists to keep out.
+  `docs/api/index.md` claimed `{}` was still accepted as a space-wide default; it now says to name the
+  field (`{"predicates": [], "responses": [...]}`), which is accepted. The engine is unchanged; the
+  refusal of `{}` is now pinned by a test.
+
 - **`DELETE /imposters` and `DELETE /imposters/{port}` return the stubs the imposter served at delete
   time** (#1229). Both answered with the stubs the imposter was *created* with, so a stub added
   through `POST /imposters/{port}/stubs`, swapped in with `PUT /imposters/{port}/stubs`, or recorded
