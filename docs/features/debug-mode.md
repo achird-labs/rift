@@ -23,6 +23,9 @@ When you send a request with the `X-Rift-Debug: true` header, Rift will:
 
 This allows you to see exactly which stub would handle a request without side effects.
 
+With `recordRequests: true` the debug request is still journaled, but without `matchOutcome`,
+`status` or `latencyMs`: the report describes the request, it is not the stub's answer.
+
 ---
 
 ## Usage
