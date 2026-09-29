@@ -413,7 +413,8 @@ pub fn validate_imposter(
 /// Whether something runs on this response's body *before* the binary decode — templating, or a
 /// behavior that rewrites the body. The engine decodes what those produce, not what is written, so a
 /// written body that is not base64 can be perfectly correct (a placeholder rendered at serve time).
-/// A W-rule that fires on a correct file is worse than silence, so W015 stands down here.
+/// A W-rule that fires on a correct file is worse than silence, so W015 stands down here, and so
+/// does W004 (a body that is JSON only once rendered, issue #1245).
 fn body_rewritten_before_decode(response: &Value) -> bool {
     const REWRITING: [&str; 4] = ["decorate", "copy", "lookup", "shellTransform"];
     let templated = response
@@ -1424,7 +1425,13 @@ pub fn validate_response(
     }
 
     if let Some(is_response) = response.get("is") {
-        validate_is_response(file, is_response, &format!("{location}.is"), result);
+        check_is_response(
+            file,
+            is_response,
+            &format!("{location}.is"),
+            result,
+            body_rewritten_before_decode(response),
+        );
     }
 
     // The engine picks `is`, then `proxy`, then `inject` (a `null` is absent), so an `inject` beside
@@ -1670,6 +1677,19 @@ pub fn validate_is_response(
     location: &str,
     result: &mut LintResult,
 ) {
+    check_is_response(file, is_response, location, result, false);
+}
+
+/// [`validate_is_response`], told whether the body is rewritten before it is served (see
+/// [`body_rewritten_before_decode`]). Only the enclosing response knows that, so
+/// [`validate_response`] passes it in.
+fn check_is_response(
+    file: &Path,
+    is_response: &Value,
+    location: &str,
+    result: &mut LintResult,
+    body_rewritten: bool,
+) {
     if let Some(status) = is_response.get("statusCode") {
         let status_num = status
             .as_u64()
@@ -1705,8 +1725,11 @@ pub fn validate_is_response(
         validate_headers(file, headers, &format!("{location}.headers"), result);
     }
 
-    // Check if body is valid JSON when Content-Type is application/json
-    if let Some(body) = is_response.get("body")
+    // Check if body is valid JSON when Content-Type is application/json. Not when templating or a
+    // behavior rewrites the body first: the engine serves what they produce, and a body that is JSON
+    // only once rendered is correct (issue #1245), as W015 already recognises.
+    if !body_rewritten
+        && let Some(body) = is_response.get("body")
         && let Some(headers) = is_response.get("headers").and_then(|h| h.as_object())
     {
         let content_type = headers
