@@ -19,10 +19,19 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
 use crate::admin_api::request_filter::{MatchClause, parse_match_clauses};
+use crate::admin_api::types::error_response;
 
 /// The boxed body type the admin service unifies over (a `Full` error response or a streaming
 /// `Channel`), so `route_request`'s `Response<Full<Bytes>>` and this streaming response share a type.
 pub(crate) type AdminBody = BoxBody<Bytes, hyper::Error>;
+
+/// Box a `Full<Bytes>` response into the streaming-unified [`AdminBody`] (issue #461), so the router
+/// path and the stream path share one response type — and so a stream refusal is built by the same
+/// canonical `errors`-envelope builders as every other admin door (issue #1226). `Full`'s error is
+/// `Infallible`, so the `map_err` closure is unreachable.
+pub(crate) fn box_full(resp: Response<Full<Bytes>>) -> Response<AdminBody> {
+    resp.map(|body| body.map_err(|never| match never {}).boxed())
+}
 
 const HEARTBEAT: Duration = Duration::from_secs(15);
 /// Write-side buffer for the SSE channel; a client this far behind on the socket causes the
@@ -52,7 +61,7 @@ pub(crate) fn stream_target(path: &str) -> Option<Option<u16>> {
 }
 
 /// Handle a stream request. `forced_port` is `Some` for the alias (which pre-binds the port and
-/// streams only request events). Returns a 400/404 error body on invalid params/unknown port,
+/// streams only request events). Returns a 400/404 `errors` envelope on invalid params/unknown port,
 /// otherwise a `text/event-stream` whose forwarder task runs until the client disconnects or
 /// `cancel` fires (server shutdown).
 pub(crate) fn handle_stream(
@@ -63,15 +72,12 @@ pub(crate) fn handle_stream(
 ) -> Response<AdminBody> {
     let params = match parse_params(query, forced_port) {
         Ok(p) => p,
-        Err((code, msg)) => return error_response(code, &msg),
+        Err((code, msg)) => return box_full(error_response(code, &msg)),
     };
     if let Some(port) = params.port
-        && manager.get_imposter(port).is_err()
+        && let Err(e) = manager.get_imposter(port)
     {
-        return error_response(
-            StatusCode::NOT_FOUND,
-            &format!("no imposter on port {port}"),
-        );
+        return box_full(e.into());
     }
 
     let bus = Arc::clone(manager.event_bus());
@@ -284,17 +290,4 @@ fn sse_frame(event: &str, id: Option<u64>, data: &serde_json::Value) -> Bytes {
     }
     frame.push_str(&format!("data: {data}\n\n"));
     Bytes::from(frame)
-}
-
-fn error_response(code: StatusCode, message: &str) -> Response<AdminBody> {
-    let body = serde_json::json!({ "error": message }).to_string();
-    Response::builder()
-        .status(code)
-        .header("Content-Type", "application/json")
-        .body(
-            Full::new(Bytes::from(body))
-                .map_err(|never| match never {})
-                .boxed(),
-        )
-        .expect("error response builds from a static status + headers")
 }

@@ -479,6 +479,9 @@ pub async fn handle_imposter_request(
      * The index travels out through an out-parameter rather than the return type because `inner`
      * returns from eight places. Widening its return would touch every one of them to carry a
      * value only this caller reads, and each extra site is a chance to drop it.
+     *
+     * Every return reaches the attach, so what is NOT an answer is decided here from the response
+     * itself (`is_served_answer`, #1227), never by which path produced it.
      */
     let started = Instant::now();
     let mut journal_index = None;
@@ -538,7 +541,9 @@ pub async fn handle_imposter_request(
     // serve path recorded no Prometheus metrics before; the recording proxy engine
     // (`proxy/handler.rs`) is a disjoint path, so there is no double-count.
     crate::extensions::record_request(&method, response.status().as_u16());
-    if let Some(index) = journal_index {
+    if let Some(index) = journal_index
+        && is_served_answer(&response)
+    {
         // Measured before CORS injection below, which is a header edit this node performs after
         // the imposter has finished — counting it would report the engine as slower than it was.
         imposter.attach_response_outcome(
@@ -553,6 +558,19 @@ pub async fn handle_imposter_request(
         inject_cors_headers(response.headers_mut());
     }
     Ok(response)
+}
+
+/// Marks a response that reports *on* a request instead of answering it: the `X-Rift-Debug` match
+/// report and its two failure doors. The journal must not record its status as the stub's (#1227).
+#[derive(Clone, Copy, Debug)]
+struct DebugReport;
+
+/// Whether `response` is what the client receives as the imposter's answer — the only thing a
+/// journal entry's `status`/`latencyMs` may describe (#1227). Not a debug report, and not a TCP-fault
+/// carrier, which the serve loop discards in favour of aborting the connection.
+fn is_served_answer<B>(response: &Response<B>) -> bool {
+    response.extensions().get::<DebugReport>().is_none()
+        && super::fault_io::tcp_fault_carrier(response).is_none()
 }
 
 fn inject_cors_headers(headers: &mut hyper::HeaderMap) {
@@ -990,23 +1008,25 @@ async fn handle_request_inner(
                 client_addr,
             )
         });
-        return match tokio::time::timeout(script_timeout, handle).await {
+        let mut report = match tokio::time::timeout(script_timeout, handle).await {
             Ok(Ok((response, annotations))) => {
                 crate::extensions::decorate::replay_annotations(annotations);
-                response
+                response?
             }
             Ok(Err(join_err)) => {
                 warn!("debug matching task panicked: {join_err}");
-                Ok(debug_matching_error_response())
+                debug_matching_error_response()
             }
             Err(_elapsed) => {
                 warn!(
                     "debug matching timed out after {}ms",
                     script_timeout.as_millis()
                 );
-                Ok(debug_matching_timeout_response())
+                debug_matching_timeout_response()
             }
         };
+        report.extensions_mut().insert(DebugReport);
+        return Ok(report);
     }
 
     // Get client address info for requestFrom, ip predicates
@@ -4014,5 +4034,34 @@ mod decode_binary_body_tests {
             decode_binary_body("aGVsbG8=".to_string(), true),
             Ok(BinaryBody::Decoded(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod served_answer_tests {
+    use super::super::fault_io::TcpFaultKind;
+    use super::*;
+
+    fn plain() -> Response<Full<Bytes>> {
+        build_response_with_headers(StatusCode::OK, [("x-a", "b")], Bytes::new())
+    }
+
+    #[test]
+    fn an_ordinary_response_is_the_served_answer() {
+        assert!(is_served_answer(&plain()));
+    }
+
+    #[test]
+    fn a_debug_report_is_not_the_served_answer() {
+        let mut report = plain();
+        report.extensions_mut().insert(DebugReport);
+        assert!(!is_served_answer(&report));
+    }
+
+    #[test]
+    fn a_tcp_fault_carrier_is_not_the_served_answer() {
+        let mut carrier = plain();
+        carrier.extensions_mut().insert(TcpFaultKind::Reset);
+        assert!(!is_served_answer(&carrier));
     }
 }
