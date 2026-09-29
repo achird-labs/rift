@@ -66,12 +66,12 @@ and the related fields are covered in [TLS/HTTPS](../features/tls.md).
 | `defaultResponse` | object | No | Response when no stub matches |
 | `defaultForward` | string | No | Rift extension: forward an unmatched request to this base URL (takes precedence over `defaultResponse`) |
 | `recordRequests` | boolean | No | Store requests for verification (default `false`) |
-| `recordMatches` | boolean | No | Record which stub matched each request (default `false`) |
+| `recordMatches` | boolean | No | **Accepted, no effect**: per-stub `matches` are not recorded. `true` is reported as [`config_key_ignored`](../features/stub-analysis.md#config_key_ignored) in `_rift.warnings` and by `rift-lint` `W017`. Use `recordRequests`: each recorded request carries `matchOutcome` |
 | `allowCORS` | boolean | No | Enable CORS headers and handle preflight requests |
 | `strictBehaviors` | boolean | No | Rift extension: a failing behavior returns `500` instead of a fallback (see [Behaviors](behaviors.md#error-semantics)) |
 | `service_name` / `serviceName` | string | No | Service identifier for documentation |
 | `service_info` / `serviceInfo` | object | No | Additional service metadata |
-| `_rift` | object | No | Rift extensions (flow state, scripts, faults, metrics) |
+| `_rift` | object | No | Rift extensions (flow state, scripts, faults). `_rift.metrics` and `_rift.proxy` are accepted and have no effect ([`config_key_ignored`](../features/stub-analysis.md#config_key_ignored)) |
 | `key` | string | No | PEM private key (`https` only; paired with `cert`) |
 | `cert` | string | No | PEM certificate (`https` only; paired with `key`) |
 | `mutualAuth` | boolean | No | Request and **require** a client certificate (`https` only; `true` on `http` is refused) |
@@ -274,8 +274,9 @@ curl http://localhost:2525/imposters/4545
 
 `body` is omitted when the request had none. `status` and `latencyMs` are the status that went
 back and how long the imposter took to produce it, in whole milliseconds. Both are **absent**, never
-`0`, when the outcome was not observed (for example an `X-Rift-Debug` request, or one that errored
-before a response existed); a present `latencyMs` of `0` is an ordinary sub-millisecond answer.
+`0`, when no answer was sent: an `X-Rift-Debug` request, a TCP fault, or a request abandoned before a
+response existed. An error response is an answer and is recorded like any other; a present
+`latencyMs` of `0` is an ordinary sub-millisecond answer.
 `matchOutcome` (which stub matched, or why none did) may also appear.
 
 Each header name maps to the **list** of values the client sent, in order, so a header sent twice

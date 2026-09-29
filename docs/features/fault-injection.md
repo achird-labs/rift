@@ -266,6 +266,12 @@ fault is **advertised and served** over HTTP/1 only (HTTP/2 multiplexing is inco
 mid-stream connection aborts). On HTTPS that means the TLS handshake offers only `http/1.1`, so an
 h2-capable client is never led to commit to a protocol the imposter will not speak.
 
+With `recordRequests: true` the faulted request is journaled with its `matchOutcome` but without
+`status` or `latencyMs`, since no response was sent. This holds for every TCP fault: `_rift.fault.tcp`,
+a top-level `fault` and a script's `reset()`. (A request reaching the imposter through the
+`/__rift/` gateway or the front door receives the placeholder `502` instead of an abort; its entry
+still has no `status`, because the placeholder is not the stub's answer.)
+
 ---
 
 ## Top-Level Fault Response (Mountebank Parity)

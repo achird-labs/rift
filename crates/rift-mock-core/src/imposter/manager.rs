@@ -1417,7 +1417,7 @@ impl ImposterManager {
         ))
     }
 
-    /// Delete an imposter
+    /// Delete an imposter, returning its config with the stubs it served at delete time (#1229).
     pub async fn delete_imposter(&self, port: u16) -> Result<ImposterConfig, ImposterError> {
         let config = self.delete_imposter_inner(port, true).await?;
         self.emit(ImposterEvent::Deleted(port));
@@ -1505,7 +1505,9 @@ impl ImposterManager {
         }
 
         info!("Imposter on port {} deleted", port);
-        Ok(imposter.config.clone())
+        // The imposter as it was at delete time, not as created (issue #1229): `DELETE /imposters`
+        // is Mountebank's save-before-reset export.
+        Ok(imposter.current_config())
     }
 
     /// Get an imposter by port
