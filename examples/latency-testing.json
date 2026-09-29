@@ -1,7 +1,7 @@
 {
   "imposters": [
     {
-      "port": 4545,
+      "port": 4549,
       "protocol": "http",
       "name": "Latency Testing",
       "stubs": [
