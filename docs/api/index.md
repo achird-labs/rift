@@ -417,10 +417,12 @@ Multiple `match` clauses are AND-ed together. `since` is applied first, then the
 **Response:** a JSON array of recorded requests. Each element carries `requestFrom` (the client
 `ip:port`); `body` is present only when the request had one. `status` and `latencyMs` (issue #940)
 give the status sent back and how long the imposter took to produce it, in whole milliseconds. They
-are either both present or both absent. Absent means "not recorded", never `0`: the `X-Rift-Debug`
-path, a request that errored before responding, and a custom journal without stable indices all
-leave them out. `latencyMs: 0` is a normal reading for a stub served from memory. `node` is present
-only when a clustered embedder's journal sets it; single-node Rift never does.
+are either both present or both absent. Absent means "not recorded", never `0`: an `X-Rift-Debug`
+request (the report is not the stub's answer), a TCP fault (the connection is aborted, nothing is
+sent), a request abandoned before a response existed, and a custom journal without stable indices
+all leave them out. An error response the client receives is recorded like any other answer.
+`latencyMs: 0` is a normal reading for a stub served from memory. `node` is present only when a
+clustered embedder's journal sets it; single-node Rift never does.
 ```json
 [
   {
@@ -644,6 +646,17 @@ data: {"missed":7}
 **Canonical tail:** connect → `hello` → baseline `GET /savedRequests` (keep `x-rift-next-index`) →
 consume events, tracking `index` → on `lagged` or a reconnect gap, `GET /savedRequests?since=<last
 index>` to fill the hole, then resume.
+
+**Errors.** A bad request is refused before the stream opens, as `application/json` in the same
+[`errors` envelope](#error-responses) as every other admin route:
+
+| Cause | Status | `type` |
+|:------|:-------|:-------|
+| unknown `types` value, `port` that is not a port number, unsupported `match` clause | `400` | `bad data` |
+| `port` names no imposter | `404` | `no such resource` |
+
+The alias below refuses the same way. Through 0.18.1 these refusals were a bare `{"error": "…"}`
+object; read `errors[0]` instead.
 
 ### GET /imposters/{port}/savedRequests/stream
 

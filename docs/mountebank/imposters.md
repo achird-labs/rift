@@ -274,8 +274,9 @@ curl http://localhost:2525/imposters/4545
 
 `body` is omitted when the request had none. `status` and `latencyMs` are the status that went
 back and how long the imposter took to produce it, in whole milliseconds. Both are **absent**, never
-`0`, when the outcome was not observed (for example an `X-Rift-Debug` request, or one that errored
-before a response existed); a present `latencyMs` of `0` is an ordinary sub-millisecond answer.
+`0`, when no answer was sent: an `X-Rift-Debug` request, a TCP fault, or a request abandoned before a
+response existed. An error response is an answer and is recorded like any other; a present
+`latencyMs` of `0` is an ordinary sub-millisecond answer.
 `matchOutcome` (which stub matched, or why none did) may also appear.
 
 Each header name maps to the **list** of values the client sent, in order, so a header sent twice
