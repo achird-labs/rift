@@ -311,6 +311,27 @@ fn cached_xpath(
     })
 }
 
+/// Check that `selector` compiles as the JSONPath the matcher will run — the same rooting
+/// ([`normalize_jsonpath`]) and the same parser as [`cached_jsonpath`]. The config doors call this so
+/// a selector that can never extract is refused at load (issue #1220) instead of reaching the
+/// matcher, where the failed extraction would read as the empty string.
+pub(crate) fn validate_jsonpath_selector(selector: &str) -> Result<(), String> {
+    serde_json_path::JsonPath::parse(&normalize_jsonpath(selector))
+        .map(drop)
+        .map_err(|e| e.to_string())
+}
+
+/// Check that `selector` compiles as the XPath the matcher will run (the same `Factory` as
+/// [`cached_xpath`]). An empty selector compiles to no expression at all, which the matcher also
+/// reads as "no extraction", so it is refused alongside a syntax error (issue #1220).
+pub(crate) fn validate_xpath_selector(selector: &str) -> Result<(), String> {
+    match sxd_xpath::Factory::new().build(selector) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err("the selector is empty".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Evaluate an XPath selector against an already-parsed DOM `Document`, using the thread-local
 /// compiled-selector cache. The matching hot path calls this directly with a `Document` shared
 /// across every predicate/stub in one request (issue #711) instead of parsing per predicate.

@@ -36,7 +36,9 @@ pub use extraction::{
     ExtractionMethod, extract_jsonpath, extract_jsonpath_value, extract_xpath,
     extract_xpath_with_ns,
 };
-pub(crate) use extraction::{LazyXmlDom, eval_xpath_on};
+pub(crate) use extraction::{
+    LazyXmlDom, eval_xpath_on, validate_jsonpath_selector, validate_xpath_selector,
+};
 pub(crate) use lookup::apply_lookup_spliced;
 #[allow(unused_imports)]
 pub use lookup::{
