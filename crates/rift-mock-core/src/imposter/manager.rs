@@ -1979,6 +1979,25 @@ impl ImposterManager {
         self.persist_imposter_checked(&imposter).await
     }
 
+    /// Clear an imposter's saved proxy responses (`DELETE /imposters/{port}/savedProxyResponses`):
+    /// the proxy store, and every stub a proxy recorded (issue #1239). When stubs were removed the
+    /// change is announced and persisted like any other stub mutation.
+    pub async fn clear_proxy_responses(&self, port: u16) -> Result<(), ImposterError> {
+        let imposter = self.get_imposter(port)?;
+        let removed = imposter.clear_proxy_responses();
+        if removed.is_empty() {
+            return Ok(());
+        }
+        if let Some(sequencer) = &self.sequencer {
+            for stub in &removed {
+                let key = crate::imposter::reconcile::stub_key(stub, 0);
+                sequencer.reset_scope(port, Some(&key));
+            }
+        }
+        self.emit(ImposterEvent::StubsChanged(port));
+        self.persist_imposter_checked(&imposter).await
+    }
+
     /// Replace all stubs for an imposter
     pub async fn replace_stubs(&self, port: u16, stubs: Vec<Stub>) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;

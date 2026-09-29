@@ -747,11 +747,8 @@ pub async fn handle_clear_proxy_responses(
     base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
-    match manager.get_imposter(port) {
-        Ok(imposter) => {
-            imposter.clear_proxy_responses();
-            handle_get(port, None, base_url, manager).await
-        }
+    match manager.clear_proxy_responses(port).await {
+        Ok(()) => handle_get(port, None, base_url, manager).await,
         Err(e) => e.into(),
     }
 }

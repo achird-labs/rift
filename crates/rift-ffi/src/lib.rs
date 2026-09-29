@@ -963,15 +963,16 @@ pub unsafe extern "C" fn rift_clear_proxy_recordings(h: *mut RiftHandle, port: u
             set_last_error("rift_clear_proxy_recordings: null handle");
             return -1;
         };
-        let imposter = match handle.manager.get_imposter(port) {
-            Ok(i) => i,
+        match handle
+            .runtime
+            .block_on(handle.manager.clear_proxy_responses(port))
+        {
+            Ok(()) => 0,
             Err(e) => {
                 set_last_error(format!("rift_clear_proxy_recordings: {e}"));
-                return -1;
+                -1
             }
-        };
-        imposter.clear_proxy_responses();
-        0
+        }
     })
 }
 
