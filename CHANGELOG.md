@@ -13,6 +13,17 @@ record.
 
 ### Fixed
 
+- **`DELETE /imposters/{port}/savedProxyResponses` removes the stubs a proxy recorded** (#1239). A
+  `proxyOnce`/`proxyAlways` proxy that records through `predicateGenerators`, `addWaitBehavior` or
+  `addDecorateBehavior` records a *stub* (marked `recordedFrom`), not an entry in the proxy store,
+  and the route cleared only the store. It answered `200` and left the recorded stub in place, so
+  the imposter kept replaying it and never reached the upstream again. The route now also removes
+  every stub carrying `recordedFrom`, as Mountebank's `deleteSavedProxyResponses` removes recorded
+  responses; the stubs you declared are kept. The change is announced as `stubsChanged` and
+  persisted to `--datadir` like any other stub mutation. `rift_clear_proxy_recordings` (FFI) does
+  the same. For embedders, `Imposter::clear_proxy_responses` now returns the removed stubs, and
+  `ImposterManager::clear_proxy_responses(port)` is the entry point that also announces and persists.
+
 - **`rift-lint --fix` repairs a `{"imposters": [...]}` wrapper and a bare array** (#1238). The
   fixer walked only a single imposter object at the document root, so for the other two shapes
   `--configfile` loads (the wrapper is what `rift save` writes) it reported the E018/E019/E020

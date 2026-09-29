@@ -135,9 +135,36 @@ impl Imposter {
         self.journal.retain(self.journal_port(), &keep);
     }
 
-    /// Clear saved proxy responses
-    pub fn clear_proxy_responses(&self) {
+    /// Clear saved proxy responses: the proxy store, and every stub a proxy recorded (marked
+    /// `recordedFrom`), as Mountebank's `deleteSavedProxyResponses` does. A proxy that records
+    /// through `predicateGenerators`, `addWaitBehavior` or `addDecorateBehavior` records a *stub*
+    /// rather than a store entry, and clearing only the store left that stub replaying, so the
+    /// upstream was never reached again (issue #1239).
+    ///
+    /// Returns the recorded stubs removed. An embedder should prefer
+    /// [`ImposterManager::clear_proxy_responses`](crate::imposter::ImposterManager::clear_proxy_responses),
+    /// which also announces and persists the changed stub set.
+    pub fn clear_proxy_responses(&self) -> Vec<Stub> {
         self.proxy_store.clear(self.journal_port());
+        if !self
+            .snapshot()
+            .stubs()
+            .iter()
+            .any(|s| s.stub.recorded_from.is_some())
+        {
+            return Vec::new();
+        }
+        self.mutate_stubs(|stubs| {
+            let mut removed = Vec::new();
+            stubs.retain(|state| {
+                let recorded = state.stub.recorded_from.is_some();
+                if recorded {
+                    removed.push(state.stub.clone());
+                }
+                !recorded
+            });
+            removed
+        })
     }
 
     /// Count this request toward `numberOfRequests` (fires even when recording is off).

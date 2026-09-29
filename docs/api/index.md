@@ -589,7 +589,10 @@ removed.
 ### DELETE /imposters/{port}/savedProxyResponses
 
 Clear responses recorded by proxy stubs (`proxyOnce` / `proxyAlways`), leaving the imposter's other
-state intact.
+state intact. Every stub a proxy recorded (one that carries `recordedFrom`, as a proxy with
+`predicateGenerators`, `addWaitBehavior` or `addDecorateBehavior` records) is removed, as
+Mountebank's `deleteSavedProxyResponses` does, so the next request reaches the upstream again. The
+stubs you declared are kept. Answers `200` with the imposter, as `GET /imposters/{port}` does.
 
 ---
 
