@@ -32,6 +32,28 @@ pub struct LookupKey {
     /// Extraction method
     #[serde(rename = "using")]
     pub extraction: ExtractionMethod,
+    /// Which of the selector's matches keys the row, as in Mountebank (issue #1240): for a regex,
+    /// `0` is the whole match and `n` the `n`th capture group; for JSONPath/XPath, the `n`th
+    /// selected value. Absent keeps Rift's default, the first capture group (or the whole match
+    /// when the pattern has none) and the first selected value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
+}
+
+impl LookupKey {
+    /// The key this lookup reads the row by, or `None` when the request yields none.
+    pub fn extract(&self, request: &RequestContext) -> Option<String> {
+        let source = self.from.extract(request)?;
+        match self.index {
+            None => self.extraction.extract(&source),
+            Some(index) => self
+                .extraction
+                .matches(&source)
+                .into_iter()
+                .nth(index)
+                .flatten(),
+        }
+    }
 }
 
 /// External data source configuration
@@ -264,11 +286,7 @@ pub(crate) fn apply_lookup_spliced(
 ) {
     for behavior in behaviors {
         // Extract key from request
-        let key_value = behavior
-            .key
-            .from
-            .extract(request)
-            .and_then(|v| behavior.key.extraction.extract(&v));
+        let key_value = behavior.key.extract(request);
 
         if let Some(key) = key_value {
             // Load CSV data
@@ -354,6 +372,7 @@ mod tests {
                     selector: ".*".to_string(),
                     options: None,
                 },
+                index: None,
             },
             from_data_source: DataSource {
                 csv: CsvDataSource {
@@ -413,6 +432,7 @@ mod tests {
                     selector: ".*".to_string(),
                     options: None,
                 },
+                index: None,
             },
             from_data_source: DataSource {
                 csv: CsvDataSource {
@@ -485,6 +505,7 @@ mod tests {
                     selector: ".*".to_string(),
                     options: None,
                 },
+                index: None,
             },
             from_data_source: DataSource {
                 csv: CsvDataSource {
@@ -548,6 +569,7 @@ mod tests {
                     selector: ".*".to_string(),
                     options: None,
                 },
+                index: None,
             },
             from_data_source: DataSource {
                 csv: CsvDataSource {
@@ -605,6 +627,7 @@ mod tests {
                     selector: ".*".to_string(),
                     options: None,
                 },
+                index: None,
             },
             from_data_source: DataSource {
                 csv: CsvDataSource {
@@ -698,6 +721,156 @@ mod tests {
         assert!(
             !out.contains("digest"),
             "unpinned block must omit digest: {out}"
+        );
+    }
+
+    // Issue #1240: Mountebank's lookup `key` takes an `index` beside `from`/`using`, choosing which
+    // element of the selector's match array keys the row (`lookupRow`: `keyValues[index]`). For a
+    // regex that array is `RegExp.exec`'s: the whole match at 0, then each capture group. Rift
+    // ignored the field and always keyed on the first group.
+
+    /// Runs one lookup parsed from `key` against `path`/`body` and returns the served body.
+    fn lookup_with_key(
+        tag: &str,
+        key: serde_json::Value,
+        path: &str,
+        body: Option<&str>,
+    ) -> String {
+        let csv =
+            std::env::temp_dir().join(format!("rift_lookup_1240_{tag}_{}.csv", std::process::id()));
+        std::fs::write(
+            &csv,
+            "id,name\nab,first\ncd,second\n/ab-cd,whole\nb2,second-book\n",
+        )
+        .expect("write csv");
+        let behavior: LookupBehavior = serde_json::from_value(serde_json::json!({
+            "key": key,
+            "fromDataSource": {"csv": {"path": csv.to_string_lossy(), "keyColumn": "id"}},
+            "into": "${row}"
+        }))
+        .expect("the lookup parses");
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: path.to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: body.map(str::to_string),
+        };
+        let served = apply_lookup_behaviors(
+            "${row}[name]",
+            &mut HashMap::new(),
+            &[behavior],
+            &request,
+            &CsvCache::default(),
+            FIXTURE_STUB,
+        );
+        let _ = std::fs::remove_file(&csv);
+        served
+    }
+
+    fn regex_key(index: Option<u64>) -> serde_json::Value {
+        let mut key = serde_json::json!({
+            "from": "path",
+            "using": {"method": "regex", "selector": "^/(ab|cd)-(ab|cd)$"}
+        });
+        if let Some(i) = index {
+            key["index"] = serde_json::json!(i);
+        }
+        key
+    }
+
+    #[test]
+    fn a_regex_lookup_index_selects_that_capture_group() {
+        assert_eq!(
+            lookup_with_key("g2", regex_key(Some(2)), "/ab-cd", None),
+            "second"
+        );
+        assert_eq!(
+            lookup_with_key("g1", regex_key(Some(1)), "/ab-cd", None),
+            "first"
+        );
+    }
+
+    #[test]
+    fn a_regex_lookup_index_zero_is_the_whole_match() {
+        assert_eq!(
+            lookup_with_key("g0", regex_key(Some(0)), "/ab-cd", None),
+            "whole"
+        );
+    }
+
+    /// Without `index` the key stays what Rift has always used (the first capture group), so no
+    /// existing config changes meaning.
+    #[test]
+    fn a_lookup_without_index_keeps_the_first_capture_group() {
+        assert_eq!(
+            lookup_with_key("none", regex_key(None), "/ab-cd", None),
+            "first"
+        );
+    }
+
+    /// An index past the match array keys nothing, as `keyValues[index]` is `undefined` in
+    /// Mountebank: no row is found and the token is left for the author to see.
+    #[test]
+    fn a_lookup_index_past_the_matches_finds_no_row() {
+        assert_eq!(
+            lookup_with_key("oob", regex_key(Some(3)), "/ab-cd", None),
+            "${row}[name]"
+        );
+    }
+
+    #[test]
+    fn a_jsonpath_lookup_index_selects_that_match() {
+        let key = serde_json::json!({
+            "from": "body",
+            "using": {"method": "jsonpath", "selector": "$.books[*].id"},
+            "index": 1
+        });
+        assert_eq!(
+            lookup_with_key(
+                "jp",
+                key,
+                "/",
+                Some(r#"{"books":[{"id":"ab"},{"id":"b2"}]}"#)
+            ),
+            "second-book"
+        );
+    }
+
+    #[test]
+    fn a_negative_lookup_index_is_refused() {
+        let parsed: Result<LookupKey, _> = serde_json::from_value(serde_json::json!({
+            "from": "path",
+            "using": {"method": "regex", "selector": ".*"},
+            "index": -1
+        }));
+        assert!(parsed.is_err(), "a negative index cannot address a match");
+    }
+
+    /// `_rift.dataset.key` is a [`LookupKey`] and must hand back the `index` the operator wrote.
+    #[test]
+    fn a_dataset_binding_keeps_the_key_index() {
+        let parsed: DatasetBinding = serde_json::from_value(serde_json::json!({
+            "name": "d",
+            "key": {"from": "path", "using": {"method": "regex", "selector": "/(.*)$"}, "index": 1},
+            "keyColumn": "id",
+            "into": "${row}"
+        }))
+        .expect("parses");
+        let out = serde_json::to_value(&parsed).expect("serializes");
+        assert_eq!(out["key"]["index"], serde_json::json!(1), "{out}");
+
+        let unindexed: DatasetBinding = serde_json::from_value(serde_json::json!({
+            "name": "d",
+            "key": {"from": "path", "using": {"method": "regex", "selector": "/(.*)$"}},
+            "keyColumn": "id",
+            "into": "${row}"
+        }))
+        .expect("parses");
+        let out = serde_json::to_value(&unindexed).expect("serializes");
+        assert!(
+            out["key"].get("index").is_none(),
+            "absent stays absent: {out}"
         );
     }
 }

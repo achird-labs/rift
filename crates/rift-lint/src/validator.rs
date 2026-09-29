@@ -2453,7 +2453,13 @@ fn validate_lookup_behavior(file: &Path, lookup: &Value, location: &str, result:
                             Some("Lookup `key.from` must be a field name or an object of names")
                         }
                         (_, None) => Some("Lookup behavior key missing 'using' field"),
-                        (_, Some(using)) => extraction_problem(using),
+                        (_, Some(using)) => extraction_problem(using).or_else(|| {
+                            // The engine reads `index` as a match position (issue #1240), so
+                            // anything but a non-negative integer is refused at create.
+                            k.get("index")
+                                .filter(|index| !index.is_u64() && !index.is_null())
+                                .map(|_| "Lookup `key.index` must be a non-negative integer")
+                        }),
                     },
                 };
                 if let Some(message) = problem {

@@ -448,6 +448,15 @@ Look up a row in a CSV file, keyed by a value extracted from the request. `key` 
 `from` and `using` as [`copy`](#copy). Each column of the matched row replaces the token
 `<into>[<column>]`, so with `"into": "${row}"` the `email` column fills `${row}[email]`.
 
+`key.index` picks which match keys the row, as in Mountebank. For a `regex`, `0` is the whole
+match and `n` is the `n`th capture group; for `jsonpath` and `xpath`, `n` is the `n`th selected
+value, counting from `0`. An index past the last match finds no row. Without `index` the key is what
+[`copy`](#copy) extracts: the first capture group (the whole match when the pattern has none), or the
+first selected value. Mountebank's default is index `0`, the whole match, so a Mountebank config
+that relies on that default with a capture-group pattern should say `"index": 0`. `index` must be a
+non-negative integer; anything else is refused when the imposter is created (`rift-lint` `E051`).
+The same `index` is kept on a `_rift.dataset` block's `key`.
+
 As with [`copy`](#copy), a `lookup` token in a **header** value is repaired after substitution: the
 request chooses which row is read, so a CSV cell holding a character a header value cannot carry
 would otherwise fail the whole response. Those characters are removed from the substituted cell and

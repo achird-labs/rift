@@ -113,6 +113,87 @@ impl ExtractionMethod {
             ExtractionMethod::XPath { selector } => extract_xpath(value, selector),
         }
     }
+
+    /// Every value the selector matches, in Mountebank's order: what a lookup `key.index` indexes
+    /// (`lookupRow`: `keyValues[index]`, issue #1240).
+    ///
+    /// For a regex this is `RegExp.exec`'s array: the whole match at 0, then each capture group, a
+    /// group that did not participate being `None`. For JSONPath and XPath it is each selected
+    /// value, in document order. No match, or a body that does not parse, is an empty list.
+    pub fn matches(&self, value: &str) -> Vec<Option<String>> {
+        match self {
+            ExtractionMethod::Regex { selector, options } => {
+                let opts = options.as_ref();
+                let Ok(re) = RegexBuilder::new(selector)
+                    .case_insensitive(opts.is_some_and(|o| o.ignore_case))
+                    .multi_line(opts.is_some_and(|o| o.multiline))
+                    .build()
+                else {
+                    return Vec::new();
+                };
+                re.captures(value)
+                    .map(|caps| {
+                        caps.iter()
+                            .map(|m| m.map(|m| m.as_str().to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            ExtractionMethod::JsonPath { selector } => {
+                let Ok(json) = serde_json::from_str::<serde_json::Value>(value) else {
+                    return Vec::new();
+                };
+                let Some(json_path) = cached_jsonpath(selector) else {
+                    return Vec::new();
+                };
+                json_path
+                    .query(&json)
+                    .all()
+                    .into_iter()
+                    .map(|node| Some(json_node_text(node)))
+                    .collect()
+            }
+            ExtractionMethod::XPath { selector } => xpath_all(value, selector),
+        }
+    }
+}
+
+/// A selected JSON node as the text a copy or lookup uses: a string unquoted, anything else as
+/// its JSON.
+fn json_node_text(node: &serde_json::Value) -> String {
+    match node {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => "null".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Every value an XPath selector yields against `xml_str`, in document order.
+fn xpath_all(xml_str: &str, selector: &str) -> Vec<Option<String>> {
+    use sxd_xpath::{Context, Value};
+
+    #[cfg(test)]
+    counters::bump_dom_parse();
+    let Ok(package) = sxd_document::parser::parse(xml_str) else {
+        return Vec::new();
+    };
+    let document = package.as_document();
+    let Some(xpath) = cached_xpath(selector, None) else {
+        return Vec::new();
+    };
+    match xpath.evaluate(&Context::new(), document.root()) {
+        Ok(Value::String(s)) => vec![Some(s)],
+        Ok(Value::Number(n)) => vec![Some(n.to_string())],
+        Ok(Value::Boolean(b)) => vec![Some(b.to_string())],
+        Ok(Value::Nodeset(nodes)) => nodes
+            .document_order()
+            .iter()
+            .map(|n| Some(n.string_value()))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Normalize a JSONPath selector to an RFC 9535 rooted path.
@@ -212,14 +293,7 @@ pub fn extract_jsonpath_value(json: &serde_json::Value, path: &str) -> Option<St
     let node_list = json_path.query(json);
 
     // Return the first matched node as a string
-    let first = node_list.first()?;
-    match first {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Bool(b) => Some(b.to_string()),
-        serde_json::Value::Null => Some("null".to_string()),
-        _ => Some(first.to_string()),
-    }
+    node_list.first().map(json_node_text)
 }
 
 /// Extract value using XPath, optionally with namespace prefix bindings.
