@@ -302,16 +302,17 @@ pub async fn handle_reload(
     // Every source proved its content unmoved (an HTTP 304, a matching sha), so there is nothing
     // to apply. Returning early is not just an optimisation: `apply_config` on an identical
     // document is still a diff pass over every imposter, and a poller doing that on a fixed
-    // interval is exactly the churn `ETag` support exists to avoid.
+    // interval is exactly the churn `ETag` support exists to avoid. The report keeps the shape a
+    // change has, with nothing in it: the four fields are port arrays on every reply (#1237).
     if all_unchanged {
         return json_response(
             StatusCode::OK,
             &serde_json::json!({
                 "message": "No source changed; imposters left as they are",
-                "created": 0,
-                "replaced": 0,
-                "stubPatched": 0,
-                "deleted": 0,
+                "created": [],
+                "replaced": [],
+                "stubPatched": [],
+                "deleted": [],
             }),
         );
     }
@@ -943,6 +944,40 @@ mod tests {
         assert!(manager.get_imposter(23741).is_ok());
 
         manager.delete_all().await;
+    }
+
+    // Issue #1237: the no-change reply is the same report as a change, with nothing in it. Typing
+    // the four fields as the integer `0` here and as port arrays everywhere else broke any client
+    // that decodes the report against one schema.
+    #[tokio::test]
+    async fn reload_with_every_source_unchanged_reports_empty_port_arrays() {
+        let mut registry = crate::sources::SourceRegistry::new();
+        registry
+            .register(Arc::new(UnchangedSource))
+            .expect("register");
+        let source = crate::sources::ReloadSource::Sources {
+            set: Arc::new(crate::sources::SourceSet::new(
+                vec![crate::sources::SourceRef::new("unchanged:x")],
+                registry,
+            )),
+            datadir: None,
+        };
+
+        let manager = Arc::new(ImposterManager::new());
+        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["message"], "No source changed; imposters left as they are",
+            "got: {body}"
+        );
+        for field in ["created", "replaced", "stubPatched", "deleted"] {
+            assert_eq!(
+                body[field],
+                serde_json::json!([]),
+                "`{field}` must be an empty port array, as on a change: {body}"
+            );
+        }
     }
 
     #[tokio::test]

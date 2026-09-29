@@ -104,7 +104,7 @@ source reports no change the reload returns without touching the running imposte
 
 ```json
 {"message": "No source changed; imposters left as they are",
- "created": 0, "replaced": 0, "stubPatched": 0, "deleted": 0}
+ "created": [], "replaced": [], "stubPatched": [], "deleted": []}
 ```
 
 When something did change, the existing incremental apply runs: unchanged imposters keep their

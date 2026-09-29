@@ -13,6 +13,15 @@ record.
 
 ### Fixed
 
+- **`POST /admin/reload` reports `created`/`replaced`/`stubPatched`/`deleted` as port arrays when
+  nothing changed** (#1237). When every `--imposters` source proved itself unchanged (an `http(s):`
+  source answering `304 Not Modified`) and there was no `--datadir`, the reply typed the four fields
+  as the integer `0`; every other reload reply, the `--configfile` no-change reply included, types
+  them as arrays of ports. A client decoding the report against one schema (`created: Vec<u16>`,
+  `List[Int]`) failed on the no-change reply. It now carries four empty arrays beside the same
+  `message`. `docs/features/hot-reload.md` and `docs/configuration/cli.md`, which documented the
+  integer shape, are corrected. A client that compared a field to `0` should test for an empty array.
+
 - **The docs no longer say `POST /imposters/{port}/spaces/{flowId}/stubs` accepts `{}`** (#1230).
   Since #932 the route refuses any body that names no stub field, `{}` included, with `400`
   `bad data`: that body is exactly the no-predicate, no-response stub the rule exists to keep out.

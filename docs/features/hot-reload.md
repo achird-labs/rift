@@ -21,8 +21,8 @@ an imposter in a file and reloading no longer tears every imposter down.
   `{"message": "No config source configured; nothing to reload"}`.
 - When every `--imposters` source reports it is unchanged (an `http(s):` source answering
   `304 Not Modified`) and there is no `--datadir`, the reload returns `200` without touching
-  anything; in that body `created`/`replaced`/`stubPatched`/`deleted` are the number `0`, not
-  arrays.
+  anything; that body carries the same `created`/`replaced`/`stubPatched`/`deleted` port arrays as
+  any other reload report, all empty.
 - The new config is **validated in full before** any running imposter is mutated. If it fails to
   parse or has duplicate ports / unsupported protocols, the running imposters are left untouched and
   the call errors. An imposter with no port, or `port: 0`, is auto-assigned and never counts as a
