@@ -11,6 +11,14 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`docs/mountebank/imposters.md` no longer says `recordMatches` records the matched stub**
+  (#1228). The engine accepts the key, ignores it and reports `config_key_ignored`, as
+  `docs/configuration/mountebank.md` already said; the imposter table now says the same and points
+  to `recordRequests` and `matchOutcome`. Its `_rift` row no longer lists `metrics` as an extension,
+  since `_rift.metrics` (like `_rift.proxy`) has no effect either.
+
 ## [0.18.1] - 2026-09-29
 
 ### Fixed
