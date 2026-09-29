@@ -66,12 +66,12 @@ and the related fields are covered in [TLS/HTTPS](../features/tls.md).
 | `defaultResponse` | object | No | Response when no stub matches |
 | `defaultForward` | string | No | Rift extension: forward an unmatched request to this base URL (takes precedence over `defaultResponse`) |
 | `recordRequests` | boolean | No | Store requests for verification (default `false`) |
-| `recordMatches` | boolean | No | Record which stub matched each request (default `false`) |
+| `recordMatches` | boolean | No | **Accepted, no effect**: per-stub `matches` are not recorded. `true` is reported as [`config_key_ignored`](../features/stub-analysis.md#config_key_ignored) in `_rift.warnings` and by `rift-lint` `W017`. Use `recordRequests`: each recorded request carries `matchOutcome` |
 | `allowCORS` | boolean | No | Enable CORS headers and handle preflight requests |
 | `strictBehaviors` | boolean | No | Rift extension: a failing behavior returns `500` instead of a fallback (see [Behaviors](behaviors.md#error-semantics)) |
 | `service_name` / `serviceName` | string | No | Service identifier for documentation |
 | `service_info` / `serviceInfo` | object | No | Additional service metadata |
-| `_rift` | object | No | Rift extensions (flow state, scripts, faults, metrics) |
+| `_rift` | object | No | Rift extensions (flow state, scripts, faults). `_rift.metrics` and `_rift.proxy` are accepted and have no effect ([`config_key_ignored`](../features/stub-analysis.md#config_key_ignored)) |
 | `key` | string | No | PEM private key (`https` only; paired with `cert`) |
 | `cert` | string | No | PEM certificate (`https` only; paired with `key`) |
 | `mutualAuth` | boolean | No | Request and **require** a client certificate (`https` only; `true` on `http` is refused) |

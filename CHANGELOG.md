@@ -13,6 +13,12 @@ record.
 
 ### Fixed
 
+- **`docs/mountebank/imposters.md` no longer says `recordMatches` records the matched stub**
+  (#1228). The engine accepts the key, ignores it and reports `config_key_ignored`, as
+  `docs/configuration/mountebank.md` already said; the imposter table now says the same and points
+  to `recordRequests` and `matchOutcome`. Its `_rift` row no longer lists `metrics` as an extension,
+  since `_rift.metrics` (like `_rift.proxy`) has no effect either.
+
 - **A journal entry records `status`/`latencyMs` only for an answer the client received** (#1227).
   An `X-Rift-Debug` request was journaled with the debug report's `200`, and a TCP fault
   (`_rift.fault.tcp`, a top-level `fault`, a script `reset()`) with the `502` of the placeholder
