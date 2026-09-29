@@ -117,6 +117,17 @@ impl Imposter {
         })
     }
 
+    /// The imposter's config carrying the stubs it serves *now*. `config.stubs` is only what it
+    /// was created with, so anything exporting the imposter — a replayable view, a delete's
+    /// response (issues #1219, #1229) — reads this instead, or loses every stub added, replaced
+    /// or recorded since.
+    pub fn current_config(&self) -> ImposterConfig {
+        ImposterConfig {
+            stubs: self.get_stubs(),
+            ..self.config.clone()
+        }
+    }
+
     /// Get all stubs
     pub fn get_stubs(&self) -> Vec<Stub> {
         self.snapshot()

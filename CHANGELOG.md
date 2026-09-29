@@ -13,6 +13,15 @@ record.
 
 ### Fixed
 
+- **`DELETE /imposters` and `DELETE /imposters/{port}` return the stubs the imposter served at delete
+  time** (#1229). Both answered with the stubs the imposter was *created* with, so a stub added
+  through `POST /imposters/{port}/stubs`, swapped in with `PUT /imposters/{port}/stubs`, or recorded
+  by a proxy was missing, and a client using the delete-all body as a save-before-reset export (the
+  Mountebank idiom) lost it. The delete-all body is now the same document
+  `GET /imposters?replayable=true` lists just before, and an embedder calling
+  `ImposterManager::delete_imposter`/`delete_all` gets the same. #1219 fixed the replayable views; the
+  delete path read the creation-time config separately.
+
 - **`docs/mountebank/imposters.md` no longer says `recordMatches` records the matched stub**
   (#1228). The engine accepts the key, ignores it and reports `config_key_ignored`, as
   `docs/configuration/mountebank.md` already said; the imposter table now says the same and points

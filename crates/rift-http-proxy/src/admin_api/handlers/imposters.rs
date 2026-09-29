@@ -766,15 +766,11 @@ pub async fn handle_clear_proxy_responses(
 /// `remove_proxies`, proxy responses are stripped via [`filter_proxy_stubs`]. `pub` so the FFI
 /// layer (issue #491) serves the SAME projection as both admin routes instead of re-implementing it.
 pub fn replayable_config(imposter: &Imposter, remove_proxies: bool) -> ImposterConfig {
-    let stubs = imposter.get_stubs();
-    ImposterConfig {
-        stubs: if remove_proxies {
-            filter_proxy_stubs(stubs)
-        } else {
-            stubs
-        },
-        ..imposter.config.clone()
+    let mut config = imposter.current_config();
+    if remove_proxies {
+        config.stubs = filter_proxy_stubs(config.stubs);
     }
+    config
 }
 
 /// Filter out proxy responses from the stubs of `config` as given. Kept for embedders that call it;
