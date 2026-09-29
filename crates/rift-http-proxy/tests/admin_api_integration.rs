@@ -539,7 +539,14 @@ async fn a_space_stub_body_that_is_not_a_stub_is_refused() {
         "the envelope mistake must be named, not reported as a generic shape error: {text}"
     );
 
-    // And nothing was installed by either attempt — the harm was never the status code, it was the
+    // An empty object names no stub field either, so it is refused too (#1230): it is exactly the
+    // no-predicate, no-response stub this rule exists to keep out. The docs once said otherwise.
+    let r = post("{}").await.unwrap();
+    assert_eq!(r.status(), 400, "`{{}}` is not a stub");
+    let text = r.text().await.unwrap();
+    assert!(text.contains("not a stub"), "{text}");
+
+    // And nothing was installed by any attempt — the harm was never the status code, it was the
     // stub left behind.
     let listed = c
         .get(format!("{admin}/imposters/19782/spaces/alpha/stubs"))
