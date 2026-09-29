@@ -13,6 +13,19 @@ record.
 
 ### Fixed
 
+- **A `lookup` key's `index` is honoured, and `_rift.dataset.key` keeps it** (#1240). Mountebank's
+  `lookup` key takes an `index` beside `from`/`using` that picks which element of the selector's
+  match array keys the CSV row (for a regex, `0` is the whole match and `n` the `n`th capture group).
+  Rift's `LookupKey` had no such field, so the value was dropped: an executed `lookup` silently keyed
+  on the first capture group, and a `_rift.dataset` block lost `index` from the `GET /imposters`
+  export, so the binding a cluster read back was not the one the operator wrote. `index` now selects
+  the `n`th regex group (`0` the whole match) or the `n`th JSONPath/XPath value; an index past the
+  last match finds no row, as in Mountebank. Without `index` the key is unchanged (the first capture
+  group, or the whole match when the pattern has none), which still differs from Mountebank's
+  whole-match default; `docs/mountebank/behaviors.md` says to write `"index": 0` for that. A
+  negative or non-integer `index` is refused at create and by `rift-lint` `E051`. For embedders,
+  `LookupKey` gained a public `index` field, which breaks a `LookupKey {}` struct literal.
+
 - **`DELETE /imposters/{port}/savedProxyResponses` removes the stubs a proxy recorded** (#1239). A
   `proxyOnce`/`proxyAlways` proxy that records through `predicateGenerators`, `addWaitBehavior` or
   `addDecorateBehavior` records a *stub* (marked `recordedFrom`), not an entry in the proxy store,

@@ -285,3 +285,34 @@ async fn reload_refuses_an_unparseable_block_and_leaves_the_running_set_unchange
     assert_eq!(imposter_count(&client, &base).await, before);
     running.shutdown().await;
 }
+
+/// Issue #1240: a lookup `key.index` is a match position, so a negative one is refused like any
+/// other unparseable block rather than admitted and ignored.
+#[tokio::test]
+async fn post_imposters_refuses_a_negative_lookup_index() {
+    let (running, base) = admin().await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(format!("{base}/imposters"))
+        .json(&json!({ "protocol": "http", "stubs": [{ "responses": [{
+            "is": { "statusCode": 200, "body": "${row}[name]" },
+            "_behaviors": { "lookup": {
+                "key": { "from": "path", "using": { "method": "regex", "selector": "/(.*)" }, "index": -1 },
+                "fromDataSource": { "csv": { "path": "/nonexistent.csv", "keyColumn": "id" } },
+                "into": "${row}"
+            } }
+        }] }] }))
+        .send()
+        .await
+        .expect("POST /imposters");
+
+    assert_eq!(response.status(), 400);
+    let body = response.text().await.expect("body");
+    assert!(
+        body.contains("`lookup`"),
+        "the refusal names `lookup`: {body}"
+    );
+    assert_eq!(imposter_count(&client, &base).await, 0);
+    running.shutdown().await;
+}

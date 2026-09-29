@@ -999,6 +999,28 @@ fn e051_copy_or_lookup_key_without_using() {
     assert_eq!(r.issues[0].location.as_deref(), Some("loc.lookup.key"));
 }
 
+/// Issue #1240: the engine reads `key.index` as a match position, so it refuses anything but a
+/// non-negative integer; the linter reports the same, and accepts a valid index.
+#[test]
+fn e051_lookup_key_index_that_is_not_a_non_negative_integer() {
+    let lookup = |index: serde_json::Value| {
+        json!({ "lookup": {
+            "key": { "from": "path", "using": { "method": "regex", "selector": "(a)(b)" }, "index": index },
+            "fromDataSource": { "csv": { "path": "x.csv", "keyColumn": "id" } },
+            "into": "${R}"
+        } })
+    };
+    for bad in [json!(-1), json!(1.5), json!("1")] {
+        let mut r = LintResult::new();
+        validate_behavior(path(), &lookup(bad.clone()), "loc", &mut r, &opts());
+        assert_eq!(codes(&r), vec!["E051"], "{bad}");
+        assert_eq!(r.issues[0].location.as_deref(), Some("loc.lookup.key"));
+    }
+    let mut r = LintResult::new();
+    validate_behavior(path(), &lookup(json!(2)), "loc", &mut r, &opts());
+    assert!(codes(&r).is_empty(), "{:?}", codes(&r));
+}
+
 #[test]
 fn e051_decorate_or_shell_transform_of_the_wrong_type() {
     for (behavior, location) in [
