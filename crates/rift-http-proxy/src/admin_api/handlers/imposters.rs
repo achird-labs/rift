@@ -175,13 +175,7 @@ pub async fn handle_list(
     if params.replayable {
         let configs: Vec<ImposterConfig> = imposters
             .iter()
-            .map(|i| {
-                if params.remove_proxies {
-                    filter_proxy_responses(&i.config)
-                } else {
-                    i.config.clone()
-                }
-            })
+            .map(|i| replayable_config(i, params.remove_proxies))
             .collect();
         let body = serde_json::json!({ "imposters": configs });
         json_response(StatusCode::OK, &body)
@@ -397,6 +391,11 @@ pub async fn handle_get(
     let params = ImposterQueryParams::parse(query);
 
     match manager.get_imposter(port) {
+        // The same document `GET /imposters?replayable=true` lists for this imposter (issue #1219).
+        Ok(imposter) if params.replayable => json_response(
+            StatusCode::OK,
+            &replayable_config(&imposter, params.remove_proxies),
+        ),
         Ok(imposter) => {
             let mut stubs = imposter.get_stubs();
 
@@ -761,13 +760,21 @@ pub async fn handle_clear_proxy_responses(
 // Helper functions
 // =============================================================================
 
-/// Filter out proxy responses from stubs. `pub` (not just `pub(crate)`) so the FFI layer
-/// (issue #491) can apply the SAME `removeProxies` projection the admin handlers use, instead of
-/// re-implementing it and risking drift.
-pub fn filter_proxy_responses(config: &ImposterConfig) -> ImposterConfig {
-    let mut filtered = config.clone();
-    filtered.stubs = filter_proxy_stubs(config.stubs.clone());
-    filtered
+/// The replayable (`?replayable=true`) projection of one imposter: its config, carrying the stubs it
+/// serves *now* — `config.stubs` is only what it was created with, so a stub added through the stub
+/// routes or recorded by a proxy would otherwise be missing from the export (issue #1219). With
+/// `remove_proxies`, proxy responses are stripped via [`filter_proxy_stubs`]. `pub` so the FFI
+/// layer (issue #491) serves the SAME projection as both admin routes instead of re-implementing it.
+pub fn replayable_config(imposter: &Imposter, remove_proxies: bool) -> ImposterConfig {
+    let stubs = imposter.get_stubs();
+    ImposterConfig {
+        stubs: if remove_proxies {
+            filter_proxy_stubs(stubs)
+        } else {
+            stubs
+        },
+        ..imposter.config.clone()
+    }
 }
 
 /// Filter proxy responses from a list of stubs. `pub` so the FFI `rift_get_imposter` detail view

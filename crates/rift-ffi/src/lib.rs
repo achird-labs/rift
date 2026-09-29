@@ -35,7 +35,7 @@
 use anyhow::Context;
 use parking_lot::Mutex;
 use rift_http_proxy::admin_api::{
-    AdminApiServer, RunningAdminApi, SERVE_OPTION_KEYS, filter_proxy_responses, filter_proxy_stubs,
+    AdminApiServer, RunningAdminApi, SERVE_OPTION_KEYS, filter_proxy_stubs, replayable_config,
 };
 use rift_http_proxy::config_loader::{self, ConfigSource};
 use rift_http_proxy::injection_gate;
@@ -590,9 +590,9 @@ enum StubRef {
 }
 
 /// `rift_list_imposters`/`rift_get_imposter` options (all optional, default `false`): `replayable`
-/// returns the full `ImposterConfig` projection instead of the summary/detail shape;
-/// `removeProxies` (with `replayable`) strips proxy responses via the SAME
-/// [`filter_proxy_responses`] the admin `?replayable=true&removeProxies=true` route uses.
+/// returns the full `ImposterConfig` projection instead of the summary/detail shape, built by the SAME
+/// [`replayable_config`] both admin `?replayable=true` routes use; `removeProxies` strips proxy
+/// responses from it.
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 struct ImposterProjection {
@@ -628,13 +628,7 @@ pub unsafe extern "C" fn rift_list_imposters(
         let body = if opts.replayable {
             let configs: Vec<ImposterConfig> = imposters
                 .iter()
-                .map(|i| {
-                    if opts.remove_proxies {
-                        filter_proxy_responses(&i.config)
-                    } else {
-                        i.config.clone()
-                    }
-                })
+                .map(|i| replayable_config(i, opts.remove_proxies))
                 .collect();
             json!({ "imposters": configs })
         } else {
@@ -698,12 +692,7 @@ pub unsafe extern "C" fn rift_get_imposter(
             }
         };
         let body = if opts.replayable {
-            let config = if opts.remove_proxies {
-                filter_proxy_responses(&imposter.config)
-            } else {
-                imposter.config.clone()
-            };
-            match serde_json::to_value(&config) {
+            match serde_json::to_value(replayable_config(&imposter, opts.remove_proxies)) {
                 Ok(v) => v,
                 Err(e) => {
                     set_last_error(format!("rift_get_imposter: encode failed: {e}"));
