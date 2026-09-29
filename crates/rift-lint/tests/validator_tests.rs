@@ -564,6 +564,43 @@ fn w004_not_fired_when_body_is_valid_json() {
     assert!(!has_code(&r, "W004"));
 }
 
+/// Issue #1245: a body that is JSON only once rendered is correct. The engine serves what
+/// templating or a body-rewriting behavior produces, so W004 must not judge the written text, as
+/// W015 already does not.
+#[test]
+fn w004_not_fired_on_a_body_rewritten_before_it_is_served() {
+    let is = json!({
+        "statusCode": 200,
+        "headers": { "Content-Type": "application/json" },
+        "body": "{ \"visits\": {{ state.visits }}, \"lastPage\": \"{{ state.lastPage }}\" }"
+    });
+    for extra in [
+        json!({ "_rift": { "templated": true } }),
+        json!({ "_behaviors": { "copy": { "from": "path", "into": "${N}", "using": { "method": "regex", "selector": ".*" } } } }),
+        json!({ "_behaviors": { "decorate": "function (req, res) {}" } }),
+    ] {
+        let mut resp = extra.clone();
+        resp["is"] = is.clone();
+        let mut r = LintResult::new();
+        validate_response(path(), &resp, "loc", &mut r, &opts(), &Value::Null);
+        assert!(!has_code(&r, "W004"), "{extra}: {:?}", codes(&r));
+    }
+}
+
+/// The stand-down is only for a rewritten body: the same text with nothing rendering it still
+/// warns through `validate_response`.
+#[test]
+fn w004_still_fires_on_an_unrendered_response() {
+    let resp = json!({ "is": {
+        "statusCode": 200,
+        "headers": { "Content-Type": "application/json" },
+        "body": "{ \"visits\": {{ state.visits }} }"
+    } });
+    let mut r = LintResult::new();
+    validate_response(path(), &resp, "loc", &mut r, &opts(), &Value::Null);
+    assert!(has_code(&r, "W004"), "{:?}", codes(&r));
+}
+
 // ─── Header rules ─────────────────────────────────────────────────────────────
 
 #[test]

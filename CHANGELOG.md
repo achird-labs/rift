@@ -13,6 +13,14 @@ record.
 
 ### Fixed
 
+- **`rift-lint` no longer reports `W004` for a body that is JSON only once rendered** (#1245). The
+  rule judged an `is.body` string under a JSON `Content-Type` as written, so a `_rift.templated`
+  body such as `{ "visits": {{ state.visits }} }`, which the engine serves as valid JSON, was
+  reported as invalid, and under `--strict` a correct file failed CI. `W004` now stands down, as
+  `W015` already did, when templating or a `copy`/`lookup`/`decorate`/`shellTransform` behavior
+  rewrites the body before it is served. The same body with nothing rendering it still warns, and
+  the public `validate_is_response`, which has no response context, is unchanged.
+
 - **The `rift-verify` docs describe `--skip-dynamic` as the opt-in it is** (#1244). The binary's
   README gave `--skip-dynamic` a default of `true` and offered `--skip-dynamic=false`, and
   `docs/configuration/cli.md`, `docs/features/stub-analysis.md` and the `--verify-dynamic` help said

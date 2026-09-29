@@ -167,7 +167,7 @@ Warnings indicate potential issues that may cause unexpected behavior.
 | W001 | Privileged port | Port 80 requires root access |
 | W002 | Stub has no responses defined | `{"predicates": [...], "responses": []}` |
 | W003 | Response has both `is` and `proxy` defined | `{"is": {...}, "proxy": {...}}` |
-| W004 | Invalid JSON body | Body isn't JSON but Content-Type is application/json |
+| W004 | Invalid JSON body | Body isn't JSON but Content-Type is application/json. Not reported when `_rift.templated` or a `copy`/`lookup`/`decorate`/`shellTransform` behavior rewrites the body before it is served |
 | W005 | Header value is null | `"X-Request-Id": null` |
 | W006 | `Content-Length` header is a numeric string below 10 | `"Content-Length": "5"` |
 | W007 | Unknown proxy mode | `"mode": "proxyEverything"` |
