@@ -131,6 +131,33 @@ fn lint_json_directory_attributes_parse_and_validation_errors() {
     );
 }
 
+/// Issue #1217: `examples/README.md` documents `rift-lint examples/`, so run exactly that. A
+/// directory run checks ports across files (#1094), which per-file checks of the same examples
+/// cannot: four examples shared port 4545 and the documented command exited 1 unnoticed.
+#[test]
+fn the_documented_examples_directory_lint_passes() {
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let out = Command::new(BIN)
+        .args([examples.to_str().unwrap(), "-o", "json"])
+        .output()
+        .expect("run rift-lint");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout is not JSON ({e}); stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(
+        report["errors"], 0,
+        "rift-lint examples/ reported errors: {report}"
+    );
+    assert!(
+        report["files_checked"].as_u64().is_some_and(|n| n >= 6),
+        "examples/ moved or emptied? {report}"
+    );
+    assert_eq!(out.status.code(), Some(0), "{report}");
+}
+
 /// Issue #1091: run the binary over a directory of single-imposter files, one per `(name, port)`.
 fn lint_ports_dir(ports: &[(&str, &str)]) -> (serde_json::Value, Option<i32>) {
     let files: Vec<(&str, String)> = ports

@@ -11,6 +11,18 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`rift-lint examples/` passes on the shipped examples again** (#1217). Since #1094/#1156 a
+  directory lint reports `E002` for a port shared across files, and four standalone examples
+  (`basic-api`, `error-testing`, `latency-testing`, `task-management-api`) all declared port 4545,
+  so the command `examples/README.md` documents exited 1. `basic-api` keeps 4545; `error-testing`
+  now uses 4548, `latency-testing` 4549 and `task-management-api` 4550, so every example has its
+  own port and the whole folder can be loaded side by side. The README's claim that CI lints the
+  examples was only true per file: the existing check linted each file on its own and only for
+  `E028`, so a cross-file conflict could not show up. A new `rift-lint` CLI test now runs the
+  binary over `examples/` exactly as documented and requires zero errors.
+
 ## [0.18.0] - 2026-09-22
 
 ### Added
