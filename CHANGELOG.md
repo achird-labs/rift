@@ -13,6 +13,17 @@ record.
 
 ### Fixed
 
+- **`GET /imposters/{port}?replayable=true` returns the replayable config, and both replayable
+  routes export the stubs the imposter serves now** (#1219). The single-imposter route ignored
+  `replayable` and returned the detail view (`numberOfRequests`, `requests`, `_links`, `_rift`),
+  while `GET /imposters?replayable=true` and `rift_get_imposter(port, {"replayable":true})` returned
+  the imposter's config; Mountebank serves the same document from both routes. Pinning the two
+  together showed that every replayable view was built from the config the imposter was *created*
+  with, so a stub added later through the stub routes, or recorded by a proxy, was missing from the
+  export, including the file `rift save` writes. One `replayable_config` projection now serves both
+  admin routes and both FFI calls from the live stubs, and `removeProxies` filters it the same way.
+  Without `replayable` the route still returns the detail view.
+
 - **A `matches` predicate whose regex does not compile is refused at load** (#1221).
   `{"matches":{"path":"(["}}` was accepted with `201`; the engine logged a `stub_index` warning and
   the matcher then read the unparseable pattern as "no match", so the stub never matched and the

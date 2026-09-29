@@ -195,8 +195,10 @@ running imposters. Use `DELETE /imposters` first if you also want unchanged impo
 Get imposter details.
 
 **Query Parameters:**
-- `replayable` (boolean) - Include full configuration for export
-- `removeProxies` (boolean) - Exclude proxy stubs
+- `replayable` (boolean) - Return the imposter's config for export instead of the details below:
+  the same document `GET /imposters?replayable=true` lists for it, with the stubs it serves now
+  and no `numberOfRequests`, `requests` or `_links`
+- `removeProxies` (boolean) - Exclude proxy responses (a stub left with none is dropped)
 
 **Response:**
 ```json
