@@ -244,7 +244,8 @@ returns `503` naming the file and the imposter is **not** deleted: it keeps serv
 anyway would bring it back on the next restart.
 
 **Response:** `200 OK` with a snapshot of the deleted imposter (`numberOfRequests` `0`, `requests`
-empty); `404` if no imposter is on that port.
+empty) whose `stubs` are the ones it served at delete time, including any added or replaced through
+the stub routes or recorded by a proxy; `404` if no imposter is on that port.
 ```json
 {
   "port": 4545,
@@ -263,6 +264,10 @@ curl -X DELETE http://localhost:2525/imposters/4545
 ### DELETE /imposters
 
 Delete all imposters.
+
+Each entry in `imposters` is the imposter as it was at delete time: the same document a
+`GET /imposters?replayable=true` issued just before would list, stubs added or replaced through the
+stub routes or recorded by a proxy included. That makes the response usable as a save-before-reset export, as in Mountebank.
 
 If an imposter's `<datadir>/<port>.json` cannot be removed, that imposter is not deleted and keeps
 serving. The call then returns `503` with an `errors` entry naming each such port and file, and
