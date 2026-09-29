@@ -13,6 +13,18 @@ record.
 
 ### Fixed
 
+- **A `matches` predicate whose regex does not compile is refused at load** (#1221).
+  `{"matches":{"path":"(["}}` was accepted with `201`; the engine logged a `stub_index` warning and
+  the matcher then read the unparseable pattern as "no match", so the stub never matched and the
+  client that created it had been told it worked. `Stub` now compiles every `matches` pattern as it
+  is parsed, beside the #1220 selector check and with the same case flag the matcher uses: a field's
+  own value (`path`), a keyed value (`query.q`, `headers.x`), and every leaf of a JSON `body`
+  object, through `not`/`and`/`or`. Every door that parses a stub therefore refuses it with `400`
+  `bad data` naming the field and the pattern: `POST`/`PUT /imposters`, the stub routes,
+  `--configfile`/`--datadir` (the load fails), and `POST /admin/reload` (refused, running imposters
+  unchanged). `rift-lint` already reported `E013` for a top-level string pattern; it now walks the
+  same nested values the engine checks and reports each invalid one at its own location.
+
 - **A `jsonpath`/`xpath` predicate selector that does not compile is refused at load** (#1220,
   and the original #181). `{"equals":{"body":""},"jsonpath":{"selector":"$[[[bad"}}` was accepted
   with `201`, and every request then read the failed extraction as the empty string, so the stub

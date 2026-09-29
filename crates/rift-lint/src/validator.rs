@@ -1252,7 +1252,10 @@ fn validate_jsonpath(file: &Path, jsonpath: &Value, location: &str, result: &mut
     }
 }
 
-/// Validate regex patterns in matches predicate.
+/// Validate regex patterns in matches predicate (E013). Every string under a field is a pattern the
+/// engine compiles — a keyed `query`/`headers` value and any leaf of a JSON `body` object too, not
+/// just a top-level string — and the engine refuses the document for any that does not compile
+/// (issue #1221), so each one is checked and reported at its own location.
 fn validate_regex_patterns(
     file: &Path,
     matches: &Value,
@@ -1260,21 +1263,44 @@ fn validate_regex_patterns(
     result: &mut LintResult,
     _options: &LintOptions,
 ) {
-    if let Some(obj) = matches.as_object() {
-        for (field, pattern) in obj {
-            if let Some(pattern_str) = pattern.as_str()
-                && let Err(e) = Regex::new(pattern_str)
-            {
-                result.add_issue(
-                    LintIssue::error(
-                        "E013",
-                        format!("Invalid regex pattern in '{field}': {e}"),
-                        file.to_path_buf(),
-                    )
-                    .with_location(format!("{location}.matches.{field}"))
-                    .with_suggestion("Check regex syntax"),
-                );
+    fn walk(file: &Path, field: &str, value: &Value, at: &str, result: &mut LintResult) {
+        match value {
+            Value::String(pattern) => {
+                if let Err(e) = Regex::new(pattern) {
+                    result.add_issue(
+                        LintIssue::error(
+                            "E013",
+                            format!("Invalid regex pattern in '{field}': {e}"),
+                            file.to_path_buf(),
+                        )
+                        .with_location(at.to_string())
+                        .with_suggestion("Check regex syntax"),
+                    );
+                }
             }
+            Value::Object(map) => {
+                for (key, v) in map {
+                    walk(file, field, v, &format!("{at}.{key}"), result);
+                }
+            }
+            Value::Array(items) => {
+                for (i, v) in items.iter().enumerate() {
+                    walk(file, field, v, &format!("{at}[{i}]"), result);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(obj) = matches.as_object() {
+        for (field, value) in obj {
+            walk(
+                file,
+                field,
+                value,
+                &format!("{location}.matches.{field}"),
+                result,
+            );
         }
     }
 }

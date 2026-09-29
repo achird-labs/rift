@@ -369,6 +369,37 @@ fn e013_invalid_regex_in_matches() {
     assert!(has_code(&r, "E013"));
 }
 
+/// Issue #1221: the engine compiles every string under a `matches` field and refuses the file for
+/// an invalid one, so a keyed or body-object pattern must be flagged too, at its own location.
+#[test]
+fn e013_invalid_regex_nested_under_a_matches_field() {
+    let pred = json!({ "matches": {
+        "query": { "q": "([" },
+        "body": { "user": { "name": "^ok$", "tags": ["a", "[x"] } }
+    } });
+    let mut r = LintResult::new();
+    validate_predicate(path(), &pred, "loc", &mut r, &opts());
+    let locations: Vec<_> = r
+        .issues
+        .iter()
+        .filter(|i| i.code == "E013")
+        .filter_map(|i| i.location.clone())
+        .collect();
+    assert_eq!(
+        locations.len(),
+        2,
+        "one E013 per invalid pattern: {locations:?}"
+    );
+    assert!(
+        locations.contains(&"loc.matches.query.q".to_string()),
+        "{locations:?}"
+    );
+    assert!(
+        locations.contains(&"loc.matches.body.user.tags[1]".to_string()),
+        "{locations:?}"
+    );
+}
+
 #[test]
 fn e013_not_fired_for_valid_regex() {
     let pred = json!({ "matches": { "path": "^/api/.*" } });
