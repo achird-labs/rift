@@ -13,6 +13,14 @@ record.
 
 ### Fixed
 
+- **`rift-lint --fix` repairs a `{"imposters": [...]}` wrapper and a bare array** (#1238). The
+  fixer walked only a single imposter object at the document root, so for the other two shapes
+  `--configfile` loads (the wrapper is what `rift save` writes) it reported the E018/E019/E020
+  finding, printed `Applied 0 fixes` and left the file unchanged with no reason given. It now
+  repairs every imposter in all three shapes and keeps the file's shape. The rewrite refusals (a
+  repeated key, a template, a number the rewrite would change) apply to the wrapper and array as
+  they do to a single imposter. `docs/features/linting.md` names the three shapes.
+
 - **`POST /admin/reload` reports `created`/`replaced`/`stubPatched`/`deleted` as port arrays when
   nothing changed** (#1237). When every `--imposters` source proved itself unchanged (an `http(s):`
   source answering `304 Not Modified`) and there was no `--datadir`, the reply typed the four fields

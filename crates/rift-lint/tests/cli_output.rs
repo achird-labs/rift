@@ -1457,3 +1457,62 @@ fn cli_fix_refuses_to_rewrite_a_template() {
         "a template must never be rewritten with the values it rendered to"
     );
 }
+
+// Issue #1238: `--fix` repaired only a single imposter object at the root. The `{"imposters":[…]}`
+// wrapper (what `rift save` writes) and a bare array are the other two shapes `--configfile`
+// loads; for them it printed `Applied 0 fixes` and left the file as it was, with no reason given.
+
+#[test]
+fn fix_repairs_every_imposter_in_an_imposters_wrapper() {
+    let original = r#"{"imposters":[
+        {"port":4990,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-N":7}}}]}]},
+        {"port":4991,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-B":true}}}]}]}
+    ]}"#;
+
+    let (after, stdout, _) = fix_one(original, &[]);
+
+    assert!(after.contains(r#""X-N": "7""#), "got: {after}");
+    assert!(after.contains(r#""X-B": "true""#), "got: {after}");
+    let doc: serde_json::Value = serde_json::from_str(&after).expect("still JSON");
+    assert_eq!(
+        doc["imposters"].as_array().map(Vec::len),
+        Some(2),
+        "the wrapper shape is kept: {after}"
+    );
+    assert!(stdout.contains("Applied 2 fixes"), "got: {stdout}");
+}
+
+#[test]
+fn fix_repairs_every_imposter_in_a_bare_array() {
+    let original = r#"[
+        {"port":4990,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-N":7}}}]}]},
+        {"port":4991,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-M":[1,"a"]}}}]}]}
+    ]"#;
+
+    let (after, stdout, _) = fix_one(original, &[]);
+
+    assert!(after.contains(r#""X-N": "7""#), "got: {after}");
+    let doc: serde_json::Value = serde_json::from_str(&after).expect("still JSON");
+    assert!(doc.is_array(), "the bare-array shape is kept: {after}");
+    assert_eq!(
+        doc[1]["stubs"][0]["responses"][0]["is"]["headers"]["X-M"],
+        serde_json::json!(["1", "a"])
+    );
+    assert!(stdout.contains("Applied 2 fixes"), "got: {stdout}");
+}
+
+/// The rewrite refusals still apply per file in the wrapper shape: a lossy number anywhere in it
+/// keeps the whole file byte-identical.
+#[test]
+fn fix_still_refuses_a_wrapper_whose_number_it_cannot_write_back() {
+    let original = r#"{"imposters":[
+        {"port":4990,"protocol":"http","stubs":[{"responses":[{"is":{"statusCode":200,"headers":{"X-N":7},
+            "body":{"big":123456789012345678901234567890}}}]}]}
+    ]}"#;
+
+    let (after, stdout, _) = fix_one(original, &[]);
+
+    assert_eq!(after, original, "the file must be byte-identical");
+    assert!(stdout.contains("Skipped"), "got: {stdout}");
+    assert!(stdout.contains("Applied 0 fixes"), "got: {stdout}");
+}
