@@ -51,6 +51,13 @@ declaring `routes` is a startup error).
 Dispatch is **in-process** — the same path the gateway uses. There is no second hop, no extra
 socket, and the imposter behaves exactly as if the request had arrived on its own port.
 
+That includes TCP faults (`_rift.fault.tcp`, a top-level `fault`, a script's `reset()`), whether
+the request came through a route or `/__rift/{port}/…`. Over HTTP/1 the front door aborts the
+client connection exactly as the imposter's port does. The front door also negotiates HTTP/2; there
+the fault resets only that request's stream (`RST_STREAM`, `INTERNAL_ERROR`, for every fault kind)
+and the connection's other streams carry on. An injected fault is logged at `debug`, not as a
+connection error. See [TCP faults](fault-injection.md).
+
 ---
 
 ## Route fields

@@ -6,6 +6,7 @@ use crate::admin_api::router::route_request;
 use crate::config_loader::ConfigSource;
 use crate::extensions::decorate::{ResponsePhase, with_annotation_scope};
 use crate::front_door::FrontDoorRoutes;
+use crate::gateway::apply_tcp_fault;
 use crate::imposter::ImposterManager;
 use crate::intercept_control::InterceptControl;
 use crate::sources::{ReloadSource, SourceSet};
@@ -21,6 +22,7 @@ use rift_mock_core::proxy::{
     AcceptBackoff, AcceptErrorClass, AcceptErrorEvent, AcceptErrorLog, classify_accept_error,
     is_fatal_listener_error,
 };
+use rift_mock_core::{FaultCell, FaultIo, InjectedFault};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -31,6 +33,37 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, warn};
+
+/// The admin service's error type (issue #1234): a hyper error from the router, or an injected
+/// TCP fault that resets one HTTP/2 stream.
+///
+/// A concrete enum rather than `Box<dyn Error + Send + Sync>`: with a boxed error as the service
+/// error, hyper's `S::Error: Into<Box<dyn Error + Send + Sync>>` bound becomes the identity
+/// conversion, which the spawned connection future's `Send` check cannot prove for every lifetime
+/// ("implementation of `From` is not general enough").
+#[derive(Debug)]
+enum AdminServiceError {
+    Hyper(hyper::Error),
+    Fault(InjectedFault),
+}
+
+impl std::fmt::Display for AdminServiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hyper(e) => e.fmt(f),
+            Self::Fault(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for AdminServiceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Hyper(e) => Some(e),
+            Self::Fault(e) => Some(e),
+        }
+    }
+}
 
 /// Bounded grace given to in-flight connections on `shutdown()` before the wait is abandoned.
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
@@ -606,7 +639,13 @@ async fn accept_loop(
             // Held for the connection's lifetime; released to the semaphore when this task ends.
             let _permit = permit;
             let stream_cancel = conn_cancel.clone();
-            let service = service_fn(move |req| {
+            // A TCP-fault stub reached through the `/__rift/` gateway aborts the client
+            // connection, as it does on the imposter's own port (issue #1234): wrapped before the
+            // preface sniff, so both protocol legs see the same stream.
+            let fault_cell = FaultCell::new();
+            let stream = FaultIo::new(stream, fault_cell.clone());
+            let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                let fault_cell = fault_cell.clone();
                 let manager = Arc::clone(&manager);
                 let api_key = api_key.clone();
                 let config_source = config_source.clone();
@@ -616,6 +655,9 @@ async fn accept_loop(
                 let scripts_dir = scripts_dir.clone();
                 let stream_cancel = stream_cancel.clone();
                 async move {
+                    // Read before the request is consumed: an HTTP/2 carrier resets its stream
+                    // instead of arming the connection-wide fault (`apply_tcp_fault`).
+                    let version = req.version();
                     // Per-request annotation scope + response decorator (issue #318):
                     // every response through this listener — including the `/__rift/`
                     // gateway — is decorated with phase `Admin`.
@@ -721,7 +763,10 @@ async fn accept_loop(
                         .map(box_full)
                     })
                     .await;
-                    let mut response = result?;
+                    let response = result.map_err(AdminServiceError::Hyper)?;
+                    // A carrier only ever comes from the gateway; everything else passes through.
+                    let mut response = apply_tcp_fault(response, version, &fault_cell)
+                        .map_err(AdminServiceError::Fault)?;
                     if let Some(decorator) = decorator {
                         decorator.decorate(
                             ResponsePhase::Admin,
@@ -730,7 +775,7 @@ async fn accept_loop(
                             response.headers_mut(),
                         );
                     }
-                    Ok::<_, hyper::Error>(response)
+                    Ok::<_, AdminServiceError>(response)
                 }
             });
 

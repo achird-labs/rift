@@ -34,3 +34,10 @@ non-numeric port returns `400`.
 
 Recorded requests made through the gateway show `requestFrom` as the loopback address, since the
 gateway is the imposter's local client.
+
+Faults behave as they do on the imposter's port, TCP faults included (`_rift.fault.tcp`, a top-level
+`fault`, a script's `reset()`). Over HTTP/1 the gateway aborts the client connection with the same
+reset, empty reply, garbage bytes or broken chunk. The admin port also speaks HTTP/2, which an
+imposter with a TCP fault never does on its own port; there the fault resets only that request's
+stream (`RST_STREAM`, `INTERNAL_ERROR`) and the connection stays up for other requests. See
+[TCP faults](fault-injection.md).

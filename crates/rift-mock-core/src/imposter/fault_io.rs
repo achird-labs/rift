@@ -96,18 +96,91 @@ pub fn tcp_fault_carrier<B>(response: &Response<B>) -> Option<&'static str> {
         .map(|kind| kind.canonical_name())
 }
 
-/// Per-connection slot the handler sets when a request matches a TCP fault; read by [`FaultIo`].
-pub(crate) type FaultCell = Arc<Mutex<Option<TcpFaultKind>>>;
+/// Per-connection slot for a TCP fault: armed when a request's response is a carrier, read by
+/// [`FaultIo`] on that connection's next write.
+///
+/// Public so a listener other than the imposter's own serve loop — the admin API's `/__rift/`
+/// gateway, the front door, or an embedder's listener — can apply a carrier as the real transport
+/// fault (issue #1234): wrap the accepted stream in [`FaultIo::new`] with a fresh cell, then arm
+/// the cell from the service (`rift_http_proxy::gateway::apply_tcp_fault` does both halves of the
+/// decision). A newtype so the lock type stays out of the public API. Cloning shares the slot.
+#[derive(Clone, Debug, Default)]
+pub struct FaultCell(Arc<Mutex<Option<TcpFaultKind>>>);
 
-/// A `TcpStream` wrapper that, when [`FaultCell`] is armed, applies a connection fault on the next
-/// write instead of forwarding hyper's response. Reads and (un-armed) writes pass straight through.
-pub(crate) struct FaultIo {
+impl FaultCell {
+    /// An empty (un-armed) slot.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Arm the slot: the connection's next write performs `kind` instead of writing.
+    ///
+    /// Only meaningful on an HTTP/1 connection, where the next write is this request's response.
+    /// On HTTP/2 the next write may belong to another stream, and the abort would take down every
+    /// stream on the connection.
+    pub fn arm(&self, kind: TcpFaultKind) {
+        *self.0.lock() = Some(kind);
+    }
+
+    /// Take (not just read) the armed fault so it fires exactly once. `FaultIo` only.
+    fn take(&self) -> Option<TcpFaultKind> {
+        self.0.lock().take()
+    }
+}
+
+/// The error an injected TCP fault surfaces as: the `io::Error` [`FaultIo`] returns to abort the
+/// connection wraps it, and a listener's HTTP/2 service returns it to reset one stream.
+///
+/// A listener tells an injected fault from a real connection failure with [`is_injected_fault`],
+/// so the fault the config asked for is not logged as a server error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InjectedFault(pub TcpFaultKind);
+
+impl std::fmt::Display for InjectedFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("rift: injected _rift.fault.tcp")
+    }
+}
+
+impl std::error::Error for InjectedFault {}
+
+/// Whether `err`, or anything in its source chain, is an [`InjectedFault`].
+///
+/// Not a plain `source()` walk: `io::Error::source()` returns the *inner* error's source, not the
+/// inner error, so a walk through the `io::Error` [`FaultIo`] returns steps straight over the
+/// marker. Each `io::Error` in the chain is therefore also opened with `get_ref()`.
+#[must_use]
+pub fn is_injected_fault(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(e) = current {
+        if e.is::<InjectedFault>() {
+            return true;
+        }
+        if let Some(inner) = e.downcast_ref::<io::Error>().and_then(io::Error::get_ref)
+            && is_injected_fault(inner)
+        {
+            return true;
+        }
+        current = e.source();
+    }
+    false
+}
+
+/// A `TcpStream` wrapper that, when its [`FaultCell`] is armed, applies a connection fault on the
+/// next write instead of forwarding hyper's response. Reads and (un-armed) writes pass straight
+/// through, so it can wrap every accepted connection at no cost to ordinary traffic.
+#[derive(Debug)]
+pub struct FaultIo {
     inner: TcpStream,
     fault: FaultCell,
 }
 
 impl FaultIo {
-    pub(crate) fn new(inner: TcpStream, fault: FaultCell) -> Self {
+    /// Wrap an accepted connection. Wrap before any protocol sniffing or TLS so the fault lands on
+    /// the raw socket.
+    #[must_use]
+    pub fn new(inner: TcpStream, fault: FaultCell) -> Self {
         Self { inner, fault }
     }
 
@@ -139,7 +212,7 @@ impl FaultIo {
                 }
             }
         }
-        io::Error::other("rift: injected _rift.fault.tcp")
+        io::Error::other(InjectedFault(kind))
     }
 }
 
@@ -159,8 +232,7 @@ impl AsyncWrite for FaultIo {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        // Take (not just read) the armed fault so it fires exactly once.
-        if let Some(kind) = self.fault.lock().take() {
+        if let Some(kind) = self.fault.take() {
             return Poll::Ready(Err(self.trip(kind)));
         }
         Pin::new(&mut self.inner).poll_write(cx, buf)
@@ -282,6 +354,74 @@ mod tests {
             hyper::header::HeaderValue::from_static("error"),
         );
         assert_eq!(tcp_fault_carrier(&response), None);
+    }
+
+    /// An outer error whose `source()` is the given `io::Error` — the shape hyper's connection
+    /// error takes around the `io::Error` `FaultIo` returns.
+    #[derive(Debug)]
+    struct Outer(io::Error);
+
+    impl std::fmt::Display for Outer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("connection error")
+        }
+    }
+
+    impl std::error::Error for Outer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    /// Issue #1234: the marker is found through an `io::Error` nested in an outer error.
+    #[test]
+    fn is_injected_fault_sees_through_a_wrapped_io_error() {
+        let err = Outer(io::Error::other(InjectedFault(TcpFaultKind::Reset)));
+        assert!(is_injected_fault(&err));
+        // Directly, and as the bare io::Error too.
+        assert!(is_injected_fault(&InjectedFault(TcpFaultKind::Empty)));
+        assert!(is_injected_fault(&io::Error::other(InjectedFault(
+            TcpFaultKind::MalformedChunk
+        ))));
+    }
+
+    /// The trap the implementation avoids: `io::Error::source()` skips its own inner error, so a
+    /// plain `source()` walk never reaches the marker. Pinned so a "simplification" to that walk
+    /// fails here rather than silently re-logging every injected fault as a server error.
+    #[test]
+    fn a_naive_source_walk_misses_the_marker() {
+        fn naive(err: &(dyn std::error::Error + 'static)) -> bool {
+            let mut current = Some(err);
+            while let Some(e) = current {
+                if e.is::<InjectedFault>() {
+                    return true;
+                }
+                current = e.source();
+            }
+            false
+        }
+        let err = Outer(io::Error::other(InjectedFault(TcpFaultKind::Reset)));
+        assert!(!naive(&err), "the naive walk steps over the marker");
+        assert!(is_injected_fault(&err));
+    }
+
+    #[test]
+    fn is_injected_fault_rejects_an_ordinary_io_error() {
+        let reset = io::Error::from(io::ErrorKind::ConnectionReset);
+        assert!(!is_injected_fault(&reset));
+        assert!(!is_injected_fault(&Outer(reset)));
+        assert!(!is_injected_fault(&Outer(io::Error::other("boom"))));
+    }
+
+    /// Armed once, fires once; clones share the slot (the listener keeps one, `FaultIo` the other).
+    #[test]
+    fn fault_cell_is_shared_and_taken_once() {
+        let cell = FaultCell::new();
+        let other = cell.clone();
+        assert_eq!(other.take(), None);
+        cell.arm(TcpFaultKind::RandomData);
+        assert_eq!(other.take(), Some(TcpFaultKind::RandomData));
+        assert_eq!(cell.take(), None);
     }
 
     /// Body-agnostic: an embedder classifies whatever body type it is holding, so classification

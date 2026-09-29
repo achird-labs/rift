@@ -2,12 +2,13 @@
 // the crate root so existing `crate::<module>` paths in the admin server, CLI and tests keep
 // resolving unchanged — the server is a thin consumer of the core.
 //
-// `TcpFaultKind`/`tcp_fault_carrier` are the two non-module names in this block: they are
-// re-exported by value so an embedder holding only `rift-http-proxy` names them at the root
-// exactly as it would on `rift-mock-core` (issue #965), not via `imposter::fault_io`.
+// The TCP-fault names are the non-module names in this block: they are re-exported by value so an
+// embedder holding only `rift-http-proxy` names them at the root exactly as it would on
+// `rift-mock-core` (issues #965, #1234), not via `imposter::fault_io`.
 pub use rift_mock_core::{
-    TcpFaultKind, backends, behaviors, config, extensions, flow_state, imposter, proxy, recording,
-    response, scripting, stub_analysis, tcp_fault_carrier, template, util,
+    FaultCell, FaultIo, InjectedFault, TcpFaultKind, backends, behaviors, config, extensions,
+    flow_state, imposter, is_injected_fault, proxy, recording, response, scripting, stub_analysis,
+    tcp_fault_carrier, template, util,
 };
 
 /// The named flow-state backends this build ships (issue #853).

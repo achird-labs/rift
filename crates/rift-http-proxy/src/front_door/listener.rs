@@ -12,6 +12,7 @@
 
 use crate::front_door::observer::RouteObserver;
 use crate::front_door::route_table::{CompiledRoutes, Route};
+use crate::gateway::apply_tcp_fault;
 use crate::imposter::ImposterManager;
 use crate::response::{ErrorKind, error_response_typed};
 use arc_swap::ArcSwap;
@@ -19,6 +20,7 @@ use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode, Uri};
+use rift_mock_core::{FaultCell, FaultIo, is_injected_fault};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -280,11 +282,25 @@ async fn front_door_accept_loop(
             // Held for the connection's lifetime; released back to the semaphore when this task
             // ends (issue #716).
             let _permit = permit;
+            // A TCP-fault stub reached through this door aborts the client connection, as it does
+            // on the imposter's own port (issue #1234): wrapped before the preface sniff, so both
+            // protocol legs see the same stream.
+            let fault_cell = FaultCell::new();
+            let stream = FaultIo::new(stream, fault_cell.clone());
             let service = service_fn(move |req: Request<Incoming>| {
                 let manager = Arc::clone(&manager);
                 let routes = Arc::clone(&routes);
                 let observer = observer.clone();
-                async move { handle_front_door_request(req, manager, routes, observer).await }
+                let fault_cell = fault_cell.clone();
+                async move {
+                    let version = req.version();
+                    let response =
+                        match handle_front_door_request(req, manager, routes, observer).await {
+                            Ok(response) => response,
+                            Err(never) => match never {},
+                        };
+                    apply_tcp_fault(response, version, &fault_cell)
+                }
             });
 
             // Both builders yield a Connection with the same drive/graceful-shutdown shape;
@@ -296,7 +312,7 @@ async fn front_door_accept_loop(
                     tokio::select! {
                         res = conn.as_mut() => {
                             if let Err(err) = res {
-                                error!("Front door connection error: {}", err);
+                                log_connection_error(err);
                             }
                         }
                         _ = conn_cancel.cancelled() => {
@@ -378,6 +394,18 @@ async fn front_door_accept_loop(
         });
     }
     Ok(())
+}
+
+/// An injected TCP fault is the behaviour a stub asked for, not a server failure, so it is logged
+/// at `debug!` (one `error!` per fault would flood the log of any resilience test). Anything else
+/// stays an `error!`.
+fn log_connection_error(err: impl Into<Box<dyn std::error::Error + Send + Sync>>) {
+    let err = err.into();
+    if is_injected_fault(&*err) {
+        debug!("Front door connection aborted by an injected TCP fault: {err}");
+    } else {
+        error!("Front door connection error: {err}");
+    }
 }
 
 /// The service body: resolve the route table, then the gateway's own `/__rift/:port` addressing,

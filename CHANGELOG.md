@@ -88,6 +88,29 @@ record.
   `message`. `docs/features/hot-reload.md` and `docs/configuration/cli.md`, which documented the
   integer shape, are corrected. A client that compared a field to `0` should test for an empty array.
 
+- **A TCP fault reached through the `/__rift/` gateway or the front door aborts the connection**
+  (#1234). `_rift.fault.tcp`, a top-level `fault` and a script `reset()` abort the socket on the
+  imposter's own port, but the admin API's `/__rift/{port}/…` gateway and the front door (routes and
+  its `/__rift/` fallback) framed the fault's placeholder as an HTTP `502` with an empty body, so a
+  resilience test routed through one port exercised the client's `502` handling instead of its
+  connection-failure handling. Over HTTP/1 both listeners now give exactly what the imposter port
+  gives: a reset, an empty reply, garbage bytes, or a `200` head then a broken chunk. Both also
+  negotiate HTTP/2, which an imposter with a TCP fault never does on its own port; there every fault
+  kind resets only that request's stream (`RST_STREAM`, `INTERNAL_ERROR`) and the connection's other
+  streams keep working. The front door logs an injected fault at `debug`, not as an `ERROR`
+  connection error. The journal is unchanged (no `status`, #1227). A client that matched on the
+  gateway's `502` will now see a transport error, as it would on the imposter's port.
+  `docs/features/fault-injection.md`, `gateway.md` and `front-door.md` describe the behaviour and
+  the HTTP/2 rule, replacing the `502` caveat.
+
+  **For embedders:** `dispatch_to_port` still returns the carrier untouched, for
+  `tcp_fault_carrier` to classify. A listener of your own can now apply it as the real fault with
+  the seam the built-in listeners use, exported from both `rift_mock_core` and `rift_http_proxy`:
+  `FaultCell`, `FaultIo::new` (wrap the accepted `TcpStream` in it), `InjectedFault` (the error
+  that resets an HTTP/2 stream), and `is_injected_fault` (recognises that fault in a connection
+  error's source chain). `rift_http_proxy::gateway::apply_tcp_fault(response, version, &cell)`
+  makes the per-response decision. See `docs/embedding/spi.md`.
+
 - **The docs no longer say `POST /imposters/{port}/spaces/{flowId}/stubs` accepts `{}`** (#1230).
   Since #932 the route refuses any body that names no stub field, `{}` included, with `400`
   `bad data`: that body is exactly the no-predicate, no-response stub the rule exists to keep out.
