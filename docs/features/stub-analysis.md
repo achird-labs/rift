@@ -385,10 +385,12 @@ Stubs with the same path but different methods don't conflict:
 
 ## The `_verify` annotation
 
-`rift-verify` normally SKIPs stubs whose response is dynamic (`inject`, `proxy`, `script`, cycling,
-`_rift.fault`, or a `repeat`, `decorate`, `copy`, `lookup` or `shellTransform` behavior) because their
-output isn't a static function of the stub, and `--skip-dynamic` makes that skip explicit. A behavior
-key set to `null` or to an empty list configures nothing, so it does not make a stub dynamic. Passing `--verify-dynamic` instead asserts those stubs, using whichever of three
+A stub whose response is dynamic (`inject`, `proxy`, `script`, cycling, `_rift.fault`, or a
+`repeat`, `decorate`, `copy`, `lookup` or `shellTransform` behavior) has output that isn't a static
+function of the stub. By default `rift-verify` still requests it and passes any `2xx` status (plus the
+headers and body of its first `is` response, when it has one); `--skip-dynamic` reports it as a
+`SKIP` instead. A behavior key set to `null` or to an empty list configures nothing, so it does not
+make a stub dynamic. Passing `--verify-dynamic` asserts those stubs properly, using whichever of three
 mechanisms applies:
 
 1. **`proxy` stubs** — an embedded mock upstream is stood up and the proxy stub is recreated pointing

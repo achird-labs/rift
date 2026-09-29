@@ -13,6 +13,18 @@ record.
 
 ### Fixed
 
+- **The `rift-verify` docs describe `--skip-dynamic` as the opt-in it is** (#1244). The binary's
+  README gave `--skip-dynamic` a default of `true` and offered `--skip-dynamic=false`, and
+  `docs/configuration/cli.md`, `docs/features/stub-analysis.md` and the `--verify-dynamic` help said
+  dynamic stubs are skipped by default. Since the flag's broken `default_value = "true"` was removed
+  early on, a plain `rift-verify` has requested a dynamic stub (inject, proxy, script, cycling,
+  faults, body-rewriting behaviors) and passed it on any `2xx` status, plus the headers and body of
+  its first `is` response; `--skip-dynamic` reports such stubs as `SKIP`, takes no value, and
+  `--skip-dynamic=false` is refused. The pages and the help text now say so, so a script stub that
+  deliberately answers a non-`2xx` status is expected to `FAIL` without the flag. The CLI is
+  unchanged: `rift-verify --skip-dynamic --verify-dynamic` behaves as before, and a unit test now
+  pins the flag's contract.
+
 - **The docs say an object `is.body` is served with its keys sorted** (#1241). Rift serves
   `{"f": 0.1, "big": 7e23}` as `{"big":7e23,"f":0.1}`; Mountebank serves `JSON.stringify(body)`,
   which keeps the declared order, so a client comparing the body *text* sees a different document.

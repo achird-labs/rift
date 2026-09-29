@@ -143,7 +143,8 @@ struct Args {
     #[arg(long)]
     dry_run: bool,
 
-    /// Skip stubs with inject/proxy/script responses (can't verify dynamically generated responses)
+    /// Report stubs with dynamic responses (inject/proxy/script/cycling/faults) as skipped instead
+    /// of requesting them. Off by default: a dynamic stub is requested and passes on any 2xx status.
     #[arg(long)]
     skip_dynamic: bool,
 
@@ -171,9 +172,9 @@ struct Args {
     #[arg(long, default_value = "rift-verify")]
     space: String,
 
-    /// Opt-in: assert dynamic behaviors instead of skipping them (issue #251). Stands up an
+    /// Opt-in: assert dynamic behaviors properly (issue #251), not just their status. Stands up an
     /// embedded mock upstream for `proxy`, runs any `_verify` sequence against a fresh imposter,
-    /// and asserts deterministic `_rift.fault` outcomes. Off by default (safe-skip preserved).
+    /// and asserts deterministic `_rift.fault` outcomes. Off by default.
     #[arg(long)]
     verify_dynamic: bool,
 
@@ -2533,6 +2534,30 @@ fn build_verify_client(timeout_secs: u64, insecure: bool) -> Result<Client, reqw
 #[cfg(test)]
 mod verify_tests {
     use super::*;
+
+    /// Issue #1244: `--skip-dynamic` is an opt-in switch. Without it a dynamic stub is requested
+    /// (and checked loosely); with it the stub is reported as a skip. The flag takes no value, so
+    /// the documented `--skip-dynamic --verify-dynamic` invocation parses and a
+    /// `--skip-dynamic=false` does not.
+    #[test]
+    fn skip_dynamic_is_an_opt_in_switch() {
+        let args = Args::try_parse_from(["rift-verify"]).expect("no flags");
+        assert!(!args.skip_dynamic, "dynamic stubs are requested by default");
+        let args = Args::try_parse_from(["rift-verify", "--skip-dynamic", "--verify-dynamic"])
+            .expect("the documented pair parses");
+        assert!(args.skip_dynamic && args.verify_dynamic);
+        assert!(Args::try_parse_from(["rift-verify", "--skip-dynamic=false"]).is_err());
+
+        let stub: Stub = serde_json::from_value(serde_json::json!({
+            "responses": [{"inject": "function () { return { statusCode: 418 }; }"}]
+        }))
+        .expect("stub");
+        let requested = generate_test_cases(0, &stub, false, "http", None);
+        assert_eq!(requested.len(), 1);
+        assert!(requested[0].is_dynamic && requested[0].skip_reason.is_none());
+        let skipped = generate_test_cases(0, &stub, true, "http", None);
+        assert!(skipped[0].skip_reason.is_some());
+    }
 
     /// Issue #1093: a null behavior key configures nothing, so it must not make a stub "dynamic".
     #[test]

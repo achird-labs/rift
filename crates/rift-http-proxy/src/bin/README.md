@@ -71,7 +71,8 @@ rift-verify -p 4545 --show-curl --verbose
 | `--verbose` | `-v` | Verbose output with timing | `false` |
 | `--timeout <SECS>` | `-t` | Request timeout in seconds | `10` |
 | `--dry-run` | | Show tests without executing | `false` |
-| `--skip-dynamic` | | Skip inject/proxy/script stubs | `true` |
+| `--skip-dynamic` | | Report dynamic stubs (inject/proxy/script/cycling/faults) as skipped instead of requesting them | `false` |
+| `--verify-dynamic` | | Assert dynamic stubs with a mock upstream, `_verify` sequences and fault checks | `false` |
 | `--status-only` | | Only verify status code (skip body/header checks) | `false` |
 | `--demo` | | Show enhanced error output examples | `false` |
 | `--help` | `-h` | Print help information | |
@@ -106,7 +107,7 @@ The tool generates test requests based on these predicate types:
 
 ### Skipped Stubs
 
-By default, stubs with dynamic or stateful responses are skipped because their output cannot be predicted:
+Stubs with dynamic or stateful responses have output that cannot be predicted from the stub:
 
 - **inject**: JavaScript injection responses
 - **proxy**: Proxy responses to upstream servers
@@ -115,7 +116,10 @@ By default, stubs with dynamic or stateful responses are skipped because their o
 - **cycling responses**: Stubs with multiple responses that rotate
 - **repeat behavior**: Stubs with `_behaviors.repeat` (stateful)
 
-Use `--skip-dynamic=false` to attempt verification of these stubs (results may be unpredictable).
+By default such a stub is still requested, and passes on any `2xx` status (plus the headers and body
+of its first `is` response, when it has one), so one that deliberately answers a non-`2xx` status is
+reported as a `FAIL`. Pass `--skip-dynamic` to report these stubs as skipped instead (the flag takes
+no value), or `--verify-dynamic` to assert them properly.
 
 ### Enhanced Error Reporting
 
