@@ -446,7 +446,9 @@ impl TryFrom<StubRaw> for Stub {
 ///
 /// A `jsonpath`/`xpath` selector that does not compile used to be accepted and then read as the
 /// empty string on every request, so `{"equals":{"body":""}}` behind it matched everything (issues
-/// #181 and #1220). Walks `not`/`and`/`or` so a nested predicate is held to the same rule.
+/// #181 and #1220). A `matches` pattern that does not compile was accepted and then never matched,
+/// so the stub was silently dead (issue #1221). Walks `not`/`and`/`or` so a nested predicate is held
+/// to the same rules.
 fn validate_predicates(predicates: &[Predicate]) -> Result<(), String> {
     predicates.iter().try_for_each(validate_predicate)
 }
@@ -462,10 +464,45 @@ fn validate_predicate(predicate: &Predicate) -> Result<(), String> {
         None => {}
     }
     match &predicate.operation {
+        PredicateOperation::Matches(fields) => {
+            // The same case class the matcher compiles with (`fields.rs`): insensitive by default.
+            let case_insensitive = !predicate.parameters.case_sensitive.unwrap_or(false);
+            fields.iter().try_for_each(|(field, expected)| {
+                validate_regex_leaves(expected, case_insensitive).map_err(|(pattern, e)| {
+                    format!(
+                        "predicate `matches` field `{field}` has an invalid regex `{pattern}`: {e}"
+                    )
+                })
+            })
+        }
         PredicateOperation::Not(inner) => validate_predicate(inner),
         PredicateOperation::And(inner) | PredicateOperation::Or(inner) => {
             validate_predicates(inner)
         }
+        _ => Ok(()),
+    }
+}
+
+/// Every string under a `matches` field is a pattern the matcher compiles: the field's own value
+/// (`path`), a keyed value (`query.q`, `headers.x`), or any leaf of a JSON `body` object. A non-string
+/// scalar is rendered to its JSON text, which is always a valid pattern. Returns the failing pattern
+/// with its error.
+fn validate_regex_leaves(
+    value: &serde_json::Value,
+    case_insensitive: bool,
+) -> Result<(), (&str, regex::Error)> {
+    use crate::imposter::predicates::regex_cache::validate_regex;
+
+    match value {
+        serde_json::Value::String(pattern) => {
+            validate_regex(pattern, case_insensitive).map_err(|e| (pattern.as_str(), e))
+        }
+        serde_json::Value::Object(map) => map
+            .values()
+            .try_for_each(|v| validate_regex_leaves(v, case_insensitive)),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .try_for_each(|v| validate_regex_leaves(v, case_insensitive)),
         _ => Ok(()),
     }
 }

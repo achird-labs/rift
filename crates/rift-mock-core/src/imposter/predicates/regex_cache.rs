@@ -70,6 +70,13 @@ fn compile(pattern: &str, case_insensitive: bool) -> Result<Regex, regex::Error>
     }
 }
 
+/// Check that `pattern` compiles exactly as [`cached_regex`] would compile it. The config doors call
+/// this so a `matches` pattern that can never match is refused at load (issue #1221) instead of
+/// being accepted and then read as "no match" on every request.
+pub(crate) fn validate_regex(pattern: &str, case_insensitive: bool) -> Result<(), regex::Error> {
+    compile(pattern, case_insensitive).map(drop)
+}
+
 /// Return the compiled regex for `pattern`, compiling and caching it on first use.
 ///
 /// `case_insensitive` is part of the key: the same source string compiled with and

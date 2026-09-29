@@ -1323,16 +1323,22 @@ mod tests {
     use std::collections::HashMap;
     use tracing_test::traced_test;
 
+    /// A stub over `preds`, built without the parse-time predicate check. Since #1221 the config
+    /// doors refuse a `matches` pattern that does not compile, but `Stub`'s fields are public, so a
+    /// stub built in code still reaches the index unchecked — and the index must stay sound for it.
+    /// The invalid- and oversized-pattern fixtures below depend on this.
+    fn unchecked_stub(preds: &Value) -> Stub {
+        let mut stub: Stub =
+            serde_json::from_value(json!({ "responses": [{ "is": { "statusCode": 200 } }] }))
+                .expect("valid stub");
+        stub.predicates = serde_json::from_value(preds.clone()).expect("valid predicates");
+        stub
+    }
+
     fn stub_states(preds: &[Value]) -> Vec<Arc<StubState>> {
         preds
             .iter()
-            .map(|p| {
-                let stub = serde_json::from_value(
-                    json!({ "predicates": p, "responses": [{ "is": { "statusCode": 200 } }] }),
-                )
-                .expect("valid stub");
-                Arc::new(StubState::new(stub))
-            })
+            .map(|p| Arc::new(StubState::new(unchecked_stub(p))))
             .collect()
     }
 
@@ -1360,13 +1366,10 @@ mod tests {
     }
 
     fn imposter(preds: &[Value]) -> Imposter {
-        let stubs: Vec<Value> = preds
-            .iter()
-            .map(|p| json!({ "predicates": p, "responses": [{ "is": { "statusCode": 200 } }] }))
-            .collect();
-        let config: ImposterConfig =
-            serde_json::from_value(json!({ "port": 9999, "protocol": "http", "stubs": stubs }))
+        let mut config: ImposterConfig =
+            serde_json::from_value(json!({ "port": 9999, "protocol": "http" }))
                 .expect("valid imposter config");
+        config.stubs = preds.iter().map(unchecked_stub).collect();
         Imposter::new(config).expect("test imposter")
     }
 
