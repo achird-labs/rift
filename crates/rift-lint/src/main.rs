@@ -574,9 +574,8 @@ fn fix_header_value(value: &mut Value) -> Option<&'static str> {
 
 /// Whether `--fix` would change anything in this document.
 ///
-/// Walks both document shapes, unlike the fixer itself, which only mutates a root-level `stubs`
-/// object: this is used to decide whether a YAML file (always a sequence) was at risk, and a
-/// shape-blind answer there would be no answer at all.
+/// Walks every document shape, as the fixer does: this is used to decide whether a YAML file
+/// (always a sequence) was at risk, and a shape-blind answer there would be no answer at all.
 fn has_fixable_header(value: &serde_json::Value) -> bool {
     fn imposter_has(imposter: &serde_json::Value) -> bool {
         imposter
@@ -592,9 +591,26 @@ fn has_fixable_header(value: &serde_json::Value) -> bool {
             .any(|v| !v.is_string())
     }
 
-    match value.as_array() {
-        Some(imposters) => imposters.iter().any(imposter_has),
-        None => imposter_has(value),
+    rift_lint::imposters_in(value)
+        .into_iter()
+        .any(|(_, imposter)| imposter_has(imposter))
+}
+
+/// Every imposter `value` holds, mutably: the three document shapes `rift --configfile` loads (a
+/// single imposter, the `{"imposters": [...]}` wrapper, a bare array), dispatched exactly as
+/// [`rift_lint::imposters_in`] dispatches them. `--fix` once walked only the first shape, so the
+/// other two linted with E018/E019/E020 and were then left unrepaired with no reason (#1238).
+fn imposters_in_mut(value: &mut Value) -> Vec<&mut Value> {
+    if value.get("imposters").is_some_and(Value::is_array) {
+        return value
+            .get_mut("imposters")
+            .and_then(Value::as_array_mut)
+            .map(|arr| arr.iter_mut().collect())
+            .unwrap_or_default();
+    }
+    match value {
+        Value::Array(arr) => arr.iter_mut().collect(),
+        other => vec![other],
     }
 }
 
@@ -609,9 +625,7 @@ fn apply_fixes(imposters: &[(PathBuf, Document)], templated: &HashSet<PathBuf>, 
         // `--fix` re-serializes with `serde_json::to_string_pretty`. Writing that under a
         // `.yaml`/`.yml` name would leave JSON text under a YAML extension — and the engine would
         // then silently reparse it as JSON, because a linted document always begins with `[`. So a
-        // YAML file is never rewritten, unconditionally and before any scan: the mutation below
-        // also assumes a single imposter object at the root, which a valid YAML document (a
-        // sequence, per `E046`) never is, so it could never detect a fix here regardless.
+        // YAML file is never rewritten, unconditionally and before any scan.
         if matches!(format_of(file), Format::Yaml) {
             // Only when the file actually had something to repair. `--fix` would never have
             // rewritten a YAML file anyway, so announcing every one of them turns a directory of
@@ -637,8 +651,11 @@ fn apply_fixes(imposters: &[(PathBuf, Document)], templated: &HashSet<PathBuf>, 
         // nothing, so printing "Fixed header ..." for it would be a lie.
         let mut fixed_here: Vec<String> = Vec::new();
 
-        // Fix header values
-        if let Some(stubs) = modified.get_mut("stubs").and_then(|v| v.as_array_mut()) {
+        // Fix header values, in every imposter the document holds.
+        for imposter in imposters_in_mut(&mut modified) {
+            let Some(stubs) = imposter.get_mut("stubs").and_then(|v| v.as_array_mut()) else {
+                continue;
+            };
             for stub in stubs {
                 if let Some(responses) = stub.get_mut("responses").and_then(|v| v.as_array_mut()) {
                     for response in responses {

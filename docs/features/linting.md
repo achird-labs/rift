@@ -205,7 +205,9 @@ its severity.
 ## Auto-Fix
 
 The `--fix` flag automatically corrects certain value shapes in `is.headers` (the E018, E019 and
-E020 findings). It runs only when the lint found at least one error:
+E020 findings). It runs only when the lint found at least one error, and repairs every imposter in
+each of the three shapes `--configfile` loads: a single imposter object, the `{"imposters": [...]}`
+wrapper (what `rift save` writes), and a bare `[...]` array. The file keeps its shape:
 
 `--fix` rewrites JSON only. A `.yaml`/`.yml` file is reported and never rewritten:
 re-serializing it would put JSON text under a YAML name, which the engine would then silently
