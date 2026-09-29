@@ -266,11 +266,17 @@ fault is **advertised and served** over HTTP/1 only (HTTP/2 multiplexing is inco
 mid-stream connection aborts). On HTTPS that means the TLS handshake offers only `http/1.1`, so an
 h2-capable client is never led to commit to a protocol the imposter will not speak.
 
+The same faults fire through the [single-port gateway](gateway.md) (`/__rift/{port}/…` on the admin
+port) and the [front door](front-door.md). Over **HTTP/1** the client sees exactly what the
+imposter's own port would give it: a reset, an empty reply, garbage bytes, or a `200` head followed
+by a broken chunk. Those two listeners are shared by every imposter (and the admin API), so they
+keep negotiating **HTTP/2**; there a TCP fault **resets that one stream** (`RST_STREAM` with
+`INTERNAL_ERROR`, for every fault kind) and leaves the connection and its other streams working.
+Aborting the socket would take down every request multiplexed on it.
+
 With `recordRequests: true` the faulted request is journaled with its `matchOutcome` but without
 `status` or `latencyMs`, since no response was sent. This holds for every TCP fault: `_rift.fault.tcp`,
-a top-level `fault` and a script's `reset()`. (A request reaching the imposter through the
-`/__rift/` gateway or the front door receives the placeholder `502` instead of an abort; its entry
-still has no `status`, because the placeholder is not the stub's answer.)
+a top-level `fault` and a script's `reset()`, and for every door the request came through.
 
 ---
 
@@ -304,8 +310,8 @@ negotiates HTTP/2, regardless of what its other stubs do.
 ### Detecting a fault in-process (embedders)
 
 A TCP fault never reaches the wire as a response. Rift builds a placeholder **carrier** response and
-the serve loop aborts the socket instead of sending it, so a client over TCP observes only the
-transport error described above.
+the listener that owns the socket (the imposter's own port, the gateway, the front door) aborts it
+instead of sending it, so a client over TCP observes only the transport error described above.
 
 A Rust program embedding the engine and calling `handle_imposter_request` directly — answering a
 "try this imposter" request in-process, with no socket involved — receives that carrier instead, and
@@ -344,6 +350,35 @@ match response.extensions().get::<TcpFaultKind>() {
 
 Do not classify on the `x-rift-fault` header: it echoes the raw configured string rather than the
 canonical name, and `_rift.fault.error` also sets it on a response the client genuinely receives.
+
+#### Serving from your own listener
+
+A listener you own that forwards to an imposter (with `dispatch_to_port` or
+`handle_imposter_request`) can apply the fault the way Rift's own listeners do, instead of
+classifying it. Wrap each accepted `TcpStream` in `FaultIo` with a fresh `FaultCell`, before any
+protocol detection, and pass every finished response through `apply_tcp_fault` together with the
+request's HTTP version:
+
+```rust
+use rift_http_proxy::gateway::{apply_tcp_fault, dispatch_to_port};
+use rift_http_proxy::{FaultCell, FaultIo};
+
+let cell = FaultCell::new();
+let io = TokioIo::new(FaultIo::new(stream, cell.clone()));
+let service = service_fn(move |req| {
+    let (manager, cell) = (manager.clone(), cell.clone());
+    async move {
+        let version = req.version();
+        let response = dispatch_to_port(&manager, port, req).await;
+        apply_tcp_fault(response, version, &cell) // Result<_, InjectedFault>
+    }
+});
+```
+
+On HTTP/1 `apply_tcp_fault` arms the cell and returns the carrier, and `FaultIo` performs the fault
+when hyper writes it. On HTTP/2 it returns `Err(InjectedFault)`, which your service returns so hyper
+resets that stream. The connection error hyper then reports on HTTP/1 is the fault you asked for,
+not a failure: `is_injected_fault(&err)` tells the two apart, so you can log it below `error`.
 
 ### Fault Precedence
 

@@ -463,6 +463,17 @@ also re-exported from `rift_http_proxy`. See
 [Fault injection → Detecting a fault in-process]({{ site.baseurl }}/features/fault-injection/#detecting-a-fault-in-process-embedders).
 Do not classify on the `x-rift-fault` header.
 
+`dispatch_to_port` returns the same carrier untouched. A listener you own can instead apply it as the
+real fault, the way the admin gateway and the front door do (issue #1234): wrap each accepted
+`TcpStream` in `FaultIo::new(stream, cell)` with a fresh `FaultCell::new()`, and pass each finished
+response through `rift_http_proxy::gateway::apply_tcp_fault(response, request_version, &cell)`. On
+HTTP/1 that arms the cell and `FaultIo` aborts the socket on the write. On HTTP/2 it returns
+`Err(InjectedFault)`, which your service returns so hyper resets that one stream. `is_injected_fault`
+recognises the resulting connection error anywhere in an error's source chain, so it need not be
+logged as a failure. `FaultCell`, `FaultIo`, `InjectedFault` and `is_injected_fault` are exported
+from both `rift_mock_core` and `rift_http_proxy`. See
+[Fault injection → Serving from your own listener]({{ site.baseurl }}/features/fault-injection/#serving-from-your-own-listener).
+
 ## Observing front-door route dispatches
 
 `RouteObserver` (`rift_http_proxy::front_door`) is called once for each request a route claims, with

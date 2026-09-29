@@ -25,7 +25,6 @@ use crate::recording::ProxyRecordingStore;
 use arc_swap::ArcSwapOption;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,13 +83,13 @@ async fn run_http1<I>(
 {
     let service = service_fn(move |req| {
         let imposter = Arc::clone(&imposter);
-        let fault_cell = Arc::clone(&fault_cell);
+        let fault_cell = fault_cell.clone();
         let decorator = decorator.clone();
         async move {
             let response =
                 handle_imposter_request_decorated(req, imposter, addr, port, decorator).await?;
             if let Some(kind) = response.extensions().get::<TcpFaultKind>().copied() {
-                *fault_cell.lock() = Some(kind);
+                fault_cell.arm(kind);
             }
             Ok::<_, std::convert::Infallible>(response)
         }
@@ -1270,10 +1269,10 @@ impl ImposterManager {
                                 let _permit = permit;
                                 // Per-connection slot for a real transport fault (issue #239);
                                 // armed by the handler, applied by FaultIo on the response write.
-                                let fault_cell: FaultCell = Arc::new(Mutex::new(None));
+                                let fault_cell = FaultCell::new();
                                 // FaultIo sits beneath TLS so #239 connection faults still break
                                 // an HTTPS connection.
-                                let faulted = FaultIo::new(stream, Arc::clone(&fault_cell));
+                                let faulted = FaultIo::new(stream, fault_cell.clone());
                                 match tls_acceptor {
                                     // Bound the TLS handshake so a stalled/half-open client
                                     // can't pin the connection task indefinitely.
@@ -2289,6 +2288,7 @@ mod port_table_tests {
 mod tests {
     use super::*;
     use crate::imposter::ResponseMode;
+    use parking_lot::Mutex;
 
     /// Raise this process's soft file-descriptor limit for the fd-heavy concurrent tests (#814).
     ///

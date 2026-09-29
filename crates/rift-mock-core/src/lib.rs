@@ -32,8 +32,11 @@ pub use extensions::template;
 
 // The TCP-fault carrier seam: an in-process embedder receives the carrier response the serve loop
 // would have replaced with a socket abort, and names these as `rift_mock_core::tcp_fault_carrier`
-// (issue #965), the same way it names `FastMap` below.
-pub use imposter::fault_io::{TcpFaultKind, tcp_fault_carrier};
+// (issue #965), the same way it names `FastMap` below. `FaultCell`/`FaultIo`/`InjectedFault`/
+// `is_injected_fault` let a listener other than the serve loop apply that abort itself (#1234).
+pub use imposter::fault_io::{
+    FaultCell, FaultIo, InjectedFault, TcpFaultKind, is_injected_fault, tcp_fault_carrier,
+};
 
 // Shared utilities
 pub mod util;

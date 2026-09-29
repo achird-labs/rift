@@ -341,6 +341,65 @@ async fn dispatch_to_port_routes_in_process() {
     manager.delete_all().await;
 }
 
+// Issue #1234 pin: the shared listeners now abort on a TCP-fault carrier, but `dispatch_to_port`
+// itself still hands the carrier back untouched — an embedder's own listener classifies it with
+// `tcp_fault_carrier` (or applies it with `apply_tcp_fault`), which it cannot do if the extension
+// were stripped or the response replaced.
+#[tokio::test]
+async fn dispatch_to_port_returns_the_tcp_fault_carrier_untouched() {
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use rift_http_proxy::tcp_fault_carrier;
+
+    let manager = Arc::new(ImposterManager::new());
+    manager
+        .create_imposter(
+            serde_json::from_value(serde_json::json!({
+                "protocol": "http", "port": 19486,
+                "stubs": [{ "responses": [{ "fault": "CONNECTION_RESET_BY_PEER" }] }]
+            }))
+            .expect("fault imposter config"),
+        )
+        .await
+        .expect("create imposter");
+
+    // Reports what `dispatch_to_port` returned as an ordinary answer, so the client can read it.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("addr");
+    let mgr = manager.clone();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let service = service_fn(move |req| {
+            let mgr = mgr.clone();
+            async move {
+                let carrier = dispatch_to_port(&mgr, 19486, req).await;
+                let report = tcp_fault_carrier(&carrier).unwrap_or("not a carrier");
+                Ok::<_, std::convert::Infallible>(hyper::Response::new(http_body_util::Full::new(
+                    hyper::body::Bytes::from(report),
+                )))
+            }
+        });
+        let _ = http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await;
+    });
+
+    let report = reqwest::get(format!("http://{addr}/x"))
+        .await
+        .expect("listener reachable")
+        .text()
+        .await
+        .expect("body");
+    assert_eq!(report, "CONNECTION_RESET_BY_PEER");
+
+    manager.delete_all().await;
+}
+
 // ===========================================================================
 // Issue #342: bindable admin/metrics servers — bound-addr reporting + shutdown
 // ===========================================================================

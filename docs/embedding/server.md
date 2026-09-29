@@ -14,8 +14,10 @@ metrics planes to addresses of its choosing.
 The server composition lives in the `rift_http_proxy::server` module (`Cli`, `Commands`,
 `ServerBuilder`, `RunningServer`, `admin_bind_addr`, `run_metrics_server`, `bind_metrics_server`,
 `RunningMetrics`); none of these are re-exported at the crate root. The crate root re-exports the
-`rift-mock-core` modules plus `TcpFaultKind`, `tcp_fault_carrier`, `default_flow_store_backends` and
-`install_default_crypto_provider`.
+`rift-mock-core` modules plus the TCP-fault seam (`TcpFaultKind`, `tcp_fault_carrier`, `FaultCell`,
+`FaultIo`, `InjectedFault`, `is_injected_fault`), `default_flow_store_backends` and
+`install_default_crypto_provider`. `gateway::apply_tcp_fault` applies a fault carrier on a listener
+of your own ([SPI → Detecting a TCP fault in-process]({{ site.baseurl }}/embedding/spi/#detecting-a-tcp-fault-in-process)).
 
 `Cli`'s `Debug` output redacts its credentials: `--api-key`, `--intercept-auth` and
 `--intercept-ca-key-pem` render as `"<redacted>"` when set (issue #1166), so a host that flattens
