@@ -22,8 +22,7 @@ record.
   with, so a stub added later through the stub routes, or recorded by a proxy, was missing from the
   export, including the file `rift save` writes. One `replayable_config` projection now serves both
   admin routes and both FFI calls from the live stubs, and `removeProxies` filters it the same way.
-  Without `replayable` the route still returns the detail view. `rift-http-proxy`'s public
-  `filter_proxy_responses` is replaced by `replayable_config`.
+  Without `replayable` the route still returns the detail view.
 
 - **A `matches` predicate whose regex does not compile is refused at load** (#1221).
   `{"matches":{"path":"(["}}` was accepted with `201`; the engine logged a `stub_index` warning and

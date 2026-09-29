@@ -777,6 +777,15 @@ pub fn replayable_config(imposter: &Imposter, remove_proxies: bool) -> ImposterC
     }
 }
 
+/// Filter out proxy responses from the stubs of `config` as given. Kept for embedders that call it;
+/// note that an imposter's `config.stubs` are the stubs it was created with, so the admin routes and
+/// the FFI export an imposter through [`replayable_config`], which reads the live ones (issue #1219).
+pub fn filter_proxy_responses(config: &ImposterConfig) -> ImposterConfig {
+    let mut filtered = config.clone();
+    filtered.stubs = filter_proxy_stubs(config.stubs.clone());
+    filtered
+}
+
 /// Filter proxy responses from a list of stubs. `pub` so the FFI `rift_get_imposter` detail view
 /// (issue #491) applies the SAME `removeProxies` projection this crate's `handle_get` applies to
 /// its live `get_stubs()`, rather than re-implementing it.
