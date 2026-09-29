@@ -273,7 +273,7 @@ pub struct DebugStubInfo {
 /// Stub definition (Mountebank-compatible with Rift extensions)
 /// Field ordering matches Mountebank output: scenarioName, predicates, responses, _links
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", from = "StubRaw")]
+#[serde(rename_all = "camelCase", try_from = "StubRaw")]
 pub struct Stub {
     /// Optional scenario name for documentation/organization (Mountebank compatible)
     /// Placed first to match Mountebank output ordering
@@ -361,7 +361,7 @@ struct DelayRange {
     max: u64,
 }
 
-/// The wire shape. `DelayRange` is rewritten into a `wait` by an infallible `From<StubRaw>`, so an
+/// The wire shape. `DelayRange` is rewritten into a `wait` by the `TryFrom<StubRaw>` conversion, so an
 /// inverted range has to be refused here, at parse, or it reaches the draw and panics (issue #1148).
 #[derive(Debug, Deserialize)]
 struct DelayRangeRaw {
@@ -402,14 +402,17 @@ fn de_u64_or_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Er
     }
 }
 
-impl From<StubRaw> for Stub {
-    fn from(raw: StubRaw) -> Self {
+impl TryFrom<StubRaw> for Stub {
+    type Error = String;
+
+    fn try_from(raw: StubRaw) -> Result<Self, Self::Error> {
         // "rules" is an alias for "predicates"; prefer "predicates" when both present
         let predicates = if !raw.predicates.is_empty() {
             raw.predicates
         } else {
             raw.rules
         };
+        validate_predicates(&predicates)?;
 
         // Convert stub-level delayRange to a wait behavior injected into each response
         let responses = if raw.delay_range.is_empty() {
@@ -422,7 +425,7 @@ impl From<StubRaw> for Stub {
                 .collect()
         };
 
-        Stub {
+        Ok(Stub {
             scenario_name: raw.scenario_name,
             required_scenario_state: raw.required_scenario_state,
             new_scenario_state: raw.new_scenario_state,
@@ -433,7 +436,37 @@ impl From<StubRaw> for Stub {
             responses,
             recorded_from: raw.recorded_from,
             verify: raw.verify,
+        })
+    }
+}
+
+/// Refuse a predicate the matcher could never evaluate as written, at parse — the layer every config
+/// door (`POST`/`PUT /imposters`, the stub routes, `--configfile`/`--datadir`, `POST /admin/reload`)
+/// deserializes a `Stub` through, so one check covers them all.
+///
+/// A `jsonpath`/`xpath` selector that does not compile used to be accepted and then read as the
+/// empty string on every request, so `{"equals":{"body":""}}` behind it matched everything (issues
+/// #181 and #1220). Walks `not`/`and`/`or` so a nested predicate is held to the same rule.
+fn validate_predicates(predicates: &[Predicate]) -> Result<(), String> {
+    predicates.iter().try_for_each(validate_predicate)
+}
+
+fn validate_predicate(predicate: &Predicate) -> Result<(), String> {
+    use crate::behaviors::{validate_jsonpath_selector, validate_xpath_selector};
+
+    match &predicate.parameters.selector {
+        Some(PredicateSelector::JsonPath { selector }) => validate_jsonpath_selector(selector)
+            .map_err(|e| format!("predicate `jsonpath` selector `{selector}` is invalid: {e}"))?,
+        Some(PredicateSelector::XPath { selector, .. }) => validate_xpath_selector(selector)
+            .map_err(|e| format!("predicate `xpath` selector `{selector}` is invalid: {e}"))?,
+        None => {}
+    }
+    match &predicate.operation {
+        PredicateOperation::Not(inner) => validate_predicate(inner),
+        PredicateOperation::And(inner) | PredicateOperation::Or(inner) => {
+            validate_predicates(inner)
         }
+        _ => Ok(()),
     }
 }
 

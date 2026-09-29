@@ -13,6 +13,19 @@ record.
 
 ### Fixed
 
+- **A `jsonpath`/`xpath` predicate selector that does not compile is refused at load** (#1220,
+  and the original #181). `{"equals":{"body":""},"jsonpath":{"selector":"$[[[bad"}}` was accepted
+  with `201`, and every request then read the failed extraction as the empty string, so the stub
+  matched everything; an `xpath` selector such as `//*[[` did the same. #181 described this in June
+  and was closed by #186, but #186's `closes #181` line belonged to its `DELETE /imposters/:port`
+  404 change and the selector fix never landed, so no test existed to notice. `Stub` now compiles
+  every predicate selector as it is parsed, with the same rooting and parser the matcher uses, and
+  walks `not`/`and`/`or` so a nested selector is checked too. Every door that parses a stub
+  therefore refuses it with `400` `bad data` naming the selector: `POST`/`PUT /imposters`, the
+  stub routes, `--configfile`/`--datadir` (the load fails), and `POST /admin/reload` (refused,
+  running imposters unchanged). Well-formed selectors, including bare Mountebank-style paths such as
+  `user.name`, load as before. A selector that compiles but finds nothing is unchanged.
+
 - **`rift-lint examples/` passes on the shipped examples again** (#1217). Since #1094/#1156 a
   directory lint reports `E002` for a port shared across files, and four standalone examples
   (`basic-api`, `error-testing`, `latency-testing`, `task-management-api`) all declared port 4545,
