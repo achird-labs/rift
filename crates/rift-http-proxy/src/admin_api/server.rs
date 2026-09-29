@@ -1,7 +1,7 @@
 //! Admin API server.
 
 use crate::admin_api::authz;
-use crate::admin_api::handlers::events::{self, AdminBody};
+use crate::admin_api::handlers::events::{self, box_full};
 use crate::admin_api::router::route_request;
 use crate::config_loader::ConfigSource;
 use crate::extensions::decorate::{ResponsePhase, with_annotation_scope};
@@ -9,7 +9,7 @@ use crate::front_door::FrontDoorRoutes;
 use crate::imposter::ImposterManager;
 use crate::intercept_control::InterceptControl;
 use crate::sources::{ReloadSource, SourceSet};
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::service::service_fn;
 use hyper::{Response, StatusCode};
@@ -985,13 +985,6 @@ fn judge_exposure(
         }
         AdminExposurePolicy::Refuse => anyhow::bail!(message.to_string()),
     }
-}
-
-/// Box a `Full<Bytes>` response into the streaming-unified `AdminBody` (issue #461), so the normal
-/// router path and the SSE stream path share one response type. `Full`'s error is `Infallible`, so
-/// the `map_err` closure is unreachable.
-fn box_full(resp: Response<Full<Bytes>>) -> Response<AdminBody> {
-    resp.map(|body| body.map_err(|never| match never {}).boxed())
 }
 
 fn unauthorized_response() -> Response<Full<Bytes>> {

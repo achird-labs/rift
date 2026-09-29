@@ -11,6 +11,17 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`GET /events` and `GET /imposters/{port}/savedRequests/stream` refuse in the `errors` envelope**
+  (#1226). A bad `types` value, a `port` that is not a port number, an unsupported `match` clause and an unknown
+  port were answered with a bare `{"error": "…"}` object, the last admin doors still serving that
+  shape after 0.18.0 removed it everywhere else. They now answer
+  `{"errors":[{"code","type","message"}]}` with `type` `bad data` (`400`) or `no such resource`
+  (`404`), built by the same helpers as the rest of the admin API. A client reading `.error` on
+  these two doors must read `errors[0]` instead. The unknown-port message is now the one
+  `GET /imposters/{port}` gives (`Imposter not found on port N`).
+
 ## [0.18.1] - 2026-09-29
 
 ### Fixed

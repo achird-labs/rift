@@ -596,20 +596,58 @@ async fn no_types_param_streams_both_families_with_monotonic_ids() {
     running.shutdown().await;
 }
 
+/// Issue #1226: a stream refused before it opens answers the canonical `errors` envelope, like
+/// every other admin door — not the bare `{"error": …}` body it served through 0.18.1. A refusal
+/// has a finite body, so a plain GET reads it (the raw-socket `Sse` stops at the response head).
 #[tokio::test]
-async fn error_branches_return_400_and_404() {
+async fn refusals_answer_the_errors_envelope() {
     let (addr, _mgr, running) = start_server(None).await;
-    // Unknown port → 404.
-    let (_a, s404) = Sse::connect(addr, "/events?port=59999", None).await;
-    assert!(s404.contains("404"), "unknown port → 404, got {s404:?}");
-    // Bad types value → 400.
-    let (_b, s400) = Sse::connect(addr, "/events?types=bogus", None).await;
-    assert!(s400.contains("400"), "bad types → 400, got {s400:?}");
-    // Alias with a nonexistent port → 404.
-    let (_c, s404b) = Sse::connect(addr, "/imposters/59998/savedRequests/stream", None).await;
-    assert!(
-        s404b.contains("404"),
-        "alias unknown port → 404, got {s404b:?}"
+    let cases = [
+        ("/events?types=bogus", 400, "bad data"),
+        ("/events?port=abc", 400, "bad data"),
+        ("/events?match=bogus", 400, "bad data"),
+        ("/events?port=59999", 404, "no such resource"),
+        (
+            "/imposters/59998/savedRequests/stream",
+            404,
+            "no such resource",
+        ),
+        // Not a stream target at all (`stream_target` rejects the port), so the router answers it.
+        // Already the envelope before #1226; pinned so the two paths stay in agreement.
+        ("/imposters/abc/savedRequests/stream", 400, "bad data"),
+    ];
+    for (path, status, error_type) in cases {
+        let resp = reqwest::get(format!("http://{addr}{path}"))
+            .await
+            .expect("send");
+        assert_eq!(resp.status().as_u16(), status, "{path}: status");
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(content_type, "application/json", "{path}: content-type");
+        let body: serde_json::Value = resp.json().await.expect("JSON body");
+        assert!(body.get("error").is_none(), "{path}: legacy key: {body}");
+        let error = &body["errors"][0];
+        assert_eq!(error["code"], status.to_string(), "{path}: code in {body}");
+        assert_eq!(error["type"], error_type, "{path}: type in {body}");
+        assert!(
+            error["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "{path}: message in {body}"
+        );
+    }
+    // The unknown-port refusal carries the same message `GET /imposters/{port}` gives.
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/events?port=59999"))
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("JSON body");
+    assert_eq!(
+        body["errors"][0]["message"],
+        "Imposter not found on port 59999"
     );
     running.shutdown().await;
 }
