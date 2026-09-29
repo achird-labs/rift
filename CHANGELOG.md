@@ -11,6 +11,8 @@ record.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-29
+
 ### Fixed
 
 - **`rift-lint` no longer reports `W004` for a body that is JSON only once rendered** (#1245). The
@@ -51,8 +53,12 @@ record.
   last match finds no row, as in Mountebank. Without `index` the key is unchanged (the first capture
   group, or the whole match when the pattern has none), which still differs from Mountebank's
   whole-match default; `docs/mountebank/behaviors.md` says to write `"index": 0` for that. A
-  negative or non-integer `index` is refused at create and by `rift-lint` `E051`. For embedders,
-  `LookupKey` gained a public `index` field, which breaks a `LookupKey {}` struct literal.
+  negative or non-integer `index` is refused at create and by `rift-lint` `E051`.
+
+  **Breaking (embedders only):** `LookupKey` gained a public `index` field, which breaks a
+  `LookupKey {}` struct literal; use `..Default::default()` or the constructor instead. This is
+  the reason this release is 0.19.0 rather than 0.18.2 — Rift is pre-1.0, and its convention treats
+  a source-breaking public-API change as a minor bump, not a patch.
 
 - **`DELETE /imposters/{port}/savedProxyResponses` removes the stubs a proxy recorded** (#1239). A
   `proxyOnce`/`proxyAlways` proxy that records through `predicateGenerators`, `addWaitBehavior` or
@@ -3777,7 +3783,8 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/achird-labs/rift/compare/v0.18.1...HEAD
+[Unreleased]: https://github.com/achird-labs/rift/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/achird-labs/rift/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/achird-labs/rift/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/achird-labs/rift/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/achird-labs/rift/compare/v0.16.0...v0.17.0
