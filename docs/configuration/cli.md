@@ -854,8 +854,8 @@ Options:
   -t, --timeout <SECS>    Request timeout in seconds [default: 10]
   -o, --output <FMT>      Output format: text (default), json
       --dry-run           Show what would be tested without making requests
-      --skip-dynamic      Skip stubs with inject/proxy/script responses
-      --verify-dynamic    Opt-in: assert dynamic stubs instead of skipping them
+      --skip-dynamic      Skip stubs with dynamic responses instead of requesting them (off by default)
+      --verify-dynamic    Opt-in: assert dynamic stubs with a mock upstream, _verify or fault checks
       --status-only       Only verify status codes (ignore body/headers)
       --gateway           Send requests through the admin port's /__rift/<port>/ gateway
       --insecure          Accept self-signed/invalid TLS certificates (https imposters)
@@ -896,10 +896,14 @@ With `-o json`, `rift-verify` writes a single summary object to stdout —
 banner output to stderr, so it pipes cleanly into other tools. Color and the decorative banner are
 also suppressed automatically when stdout is not a TTY (piped) or when `NO_COLOR` is set.
 
-By default, `rift-verify` SKIPs stubs whose response is dynamic (proxy/inject/script/cycling/faults,
-and the `repeat`/`decorate`/`copy`/`lookup`/`shellTransform` behaviors unless `null` or an empty list)
-because their output isn't a static function of the stub — `--skip-dynamic` makes that skip explicit.
-`--verify-dynamic` is the opt-in complement: it asserts those stubs instead of skipping them, using
+A stub whose response is dynamic (proxy/inject/script/cycling/faults, and the
+`repeat`/`decorate`/`copy`/`lookup`/`shellTransform` behaviors unless `null` or an empty list) has
+output that isn't a static function of the stub. By default `rift-verify` still sends it a request,
+and asserts only what can be known: any `2xx` status passes (a `_rift.fault.tcp` reset passes as the
+expected outcome), plus the headers and body of its first `is` response when it has one. So a script
+or inject stub that deliberately answers a non-`2xx` status is reported as a `FAIL`.
+`--skip-dynamic` reports every such stub as a `SKIP` instead; it is a plain switch and takes no value.
+`--verify-dynamic` asserts those stubs properly, using
 three mechanisms — an embedded mock upstream for `proxy` stubs (verifying the proxied response and,
 when `predicateGenerators` is set, the recorded-stub prepend); a `_verify` expectation sequence
 (see below) run against a freshly recreated imposter for inject/script/decorate/cycling/stateful
