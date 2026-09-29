@@ -57,8 +57,10 @@ pub struct RecordedRequest {
     ///
     /// Absent means **not recorded**, never zero. A `0` here would read as "instant" and a
     /// missing status as "no response"; both are claims this engine cannot make about a request
-    /// whose outcome it did not observe — the `X-Rift-Debug` path returns early, and a request
-    /// journalled before an error never reaches the attach.
+    /// whose answer it did not send (#1227): an `X-Rift-Debug` report describes the request rather
+    /// than answering it, a TCP fault aborts the connection instead of responding, and a request
+    /// abandoned before a response existed never reaches the attach. An error response the client
+    /// does receive is an answer like any other and carries its status.
     ///
     /// A present `latency_ms` of `0` is an ordinary reading, not a missing one: a stub answered
     /// from memory usually takes well under a millisecond. The resolution is chosen for the

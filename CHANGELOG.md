@@ -13,6 +13,15 @@ record.
 
 ### Fixed
 
+- **A journal entry records `status`/`latencyMs` only for an answer the client received** (#1227).
+  An `X-Rift-Debug` request was journaled with the debug report's `200`, and a TCP fault
+  (`_rift.fault.tcp`, a top-level `fault`, a script `reset()`) with the `502` of the placeholder
+  response the serve loop discards before aborting the connection. Both now leave the two fields
+  out, as the docs said for the debug path; `matchOutcome` is unchanged (absent on the debug path,
+  present on a fault). The docs also claimed a request that "errored before responding" leaves them
+  out: an error the client receives is an answer and was, and still is, recorded with its status.
+  Entries already persisted in a `--datadir` keep what they recorded.
+
 - **`GET /events` and `GET /imposters/{port}/savedRequests/stream` refuse in the `errors` envelope**
   (#1226). A bad `types` value, a `port` that is not a port number, an unsupported `match` clause and an unknown
   port were answered with a bare `{"error": "…"}` object, the last admin doors still serving that
