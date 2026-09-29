@@ -647,6 +647,17 @@ data: {"missed":7}
 consume events, tracking `index` → on `lagged` or a reconnect gap, `GET /savedRequests?since=<last
 index>` to fill the hole, then resume.
 
+**Errors.** A bad request is refused before the stream opens, as `application/json` in the same
+[`errors` envelope](#error-responses) as every other admin route:
+
+| Cause | Status | `type` |
+|:------|:-------|:-------|
+| unknown `types` value, `port` that is not a port number, unsupported `match` clause | `400` | `bad data` |
+| `port` names no imposter | `404` | `no such resource` |
+
+The alias below refuses the same way. Through 0.18.1 these refusals were a bare `{"error": "…"}`
+object; read `errors[0]` instead.
+
 ### GET /imposters/{port}/savedRequests/stream
 
 Sugar alias for `GET /events?types=requests&port={port}` — a handle-scoped request tail that mirrors
