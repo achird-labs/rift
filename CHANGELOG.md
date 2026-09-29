@@ -13,6 +13,14 @@ record.
 
 ### Fixed
 
+- **The docs say an object `is.body` is served with its keys sorted** (#1241). Rift serves
+  `{"f": 0.1, "big": 7e23}` as `{"big":7e23,"f":0.1}`; Mountebank serves `JSON.stringify(body)`,
+  which keeps the declared order, so a client comparing the body *text* sees a different document.
+  `docs/mountebank/responses.md` said nothing about key order. It now documents sorted keys as a
+  deliberate divergence (JSON values are key-sorted throughout the engine, and the stable stub
+  identity used by incremental reload relies on it) and that a string body is served verbatim when
+  the exact bytes matter. The engine is unchanged.
+
 - **A `lookup` key's `index` is honoured, and `_rift.dataset.key` keeps it** (#1240). Mountebank's
   `lookup` key takes an `index` beside `from`/`using` that picks which element of the selector's
   match array keys the CSV row (for a regex, `0` is the whole match and `n` the `n`th capture group).
