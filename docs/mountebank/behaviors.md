@@ -76,7 +76,7 @@ The array form is a program, as in Mountebank: every element runs, in array orde
 
 `_behaviors` must be an object; the array form is only accepted under `behaviors`, and each of its elements must be an object (a non-object element is skipped). Any other shape — an array or scalar `_behaviors`, or a scalar `behaviors` — is refused: `POST /imposters` returns `400` and a config file fails to load. This holds with `--allowInjection` on too.
 
-A behavior value the engine cannot read is refused the same way, on any response type and in any array element: for example a `wait` with string bounds (`{"min": "100", "max": "200"}`) or a fractional or negative number, `"repeat": 2.0`, or a `copy` with no `using`. `POST`/`PUT /imposters`, the stub endpoints, `--configfile` and `POST /admin/reload` answer `400` or fail the load naming the key; a `--datadir` file holding one is skipped at startup and listed in the startup error summary. Before 0.18.0 such a block loaded and served without its behaviors. `rift-lint` reports these as `E025`, `E035` and `E051`. Only a step that will run is checked: a `behaviors` shadowed by `_behaviors`, or a step a later `null` removes, still loads — except an inverted `wait` range, which is refused wherever it is written.
+A behavior value the engine cannot read is refused the same way, on any response type and in any array element: for example a `wait` with string bounds (`{"min": "100", "max": "200"}`) or a fractional or negative number, `"repeat": 2.0`, or a `copy` with no `using`. `POST`/`PUT /imposters`, the stub endpoints, `--configfile` and `POST /admin/reload` answer `400` or fail the load naming the key; a `--datadir` file holding one is skipped at startup and listed in the startup error summary. Before 0.18.0 such a block loaded and served without its behaviors. A `copy` or `lookup` whose `using` selector does not compile (a regex, JSONPath or XPath syntax error) is refused the same way; releases up to 0.19.0 loaded it and extracted nothing on every request. `rift-lint` reports these as `E025`, `E035` and `E051`, and checks a regex selector but not a JSONPath or XPath one. Only a step that will run is checked: a `behaviors` shadowed by `_behaviors`, or a step a later `null` removes, still loads — except an inverted `wait` range, which is refused wherever it is written.
 
 ### How Rift writes behaviors back
 
@@ -334,7 +334,8 @@ from that value:
 | `xpath` | An XPath selector | The selected value from an XML source |
 
 Every occurrence of the `into` token in the body and header values is replaced. If the source is
-absent, or nothing is extracted, the token is replaced with an empty string.
+absent, or nothing is extracted, the token is replaced with an empty string. A selector that does
+not compile is not treated as "nothing extracted": the imposter is refused when it is loaded.
 
 Rift returns the first capture group where Mountebank returns the whole regex match, so a pattern
 like `/users/(\d+)` yields just the id.

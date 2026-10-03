@@ -965,8 +965,8 @@ fn refuse_unparseable_object(block: &serde_json::Value) -> Result<(), String> {
     let Some(keys) = block.as_object() else {
         return Ok(());
     };
-    if crate::behaviors::ResponseBehaviors::deserialize(block).is_ok() {
-        return Ok(());
+    if let Ok(behaviors) = crate::behaviors::ResponseBehaviors::deserialize(block) {
+        return validate_behavior_selectors(&behaviors);
     }
     // serde's message names nothing the author wrote ("did not match any variant of untagged enum
     // WaitBehavior"), so find the key. The behaviors are independent fields, so one key parses or
@@ -989,6 +989,47 @@ fn refuse_unparseable_object(block: &serde_json::Value) -> Result<(), String> {
     // Every key parses alone, so the failure is in no single key; report the block as a whole
     // rather than admit it.
     Err("behaviors block is malformed".to_string())
+}
+
+/// Every `copy` and `lookup` selector compiles (issue #1258). The extractors read a selector that
+/// does not compile as "nothing extracted", so the token became the empty string (or the lookup
+/// found no row) on every request, the behavior twin of the predicate refusal in
+/// [`validate_predicate`] (#1220, #1221).
+fn validate_behavior_selectors(
+    behaviors: &crate::behaviors::ResponseBehaviors,
+) -> Result<(), String> {
+    let copies = behaviors.copy.iter().map(|copy| ("copy", &copy.extraction));
+    let lookups = behaviors
+        .lookup
+        .iter()
+        .map(|lookup| ("lookup", &lookup.key.extraction));
+    copies
+        .chain(lookups)
+        .try_for_each(|(key, extraction)| validate_extraction_selector(key, extraction))
+}
+
+fn validate_extraction_selector(
+    key: &str,
+    extraction: &crate::behaviors::ExtractionMethod,
+) -> Result<(), String> {
+    use crate::behaviors::{ExtractionMethod, validate_jsonpath_selector, validate_xpath_selector};
+    use crate::imposter::predicates::regex_cache::validate_regex;
+
+    let (method, selector, compiled) = match extraction {
+        ExtractionMethod::Regex { selector, options } => {
+            let case_insensitive = options.as_ref().is_some_and(|o| o.ignore_case);
+            let compiled = validate_regex(selector, case_insensitive).map_err(|e| e.to_string());
+            ("regex", selector, compiled)
+        }
+        ExtractionMethod::JsonPath { selector } => {
+            ("jsonpath", selector, validate_jsonpath_selector(selector))
+        }
+        ExtractionMethod::XPath { selector } => {
+            ("xpath", selector, validate_xpath_selector(selector))
+        }
+    };
+    compiled
+        .map_err(|e| format!("`{key}` behavior `{method}` selector `{selector}` is invalid: {e}"))
 }
 
 fn deserialize_underscore_behaviors<'de, D>(
