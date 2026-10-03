@@ -489,11 +489,14 @@ impl Drop for ReplayGuard {
 /// `copy`/`lookup` selectors. Normalisation (aliases such as `rules`, `delayRange` → `wait`,
 /// defaults) is unchanged.
 ///
-/// Every other decode-time refusal still applies, because the decoded value could not be checked
-/// for it afterwards: a value that cannot be represented, an inverted `wait`/`delayRange` range, a
-/// `_behaviors` array or scalar `behaviors`, a header repeated in a different case where only one is
-/// allowed, a `_rift.fault.tcp` outside its bounds. A new decode-time refusal belongs in
-/// [`admission_check`] and behind [`Admission`] whenever the stored value keeps what it checks.
+/// Every other decode-time refusal still applies and is part of the stored format (issue #1268):
+/// type and shape errors, an inverted `wait`/`delayRange` range, a `_behaviors` array or scalar
+/// `behaviors`, a single-valued header named twice, a `_rift.fault.tcp` outside its bounds.
+///
+/// **The replay floor.** The floor is the first release that ships this function. A config an
+/// engine at or after the floor admitted through any door decodes with `deserialize_replayed` on
+/// every later engine, to the same value, and passes [`admission_check`] unless a check was added
+/// after it was admitted. `tests/replay_floor.rs` holds the refusals that may not change.
 ///
 /// A value decoded this way must pass [`admission_check`] before it is handed to
 /// `ImposterManager`. `T` is generic, so an embedder's own type that contains `Stub`s decodes through
@@ -511,23 +514,37 @@ where
 
 /// The admission checks a config door runs while decoding an imposter, as a function (issue #1267):
 /// every predicate `jsonpath`/`xpath` selector and `matches` pattern, every behaviors block parses,
-/// and every `copy`/`lookup` selector. `Err` carries the message the door would have answered.
-/// Always checks, including when called from inside [`deserialize_replayed`].
+/// and every `copy`/`lookup` selector. Always checks, including when called from inside
+/// [`deserialize_replayed`].
+///
+/// Its contract with the doors (issue #1268): a config a door admits passes; otherwise `Err` carries
+/// the message of the first failure in the order a door decodes, so it names what the door would
+/// have named. It judges the compiled program, which differs from what the door checked in one
+/// place, a top-level `repeat`: the door checks the behaviors block before it, and merges it after.
+/// So a malformed `repeat` inside the block that the top-level one replaces is refused only by the
+/// door, and when the top-level `repeat` is itself malformed, both refuse but this names it first.
 pub fn admission_check(config: &ImposterConfig) -> Result<(), String> {
     config.stubs.iter().try_for_each(admission_check_stub)
 }
 
-/// [`admission_check`] for one stub.
+/// [`admission_check`] for one stub. Responses first: they decode before `TryFrom<StubRaw>` checks
+/// the stub's predicates, so this is the order a door reports in.
 pub fn admission_check_stub(stub: &Stub) -> Result<(), String> {
-    validate_predicates(&stub.predicates)?;
     stub.responses.iter().try_for_each(|response| {
         refuse_unparseable_behaviors(response.behaviors_block(), Admission::Checked)
-    })
+    })?;
+    validate_predicates(&stub.predicates)
 }
 
-/// Refuse a predicate the matcher could never evaluate as written, at parse — the layer every config
-/// door (`POST`/`PUT /imposters`, the stub routes, `--configfile`/`--datadir`, `POST /admin/reload`)
-/// deserializes a `Stub` through, so one check covers them all.
+/// Refuse a predicate the matcher could never evaluate as written, at parse, on every config door
+/// (`POST`/`PUT /imposters`, the stub routes, `--configfile`/`--datadir`, `POST /admin/reload`).
+///
+/// Adding a refusal anywhere a config decodes changes the stored format an embedder replays (issue
+/// #1268). A new check on anything reachable from `ImposterConfig` runs only under
+/// [`Admission::Checked`] and is re-run by [`admission_check_stub`] on the decoded value. It may be
+/// unconditional only when no engine ever admitted the input, which in practice means the shape
+/// rules of a field introduced in the same change. `tests/replay_floor.rs` fails until the new
+/// refusal is classified.
 ///
 /// A `jsonpath`/`xpath` selector that does not compile used to be accepted and then read as the
 /// empty string on every request, so `{"equals":{"body":""}}` behind it matched everything (issues

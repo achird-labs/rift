@@ -153,13 +153,27 @@ reading them, and a later release that tightens a check would make stored config
 | Item | Signature | Purpose |
 |:-----|:----------|:--------|
 | `deserialize_replayed` | `fn deserialize_replayed<'de, T: Deserialize<'de>, D: Deserializer<'de>>(d: D) -> Result<T, D::Error>` | Decode with exactly the admission checks above switched off. `T` can be any type that contains configs, and it works as `#[serde(deserialize_with = "deserialize_replayed")]` on a field. |
-| `admission_check` | `fn admission_check(config: &ImposterConfig) -> Result<(), String>` | Run the checks the decode skipped. `Err` carries the message a door would have answered. |
+| `admission_check` | `fn admission_check(config: &ImposterConfig) -> Result<(), String>` | Run the checks the decode skipped. A config a door admits passes. Otherwise `Err` carries the message of the first failure in the order a door decodes, so it names what the door would have named. |
 | `admission_check_stub` | `fn admission_check_stub(stub: &Stub) -> Result<(), String>` | The same for one stub. |
 
-The other refusals a decode makes still apply on replay, because the decoded value could not be
-checked for them afterwards: a value that cannot be represented, a `wait` or `delayRange` whose
-`min` exceeds its `max`, `_behaviors` given as an array or `behaviors` as a scalar, a header
-repeated in a different case where only one is allowed, and a `_rift.fault.tcp` outside its bounds.
+`admission_check` judges the program that will run, which differs from what a door checked in one
+place, a top-level `repeat` next to a behaviors block. A door checks the block first and merges the
+`repeat` in afterwards. So a malformed `repeat` inside the block that the top-level one replaces is
+refused by a door but passes `admission_check`, and when the top-level `repeat` is itself malformed,
+both refuse but `admission_check` names the `repeat` first.
+
+**The replay floor.** The floor is the first release that ships `deserialize_replayed`. A config an
+engine at or after the floor admitted through any door decodes with `deserialize_replayed` on every
+later engine, to the same value, and passes `admission_check` unless a check was added after it was
+admitted. What a replayed decode still refuses is part of the stored format and does not change:
+
+- type and shape errors;
+- a `wait` or `delayRange` whose `min` exceeds its `max`;
+- `_behaviors` given as an array, or `behaviors` as a scalar;
+- a single-valued header (`proxy.injectHeaders`, `_rift.fault.error.headers`) named twice;
+- a `_rift.fault.tcp` probability outside 0.0–1.0, or its object form without a `type`.
+
+Configs stored by an engine older than the floor are not covered.
 
 Run `admission_check` on a replayed value before handing it to `ImposterManager`, and decide there
 what a refused config means for you, for example skip that imposter and report it, as the engine
