@@ -117,6 +117,29 @@ ServerBuilder::from_cli(Cli::parse())
     .await?;
 ```
 
+### Reconciling one imposter (`apply_one`)
+
+`ImposterManager::apply_config` reconciles the whole imposter set: it deletes every running port the
+set leaves out and checks every imposter it keeps. An embedder that already knows exactly one port
+changed can reconcile that port alone:
+
+```rust
+let report = manager.apply_one(config).await?;
+```
+
+| Item | Signature | Purpose |
+|:-----|:----------|:--------|
+| `apply_one` | `async fn apply_one(&self, config: ImposterConfig) -> Result<ApplyReport, ImposterError>` | Make the decisions `apply_config` makes for `config`'s port and no other: create it if absent, replace it on an imposter-level change, rebind it if it is registered without a listener, toggle `enabled` in place, and patch its stubs in place so unchanged stubs keep their response cycles. The `ApplyReport` is the one `apply_config` would report for that port. A running imposter stays in its persistence store and a new one is written to the datadir. |
+| `apply_one_desired` | `async fn apply_one_desired(&self, desired: DesiredImposter) -> Result<ApplyReport, ImposterError>` | `apply_one` with the store the imposter belongs to, as in `apply_desired`: a running imposter whose store changed is retagged in place. |
+
+- `config` must name an explicit port. A config with no port, or port `0`, is refused with
+  `ImposterError::ExplicitPortRequired`; auto-assigned imposters go through `apply_config`.
+- `Err` means nothing changed: an invalid protocol, a duplicate stub `id`, or a missing port. A
+  failure while applying, such as a bind failure, is reported in `ApplyReport::failed`.
+- `apply_one` never deletes. Remove a port with `delete_imposter`.
+- Nothing serializes `apply_one` against a concurrent `apply_config`, whose delete sweep can remove
+  the port, just as two concurrent `apply_config` calls are not serialized.
+
 ---
 
 ## Bindable admin & metrics servers
