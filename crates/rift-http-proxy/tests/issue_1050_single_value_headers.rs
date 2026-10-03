@@ -14,8 +14,6 @@
 //! match any variant" — or drop the imposter silently — while every serde-layer test above still
 //! passed.
 
-use std::time::Duration;
-
 use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::config_loader::{ConfigSource, load_configs};
 use rift_mock_core::imposter::ImposterManager;
@@ -37,10 +35,9 @@ fn duplicate_inject_headers() -> serde_json::Value {
 #[tokio::test]
 async fn posting_a_duplicate_named_header_is_refused_with_an_actionable_400() {
     let manager = Arc::new(ImposterManager::new());
-    let admin = "127.0.0.1:12770";
-    let server = AdminApiServer::new(admin.parse().unwrap(), manager.clone(), None);
-    tokio::spawn(server.run());
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let server = AdminApiServer::new("127.0.0.1:0".parse().unwrap(), manager.clone(), None);
+    let running = server.bind().await.expect("admin API binds");
+    let admin = running.local_addr();
 
     let resp = reqwest::Client::new()
         .post(format!("http://{admin}/imposters"))

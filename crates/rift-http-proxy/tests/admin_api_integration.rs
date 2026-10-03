@@ -15,6 +15,10 @@ async fn text(c: &reqwest::Client, url: String) -> String {
 async fn json(c: &reqwest::Client, url: String) -> serde_json::Value {
     serde_json::from_str(&text(c, url).await).expect("json")
 }
+async fn bind_admin(server: rift_http_proxy::admin_api::AdminApiServer) -> String {
+    let running = server.bind().await.expect("admin API binds");
+    format!("http://{}", running.local_addr())
+}
 async fn get(c: &reqwest::Client, port: u16, path: &str, space: Option<&str>) -> reqwest::Response {
     let mut req = c.get(format!("http://127.0.0.1:{port}{path}"));
     if let Some(s) = space {
@@ -60,13 +64,14 @@ async fn scenario_admin_endpoints_arrange_inspect_reset() {
     let config = serde_json::from_value(order_fsm(19763, None)).unwrap();
     manager.create_imposter(config).await.expect("create");
 
-    let admin_addr = "127.0.0.1:12590".parse().unwrap();
-    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
 
     let c = reqwest::Client::new();
-    let admin = "http://127.0.0.1:12590";
 
     // GET scenarios → initial "Started"
     let v = json(&c, format!("{admin}/imposters/19763/scenarios")).await;
@@ -129,13 +134,14 @@ async fn delete_flow_state_clears_whole_flow() {
     let config = serde_json::from_value(order_fsm(19780, None)).unwrap();
     manager.create_imposter(config).await.expect("create");
 
-    let admin_addr = "127.0.0.1:12602".parse().unwrap();
-    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
 
     let c = reqwest::Client::new();
-    let admin = "http://127.0.0.1:12602";
     let key_url = |k: &str| format!("{admin}/admin/imposters/19780/flow-state/flowX/{k}");
 
     // Arrange two keys under flow "flowX".
@@ -197,13 +203,14 @@ async fn create_imposter_rejects_an_unregistered_flow_state_backend() {
         ImposterManager::new()
             .with_flow_store_backends(rift_http_proxy::default_flow_store_backends()),
     );
-    let admin_addr = "127.0.0.1:12604".parse().unwrap();
-    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
 
     let c = reqwest::Client::new();
-    let admin = "http://127.0.0.1:12604";
     let r = c
         .post(format!("{admin}/imposters"))
         .header("content-type", "application/json")
@@ -243,13 +250,14 @@ async fn create_imposter_rejects_an_unregistered_flow_state_backend() {
 #[tokio::test]
 async fn create_imposter_rejects_non_positive_ttl_seconds() {
     let manager = std::sync::Arc::new(ImposterManager::new());
-    let admin_addr = "127.0.0.1:12603".parse().unwrap();
-    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
 
     let c = reqwest::Client::new();
-    let admin = "http://127.0.0.1:12603";
     let r = c
         .post(format!("{admin}/imposters"))
         .header("content-type", "application/json")
@@ -275,13 +283,14 @@ async fn oversized_admin_body_is_rejected_with_413() {
     use rift_http_proxy::admin_api::types::MAX_ADMIN_BODY_BYTES;
 
     let manager = std::sync::Arc::new(ImposterManager::new());
-    let admin_addr = "127.0.0.1:12610".parse().unwrap();
-    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
 
     let c = reqwest::Client::new();
-    let admin = "http://127.0.0.1:12610";
     let oversized = vec![b'a'; MAX_ADMIN_BODY_BYTES + 4096];
     let r = c
         .post(format!("{admin}/imposters"))
@@ -303,13 +312,14 @@ async fn scenario_admin_reset_is_per_flow_with_explicit_flow_id() {
     let config = serde_json::from_value(order_fsm(19765, Some("header:X-Mock-Space"))).unwrap();
     manager.create_imposter(config).await.expect("create");
 
-    let admin_addr = "127.0.0.1:12591".parse().unwrap();
-    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
 
     let c = reqwest::Client::new();
-    let admin = "http://127.0.0.1:12591";
     let set_state = |flow: &str| {
         c.put(format!("{admin}/imposters/19765/scenarios/order/state"))
             .header("content-type", "application/json")
@@ -364,12 +374,13 @@ async fn space_teardown_is_isolated() {
     .unwrap();
     manager.create_imposter(config).await.expect("create");
 
-    let admin_addr = "127.0.0.1:12592".parse().unwrap();
-    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
     let c = reqwest::Client::new();
-    let admin = "http://127.0.0.1:12592";
 
     // record one request per space
     let _ = get(&c, 19773, "/data", Some("alpha")).await;
@@ -449,12 +460,13 @@ async fn space_teardown_resets_scenario_state_and_leaves_others() {
     .unwrap();
     manager.create_imposter(config).await.expect("create");
 
-    let admin_addr = "127.0.0.1:12593".parse().unwrap();
-    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
     let c = reqwest::Client::new();
-    let admin = "http://127.0.0.1:12593";
     let state_url = |flow: &str| format!("{admin}/admin/imposters/19774/flow-state/{flow}/order");
 
     // advance both spaces' "order" scenario to paid
@@ -506,12 +518,13 @@ async fn a_space_stub_body_that_is_not_a_stub_is_refused() {
     let config = serde_json::from_value(correlated_config(19782, serde_json::json!([]))).unwrap();
     manager.create_imposter(config).await.expect("create");
 
-    let admin_addr = "127.0.0.1:12601".parse().unwrap();
-    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
     let c = reqwest::Client::new();
-    let admin = "http://127.0.0.1:12601";
     let post = |body: &'static str| {
         c.post(format!("{admin}/imposters/19782/spaces/alpha/stubs"))
             .header("content-type", "application/json")
@@ -581,12 +594,13 @@ async fn space_stub_registration_and_inspection_endpoints() {
     let config = serde_json::from_value(correlated_config(19775, serde_json::json!([]))).unwrap();
     manager.create_imposter(config).await.expect("create");
 
-    let admin_addr = "127.0.0.1:12594".parse().unwrap();
-    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
     let c = reqwest::Client::new();
-    let admin = "http://127.0.0.1:12594";
 
     // register a stub scoped to "alpha" via the space endpoint
     let r = c
@@ -644,12 +658,13 @@ async fn stub_by_id_admin_endpoints() {
     .unwrap();
     manager.create_imposter(config).await.expect("create");
 
-    let admin_addr = "127.0.0.1:12596".parse().unwrap();
-    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
     let c = reqwest::Client::new();
-    let admin = "http://127.0.0.1:12596";
 
     let add = |id: serde_json::Value, body: &str| {
         let stub = serde_json::json!({
@@ -1146,18 +1161,16 @@ mod non_ascii_request_headers {
              dropped before matching ever saw it. got: {body}"
         );
 
-        let admin = "127.0.0.1:12760";
         let server = rift_http_proxy::admin_api::AdminApiServer::new(
-            admin.parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
             manager.clone(),
             None,
         );
-        tokio::spawn(server.run());
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let admin = bind_admin(server).await;
 
         let recorded = json(
             &reqwest::Client::new(),
-            format!("http://{admin}/imposters/22750/requests"),
+            format!("{admin}/imposters/22750/requests"),
         )
         .await;
         // A single-valued header serialises as a bare string, not a one-element array (#238), so
@@ -1214,18 +1227,16 @@ mod non_ascii_request_headers {
         .await
         .expect("proxied request");
 
-        let admin = "127.0.0.1:12761";
         let server = rift_http_proxy::admin_api::AdminApiServer::new(
-            admin.parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
             manager.clone(),
             None,
         );
-        tokio::spawn(server.run());
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let admin = bind_admin(server).await;
 
         let upstream = json(
             &reqwest::Client::new(),
-            format!("http://{admin}/imposters/22752/requests"),
+            format!("{admin}/imposters/22752/requests"),
         )
         .await;
         assert_eq!(
@@ -1472,18 +1483,16 @@ mod multi_value_headers {
             .await
             .unwrap();
 
-        let admin = "127.0.0.1:12720";
         let server = rift_http_proxy::admin_api::AdminApiServer::new(
-            admin.parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
             manager.clone(),
             None,
         );
-        tokio::spawn(server.run());
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let admin = bind_admin(server).await;
 
         let recorded = json(
             &reqwest::Client::new(),
-            format!("http://{admin}/imposters/19822/requests"),
+            format!("{admin}/imposters/19822/requests"),
         )
         .await;
         let values: Vec<String> = recorded[0]["headers"]["X-Multi"]
@@ -1643,17 +1652,15 @@ mod repeated_request_headers_reach_matching {
             "a non-UTF-8 value must not be matchable as an empty string, got: {body}"
         );
 
-        let admin = "127.0.0.1:12724";
         let server = rift_http_proxy::admin_api::AdminApiServer::new(
-            admin.parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
             manager.clone(),
             None,
         );
-        tokio::spawn(server.run());
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let admin = bind_admin(server).await;
         let recorded = json(
             &reqwest::Client::new(),
-            format!("http://{admin}/imposters/21524/requests"),
+            format!("{admin}/imposters/21524/requests"),
         )
         .await;
         assert_eq!(
@@ -1737,18 +1744,16 @@ mod repeated_request_headers_reach_matching {
             .await
             .expect("proxied request");
 
-        let admin = "127.0.0.1:12725";
         let server = rift_http_proxy::admin_api::AdminApiServer::new(
-            admin.parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
             manager.clone(),
             None,
         );
-        tokio::spawn(server.run());
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let admin = bind_admin(server).await;
 
         let recorded = json(
             &reqwest::Client::new(),
-            format!("http://{admin}/imposters/21526/requests"),
+            format!("{admin}/imposters/21526/requests"),
         )
         .await;
         let values: Vec<String> = recorded[0]["headers"]["X-Test"]
@@ -1862,19 +1867,18 @@ mod reload {
             .to_string()
     }
 
-    async fn start(port: u16, src: Option<ConfigSource>) -> std::sync::Arc<ImposterManager> {
+    async fn start(src: Option<ConfigSource>) -> (std::sync::Arc<ImposterManager>, String) {
         let manager = std::sync::Arc::new(ImposterManager::new());
         let mut server = rift_http_proxy::admin_api::AdminApiServer::new(
-            format!("127.0.0.1:{port}").parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
             manager.clone(),
             None,
         );
         if let Some(src) = src {
             server = server.with_config_source(src);
         }
-        tokio::spawn(server.run());
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        manager
+        let admin = bind_admin(server).await;
+        (manager, admin)
     }
 
     #[tokio::test]
@@ -1887,7 +1891,7 @@ mod reload {
             no_parse: false,
         };
 
-        let manager = start(12597, Some(source.clone())).await;
+        let (manager, admin) = start(Some(source.clone())).await;
         manager
             .reload(load_configs(&source).unwrap())
             .await
@@ -1897,7 +1901,7 @@ mod reload {
         // change the file on disk, then reload via the admin endpoint
         std::fs::write(&path, cfg(19790, "v2")).unwrap();
         let resp = reqwest::Client::new()
-            .post("http://127.0.0.1:12597/admin/reload")
+            .post(format!("{admin}/admin/reload"))
             .send()
             .await
             .unwrap();
@@ -1929,7 +1933,7 @@ mod reload {
             no_parse: false,
         };
 
-        let manager = start(12600, Some(source.clone())).await;
+        let (manager, admin) = start(Some(source.clone())).await;
         manager
             .reload(load_configs(&source).unwrap())
             .await
@@ -1944,7 +1948,7 @@ mod reload {
         )
         .unwrap();
         let resp = reqwest::Client::new()
-            .post("http://127.0.0.1:12600/admin/reload")
+            .post(format!("{admin}/admin/reload"))
             .send()
             .await
             .unwrap();
@@ -1968,7 +1972,7 @@ mod reload {
             no_parse: false,
         };
 
-        let manager = start(12598, Some(source.clone())).await;
+        let (manager, admin) = start(Some(source.clone())).await;
         manager
             .reload(load_configs(&source).unwrap())
             .await
@@ -1978,7 +1982,7 @@ mod reload {
         // corrupt the file → reload must 500 and leave the running imposter intact
         std::fs::write(&path, "{ not valid json").unwrap();
         let resp = reqwest::Client::new()
-            .post("http://127.0.0.1:12598/admin/reload")
+            .post(format!("{admin}/admin/reload"))
             .send()
             .await
             .unwrap();
@@ -2016,7 +2020,7 @@ mod reload {
             no_parse: false,
         };
 
-        let manager = start(12601, Some(source.clone())).await;
+        let (manager, admin) = start(Some(source.clone())).await;
         manager
             .apply_config(load_configs(&source).unwrap())
             .await
@@ -2036,7 +2040,7 @@ mod reload {
         // Change only the sibling on disk, then reload via the admin endpoint.
         std::fs::write(&path, two_imposter_cfg("keep", "v2")).unwrap();
         let resp = reqwest::Client::new()
-            .post("http://127.0.0.1:12601/admin/reload")
+            .post(format!("{admin}/admin/reload"))
             .send()
             .await
             .unwrap();
@@ -2079,7 +2083,6 @@ mod reload {
         use rift_http_proxy::sources::{FileSource, SourceRef, SourceRegistry, SourceSet};
         use std::sync::Arc;
 
-        const ADMIN: u16 = 23751;
         const FROM_FILE: u16 = 23752;
         const FROM_API: u16 = 23753;
 
@@ -2110,17 +2113,16 @@ mod reload {
             registry,
         ));
         let server = rift_http_proxy::admin_api::AdminApiServer::new(
-            format!("127.0.0.1:{ADMIN}").parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
             manager.clone(),
             None,
         )
         .with_imposter_sources(set, Some(datadir.clone()));
-        tokio::spawn(server.run());
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let admin = bind_admin(server).await;
 
         let client = reqwest::Client::new();
         let created = client
-            .post(format!("http://127.0.0.1:{ADMIN}/imposters"))
+            .post(format!("{admin}/imposters"))
             .json(&serde_json::json!({"port": FROM_API, "protocol": "http", "stubs": []}))
             .send()
             .await
@@ -2131,7 +2133,7 @@ mod reload {
 
         let reload = || async {
             let resp = client
-                .post(format!("http://127.0.0.1:{ADMIN}/admin/reload"))
+                .post(format!("{admin}/admin/reload"))
                 .send()
                 .await
                 .unwrap();
@@ -2180,9 +2182,9 @@ mod reload {
 
     #[tokio::test]
     async fn reload_with_no_source_is_noop_200() {
-        let manager = start(12599, None).await;
+        let (manager, admin) = start(None).await;
         let resp = reqwest::Client::new()
-            .post("http://127.0.0.1:12599/admin/reload")
+            .post(format!("{admin}/admin/reload"))
             .send()
             .await
             .unwrap();
@@ -2268,14 +2270,9 @@ mod date_templates {
 mod gateway {
     use super::*;
     use std::sync::Arc;
-    use std::time::Duration;
 
     /// Start an imposter (with the given stubs) + an AdminApiServer; returns (manager, admin_base).
-    async fn setup(
-        imposter_port: u16,
-        admin_port: u16,
-        stubs: serde_json::Value,
-    ) -> (Arc<ImposterManager>, String) {
+    async fn setup(imposter_port: u16, stubs: serde_json::Value) -> (Arc<ImposterManager>, String) {
         let manager = Arc::new(ImposterManager::new());
         manager
             .create_imposter(
@@ -2287,20 +2284,18 @@ mod gateway {
             .await
             .expect("create imposter");
         let server = rift_http_proxy::admin_api::AdminApiServer::new(
-            format!("127.0.0.1:{admin_port}").parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
             manager.clone(),
             None,
         );
-        tokio::spawn(server.run());
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        (manager, format!("http://127.0.0.1:{admin_port}"))
+        let admin = bind_admin(server).await;
+        (manager, admin)
     }
 
     #[tokio::test]
     async fn gateway_routes_to_imposter() {
         let (manager, admin) = setup(
             19850,
-            12750,
             serde_json::json!([{
                 "predicates": [{"equals": {"path": "/api/data"}}],
                 "responses": [{"is": {"statusCode": 200, "body": "routed"}}]
@@ -2321,7 +2316,6 @@ mod gateway {
     async fn gateway_preserves_method_and_query() {
         let (manager, admin) = setup(
             19851,
-            12751,
             serde_json::json!([{
                 "predicates": [{"equals": {"method": "POST", "path": "/submit", "query": {"q": "1"}}}],
                 "responses": [{"is": {"statusCode": 201, "body": "posted"}}]
@@ -2343,7 +2337,6 @@ mod gateway {
     async fn gateway_unknown_port_404() {
         let (manager, admin) = setup(
             19852,
-            12752,
             serde_json::json!([{"responses": [{"is": {"statusCode": 200, "body": "x"}}]}]),
         )
         .await;
@@ -2358,7 +2351,6 @@ mod gateway {
     async fn gateway_forwards_post_body() {
         let (manager, admin) = setup(
             19854,
-            12754,
             serde_json::json!([{
                 "predicates": [{"equals": {"method": "POST", "path": "/echo", "body": "hello-body"}}],
                 "responses": [{"is": {"statusCode": 200, "body": "got-body"}}]
@@ -2383,7 +2375,6 @@ mod gateway {
     async fn gateway_no_subpath_routes_to_root() {
         let (manager, admin) = setup(
             19855,
-            12755,
             serde_json::json!([{
                 "predicates": [{"equals": {"path": "/"}}],
                 "responses": [{"is": {"statusCode": 200, "body": "root"}}]
@@ -2403,7 +2394,6 @@ mod gateway {
     async fn gateway_non_numeric_port_400() {
         let (manager, admin) = setup(
             19856,
-            12756,
             serde_json::json!([{"responses": [{"is": {"statusCode": 200, "body": "x"}}]}]),
         )
         .await;
@@ -2435,17 +2425,14 @@ mod gateway {
             .await
             .expect("create imposter");
         let server = rift_http_proxy::admin_api::AdminApiServer::new(
-            "127.0.0.1:12757".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
             manager.clone(),
             Some("secret".to_string()),
         );
-        tokio::spawn(server.run());
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let admin = bind_admin(server).await;
 
         // Admin route without the key → 401 (control plane stays protected).
-        let admin_resp = reqwest::get("http://127.0.0.1:12757/imposters")
-            .await
-            .unwrap();
+        let admin_resp = reqwest::get(format!("{admin}/imposters")).await.unwrap();
         assert_eq!(
             admin_resp.status(),
             401,
@@ -2453,7 +2440,7 @@ mod gateway {
         );
 
         // Gateway without the key → serves (data plane is not gated).
-        let gw = reqwest::get("http://127.0.0.1:12757/__rift/19857/x")
+        let gw = reqwest::get(format!("{admin}/__rift/19857/x"))
             .await
             .unwrap();
         assert_eq!(gw.status(), 200);
@@ -2484,13 +2471,15 @@ async fn get_imposter_exposes_flowstate_redacted() {
     .unwrap();
     manager.create_imposter(config).await.expect("create");
 
-    let admin_addr = "127.0.0.1:12596".parse().unwrap();
-    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
 
     let c = reqwest::Client::new();
-    let v = json(&c, "http://127.0.0.1:12596/imposters/22626".to_string()).await;
+    let v = json(&c, format!("{admin}/imposters/22626")).await;
     assert_eq!(
         v.pointer("/_rift/flowState/flowIdSource")
             .and_then(|x| x.as_str()),

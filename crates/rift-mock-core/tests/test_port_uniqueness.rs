@@ -273,3 +273,67 @@ fn the_port_matcher_accepts_ports_and_rejects_look_alikes() {
         "an underscore-separated literal is not matched"
     );
 }
+
+/// Issue #1264: `tokio::spawn(server.run())` throws away the bind result. `AdminApiServer::run()` is
+/// `bind()` then `join()` (and `ServerBuilder::run()` is `start()` then `join()`), so a failed bind
+/// ends in a `JoinHandle` nobody reads, and the test's next request fails with `ConnectionRefused`
+/// as if the product were broken. Bind first instead:
+/// `let running = server.bind().await.expect("admin API binds");`, with the base URL from
+/// `running.local_addr()`. Matched across lines (rustfmt splits a long builder chain) but never
+/// across a `;` or a brace, so an `async move { ... .run().await }` block is not a match.
+static DISCARDED_RUN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"spawn\(\s*[^;{}]*?\.run\(\)\s*,?\s*\)")
+        .expect("discarded-run pattern is a valid constant regex")
+});
+
+/// Files allowed to spawn a server's `run()` future, with the reason. Empty: keep it that way.
+const SPAWNED_RUN_EXCEPTIONS: &[(&str, &str)] = &[];
+
+#[test]
+fn no_test_discards_a_server_bind_result() {
+    let exempt: Vec<&str> = SPAWNED_RUN_EXCEPTIONS.iter().map(|(f, _)| *f).collect();
+    let mut offenders = Vec::new();
+    for path in rust_sources() {
+        let relative = rel(&path);
+        if exempt.iter().any(|f| relative.ends_with(f)) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read source");
+        for found in DISCARDED_RUN.find_iter(&text) {
+            let line = text[..found.start()].matches('\n').count() + 1;
+            offenders.push(format!("  {relative}:{line}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "{} place(s) spawn a server's `run()` and discard its bind result; a failed bind then \
+         surfaces as ConnectionRefused on the first request (issue #1264). Bind first: \
+         `let running = server.bind().await.expect(\"admin API binds\");` and build the URL from \
+         `running.local_addr()`:\n{}",
+        offenders.len(),
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn the_discarded_run_matcher_accepts_spawned_runs_and_rejects_bound_servers() {
+    for spawned in [
+        "tokio::spawn(server.run());",
+        "        tokio::spawn( admin.run() );",
+        "let _ = tokio::spawn(server.run());",
+        "tokio::spawn(AdminApiServer::new(addr, manager, None).run());",
+        "tokio::spawn(ServerBuilder::from_cli(cli).manager(m.clone()).run());",
+        "tokio::spawn(\n        ServerBuilder::from_cli(cli)\n            .manager(manager)\n            .run(),\n    );",
+    ] {
+        assert!(DISCARDED_RUN.is_match(spawned), "{spawned}");
+    }
+    for fine in [
+        "let running = server.bind().await.expect(\"admin API binds\");",
+        "tokio::spawn(async move { server.run().await })",
+        "tokio::spawn(fut);\nlet x = server.run();",
+        "tokio::spawn(running.join());",
+        "let handle = runner.run();",
+    ] {
+        assert!(!DISCARDED_RUN.is_match(fine), "{fine}");
+    }
+}

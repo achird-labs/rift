@@ -28,21 +28,11 @@ struct Admin {
 impl Admin {
     async fn start() -> Self {
         let manager = Arc::new(ImposterManager::new());
-        let admin_port = free_port();
-        let server = AdminApiServer::new(
-            format!("127.0.0.1:{admin_port}").parse().expect("addr"),
-            manager.clone(),
-            None,
-        );
-        tokio::spawn(server.run());
-        let url = format!("http://127.0.0.1:{admin_port}");
+        let server =
+            AdminApiServer::new("127.0.0.1:0".parse().expect("addr"), manager.clone(), None);
+        let running = server.bind().await.expect("admin API binds");
+        let url = format!("http://{}", running.local_addr());
         let client = reqwest::Client::new();
-        for _ in 0..100 {
-            if client.get(format!("{url}/imposters")).send().await.is_ok() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
         Admin {
             client,
             url,

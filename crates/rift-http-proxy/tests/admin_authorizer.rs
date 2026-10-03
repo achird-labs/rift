@@ -63,34 +63,28 @@ impl AdminAuthorizer for SpyAuthorizer {
 }
 
 async fn start_admin(
-    admin_port: u16,
     api_key: Option<&str>,
     authorizer: Option<Arc<dyn AdminAuthorizer>>,
-) {
+) -> String {
     let manager = Arc::new(ImposterManager::new());
     let mut server = AdminApiServer::new(
-        format!("127.0.0.1:{admin_port}").parse().expect("addr"),
+        "127.0.0.1:0".parse().expect("addr"),
         manager,
         api_key.map(str::to_string),
     );
     if let Some(a) = authorizer {
         server = server.with_admin_authorizer(a);
     }
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-}
-
-fn base(port: u16) -> String {
-    format!("http://127.0.0.1:{port}")
+    let running = server.bind().await.expect("admin API binds");
+    format!("http://{}", running.local_addr())
 }
 
 #[tokio::test]
 async fn no_authorizer_installed_changes_nothing() {
     // The seam's premise: install nothing, behave exactly as before.
-    let port = 14801;
-    start_admin(port, None, None).await;
+    let base = start_admin(None, None).await;
 
-    let resp = reqwest::get(format!("{}/imposters", base(port)))
+    let resp = reqwest::get(format!("{base}/imposters"))
         .await
         .expect("list imposters");
     assert_eq!(resp.status(), 200);
@@ -100,14 +94,13 @@ async fn no_authorizer_installed_changes_nothing() {
 async fn deny_on_an_authenticated_request_is_403_not_401() {
     // 401 would tell an authenticated caller to re-authenticate, sending them round a loop that
     // cannot succeed. The credential was fine; the permission was not.
-    let port = 14802;
     let spy = SpyAuthorizer::new(AuthzDecision::Deny {
         reason: "not your tenant",
     });
-    start_admin(port, Some("s3cret"), Some(spy.clone())).await;
+    let base = start_admin(Some("s3cret"), Some(spy.clone())).await;
 
     let resp = reqwest::Client::new()
-        .get(format!("{}/imposters", base(port)))
+        .get(format!("{base}/imposters"))
         .header("authorization", "s3cret")
         .send()
         .await
@@ -124,14 +117,13 @@ async fn deny_on_an_authenticated_request_is_403_not_401() {
 
 #[tokio::test]
 async fn allow_lets_the_request_through() {
-    let port = 14803;
     let spy = SpyAuthorizer::new(AuthzDecision::Allow {
         principal: Some("alice".into()),
     });
-    start_admin(port, Some("s3cret"), Some(spy.clone())).await;
+    let base = start_admin(Some("s3cret"), Some(spy.clone())).await;
 
     let resp = reqwest::Client::new()
-        .get(format!("{}/imposters", base(port)))
+        .get(format!("{base}/imposters"))
         .header("authorization", "s3cret")
         .send()
         .await
@@ -145,11 +137,10 @@ async fn an_unauthenticated_request_is_401_and_never_reaches_the_authorizer() {
     // Both halves matter. The 401 is the ordering guarantee; the empty call log proves the hook
     // cannot be used as an oracle by an anonymous caller, and that an authorizer cannot
     // accidentally *grant* access to a request that failed authentication.
-    let port = 14804;
     let spy = SpyAuthorizer::new(AuthzDecision::allow());
-    start_admin(port, Some("s3cret"), Some(spy.clone())).await;
+    let base = start_admin(Some("s3cret"), Some(spy.clone())).await;
 
-    let resp = reqwest::get(format!("{}/imposters", base(port)))
+    let resp = reqwest::get(format!("{base}/imposters"))
         .await
         .expect("request");
     assert_eq!(resp.status(), 401);
@@ -164,16 +155,15 @@ async fn an_unauthenticated_request_is_401_and_never_reaches_the_authorizer() {
 async fn an_unauthenticated_request_to_an_unknown_path_is_401_not_404() {
     // The route-existence oracle. If authentication ever moved after route parsing this would
     // answer 404 and leak which admin routes exist to an anonymous caller.
-    let port = 14805;
     let spy = SpyAuthorizer::new(AuthzDecision::allow());
-    start_admin(port, Some("s3cret"), Some(spy.clone())).await;
+    let base = start_admin(Some("s3cret"), Some(spy.clone())).await;
 
     for path in [
         "/definitely-not-a-route",
         "/imposters/4545/nope",
         "/admin/reload",
     ] {
-        let resp = reqwest::get(format!("{}{path}", base(port)))
+        let resp = reqwest::get(format!("{base}{path}"))
             .await
             .expect("request");
         assert_eq!(resp.status(), 401, "{path} leaked its existence");
@@ -186,12 +176,11 @@ async fn an_unknown_path_still_404s_for_an_authorized_caller() {
     // `classify` returns None for unmatched paths, so the hook is skipped and the ordinary 404
     // stands. A denying authorizer must not turn 404s into 403s — that would be a behaviour
     // change for a route that reaches no handler.
-    let port = 14806;
     let spy = SpyAuthorizer::new(AuthzDecision::Deny { reason: "nope" });
-    start_admin(port, Some("s3cret"), Some(spy.clone())).await;
+    let base = start_admin(Some("s3cret"), Some(spy.clone())).await;
 
     let resp = reqwest::Client::new()
-        .get(format!("{}/definitely-not-a-route", base(port)))
+        .get(format!("{base}/definitely-not-a-route"))
         .header("authorization", "s3cret")
         .send()
         .await
@@ -203,12 +192,11 @@ async fn an_unknown_path_still_404s_for_an_authorized_caller() {
 #[tokio::test]
 async fn the_hook_receives_the_parsed_route_not_a_raw_path() {
     // The reason the seam exists: an embedder should not have to re-parse admin routes.
-    let port = 14807;
     let spy = SpyAuthorizer::new(AuthzDecision::allow());
-    start_admin(port, None, Some(spy.clone())).await;
+    let base = start_admin(None, Some(spy.clone())).await;
 
     reqwest::Client::new()
-        .post(format!("{}/imposters", base(port)))
+        .post(format!("{base}/imposters"))
         .header("x-rift-scope", "tenant-7")
         .json(&serde_json::json!({"protocol": "http", "port": 14899}))
         .send()
@@ -225,10 +213,7 @@ async fn the_hook_receives_the_parsed_route_not_a_raw_path() {
     );
 
     reqwest::Client::new()
-        .put(format!(
-            "{}/imposters/14899/scenarios/checkout/state",
-            base(port)
-        ))
+        .put(format!("{base}/imposters/14899/scenarios/checkout/state"))
         .json(&serde_json::json!({"state": "Started"}))
         .send()
         .await
@@ -250,12 +235,11 @@ async fn the_hook_receives_the_parsed_route_not_a_raw_path() {
 async fn the_credential_is_passed_through_verbatim() {
     // Upstream must not parse or normalise it: an embedder's credential format is not upstream's
     // vocabulary.
-    let port = 14808;
     let spy = SpyAuthorizer::new(AuthzDecision::allow());
-    start_admin(port, None, Some(spy.clone())).await;
+    let base = start_admin(None, Some(spy.clone())).await;
 
     reqwest::Client::new()
-        .get(format!("{}/imposters", base(port)))
+        .get(format!("{base}/imposters"))
         .header("authorization", "Bearer  weird.token  ")
         .send()
         .await
@@ -269,14 +253,13 @@ async fn the_credential_is_passed_through_verbatim() {
 async fn gateway_traffic_is_not_authorized() {
     // `/__rift/` is data-plane imposter traffic. It skips the admin api key for the same reason,
     // and authorizing it would force the app under test to carry an admin identity.
-    let port = 14809;
     let spy = SpyAuthorizer::new(AuthzDecision::Deny {
         reason: "would break the data plane",
     });
-    start_admin(port, None, Some(spy.clone())).await;
+    let base = start_admin(None, Some(spy.clone())).await;
 
     let manager_resp = reqwest::Client::new()
-        .post(format!("{}/imposters", base(port)))
+        .post(format!("{base}/imposters"))
         .json(&serde_json::json!({
             "protocol": "http", "port": 14898,
             "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "gw"}}]}]
@@ -288,7 +271,7 @@ async fn gateway_traffic_is_not_authorized() {
     drop(manager_resp);
     spy.calls.lock().clear();
 
-    let _ = reqwest::get(format!("{}/__rift/14898/anything", base(port))).await;
+    let _ = reqwest::get(format!("{base}/__rift/14898/anything")).await;
     assert!(
         spy.calls().is_empty(),
         "gateway traffic must not consult the admin authorizer, saw: {:?}",
@@ -299,13 +282,12 @@ async fn gateway_traffic_is_not_authorized() {
 #[tokio::test]
 async fn verify_is_not_classified_as_a_write() {
     // A POST that mutates nothing. A read-only principal must still be able to verify.
-    let port = 14810;
     let spy = SpyAuthorizer::new(AuthzDecision::allow());
-    start_admin(port, None, Some(spy.clone())).await;
+    let base = start_admin(None, Some(spy.clone())).await;
 
     let manager = reqwest::Client::new();
     manager
-        .post(format!("{}/imposters", base(port)))
+        .post(format!("{base}/imposters"))
         .json(&imposter_cfg(serde_json::json!({
             "protocol": "http", "port": 14897,
             "stubs": [{"responses": [{"is": {"statusCode": 200}}]}]
@@ -316,7 +298,7 @@ async fn verify_is_not_classified_as_a_write() {
     spy.calls.lock().clear();
 
     let _ = manager
-        .post(format!("{}/imposters/14897/verify", base(port)))
+        .post(format!("{base}/imposters/14897/verify"))
         .json(&serde_json::json!({"predicates": [], "atLeast": 0}))
         .send()
         .await;
@@ -331,14 +313,13 @@ async fn the_cross_imposter_event_stream_is_gated() {
     // `GET /events` is dispatched before the router, so it was invisible to the hook: a Deny-all
     // authorizer could not stop a caller streaming every imposter's recorded requests, headers
     // and bodies. The highest-value read on the admin plane must not be the one it cannot gate.
-    let port = 14811;
     let spy = SpyAuthorizer::new(AuthzDecision::Deny {
         reason: "no event access",
     });
-    start_admin(port, None, Some(spy.clone())).await;
+    let base = start_admin(None, Some(spy.clone())).await;
 
     let resp = reqwest::Client::new()
-        .get(format!("{}/events", base(port)))
+        .get(format!("{base}/events"))
         .send()
         .await
         .expect("request");
@@ -358,15 +339,11 @@ async fn the_cross_imposter_event_stream_is_gated() {
 
 #[tokio::test]
 async fn the_per_imposter_stream_alias_is_gated_and_scoped() {
-    let port = 14812;
     let spy = SpyAuthorizer::new(AuthzDecision::Deny { reason: "nope" });
-    start_admin(port, None, Some(spy.clone())).await;
+    let base = start_admin(None, Some(spy.clone())).await;
 
     let resp = reqwest::Client::new()
-        .get(format!(
-            "{}/imposters/4545/savedRequests/stream",
-            base(port)
-        ))
+        .get(format!("{base}/imposters/4545/savedRequests/stream"))
         .send()
         .await
         .expect("request");
@@ -381,9 +358,8 @@ async fn the_per_imposter_stream_alias_is_gated_and_scoped() {
 async fn an_empty_path_segment_cannot_route_past_the_classifier() {
     // Hyper does not normalise `//`, and the router does not filter empty segments. When the
     // classifier did, these dispatched into real handlers the hook had never seen.
-    let port = 14813;
     let spy = SpyAuthorizer::new(AuthzDecision::Deny { reason: "denied" });
-    start_admin(port, None, Some(spy.clone())).await;
+    let base = start_admin(None, Some(spy.clone())).await;
 
     let client = reqwest::Client::new();
     for (method, path) in [
@@ -392,10 +368,7 @@ async fn an_empty_path_segment_cannot_route_past_the_classifier() {
         ("DELETE", "/imposters/4545/spaces/"),
         ("GET", "/imposters/4545/stubs/by-id/"),
     ] {
-        let req = client.request(
-            method.parse().expect("method"),
-            format!("{}{path}", base(port)),
-        );
+        let req = client.request(method.parse().expect("method"), format!("{base}{path}"));
         let status = req.send().await.expect("request").status();
         assert_ne!(
             status, 200,
@@ -409,12 +382,11 @@ async fn an_empty_space_segment_is_not_authorized_against_the_wrong_space() {
     // The subtler half: `POST /imposters/:port/spaces//stubs` writes into space "" but the old
     // classifier reported space "stubs", so an authorizer scoping by space granted on the wrong
     // subject rather than simply missing the route.
-    let port = 14814;
     let spy = SpyAuthorizer::new(AuthzDecision::allow());
-    start_admin(port, None, Some(spy.clone())).await;
+    let base = start_admin(None, Some(spy.clone())).await;
 
     let _ = reqwest::Client::new()
-        .post(format!("{}/imposters/4545/spaces//stubs", base(port)))
+        .post(format!("{base}/imposters/4545/spaces//stubs"))
         .json(&serde_json::json!({"responses": [{"is": {"statusCode": 200}}]}))
         .send()
         .await;
@@ -433,12 +405,11 @@ async fn a_destructive_put_requires_delete_not_write() {
     // `PUT /imposters {"imposters":[]}` reconciles the set toward the payload and removes
     // everything. Classifying it as `imposter.write` would let a write-but-not-delete principal
     // wipe the server.
-    let port = 14815;
     let spy = SpyAuthorizer::new(AuthzDecision::allow());
-    start_admin(port, None, Some(spy.clone())).await;
+    let base = start_admin(None, Some(spy.clone())).await;
 
     let _ = reqwest::Client::new()
-        .put(format!("{}/imposters", base(port)))
+        .put(format!("{base}/imposters"))
         .json(&serde_json::json!({"imposters": []}))
         .send()
         .await;
