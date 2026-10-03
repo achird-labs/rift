@@ -23,6 +23,18 @@ record.
   now flags exactly these spellings; it used to flag every `[:N]` slice and say Rift supported it as
   Mountebank does, which was wrong for `[:0]`.
 
+- **Re-applying an unchanged config no longer replaces imposters whose stubs have multi-key maps**
+  (#1256). A stub without an `id` is matched across a reconcile by a hash of its content, and that
+  hash was taken over bytes whose order depended on how the stub's predicate and response-header
+  maps happened to be built. Two parses of the same JSON hashed differently, so `PUT /imposters`,
+  `POST /admin/reload`, `rift_apply_config` and embedders calling `apply_config` saw every stub with
+  a two-key `equals` or two response headers as removed and re-added, and replaced the imposter
+  wholesale: response cycles reset, the listener was rebound and a `Replaced` event fired. The hash
+  now covers a canonical form, so an identical re-apply leaves the imposter untouched. The content
+  key of every stub without an `id` changes once on upgrade, so a response sequencer that keys
+  cursors by it across processes restarts those cursors once, and processes on the old and new
+  versions disagree on the key until all are upgraded. Stubs with an `id` are unaffected.
+
 ## [0.19.0] - 2026-09-29
 
 ### Fixed
