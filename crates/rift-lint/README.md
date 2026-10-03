@@ -148,7 +148,7 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 
 | Code | Description |
 |------|-------------|
-| I001 | Mountebank slice notation in JSONPath |
+| I001 | jsonpath-plus shorthand in JSONPath (`.[`, a `0` slice end or step) |
 | I002 | Proxy targets localhost |
 | I003 | Response uses the Rift `_rift` extension |
 | I004 | This build omits the `javascript` feature, so JavaScript was not syntax-checked |
