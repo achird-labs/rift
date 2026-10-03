@@ -229,6 +229,10 @@ impl From<ImposterError> for Response<Full<Bytes>> {
                 &format!("Flow store configuration error: {msg}"),
             ),
             ImposterError::Backend(e) => crate::extensions::decorate::backend_error_response(&e),
+            ImposterError::ExplicitPortRequired => error_response(
+                StatusCode::BAD_REQUEST,
+                &ImposterError::ExplicitPortRequired.to_string(),
+            ),
         }
     }
 }
@@ -244,6 +248,13 @@ mod tests {
     // AC2: the status → default-slug table IS the specification for every door that does not name
     // its own kind (~85 call sites reach `error_body` without one). Pinning it here is what stops a
     // door's `type` changing as a side effect of an unrelated edit.
+    // Issue #1253: a config without an explicit port is the caller's mistake, not a server fault.
+    #[test]
+    fn explicit_port_required_maps_to_400() {
+        let response: Response<Full<Bytes>> = ImposterError::ExplicitPortRequired.into();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
     #[test]
     fn status_to_default_slug_table_is_pinned() {
         let expected = [

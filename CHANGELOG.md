@@ -11,6 +11,17 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **`ImposterManager::apply_one` reconciles a single imposter** (#1253). `apply_config` takes the
+  whole imposter set, so an embedder that knew one port changed had to pass every imposter and pay
+  for checking all of them, or call `create_imposter`/`replace_stubs` and lose the in-place stub
+  patching that keeps response cycles. `apply_one(config)` runs `apply_config`'s decisions for that
+  port alone and returns the same `ApplyReport`; `apply_one_desired` also carries the persistence
+  store. Both refuse a config without an explicit port with the new
+  `ImposterError::ExplicitPortRequired`, a new variant of that public enum, and neither deletes.
+  `apply_config` now runs the same per-port code. Documented in `docs/embedding/server.md`.
+
 ### Fixed
 
 - **An imposter whose `jsonpath` selector uses Mountebank's jsonpath-plus shorthands loads and
