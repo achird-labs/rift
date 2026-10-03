@@ -205,6 +205,9 @@ fn xpath_all(xml_str: &str, selector: &str) -> Vec<Option<String>> {
 ///
 /// Surrounding whitespace is trimmed uniformly so a rooted and a bare selector
 /// are handled the same way regardless of stray padding.
+///
+/// Mountebank's jsonpath-plus shorthands are then rewritten to the RFC 9535 form that selects the
+/// same nodes (issue #1255); see [`rewrite_jsonpath_plus_shorthands`].
 fn normalize_jsonpath(path: &str) -> Cow<'_, str> {
     let trimmed = path.trim();
     let prefix = if trimmed.starts_with('$') {
@@ -214,12 +217,141 @@ fn normalize_jsonpath(path: &str) -> Cow<'_, str> {
     } else {
         "$."
     };
-    // Borrow only when nothing needs changing: already rooted and no stray padding.
-    if prefix.is_empty() && trimmed.len() == path.len() {
+    let rooted = if prefix.is_empty() && trimmed.len() == path.len() {
+        // Borrow only when nothing needs changing: already rooted and no stray padding.
         Cow::Borrowed(path)
     } else {
         Cow::Owned(format!("{prefix}{trimmed}"))
+    };
+    match rewrite_jsonpath_plus_shorthands(&rooted) {
+        Some(rewritten) => Cow::Owned(rewritten),
+        None => rooted,
     }
+}
+
+/// Rewrite the two jsonpath-plus spellings RFC 9535 refuses or reads differently, outside quoted
+/// names, or `None` when the selector contains neither:
+///
+/// - `.[` is a descendant segment in jsonpath-plus (`toPathArray` turns the `.` and the `[` into
+///   `;;`, then `;;` into `;..;`), so it becomes `..[`.
+/// - A slice end or step that parses to `0` falls back to its default there (`parseInt(end) ||
+///   len`, `parseInt(step) || 1`), so `[:0]` is the whole array, not an empty one. It becomes empty
+///   (open end, default step). A zero end with a negative step is left alone.
+///
+/// Nothing inside an RFC 9535 filter (`[?...]`) is rewritten.
+fn rewrite_jsonpath_plus_shorthands(selector: &str) -> Option<String> {
+    // Runs on every match-time lookup (before the compiled-selector cache), so a selector that
+    // cannot contain either shorthand must not allocate.
+    if !selector.contains(".[") && !selector.contains(':') {
+        return None;
+    }
+    let chars: Vec<char> = selector.chars().collect();
+    let mut out = String::with_capacity(selector.len() + 2);
+    let mut changed = false;
+    let mut quote: Option<char> = None;
+    // Inside an RFC 9535 filter (`[?...]`) nothing is rewritten: jsonpath-plus filters are
+    // JavaScript (`?(...)`), so Mountebank gives these spellings no meaning to match there.
+    let mut filter_depth = 0usize;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = quote {
+            out.push(c);
+            if c == '\\' {
+                if let Some(&next) = chars.get(i + 1) {
+                    out.push(next);
+                    i += 1;
+                }
+            } else if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if filter_depth > 0 {
+            match c {
+                '\'' | '"' => quote = Some(c),
+                '[' => filter_depth += 1,
+                ']' => filter_depth -= 1,
+                _ => {}
+            }
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        match c {
+            '\'' | '"' => {
+                quote = Some(c);
+                out.push(c);
+            }
+            '[' if chars.get(i + 1) == Some(&'?') => {
+                filter_depth = 1;
+                out.push(c);
+            }
+            '.' if chars.get(i + 1) == Some(&'[') && !out.ends_with('.') => {
+                out.push_str("..");
+                changed = true;
+            }
+            '[' => {
+                let close = chars[i + 1..]
+                    .iter()
+                    .position(|&ch| matches!(ch, ']' | '[' | '\'' | '"'))
+                    .map(|offset| i + 1 + offset)
+                    .filter(|&end| chars[end] == ']');
+                let slice = close.and_then(|end| {
+                    rewrite_zero_slice_bounds(&chars[i + 1..end].iter().collect::<String>())
+                        .map(|rewritten| (end, rewritten))
+                });
+                match slice {
+                    Some((end, rewritten)) => {
+                        out.push('[');
+                        out.push_str(&rewritten);
+                        out.push(']');
+                        changed = true;
+                        i = end;
+                    }
+                    None => out.push(c),
+                }
+            }
+            _ => out.push(c),
+        }
+        i += 1;
+    }
+    changed.then_some(out)
+}
+
+/// For a bracket body that is a slice (`start:end` or `start:end:step`, each part an optional
+/// integer), the body with a zero end or step emptied, or `None` if it is not a slice or has
+/// neither.
+fn rewrite_zero_slice_bounds(body: &str) -> Option<String> {
+    let parts: Vec<&str> = body.split(':').map(str::trim).collect();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    let is_int = |part: &str| {
+        let digits = part.strip_prefix('-').unwrap_or(part);
+        !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+    };
+    if !parts.iter().all(|part| part.is_empty() || is_int(part)) {
+        return None;
+    }
+    let is_zero =
+        |part: &str| is_int(part) && part.trim_start_matches('-').bytes().all(|b| b == b'0');
+    // A negative step walks down, where an end of `0` is a real bound (`[5:0:-1]` stops before
+    // index 0) and jsonpath-plus, which only counts up, selects nothing to be compatible with.
+    let negative_step = parts
+        .get(2)
+        .is_some_and(|step| step.starts_with('-') && !is_zero(step));
+    let zero_end = is_zero(parts[1]) && !negative_step;
+    let zero_step = parts.get(2).is_some_and(|step| is_zero(step));
+    if !zero_end && !zero_step {
+        return None;
+    }
+    let end = if zero_end { "" } else { parts[1] };
+    Some(match parts.get(2) {
+        Some(step) => format!("{}:{end}:{}", parts[0], if zero_step { "" } else { step }),
+        None => format!("{}:{end}", parts[0]),
+    })
 }
 
 /// Process-wide cache of compiled JSONPath selectors (issue #711).
@@ -669,6 +801,112 @@ mod tests {
             extract_jsonpath(json, "$.items[1]"),
             Some("second".to_string())
         );
+    }
+
+    // Issue #1255: Mountebank's jsonpath-plus reads `.[` as a descendant segment and a slice end
+    // or step of `0` as open; the selector is rewritten to the RFC 9535 form that means the same.
+    #[test]
+    fn normalize_rewrites_jsonpath_plus_shorthands() {
+        let cases = [
+            ("$.a.b.[0].c", "$.a.b..[0].c"),
+            ("$.a.b.[:0].c", "$.a.b..[:].c"),
+            ("$.x.y.[*].z", "$.x.y..[*].z"),
+            ("$.a[1:0]", "$.a[1:]"),
+            ("$.a[::0]", "$.a[::]"),
+            ("$.a[0:0:0]", "$.a[0::]"),
+            ("$.a[ : -0 ]", "$.a[:]"),
+            ("b.[0]", "$.b..[0]"),
+            ("  $.a.[0]  ", "$.a..[0]"),
+            ("$.[0]", "$..[0]"),
+            ("$.a[3:0:2]", "$.a[3::2]"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(normalize_jsonpath(input), expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn normalize_leaves_standard_and_quoted_selectors_alone() {
+        for selector in [
+            "$.a[:1]",
+            "$.a[1:3:2]",
+            "$.a[-2:]",
+            "$.a..[0]",
+            "$['a.[x']",
+            "$[\"k.[:0]\"]",
+            "$['it\\'s.[0]']",
+            "$.a[?@.b == 'x.[0]']",
+            "$.a[5:0:-1]",
+            "$[?@.a[0:0]]",
+            "$[?@.a.[0]].b",
+            "$.a[:0",
+            "$.store.book",
+        ] {
+            assert!(
+                matches!(normalize_jsonpath(selector), Cow::Borrowed(_)),
+                "{selector:?} must pass through untouched, got {:?}",
+                normalize_jsonpath(selector)
+            );
+        }
+    }
+
+    fn selected(selector: &str, json: serde_json::Value) -> Vec<serde_json::Value> {
+        cached_jsonpath(selector)
+            .unwrap_or_else(|| panic!("{selector} compiles"))
+            .query(&json)
+            .all()
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    // Expected values measured with jsonpath-plus 10.4.0, the library Mountebank evaluates with.
+    #[test]
+    fn dot_bracket_selects_what_mountebank_selects() {
+        use serde_json::json;
+        let nested = json!({"a": {"b": [{"c": 1}, {"c": 2}, {"d": [{"c": 3}]}]}});
+        assert_eq!(
+            selected("$.a.b.[0].c", nested.clone()),
+            vec![json!(1), json!(3)]
+        );
+        assert_eq!(selected("$.a.b[0].c", nested), vec![json!(1)]);
+
+        let object_of_arrays =
+            json!({"a": {"b": {"p": [{"c": "p0"}, {"c": "p1"}], "q": [{"c": "q0"}]}}});
+        assert_eq!(
+            selected("$.a.b.[0].c", object_of_arrays.clone()),
+            vec![json!("p0"), json!("q0")]
+        );
+        assert!(selected("$.a.b[0].c", object_of_arrays).is_empty());
+    }
+
+    #[test]
+    fn zero_slice_end_selects_the_whole_array_as_mountebank_does() {
+        use serde_json::json;
+        let body = json!({"x": {"y": [{"z": "first"}, {"z": "second"}]}});
+        assert_eq!(
+            selected("$.x.y.[:0].z", body.clone()),
+            vec![json!("first"), json!("second")]
+        );
+        assert_eq!(
+            selected("$.x.y[1:0].z", body.clone()),
+            vec![json!("second")]
+        );
+        assert_eq!(
+            selected("$.x.y[::0].z", body.clone()),
+            vec![json!("first"), json!("second")]
+        );
+        // A reverse slice keeps its RFC 9535 meaning: down from index 1, stopping before 0.
+        assert_eq!(selected("$.x.y[1:0:-1].z", body), vec![json!("second")]);
+        assert_eq!(
+            extract_jsonpath(
+                r#"{"x":{"y":[{"z":"first"},{"z":"second"}]}}"#,
+                "$.x.y.[:0].z"
+            ),
+            Some("first".to_string())
+        );
+        assert!(validate_jsonpath_selector("$.x.y.[:0].z").is_ok());
+        assert!(validate_jsonpath_selector("$.a.b.[0].c").is_ok());
     }
 
     // Issue #306: bare selectors (no leading `$`) are treated as root-relative,

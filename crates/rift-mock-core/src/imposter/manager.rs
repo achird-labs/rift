@@ -1701,84 +1701,141 @@ impl ImposterManager {
                 continue;
             };
 
-            let Ok(existing) = self.get_imposter(port) else {
-                let persistence = requested.unwrap_or(Persistence::Datadir);
-                self.create_for_apply(config, port, persistence, &mut report)
-                    .await;
-                continue;
-            };
-
-            // Retag before anything below can write the file, so every write in this iteration
-            // (the enabled toggle, a stub patch, a replace's re-create) goes to the new store.
-            let persistence = requested.unwrap_or_else(|| existing.persistence());
-            let retagged = existing.persistence() != persistence;
-            if retagged {
-                existing.set_persistence(persistence);
-            }
-
-            if imposter_level_differs_ignoring_enabled(&existing.config, &config) {
-                self.replace_imposter(port, config, persistence, requested, &mut report)
-                    .await;
-                continue;
-            }
-
-            // Heal an imposter registered without a listener (issue #143). Mandatory, not an
-            // optimization: before that feature a failed bind left no entry, so every apply
-            // naturally retried it; with an entry present the arms below would see "exists,
-            // unchanged" and the node would stay degraded forever even after the port freed up.
-            // Reported like a create/failure so the embedder's degraded-state tracking — which
-            // keys off exactly these fields — clears or refreshes on the same apply.
-            if !existing.is_bound() {
-                match self.rebind_imposter(&existing).await {
-                    Ok(()) => report.created.push(port),
-                    Err(e) => report.failed.push((port, e)),
-                }
-            }
-
-            // An enabled-only imposter-level diff applies IN PLACE (issue
-            // #817): pause/resume must never reset cursors, scenario state or
-            // recorded requests, which a wholesale replace would. Compared
-            // against the live flag, not the retained boot value.
-            if existing.is_enabled() != config.enabled {
-                if let Err(e) = self.set_imposter_enabled(port, config.enabled).await {
-                    report.failed.push((port, e));
-                }
-                report.toggled.push(port);
-            }
-
-            match existing.reconcile_stubs(config.stubs.clone()) {
-                StubReconcile::Unchanged => {
-                    if retagged
-                        && persistence == Persistence::Datadir
-                        && let Err(e) = self.persist_imposter_checked(&existing).await
-                    {
-                        report.failed.push((port, e));
-                    }
-                }
-                StubReconcile::Patched { removed_keys } => {
-                    // apply_config removals are stub deletes: fire the sequencer GC hook
-                    // per removed stub, same as delete_stub (issue #313).
-                    if let Some(sequencer) = &self.sequencer {
-                        for key in &removed_keys {
-                            sequencer.reset_scope(port, Some(key));
-                        }
-                    }
-                    report.stub_patched.push(port);
-                    self.emit(ImposterEvent::StubsChanged(port));
-                    // The in-memory patch stands either way; a datadir write failure must
-                    // still be observable (issue #173), not silently lost until restart.
-                    if let Err(e) = self.persist_imposter_checked(&existing).await {
-                        report.failed.push((port, e));
-                    }
-                }
-                StubReconcile::Degenerate => {
-                    self.replace_imposter(port, config, persistence, requested, &mut report)
-                        .await;
-                }
-            }
+            self.apply_entry(port, config, requested, &mut report).await;
         }
 
         Ok(report)
+    }
+
+    /// Reconcile exactly one imposter toward `config`, making the decisions
+    /// [`apply_config`](Self::apply_config) makes for its port (issue #1253): absent → create;
+    /// imposter-level change → replace; registered without a listener → rebind; `enabled` differs →
+    /// toggle in place; stubs differ → patch in place, or replace when the change is degenerate. No
+    /// other imposter is read or written and nothing is deleted — remove a port with
+    /// [`delete_imposter`](Self::delete_imposter).
+    ///
+    /// `config` must name an explicit port: a port-less or port-`0` config is refused with
+    /// [`ImposterError::ExplicitPortRequired`], since there is nothing to reconcile it against (use
+    /// `apply_config` for auto-assigned imposters). A running imposter stays in its persistence store
+    /// and a new one is created as [`Persistence::Datadir`], as with `apply_config`.
+    ///
+    /// `Err` (an invalid protocol, a duplicate stub id, a missing port) means nothing was mutated;
+    /// a failure while applying lands in [`ApplyReport::failed`], as with `apply_config`. Nothing
+    /// serializes this against a concurrent `apply_config`, whose delete sweep may remove the port.
+    pub async fn apply_one(&self, config: ImposterConfig) -> Result<ApplyReport, ImposterError> {
+        self.apply_one_entry(config, None).await
+    }
+
+    /// [`apply_one`](Self::apply_one) with the store the imposter belongs to, the per-entry
+    /// contract of [`apply_desired`](Self::apply_desired): a running imposter whose store changed is
+    /// retagged in place.
+    pub async fn apply_one_desired(
+        &self,
+        desired: DesiredImposter,
+    ) -> Result<ApplyReport, ImposterError> {
+        self.apply_one_entry(desired.config, Some(desired.persistence))
+            .await
+    }
+
+    async fn apply_one_entry(
+        &self,
+        config: ImposterConfig,
+        requested: Option<Persistence>,
+    ) -> Result<ApplyReport, ImposterError> {
+        let port = config
+            .explicit_port()
+            .ok_or(ImposterError::ExplicitPortRequired)?;
+        Self::validate_config_set(std::iter::once(&config))?;
+        let mut report = ApplyReport::default();
+        self.apply_entry(port, config, requested, &mut report).await;
+        Ok(report)
+    }
+
+    /// The per-port arm shared by [`apply_entries`](Self::apply_entries) and
+    /// [`apply_one`](Self::apply_one), so the two cannot diverge. `config` is already validated and
+    /// `port` is its explicit port.
+    async fn apply_entry(
+        &self,
+        port: u16,
+        config: ImposterConfig,
+        requested: Option<Persistence>,
+        report: &mut ApplyReport,
+    ) {
+        let Ok(existing) = self.get_imposter(port) else {
+            let persistence = requested.unwrap_or(Persistence::Datadir);
+            self.create_for_apply(config, port, persistence, report)
+                .await;
+            return;
+        };
+
+        // Retag before anything below can write the file, so every write in this iteration
+        // (the enabled toggle, a stub patch, a replace's re-create) goes to the new store.
+        let persistence = requested.unwrap_or_else(|| existing.persistence());
+        let retagged = existing.persistence() != persistence;
+        if retagged {
+            existing.set_persistence(persistence);
+        }
+
+        if imposter_level_differs_ignoring_enabled(&existing.config, &config) {
+            self.replace_imposter(port, config, persistence, requested, report)
+                .await;
+            return;
+        }
+
+        // Heal an imposter registered without a listener (issue #143). Mandatory, not an
+        // optimization: before that feature a failed bind left no entry, so every apply
+        // naturally retried it; with an entry present the arms below would see "exists,
+        // unchanged" and the node would stay degraded forever even after the port freed up.
+        // Reported like a create/failure so the embedder's degraded-state tracking — which
+        // keys off exactly these fields — clears or refreshes on the same apply.
+        if !existing.is_bound() {
+            match self.rebind_imposter(&existing).await {
+                Ok(()) => report.created.push(port),
+                Err(e) => report.failed.push((port, e)),
+            }
+        }
+
+        // An enabled-only imposter-level diff applies IN PLACE (issue
+        // #817): pause/resume must never reset cursors, scenario state or
+        // recorded requests, which a wholesale replace would. Compared
+        // against the live flag, not the retained boot value.
+        if existing.is_enabled() != config.enabled {
+            if let Err(e) = self.set_imposter_enabled(port, config.enabled).await {
+                report.failed.push((port, e));
+            }
+            report.toggled.push(port);
+        }
+
+        match existing.reconcile_stubs(config.stubs.clone()) {
+            StubReconcile::Unchanged => {
+                if retagged
+                    && persistence == Persistence::Datadir
+                    && let Err(e) = self.persist_imposter_checked(&existing).await
+                {
+                    report.failed.push((port, e));
+                }
+            }
+            StubReconcile::Patched { removed_keys } => {
+                // apply_config removals are stub deletes: fire the sequencer GC hook
+                // per removed stub, same as delete_stub (issue #313).
+                if let Some(sequencer) = &self.sequencer {
+                    for key in &removed_keys {
+                        sequencer.reset_scope(port, Some(key));
+                    }
+                }
+                report.stub_patched.push(port);
+                self.emit(ImposterEvent::StubsChanged(port));
+                // The in-memory patch stands either way; a datadir write failure must
+                // still be observable (issue #173), not silently lost until restart.
+                if let Err(e) = self.persist_imposter_checked(&existing).await {
+                    report.failed.push((port, e));
+                }
+            }
+            StubReconcile::Degenerate => {
+                self.replace_imposter(port, config, persistence, requested, report)
+                    .await;
+            }
+        }
     }
 
     /// Stable-sort `configs` so every explicit-port config comes before any auto-assigned one (issue
@@ -3840,6 +3897,275 @@ mod tests {
         assert!(manager.get_imposter(19426).is_ok());
 
         manager.delete_all().await;
+    }
+
+    // Issue #1253: `apply_one` reconciles a single imposter with `apply_config`'s per-port arm.
+    mod apply_one {
+        use super::*;
+
+        fn cfg(port: u16, stubs: serde_json::Value) -> ImposterConfig {
+            imposter_cfg(json!({"protocol": "http", "port": port, "stubs": stubs}))
+        }
+
+        #[tokio::test]
+        async fn creates_an_absent_port() {
+            let manager = ImposterManager::new();
+            let report = manager
+                .apply_one(cfg(19721, json!([stub_json("a")])))
+                .await
+                .expect("apply_one");
+            assert_eq!(report.created, vec![19721]);
+            assert!(report.deleted.is_empty() && report.failed.is_empty());
+            assert!(manager.get_imposter(19721).is_ok());
+            manager.delete_all().await;
+        }
+
+        #[tokio::test]
+        async fn patches_in_place_and_leaves_other_ports_untouched() {
+            let listener = Arc::new(RecordingListener::default());
+            let manager = ImposterManager::new().with_event_listener(listener.clone());
+            let p = |last: &str| {
+                cfg(
+                    19722,
+                    json!([
+                        cycled_stub_json("p1", "p2"),
+                        stub_json("b"),
+                        stub_json("c"),
+                        stub_json(last)
+                    ]),
+                )
+            };
+            let q = cfg(19723, json!([cycled_stub_json("q1", "q2")]));
+            manager.apply_config(vec![p("d"), q]).await.expect("seed");
+            let p_before = manager.get_imposter(19722).unwrap();
+            let q_before = manager.get_imposter(19723).unwrap();
+            assert_eq!(next_body(&p_before.snapshot().stubs()[0]), "p1");
+            assert_eq!(next_body(&q_before.snapshot().stubs()[0]), "q1");
+            listener.0.lock().clear();
+
+            let report = manager.apply_one(p("e")).await.expect("apply_one");
+
+            assert_eq!(report.stub_patched, vec![19722]);
+            assert!(report.created.is_empty() && report.replaced.is_empty());
+            assert!(
+                report.deleted.is_empty(),
+                "apply_one never deletes: {report:?}"
+            );
+            assert!(report.failed.is_empty() && report.toggled.is_empty());
+            let p_after = manager.get_imposter(19722).unwrap();
+            assert!(Arc::ptr_eq(&p_before, &p_after));
+            assert_eq!(
+                next_body(&p_after.snapshot().stubs()[0]),
+                "p2",
+                "patched imposter keeps cursors"
+            );
+            let q_after = manager.get_imposter(19723).expect("other port survives");
+            assert!(Arc::ptr_eq(&q_before, &q_after));
+            assert_eq!(next_body(&q_after.snapshot().stubs()[0]), "q2");
+            assert_eq!(
+                listener.0.lock().clone(),
+                vec![ImposterEvent::StubsChanged(19722)]
+            );
+            manager.delete_all().await;
+        }
+
+        #[tokio::test]
+        async fn never_deletes_ports_it_was_not_given() {
+            let manager = ImposterManager::new();
+            manager
+                .apply_config(vec![cfg(19747, json!([stub_json("a")]))])
+                .await
+                .expect("seed");
+            let report = manager
+                .apply_one(cfg(19748, json!([stub_json("b")])))
+                .await
+                .expect("apply_one");
+            assert_eq!(report.created, vec![19748]);
+            assert!(report.deleted.is_empty(), "{report:?}");
+            assert_eq!(manager.imposters.ports(), vec![19747, 19748]);
+            manager.delete_all().await;
+        }
+
+        #[tokio::test]
+        async fn an_unchanged_config_touches_nothing() {
+            let listener = Arc::new(RecordingListener::default());
+            let manager = ImposterManager::new().with_event_listener(listener.clone());
+            let config = || cfg(19724, json!([stub_json("a")]));
+            manager.apply_one(config()).await.expect("create");
+            let before = manager.get_imposter(19724).unwrap();
+            listener.0.lock().clear();
+            let report = manager.apply_one(config()).await.expect("re-apply");
+            assert_eq!(listener.0.lock().clone(), Vec::<ImposterEvent>::new());
+            assert!(report.created.is_empty() && report.replaced.is_empty());
+            assert!(report.stub_patched.is_empty() && report.toggled.is_empty());
+            assert!(report.deleted.is_empty() && report.failed.is_empty());
+            assert!(Arc::ptr_eq(&before, &manager.get_imposter(19724).unwrap()));
+            manager.delete_all().await;
+        }
+
+        #[tokio::test]
+        async fn toggles_enabled_in_place() {
+            let manager = ImposterManager::new();
+            manager
+                .apply_one(cfg(19725, json!([stub_json("a")])))
+                .await
+                .expect("create");
+            let before = manager.get_imposter(19725).unwrap();
+            let paused = imposter_cfg(json!({
+                "protocol": "http", "port": 19725, "enabled": false, "stubs": [stub_json("a")]
+            }));
+            let report = manager.apply_one(paused).await.expect("pause");
+            assert_eq!(report.toggled, vec![19725]);
+            assert!(report.replaced.is_empty());
+            let after = manager.get_imposter(19725).unwrap();
+            assert!(Arc::ptr_eq(&before, &after));
+            assert!(!after.is_enabled());
+            manager.delete_all().await;
+        }
+
+        #[tokio::test]
+        async fn an_imposter_level_change_replaces() {
+            let manager = ImposterManager::new();
+            manager
+                .apply_one(cfg(19726, json!([stub_json("a")])))
+                .await
+                .expect("create");
+            let before = manager.get_imposter(19726).unwrap();
+            let renamed = imposter_cfg(json!({
+                "protocol": "http", "port": 19726, "name": "renamed", "stubs": [stub_json("a")]
+            }));
+            let report = manager.apply_one(renamed).await.expect("replace");
+            assert_eq!(report.replaced, vec![19726]);
+            assert!(report.deleted.is_empty() && report.failed.is_empty());
+            assert!(!Arc::ptr_eq(&before, &manager.get_imposter(19726).unwrap()));
+            manager.delete_all().await;
+        }
+
+        #[tokio::test]
+        async fn a_degenerate_stub_change_replaces() {
+            let manager = ImposterManager::new();
+            manager
+                .apply_one(cfg(19727, json!([stub_json("a"), stub_json("b")])))
+                .await
+                .expect("create");
+            let report = manager
+                .apply_one(cfg(19727, json!([stub_json("x"), stub_json("y")])))
+                .await
+                .expect("replace");
+            assert_eq!(report.replaced, vec![19727]);
+            assert!(report.stub_patched.is_empty());
+            manager.delete_all().await;
+        }
+
+        #[tokio::test]
+        async fn refuses_a_config_without_an_explicit_port() {
+            let manager = ImposterManager::new();
+            let portless = imposter_cfg(json!({"protocol": "http", "stubs": []}));
+            let port_zero = imposter_cfg(json!({"protocol": "http", "port": 0, "stubs": []}));
+            for config in [portless, port_zero] {
+                let result = manager.apply_one(config).await;
+                assert!(
+                    matches!(result, Err(ImposterError::ExplicitPortRequired)),
+                    "{result:?}"
+                );
+            }
+            assert!(manager.imposters.ports().is_empty(), "nothing was created");
+        }
+
+        #[tokio::test]
+        async fn refuses_duplicate_stub_ids_and_an_invalid_protocol_without_mutating() {
+            let manager = ImposterManager::new();
+            manager
+                .apply_one(cfg(19728, json!([stub_json("a")])))
+                .await
+                .expect("create");
+            let before = manager.get_imposter(19728).unwrap();
+            let mut dup_a: serde_json::Value = stub_json("a");
+            dup_a["id"] = json!("same");
+            let mut dup_b: serde_json::Value = stub_json("b");
+            dup_b["id"] = json!("same");
+            let result = manager.apply_one(cfg(19728, json!([dup_a, dup_b]))).await;
+            assert!(
+                matches!(result, Err(ImposterError::StubIdConflict(ref id)) if id == "same"),
+                "{result:?}"
+            );
+            let tcp = imposter_cfg(json!({"protocol": "tcp", "port": 19728, "stubs": []}));
+            let result = manager.apply_one(tcp).await;
+            assert!(
+                matches!(result, Err(ImposterError::InvalidProtocol(ref p)) if p == "tcp"),
+                "{result:?}"
+            );
+            assert!(Arc::ptr_eq(&before, &manager.get_imposter(19728).unwrap()));
+            manager.delete_all().await;
+        }
+
+        #[tokio::test]
+        async fn desired_retags_a_running_imposter_in_place() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+            let config = || datadir_cfg(json!({"port": 23790, "protocol": "http", "stubs": []}));
+            let file = dir.path().join("23790.json");
+            manager
+                .create_imposter_as(config(), Persistence::Ephemeral)
+                .await
+                .expect("create");
+            let before = manager.get_imposter(23790).unwrap();
+            assert!(!file.exists());
+
+            let report = manager
+                .apply_one_desired(DesiredImposter {
+                    config: config(),
+                    persistence: Persistence::Datadir,
+                })
+                .await
+                .expect("retag");
+            assert!(report.failed.is_empty(), "{:?}", report.failed);
+            assert!(report.created.is_empty() && report.replaced.is_empty());
+            assert!(file.exists(), "a retag to the datadir writes the file");
+            assert!(Arc::ptr_eq(&before, &manager.get_imposter(23790).unwrap()));
+            manager.delete_all().await;
+        }
+
+        // `apply_one` is `apply_config`'s arm for one port: on the same starting state, the same
+        // desired config yields the same report (bar `deleted`, which only the whole-set sweep fills).
+        #[tokio::test]
+        async fn report_matches_apply_config_for_the_same_port() {
+            async fn run(port: u16, via_one: bool) -> ApplyReport {
+                let manager = ImposterManager::new();
+                let seed = cfg(
+                    port,
+                    json!([
+                        cycled_stub_json("a1", "a2"),
+                        stub_json("b"),
+                        stub_json("c"),
+                        stub_json("d")
+                    ]),
+                );
+                manager.apply_config(vec![seed]).await.expect("seed");
+                let next = imposter_cfg(json!({
+                    "protocol": "http", "port": port, "enabled": false,
+                    "stubs": [cycled_stub_json("a1", "a2"), stub_json("b"), stub_json("c"), stub_json("e")]
+                }));
+                let report = if via_one {
+                    manager.apply_one(next).await
+                } else {
+                    manager.apply_config(vec![next]).await
+                }
+                .expect("apply");
+                manager.delete_all().await;
+                report
+            }
+            let one = run(19729, true).await;
+            let all = run(19730, false).await;
+            assert_eq!(one.toggled, vec![19729]);
+            assert_eq!(one.stub_patched, vec![19729]);
+            assert_eq!(all.toggled, vec![19730]);
+            assert_eq!(all.stub_patched, vec![19730]);
+            for r in [&one, &all] {
+                assert!(r.created.is_empty() && r.replaced.is_empty() && r.deleted.is_empty());
+                assert!(r.failed.is_empty());
+            }
+        }
     }
 
     // Issue #1256: re-applying a freshly parsed copy of the same config must not replace an
@@ -6444,6 +6770,45 @@ mod tests {
                 .iter()
                 .find(|(p, _)| *p == port)
                 .map(|(_, e)| e)
+        }
+
+        // Issue #1253: `apply_one` runs the rebind arm too.
+        #[tokio::test]
+        async fn apply_one_rebinds_an_unbound_imposter() {
+            let blocker = squat(19614).await;
+            let manager = ImposterManager::new().with_serve_unbound(true);
+            let report = manager
+                .apply_one(cfg(19614, "healed"))
+                .await
+                .expect("apply_one");
+            assert!(matches!(
+                failure_for(&report, 19614),
+                Some(ImposterError::BindError(19614, _))
+            ));
+            assert!(!manager.imposters.get(19614).expect("registered").is_bound());
+
+            let report = manager
+                .apply_one(cfg(19614, "healed"))
+                .await
+                .expect("apply_one");
+            assert!(
+                matches!(
+                    failure_for(&report, 19614),
+                    Some(ImposterError::BindError(19614, _))
+                ),
+                "still squatted: {report:?}"
+            );
+            assert!(!report.created.contains(&19614));
+
+            drop(blocker);
+            let report = manager
+                .apply_one(cfg(19614, "healed"))
+                .await
+                .expect("apply_one");
+            assert!(report.created.contains(&19614), "{report:?}");
+            assert!(failure_for(&report, 19614).is_none());
+            assert!(manager.imposters.get(19614).expect("registered").is_bound());
+            manager.delete_imposter(19614).await.expect("delete");
         }
 
         // AC6: the flag is opt-in. With it off (the OSS default) a bind failure on the

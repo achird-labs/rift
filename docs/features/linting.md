@@ -189,7 +189,7 @@ Informational messages about configuration patterns.
 
 | Code | Description |
 |:-----|:------------|
-| I001 | Mountebank slice notation detected (`[:0]`) |
+| I001 | JSONPath uses a jsonpath-plus shorthand (`.[`, or a slice end or step of `0`) that Rift reads as Mountebank does but standard JSONPath reads differently |
 | I002 | Proxy targets localhost |
 | I003 | Response uses the Rift `_rift` extension (not Mountebank-compatible) |
 | I004 | This build omits the `javascript` feature, so the run's JavaScript was not syntax-checked (no E028/E040). Reported once per run, not per script. Every release artifact has the feature; only a source build that opts out with `--no-default-features` can report this |

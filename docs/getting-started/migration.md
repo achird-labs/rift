@@ -22,7 +22,7 @@ Rift maintains full compatibility with Mountebank's HTTP/HTTPS protocol support:
 | REST API | Yes | Yes | Same endpoints |
 | JSON Configuration | Yes | Yes | Same format |
 | All Predicates | Yes | Yes | equals, contains, matches, exists, etc. |
-| JSONPath | Yes | Yes | Same syntax |
+| JSONPath | Yes | Yes | Same syntax; the jsonpath-plus shorthands `.[` and a `0` slice end are read as Mountebank reads them |
 | XPath | Yes | Yes | Same syntax |
 | Behaviors | Yes | Yes | wait, repeat, copy, lookup, decorate, shellTransform — on `is`, `inject` and `proxy` responses, in Mountebank's order |
 | Proxy Mode | Yes | Yes | Record and replay |

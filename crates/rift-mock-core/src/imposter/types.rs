@@ -2182,6 +2182,8 @@ pub enum ImposterError {
     FlowStoreConfig(String),
     #[error("backend error: {0:#}")]
     Backend(anyhow::Error),
+    #[error("an explicit port is required to reconcile a single imposter")]
+    ExplicitPortRequired,
 }
 
 #[cfg(test)]

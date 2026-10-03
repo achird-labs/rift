@@ -354,11 +354,36 @@ fn e011_jsonpath_missing_selector() {
 }
 
 #[test]
-fn i001_jsonpath_slice_notation() {
-    let pred = json!({ "equals": { "body": "x" }, "jsonpath": { "selector": "$[:2]" } });
-    let mut r = LintResult::new();
-    validate_predicate(path(), &pred, "loc", &mut r, &opts());
-    assert!(has_code(&r, "I001"), "expected I001, got {:?}", codes(&r));
+fn i001_jsonpath_plus_shorthands() {
+    for selector in ["$.a.b.[0].c", "$.a[:0]", "$.a[1:0]", "$.a[::0]", "$.a.[:0]"] {
+        let pred = json!({ "equals": { "body": "x" }, "jsonpath": { "selector": selector } });
+        let mut r = LintResult::new();
+        validate_predicate(path(), &pred, "loc", &mut r, &opts());
+        assert!(
+            has_code(&r, "I001"),
+            "{selector}: expected I001, got {:?}",
+            codes(&r)
+        );
+        let issue = r.issues.iter().find(|i| i.code == "I001").expect("I001");
+        assert!(
+            issue
+                .suggestion
+                .as_deref()
+                .is_some_and(|s| s.contains("jsonpath-plus")),
+            "{:?}",
+            issue.suggestion
+        );
+    }
+}
+
+#[test]
+fn i001_quiet_on_standard_slices_and_descendants() {
+    for selector in ["$[:2]", "$.a[1:3]", "$.a..[0]", "$['k.[0]']"] {
+        let pred = json!({ "equals": { "body": "x" }, "jsonpath": { "selector": selector } });
+        let mut r = LintResult::new();
+        validate_predicate(path(), &pred, "loc", &mut r, &opts());
+        assert!(!has_code(&r, "I001"), "{selector}: unexpected I001");
+    }
 }
 
 #[test]

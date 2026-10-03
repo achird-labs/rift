@@ -11,6 +11,17 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **`ImposterManager::apply_one` reconciles a single imposter** (#1253). `apply_config` takes the
+  whole imposter set, so an embedder that knew one port changed had to pass every imposter and pay
+  for checking all of them, or call `create_imposter`/`replace_stubs` and lose the in-place stub
+  patching that keeps response cycles. `apply_one(config)` runs `apply_config`'s decisions for that
+  port alone and returns the same `ApplyReport`; `apply_one_desired` also carries the persistence
+  store. Both refuse a config without an explicit port with the new
+  `ImposterError::ExplicitPortRequired`, a new variant of that public enum, and neither deletes.
+  `apply_config` now runs the same per-port code. Documented in `docs/embedding/server.md`.
+
 ### Fixed
 
 - **A `copy` or `lookup` behavior whose selector does not compile is refused at load** (#1258). A
@@ -22,6 +33,16 @@ record.
   selector, and a `--datadir` file holding one is skipped at startup and listed in the startup error
   summary. As before, a step that a later `null` removes is not checked. `rift-lint` reports a regex
   selector that does not compile as `E051`.
+
+- **An imposter whose `jsonpath` selector uses Mountebank's jsonpath-plus shorthands loads and
+  selects what Mountebank selects** (#1255). A selector with a dot before a bracket, such as
+  `$.x.y.[:0].z`, was refused at creation, so the whole imposter failed to load. jsonpath-plus reads
+  `.[` as a descendant segment and a slice end or step of `0` as open-ended, so `[:0]` is the whole
+  array. Rift now rewrites both to the standard form that means the same (`..[`, `[:]`) before
+  parsing a selector, in predicates and in `copy`/`lookup` alike. A `[:0]` that already loaded was
+  read as an empty slice and now selects the whole array, as in Mountebank. `rift-lint`'s `I001`
+  now flags exactly these spellings; it used to flag every `[:N]` slice and say Rift supported it as
+  Mountebank does, which was wrong for `[:0]`.
 
 - **Re-applying an unchanged config no longer replaces imposters whose stubs have multi-key maps**
   (#1256). A stub without an `id` is matched across a reconcile by a hash of its content, and that
