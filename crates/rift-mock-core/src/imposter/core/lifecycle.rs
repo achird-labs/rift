@@ -27,7 +27,7 @@ impl Imposter {
     /// Only a patch stores a new snapshot: `Unchanged` and `Degenerate` leave the current one, and
     /// its match index, in place rather than rebuilding an identical copy (issue #1254), which is
     /// why this does not go through [`mutate_stubs`](Self::mutate_stubs).
-    pub(crate) fn reconcile_stubs(&self, desired: Vec<Stub>) -> StubReconcile {
+    pub(crate) fn reconcile_stubs(&self, desired: &[Stub]) -> StubReconcile {
         let _writer = self.stubs_write.lock();
         let current = self.stubs_snapshot.load();
         match plan_stub_reconcile(current.stubs(), desired) {

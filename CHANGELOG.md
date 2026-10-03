@@ -22,6 +22,19 @@ record.
   `ImposterError::ExplicitPortRequired`, a new variant of that public enum, and neither deletes.
   `apply_config` now runs the same per-port code. Documented in `docs/embedding/server.md`.
 
+### Performance
+
+- **Re-applying an unchanged imposter set costs a fraction of creating it** (#1254). Every
+  `apply_config` (and so `PUT /imposters`, `POST /admin/reload` and `rift_apply_config`) serialized
+  and hashed every live and desired stub of every running imposter, cloned every stub twice, and
+  rebuilt each imposter's match index even when nothing had changed. A stub's content hash is now
+  cached on the running stub, an unchanged or wholesale-replaced imposter keeps its current match
+  index, and the desired config is compared without cloning its stubs. On a 200-imposter,
+  1000-stub set an identical re-apply went from about twice the cost of creating the set from
+  nothing to about half of it (8.5 ms to 2.1 ms on the new `apply_config_bench`), and a one-stub
+  change costs the same. What remains is one canonical serialization per desired stub. The response
+  sequencer also stops serializing the matched stub on every response decision.
+
 ### Fixed
 
 - **An imposter whose `jsonpath` selector uses Mountebank's jsonpath-plus shorthands loads and

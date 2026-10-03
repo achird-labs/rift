@@ -242,7 +242,7 @@ pub(crate) enum StubPlan {
 /// is a matching content; for an explicit id the hashes are compared. Equal `(id, hash)` sequences
 /// are `Unchanged`, which is the common case of re-applying an unchanged set and costs one
 /// serialization per desired stub and nothing per live one.
-pub(crate) fn plan_stub_reconcile(states: &[Arc<StubState>], desired: Vec<Stub>) -> StubPlan {
+pub(crate) fn plan_stub_reconcile(states: &[Arc<StubState>], desired: &[Stub]) -> StubPlan {
     let desired_hashes: Vec<u64> = desired.iter().map(content_hash).collect();
     let unchanged = states.len() == desired.len()
         && states
@@ -291,15 +291,16 @@ pub(crate) fn plan_stub_reconcile(states: &[Arc<StubState>], desired: Vec<Stub>)
 
     let mut by_key: HashMap<String, Arc<StubState>> =
         old_keys.into_iter().zip(states.iter().cloned()).collect();
+    // Only an inserted or changed stub is cloned out of `desired`; a surviving one reuses its Arc.
     let next = new_keys
         .into_iter()
-        .zip(desired.into_iter().zip(desired_hashes))
+        .zip(desired.iter().zip(desired_hashes))
         .map(|(key, (stub, hash))| match by_key.remove(&key) {
             // Same key: keep the slot's cycler + slot token; only rebuild the Arc when the
             // stub content actually changed (issue #287).
             Some(state) if state.content_hash() == hash => state,
-            Some(state) => Arc::new(state.with_stub_hashed(stub, hash)),
-            None => Arc::new(StubState::with_hash(stub, hash)),
+            Some(state) => Arc::new(state.with_stub_hashed(stub.clone(), hash)),
+            None => Arc::new(StubState::with_hash(stub.clone(), hash)),
         })
         .collect();
     let removed_keys = by_key
@@ -316,7 +317,7 @@ pub(crate) fn reconcile_stub_states(
     states: &mut Vec<Arc<StubState>>,
     desired: Vec<Stub>,
 ) -> StubReconcile {
-    match plan_stub_reconcile(states, desired) {
+    match plan_stub_reconcile(states, &desired) {
         StubPlan::Unchanged => StubReconcile::Unchanged,
         StubPlan::Degenerate => StubReconcile::Degenerate,
         StubPlan::Patched { next, removed_keys } => {

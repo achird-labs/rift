@@ -12,6 +12,8 @@
 //! Fixtures use multi-key `equals` predicates and response headers, the shape whose keys were
 //! unstable before #1256, so the identical case measures a true no-op, not wholesale replaces.
 
+use std::time::{Duration, Instant};
+
 use criterion::{Criterion, criterion_group, criterion_main};
 use rift_mock_core::imposter::{ImposterConfig, ImposterManager};
 use serde_json::json;
@@ -58,19 +60,23 @@ fn bench_apply_config(c: &mut Criterion) {
     let mut group = c.benchmark_group("apply_config");
     group.sample_size(10);
 
+    // Times the apply only: building the set and tearing the listeners down are excluded.
     group.bench_function("cold", |b| {
-        b.iter_batched(
-            || set(None),
-            |configs| {
-                runtime.block_on(async {
-                    let manager = ImposterManager::new();
-                    let report = manager.apply_config(configs).await.expect("apply");
-                    assert_eq!(report.created.len(), usize::from(IMPOSTERS));
-                    manager.delete_all().await;
-                });
-            },
-            criterion::BatchSize::PerIteration,
-        );
+        b.iter_custom(|iterations| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iterations {
+                let configs = set(None);
+                let manager = ImposterManager::new();
+                let started = Instant::now();
+                let report = runtime
+                    .block_on(manager.apply_config(configs))
+                    .expect("apply");
+                total += started.elapsed();
+                assert_eq!(report.created.len(), usize::from(IMPOSTERS));
+                runtime.block_on(manager.delete_all());
+            }
+            total
+        });
     });
 
     let manager = ImposterManager::new();

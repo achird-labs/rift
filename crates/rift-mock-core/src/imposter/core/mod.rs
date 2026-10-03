@@ -270,6 +270,23 @@ pub struct Imposter {
     /// next [`Self::stub_warnings`] read and reused until the next `mutate_stubs`. Keeps the O(n)
     /// analysis off the per-`GET` hot path and gives HTTP and embedded/FFI one shared code path.
     stub_warnings: ArcSwapOption<Vec<crate::extensions::stub_analysis::StubWarning>>,
+    /// [`imposter_level_view`] of `config`, computed on the first reconcile that asks (issue
+    /// #1254). `config` never changes after construction, so neither does this.
+    imposter_level: OnceLock<Result<serde_json::Value, String>>,
+}
+
+/// `config` as `apply_config` compares it at the imposter level: every field except `stubs`, with
+/// `enabled` normalized (an enabled-only change toggles in place, #817). The stubs are moved out for
+/// the serialization and put back, rather than cloned (issue #1254).
+pub(crate) fn imposter_level_view(
+    config: &mut ImposterConfig,
+) -> serde_json::Result<serde_json::Value> {
+    let stubs = std::mem::take(&mut config.stubs);
+    let enabled = std::mem::replace(&mut config.enabled, true);
+    let view = serde_json::to_value(&*config);
+    config.stubs = stubs;
+    config.enabled = enabled;
+    view
 }
 
 impl Imposter {
@@ -389,6 +406,7 @@ impl Imposter {
             flow_store,
             sequencer,
             stub_warnings: ArcSwapOption::empty(),
+            imposter_level: OnceLock::new(),
         })
     }
 
@@ -413,6 +431,15 @@ impl Imposter {
     /// wait-free load (issue #707). The match hot path calls this exactly once per request.
     pub(crate) fn snapshot(&self) -> arc_swap::Guard<Arc<StubSnapshot>> {
         self.stubs_snapshot.load()
+    }
+
+    /// This imposter's [`imposter_level_view`], cached. Computing it clones `config` once; a
+    /// serialization failure is kept as its message.
+    pub(crate) fn imposter_level_view(&self) -> &Result<serde_json::Value, String> {
+        self.imposter_level.get_or_init(|| {
+            let mut config = self.config.clone();
+            imposter_level_view(&mut config).map_err(|e| e.to_string())
+        })
     }
 
     /// Whether this imposter owns a listener on its port.
@@ -1828,7 +1855,7 @@ mod tests {
         fn an_unchanged_reconcile_keeps_the_snapshot() {
             let imposter = imposter_with(&["a", "b", "c"]);
             let before = imposter.stubs_snapshot.load_full();
-            let outcome = imposter.reconcile_stubs(stubs(&["a", "b", "c"]));
+            let outcome = imposter.reconcile_stubs(&stubs(&["a", "b", "c"]));
             assert!(matches!(outcome, StubReconcile::Unchanged), "{outcome:?}");
             assert!(Arc::ptr_eq(&before, &imposter.stubs_snapshot.load_full()));
         }
@@ -1837,7 +1864,7 @@ mod tests {
         fn a_degenerate_reconcile_keeps_the_snapshot() {
             let imposter = imposter_with(&["a", "b"]);
             let before = imposter.stubs_snapshot.load_full();
-            let outcome = imposter.reconcile_stubs(stubs(&["x", "y"]));
+            let outcome = imposter.reconcile_stubs(&stubs(&["x", "y"]));
             assert!(matches!(outcome, StubReconcile::Degenerate), "{outcome:?}");
             assert!(Arc::ptr_eq(&before, &imposter.stubs_snapshot.load_full()));
         }
@@ -1846,7 +1873,7 @@ mod tests {
         fn a_patch_stores_a_new_snapshot_reusing_unchanged_states() {
             let imposter = imposter_with(&["a", "b", "c", "d"]);
             let before = imposter.stubs_snapshot.load_full();
-            let outcome = imposter.reconcile_stubs(stubs(&["a", "b", "c", "e"]));
+            let outcome = imposter.reconcile_stubs(&stubs(&["a", "b", "c", "e"]));
             assert!(
                 matches!(outcome, StubReconcile::Patched { .. }),
                 "{outcome:?}"
