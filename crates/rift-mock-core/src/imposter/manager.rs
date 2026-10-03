@@ -4166,6 +4166,7 @@ mod tests {
                 assert!(r.failed.is_empty());
             }
         }
+    }
 
     // Issue #1256: re-applying a freshly parsed copy of the same config must not replace an
     // imposter whose stubs carry multi-key maps (predicates, response headers).
