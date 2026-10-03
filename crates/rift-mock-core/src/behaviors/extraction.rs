@@ -158,9 +158,9 @@ impl ExtractionMethod {
     }
 }
 
-/// A selected JSON node as the text a copy or lookup uses: a string unquoted, anything else as
-/// its JSON.
-fn json_node_text(node: &serde_json::Value) -> String {
+/// A selected JSON node as the text a copy, lookup or predicate uses: a string unquoted, anything
+/// else as its JSON (Mountebank's `forceStrings` for scalars).
+pub(crate) fn json_node_text(node: &serde_json::Value) -> String {
     match node {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Number(n) => n.to_string(),
@@ -172,28 +172,14 @@ fn json_node_text(node: &serde_json::Value) -> String {
 
 /// Every value an XPath selector yields against `xml_str`, in document order.
 fn xpath_all(xml_str: &str, selector: &str) -> Vec<Option<String>> {
-    use sxd_xpath::{Context, Value};
-
     #[cfg(test)]
     counters::bump_dom_parse();
     let Ok(package) = sxd_document::parser::parse(xml_str) else {
         return Vec::new();
     };
-    let document = package.as_document();
-    let Some(xpath) = cached_xpath(selector, None) else {
-        return Vec::new();
-    };
-    match xpath.evaluate(&Context::new(), document.root()) {
-        Ok(Value::String(s)) => vec![Some(s)],
-        Ok(Value::Number(n)) => vec![Some(n.to_string())],
-        Ok(Value::Boolean(b)) => vec![Some(b.to_string())],
-        Ok(Value::Nodeset(nodes)) => nodes
-            .document_order()
-            .iter()
-            .map(|n| Some(n.string_value()))
-            .collect(),
-        Err(_) => Vec::new(),
-    }
+    eval_xpath_all_on(&package.as_document(), selector, None)
+        .map(|values| values.into_iter().map(Some).collect())
+        .unwrap_or_default()
 }
 
 /// Normalize a JSONPath selector to an RFC 9535 rooted path.
@@ -410,8 +396,8 @@ fn cached_jsonpath(selector: &str) -> Option<Arc<serde_json_path::JsonPath>> {
 /// Mountebank compatibility.
 ///
 /// String-only entry point for callers that only have the raw body (copy/lookup behaviors); it
-/// parses the body once and delegates to [`extract_jsonpath_value`], which is also what the matching
-/// hot path calls directly with an already-parsed `Value` to avoid a second parse (issue #711).
+/// parses the body once and delegates to [`extract_jsonpath_value`]. Predicates use
+/// [`jsonpath_selection`] instead, which keeps every selected value (issue #1257).
 pub fn extract_jsonpath(json_str: &str, path: &str) -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(json_str).ok()?;
     extract_jsonpath_value(&json, path)
@@ -428,6 +414,50 @@ pub fn extract_jsonpath_value(json: &serde_json::Value, path: &str) -> Option<St
     node_list.first().map(json_node_text)
 }
 
+/// What a predicate's selector selected, as Mountebank's predicates see it (issue #1257).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Selection {
+    /// One value, compared as before. Nothing selected is the empty string, as Mountebank reads it.
+    One(String),
+    /// Several values (or the elements of a single selected array): the predicate holds when any
+    /// of them satisfies it, and `deepEquals` compares the sorted list.
+    Many(Vec<String>),
+}
+
+impl Selection {
+    fn from_texts(mut texts: Vec<String>) -> Self {
+        match texts.len() {
+            0 => Self::One(String::new()),
+            1 => Self::One(texts.swap_remove(0)),
+            _ => Self::Many(texts),
+        }
+    }
+}
+
+/// What a predicate's JSONPath selector selects: the text of every selected node, except that a
+/// single selected node which is a non-empty array stands for its elements (Mountebank cannot tell
+/// `$.tags` from `$.tags[*]`). `None` when the selector does not compile.
+pub(crate) fn jsonpath_selection(json: &serde_json::Value, path: &str) -> Option<Selection> {
+    let json_path = cached_jsonpath(path)?;
+    let nodes = json_path.query(json).all();
+    Some(match nodes.as_slice() {
+        [serde_json::Value::Array(items)] if !items.is_empty() => {
+            Selection::Many(items.iter().map(json_node_text).collect())
+        }
+        _ => Selection::from_texts(nodes.into_iter().map(json_node_text).collect()),
+    })
+}
+
+/// What a predicate's XPath selector selects, in document order. `None` when the selector does not
+/// compile or does not evaluate.
+pub(crate) fn xpath_selection(
+    document: &sxd_document::dom::Document,
+    selector: &str,
+    ns: Option<&HashMap<String, String>>,
+) -> Option<Selection> {
+    eval_xpath_all_on(document, selector, ns).map(Selection::from_texts)
+}
+
 /// Extract value using XPath, optionally with namespace prefix bindings.
 /// Used by copy behaviors and predicate xpath parameter.
 pub fn extract_xpath(xml_str: &str, path: &str) -> Option<String> {
@@ -436,10 +466,9 @@ pub fn extract_xpath(xml_str: &str, path: &str) -> Option<String> {
 
 /// Extract value using XPath with optional namespace prefix→URI map.
 ///
-/// String-only entry point for callers that only have the raw body (copy behaviors, and any
-/// predicate caller that hasn't pre-parsed a DOM). It parses the body itself — bumping `DOM_PARSE` —
-/// then delegates to [`eval_xpath_on`], which is also what the matching hot path calls directly
-/// against a DOM shared across a whole request (issue #711).
+/// String-only entry point for callers that only have the raw body (copy behaviors). It parses the
+/// body itself — bumping `DOM_PARSE` — then delegates to [`eval_xpath_on`]. Predicates use
+/// [`xpath_selection`] against the request's shared DOM instead (issues #711, #1257).
 pub fn extract_xpath_with_ns(
     xml_str: &str,
     path: &str,
@@ -539,8 +568,7 @@ pub(crate) fn validate_xpath_selector(selector: &str) -> Result<(), String> {
 }
 
 /// Evaluate an XPath selector against an already-parsed DOM `Document`, using the thread-local
-/// compiled-selector cache. The matching hot path calls this directly with a `Document` shared
-/// across every predicate/stub in one request (issue #711) instead of parsing per predicate.
+/// compiled-selector cache: the first selected value, in document order.
 pub(crate) fn eval_xpath_on(
     document: &sxd_document::dom::Document,
     selector: &str,
@@ -562,9 +590,54 @@ pub(crate) fn eval_xpath_on(
         Ok(Value::String(s)) => Some(s),
         Ok(Value::Number(n)) => Some(n.to_string()),
         Ok(Value::Boolean(b)) => Some(b.to_string()),
-        Ok(Value::Nodeset(nodes)) => nodes.iter().next().map(|n| n.string_value()),
+        // The node set is a hash set: take the first node in document order, not whichever node
+        // iteration happens to yield first (issue #1257).
+        Ok(Value::Nodeset(nodes)) => nodes.document_order_first().map(|n| n.string_value()),
         _ => None,
     }
+}
+
+/// Every value an XPath selector yields against `document`, in document order — what a predicate
+/// matches against (issue #1257). `None` when the selector does not compile or does not evaluate.
+fn eval_xpath_all_on(
+    document: &sxd_document::dom::Document,
+    selector: &str,
+    ns: Option<&HashMap<String, String>>,
+) -> Option<Vec<String>> {
+    use sxd_xpath::{Context, Value};
+
+    let xpath = cached_xpath(selector, ns)?;
+    let mut context = Context::new();
+    if let Some(namespaces) = ns {
+        for (prefix, uri) in namespaces {
+            context.set_namespace(prefix, uri);
+        }
+    }
+    match xpath.evaluate(&context, document.root()) {
+        Ok(Value::String(s)) => Some(vec![s]),
+        Ok(Value::Number(n)) => Some(vec![n.to_string()]),
+        Ok(Value::Boolean(b)) => Some(vec![b.to_string()]),
+        Ok(Value::Nodeset(nodes)) => Some(
+            nodes
+                .document_order()
+                .iter()
+                .map(|n| n.string_value())
+                .collect(),
+        ),
+        Err(_) => None,
+    }
+}
+
+/// [`xpath_selection`] against a raw body, for a caller without a pre-parsed DOM.
+pub(crate) fn xpath_selection_in(
+    xml_str: &str,
+    selector: &str,
+    ns: Option<&HashMap<String, String>>,
+) -> Option<Selection> {
+    #[cfg(test)]
+    counters::bump_dom_parse();
+    let package = sxd_document::parser::parse(xml_str).ok()?;
+    xpath_selection(&package.as_document(), selector, ns)
 }
 
 /// Parse-once-per-request primitive for the XML DOM (issue #711).
@@ -801,6 +874,16 @@ mod tests {
             extract_jsonpath(json, "$.items[1]"),
             Some("second".to_string())
         );
+    }
+
+    // Issue #1257: a copy/lookup takes the first selected node in document order. The DOM's node
+    // set is a hash set, so "first" used to be whichever node hashed first.
+    #[test]
+    fn xpath_extraction_takes_the_first_node_in_document_order() {
+        let xml = "<r><n>first</n><n>second</n><n>third</n><n>fourth</n><n>fifth</n></r>";
+        for _ in 0..50 {
+            assert_eq!(extract_xpath(xml, "//n"), Some("first".to_string()));
+        }
     }
 
     // Issue #1255: Mountebank's jsonpath-plus reads `.[` as a descendant segment and a slice end

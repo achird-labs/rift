@@ -24,6 +24,15 @@ record.
 
 ### Fixed
 
+- **A `jsonpath` or `xpath` predicate holds when any selected value satisfies it, as in Mountebank**
+  (#1257). A selector that picked several values, such as `$.items[*].name`, was compared using only
+  the first one, so `{"equals": {"body": "second"}}` never matched the second item and
+  `{"deepEquals": {"body": "first"}}` matched a selection of two. The scalar operators and `exists`
+  now hold when any selected value satisfies them, an expected array needs each element matched,
+  `deepEquals` compares the sorted list, and a single selected array stands for its elements. XPath
+  selected an arbitrary node as the "first" one, because the DOM's node set is unordered; predicates,
+  `copy` and `lookup` now take XPath values in document order.
+
 - **An imposter whose `jsonpath` selector uses Mountebank's jsonpath-plus shorthands loads and
   selects what Mountebank selects** (#1255). A selector with a dot before a bracket, such as
   `$.x.y.[:0].z`, was refused at creation, so the whole imposter failed to load. jsonpath-plus reads
