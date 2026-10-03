@@ -3899,6 +3899,31 @@ mod tests {
         manager.delete_all().await;
     }
 
+    // Issue #1254: re-applying an unchanged set leaves each imposter's stub snapshot (and so its
+    // match index) as it was, rather than rebuilding an identical one per imposter per apply.
+    #[tokio::test]
+    async fn apply_config_identical_set_stores_no_snapshot() {
+        let manager = ImposterManager::new();
+        let config = || {
+            imposter_cfg(json!({
+                "protocol": "http", "port": 19748,
+                "stubs": [stub_json("a"), stub_json("b"), cycled_stub_json("c1", "c2")]
+            }))
+        };
+        manager.apply_config(vec![config()]).await.expect("create");
+        let imposter = manager.get_imposter(19748).unwrap();
+        let before = Arc::clone(&*imposter.snapshot());
+
+        let report = manager
+            .apply_config(vec![config()])
+            .await
+            .expect("re-apply");
+        assert!(report.replaced.is_empty() && report.stub_patched.is_empty());
+        assert!(Arc::ptr_eq(&before, &*imposter.snapshot()));
+
+        manager.delete_all().await;
+    }
+
     #[derive(Default)]
     struct RecordingListener(Mutex<Vec<ImposterEvent>>);
 

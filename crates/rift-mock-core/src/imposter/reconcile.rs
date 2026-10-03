@@ -115,7 +115,15 @@ pub trait ImposterEventListener: Send + Sync {
 pub fn stub_key(stub: &Stub, occurrence: usize) -> String {
     match &stub.id {
         Some(id) => id.clone(),
-        None => format!("~{:016x}#{occurrence}", content_hash(stub)),
+        None => key_for(None, content_hash(stub), occurrence),
+    }
+}
+
+/// [`stub_key`] from a stub's id and an already-computed [`content_hash`].
+pub(crate) fn key_for(id: Option<&str>, hash: u64, occurrence: usize) -> String {
+    match id {
+        Some(id) => id.to_string(),
+        None => format!("~{hash:016x}#{occurrence}"),
     }
 }
 
@@ -124,7 +132,7 @@ pub fn stub_key(stub: &Stub, occurrence: usize) -> String {
 /// stub is first converted to a `serde_json::Value`, whose objects are sorted maps (`preserve_order`
 /// is off workspace-wide), and that is what gets hashed (issue #1256). Struct fields are sorted
 /// too, so this form differs from serializing the stub directly: every id-less key moved once.
-fn content_hash(stub: &Stub) -> u64 {
+pub(crate) fn content_hash(stub: &Stub) -> u64 {
     let mut hasher = Fnv1a::default();
     let hashed = serde_json::to_value(stub)
         .and_then(|canonical| serde_json::to_writer(&mut hasher, &canonical));
@@ -169,19 +177,25 @@ impl std::io::Write for Fnv1a {
 
 /// Keys for a stub sequence; occurrence is counted per content hash so content-identical
 /// id-less siblings get distinct keys and stay individually addressable in the diff.
+#[cfg(test)]
 pub(crate) fn stub_keys(stubs: &[Stub]) -> Vec<String> {
-    stub_keys_iter(stubs.iter())
+    keys_from(
+        stubs
+            .iter()
+            .map(|stub| (stub.id.as_deref(), content_hash(stub))),
+    )
 }
 
-fn stub_keys_iter<'a>(stubs: impl Iterator<Item = &'a Stub>) -> Vec<String> {
+/// Keys from each stub's `(id, content hash)`, so a caller holding cached hashes (live
+/// [`StubState`]s) never re-serializes a stub.
+fn keys_from<'a>(stubs: impl Iterator<Item = (Option<&'a str>, u64)>) -> Vec<String> {
     let mut seen: HashMap<u64, usize> = HashMap::new();
     stubs
-        .map(|stub| match &stub.id {
-            Some(id) => id.clone(),
+        .map(|(id, hash)| match id {
+            Some(id) => id.to_string(),
             None => {
-                let hash = content_hash(stub);
                 let occurrence = seen.entry(hash).or_insert(0);
-                let key = format!("~{hash:016x}#{occurrence}");
+                let key = key_for(None, hash, *occurrence);
                 *occurrence += 1;
                 key
             }
@@ -205,17 +219,51 @@ pub(crate) enum StubReconcile {
     Degenerate,
 }
 
-/// Reconcile a live `StubState` vector toward `desired`, preserving per-slot cycling
-/// state for every stub whose key survives. Pure moves (reorder) preserve everything;
-/// a same-key content change (explicit id) swaps the stub in place like
-/// `replace_stub_by_id`. Returns `Degenerate` — without mutating — when the changed
+/// What reconciling a live stub vector toward a desired one would do, computed without touching
+/// the live vector, so an `Unchanged` or `Degenerate` outcome stores nothing (issue #1254).
+pub(crate) enum StubPlan {
+    Unchanged,
+    Degenerate,
+    Patched {
+        /// The new stub vector, in desired order, reusing every surviving `Arc<StubState>`.
+        next: Vec<Arc<StubState>>,
+        /// Sequencer keys (occurrence 0) of the stubs the patch removes.
+        removed_keys: Vec<String>,
+    },
+}
+
+/// Plan the reconcile of `states` toward `desired`, preserving per-slot cycling state for every
+/// stub whose key survives. Pure moves (reorder) preserve everything; a same-key content change
+/// (explicit id) swaps the stub in place like `replace_stub_by_id`. `Degenerate` when the changed
 /// fraction exceeds 1/2 (pure moves cost nothing in that metric).
-pub(crate) fn reconcile_stub_states(
-    states: &mut Vec<Arc<StubState>>,
-    desired: Vec<Stub>,
-) -> StubReconcile {
-    let old_keys = stub_keys_iter(states.iter().map(|s| &s.stub));
-    let new_keys = stub_keys(&desired);
+///
+/// Content is compared by [`content_hash`]: cached on each live state, computed once per desired
+/// stub (issue #1254). A content key already embeds the hash, so for id-less stubs a matching key
+/// is a matching content; for an explicit id the hashes are compared. Equal `(id, hash)` sequences
+/// are `Unchanged`, which is the common case of re-applying an unchanged set and costs one
+/// serialization per desired stub and nothing per live one.
+pub(crate) fn plan_stub_reconcile(states: &[Arc<StubState>], desired: Vec<Stub>) -> StubPlan {
+    let desired_hashes: Vec<u64> = desired.iter().map(content_hash).collect();
+    let unchanged = states.len() == desired.len()
+        && states
+            .iter()
+            .zip(desired.iter().zip(&desired_hashes))
+            .all(|(state, (stub, hash))| state.stub.id == stub.id && state.content_hash() == *hash);
+    if unchanged {
+        return StubPlan::Unchanged;
+    }
+
+    let old_keys = keys_from(
+        states
+            .iter()
+            .map(|state| (state.stub.id.as_deref(), state.content_hash())),
+    );
+    let new_keys = keys_from(
+        desired
+            .iter()
+            .zip(&desired_hashes)
+            .map(|(stub, hash)| (stub.id.as_deref(), *hash)),
+    );
 
     let old_index: HashMap<&String, usize> =
         old_keys.iter().enumerate().map(|(i, k)| (k, i)).collect();
@@ -227,61 +275,53 @@ pub(crate) fn reconcile_stub_states(
     for (i, key) in new_keys.iter().enumerate() {
         match old_index.get(key) {
             None => inserts += 1,
-            // Same key, different content — explicit-id stubs (or a hash collision).
-            Some(&j) if stubs_differ(&desired[i], &states[j].stub) => {
+            // Same explicit id, different content.
+            Some(&j) if states[j].content_hash() != desired_hashes[i] => {
                 content_replaced += 1;
             }
             Some(_) => {}
         }
     }
 
-    if old_keys == new_keys && content_replaced == 0 {
-        return StubReconcile::Unchanged;
-    }
     // Changed fraction over both sides: a content replace touches one slot on each side.
     let changed_slots = deletes + inserts + 2 * content_replaced;
     if changed_slots * 2 > states.len() + desired.len() {
-        return StubReconcile::Degenerate;
+        return StubPlan::Degenerate;
     }
 
     let mut by_key: HashMap<String, Arc<StubState>> =
-        old_keys.into_iter().zip(states.drain(..)).collect();
-    *states = new_keys
+        old_keys.into_iter().zip(states.iter().cloned()).collect();
+    let next = new_keys
         .into_iter()
-        .zip(desired)
-        .map(|(key, stub)| match by_key.remove(&key) {
+        .zip(desired.into_iter().zip(desired_hashes))
+        .map(|(key, (stub, hash))| match by_key.remove(&key) {
             // Same key: keep the slot's cycler + slot token; only rebuild the Arc when the
             // stub content actually changed (issue #287).
-            Some(state) => {
-                if stubs_differ(&state.stub, &stub) {
-                    Arc::new(state.with_stub(stub))
-                } else {
-                    state
-                }
-            }
-            None => Arc::new(StubState::new(stub)),
+            Some(state) if state.content_hash() == hash => state,
+            Some(state) => Arc::new(state.with_stub_hashed(stub, hash)),
+            None => Arc::new(StubState::with_hash(stub, hash)),
         })
         .collect();
     let removed_keys = by_key
         .into_values()
-        .map(|state| stub_key(&state.stub, 0))
+        .map(|state| state.sequence_key())
         .collect();
-    StubReconcile::Patched { removed_keys }
+    StubPlan::Patched { next, removed_keys }
 }
 
-/// Content inequality via canonical JSON. A serialization failure on either side counts
-/// as "differs" — the conservative direction for a diff (worst case an unneeded replace,
-/// never a silently dropped change) — and is logged.
-fn stubs_differ(a: &Stub, b: &Stub) -> bool {
-    match (serde_json::to_value(a), serde_json::to_value(b)) {
-        (Ok(va), Ok(vb)) => va != vb,
-        (ra, rb) => {
-            error!(
-                "stub serialization failed during reconcile; treating as changed: {:?} {:?}",
-                ra.err(),
-                rb.err()
-            );
-            true
+/// Apply [`plan_stub_reconcile`] to an owned vector, which is left untouched unless the plan
+/// patches it.
+#[cfg(test)]
+pub(crate) fn reconcile_stub_states(
+    states: &mut Vec<Arc<StubState>>,
+    desired: Vec<Stub>,
+) -> StubReconcile {
+    match plan_stub_reconcile(states, desired) {
+        StubPlan::Unchanged => StubReconcile::Unchanged,
+        StubPlan::Degenerate => StubReconcile::Degenerate,
+        StubPlan::Patched { next, removed_keys } => {
+            *states = next;
+            StubReconcile::Patched { removed_keys }
         }
     }
 }

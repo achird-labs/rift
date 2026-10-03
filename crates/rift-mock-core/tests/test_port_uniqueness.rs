@@ -45,6 +45,7 @@ const PORT_HI: u16 = 24999;
 const RESERVED: &[(u16, u16, &str)] = &[
     (18000, 18021, "rift_extensions.rs"),
     (19000, 19091, "mountebank_compatibility.rs"),
+    (15100, 15299, "apply_config_bench.rs"),
 ];
 
 /// Ports allowed in more than one file, with the reason. Keep this list short: a growing one means

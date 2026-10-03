@@ -25,8 +25,8 @@ use anyhow::Context;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
@@ -112,6 +112,11 @@ pub struct StubState {
     /// Slot token for sequencer keying (issue #313): minted at insertion, preserved by
     /// in-place replaces (which keep the StubState), dropped with the slot.
     pub(crate) slot: u64,
+    /// `stub`'s content hash, computed on first use and kept for the state's lifetime (issue
+    /// #1254): a state never changes its `stub` (an edit builds a new state, #287), so the hash
+    /// cannot go stale. Lazy so a mutation that builds states (proxy recording appends a response
+    /// per request) pays nothing unless a reconcile or a sequencer asks for the key.
+    content_hash: OnceLock<u64>,
 }
 
 impl StubState {
@@ -121,7 +126,29 @@ impl StubState {
             stub,
             cycler: Arc::new(RuleCycler::new()),
             slot: NEXT_STUB_SLOT.fetch_add(1, Ordering::Relaxed),
+            content_hash: OnceLock::new(),
         }
+    }
+
+    /// A new slot for `stub`, whose content hash the caller already computed.
+    #[must_use]
+    pub(crate) fn with_hash(stub: Stub, hash: u64) -> Self {
+        Self {
+            content_hash: OnceLock::from(hash),
+            ..Self::new(stub)
+        }
+    }
+
+    /// The stub's content hash (see [`crate::imposter::reconcile::content_hash`]).
+    pub(crate) fn content_hash(&self) -> u64 {
+        *self
+            .content_hash
+            .get_or_init(|| crate::imposter::reconcile::content_hash(&self.stub))
+    }
+
+    /// The stub's sequencer key, `stub_key(stub, 0)`, from the cached hash.
+    pub(crate) fn sequence_key(&self) -> String {
+        crate::imposter::reconcile::key_for(self.stub.id.as_deref(), self.content_hash(), 0)
     }
 
     #[must_use]
@@ -154,6 +181,16 @@ impl StubState {
             stub,
             cycler: Arc::clone(&self.cycler),
             slot: self.slot,
+            content_hash: OnceLock::new(),
+        }
+    }
+
+    /// [`with_stub`](Self::with_stub) for a stub whose content hash the caller already computed.
+    #[must_use]
+    pub(crate) fn with_stub_hashed(&self, stub: Stub, hash: u64) -> Self {
+        Self {
+            content_hash: OnceLock::from(hash),
+            ..self.with_stub(stub)
         }
     }
 }
@@ -1758,5 +1795,86 @@ mod tests {
             .generate_predicates_from_request(&generators, "GET", "/test", &headers, None, None)
             .expect_err("a malformed inject generator must fail, not return empty predicates");
         assert_eq!(err.kind(), "script-error");
+    }
+
+    // Issue #1254: a reconcile that changes nothing must not rebuild the snapshot and its match
+    // index; neither must a degenerate one, which the manager answers with a wholesale replace.
+    mod reconcile_snapshot {
+        use super::*;
+        use crate::imposter::reconcile::StubReconcile;
+
+        fn stubs(bodies: &[&str]) -> Vec<Stub> {
+            bodies
+                .iter()
+                .map(|body| {
+                    serde_json::from_value(json!({
+                        "predicates": [{ "equals": { "method": "GET", "path": format!("/{body}") } }],
+                        "responses": [{ "is": { "statusCode": 200, "headers": { "A": "1", "B": "2" }, "body": body } }]
+                    }))
+                    .expect("stub json")
+                })
+                .collect()
+        }
+
+        fn imposter_with(bodies: &[&str]) -> Imposter {
+            let config: ImposterConfig =
+                serde_json::from_value(json!({ "port": 0, "protocol": "http" })).expect("config");
+            let imposter = Imposter::new(config).expect("imposter");
+            imposter.replace_stubs(stubs(bodies));
+            imposter
+        }
+
+        #[test]
+        fn an_unchanged_reconcile_keeps_the_snapshot() {
+            let imposter = imposter_with(&["a", "b", "c"]);
+            let before = imposter.stubs_snapshot.load_full();
+            let outcome = imposter.reconcile_stubs(stubs(&["a", "b", "c"]));
+            assert!(matches!(outcome, StubReconcile::Unchanged), "{outcome:?}");
+            assert!(Arc::ptr_eq(&before, &imposter.stubs_snapshot.load_full()));
+        }
+
+        #[test]
+        fn a_degenerate_reconcile_keeps_the_snapshot() {
+            let imposter = imposter_with(&["a", "b"]);
+            let before = imposter.stubs_snapshot.load_full();
+            let outcome = imposter.reconcile_stubs(stubs(&["x", "y"]));
+            assert!(matches!(outcome, StubReconcile::Degenerate), "{outcome:?}");
+            assert!(Arc::ptr_eq(&before, &imposter.stubs_snapshot.load_full()));
+        }
+
+        #[test]
+        fn a_patch_stores_a_new_snapshot_reusing_unchanged_states() {
+            let imposter = imposter_with(&["a", "b", "c", "d"]);
+            let before = imposter.stubs_snapshot.load_full();
+            let outcome = imposter.reconcile_stubs(stubs(&["a", "b", "c", "e"]));
+            assert!(
+                matches!(outcome, StubReconcile::Patched { .. }),
+                "{outcome:?}"
+            );
+            let after = imposter.stubs_snapshot.load_full();
+            assert!(!Arc::ptr_eq(&before, &after));
+            assert!(Arc::ptr_eq(&before.stubs()[0], &after.stubs()[0]));
+        }
+
+        #[test]
+        fn the_cached_hash_and_key_match_the_stub() {
+            let [first, second]: [Stub; 2] = stubs(&["a", "b"]).try_into().expect("two stubs");
+            let state = StubState::new(first.clone());
+            assert_eq!(
+                state.content_hash(),
+                crate::imposter::reconcile::content_hash(&first)
+            );
+            assert_eq!(
+                state.sequence_key(),
+                crate::imposter::reconcile::stub_key(&first, 0)
+            );
+            let swapped = state.with_stub(second.clone());
+            assert_eq!(
+                swapped.content_hash(),
+                crate::imposter::reconcile::content_hash(&second),
+                "an in-place replace must not keep the old stub's hash"
+            );
+            assert_eq!(StubState::with_hash(first, 42).content_hash(), 42);
+        }
     }
 }

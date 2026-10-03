@@ -40,9 +40,9 @@ impl Imposter {
         if responses.is_empty() {
             return Ok(None);
         }
-        // stub_key is computed per decision (not cached) because in-place replaces swap
-        // `stub` under the same StubState; occurrence 0 is documented on SequenceKey.
-        let stub_key = crate::imposter::reconcile::stub_key(&stub_state.stub, 0);
+        // Occurrence 0 is documented on SequenceKey; the content hash is cached on the state,
+        // so this serializes the stub at most once per state, not once per decision (#1254).
+        let stub_key = stub_state.sequence_key();
         let key = crate::behaviors::SequenceKey {
             port: self.config.port.unwrap_or(0),
             slot: stub_state.slot,
