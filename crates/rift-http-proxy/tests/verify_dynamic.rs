@@ -11,12 +11,11 @@ use tokio::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_rift-verify");
 
-async fn start_admin(port: u16, manager: Arc<ImposterManager>) -> String {
-    let addr = format!("127.0.0.1:{port}").parse().unwrap();
+async fn start_admin(manager: Arc<ImposterManager>) -> String {
+    let addr = "127.0.0.1:0".parse().unwrap();
     let server = rift_http_proxy::admin_api::AdminApiServer::new(addr, manager, None);
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    format!("http://127.0.0.1:{port}")
+    let running = server.bind().await.expect("admin API binds");
+    format!("http://{}", running.local_addr())
 }
 
 async fn create(manager: &ImposterManager, config: serde_json::Value) {
@@ -88,7 +87,7 @@ async fn verify_dynamic_asserts_proxy_verify_and_fault() {
     )
     .await;
 
-    let admin = start_admin(12671, manager).await;
+    let admin = start_admin(manager).await;
     let out = run_verify(&admin).await;
     let stdout = String::from_utf8_lossy(&out.stdout);
 
@@ -139,7 +138,7 @@ async fn verify_dynamic_fails_on_wrong_expectation() {
     )
     .await;
 
-    let admin = start_admin(12681, manager).await;
+    let admin = start_admin(manager).await;
     let out = run_verify(&admin).await;
     let stdout = String::from_utf8_lossy(&out.stdout);
 
@@ -167,7 +166,7 @@ async fn dynamic_skipped_without_flag() {
     )
     .await;
 
-    let admin = start_admin(12691, manager).await;
+    let admin = start_admin(manager).await;
     let out = Command::new(BIN)
         .args(["--admin-url", &admin, "--skip-dynamic"])
         .output()
@@ -205,7 +204,7 @@ async fn verify_dynamic_asserts_tcp_fault() {
     )
     .await;
 
-    let admin = start_admin(12701, manager).await;
+    let admin = start_admin(manager).await;
     let out = run_verify(&admin).await;
     let stdout = String::from_utf8_lossy(&out.stdout);
 
@@ -242,7 +241,7 @@ async fn verify_normal_pass_asserts_tcp_fault() {
     )
     .await;
 
-    let admin = start_admin(12711, manager).await;
+    let admin = start_admin(manager).await;
     let out = Command::new(BIN)
         .args(["--admin-url", &admin]) // normal mode: no --skip-dynamic, no --verify-dynamic
         .output()
@@ -279,7 +278,7 @@ async fn verify_normal_pass_accepts_date_template_body() {
     )
     .await;
 
-    let admin = start_admin(12721, manager).await;
+    let admin = start_admin(manager).await;
     let out = Command::new(BIN)
         .args(["--admin-url", &admin]) // normal verification pass
         .output()
@@ -316,7 +315,7 @@ async fn verify_normal_pass_accepts_plaintext_template_body() {
     )
     .await;
 
-    let admin = start_admin(12731, manager).await;
+    let admin = start_admin(manager).await;
     let out = Command::new(BIN)
         .args(["--admin-url", &admin])
         .output()
@@ -356,7 +355,7 @@ async fn verify_normal_pass_drives_space_partitioned_stubs() {
     )
     .await;
 
-    let admin = start_admin(12741, manager).await;
+    let admin = start_admin(manager).await;
     let out = Command::new(BIN)
         .args(["--admin-url", &admin])
         .output()
@@ -396,7 +395,7 @@ async fn verify_flow_id_header_does_not_clobber_detection() {
     )
     .await;
 
-    let admin = start_admin(12761, manager).await;
+    let admin = start_admin(manager).await;
     let out = Command::new(BIN)
         .args(["--admin-url", &admin, "--flow-id-header", "X-Wrong-Header"])
         .output()
@@ -432,7 +431,7 @@ async fn verify_skips_space_stub_when_flow_id_unresolvable() {
     )
     .await;
 
-    let admin = start_admin(12771, manager).await;
+    let admin = start_admin(manager).await;
     let out = Command::new(BIN)
         .args(["--admin-url", &admin, "--verbose"])
         .output()
@@ -468,7 +467,7 @@ async fn verify_normal_pass_drives_xpath_attribute_stub() {
     )
     .await;
 
-    let admin = start_admin(12781, manager).await;
+    let admin = start_admin(manager).await;
     let out = Command::new(BIN)
         .args(["--admin-url", &admin])
         .output()
@@ -502,7 +501,7 @@ async fn verify_skips_unsynthesizable_xpath_stub() {
     )
     .await;
 
-    let admin = start_admin(12791, manager).await;
+    let admin = start_admin(manager).await;
     let out = Command::new(BIN)
         .args(["--admin-url", &admin, "--verbose"])
         .output()

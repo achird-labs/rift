@@ -21,12 +21,18 @@ async fn verify_json_output_has_summary_fields() {
     .expect("valid imposter config");
     manager.create_imposter(cfg).await.expect("create imposter");
 
-    let addr = "127.0.0.1:22658".parse().unwrap();
-    tokio::spawn(rift_http_proxy::admin_api::AdminApiServer::new(addr, manager, None).run());
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let running = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().expect("addr"),
+        manager,
+        None,
+    )
+    .bind()
+    .await
+    .expect("admin API binds");
+    let admin_url = format!("http://{}", running.local_addr());
 
     let out = Command::new(BIN)
-        .args(["--admin-url", "http://127.0.0.1:22658", "-o", "json"])
+        .args(["--admin-url", admin_url.as_str(), "-o", "json"])
         .output()
         .await
         .expect("run rift-verify");

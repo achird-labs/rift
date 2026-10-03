@@ -48,16 +48,20 @@ async fn server_builder_with_injected_manager_serves_admin_api() {
         "--host",
         "127.0.0.1",
         "--port",
-        "12610",
+        "0",
         "--metrics-port",
         "22600",
     ])
     .expect("cli parse");
 
-    tokio::spawn(ServerBuilder::from_cli(cli).manager(manager.clone()).run());
-    wait_for_http("http://127.0.0.1:12610/health").await;
+    let server = ServerBuilder::from_cli(cli)
+        .manager(manager.clone())
+        .start()
+        .await
+        .expect("server starts");
+    let admin = format!("http://{}", server.admin_addr());
 
-    let imposters: serde_json::Value = reqwest::get("http://127.0.0.1:12610/imposters")
+    let imposters: serde_json::Value = reqwest::get(format!("{admin}/imposters"))
         .await
         .expect("admin api reachable")
         .json()
@@ -109,20 +113,20 @@ async fn server_builder_registers_the_shipped_flow_store_backends() {
         "--host",
         "127.0.0.1",
         "--port",
-        // Not 12611: `dispatch_to_port_routes_in_process` binds that port directly, and these two
-        // run in parallel in this binary. Whichever loses the race sees the other's listener, so
-        // the collision surfaced as a confusing ConnectionRefused rather than a bind failure.
-        "12631",
+        "0",
         "--metrics-port",
         "19483",
     ])
     .expect("cli parse");
 
-    tokio::spawn(ServerBuilder::from_cli(cli).run());
-    wait_for_http("http://127.0.0.1:12631/health").await;
+    let server = ServerBuilder::from_cli(cli)
+        .start()
+        .await
+        .expect("server starts");
+    let admin = format!("http://{}", server.admin_addr());
 
     let response = reqwest::Client::new()
-        .post("http://127.0.0.1:12631/imposters")
+        .post(format!("{admin}/imposters"))
         .header("content-type", "application/json")
         .body(
             serde_json::json!({
@@ -206,7 +210,7 @@ async fn server_builder_internal_manager_loads_configfile_and_reloads() {
         "--host",
         "127.0.0.1",
         "--port",
-        "12612",
+        "0",
         "--metrics-port",
         "19486",
         "--configfile",
@@ -214,8 +218,11 @@ async fn server_builder_internal_manager_loads_configfile_and_reloads() {
     ])
     .expect("cli parse");
 
-    tokio::spawn(ServerBuilder::from_cli(cli).run());
-    wait_for_http("http://127.0.0.1:12612/health").await;
+    let server = ServerBuilder::from_cli(cli)
+        .start()
+        .await
+        .expect("server starts");
+    let admin = format!("http://{}", server.admin_addr());
 
     let served = reqwest::get("http://127.0.0.1:19485/ping")
         .await
@@ -227,7 +234,7 @@ async fn server_builder_internal_manager_loads_configfile_and_reloads() {
 
     std::fs::write(&path, cfg("v2")).expect("rewrite config");
     let resp = reqwest::Client::new()
-        .post("http://127.0.0.1:12612/admin/reload")
+        .post(format!("{admin}/admin/reload"))
         .send()
         .await
         .expect("reload");
@@ -956,7 +963,7 @@ async fn server_builder_still_accepts_and_enforces_a_real_api_key() {
         "--host",
         "127.0.0.1",
         "--port",
-        "12614",
+        "0",
         "--metrics-port",
         "22604",
         "--api-key",
@@ -964,15 +971,15 @@ async fn server_builder_still_accepts_and_enforces_a_real_api_key() {
     ])
     .expect("cli parse");
 
-    tokio::spawn(ServerBuilder::from_cli(cli).run());
-    // Readiness only: `wait_for_http` needs *any* HTTP response, and with a key configured this
-    // probe gets a 401 — `/health` is behind the auth gate like everything except the `/__rift/`
-    // gateway. That 401 is itself evidence the gate is on; the assertions below are what test it.
-    wait_for_http("http://127.0.0.1:12614/health").await;
+    let server = ServerBuilder::from_cli(cli)
+        .start()
+        .await
+        .expect("server starts");
+    let admin = format!("http://{}", server.admin_addr());
 
     let client = reqwest::Client::new();
     let anonymous = client
-        .get("http://127.0.0.1:12614/imposters")
+        .get(format!("{admin}/imposters"))
         .send()
         .await
         .expect("request");
@@ -983,7 +990,7 @@ async fn server_builder_still_accepts_and_enforces_a_real_api_key() {
     );
 
     let authorized = client
-        .get("http://127.0.0.1:12614/imposters")
+        .get(format!("{admin}/imposters"))
         .header("authorization", "s3cret-token")
         .send()
         .await

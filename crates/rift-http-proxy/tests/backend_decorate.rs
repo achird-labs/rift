@@ -29,14 +29,10 @@ fn failing_backend_cfg(port: u16) -> ImposterConfig {
     }))
 }
 
-async fn start_admin(admin_port: u16, manager: Arc<ImposterManager>) {
-    let server = AdminApiServer::new(
-        format!("127.0.0.1:{admin_port}").parse().expect("addr"),
-        manager,
-        None,
-    );
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+async fn start_admin(manager: Arc<ImposterManager>) -> String {
+    let server = AdminApiServer::new("127.0.0.1:0".parse().expect("addr"), manager, None);
+    let running = server.bind().await.expect("admin API binds");
+    format!("http://{}", running.local_addr())
 }
 
 type DecoratorCall = (ResponsePhase, Option<u16>, Vec<(String, String)>);
@@ -71,9 +67,9 @@ async fn admin_responses_are_decorated() {
         ImposterManager::new()
             .with_response_decorator(recorder.clone() as Arc<dyn ResponseDecorator>),
     );
-    start_admin(12618, manager).await;
+    let admin = start_admin(manager).await;
 
-    let resp = reqwest::get("http://127.0.0.1:12618/health")
+    let resp = reqwest::get(format!("{admin}/health"))
         .await
         .expect("request");
     assert_eq!(resp.status(), 200);
@@ -123,9 +119,9 @@ async fn flow_state_admin_endpoint_returns_structured_503() {
         .create_imposter(failing_backend_cfg(19494))
         .await
         .expect("create");
-    start_admin(12620, manager.clone()).await;
+    let admin = start_admin(manager.clone()).await;
 
-    let resp = reqwest::get("http://127.0.0.1:12620/admin/imposters/19494/flow-state/f/k")
+    let resp = reqwest::get(format!("{admin}/admin/imposters/19494/flow-state/f/k"))
         .await
         .expect("request");
     assert_eq!(
@@ -147,9 +143,9 @@ async fn scenario_list_maps_backend_error_to_503() {
         .create_imposter(failing_backend_cfg(19495))
         .await
         .expect("create");
-    start_admin(12621, manager.clone()).await;
+    let admin = start_admin(manager.clone()).await;
 
-    let resp = reqwest::get("http://127.0.0.1:12621/imposters/19495/scenarios")
+    let resp = reqwest::get(format!("{admin}/imposters/19495/scenarios"))
         .await
         .expect("request");
     assert_eq!(resp.status(), 503);
@@ -237,9 +233,9 @@ async fn admin_decorator_receives_backend_annotations() {
         .create_imposter(failing_backend_cfg(19498))
         .await
         .expect("create");
-    start_admin(12623, manager.clone()).await;
+    let admin = start_admin(manager.clone()).await;
 
-    let resp = reqwest::get("http://127.0.0.1:12623/admin/imposters/19498/flow-state/f/k")
+    let resp = reqwest::get(format!("{admin}/admin/imposters/19498/flow-state/f/k"))
         .await
         .expect("request");
     assert_eq!(resp.status(), 503);
@@ -270,9 +266,9 @@ async fn gateway_503_is_decorated_with_admin_phase() {
         .create_imposter(failing_backend_cfg(19499))
         .await
         .expect("create");
-    start_admin(12624, manager.clone()).await;
+    let admin = start_admin(manager.clone()).await;
 
-    let resp = reqwest::get("http://127.0.0.1:12624/__rift/19499/gated")
+    let resp = reqwest::get(format!("{admin}/__rift/19499/gated"))
         .await
         .expect("request");
     assert_eq!(resp.status(), 503);
@@ -311,14 +307,14 @@ async fn unauthorized_response_is_decorated() {
             .with_response_decorator(recorder.clone() as Arc<dyn ResponseDecorator>),
     );
     let server = AdminApiServer::new(
-        "127.0.0.1:12625".parse().expect("addr"),
+        "127.0.0.1:0".parse().expect("addr"),
         manager,
         Some("secret-token".to_string()),
     );
-    tokio::spawn(server.run());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let running = server.bind().await.expect("admin API binds");
+    let admin = format!("http://{}", running.local_addr());
 
-    let resp = reqwest::get("http://127.0.0.1:12625/health")
+    let resp = reqwest::get(format!("{admin}/health"))
         .await
         .expect("request");
     assert_eq!(resp.status(), 401);
@@ -349,11 +345,11 @@ async fn flow_state_write_endpoints_map_backend_error_to_503() {
         .create_imposter(failing_backend_cfg(19504))
         .await
         .expect("create");
-    start_admin(12622, manager.clone()).await;
+    let admin = start_admin(manager.clone()).await;
     let client = reqwest::Client::new();
 
     let put = client
-        .put("http://127.0.0.1:12622/admin/imposters/19504/flow-state/f/k")
+        .put(format!("{admin}/admin/imposters/19504/flow-state/f/k"))
         .json(&serde_json::json!({"value": 1}))
         .send()
         .await
@@ -361,14 +357,14 @@ async fn flow_state_write_endpoints_map_backend_error_to_503() {
     assert_eq!(put.status(), 503, "PUT flow-state");
 
     let del = client
-        .delete("http://127.0.0.1:12622/admin/imposters/19504/flow-state/f/k")
+        .delete(format!("{admin}/admin/imposters/19504/flow-state/f/k"))
         .send()
         .await
         .expect("delete");
     assert_eq!(del.status(), 503, "DELETE flow-state");
 
     let set_state = client
-        .put("http://127.0.0.1:12622/imposters/19504/scenarios/order/state")
+        .put(format!("{admin}/imposters/19504/scenarios/order/state"))
         .json(&serde_json::json!({"state": "paid"}))
         .send()
         .await
@@ -376,7 +372,7 @@ async fn flow_state_write_endpoints_map_backend_error_to_503() {
     assert_eq!(set_state.status(), 503, "PUT scenario state");
 
     let reset = client
-        .post("http://127.0.0.1:12622/imposters/19504/scenarios/reset")
+        .post(format!("{admin}/imposters/19504/scenarios/reset"))
         .send()
         .await
         .expect("reset");

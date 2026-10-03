@@ -4,7 +4,6 @@
 
 use std::net::TcpListener;
 use std::sync::Arc;
-use std::time::Duration;
 
 use rift_http_proxy::admin_api::AdminApiServer;
 use rift_http_proxy::imposter::ImposterManager;
@@ -19,26 +18,14 @@ fn free_port() -> u16 {
 }
 
 async fn start_admin() -> (reqwest::Client, String) {
-    let admin_port = free_port();
     let server = AdminApiServer::new(
-        format!("127.0.0.1:{admin_port}").parse().expect("addr"),
+        "127.0.0.1:0".parse().expect("addr"),
         Arc::new(ImposterManager::new()),
         None,
     );
-    tokio::spawn(server.run());
-    let admin = format!("http://127.0.0.1:{admin_port}");
+    let running = server.bind().await.expect("admin API binds");
+    let admin = format!("http://{}", running.local_addr());
     let client = reqwest::Client::new();
-    for _ in 0..100 {
-        if client
-            .get(format!("{admin}/imposters"))
-            .send()
-            .await
-            .is_ok()
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
     (client, admin)
 }
 
