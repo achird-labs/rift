@@ -273,6 +273,25 @@ selector is used — predicates and the `copy` behavior's `jsonpath` extraction 
 
 ---
 
+## Selectors that pick several values
+
+A `jsonpath` or `xpath` selector can select more than one value, for example `$.items[*].name` or
+`//user/name`. As in Mountebank, the predicate holds when **any** selected value satisfies it:
+
+- `equals`, `contains`, `startsWith`, `endsWith` and `matches` with a single expected `body` hold
+  when one of the selected values matches it. `caseSensitive` and `except` apply to each value.
+- An expected `body` that is an array holds when every element of it matches some selected value.
+- `exists` with `true` holds when some selected value is non-empty; with `false`, when some is empty
+  or nothing is selected.
+- `deepEquals` compares the sorted list of selected values with the sorted expected array, so
+  `{"deepEquals": {"body": ["b", "a"]}}` matches a selection of `a` and `b`, and a single expected
+  value never matches a selection of several.
+- A JSONPath selector that selects one array, such as `$.tags`, stands for the array's elements,
+  as in Mountebank: `{"equals": {"body": "important"}}` matches `{"tags": ["a", "important"]}`.
+
+XPath values are taken in document order. A `copy` or `lookup` behavior still uses the first
+selected value.
+
 ## XPath Predicates
 
 Match values in XML bodies using XPath:

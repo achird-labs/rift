@@ -4,7 +4,7 @@
 //! Also supports requestFrom, ip, and form fields.
 
 use crate::behaviors::{
-    LazyXmlDom, eval_xpath_on, extract_jsonpath, extract_jsonpath_value, extract_xpath_with_ns,
+    LazyXmlDom, Selection, json_node_text, jsonpath_selection, xpath_selection, xpath_selection_in,
 };
 use crate::imposter::types::{Predicate, PredicateOperation, PredicateSelector};
 use crate::util::FastMap;
@@ -400,152 +400,164 @@ where
     };
     let body_str = body.unwrap_or("");
 
-    // Handle jsonpath parameter - extract value from JSON body
-    let extracted_body: String;
-    let effective_body = match &predicate.parameters.selector {
-        Some(PredicateSelector::JsonPath { selector }) => {
-            // Reuse the once-per-request body parse when the caller threaded it (issue #290) —
-            // `extract_jsonpath_value` also reuses the process-wide compiled-selector cache
-            // (issue #711) so this doesn't recompile `selector` per stub/predicate either way.
-            extracted_body = match body_json {
-                Some(json) => extract_jsonpath_value(json, selector),
-                None => extract_jsonpath(body_str, selector),
+    // What a jsonpath/xpath selector picks out of the body (issue #1257): one value, or several, in
+    // which case the predicate holds when any of them satisfies it. Reuses the once-per-request body
+    // parse and DOM when the caller threaded them (issues #290, #711) and the compiled-selector
+    // caches. A selector that does not compile is refused at load (#1220), so the empty-string
+    // fallback only covers a body that is not JSON/XML, which Mountebank also reads as `""`.
+    let selection = match &predicate.parameters.selector {
+        Some(PredicateSelector::JsonPath { selector }) => Some(
+            match body_json {
+                Some(json) => jsonpath_selection(json, selector),
+                None => serde_json::from_str::<serde_json::Value>(body_str)
+                    .ok()
+                    .and_then(|json| jsonpath_selection(&json, selector)),
             }
-            .unwrap_or_default();
-            &extracted_body
-        }
+            .unwrap_or(Selection::One(String::new())),
+        ),
         Some(PredicateSelector::XPath {
             selector,
             namespaces,
-        }) => {
-            // Reuse the once-per-request DOM when the caller threaded it (issue #711) — the DOM is
-            // parsed at most once no matter how many XPath predicates/stubs evaluate it this request.
-            extracted_body = match xml_dom.and_then(LazyXmlDom::document) {
-                Some(document) => eval_xpath_on(&document, selector, namespaces.as_ref()),
-                None => extract_xpath_with_ns(body_str, selector, namespaces.as_ref()),
+        }) => Some(
+            match xml_dom.and_then(LazyXmlDom::document) {
+                Some(document) => xpath_selection(&document, selector, namespaces.as_ref()),
+                None => xpath_selection_in(body_str, selector, namespaces.as_ref()),
             }
-            .unwrap_or_default();
-            &extracted_body
-        }
-        None => body_str,
+            .unwrap_or(Selection::One(String::new())),
+        ),
+        None => None,
     };
 
-    // The once-parsed body corresponds to `effective_body` only when there is no selector; with a
-    // jsonpath/xpath selector the effective body is a different string, so don't reuse the parse.
+    // The once-parsed body corresponds to the compared body only when there is no selector; with a
+    // jsonpath/xpath selector the compared body is a selected value, so don't reuse the parse.
     let field_body_json = if predicate.parameters.selector.is_none() {
         body_json
     } else {
         None
     };
 
+    // One leaf operator against one candidate body.
+    let leaf = |kind: LeafKind, fields: &HashMap<String, serde_json::Value>, body: &str| -> bool {
+        match kind {
+            LeafKind::Equals | LeafKind::DeepEquals => check_predicate_fields(
+                fields,
+                method,
+                path,
+                query_map,
+                headers,
+                body,
+                &apply_except,
+                str_equals,
+                kind == LeafKind::DeepEquals,
+                request_from,
+                client_ip,
+                form,
+                key_case_sensitive,
+                field_body_json,
+            ),
+            LeafKind::Contains => check_predicate_fields(
+                fields,
+                method,
+                path,
+                query_map,
+                headers,
+                body,
+                &apply_except,
+                |expected, actual| str_contains(actual, expected),
+                false,
+                request_from,
+                client_ip,
+                form,
+                key_case_sensitive,
+                field_body_json,
+            ),
+            LeafKind::StartsWith => check_predicate_fields(
+                fields,
+                method,
+                path,
+                query_map,
+                headers,
+                body,
+                &apply_except,
+                |expected, actual| str_starts_with(actual, expected),
+                false,
+                request_from,
+                client_ip,
+                form,
+                key_case_sensitive,
+                field_body_json,
+            ),
+            LeafKind::EndsWith => check_predicate_fields(
+                fields,
+                method,
+                path,
+                query_map,
+                headers,
+                body,
+                &apply_except,
+                |expected, actual| str_ends_with(actual, expected),
+                false,
+                request_from,
+                client_ip,
+                form,
+                key_case_sensitive,
+                field_body_json,
+            ),
+            LeafKind::Matches => check_predicate_fields_regex(
+                fields,
+                method,
+                path,
+                query_map,
+                headers,
+                body,
+                &apply_except,
+                case_sensitive,
+                request_from,
+                client_ip,
+                form,
+                key_case_sensitive,
+                field_body_json,
+            ),
+            LeafKind::Exists => check_exists_predicate(
+                fields,
+                method,
+                path,
+                query_map,
+                headers,
+                body,
+                request_from,
+                client_ip,
+                form,
+                key_case_sensitive,
+            ),
+        }
+    };
+    let sort_key = |text: &str| {
+        let text = apply_except(text);
+        if case_sensitive {
+            text.into_owned()
+        } else {
+            text.to_ascii_lowercase()
+        }
+    };
+    let evaluate = |kind: LeafKind, fields: &HashMap<String, serde_json::Value>| -> bool {
+        match &selection {
+            None => leaf(kind, fields, body_str),
+            Some(Selection::One(value)) => leaf(kind, fields, value),
+            Some(Selection::Many(values)) => {
+                holds_for_any_selected(kind, fields, values, &sort_key, &leaf)
+            }
+        }
+    };
+
     match &predicate.operation {
-        PredicateOperation::Equals(fields) => Ok(check_predicate_fields(
-            fields,
-            method,
-            path,
-            query_map,
-            headers,
-            effective_body,
-            &apply_except,
-            str_equals,
-            false, // not deep equals
-            request_from,
-            client_ip,
-            form,
-            key_case_sensitive,
-            field_body_json,
-        )),
-        PredicateOperation::DeepEquals(fields) => Ok(check_predicate_fields(
-            fields,
-            method,
-            path,
-            query_map,
-            headers,
-            effective_body,
-            &apply_except,
-            str_equals,
-            true, // deep equals
-            request_from,
-            client_ip,
-            form,
-            key_case_sensitive,
-            field_body_json,
-        )),
-        PredicateOperation::Contains(fields) => Ok(check_predicate_fields(
-            fields,
-            method,
-            path,
-            query_map,
-            headers,
-            effective_body,
-            &apply_except,
-            |expected, actual| str_contains(actual, expected),
-            false,
-            request_from,
-            client_ip,
-            form,
-            key_case_sensitive,
-            field_body_json,
-        )),
-        PredicateOperation::StartsWith(fields) => Ok(check_predicate_fields(
-            fields,
-            method,
-            path,
-            query_map,
-            headers,
-            effective_body,
-            &apply_except,
-            |expected, actual| str_starts_with(actual, expected),
-            false,
-            request_from,
-            client_ip,
-            form,
-            key_case_sensitive,
-            field_body_json,
-        )),
-        PredicateOperation::EndsWith(fields) => Ok(check_predicate_fields(
-            fields,
-            method,
-            path,
-            query_map,
-            headers,
-            effective_body,
-            &apply_except,
-            |expected, actual| str_ends_with(actual, expected),
-            false,
-            request_from,
-            client_ip,
-            form,
-            key_case_sensitive,
-            field_body_json,
-        )),
-        PredicateOperation::Matches(fields) => Ok(check_predicate_fields_regex(
-            fields,
-            method,
-            path,
-            query_map,
-            headers,
-            effective_body,
-            &apply_except,
-            case_sensitive,
-            request_from,
-            client_ip,
-            form,
-            key_case_sensitive,
-            field_body_json,
-        )),
-        PredicateOperation::Exists(fields) => Ok(check_exists_predicate(
-            fields,
-            method,
-            path,
-            query_map,
-            headers,
-            effective_body,
-            request_from,
-            client_ip,
-            form,
-            key_case_sensitive,
-        )),
+        PredicateOperation::Equals(fields) => Ok(evaluate(LeafKind::Equals, fields)),
+        PredicateOperation::DeepEquals(fields) => Ok(evaluate(LeafKind::DeepEquals, fields)),
+        PredicateOperation::Contains(fields) => Ok(evaluate(LeafKind::Contains, fields)),
+        PredicateOperation::StartsWith(fields) => Ok(evaluate(LeafKind::StartsWith, fields)),
+        PredicateOperation::EndsWith(fields) => Ok(evaluate(LeafKind::EndsWith, fields)),
+        PredicateOperation::Matches(fields) => Ok(evaluate(LeafKind::Matches, fields)),
+        PredicateOperation::Exists(fields) => Ok(evaluate(LeafKind::Exists, fields)),
         PredicateOperation::Not(inner) => Ok(!predicate_matches_inner(
             inner,
             method,
@@ -659,6 +671,63 @@ pub(crate) mod regex_cache;
 use fields::{check_predicate_fields, check_predicate_fields_regex};
 use json::check_exists_predicate;
 use regex_cache::cached_regex;
+
+/// The operators that compare request fields, as opposed to `not`/`and`/`or`/`inject`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeafKind {
+    Equals,
+    DeepEquals,
+    Contains,
+    StartsWith,
+    EndsWith,
+    Matches,
+    Exists,
+}
+
+/// A leaf predicate whose selector picked several values (issue #1257), as Mountebank's
+/// predicates.js evaluates it: a scalar expected `body` holds when any value satisfies it; an array
+/// expected `body` needs every expected element to be satisfied by some value; `deepEquals` compares
+/// the sorted list element by element and so needs an array of the same length. The other fields
+/// do not depend on the selection and are checked with each candidate as usual. `sort_key` orders
+/// both sides of a `deepEquals` the way the comparison sees them (`except` removed, case folded).
+fn holds_for_any_selected(
+    kind: LeafKind,
+    fields: &HashMap<String, serde_json::Value>,
+    values: &[String],
+    sort_key: &impl Fn(&str) -> String,
+    leaf: &impl Fn(LeafKind, &HashMap<String, serde_json::Value>, &str) -> bool,
+) -> bool {
+    let Some(expected) = fields.get("body") else {
+        // No `body` constraint: the selection is irrelevant, any candidate gives the same answer.
+        return leaf(kind, fields, &values[0]);
+    };
+    let expecting = |element: &serde_json::Value| {
+        let mut narrowed = fields.clone();
+        narrowed.insert("body".to_string(), element.clone());
+        narrowed
+    };
+    match (kind, expected) {
+        (LeafKind::DeepEquals, serde_json::Value::Array(elements)) => {
+            if elements.len() != values.len() {
+                return false;
+            }
+            let mut elements: Vec<&serde_json::Value> = elements.iter().collect();
+            elements.sort_by_cached_key(|element| sort_key(&json_node_text(element)));
+            let mut values: Vec<&String> = values.iter().collect();
+            values.sort_by_cached_key(|value| sort_key(value));
+            elements
+                .iter()
+                .zip(values)
+                .all(|(element, value)| leaf(kind, &expecting(element), value))
+        }
+        (LeafKind::DeepEquals, _) => false,
+        (_, serde_json::Value::Array(elements)) => elements.iter().all(|element| {
+            let narrowed = expecting(element);
+            values.iter().any(|value| leaf(kind, &narrowed, value))
+        }),
+        _ => values.iter().any(|value| leaf(kind, fields, value)),
+    }
+}
 
 /// Re-exported from [`crate::util`], its one home (issue #1153), so the long-standing public path
 /// `rift_mock_core::imposter::parse_query_string` keeps working.
@@ -2908,6 +2977,183 @@ mod tests {
                 .unwrap(),
                 "both operators fold ASCII case by default"
             );
+        }
+    }
+
+    // Issue #1257: a selector that picks several values matches when any of them satisfies the
+    // operator, as Mountebank's predicates.js does (`expectedMatchesAtLeastOneValueInActualArray`);
+    // `deepEquals` compares the sorted list. Expected values come from Mountebank's own
+    // `predicates.evaluate` run against the same bodies.
+    mod any_selected_value {
+        use super::*;
+
+        const TWO_ZS: &str = r#"{"x":{"y":[{"z":"first"},{"z":"second"}]}}"#;
+
+        fn holds(predicate: serde_json::Value, body: &str) -> bool {
+            let predicate: Predicate = serde_json::from_value(predicate).expect("predicate json");
+            predicate_matches(
+                &predicate,
+                "POST",
+                "/x",
+                None,
+                &empty_headers(),
+                Some(body),
+                None,
+                None,
+                None,
+                0,
+            )
+            .expect("evaluates")
+        }
+
+        fn jp(op: &str, expected: serde_json::Value, selector: &str) -> serde_json::Value {
+            json!({ op: { "body": expected }, "jsonpath": { "selector": selector } })
+        }
+
+        #[test]
+        fn scalar_operators_match_any_selected_value() {
+            let sel = "$.x.y[*].z";
+            assert!(holds(jp("equals", json!("second"), sel), TWO_ZS));
+            assert!(holds(jp("equals", json!("first"), sel), TWO_ZS));
+            assert!(!holds(jp("equals", json!("third"), sel), TWO_ZS));
+            assert!(holds(jp("contains", json!("cond"), sel), TWO_ZS));
+            assert!(holds(jp("startsWith", json!("sec"), sel), TWO_ZS));
+            assert!(holds(jp("endsWith", json!("ond"), sel), TWO_ZS));
+            assert!(holds(jp("matches", json!("^sec"), sel), TWO_ZS));
+            assert!(!holds(jp("matches", json!("^thi"), sel), TWO_ZS));
+            // caseSensitive is still honoured per value.
+            assert!(holds(jp("equals", json!("SECOND"), sel), TWO_ZS));
+            let strict = json!({ "equals": { "body": "SECOND" }, "caseSensitive": true,
+                                 "jsonpath": { "selector": sel } });
+            assert!(!holds(strict, TWO_ZS));
+        }
+
+        #[test]
+        fn an_expected_array_needs_every_value_to_be_selected() {
+            let sel = "$.x.y[*].z";
+            assert!(holds(jp("equals", json!(["second", "first"]), sel), TWO_ZS));
+            assert!(!holds(jp("equals", json!(["first", "third"]), sel), TWO_ZS));
+        }
+
+        #[test]
+        fn exists_looks_at_every_selected_value() {
+            let sel = "$.x.y[*].z";
+            assert!(holds(jp("exists", json!(true), sel), TWO_ZS));
+            assert!(!holds(jp("exists", json!(false), sel), TWO_ZS));
+            assert!(holds(jp("exists", json!(false), "$.x.nope"), TWO_ZS));
+            assert!(!holds(jp("exists", json!(true), "$.x.nope"), TWO_ZS));
+        }
+
+        #[test]
+        fn deep_equals_compares_the_sorted_selection() {
+            let sel = "$.x.y[*].z";
+            assert!(!holds(jp("deepEquals", json!("first"), sel), TWO_ZS));
+            assert!(holds(
+                jp("deepEquals", json!(["second", "first"]), sel),
+                TWO_ZS
+            ));
+            assert!(!holds(jp("deepEquals", json!(["first"]), sel), TWO_ZS));
+            assert!(!holds(
+                jp("deepEquals", json!(["first", "second", "third"]), sel),
+                TWO_ZS
+            ));
+            // A single selected scalar still compares as a scalar.
+            assert!(holds(
+                jp("deepEquals", json!("first"), "$.x.y[0].z"),
+                TWO_ZS
+            ));
+        }
+
+        #[test]
+        fn a_single_selected_array_is_matched_element_wise() {
+            let body = r#"{"tags":["a","important"],"one":["x"]}"#;
+            assert!(holds(jp("equals", json!("important"), "$.tags"), body));
+            assert!(holds(jp("contains", json!("port"), "$.tags"), body));
+            assert!(!holds(jp("equals", json!("b"), "$.tags"), body));
+            assert!(holds(jp("equals", json!("x"), "$.one"), body));
+            assert!(holds(jp("deepEquals", json!(["x"]), "$.one"), body));
+            assert!(!holds(jp("deepEquals", json!("x"), "$.one"), body));
+            assert!(holds(
+                jp("deepEquals", json!(["important", "a"]), "$.tags"),
+                body
+            ));
+        }
+
+        #[test]
+        fn other_fields_still_have_to_hold() {
+            let pred = |method: &str| {
+                json!({ "equals": { "method": method, "body": "second" },
+                        "jsonpath": { "selector": "$.x.y[*].z" } })
+            };
+            assert!(holds(pred("POST"), TWO_ZS));
+            assert!(!holds(pred("GET"), TWO_ZS), "the request is a POST");
+            // No `body` constraint: the selection does not matter.
+            let method_only = json!({ "equals": { "method": "POST" },
+                                      "jsonpath": { "selector": "$.x.y[*].z" } });
+            assert!(holds(method_only, TWO_ZS));
+        }
+
+        #[test]
+        fn not_and_or_wrap_the_any_value_result() {
+            let eq = |v: &str| jp("equals", json!(v), "$.x.y[*].z");
+            assert!(!holds(json!({ "not": eq("first") }), TWO_ZS));
+            assert!(holds(json!({ "not": eq("third") }), TWO_ZS));
+            assert!(holds(json!({ "or": [eq("third"), eq("second")] }), TWO_ZS));
+            assert!(holds(json!({ "and": [eq("first"), eq("second")] }), TWO_ZS));
+            assert!(!holds(json!({ "and": [eq("first"), eq("third")] }), TWO_ZS));
+        }
+
+        #[test]
+        fn deep_equals_sorts_after_except_is_removed() {
+            let pred = json!({ "deepEquals": { "body": ["a", "b"] }, "except": "^zz-",
+                               "jsonpath": { "selector": "$.v[*]" } });
+            assert!(holds(pred, r#"{"v":["zz-a","b"]}"#));
+        }
+
+        #[test]
+        fn except_applies_to_each_selected_value() {
+            let pred = json!({ "equals": { "body": "a" }, "except": "^x-",
+                               "jsonpath": { "selector": "$.v[*]" } });
+            assert!(holds(pred, r#"{"v":["b","x-a"]}"#));
+        }
+
+        #[test]
+        fn exists_with_mixed_empty_values() {
+            let body = r#"{"v":[{"s":"a"},{"s":""}]}"#;
+            assert!(holds(jp("exists", json!(false), "$.v[*].s"), body));
+            assert!(holds(jp("exists", json!(true), "$.v[*].s"), body));
+            let all_empty = r#"{"v":[{"s":""},{"s":""}]}"#;
+            assert!(!holds(jp("exists", json!(true), "$.v[*].s"), all_empty));
+        }
+
+        #[test]
+        fn deep_equals_sorts_case_insensitively_unless_case_sensitive() {
+            let body = r#"{"v":["A","b"]}"#;
+            assert!(holds(jp("deepEquals", json!(["B", "a"]), "$.v[*]"), body));
+            let strict = json!({ "deepEquals": { "body": ["B", "a"] }, "caseSensitive": true,
+                                 "jsonpath": { "selector": "$.v[*]" } });
+            assert!(!holds(strict, body));
+        }
+
+        #[test]
+        fn numbers_compare_by_their_text() {
+            let body = r#"{"items":[{"id":1},{"id":2}]}"#;
+            assert!(holds(jp("equals", json!(2), "$.items[*].id"), body));
+            assert!(holds(
+                jp("deepEquals", json!([2, 1]), "$.items[*].id"),
+                body
+            ));
+            assert!(!holds(jp("equals", json!(3), "$.items[*].id"), body));
+        }
+
+        #[test]
+        fn xpath_matches_any_selected_node() {
+            let xml = "<users><user><name>ann</name></user><user><name>bob</name></user></users>";
+            let xp = |op: &str, expected: serde_json::Value| json!({ op: { "body": expected }, "xpath": { "selector": "//user/name" } });
+            assert!(holds(xp("equals", json!("bob")), xml));
+            assert!(holds(xp("equals", json!("ann")), xml));
+            assert!(!holds(xp("equals", json!("cat")), xml));
+            assert!(holds(xp("deepEquals", json!(["bob", "ann"])), xml));
         }
     }
 }

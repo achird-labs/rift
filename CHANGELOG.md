@@ -13,6 +13,15 @@ record.
 
 ### Fixed
 
+- **A `jsonpath` or `xpath` predicate holds when any selected value satisfies it, as in Mountebank**
+  (#1257). A selector that picked several values, such as `$.items[*].name`, was compared using only
+  the first one, so `{"equals": {"body": "second"}}` never matched the second item and
+  `{"deepEquals": {"body": "first"}}` matched a selection of two. The scalar operators and `exists`
+  now hold when any selected value satisfies them, an expected array needs each element matched,
+  `deepEquals` compares the sorted list, and a single selected array stands for its elements. XPath
+  selected an arbitrary node as the "first" one, because the DOM's node set is unordered; predicates,
+  `copy` and `lookup` now take XPath values in document order.
+
 - **Re-applying an unchanged config no longer replaces imposters whose stubs have multi-key maps**
   (#1256). A stub without an `id` is matched across a reconcile by a hash of its content, and that
   hash was taken over bytes whose order depended on how the stub's predicate and response-header
