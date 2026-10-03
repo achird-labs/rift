@@ -3842,6 +3842,63 @@ mod tests {
         manager.delete_all().await;
     }
 
+    // Issue #1256: re-applying a freshly parsed copy of the same config must not replace an
+    // imposter whose stubs carry multi-key maps (predicates, response headers).
+    #[tokio::test]
+    async fn apply_config_identical_multi_key_set_replaces_nothing() {
+        let listener = Arc::new(RecordingListener::default());
+        let manager = ImposterManager::new().with_event_listener(listener.clone());
+        let config = || {
+            imposter_cfg(json!({
+                "protocol": "http", "port": 19470,
+                "stubs": [{
+                    "predicates": [{"equals": {"method": "GET", "path": "/m", "body": "x", "query": {"a": "1", "b": "2"}}}],
+                    "responses": [
+                        {"is": {"statusCode": 200, "headers": {"X-A": "1", "X-B": "2", "X-C": "3"}, "body": "m1"}},
+                        {"is": {"statusCode": 200, "headers": {"X-A": "1", "X-B": "2", "X-C": "3"}, "body": "m2"}}
+                    ]
+                }, stub_json("b")]
+            }))
+        };
+        manager.apply_config(vec![config()]).await.expect("create");
+        let before = manager.get_imposter(19470).unwrap();
+        assert_eq!(next_body(&before.snapshot().stubs()[0]), "m1");
+        listener.0.lock().clear();
+
+        for _ in 0..5 {
+            let report = manager
+                .apply_config(vec![config()])
+                .await
+                .expect("re-apply");
+            assert!(
+                report.replaced.is_empty(),
+                "replaced: {:?}",
+                report.replaced
+            );
+            assert!(
+                report.stub_patched.is_empty(),
+                "patched: {:?}",
+                report.stub_patched
+            );
+            assert!(report.created.is_empty() && report.deleted.is_empty());
+            assert!(report.failed.is_empty());
+        }
+
+        let after = manager.get_imposter(19470).unwrap();
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "imposter must not be recreated"
+        );
+        assert_eq!(
+            next_body(&after.snapshot().stubs()[0]),
+            "m2",
+            "cycler survives"
+        );
+        assert_eq!(listener.0.lock().clone(), Vec::<ImposterEvent>::new());
+
+        manager.delete_all().await;
+    }
+
     #[derive(Default)]
     struct RecordingListener(Mutex<Vec<ImposterEvent>>);
 
