@@ -242,6 +242,22 @@ A leading `$` is optional. A selector that does not start with `$` is treated as
 `user.name` is normalized to `$.user.name`, and `[0]` to `$[0]`. This applies wherever a `jsonpath`
 selector is used — predicates and the `copy` behavior's `jsonpath` extraction alike.
 
+### Mountebank (jsonpath-plus) shorthands
+
+Mountebank evaluates JSONPath with the jsonpath-plus library, which accepts two spellings the
+JSONPath standard (RFC 9535) refuses or reads differently. Rift reads them as Mountebank does, by
+rewriting the selector to the standard form that selects the same values:
+
+| Written | Mountebank reads it as | Rift evaluates |
+|:--------|:-----------------------|:---------------|
+| `$.a.b.[0].c` | a descendant segment: `[0]` of `b` and of every array under `b` | `$.a.b..[0].c` |
+| `$.a.b[:0]` | a slice end of `0` falls back to the array length: the whole array | `$.a.b[:]` |
+| `$.a.b[::0]` | a step of `0` falls back to `1` | `$.a.b[::]` |
+
+So `$.x.y.[:0].z` selects the `z` of every element of every array at or under `y`, not nothing.
+Quoted names are left alone. The rewrite only affects evaluation: `GET /imposters` and a saved
+imposter keep the selector as written. `rift-lint` reports these spellings as `I001`.
+
 ### JSONPath Operators
 
 ```json
