@@ -414,7 +414,9 @@ impl TryFrom<StubRaw> for Stub {
         } else {
             raw.rules
         };
-        validate_predicates(&predicates)?;
+        if admission() == Admission::Checked {
+            validate_predicates(&predicates)?;
+        }
 
         // Convert stub-level delayRange to a wait behavior injected into each response
         let responses = if raw.delay_range.is_empty() {
@@ -440,6 +442,87 @@ impl TryFrom<StubRaw> for Stub {
             verify: raw.verify,
         })
     }
+}
+
+/// Whether the decode running on this thread applies the engine's admission checks (issue #1267).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    /// A config door: refuse what the engine would not admit today.
+    Checked,
+    /// [`deserialize_replayed`]: structure and normalisation only.
+    Skipped,
+}
+
+thread_local! {
+    static ADMISSION: std::cell::Cell<Admission> = const { std::cell::Cell::new(Admission::Checked) };
+}
+
+fn admission() -> Admission {
+    ADMISSION.with(std::cell::Cell::get)
+}
+
+/// Switches this thread's decodes to [`Admission::Skipped`] until dropped, then restores whatever
+/// was in force before, so a replayed field nested in a validating decode does not leave its
+/// siblings unchecked, and a panic mid-decode does not leave the thread unchecked.
+struct ReplayGuard {
+    previous: Admission,
+}
+
+impl ReplayGuard {
+    fn enter() -> Self {
+        Self {
+            previous: ADMISSION.with(|cell| cell.replace(Admission::Skipped)),
+        }
+    }
+}
+
+impl Drop for ReplayGuard {
+    fn drop(&mut self) {
+        ADMISSION.with(|cell| cell.set(self.previous));
+    }
+}
+
+/// Deserialize with the engine's admission checks switched off, for an embedder replaying configs an
+/// engine already admitted, from its own log or tables or from a peer (issue #1267). The skipped
+/// checks are exactly those [`admission_check`] runs on the decoded value: predicate
+/// `jsonpath`/`xpath` selectors and `matches` patterns, behaviors blocks that do not parse, and
+/// `copy`/`lookup` selectors. Normalisation (aliases such as `rules`, `delayRange` → `wait`,
+/// defaults) is unchanged.
+///
+/// Every other decode-time refusal still applies, because the decoded value could not be checked
+/// for it afterwards: a value that cannot be represented, an inverted `wait`/`delayRange` range, a
+/// `_behaviors` array or scalar `behaviors`, a header repeated in a different case where only one is
+/// allowed, a `_rift.fault.tcp` outside its bounds. A new decode-time refusal belongs in
+/// [`admission_check`] and behind [`Admission`] whenever the stored value keeps what it checks.
+///
+/// A value decoded this way must pass [`admission_check`] before it is handed to
+/// `ImposterManager`. `T` is generic, so an embedder's own type that contains `Stub`s decodes through
+/// the same call, and it composes with `#[serde(deserialize_with = "deserialize_replayed")]`. The
+/// switch is per thread and lasts for this call only; decoding is synchronous, so it never spans an
+/// `.await`.
+pub fn deserialize_replayed<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    let _replaying = ReplayGuard::enter();
+    T::deserialize(deserializer)
+}
+
+/// The admission checks a config door runs while decoding an imposter, as a function (issue #1267):
+/// every predicate `jsonpath`/`xpath` selector and `matches` pattern, every behaviors block parses,
+/// and every `copy`/`lookup` selector. `Err` carries the message the door would have answered.
+/// Always checks, including when called from inside [`deserialize_replayed`].
+pub fn admission_check(config: &ImposterConfig) -> Result<(), String> {
+    config.stubs.iter().try_for_each(admission_check_stub)
+}
+
+/// [`admission_check`] for one stub.
+pub fn admission_check_stub(stub: &Stub) -> Result<(), String> {
+    validate_predicates(&stub.predicates)?;
+    stub.responses.iter().try_for_each(|response| {
+        refuse_unparseable_behaviors(response.behaviors_block(), Admission::Checked)
+    })
 }
 
 /// Refuse a predicate the matcher could never evaluate as written, at parse — the layer every config
@@ -949,12 +1032,23 @@ fn refuse_inverted_waits_in_block(block: &serde_json::Value) -> Result<(), Strin
 /// step a later `null` removes, or a `behaviors` shadowed by `_behaviors`, is not refused: it
 /// configures nothing, and rift-lint reads the array the same way. Every other element is live
 /// (#1195, #1198), so a malformed earlier element is refused rather than overridden.
-fn refuse_unparseable_behaviors(block: Option<&serde_json::Value>) -> Result<(), String> {
+///
+/// An admission check, not a structural one (issue #1267): the block is stored as written, so a
+/// replayed decode ([`Admission::Skipped`]) skips it and [`admission_check_stub`] runs it on the
+/// decoded value with the same result. The decode passes the thread's mode; `admission_check_stub`
+/// always passes [`Admission::Checked`].
+fn refuse_unparseable_behaviors(
+    block: Option<&serde_json::Value>,
+    admission: Admission,
+) -> Result<(), String> {
+    if admission == Admission::Skipped {
+        return Ok(());
+    }
     match block {
         // A compiled program: every step runs, so every step must parse.
         Some(serde_json::Value::Array(program)) => program
             .iter()
-            .try_for_each(|element| refuse_unparseable_behaviors(Some(element))),
+            .try_for_each(|element| refuse_unparseable_behaviors(Some(element), admission)),
         Some(object @ serde_json::Value::Object(_)) => refuse_unparseable_object(object),
         // Nothing else reaches here: the field deserializers refuse other shapes.
         _ => Ok(()),
@@ -1109,10 +1203,10 @@ impl TryFrom<StubResponseRaw> for StubResponse {
             .and_then(compile_behaviors);
         // Both are checked before the merge, so a malformed `repeat` in the block is refused even
         // when the top-level one replaces it — the rule rift-lint applies to each.
-        refuse_unparseable_behaviors(behaviors.as_ref())?;
+        refuse_unparseable_behaviors(behaviors.as_ref(), admission())?;
         if let Some(repeat) = raw.repeat {
             let alone = serde_json::json!({ "repeat": repeat });
-            refuse_unparseable_behaviors(Some(&alone))?;
+            refuse_unparseable_behaviors(Some(&alone), admission())?;
             // Appended, so it is the last `repeat` and wins, as it does in Mountebank.
             let mut program = match behaviors {
                 Some(serde_json::Value::Array(program)) => program,

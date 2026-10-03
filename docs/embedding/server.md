@@ -140,6 +140,44 @@ let report = manager.apply_one(config).await?;
 - Nothing serializes `apply_one` against a concurrent `apply_config`, whose delete sweep can remove
   the port, just as two concurrent `apply_config` calls are not serialized.
 
+### Replaying admitted configs (`deserialize_replayed`, `admission_check`)
+
+Decoding an `ImposterConfig`, `Stub` or `StubResponse` runs the engine's admission checks. A
+predicate `jsonpath`/`xpath` selector or `matches` pattern that does not compile, a behaviors block
+that does not parse, or a `copy`/`lookup` selector that does not compile is refused inside `serde`.
+That is right for configs arriving at a door. It is wrong for
+configs an engine already admitted, which an embedder keeps in its own log or tables or receives from
+a peer: whether those bytes decode would then depend on the admission rules of the engine version
+reading them, and a later release that tightens a check would make stored configs unreadable.
+
+| Item | Signature | Purpose |
+|:-----|:----------|:--------|
+| `deserialize_replayed` | `fn deserialize_replayed<'de, T: Deserialize<'de>, D: Deserializer<'de>>(d: D) -> Result<T, D::Error>` | Decode with exactly the admission checks above switched off. `T` can be any type that contains configs, and it works as `#[serde(deserialize_with = "deserialize_replayed")]` on a field. |
+| `admission_check` | `fn admission_check(config: &ImposterConfig) -> Result<(), String>` | Run the checks the decode skipped. `Err` carries the message a door would have answered. |
+| `admission_check_stub` | `fn admission_check_stub(stub: &Stub) -> Result<(), String>` | The same for one stub. |
+
+The other refusals a decode makes still apply on replay, because the decoded value could not be
+checked for them afterwards: a value that cannot be represented, a `wait` or `delayRange` whose
+`min` exceeds its `max`, `_behaviors` given as an array or `behaviors` as a scalar, a header
+repeated in a different case where only one is allowed, and a `_rift.fault.tcp` outside its bounds.
+
+Run `admission_check` on a replayed value before handing it to `ImposterManager`, and decide there
+what a refused config means for you, for example skip that imposter and report it, as the engine
+does for a `--datadir` file it now refuses. The switch is per thread and lasts for one call; decoding
+is synchronous, so it never spans an `.await`.
+
+```rust
+use rift_mock_core::imposter::{ImposterConfig, admission_check, deserialize_replayed};
+
+let mut decoder = serde_json::Deserializer::from_slice(&stored_bytes);
+let config: ImposterConfig = deserialize_replayed(&mut decoder)?;
+decoder.end()?; // a hand-built decoder does not reject trailing bytes by itself
+match admission_check(&config) {
+    Ok(()) => { manager.apply_one(config).await?; }
+    Err(reason) => tracing::warn!(%reason, "stored imposter no longer admitted; skipped"),
+}
+```
+
 ---
 
 ## Bindable admin & metrics servers

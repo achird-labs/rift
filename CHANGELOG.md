@@ -13,6 +13,16 @@ record.
 
 ### Added
 
+- **Embedders can decode configs the engine already admitted without re-admitting them**
+  (#1267). The admission checks (predicate selectors and `matches` patterns, behaviors blocks that
+  must parse, `copy`/`lookup` selectors) run inside `Deserialize`, so an embedder replaying configs
+  from its own log or tables could not decode one that a newer engine refuses: rift-cluster nodes
+  holding such an entry stopped starting or stopped serving. `rift_mock_core::imposter::deserialize_replayed`
+  decodes with exactly those checks switched off, and `admission_check` / `admission_check_stub`
+  run them separately, returning the message a door would have answered. Refusals the decoded value
+  could not be re-checked for still apply on replay. No config door changes. Documented in
+  `docs/embedding/server.md`.
+
 - **`ImposterManager::apply_one` reconciles a single imposter** (#1253). `apply_config` takes the
   whole imposter set, so an embedder that knew one port changed had to pass every imposter and pay
   for checking all of them, or call `create_imposter`/`replace_stubs` and lose the in-place stub
