@@ -79,6 +79,10 @@ fn blocks() -> Vec<Value> {
         json!({ "copy": { "from": "path", "into": "${P}",
                           "using": { "method": "regex", "selector": ".", "options": { "ignoreCase": true } } } }),
         json!({ "copy": { "from": "path", "into": "${P}" } }),
+        // Issue #1258: a regex selector that does not compile. (A bad JSONPath/XPath selector is
+        // engine-only: rift-lint carries neither parser, so it is deliberately absent here.)
+        json!({ "copy": { "from": "path", "into": "${P}",
+                          "using": { "method": "regex", "selector": "(unclosed" } } }),
         json!({ "copy": { "from": "path", "into": "${P}", "using": null } }),
         json!({ "copy": { "from": "path", "into": "${P}", "using": { "method": "regex" } } }),
         json!({ "copy": { "from": "path", "into": "${P}", "using": { "method": "sed", "selector": "x" } } }),
