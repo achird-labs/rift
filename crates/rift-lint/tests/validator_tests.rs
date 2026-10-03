@@ -1061,6 +1061,37 @@ fn e051_copy_or_lookup_key_without_using() {
     assert_eq!(r.issues[0].location.as_deref(), Some("loc.lookup.key"));
 }
 
+/// Issue #1258: the engine refuses a copy/lookup regex selector that does not compile, so lint
+/// reports it as E051; a compiling one stays quiet.
+#[test]
+fn e051_copy_or_lookup_regex_selector_that_does_not_compile() {
+    let copy = json!({ "copy": [{ "from": "path", "into": "${P}", "using": { "method": "regex", "selector": "(unclosed" } }] });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &copy, "loc", &mut r, &opts());
+    assert_eq!(codes(&r), vec!["E051"]);
+    assert_eq!(r.issues[0].location.as_deref(), Some("loc.copy[0]"));
+    assert!(
+        r.issues[0].message.contains("(unclosed"),
+        "{}",
+        r.issues[0].message
+    );
+
+    let lookup = json!({ "lookup": {
+        "key": { "from": "path", "using": { "method": "regex", "selector": "[z-a]" } },
+        "fromDataSource": { "csv": { "path": "x.csv", "keyColumn": "id" } },
+        "into": "${R}"
+    } });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &lookup, "loc", &mut r, &opts());
+    assert_eq!(codes(&r), vec!["E051"]);
+    assert_eq!(r.issues[0].location.as_deref(), Some("loc.lookup.key"));
+
+    let fine = json!({ "copy": [{ "from": "path", "into": "${P}", "using": { "method": "regex", "selector": "/(\\d+)", "options": { "ignoreCase": true } } }] });
+    let mut r = LintResult::new();
+    validate_behavior(path(), &fine, "loc", &mut r, &opts());
+    assert!(codes(&r).is_empty(), "{:?}", codes(&r));
+}
+
 /// Issue #1240: the engine reads `key.index` as a match position, so it refuses anything but a
 /// non-negative integer; the linter reports the same, and accepts a valid index.
 #[test]

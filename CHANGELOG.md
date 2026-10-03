@@ -37,6 +37,16 @@ record.
 
 ### Fixed
 
+- **A `copy` or `lookup` behavior whose selector does not compile is refused at load** (#1258). A
+  `using` regex, JSONPath or XPath selector with a syntax error was accepted, and on every request
+  the behavior extracted nothing: the token was replaced with an empty string, or the lookup found no
+  row, with nothing logged. The predicate doors have refused such selectors since 0.18.1; the
+  behavior doors now do the same. `POST`/`PUT /imposters`, the stub endpoints, `--configfile` and
+  `POST /admin/reload` answer `400` or fail the load, naming the behavior, the method and the
+  selector, and a `--datadir` file holding one is skipped at startup and listed in the startup error
+  summary. As before, a step that a later `null` removes is not checked. `rift-lint` reports a regex
+  selector that does not compile as `E051`.
+
 - **A `jsonpath` or `xpath` predicate holds when any selected value satisfies it, as in Mountebank**
   (#1257). A selector that picked several values, such as `$.items[*].name`, was compared using only
   the first one, so `{"equals": {"body": "second"}}` never matched the second item and

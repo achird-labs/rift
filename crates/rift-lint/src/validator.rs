@@ -2356,6 +2356,26 @@ fn extraction_problem(using: &Value) -> Option<&'static str> {
     None
 }
 
+/// A well-formed regex `using` whose selector does not compile (issue #1258): the engine refuses it
+/// at load rather than extract nothing on every request. JSONPath and XPath selectors are checked by
+/// the engine only; rift-lint carries neither parser.
+fn regex_selector_problem(using: &Value) -> Option<String> {
+    if using.get("method").and_then(Value::as_str) != Some("regex") {
+        return None;
+    }
+    let selector = using.get("selector").and_then(Value::as_str)?;
+    let ignore_case = using
+        .get("options")
+        .and_then(|o| o.get("ignoreCase"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    regex::RegexBuilder::new(selector)
+        .case_insensitive(ignore_case)
+        .build()
+        .err()
+        .map(|e| format!("`using.selector` regex `{selector}` does not compile: {e}"))
+}
+
 /// The engine's `CopySource`: a field name, or a map of names (`{"query": "q"}`).
 fn copy_source_is_well_formed(from: &Value) -> bool {
     from.is_string()
@@ -2426,6 +2446,8 @@ fn validate_copy_behavior(file: &Path, copy: &Value, location: &str, result: &mu
         };
         if let Some(message) = using_problem {
             report_malformed_behavior(file, &item_location, message, result);
+        } else if let Some(message) = obj.get("using").and_then(regex_selector_problem) {
+            report_malformed_behavior(file, &item_location, &message, result);
         }
     }
 }
@@ -2502,6 +2524,8 @@ fn validate_lookup_behavior(file: &Path, lookup: &Value, location: &str, result:
                 };
                 if let Some(message) = problem {
                     report_malformed_behavior(file, &key_location, message, result);
+                } else if let Some(message) = key.get("using").and_then(regex_selector_problem) {
+                    report_malformed_behavior(file, &key_location, &message, result);
                 }
             }
         }
