@@ -121,6 +121,10 @@ harness = false
 name = "response_serve_bench"
 harness = false
 
+[[bench]]
+name = "apply_config_bench"
+harness = false
+
 [features]
 default = ["javascript", "quamina-matching"]
 # NOTE: there is deliberately no `redis-backend` feature here any more (issue #853). The Redis flow

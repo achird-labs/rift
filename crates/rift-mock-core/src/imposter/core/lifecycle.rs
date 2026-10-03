@@ -3,7 +3,7 @@
 //! Part of the `Imposter` implementation; see `core/mod.rs` for the struct definition.
 
 use super::*;
-use crate::imposter::reconcile::{StubReconcile, reconcile_stub_states};
+use crate::imposter::reconcile::{StubPlan, StubReconcile, plan_stub_reconcile};
 
 impl Imposter {
     /// Move the stub at `from` to position `to`, carrying its cycling state with it
@@ -23,8 +23,23 @@ impl Imposter {
     }
 
     /// Reconcile live stubs toward `desired` under one write critical section (issue #316).
-    pub(crate) fn reconcile_stubs(&self, desired: Vec<Stub>) -> StubReconcile {
-        self.mutate_stubs(|stubs| reconcile_stub_states(stubs, desired))
+    ///
+    /// Only a patch stores a new snapshot: `Unchanged` and `Degenerate` leave the current one, and
+    /// its match index, in place rather than rebuilding an identical copy (issue #1254), which is
+    /// why this does not go through [`mutate_stubs`](Self::mutate_stubs).
+    pub(crate) fn reconcile_stubs(&self, desired: &[Stub]) -> StubReconcile {
+        let _writer = self.stubs_write.lock();
+        let current = self.stubs_snapshot.load();
+        match plan_stub_reconcile(current.stubs(), desired) {
+            StubPlan::Unchanged => StubReconcile::Unchanged,
+            StubPlan::Degenerate => StubReconcile::Degenerate,
+            StubPlan::Patched { next, removed_keys } => {
+                self.stubs_snapshot
+                    .store(Arc::new(StubSnapshot::build(next)));
+                self.stub_warnings.store(None);
+                StubReconcile::Patched { removed_keys }
+            }
+        }
     }
 
     /// Add a stub at a specific index

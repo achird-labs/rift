@@ -1757,7 +1757,7 @@ impl ImposterManager {
     async fn apply_entry(
         &self,
         port: u16,
-        config: ImposterConfig,
+        mut config: ImposterConfig,
         requested: Option<Persistence>,
         report: &mut ApplyReport,
     ) {
@@ -1776,7 +1776,7 @@ impl ImposterManager {
             existing.set_persistence(persistence);
         }
 
-        if imposter_level_differs_ignoring_enabled(&existing.config, &config) {
+        if imposter_level_differs_ignoring_enabled(&existing, &mut config) {
             self.replace_imposter(port, config, persistence, requested, report)
                 .await;
             return;
@@ -1806,7 +1806,7 @@ impl ImposterManager {
             report.toggled.push(port);
         }
 
-        match existing.reconcile_stubs(config.stubs.clone()) {
+        match existing.reconcile_stubs(&config.stubs) {
             StubReconcile::Unchanged => {
                 if retagged
                     && persistence == Persistence::Datadir
@@ -2226,20 +2226,20 @@ impl Default for ImposterManager {
 /// (issue #817 — pause/resume must not reset runtime state). A serialization failure on
 /// either side counts as "differs" — the conservative direction (worst case an unnecessary
 /// replace, never a silently skipped change).
-fn imposter_level_differs_ignoring_enabled(a: &ImposterConfig, b: &ImposterConfig) -> bool {
-    let flatten = |config: &ImposterConfig| {
-        let mut flat = config.clone();
-        flat.stubs = Vec::new();
-        flat.enabled = true;
-        serde_json::to_value(&flat)
-    };
-    match (flatten(a), flatten(b)) {
-        (Ok(va), Ok(vb)) => va != vb,
-        (ra, rb) => {
+fn imposter_level_differs_ignoring_enabled(
+    existing: &Imposter,
+    desired: &mut ImposterConfig,
+) -> bool {
+    match (
+        existing.imposter_level_view(),
+        super::core::imposter_level_view(desired),
+    ) {
+        (Ok(running), Ok(wanted)) => *running != wanted,
+        (running, wanted) => {
             error!(
                 "imposter config serialization failed during reconcile; treating as changed: {:?} {:?}",
-                ra.err(),
-                rb.err()
+                running.as_ref().err(),
+                wanted.err()
             );
             true
         }
@@ -4221,6 +4221,31 @@ mod tests {
             "cycler survives"
         );
         assert_eq!(listener.0.lock().clone(), Vec::<ImposterEvent>::new());
+
+        manager.delete_all().await;
+    }
+
+    // Issue #1254: re-applying an unchanged set leaves each imposter's stub snapshot (and so its
+    // match index) as it was, rather than rebuilding an identical one per imposter per apply.
+    #[tokio::test]
+    async fn apply_config_identical_set_stores_no_snapshot() {
+        let manager = ImposterManager::new();
+        let config = || {
+            imposter_cfg(json!({
+                "protocol": "http", "port": 19749,
+                "stubs": [stub_json("a"), stub_json("b"), cycled_stub_json("c1", "c2")]
+            }))
+        };
+        manager.apply_config(vec![config()]).await.expect("create");
+        let imposter = manager.get_imposter(19749).unwrap();
+        let before = Arc::clone(&*imposter.snapshot());
+
+        let report = manager
+            .apply_config(vec![config()])
+            .await
+            .expect("re-apply");
+        assert!(report.replaced.is_empty() && report.stub_patched.is_empty());
+        assert!(Arc::ptr_eq(&before, &*imposter.snapshot()));
 
         manager.delete_all().await;
     }
