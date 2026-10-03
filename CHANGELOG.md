@@ -11,6 +11,18 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An imposter whose `jsonpath` selector uses Mountebank's jsonpath-plus shorthands loads and
+  selects what Mountebank selects** (#1255). A selector with a dot before a bracket, such as
+  `$.x.y.[:0].z`, was refused at creation, so the whole imposter failed to load. jsonpath-plus reads
+  `.[` as a descendant segment and a slice end or step of `0` as open-ended, so `[:0]` is the whole
+  array. Rift now rewrites both to the standard form that means the same (`..[`, `[:]`) before
+  parsing a selector, in predicates and in `copy`/`lookup` alike. A `[:0]` that already loaded was
+  read as an empty slice and now selects the whole array, as in Mountebank. `rift-lint`'s `I001`
+  now flags exactly these spellings; it used to flag every `[:N]` slice and say Rift supported it as
+  Mountebank does, which was wrong for `[:0]`.
+
 ## [0.19.0] - 2026-09-29
 
 ### Fixed

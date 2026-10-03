@@ -12,9 +12,20 @@ use std::sync::LazyLock;
 // Both are compile-time-constant patterns, so a compile failure is a programming error caught
 // immediately by tests, not a data-dependent runtime error.
 
-/// Mountebank slice notation `[:N]` in a JSONPath selector (lint rule I001).
-static JSONPATH_SLICE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\[:(\d+)\]").expect("jsonpath slice pattern is a valid constant regex")
+/// jsonpath-plus spellings whose meaning differs from RFC 9535 (lint rule I001): `.[` (a
+/// descendant segment there) and a slice whose end or step is `0` (open-ended there). Matched
+/// against the selector with its quoted names blanked by [`JSONPATH_QUOTED_RE`].
+static JSONPATH_PLUS_SHORTHAND_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?:^|[^.])\.\[|\[\s*-?\d*\s*:\s*-?0+\s*(?:\]|:\s*\d*\s*\])|\[\s*-?\d*\s*:\s*-?\d*\s*:\s*-?0+\s*\]",
+    )
+    .expect("jsonpath-plus shorthand pattern is a valid constant regex")
+});
+
+/// A quoted name in a JSONPath selector, with backslash escapes (lint rule I001).
+static JSONPATH_QUOTED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*""#)
+        .expect("jsonpath quoted-name pattern is a valid constant regex")
 });
 
 /// Port suffix in a proxy `to` URL, e.g. `localhost:15000` (lint rule I002).
@@ -1217,15 +1228,19 @@ pub fn validate_predicate(
 /// Validate JSONPath selector.
 fn validate_jsonpath(file: &Path, jsonpath: &Value, location: &str, result: &mut LintResult) {
     if let Some(selector) = jsonpath.get("selector").and_then(|v| v.as_str()) {
-        if JSONPATH_SLICE_RE.is_match(selector) {
+        if JSONPATH_PLUS_SHORTHAND_RE.is_match(&JSONPATH_QUOTED_RE.replace_all(selector, "''")) {
             result.add_issue(
                 LintIssue::info(
                     "I001",
-                    format!("JSONPath uses Mountebank slice notation: {selector}"),
+                    format!("JSONPath uses Mountebank (jsonpath-plus) shorthand: {selector}"),
                     file.to_path_buf(),
                 )
                 .with_location(format!("{location}.jsonpath.selector"))
-                .with_suggestion("This is supported by Rift but not standard JSONPath"),
+                .with_suggestion(
+                    "jsonpath-plus reads `.[` as the descendant segment `..[` and a slice end or \
+                     step of `0` as open-ended; Rift reads it the same way. The standard spelling \
+                     is `..[` and an empty end or step, e.g. `[:]` for `[:0]`",
+                ),
             );
         }
 
@@ -2865,17 +2880,36 @@ mod js_syntax_tests {
 
 #[cfg(test)]
 mod regex_static_tests {
-    use super::{JSONPATH_SLICE_RE, PROXY_PORT_RE};
+    use super::{JSONPATH_PLUS_SHORTHAND_RE, PROXY_PORT_RE};
 
     #[test]
-    fn jsonpath_slice_re_matches_mountebank_slice() {
-        assert!(JSONPATH_SLICE_RE.is_match("$.items[:3]"));
-        assert_eq!(
-            JSONPATH_SLICE_RE.captures("$.items[:12]").unwrap()[1].to_string(),
-            "12"
-        );
-        assert!(!JSONPATH_SLICE_RE.is_match("$.items[0]"));
-        assert!(!JSONPATH_SLICE_RE.is_match("$.items[*]"));
+    fn jsonpath_plus_shorthand_re_matches_only_divergent_spellings() {
+        for divergent in [
+            "$.a.[0]",
+            ".[0]",
+            "$.a[:0]",
+            "$.a[1:0]",
+            "$.a[ : -00 ]",
+            "$.a[::0]",
+            "$.a[1:2:0]",
+        ] {
+            assert!(
+                JSONPATH_PLUS_SHORTHAND_RE.is_match(divergent),
+                "{divergent}"
+            );
+        }
+        for standard in [
+            "$.items[:3]",
+            "$.items[0]",
+            "$.items[*]",
+            "$.a..[0]",
+            "$.a[10:]",
+            "$.a[:10]",
+            "$.a[1:2:3]",
+            "$.a[5:0:-1]",
+        ] {
+            assert!(!JSONPATH_PLUS_SHORTHAND_RE.is_match(standard), "{standard}");
+        }
     }
 
     #[test]
