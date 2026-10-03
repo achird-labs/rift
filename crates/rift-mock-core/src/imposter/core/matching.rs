@@ -1332,6 +1332,24 @@ mod bounded_matching_tests {
         );
     }
 
+    // Issue #1257 on the request path: an XPath predicate whose selector picks several nodes
+    // matches when any of them satisfies it, against the request's shared DOM (parsed once).
+    #[test]
+    fn xpath_predicate_matches_any_selected_node_on_the_shared_dom() {
+        let imp = imposter(json!([
+            { "predicates": [{ "equals": { "body": "bob" }, "xpath": { "selector": "//user/name" } }],
+              "responses": [{ "is": { "statusCode": 200 } }] }
+        ]));
+        let body = "<users><user><name>ann</name></user><user><name>bob</name></user></users>";
+        let headers = no_headers();
+        counters::reset();
+        let hit = imp
+            .find_matching_stub_with_client("POST", "/x", &headers, None, Some(body), None, None)
+            .expect("no backend error");
+        assert_eq!(hit.map(|(_, i)| i), Some(0));
+        assert_eq!(counters::dom_parses(), 1);
+    }
+
     // AC1 boundary: a request that touches no XPath predicate must not parse a DOM at all — the
     // parse is lazy, paid only when an XPath predicate is actually evaluated.
     #[test]

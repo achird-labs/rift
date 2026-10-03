@@ -449,7 +449,7 @@ Feature: Predicate Matching Compatibility
         "responses": [{"is": {"statusCode": 200, "body": "wildcard matched"}}]
       }
       """
-    When I send POST request with JSON body '{"users": [{"status": "inactive"}, {"status": "active"}]}' on imposter 4545
+    When I send POST request with JSON body '{"users": [{"status": "disabled"}, {"status": "active"}]}' on imposter 4545
     Then both services should return status 200
 
   # ==========================================================================

@@ -330,8 +330,8 @@ from that value:
 | `method` | `selector` | Result |
 |:---------|:-----------|:-------|
 | `regex` | A regular expression | The first capture group, or the whole match if the pattern has none. `options` takes `ignoreCase` and `multiline`. |
-| `jsonpath` | A JSONPath selector | The selected value from a JSON source |
-| `xpath` | An XPath selector | The selected value from an XML source |
+| `jsonpath` | A JSONPath selector | The first selected value from a JSON source |
+| `xpath` | An XPath selector | The first selected value, in document order, from an XML source |
 
 Every occurrence of the `into` token in the body and header values is replaced. If the source is
 absent, or nothing is extracted, the token is replaced with an empty string. A selector that does
