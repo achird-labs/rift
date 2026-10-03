@@ -110,7 +110,7 @@ pub trait ImposterEventListener: Send + Sync {
 }
 
 /// Stable stub identity: the explicit `id` (issue #202) if set, else
-/// `"~" + <16-hex content hash> + "#" + <occurrence among byte-identical siblings>`.
+/// `"~" + <16-hex content hash> + "#" + <occurrence among content-identical siblings>`.
 /// The `~` prefix keeps generated keys disjoint from user-supplied ids.
 pub fn stub_key(stub: &Stub, occurrence: usize) -> String {
     match &stub.id {
@@ -119,23 +119,55 @@ pub fn stub_key(stub: &Stub, occurrence: usize) -> String {
     }
 }
 
-/// FNV-1a 64 over the stub's serialized JSON. Deterministic: struct field order is fixed
-/// and serde_json maps are sorted (the `preserve_order` feature is off workspace-wide).
+/// FNV-1a 64 over the stub's canonical JSON. `Stub` holds `std::collections::HashMap`s
+/// (predicate operations, response headers) that serialize in per-instance iteration order, so the
+/// stub is first converted to a `serde_json::Value`, whose objects are sorted maps (`preserve_order`
+/// is off workspace-wide), and that is what gets hashed (issue #1256). Struct fields are sorted
+/// too, so this form differs from serializing the stub directly: every id-less key moved once.
 fn content_hash(stub: &Stub) -> u64 {
-    let canonical = serde_json::to_string(stub).unwrap_or_else(|e| {
+    let mut hasher = Fnv1a::default();
+    let hashed = serde_json::to_value(stub)
+        .and_then(|canonical| serde_json::to_writer(&mut hasher, &canonical));
+    if let Err(e) = hashed {
         // Debug output is content-distinguishing but not canonical across processes —
         // keys built from it may churn between reloads, so make the degradation visible.
         error!("stub serialization failed while keying; falling back to Debug format: {e}");
-        format!("{stub:?}")
-    });
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    canonical.bytes().fold(FNV_OFFSET, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
-    })
+        hasher = Fnv1a::default();
+        hasher.update(format!("{stub:?}").as_bytes());
+    }
+    hasher.0
 }
 
-/// Keys for a stub sequence; occurrence is counted per content hash so byte-identical
+/// Streaming FNV-1a 64, so the canonical JSON is hashed without materializing a `String`.
+struct Fnv1a(u64);
+
+impl Default for Fnv1a {
+    fn default() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl Fnv1a {
+    fn update(&mut self, bytes: &[u8]) {
+        const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+        self.0 = bytes.iter().fold(self.0, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+        });
+    }
+}
+
+impl std::io::Write for Fnv1a {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Keys for a stub sequence; occurrence is counted per content hash so content-identical
 /// id-less siblings get distinct keys and stay individually addressable in the diff.
 pub(crate) fn stub_keys(stubs: &[Stub]) -> Vec<String> {
     stub_keys_iter(stubs.iter())
@@ -294,6 +326,72 @@ mod tests {
             .as_str()
             .expect("string body")
             .to_string()
+    }
+
+    /// A stub whose predicate and response headers are multi-key `HashMap`s — the shape whose
+    /// serialization order varied per parse before issue #1256.
+    const MULTI_KEY_STUB: &str = r#"{
+        "predicates": [
+            {"equals": {"method": "GET", "path": "/a", "query": {"q": "1", "r": "2"}, "body": "x"}},
+            {"or": [{"contains": {"path": "/a", "body": "y", "method": "G"}}, {"not": {"startsWith": {"path": "/b", "body": "z"}}}]}
+        ],
+        "responses": [{"is": {"statusCode": 200, "headers": {"Content-Type": "application/json", "X-A": "1", "X-B": "2", "X-C": "3", "X-D": "4"}, "body": "b"}}]
+    }"#;
+
+    fn parse_multi() -> Stub {
+        serde_json::from_str(MULTI_KEY_STUB).expect("multi-key stub json")
+    }
+
+    // Issue #1256: identical content must key identically however its maps were built.
+    #[test]
+    fn stub_key_is_stable_across_fresh_parses() {
+        let first = stub_key(&parse_multi(), 0);
+        for _ in 0..20 {
+            assert_eq!(stub_key(&parse_multi(), 0), first);
+        }
+    }
+
+    #[test]
+    fn identical_multi_key_stubs_are_unchanged() {
+        let mut live = vec![st(parse_multi()), st(one_resp("a"))];
+        let before: Vec<_> = live.iter().map(Arc::clone).collect();
+        let outcome = reconcile_stub_states(&mut live, vec![parse_multi(), one_resp("a")]);
+        assert!(
+            matches!(outcome, StubReconcile::Unchanged),
+            "a re-parsed identical set must be Unchanged, got {outcome:?}"
+        );
+        assert!(live.iter().zip(&before).all(|(a, b)| Arc::ptr_eq(a, b)));
+    }
+
+    #[test]
+    fn identical_multi_key_siblings_get_distinct_occurrences() {
+        let keys = stub_keys(&[parse_multi(), parse_multi()]);
+        assert!(keys[0].ends_with("#0"), "{keys:?}");
+        assert!(keys[1].ends_with("#1"), "{keys:?}");
+        assert_eq!(
+            keys[0].trim_end_matches("#0"),
+            keys[1].trim_end_matches("#1")
+        );
+    }
+
+    // The key is process-independent (rift-cluster shares response cursors across nodes by it), so
+    // its exact value is pinned: any change to the hashed form moves every id-less stub's key.
+    #[test]
+    fn stub_key_value_is_pinned() {
+        assert_eq!(stub_key(&one_resp("a"), 0), "~d760f3e4c82afe1f#0");
+    }
+
+    #[test]
+    fn stub_key_ignores_json_key_order() {
+        let a = stub(json!({
+            "predicates": [{"equals": {"method": "GET", "path": "/p"}}],
+            "responses": [{"is": {"headers": {"A": "1", "B": "2"}, "statusCode": 200}}]
+        }));
+        let b = stub(json!({
+            "responses": [{"is": {"statusCode": 200, "headers": {"B": "2", "A": "1"}}}],
+            "predicates": [{"equals": {"path": "/p", "method": "GET"}}]
+        }));
+        assert_eq!(stub_key(&a, 0), stub_key(&b, 0));
     }
 
     // AC3: determinism, occurrence suffixes, "~" disjointness from user ids.
