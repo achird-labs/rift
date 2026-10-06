@@ -4,7 +4,7 @@ A drop-in local replacement for the three Optimizely SaaS hosts an SDK (or Optim
 
 | Port | Stands in for | Serves |
 |---|---|---|
-| 4600 | `https://cdn.optimizely.com` (and `config.optimizely.com/datafiles/auth/`) | `GET /datafiles/{sdkKey}.json` → 200 + `Last-Modified`; `If-Modified-Since` matching the current stamp → 304 |
+| 4600 | `https://cdn.optimizely.com` (and `config.optimizely.com/datafiles/auth/`) | `GET /datafiles/{sdkKey}.json` → 200 + `ETag` + `Last-Modified`; `If-None-Match` / `If-Modified-Since` matching them → 304 |
 | 4601 | `https://logx.optimizely.com` | `POST /v1/events` → 204 (400 if the batch has no `visitors[].visitor_id`) |
 | 4602 | `https://api.zaius.com` (ODP) | `POST /v3/graphql` segment lookups, `POST /v3/events` identify events, 403 on a wrong `x-api-key` |
 | 4610 | TLS intercept forward proxy | answers the hosts above over HTTPS from the three imposters (see [Intercept mode](#intercept-mode-zero-code-changes)) |
@@ -45,10 +45,10 @@ python3 -m venv .venv && .venv/bin/pip install optimizely-sdk requests
 Edit `fixtures/datafile.json` (flip a rollout, change a variable, add a flag), then:
 
 ```sh
-curl -X POST http://localhost:2525/admin/reload      # re-reads the file; only the CDN stub is patched
+curl -X POST http://localhost:2525/admin/reload      # re-reads the file; the CDN stub is rebuilt and its ETag / Last-Modified move with it
 ```
 
-Pollers that cache `Last-Modified` keep receiving 304 until you also change the stamp in `imposters.json` (the `If-Modified-Since` predicate of the `datafile-not-modified` stub and the two `Last-Modified` headers). Bump `revision` in the datafile at the same time so `OptimizelyConfig.revision` moves. The two-stub 304 is a stand-in: once Rift ships a declarative conditional GET (`_rift.conditional`, achird-labs/rift#1280), the CDN imposter collapses to one stub whose validator follows the body.
+The validators follow the body: `_rift.conditional` serves an `ETag` over the served bytes and a `Last-Modified` equal to the stub's load time, so a reload that changes the datafile makes pollers refetch with no stamp to bump (an unchanged reload keeps both, so pollers keep getting 304). The Python SDK polls with `If-Modified-Since` only; the `ETag` serves other clients (Java/Go SDKs, curl). Bump `revision` in the datafile so `OptimizelyConfig.revision` moves.
 
 ## Intercept mode: zero code changes
 
@@ -136,7 +136,7 @@ A hosts-file / DNS override is **not** a shortcut: every SDK pins `https://` on 
 | ODP real-time segment targeting | `user-vip` qualifies for `high_value_customers` → `vip_support` on; anyone else off |
 | ODP unknown identifier path | `user-unknown` → GraphQL `errors[]` with `InvalidIdentifierException` |
 | ODP auth failure | send any `x-api-key` other than `mock-odp-public-key` → 403 |
-| Conditional polling | send `If-Modified-Since: Sat, 03 Oct 2026 12:00:00 GMT` → 304 |
+| Conditional polling | send back the `Last-Modified` / `ETag` you were given → 304 |
 | Datafile change at runtime | edit fixture, `POST /admin/reload` |
 | Event delivery assertion | `GET /imposters/4601/savedRequests?match=path=/v1/events`, or `POST /imposters/4601/verify` |
 
