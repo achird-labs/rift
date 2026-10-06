@@ -48,6 +48,12 @@ spec:
 
 [Full Kubernetes Guide]({{ site.baseurl }}/deployment/kubernetes/)
 
+### AWS ECS / Fargate
+
+A task with Rift and your app side by side, sharing `localhost`, with the intercept CA held in
+Secrets Manager: [ECS / Fargate Guide]({{ site.baseurl }}/deployment/ecs-fargate/) (a reference task
+definition).
+
 ### Binary
 
 Standalone deployment without containers:
@@ -191,6 +197,10 @@ No setting is required; every one has a default.
 | `RIFT_METRICS_PORT` | Metrics port | `9090` |
 | `RIFT_UPSTREAM_CA_FILE` | PEM CA file trusted for outbound TLS — proxy stubs and `--configfile` URLs. Appended to the image's trust store | |
 | `RIFT_UPSTREAM_TLS_SKIP_VERIFY` | Skip outbound certificate verification (development only) | `false` |
+| `RIFT_INTERCEPT_PORT` | Start the [intercept listener]({{ site.baseurl }}/features/intercept-proxy/) on this port | off |
+| `RIFT_INTERCEPT_AUTH` | `user:pass` required as `Proxy-Authorization: Basic` on every `CONNECT` | off |
+| `RIFT_INTERCEPT_CA_CERT` / `RIFT_INTERCEPT_CA_KEY` | Intercept CA certificate and key as PEM file paths | a CA is generated in memory |
+| `RIFT_INTERCEPT_CA_CERT_PEM` / `RIFT_INTERCEPT_CA_KEY_PEM` | The same pair as inline PEM text (for `Secret`s and Secrets Manager); conflicts with the file pair | |
 
 The full list is in the [CLI Reference]({{ site.baseurl }}/configuration/cli/#environment-variables).
 

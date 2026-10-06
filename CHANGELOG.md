@@ -13,6 +13,7 @@ record.
 
 ### Added
 
+- **Docs: intercept proxy in containers** (#1275): a new [ECS / Fargate deployment page](docs/deployment/ecs-fargate.md) (a reference task definition), plus intercept sections in the Docker and Kubernetes guides, the `RIFT_INTERCEPT_*` variables in the deployment table and the image's `Dockerfile` comments.
 - **An intercept `forward` rule can name its target's `host` and `scheme`** (#1273):
   `{"forward": {"host": "mock-svc", "port": 4600, "scheme": "https"}}`. It could only reach
   `http://127.0.0.1:{port}`, so an imposter in another container, a rift-cluster node or a TLS-only

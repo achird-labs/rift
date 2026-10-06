@@ -166,6 +166,25 @@ ENV MB_LOGLEVEL=info
 ENV RIFT_METRICS_PORT=9090
 # Prometheus metrics server port (--metrics-port)
 
+# RIFT_UPSTREAM_CA_FILE=/certs/corp-ca.pem
+# PEM CA appended to the trust store for outbound TLS (--upstream-ca-file)
+
+# RIFT_UPSTREAM_TLS_SKIP_VERIFY=1
+# Skip outbound certificate verification; development only (--upstream-tls-skip-verify)
+
+# RIFT_INTERCEPT_PORT=8080
+# Start the TLS intercept proxy listener on this port (--intercept-port)
+
+# RIFT_INTERCEPT_AUTH=user:pass
+# Require Proxy-Authorization: Basic on every CONNECT (--intercept-auth)
+
+# RIFT_INTERCEPT_CA_CERT=/certs/ca-cert.pem
+# RIFT_INTERCEPT_CA_KEY=/certs/ca-key.pem
+# Intercept CA as PEM files (--intercept-ca-cert, --intercept-ca-key)
+
+# RIFT_INTERCEPT_CA_CERT_PEM / RIFT_INTERCEPT_CA_KEY_PEM
+# Intercept CA as inline PEM text, e.g. from a Secret (--intercept-ca-cert-pem, --intercept-ca-key-pem)
+
 # ============================================================
 # Scripting Features (enabled by default)
 # ============================================================
@@ -212,6 +231,14 @@ ENV RIFT_METRICS_PORT=9090
 #   --local-only            Localhost only [env: MB_LOCAL_ONLY]
 #   --loglevel <LEVEL>      Log level [env: MB_LOGLEVEL] [default: info]
 #   --metrics-port <PORT>   Metrics port [env: RIFT_METRICS_PORT] [default: 9090]
+#   --upstream-ca-file <FILE>      Extra CA for outbound TLS [env: RIFT_UPSTREAM_CA_FILE]
+#   --upstream-tls-skip-verify     Skip outbound verification [env: RIFT_UPSTREAM_TLS_SKIP_VERIFY]
+#   --intercept-port <PORT>        Start the intercept proxy [env: RIFT_INTERCEPT_PORT]
+#   --intercept-auth <USER:PASS>   Proxy credential for CONNECT [env: RIFT_INTERCEPT_AUTH]
+#   --intercept-ca-cert <FILE>     Intercept CA certificate PEM [env: RIFT_INTERCEPT_CA_CERT]
+#   --intercept-ca-key <FILE>      Intercept CA key PEM [env: RIFT_INTERCEPT_CA_KEY]
+#   --intercept-ca-cert-pem <PEM>  Inline CA certificate [env: RIFT_INTERCEPT_CA_CERT_PEM]
+#   --intercept-ca-key-pem <PEM>   Inline CA key [env: RIFT_INTERCEPT_CA_KEY_PEM]
 #   --mock                  Accepted for Mountebank compatibility; no effect (issue #1152)
 #   --debug                 Enable debug mode
 #   --nologfile             Disable log file (stdout only)
