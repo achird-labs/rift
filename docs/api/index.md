@@ -175,9 +175,19 @@ running imposters. Use `DELETE /imposters` first if you also want unchanged impo
 **Response:** `200 OK`
 ```json
 {
-  "imposters": [...]
+  "imposters": [...],
+  "created": [4546],
+  "replaced": [],
+  "stubPatched": [4545],
+  "toggled": [],
+  "deleted": [4544]
 }
 ```
+
+`imposters` is the same listing as `GET /imposters`, unchanged for Mountebank clients. The five port
+arrays are always present and mirror `POST /admin/reload`: `created`, `replaced`, `stubPatched`,
+`deleted`, and `toggled` (ports whose only change was the `enabled` flag, applied in place with
+runtime state intact). An unchanged imposter appears in none of them.
 
 **Errors:**
 - `400 Bad Request` — the set failed validation (bad protocol, duplicate port, duplicate stub id);
@@ -185,7 +195,7 @@ running imposters. Use `DELETE /imposters` first if you also want unchanged impo
   such an imposter is re-created on each `PUT`, after every imposter with an explicit port, so it
   never takes a port an explicit imposter in the set is serving.
 - `500 Internal Server Error` — one or more imposters failed to apply (e.g. a port bind failure);
-  the body carries the per-port `failed` list plus the `created`/`replaced`/`stubPatched`/`deleted`
+  the body carries the per-port `failed` list plus the `created`/`replaced`/`stubPatched`/`toggled`/`deleted`
   report of what did apply, mirroring `POST /admin/reload`.
 
 ---

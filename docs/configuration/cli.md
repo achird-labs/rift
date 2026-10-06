@@ -105,8 +105,10 @@ source reports no change the reload returns without touching the running imposte
 
 ```json
 {"message": "No source changed; imposters left as they are",
- "created": [], "replaced": [], "stubPatched": [], "deleted": []}
+ "created": [], "replaced": [], "stubPatched": [], "toggled": [], "deleted": []}
 ```
+
+`toggled` lists ports whose only change was the `enabled` flag, applied in place.
 
 When something did change, the existing incremental apply runs: unchanged imposters keep their
 recorded requests, scenario state and response cyclers; only changed ports are patched or replaced.

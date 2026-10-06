@@ -421,9 +421,11 @@ char *rift_serve_admin(RiftHandle *h,
 
 /**
  * Incrementally reconcile the manager toward the given config (issue #316/#343). Input is
- * `{"imposters":[...]}` or a bare array. Returns (caller frees) a report with the same field
- * names as `POST /admin/reload`:
- * `{"created":[..],"replaced":[..],"stubPatched":[..],"deleted":[..],"failed":[{"port":0,"error":".."}]}`.
+ * `{"imposters":[...]}` or a bare array. Returns (caller frees) a report:
+ * `{"created":[..],"replaced":[..],"stubPatched":[..],"toggled":[..],"deleted":[..],"failed":[{"port":0,"error":".."}]}`.
+ * The five port lists are the same as `POST /admin/reload` and `PUT /imposters` report; `failed`
+ * is `[{"port","error"}]` here and `["<port>: <error>"]` over HTTP; `message`, `warnings` and
+ * `intercept` are HTTP-only.
  * Returns null only on invalid input / up-front validation failure — then nothing was mutated
  * and the reason is in [`rift_last_error`]. Partial per-port failures come back in `failed`.
  *

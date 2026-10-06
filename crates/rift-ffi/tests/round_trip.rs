@@ -653,7 +653,14 @@ fn ffi_apply_config_report_fields_and_validation() {
         let cfg = cstr(r#"{"imposters":[{"port":19993,"protocol":"http","stubs":[]}]}"#);
         let report = take_json(rift_apply_config(h, cfg.as_ptr()));
         let v: serde_json::Value = serde_json::from_str(&report).expect("report json");
-        for k in ["created", "replaced", "stubPatched", "deleted", "failed"] {
+        for k in [
+            "created",
+            "replaced",
+            "stubPatched",
+            "toggled",
+            "deleted",
+            "failed",
+        ] {
             assert!(
                 v.get(k).is_some(),
                 "apply report has field `{k}` (reload parity)"
@@ -667,6 +674,16 @@ fn ffi_apply_config_report_fields_and_validation() {
                 .any(|p| p.as_u64() == Some(19993)),
             "19993 reported as created"
         );
+
+        // An `enabled`-only change is reported in `toggled`, and only there.
+        let paused =
+            cstr(r#"{"imposters":[{"port":19993,"protocol":"http","enabled":false,"stubs":[]}]}"#);
+        let report = take_json(rift_apply_config(h, paused.as_ptr()));
+        let v: serde_json::Value = serde_json::from_str(&report).expect("report json");
+        assert_eq!(v["toggled"], serde_json::json!([19993]), "{v}");
+        for k in ["created", "replaced", "stubPatched", "deleted"] {
+            assert_eq!(v[k], serde_json::json!([]), "`{k}` on a toggle: {v}");
+        }
 
         // Duplicate explicit ports parse but fail up-front validation → NULL + last_error, and
         // nothing is mutated (port 19994 is left free to bind afterward).

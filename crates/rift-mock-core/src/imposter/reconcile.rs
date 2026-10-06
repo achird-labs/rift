@@ -50,6 +50,28 @@ pub struct ApplyReport {
     pub failed: Vec<(u16, ImposterError)>,
 }
 
+impl ApplyReport {
+    /// The per-port lists as the admin API and the C-ABI report them: `created`, `replaced`,
+    /// `stubPatched`, `toggled`, `deleted` — always all five, empty when nothing happened.
+    ///
+    /// `failed` is not here: HTTP and the FFI render it differently (strings vs objects). This is
+    /// the one place that knows the list of lists, so a new field cannot be missed by one surface.
+    #[must_use]
+    pub fn port_lists(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut lists = serde_json::Map::new();
+        for (key, ports) in [
+            ("created", &self.created),
+            ("replaced", &self.replaced),
+            ("stubPatched", &self.stub_patched),
+            ("toggled", &self.toggled),
+            ("deleted", &self.deleted),
+        ] {
+            lists.insert(key.to_owned(), serde_json::json!(ports));
+        }
+        lists
+    }
+}
+
 /// Outcome of [`ImposterManager::delete_all`](super::ImposterManager::delete_all) (issue #1124).
 ///
 /// A port in `failed` was **not** deleted: it is still registered and serving, because its datadir
@@ -347,6 +369,27 @@ pub(crate) fn reconcile_stub_states(
 mod tests {
     use super::*;
     use crate::imposter::core::StubState;
+
+    #[test]
+    fn port_lists_has_every_list_even_when_empty() {
+        let lists = ApplyReport::default().port_lists();
+        let mut keys: Vec<&str> = lists.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["created", "deleted", "replaced", "stubPatched", "toggled"]
+        );
+        assert!(lists.values().all(|v| v == &json!([])));
+
+        let report = ApplyReport {
+            toggled: vec![7],
+            stub_patched: vec![8],
+            ..ApplyReport::default()
+        };
+        let lists = report.port_lists();
+        assert_eq!(lists["toggled"], json!([7]));
+        assert_eq!(lists["stubPatched"], json!([8]));
+    }
     use crate::imposter::types::Stub;
     use serde_json::json;
 
