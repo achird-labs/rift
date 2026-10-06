@@ -257,7 +257,7 @@ boot to install them — a bootstrap sidecar that exits `0` (and so crash-loops 
 `restartPolicy: Always`), and a window where the SUT's first calls race the rule that isn't there
 yet. Instead, put an `intercept` block next to your imposters in `--configfile`: the listener binds
 with its rules **already installed**, so the server is correct the moment it is ready.
-[Demo 6]({{ site.baseurl }}/demo/#demo-6-https-intercept-proxy-standalone) runs this end to end: a
+[the intercept demo](https://github.com/achird-labs/rift/tree/master/docs/demo#demo-6-https-intercept-proxy-standalone) runs this end to end: a
 SUT container behind `HTTPS_PROXY`, a CA made with `rift intercept-ca generate`, and a datafile
 served from disk that a reload swaps.
 
