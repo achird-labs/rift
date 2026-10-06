@@ -3703,3 +3703,63 @@ fn predicates_spelled_rules_are_linted() {
         r.issues
     );
 }
+
+// ─── #1296: W019 for `_rift.conditional` that can never fire ────────────────────────────────
+
+fn w019_locations(stub: Value) -> (Vec<String>, Vec<String>) {
+    let v = make_imposter(json!([stub]));
+    let mut r = LintResult::new();
+    validate_imposter(path(), &v, &mut r, &opts());
+    let w019 = r
+        .issues
+        .iter()
+        .filter(|i| i.code == "W019")
+        .map(|i| i.location.clone().unwrap_or_default())
+        .collect();
+    let all = codes(&r).into_iter().map(str::to_owned).collect();
+    (w019, all)
+}
+
+#[test]
+fn w019_conditional_on_a_script_only_response() {
+    let (w019, _) = w019_locations(json!({"responses": [
+        {"_rift": {"conditional": true, "script": {"code": "response.body = 'x';"}}}
+    ]}));
+    assert_eq!(w019, vec!["stubs[0].responses[0]._rift.conditional"]);
+}
+
+#[test]
+fn w019_conditional_with_a_post_only_method_predicate() {
+    let (w019, _) = w019_locations(json!({
+        "predicates": [{"equals": {"path": "/x"}}, {"equals": {"method": "post"}}],
+        "responses": [{"is": {"statusCode": 200}, "_rift": {"conditional": true}}]
+    }));
+    assert_eq!(w019, vec!["stubs[0].predicates[1]"]);
+}
+
+#[test]
+fn w019_is_silent_for_get_head_and_or_wrapped_method() {
+    for preds in [
+        json!([{"equals": {"method": "GET"}}]),
+        json!([{"equals": {"method": "HEAD"}}]),
+        json!([{"equals": {"method": "get"}}]),
+        json!([{"or": [{"equals": {"method": "POST"}}, {"equals": {"method": "GET"}}]}]),
+        json!([{"matches": {"method": "^P"}}]),
+        json!([{"equals": {"method": 5}}]),
+    ] {
+        let (w019, _) = w019_locations(json!({
+            "predicates": preds,
+            "responses": [{"is": {"statusCode": 200}, "_rift": {"conditional": true}}]
+        }));
+        assert!(w019.is_empty(), "{preds}: {w019:?}");
+    }
+}
+
+#[test]
+fn w019_does_not_duplicate_w017_on_proxy() {
+    let (w019, all) = w019_locations(json!({"responses": [
+        {"proxy": {"to": "http://localhost:1"}, "_rift": {"conditional": true}}
+    ]}));
+    assert!(w019.is_empty(), "{w019:?}");
+    assert!(all.iter().any(|c| c == "W017"), "{all:?}");
+}

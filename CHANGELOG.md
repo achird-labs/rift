@@ -13,6 +13,8 @@ record.
 
 ### Added
 
+- **W019 and `conditional_never_runs` for a `_rift.conditional` that can never fire** (#1296): `rift-lint` and the engine's `_rift.warnings` now flag it on a script-only response, or on an `is` response behind a top-level `method` predicate that excludes GET and HEAD.
+
 - **Docs: intercept proxy in containers** (#1275): a new [ECS / Fargate deployment page](docs/deployment/ecs-fargate.md) (a reference task definition), plus intercept sections in the Docker and Kubernetes guides, the `RIFT_INTERCEPT_*` variables in the deployment table and the image's `Dockerfile` comments.
 
 - **A runnable standalone intercept demo** (#1276): `docs/demo/docker-compose-intercept.yml` puts a

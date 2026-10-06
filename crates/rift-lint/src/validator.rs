@@ -219,6 +219,87 @@ fn ignored_rift_shape(response: &Value) -> Option<&'static str> {
         .find(|shape| present(shape))
 }
 
+/// W019 (issue #1296): `_rift.conditional` that can never answer 304. Mirrors the engine's
+/// `ConditionalNeverRuns`. A `proxy`/`inject`/`fault` response is W017's, so it is skipped here.
+/// Conservative: only a top-level `equals`/`deepEquals` `method` with a single string value other
+/// than GET/HEAD (case-insensitive) counts; `or`/`not`/`and`, `matches`, `exists`, `except`, a
+/// selector or a non-string value are not judged.
+fn check_conditional_never_fires(file: &Path, imposter: &Value, result: &mut LintResult) {
+    let Some(stubs) = imposter.get("stubs").and_then(Value::as_array) else {
+        return;
+    };
+    let declares = |response: &Value| {
+        response
+            .get("_rift")
+            .and_then(|r| r.get("conditional"))
+            .is_some_and(|c| !c.is_null() && *c != Value::Bool(false))
+    };
+    for (stub_idx, stub) in stubs.iter().enumerate() {
+        let responses = stub
+            .get("responses")
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice);
+        let present = |response: &Value, key: &str| response.get(key).is_some_and(|v| !v.is_null());
+        for (resp_idx, response) in responses.iter().enumerate() {
+            if declares(response)
+                && !present(response, "is")
+                && ignored_rift_shape(response).is_none()
+            {
+                result.add_issue(
+                    LintIssue::warning(
+                        "W019",
+                        "`_rift.conditional` on a script-only response never fires: conditional \
+                         GET applies only to an `is` response",
+                        file.to_path_buf(),
+                    )
+                    .with_location(format!(
+                        "stubs[{stub_idx}].responses[{resp_idx}]._rift.conditional"
+                    ))
+                    .with_suggestion("Put the body in an `is` response, or drop `conditional`"),
+                );
+            }
+        }
+        let has_is_conditional = responses.iter().any(|r| present(r, "is") && declares(r));
+        if !has_is_conditional {
+            continue;
+        }
+        let predicates = stub
+            .get("predicates")
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice);
+        for (pred_idx, predicate) in predicates.iter().enumerate() {
+            let has_modifier = predicate
+                .get("except")
+                .and_then(Value::as_str)
+                .is_some_and(|e| !e.is_empty())
+                || ["jsonpath", "xpath"]
+                    .iter()
+                    .any(|k| predicate.get(k).is_some());
+            let method = ["equals", "deepEquals"]
+                .iter()
+                .find_map(|op| predicate.get(op)?.get("method")?.as_str());
+            if let Some(method) = method
+                && !has_modifier
+                && !method.eq_ignore_ascii_case("GET")
+                && !method.eq_ignore_ascii_case("HEAD")
+            {
+                result.add_issue(
+                    LintIssue::warning(
+                        "W019",
+                        format!(
+                            "`_rift.conditional` never fires: this stub's method predicate \
+                             ({method}) excludes GET and HEAD, so it never answers 304"
+                        ),
+                        file.to_path_buf(),
+                    )
+                    .with_location(format!("stubs[{stub_idx}].predicates[{pred_idx}]"))
+                    .with_suggestion("Match GET/HEAD, or drop `conditional`"),
+                );
+            }
+        }
+    }
+}
+
 /// E035: the engine reads `repeat` as a `u32` and refuses the file for anything else (#1162); `0`
 /// is admitted there and served once, and flagged here as never what the author meant.
 fn check_repeat(file: &Path, repeat: &Value, location: &str, result: &mut LintResult) {
@@ -398,6 +479,7 @@ pub fn validate_imposter(
     check_port_range(file, imposter, result);
     check_state_without_flow_state(file, imposter, result);
     check_ignored_keys(file, imposter, result);
+    check_conditional_never_fires(file, imposter, result);
     disclose_carrier_fields(file, imposter, result);
 
     // Named script registry (`_rift.scripts`, issue #356): validated once up front (each entry

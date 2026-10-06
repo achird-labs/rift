@@ -191,6 +191,22 @@ execute (see [Flow State]({{ site.baseurl }}/features/flow-state/#is-responses-o
 }
 ```
 
+### conditional_never_runs
+
+A response carries `_rift.conditional` but it can never answer 304 (issue #1296): it is on a
+script-only `_rift` response (conditional GET reads only an `is` response), or on an `is` response
+in a stub whose top-level `equals`/`deepEquals` `method` predicate is a single string other than
+`GET`/`HEAD`. A `method` under `or`/`not`/`and`, or matched with `matches`/`exists`, is not judged.
+`rift-lint` reports the same shapes as W019.
+
+```json
+{
+  "warningType": "conditional_never_runs",
+  "message": "Stub at index 0 has _rift.conditional but its method predicate (POST) excludes GET and HEAD, so it never answers 304",
+  "stubIndex": 0
+}
+```
+
 ### config_key_ignored
 
 A key the engine parses and does not act on (issue #1152). The value reads back unchanged, so
