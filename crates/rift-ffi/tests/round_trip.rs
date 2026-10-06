@@ -2019,6 +2019,27 @@ fn write_committed_ca(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     (cert_path, key_path)
 }
 
+/// Issue #1293: `rift_start_intercept` takes the CA from environment variables it names — the
+/// same keys a config-file block carries, since both parse `InterceptStartOptions`.
+#[test]
+fn ffi_start_intercept_with_env_named_pem() {
+    unsafe {
+        let ca = rift_mock_core::proxy::intercept_ca::CertificateAuthority::generate().unwrap();
+        // SAFETY: set_var races any concurrent getenv in the process; the names are unique to this
+        // test, as elsewhere in this suite, so no other test depends on the values.
+        std::env::set_var("RIFT_TEST_1293_FFI_CERT", ca.ca_cert_pem());
+        std::env::set_var("RIFT_TEST_1293_FFI_KEY", ca.ca_key_pem());
+        let h = rift_start();
+        let opts = cstr(
+            r#"{"port":0,"caCertPemEnv":"RIFT_TEST_1293_FFI_CERT","caKeyPemEnv":"RIFT_TEST_1293_FFI_KEY"}"#,
+        );
+        let started = take_json(rift_start_intercept(h, opts.as_ptr()));
+        assert!(!started.is_empty(), "start succeeds");
+        assert_eq!(take_json(rift_intercept_ca_pem(h)), ca.ca_cert_pem());
+        rift_stop(h);
+    }
+}
+
 /// Issue #429 (AC1/AC4): two `rift_start_intercept` instances started with the SAME committed CA
 /// present mutually-trusted leaves — a truststore holding instance A's exported CA validates the
 /// TLS instance B intercepts. Both instances expose the committed CA verbatim (loaded, not

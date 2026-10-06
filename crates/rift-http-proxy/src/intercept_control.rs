@@ -18,7 +18,9 @@ use crate::intercept_rules::{
     InterceptRule, InterceptRules, InterceptState, RulesAtCapacity, SeededReplaced,
 };
 use rift_mock_core::proxy::OutboundTls;
-use rift_mock_core::proxy::intercept_ca::{CaSource, CertificateAuthority, SniCertResolver};
+use rift_mock_core::proxy::intercept_ca::{
+    CaInputs, CaSource, CertificateAuthority, SniCertResolver,
+};
 use serde::Serialize;
 
 /// Log an `anyhow`-typed intercept-start failure with its whole cause chain (issue #683).
@@ -85,11 +87,12 @@ impl std::fmt::Debug for ListenerSpec {
 }
 
 /// The CA source by identity, not content: a file pair by its paths (rotating a CA in place is a
-/// restart), inline PEM by its certificate.
+/// restart), inline PEM by its certificate, an env-named pair by the variable names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CaSpec {
     Generated,
     Paths { cert: String, key: String },
+    Env { cert: String, key: String },
     Pem { cert: String },
 }
 
@@ -101,7 +104,13 @@ impl ListenerSpec {
                 key: key.clone(),
             },
             (_, _, Some(cert)) => CaSpec::Pem { cert: cert.clone() },
-            _ => CaSpec::Generated,
+            _ => match (&opts.ca_cert_pem_env, &opts.ca_key_pem_env) {
+                (Some(cert), Some(key)) => CaSpec::Env {
+                    cert: cert.clone(),
+                    key: key.clone(),
+                },
+                _ => CaSpec::Generated,
+            },
         };
         Self {
             host: opts.host.clone().unwrap_or_else(|| "127.0.0.1".to_string()),
@@ -198,6 +207,12 @@ pub struct InterceptStartOptions {
     pub ca_cert_pem: Option<String>,
     /// Inline CA private-key PEM (issue #593). Secret material — never logged (see the `Debug` impl).
     pub ca_key_pem: Option<String>,
+    /// The *name* of an environment variable holding the CA certificate PEM (issue #1293) — for a
+    /// secret store that delivers secrets only as environment variables (ECS/Fargate). Both-or-
+    /// neither with `ca_key_pem_env`, mutually exclusive with the path and inline pairs. Not secret.
+    pub ca_cert_pem_env: Option<String>,
+    /// The name of an environment variable holding the CA private-key PEM (issue #1293).
+    pub ca_key_pem_env: Option<String>,
     /// Generate a fresh CA and return its cert **and** key in the start response (issue #593).
     /// Only valid when no CA source is supplied — combining it with a path/PEM pair is a `400`.
     pub return_ca_key: Option<bool>,
@@ -265,6 +280,9 @@ impl std::fmt::Debug for InterceptStartOptions {
                 "ca_key_pem",
                 &self.ca_key_pem.as_ref().map(|_| "<redacted>"),
             )
+            // Variable names, not values: safe to show, and what an operator needs to debug.
+            .field("ca_cert_pem_env", &self.ca_cert_pem_env)
+            .field("ca_key_pem_env", &self.ca_key_pem_env)
             .field("return_ca_key", &self.return_ca_key)
             .field("auth", &self.auth)
             // Count only: a rule's serve body can be an arbitrarily large payload.
@@ -515,12 +533,14 @@ impl InterceptControl {
         // Log CA/option failures here so every surface (FFI, admin `POST /intercept`, CLI flag) gets
         // a server-side trail — not just the FFI, which used to `warn!` these on its own. The map to
         // `Ca` keeps these validation failures on the existing 400 path.
-        let source = CaSource::resolve(
-            opts.ca_cert_path.map(PathBuf::from),
-            opts.ca_key_path.map(PathBuf::from),
-            opts.ca_cert_pem,
-            opts.ca_key_pem,
-        )
+        let source = CaSource::from_inputs(CaInputs {
+            cert_path: opts.ca_cert_path.map(PathBuf::from),
+            key_path: opts.ca_key_path.map(PathBuf::from),
+            cert_pem: opts.ca_cert_pem,
+            key_pem: opts.ca_key_pem,
+            cert_pem_env: opts.ca_cert_pem_env,
+            key_pem_env: opts.ca_key_pem_env,
+        })
         .map_err(|e| {
             warn_intercept_start_failure(&e, "invalid CA options");
             InterceptStartError::Ca(e)
@@ -1398,5 +1418,80 @@ mod tests {
             control.reapply_config_block(Some(block(serde_json::json!({ "rules": [] })))),
             BlockReapplied::NotApplied(w) if w.contains("no listener is running")
         ));
+    }
+
+    // ===== Issue #1293: the CA pair named by environment variables =====
+
+    /// Process-wide env writes: each test uses its own variable names, so tests running in
+    /// parallel never read each other's values.
+    fn set_env(name: &str, value: &str) {
+        // SAFETY: set_var races any concurrent getenv in the process; the names are unique to the
+        // calling test, as elsewhere in this crate, so no other test depends on the values.
+        unsafe { std::env::set_var(name, value) };
+    }
+
+    #[tokio::test]
+    async fn start_with_env_named_pem_loads_ca() {
+        let (cert_pem, key_pem) = ca_pem_pair();
+        set_env("RIFT_TEST_1293_START_CERT", &cert_pem);
+        set_env("RIFT_TEST_1293_START_KEY", &key_pem);
+        let control = InterceptControl::default();
+        let opts: InterceptStartOptions = serde_json::from_value(serde_json::json!({
+            "caCertPemEnv": "RIFT_TEST_1293_START_CERT",
+            "caKeyPemEnv": "RIFT_TEST_1293_START_KEY"
+        }))
+        .expect("the two keys are part of the start options");
+        control.start(opts).await.expect("start with env-named PEM");
+        assert_eq!(control.state().expect("running").ca.ca_cert_pem(), cert_pem);
+        control.stop().await;
+    }
+
+    #[tokio::test]
+    async fn an_unset_env_named_variable_is_a_ca_error_naming_it() {
+        let control = InterceptControl::default();
+        let opts = InterceptStartOptions {
+            ca_cert_pem_env: Some("RIFT_TEST_1293_NEVER_SET_CERT".into()),
+            ca_key_pem_env: Some("RIFT_TEST_1293_NEVER_SET_KEY".into()),
+            ..Default::default()
+        };
+        match control.start(opts).await {
+            Err(InterceptStartError::Ca(e)) => assert!(
+                format!("{e:#}").contains("RIFT_TEST_1293_NEVER_SET_CERT"),
+                "{e:#}"
+            ),
+            other => panic!("expected a CA error, got {other:?}"),
+        }
+        assert!(control.status().is_none(), "nothing was bound");
+    }
+
+    #[tokio::test]
+    async fn return_ca_key_with_env_named_pem_is_error() {
+        let (cert_pem, key_pem) = ca_pem_pair();
+        set_env("RIFT_TEST_1293_RCK_CERT", &cert_pem);
+        set_env("RIFT_TEST_1293_RCK_KEY", &key_pem);
+        let control = InterceptControl::default();
+        let opts = InterceptStartOptions {
+            ca_cert_pem_env: Some("RIFT_TEST_1293_RCK_CERT".into()),
+            ca_key_pem_env: Some("RIFT_TEST_1293_RCK_KEY".into()),
+            return_ca_key: Some(true),
+            ..Default::default()
+        };
+        assert!(matches!(
+            control.start(opts).await,
+            Err(InterceptStartError::Ca(_))
+        ));
+    }
+
+    #[test]
+    fn debug_shows_env_names_but_not_their_values() {
+        set_env("RIFT_TEST_1293_DEBUG_KEY", "supersecret-from-env");
+        let opts = InterceptStartOptions {
+            ca_cert_pem_env: Some("RIFT_TEST_1293_DEBUG_CERT".into()),
+            ca_key_pem_env: Some("RIFT_TEST_1293_DEBUG_KEY".into()),
+            ..Default::default()
+        };
+        let rendered = format!("{opts:?}");
+        assert!(rendered.contains("RIFT_TEST_1293_DEBUG_KEY"), "{rendered}");
+        assert!(!rendered.contains("supersecret-from-env"), "{rendered}");
     }
 }

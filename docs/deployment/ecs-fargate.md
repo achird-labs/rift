@@ -27,10 +27,10 @@ namespace, so the app reaches Rift on `localhost` -- the same arrangement as the
 - `rift` runs the intercept listener, with its rules declared in a config file.
 - `app` sets `HTTPS_PROXY=http://127.0.0.1:8080` and trusts the intercept CA.
 - The CA pair lives in Secrets Manager. ECS injects a secret only as an environment variable, and
-  Rift's config-file listener reads its CA from files (`caCertPath` / `caKeyPath`), so the `rift`
-  container's entrypoint writes the variables to files and then starts Rift. The variables are
-  deliberately **not** named `RIFT_INTERCEPT_*`: those belong to the flag-started listener, and
-  setting one alongside a config `intercept` block is a startup error.
+  the config-file block reads it from there by name: `"caCertPemEnv": "INTERCEPT_CA_CERT"`,
+  `"caKeyPemEnv": "INTERCEPT_CA_KEY"`. The variables are deliberately **not** named
+  `RIFT_INTERCEPT_*`: those are the flags' own variables, and setting one alongside a config
+  `intercept` block is a startup error.
 - The app trusts the **same certificate**, so it must be baked into the app image (below) -- a JVM
   in particular reads its truststore once, at startup.
 
@@ -49,8 +49,7 @@ namespace, so the app reaches Rift on `localhost` -- the same arrangement as the
       "name": "rift",
       "image": "123456789012.dkr.ecr.eu-west-1.amazonaws.com/app-rift-mocks:latest",
       "essential": true,
-      "entryPoint": ["sh", "-c"],
-      "command": ["umask 077 && printf '%s' \"$INTERCEPT_CA_CERT\" > /tmp/ca-cert.pem && printf '%s' \"$INTERCEPT_CA_KEY\" > /tmp/ca-key.pem && exec rift --configfile /config/mock.json"],
+      "command": ["--configfile", "/config/mock.json"],
       "stopTimeout": 10,
       "secrets": [
         { "name": "INTERCEPT_CA_CERT",
@@ -84,16 +83,21 @@ namespace, so the app reaches Rift on `localhost` -- the same arrangement as the
 is up with its rules installed. The `intercept` block in `mock.json` is the one shown under
 [Docker]({{ site.baseurl }}/deployment/docker/#intercepting-https-from-another-container); give it
 `"host": "127.0.0.1"` here, since only the task's own app connects, `"port": 8080`,
-`"caCertPath": "/tmp/ca-cert.pem"` and `"caKeyPath": "/tmp/ca-key.pem"`.
+`"caCertPemEnv": "INTERCEPT_CA_CERT"` and `"caKeyPemEnv": "INTERCEPT_CA_KEY"`. A multi-line PEM
+survives intact: Secrets Manager stores it verbatim and Rift reads the variable as-is. No shell is
+involved, so the `-static` image works too.
 
-The shell entrypoint needs the default (Debian-based) image; the `-static` image has no shell.
-`exec` keeps Rift as PID 1 so it still receives `SIGTERM`. A multi-line PEM survives intact: Secrets
-Manager stores it verbatim and `printf '%s'` writes it back unchanged.
+On a Rift release before `caCertPemEnv` existed, the block refuses the two keys. There, write the
+secrets to files with a shell entrypoint (`"entryPoint": ["sh", "-c"]`, `"command": ["umask 077 &&
+printf '%s' \"$INTERCEPT_CA_CERT\" > /tmp/ca-cert.pem && printf '%s' \"$INTERCEPT_CA_KEY\" >
+/tmp/ca-key.pem && exec rift --configfile /config/mock.json"]`) and point `caCertPath`/`caKeyPath`
+at them; that needs the default (Debian-based) image.
 
 **Alternative: the flag path.** Start the listener with `--intercept-port 8080` and the secrets named
 `RIFT_INTERCEPT_CA_CERT_PEM` / `RIFT_INTERCEPT_CA_KEY_PEM`, with **no** `intercept` block, and install
 the rules with a one-shot `PUT /intercept/rules` against `localhost:2525`. That needs no shell, but
-costs a bootstrap call and a window where the app's first calls can race the missing rules.
+costs a bootstrap call and a window where the app's first calls can race the missing rules; with
+`caCertPemEnv` the block path needs no shell either, so prefer it.
 
 Remember that `execute-command` and the task role are separate from this: the execution role needs
 `secretsmanager:GetSecretValue` on both secrets.
