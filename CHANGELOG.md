@@ -13,6 +13,12 @@ record.
 
 ### Added
 
+- **A runnable standalone intercept demo** (#1276): `docs/demo/docker-compose-intercept.yml` puts a
+  SUT container behind `HTTPS_PROXY`, with a CA made by `rift intercept-ca generate` and a datafile
+  imposter that a reload swaps. The SUT's healthcheck fetches the datafile through the MITM, so the
+  demo-compose CI gate now fails if the standalone intercept path breaks — nothing in CI exercised
+  it in the published image before.
+
 - **`POST /admin/reload` re-applies the config file's `intercept.rules`** (#1271). A standalone rig
   that keeps its whole mock in one file had to call the admin API to change a rule, though an edit
   to an imposter in the same file reloaded. The block's rules now replace the rules the file

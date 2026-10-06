@@ -1,2 +1,5 @@
 # Generated TLS certificates (self-signed for demo)
 certs/
+
+# The intercept demo CA (./generate-intercept-ca.sh)
+intercept-ca/
