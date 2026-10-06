@@ -260,6 +260,7 @@ mod tests {
             responses: vec![StubResponse::RiftScript {
                 rift: Box::new(RiftResponseExtension {
                     dataset: None,
+                    conditional: None,
                     fault: None,
                     script: Some(RiftScriptConfig {
                         engine: Some(engine.to_string()),
@@ -424,6 +425,7 @@ mod tests {
                 responses: vec![StubResponse::RiftScript {
                     rift: Box::new(RiftResponseExtension {
                         dataset: None,
+                        conditional: None,
                         fault: None,
                         script: Some(RiftScriptConfig {
                             engine: Some("rhai".to_string()),
@@ -450,6 +452,7 @@ mod tests {
                 responses: vec![StubResponse::RiftScript {
                     rift: Box::new(RiftResponseExtension {
                         dataset: None,
+                        conditional: None,
                         fault: None,
                         script: Some(RiftScriptConfig {
                             engine: Some("rhai".to_string()),

@@ -98,7 +98,7 @@ const LEDGER: &[(&str, &str, usize)] = &[
         "deny_unknown_fields",
         0,
     ),
-    ("crates/rift-mock-core/src/imposter/types.rs", "untagged", 6),
+    ("crates/rift-mock-core/src/imposter/types.rs", "untagged", 7),
     ("crates/rift-mock-core/src/imposter/types.rs", "tag attr", 1),
     ("crates/rift-mock-core/src/imposter/types.rs", "flatten", 2),
     (
@@ -114,12 +114,12 @@ const LEDGER: &[(&str, &str, usize)] = &[
     (
         "crates/rift-mock-core/src/imposter/types.rs",
         "decode fn `?`",
-        16,
+        17,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",
         "decode fn `Err(`",
-        14,
+        15,
     ),
     ("crates/rift-types/src/wire.rs", "::custom", 4),
     ("crates/rift-types/src/wire.rs", "serde error helper", 0),
@@ -465,6 +465,14 @@ fn the_floor_refusals_hold_on_replay() {
         (
             r#"{"responses":[{"is":{"statusCode":200},"_rift":{"fault":{"tcp":{"probability":0.5}}}}]}"#,
             "_rift.fault.tcp object form requires a string 'type'",
+        ),
+        // Structural: `_rift.conditional` (issue #1280) is `true`/`false` or an object. An older
+        // engine ignored the key whatever its value (`_rift` has no `deny_unknown_fields`), so such
+        // bytes now fail to decode — accepted, as for `stateOps`/`dataset`, because a new field's
+        // shape is structural and no engine ever *acted* on another.
+        (
+            r#"{"responses":[{"is":{"statusCode":200},"_rift":{"conditional":"yes"}}]}"#,
+            "did not match any variant of untagged enum ConditionalGet",
         ),
     ];
     for (stub, refusal) in cases {
