@@ -282,10 +282,12 @@ The block is the same shape as the `POST /intercept` body — `host`, `port`, th
   lists both.
 - **`rules` works over the admin API and FFI too.** `POST /intercept` and `rift_start_intercept`
   accept the same optional `rules` array, so any surface can start-and-seed in one call.
-- **Boot-only.** `POST /admin/reload` re-applies imposters only. When the reloaded file carries an
-  `intercept` block, the response body carries a `warnings` entry saying it was not re-applied (and
-  the server logs a warning), so an edit to the block never *looks* applied. Change rules at runtime
-  over the admin API, or restart to re-read the block.
+- **Rules reload; the listener does not.** `POST /admin/reload` replaces the rules this file
+  installed with the block's current `rules`, keeping rules added at runtime after them, provided
+  the block still describes the running listener (`host`, `port`, `auth`, CA source). A change to
+  any of those, a listener stopped with `DELETE /intercept`, or one started by the flags or at
+  runtime leaves the rules alone and says why in the response's `warnings`; restart to apply a
+  listener change. See [Hot reload]({{ site.baseurl }}/features/hot-reload/#reload-response).
 - **Injection is gated.** A rule whose predicates use `inject` needs `--allowInjection`, exactly as a
   config-file imposter's scripting surface does — the file crossed the same trust boundary.
 

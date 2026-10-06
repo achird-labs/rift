@@ -37,6 +37,35 @@ fn route(id: &str, host: &str, port: u16) -> String {
     format!(r#"{{"id":"{id}","match":{{"host":"{host}"}},"target":{{"port":{port}}}}}"#)
 }
 
+/// Write a config whose imposter listens on a free port, with `routes` built for that port, and
+/// start a server on it — retrying on a fresh port when the imposter did not get its port.
+///
+/// `free_port` releases the port before the server binds it, so a test running in parallel can
+/// take it in between; the boot then serves without the imposter (a bind failure there is logged,
+/// not fatal) and the first reload fails retrying the bind (`Address already in use`).
+async fn start_with_imposter(
+    config: &Path,
+    front_door: bool,
+    routes: impl Fn(u16) -> Option<String>,
+) -> (RunningServer, u16) {
+    for _ in 0..5 {
+        let imposter = free_port();
+        write_config(config, imposter, routes(imposter).as_deref());
+        let server = start(config, front_door).await;
+        let bound = reqwest::get(format!(
+            "http://{}/imposters/{imposter}",
+            server.admin_addr()
+        ))
+        .await
+        .is_ok_and(|r| r.status().is_success());
+        if bound {
+            return (server, imposter);
+        }
+        server.shutdown().await;
+    }
+    panic!("no free port for the imposter after 5 attempts");
+}
+
 async fn start(config: &Path, front_door: bool) -> RunningServer {
     let mut args = vec![
         "rift".to_owned(),
@@ -94,9 +123,8 @@ fn no_route() -> (u16, Option<String>) {
 async fn a_reload_swaps_in_the_edited_route_table() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = dir.path().join("imposters.json");
-    let imposter = free_port();
-    write_config(&config, imposter, Some(&route("a", "a.test", imposter)));
-    let server = start(&config, true).await;
+    let (server, imposter) =
+        start_with_imposter(&config, true, |p| Some(route("a", "a.test", p))).await;
     assert_eq!(through_front_door(&server, "a.test").await, ROUTED);
 
     // Only `routes` changes: the imposters are byte-identical, so the diff has nothing to do.
@@ -120,9 +148,8 @@ async fn a_reload_swaps_in_the_edited_route_table() {
 async fn an_invalid_route_table_is_refused_and_the_old_one_keeps_serving() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = dir.path().join("imposters.json");
-    let imposter = free_port();
-    write_config(&config, imposter, Some(&route("a", "a.test", imposter)));
-    let server = start(&config, true).await;
+    let (server, imposter) =
+        start_with_imposter(&config, true, |p| Some(route("a", "a.test", p))).await;
 
     let duplicate = format!(
         "{},{}",
@@ -141,9 +168,8 @@ async fn an_invalid_route_table_is_refused_and_the_old_one_keeps_serving() {
 async fn a_routes_block_without_a_front_door_is_reported_not_dropped() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = dir.path().join("imposters.json");
-    let imposter = free_port();
-    write_config(&config, imposter, Some(&route("a", "a.test", imposter)));
-    let server = start(&config, false).await;
+    let (server, imposter) =
+        start_with_imposter(&config, false, |p| Some(route("a", "a.test", p))).await;
 
     let (status, body) = reload(&server).await;
     assert_eq!(status, 200, "{body}");

@@ -121,6 +121,7 @@ pub async fn route_request(
         manager,
         config_source,
         front_door_routes,
+        intercept.as_ref(),
         allow_injection,
         scripts_dir,
         config_snapshot,
@@ -153,6 +154,7 @@ async fn route_by_path(
     manager: Arc<ImposterManager>,
     config_source: Option<ReloadSource>,
     front_door_routes: Option<FrontDoorRoutes>,
+    intercept: Option<&InterceptControl>,
     allow_injection: bool,
     scripts_dir: Option<Arc<PathBuf>>,
     config_snapshot: system::ConfigSnapshot,
@@ -176,6 +178,7 @@ async fn route_by_path(
                 manager,
                 config_source,
                 front_door_routes.as_ref(),
+                intercept,
                 allow_injection,
             )
             .await;

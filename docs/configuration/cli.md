@@ -99,7 +99,8 @@ rule: at most one source may declare each.
 ### Reload and `ETag`
 
 `POST /admin/reload` re-fetches every source. An `https:` source sends `If-None-Match` with the
-`ETag` it last saw; a `304 Not Modified` is served from cache without re-parsing, and when *every*
+`ETag` it last saw; a `304 Not Modified` is served from cache — imposters, `routes` and `intercept`
+block alike — without re-parsing, and when *every*
 source reports no change the reload returns without touching the running imposters at all:
 
 ```json

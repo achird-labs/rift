@@ -12,7 +12,9 @@ use crate::imposter::{
     ImposterConfig, ImposterManager, Persistence, ScriptBaseDir, TlsDefaults, resolve_scripts,
 };
 use crate::injection_gate::GATED_SCRIPT_SURFACES;
-use crate::intercept_control::{InterceptAuth, InterceptControl, InterceptStartOptions};
+use crate::intercept_control::{
+    InterceptAuth, InterceptControl, InterceptOrigin, InterceptStartOptions,
+};
 use crate::sources::{
     self, FileSource, HttpSource, ImposterSource, SourceRef, SourceRegistry, SourceSet,
 };
@@ -836,10 +838,16 @@ impl ServerBuilder {
         let intercept = InterceptControl::default()
             .with_exposure_policy(cli.require_admin_auth.into())
             .with_outbound_tls(outbound_tls.clone());
-        let start_options = intercept_block.or(intercept_flag_opts);
-        if let Some(options) = start_options {
+        // The origin travels with the listener so a reload knows whether the file's block owns its
+        // rules (issue #1271); the two cannot both be set, which `intercept_block` refuses above.
+        let start_options = match (intercept_block, intercept_flag_opts) {
+            (Some(block), _) => Some((block, InterceptOrigin::ConfigFile)),
+            (None, Some(flags)) => Some((flags, InterceptOrigin::Flags)),
+            (None, None) => None,
+        };
+        if let Some((options, origin)) = start_options {
             let seeded_rules = options.rules.len();
-            if let Err(e) = intercept.start(options).await {
+            if let Err(e) = intercept.start_from(options, origin).await {
                 // Same contract as the admin-bind arm below: don't orphan a listener already bound
                 // by this call. #655 widens the ways this can fail (rule-capacity, and a CA/bind
                 // error declared by the config block rather than typed as a flag), and `start()` is

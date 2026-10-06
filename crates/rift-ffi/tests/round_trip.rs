@@ -2494,6 +2494,54 @@ fn intercept_config_file(dir: &std::path::Path, imposter_port: u16, predicates: 
     serde_json::json!(path.to_str().expect("utf8 path")).to_string()
 }
 
+/// Issue #1271: an embedded host's `POST /admin/reload` re-applies its `configFile`'s intercept
+/// rules, as the CLI does — the block started the listener, so the block owns its rules.
+#[test]
+fn ffi_admin_reload_reapplies_the_config_file_intercept_rules() {
+    unsafe {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reload-intercept.json");
+        let write = |body: &str| {
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"imposters": [], "intercept": {{ "port": 0, "rules": [
+                        {{ "host": "a.example.com",
+                           "action": {{ "serve": {{ "statusCode": 200, "body": "{body}" }} }} }} ] }} }}"#
+                ),
+            )
+            .expect("write config");
+        };
+        write("v1");
+        let path_json = serde_json::json!(path.to_str().expect("utf8 path")).to_string();
+
+        let h = rift_start();
+        let info = take_json(rift_serve_admin(
+            h,
+            cstr(&format!(r#"{{"port": 0, "configFile": {path_json}}}"#)).as_ptr(),
+        ));
+        let info: serde_json::Value = serde_json::from_str(&info).expect("serve json");
+        let admin_port = info["adminPort"].as_u64().expect("adminPort");
+
+        write("v2");
+        let body: serde_json::Value = rt().block_on(async move {
+            reqwest::Client::new()
+                .post(format!("http://127.0.0.1:{admin_port}/admin/reload"))
+                .send()
+                .await
+                .expect("reload")
+                .json()
+                .await
+                .expect("reload json")
+        });
+        assert_eq!(body["intercept"]["rulesSeeded"], 1, "{body}");
+        let listed: serde_json::Value =
+            serde_json::from_str(&take_json(rift_intercept_list_rules(h))).expect("rules json");
+        assert_eq!(listed[0]["action"]["serve"]["body"], "v2", "{listed}");
+        rift_stop(h);
+    }
+}
+
 /// Issue #655 AC7: an embedded host booting from a `configFile` gets the listener **and** its rules
 /// with no extra FFI call — the same declarative parity the CLI has. Without this the FFI block
 /// handling could be deleted wholesale and nothing would fail.

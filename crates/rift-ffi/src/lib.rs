@@ -40,7 +40,7 @@ use rift_http_proxy::admin_api::{
 use rift_http_proxy::config_loader::{self, ConfigSource};
 use rift_http_proxy::injection_gate;
 use rift_http_proxy::intercept_control::{
-    InterceptControl, InterceptStartError, InterceptStartOptions, InterceptStatus,
+    InterceptControl, InterceptOrigin, InterceptStartError, InterceptStartOptions, InterceptStatus,
 };
 use rift_http_proxy::intercept_rules::InterceptRule;
 use rift_http_proxy::server::{RunningMetrics, bind_metrics_server};
@@ -2056,7 +2056,7 @@ async fn build_admin_plane_inner(
                 }
                 handle
                     .intercept
-                    .start(block)
+                    .start_from(block, InterceptOrigin::ConfigFile)
                     .await
                     .context("configFile intercept")?;
                 *started_intercept = true;

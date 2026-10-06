@@ -13,6 +13,17 @@ record.
 
 ### Added
 
+- **`POST /admin/reload` re-applies the config file's `intercept.rules`** (#1271). A standalone rig
+  that keeps its whole mock in one file had to call the admin API to change a rule, though an edit
+  to an imposter in the same file reloaded. The block's rules now replace the rules the file
+  installed, atomically, keeping runtime rules after them, and the response reports
+  `"intercept": {"rulesSeeded": n, "rulesRuntime": m}`. The listener stays boot-only: a block that
+  changes `host`, `port`, `auth` or the CA source, a stopped listener, or one started by the flags
+  or at runtime is reported in `warnings` instead. A scripted rule without `--allowInjection`
+  refuses the whole reload. An HTTP imposter source answering `304` now serves its cached
+  `intercept` and `routes` blocks; it answered none, so a reload where another source changed
+  emptied the front door's routes.
+
 - **Intercept rules can be replaced atomically** (#1272). `PUT /intercept/rules` and
   `rift_intercept_replace_rules` swap the whole rule set in one step and answer with the stored set.
   Rules match first-to-last, so appending never overrides an installed rule, and `DELETE` then

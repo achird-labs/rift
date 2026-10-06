@@ -119,25 +119,53 @@ A successful reload returns `200` with the change set:
 }
 ```
 
-Reload applies the imposters and the [`routes` block](front-door.md). If the config file also
-declares an [`intercept` block](intercept-proxy.md#declare-it-in-the-config-file), that block is
-*not* re-applied —
-re-seeding would duplicate or clobber rules added at runtime, and rebinding the listener is a
-lifecycle change reload does not own. So that an edit to the block never *looks* applied, the
-response says so explicitly (the field is absent otherwise):
+Reload applies the imposters, the [`routes` block](front-door.md) and the rules of the
+[`intercept` block](intercept-proxy.md#declare-it-in-the-config-file).
+
+**Intercept rules reload; the listener does not.** When the intercept listener was started from
+this config file's `intercept` block and the block still describes it — the same `host`, `port`,
+`auth` and CA source — the block's `rules` replace the rules the file installed, after the
+imposters and routes apply. Rules added at runtime with `POST /intercept/rules` stay, after the
+file's rules, and the swap is atomic: a request in flight is matched against the old file rules or
+the new ones, never neither. The response reports it:
+
+```json
+{
+  "message": "Reloaded 3 imposter(s)",
+  "created": [], "replaced": [4600], "stubPatched": [], "deleted": [],
+  "intercept": { "rulesSeeded": 2, "rulesRuntime": 1 }
+}
+```
+
+After `PUT /intercept/rules` every stored rule counts as a runtime rule, and after
+`DELETE /intercept/rules` there are none, so the next reload puts the file's rules back in front.
+A reload that applies nothing applies no rules either: when every source reports no change (an
+`https:` source answering `304`), it returns before anything runs, and when an imposter fails to
+apply (`500`), neither the routes nor the intercept rules change. A rule that uses `inject` without
+`--allowInjection` refuses the whole reload before any imposter changes, as a scripted imposter
+does.
+
+Rebinding the listener, changing its credential or swapping its CA would break the trust the SUT
+already set up, so reload never does any of them. When it cannot apply the block's rules, the
+rules stay as they were, there is no `intercept` field, and `warnings` (absent otherwise) says why:
+
+- the block changed a listener field — the warning names which (`host`, `port`, `auth`, `ca`);
+  restart to apply it. A CA file pair is compared by its paths, so rotating the files in place also
+  needs a restart;
+- no listener is running (it was stopped with `DELETE /intercept`); restart to bind it;
+- the listener was started from the `--intercept-*` flags, or at runtime with `POST /intercept` or
+  FFI — the file's block does not own its rules;
+- the file no longer declares a block; the listener it started keeps running with its rules.
 
 ```json
 {
   "message": "Reloaded 3 imposter(s)",
   "warnings": [
-    "the config file's `intercept` block is applied at startup only and was NOT re-applied; ..."
+    "the config file changed the intercept listener's port; the listener is started at boot only, so its rules were NOT re-applied — restart to apply the block"
   ],
   "created": [], "replaced": [], "stubPatched": [], "deleted": []
 }
 ```
-
-Change intercept rules at runtime with `POST`/`DELETE /intercept/rules`, or restart to re-read the
-block.
 
 A [`routes` block](front-door.md) **is** re-applied. After the imposters apply successfully, the
 front door switches to the reloaded table in one step: requests after the reload use the new
