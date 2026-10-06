@@ -7,22 +7,6 @@
       "recordRequests": true,
       "stubs": [
         {
-          "id": "datafile-not-modified",
-          "predicates": [
-            { "equals": { "method": "GET" } },
-            { "matches": { "path": "^/datafiles/(auth/)?[A-Za-z0-9+/=_:-]+\\.json$" } },
-            { "equals": { "headers": { "If-Modified-Since": "Sat, 03 Oct 2026 12:00:00 GMT" } } }
-          ],
-          "responses": [
-            {
-              "is": {
-                "statusCode": 304,
-                "headers": { "Last-Modified": "Sat, 03 Oct 2026 12:00:00 GMT" }
-              }
-            }
-          ]
-        },
-        {
           "id": "datafile",
           "predicates": [
             { "equals": { "method": "GET" } },
@@ -34,11 +18,11 @@
                 "statusCode": 200,
                 "headers": {
                   "Content-Type": "application/json",
-                  "Last-Modified": "Sat, 03 Oct 2026 12:00:00 GMT",
                   "Cache-Control": "max-age=0, no-cache"
                 },
                 "body": "<%- stringify('fixtures/datafile.json') %>"
-              }
+              },
+              "_rift": { "conditional": true }
             }
           ]
         }

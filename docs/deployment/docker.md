@@ -257,8 +257,10 @@ HTTPS through it. Declare the listener and its rules in the config file, so it i
 }
 ```
 
-The CA for a config-file listener comes from the block: `caCertPath` / `caKeyPath` (files, as here)
-or `caCertPem` / `caKeyPem` (inline). The `RIFT_INTERCEPT_*` variables and `--intercept-*` flags
+The CA for a config-file listener comes from the block: `caCertPath` / `caKeyPath` (files, as here),
+`caCertPem` / `caKeyPem` (inline), or `caCertPemEnv` / `caKeyPemEnv` (the names of two environment
+variables holding the PEMs — e.g. set by CI or an orchestrator that injects secrets as variables;
+Docker/Compose secrets are mounted as files under `/run/secrets`, so use the path pair for those). The `RIFT_INTERCEPT_*` variables and `--intercept-*` flags
 belong to the other way of starting a listener -- `--intercept-port` with no block, rules added over
 the admin API afterwards. Setting any of them **alongside a block is a startup error**, so do not put
 `RIFT_INTERCEPT_CA_CERT_PEM` (or any `RIFT_INTERCEPT_*`) in the environment of a container that loads

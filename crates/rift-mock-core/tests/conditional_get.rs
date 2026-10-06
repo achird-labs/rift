@@ -614,3 +614,118 @@ async fn head_200_carries_the_get_validators() {
     assert_eq!(header(&head, "etag").as_deref(), Some(HELLO_ETAG));
     manager.delete_all().await;
 }
+
+// ===== Issue #1294: an identical replace is not a change =====
+
+/// A stub that answers "a" then "b" (so the cycle position is observable) with `conditional`.
+fn cycling_stub(id: &str, first: &str) -> Value {
+    json!({
+        "id": id,
+        "responses": [
+            { "is": { "statusCode": 200, "body": first }, "_rift": { "conditional": true } },
+            { "is": { "statusCode": 200, "body": "b" }, "_rift": { "conditional": true } }
+        ]
+    })
+}
+
+fn stub(v: Value) -> Stub {
+    serde_json::from_value(v).expect("valid stub")
+}
+
+async fn last_modified_and_body(port: u16) -> (String, String) {
+    let response = get(port, &[]).await;
+    let lm = header(&response, "last-modified").expect("Last-Modified");
+    (lm, response.text().await.expect("body"))
+}
+
+#[tokio::test]
+async fn replace_stub_with_identical_content_keeps_last_modified_and_cursor() {
+    let manager = ImposterManager::new();
+    let port = create(
+        &manager,
+        json!({ "port": 0, "protocol": "http", "stubs": [cycling_stub("s", "a")] }),
+    )
+    .await;
+    let (stamp, body) = last_modified_and_body(port).await;
+    assert_eq!(body, "a");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    manager
+        .replace_stub(port, 0, stub(cycling_stub("s", "a")))
+        .await
+        .expect("replace");
+    let (after, body) = last_modified_and_body(port).await;
+    assert_eq!(after, stamp, "an identical replace is not a change");
+    assert_eq!(body, "b", "the cycle position is kept, as it always was");
+    manager.delete_all().await;
+}
+
+#[tokio::test]
+async fn replace_stub_by_id_with_identical_content_keeps_last_modified() {
+    let manager = ImposterManager::new();
+    let port = create(
+        &manager,
+        json!({ "port": 0, "protocol": "http", "stubs": [cycling_stub("s", "a")] }),
+    )
+    .await;
+    let (stamp, _) = last_modified_and_body(port).await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    manager
+        .replace_stub_by_id(port, "s", stub(cycling_stub("s", "a")))
+        .await
+        .expect("replace");
+    let (after, _) = last_modified_and_body(port).await;
+    assert_eq!(after, stamp);
+    manager.delete_all().await;
+}
+
+/// The bulk replace keeps its pinned contract — every cycle restarts — while an unchanged stub
+/// keeps its `Last-Modified`.
+#[tokio::test]
+async fn replace_stubs_with_an_identical_set_keeps_last_modified_but_resets_the_cycle() {
+    let manager = ImposterManager::new();
+    let port = create(
+        &manager,
+        json!({ "port": 0, "protocol": "http", "stubs": [cycling_stub("s", "a")] }),
+    )
+    .await;
+    let (stamp, body) = last_modified_and_body(port).await;
+    assert_eq!(body, "a");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    manager
+        .replace_stubs(port, vec![stub(cycling_stub("s", "a"))])
+        .await
+        .expect("replace all");
+    let (after, body) = last_modified_and_body(port).await;
+    assert_eq!(after, stamp, "the content did not change");
+    assert_eq!(body, "a", "a bulk replace still restarts the cycle");
+    manager.delete_all().await;
+}
+
+/// The negative: changed content still moves the stamp, on every replace door.
+#[tokio::test]
+async fn replace_with_changed_content_moves_last_modified() {
+    let manager = ImposterManager::new();
+    let port = create(
+        &manager,
+        json!({ "port": 0, "protocol": "http", "stubs": [cycling_stub("s", "a")] }),
+    )
+    .await;
+    let (stamp, _) = last_modified_and_body(port).await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    manager
+        .replace_stub(port, 0, stub(cycling_stub("s", "a2")))
+        .await
+        .expect("replace");
+    let (after_one, _) = last_modified_and_body(port).await;
+    assert_ne!(after_one, stamp, "replace_stub with new content");
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    manager
+        .replace_stubs(port, vec![stub(cycling_stub("s", "a3"))])
+        .await
+        .expect("replace all");
+    let (after_all, _) = last_modified_and_body(port).await;
+    assert_ne!(after_all, after_one, "replace_stubs with new content");
+    manager.delete_all().await;
+}

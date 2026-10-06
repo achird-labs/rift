@@ -15,6 +15,14 @@ record.
 
 - **W019 and `conditional_never_runs` for a `_rift.conditional` that can never fire** (#1296): `rift-lint` and the engine's `_rift.warnings` now flag it on a script-only response, or on an `is` response behind a top-level `method` predicate that excludes GET and HEAD.
 
+- **A config-file `intercept` block can take its CA from environment variables** (#1293):
+  `"caCertPemEnv": "INTERCEPT_CA_CERT", "caKeyPemEnv": "INTERCEPT_CA_KEY"` names two variables
+  holding the PEMs, read when the listener starts (also accepted by `POST /intercept` and
+  `rift_start_intercept`). ECS/Fargate delivers secrets only as environment variables, and the
+  `RIFT_INTERCEPT_CA_*_PEM` variables count as flags that a block refuses to share the listener with,
+  so a task had to write the secret to a file in a shell entrypoint first. An unset variable fails
+  the start, naming it.
+
 - **Docs: intercept proxy in containers** (#1275): a new [ECS / Fargate deployment page](docs/deployment/ecs-fargate.md) (a reference task definition), plus intercept sections in the Docker and Kubernetes guides, the `RIFT_INTERCEPT_*` variables in the deployment table and the image's `Dockerfile` comments.
 
 - **A runnable standalone intercept demo** (#1276): `docs/demo/docker-compose-intercept.yml` puts a
@@ -92,6 +100,10 @@ record.
   `ImposterError::ExplicitPortRequired`, a new variant of that public enum, and neither deletes.
   `apply_config` now runs the same per-port code. Documented in `docs/embedding/server.md`.
 
+### Changed
+
+- **templates/optimizely: the datafile CDN now uses `_rift.conditional`** (#1295): `Last-Modified` is the stub's load time and an `ETag` is served; a reload that changes `fixtures/datafile.json` invalidates pollers without touching `imposters.json`. Wire-visible: the fixed `Sat, 03 Oct 2026 12:00:00 GMT` stamp is gone, so a test that copied it as an `If-Modified-Since` will now get a 200 or a different 304 timing.
+
 ### Performance
 
 - **Re-applying an unchanged imposter set costs a fraction of creating it** (#1254). Every
@@ -106,6 +118,12 @@ record.
   sequencer also stops serializing the matched stub on every response decision.
 
 ### Fixed
+
+- **An admin stub replace that changes nothing no longer moves `Last-Modified: load`** (#1294).
+  `PUT /imposters/{port}/stubs/{index}`, `…/stubs/by-id/{id}` and `PUT /imposters/{port}/stubs`
+  re-stamped every stub they touched, so `_rift.conditional` pollers re-downloaded a body that had
+  not changed. A byte-identical stub now keeps its stamp; the bulk `PUT …/stubs` still restarts
+  every response cycle, as before.
 
 - **A config file that fails to parse after a `stringify` now says why** (#1279). Written without
   quotes, `"body": <%- stringify('datafile.json') %>` failed with only serde's

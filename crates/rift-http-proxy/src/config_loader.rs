@@ -570,6 +570,26 @@ mod tests {
         assert_eq!(auth.password, "s3cr3t");
     }
 
+    /// Issue #1293: the env-named CA keys are part of the block (it stays `deny_unknown_fields`).
+    #[test]
+    fn load_configs_full_reads_env_named_ca_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "cfg.json",
+            r#"{ "imposters": [], "intercept": { "caCertPemEnv": "A", "caKeyPemEnv": "B" } }"#,
+        );
+        let intercept = load_configs_full(&ConfigSource::File {
+            path,
+            no_parse: false,
+        })
+        .expect("loads")
+        .intercept
+        .expect("block read");
+        assert_eq!(intercept.ca_cert_pem_env.as_deref(), Some("A"));
+        assert_eq!(intercept.ca_key_pem_env.as_deref(), Some("B"));
+    }
+
     /// AC2: absent block → exactly today's behaviour, imposters untouched.
     #[test]
     fn load_configs_full_without_intercept_block_is_none() {

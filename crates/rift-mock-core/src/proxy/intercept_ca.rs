@@ -73,16 +73,73 @@ impl std::fmt::Debug for CaSource {
     }
 }
 
+/// Every way a start request can name its CA, before they are reduced to one [`CaSource`]: a file
+/// pair, an inline PEM pair, or a pair of environment variable *names* whose values are the PEMs
+/// (issue #1293 — a secret store such as ECS's delivers secrets only as environment variables).
+#[derive(Default, Clone)]
+pub struct CaInputs {
+    pub cert_path: Option<PathBuf>,
+    pub key_path: Option<PathBuf>,
+    pub cert_pem: Option<String>,
+    pub key_pem: Option<String>,
+    pub cert_pem_env: Option<String>,
+    pub key_pem_env: Option<String>,
+}
+
+impl std::fmt::Debug for CaInputs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Inline PEM is never rendered (the key is secret material); paths and env var *names* are.
+        f.debug_struct("CaInputs")
+            .field("cert_path", &self.cert_path)
+            .field("key_path", &self.key_path)
+            .field("cert_pem", &self.cert_pem.as_ref().map(|_| "<pem>"))
+            .field("key_pem", &self.key_pem.as_ref().map(|_| "<redacted>"))
+            .field("cert_pem_env", &self.cert_pem_env)
+            .field("key_pem_env", &self.key_pem_env)
+            .finish()
+    }
+}
+
 impl CaSource {
-    /// Reduce the three optional pairs to a single source, rejecting a half-supplied pair or more
-    /// than one pair. Both path fields empty and both PEM fields empty → [`CaSource::Generate`].
-    /// Error messages never include PEM contents.
+    /// Reduce a file pair and an inline PEM pair to a single source. See
+    /// [`from_inputs`](Self::from_inputs), which also takes an env-named pair.
     pub fn resolve(
         cert_path: Option<PathBuf>,
         key_path: Option<PathBuf>,
         cert_pem: Option<String>,
         key_pem: Option<String>,
     ) -> anyhow::Result<Self> {
+        Self::from_inputs(CaInputs {
+            cert_path,
+            key_path,
+            cert_pem,
+            key_pem,
+            ..CaInputs::default()
+        })
+    }
+
+    /// Reduce the three optional pairs to a single source, rejecting a half-supplied pair or more
+    /// than one pair; none at all → [`CaSource::Generate`]. An env-named pair is read from the
+    /// process environment here and becomes [`CaSource::Pem`]. Error messages never include PEM
+    /// contents.
+    pub fn from_inputs(inputs: CaInputs) -> anyhow::Result<Self> {
+        Self::from_inputs_with_env(inputs, &|name| std::env::var(name))
+    }
+
+    /// [`from_inputs`](Self::from_inputs) with the environment lookup supplied, so the rules can be
+    /// tested without writing to the process environment.
+    pub(crate) fn from_inputs_with_env(
+        inputs: CaInputs,
+        env: &dyn Fn(&str) -> Result<String, std::env::VarError>,
+    ) -> anyhow::Result<Self> {
+        let CaInputs {
+            cert_path,
+            key_path,
+            cert_pem,
+            key_pem,
+            cert_pem_env,
+            key_pem_env,
+        } = inputs;
         let paths = match (cert_path, key_path) {
             (Some(cert), Some(key)) => Some((cert, key)),
             (None, None) => None,
@@ -97,12 +154,27 @@ impl CaSource {
                 "intercept CA cert and key PEM must be provided together (or both omitted)"
             ),
         };
-        match (paths, pem) {
-            (Some((cert, key)), None) => Ok(CaSource::Paths { cert, key }),
-            (None, Some((cert, key))) => Ok(CaSource::Pem { cert, key }),
-            (None, None) => Ok(CaSource::Generate),
-            (Some(_), Some(_)) => anyhow::bail!(
+        let env_names = match (cert_pem_env, key_pem_env) {
+            (Some(cert), Some(key)) => Some((cert, key)),
+            (None, None) => None,
+            _ => anyhow::bail!(
+                "intercept CA cert and key env var names must be provided together (or both omitted)"
+            ),
+        };
+        match (paths, pem, env_names) {
+            (Some((cert, key)), None, None) => Ok(CaSource::Paths { cert, key }),
+            (None, Some((cert, key)), None) => Ok(CaSource::Pem { cert, key }),
+            (None, None, Some((cert, key))) => Ok(CaSource::Pem {
+                cert: read_named_pem(env, &cert, "caCertPemEnv")?,
+                key: read_named_pem(env, &key, "caKeyPemEnv")?,
+            }),
+            (None, None, None) => Ok(CaSource::Generate),
+            (Some(_), Some(_), None) => anyhow::bail!(
                 "intercept CA path and inline PEM are mutually exclusive — supply only one"
+            ),
+            _ => anyhow::bail!(
+                "intercept CA path, inline PEM and env-named PEM are mutually exclusive — supply \
+                 only one"
             ),
         }
     }
@@ -112,6 +184,23 @@ impl CaSource {
     pub fn is_generate(&self) -> bool {
         matches!(self, CaSource::Generate)
     }
+}
+
+/// The value of the environment variable `name`, which the `key` option named. An unset or
+/// non-UTF-8 variable is an error naming both, never an empty CA and never a fallback.
+fn read_named_pem(
+    env: &dyn Fn(&str) -> Result<String, std::env::VarError>,
+    name: &str,
+    key: &str,
+) -> anyhow::Result<String> {
+    env(name).map_err(|e| match e {
+        std::env::VarError::NotPresent => {
+            anyhow::anyhow!("environment variable {name} (named by {key}) is not set")
+        }
+        std::env::VarError::NotUnicode(_) => {
+            anyhow::anyhow!("environment variable {name} (named by {key}) is not valid UTF-8")
+        }
+    })
 }
 
 /// How [`CertificateAuthority::generate_with`] shapes a CA an operator means to keep (issue
@@ -808,5 +897,128 @@ mod tests {
             .map(|c| std::str::from_utf8(c).expect("base64 is ASCII"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    // ===== Issue #1293: a CA pair named by environment variables =====
+
+    fn env_of(
+        vars: &'static [(&'static str, &'static str)],
+    ) -> impl Fn(&str) -> Result<String, std::env::VarError> {
+        move |name| {
+            vars.iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| (*v).to_string())
+                .ok_or(std::env::VarError::NotPresent)
+        }
+    }
+
+    fn named(cert: &str, key: &str) -> CaInputs {
+        CaInputs {
+            cert_pem_env: Some(cert.to_string()),
+            key_pem_env: Some(key.to_string()),
+            ..CaInputs::default()
+        }
+    }
+
+    #[test]
+    fn an_env_named_pair_resolves_to_the_variables_pem() {
+        let lookup = env_of(&[("CA_C", "cert-pem"), ("CA_K", "key-pem")]);
+        match CaSource::from_inputs_with_env(named("CA_C", "CA_K"), &lookup).expect("resolves") {
+            CaSource::Pem { cert, key } => {
+                assert_eq!(cert, "cert-pem");
+                assert_eq!(key, "key-pem");
+            }
+            other => panic!("expected Pem, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_env_named_pair_is_both_or_neither_and_exclusive() {
+        let lookup = env_of(&[("CA_C", "c"), ("CA_K", "k")]);
+        let half = CaInputs {
+            cert_pem_env: Some("CA_C".into()),
+            ..CaInputs::default()
+        };
+        let err = CaSource::from_inputs_with_env(half, &lookup).expect_err("half pair");
+        assert_eq!(
+            err.to_string(),
+            "intercept CA cert and key env var names must be provided together (or both omitted)"
+        );
+
+        let with_inline = CaInputs {
+            cert_pem: Some("c".into()),
+            key_pem: Some("k".into()),
+            ..named("CA_C", "CA_K")
+        };
+        let with_paths = CaInputs {
+            cert_path: Some("c.pem".into()),
+            key_path: Some("k.pem".into()),
+            ..named("CA_C", "CA_K")
+        };
+        for inputs in [with_inline, with_paths] {
+            let err = CaSource::from_inputs_with_env(inputs, &lookup).expect_err("two sources");
+            assert_eq!(
+                err.to_string(),
+                "intercept CA path, inline PEM and env-named PEM are mutually exclusive — supply only one"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unset_or_non_unicode_variable_is_named_and_never_defaults() {
+        let lookup = env_of(&[("CA_K", "k")]);
+        let err = CaSource::from_inputs_with_env(named("CA_C", "CA_K"), &lookup)
+            .expect_err("cert variable unset");
+        assert_eq!(
+            err.to_string(),
+            "environment variable CA_C (named by caCertPemEnv) is not set"
+        );
+        let not_unicode = |name: &str| match name {
+            "CA_C" => Ok("c".to_string()),
+            _ => Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
+                "x",
+            ))),
+        };
+        let err = CaSource::from_inputs_with_env(named("CA_C", "CA_K"), &not_unicode)
+            .expect_err("key variable not unicode");
+        assert_eq!(
+            err.to_string(),
+            "environment variable CA_K (named by caKeyPemEnv) is not valid UTF-8"
+        );
+    }
+
+    #[test]
+    fn an_env_named_pair_is_not_a_generated_ca() {
+        let lookup = env_of(&[("CA_C", "c"), ("CA_K", "k")]);
+        let source = CaSource::from_inputs_with_env(named("CA_C", "CA_K"), &lookup).unwrap();
+        assert!(!source.is_generate(), "returnCaKey must stay refused");
+    }
+
+    #[test]
+    fn ca_inputs_debug_never_prints_inline_pem() {
+        let inputs = CaInputs {
+            key_pem: Some("-----BEGIN PRIVATE KEY-----supersecret".into()),
+            cert_pem: Some("-----BEGIN CERTIFICATE-----secret".into()),
+            key_pem_env: Some("CA_K".into()),
+            ..CaInputs::default()
+        };
+        let rendered = format!("{inputs:?}");
+        assert!(!rendered.contains("secret"), "{rendered}");
+        assert!(
+            rendered.contains("CA_K"),
+            "env var names are shown: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_four_argument_resolve_is_unchanged() {
+        let err = CaSource::resolve(
+            Some("c".into()),
+            Some("k".into()),
+            Some("c".into()),
+            Some("k".into()),
+        )
+        .expect_err("two sources");
+        assert!(err.to_string().contains("mutually exclusive"), "{err}");
     }
 }

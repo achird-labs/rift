@@ -14,7 +14,6 @@ LOGX=${LOGX:-http://localhost:4601}
 ODP=${ODP:-http://localhost:4602}
 ADMIN=${ADMIN:-http://localhost:2525}
 PROXY=${PROXY:-http://127.0.0.1:4610}
-LM='Sat, 03 Oct 2026 12:00:00 GMT'
 ODP_KEY='mock-odp-public-key'
 
 TMP="$(mktemp -d)"
@@ -58,14 +57,23 @@ expect_json "datafile body parses, 3 flags, ODP host points at the mock" \
    and {f["key"] for f in d["featureFlags"]} == {"checkout_redesign", "vip_support", "legacy_search"}
    and d["integrations"][0]["host"].endswith(":4602")' \
   "$CDN/datafiles/MOCK_SDK_KEY.json"
-curl -sS -m 10 -D "$TMP/headers" -o /dev/null "$CDN/datafiles/MOCK_SDK_KEY.json" || fail "GET datafile headers"
-if tr -d '\r' <"$TMP/headers" | grep -qi "^last-modified: $LM\$"; then
-  ok "Last-Modified header present"
-else
-  fail "Last-Modified header missing or wrong"
-fi
-expect_status "If-Modified-Since (current) -> 304" 304 -H "If-Modified-Since: $LM" "$CDN/datafiles/MOCK_SDK_KEY.json"
-expect_status "If-Modified-Since (stale) -> 200" 200 -H "If-Modified-Since: Mon, 01 Jan 2024 00:00:00 GMT" "$CDN/datafiles/MOCK_SDK_KEY.json"
+# Validators are served by `_rift.conditional`: capture them from a plain GET, then replay them.
+URL="$CDN/datafiles/MOCK_SDK_KEY.json"
+header() { tr -d '\r' <"$1" | sed -n "s/^$2: //Ip" | head -n 1; }
+if ! curl -sS -m 10 -D "$TMP/headers" -o /dev/null "$URL"; then fail "GET datafile headers"; fi
+ETAG="$(header "$TMP/headers" etag)"
+LM="$(header "$TMP/headers" last-modified)"
+if printf '%s' "$ETAG" | grep -Eq '^"fnv1a64-[0-9a-f]{16}"$'; then ok "ETag is a strong fnv1a64 tag ($ETAG)"; else fail "ETag missing or malformed: '$ETAG'"; fi
+if printf '%s' "$LM" | grep -Eq '^[A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT$'; then ok "Last-Modified is an IMF-fixdate ($LM)"; else fail "Last-Modified missing or malformed: '$LM'"; fi
+
+if ! curl -sS -m 10 -D "$TMP/h304" -o "$TMP/b304" -H "If-None-Match: $ETAG" "$URL"; then fail "If-None-Match request failed"; fi
+if head -n 1 "$TMP/h304" | grep -q ' 304'; then ok "If-None-Match (current ETag) -> 304"; else fail "If-None-Match (current ETag) -> 304 (got: $(head -n 1 "$TMP/h304"))"; fi
+if [ ! -s "$TMP/b304" ]; then ok "304 has an empty body"; else fail "304 has a body"; fi
+if [ -n "$(header "$TMP/h304" last-modified)" ]; then ok "304 carries Last-Modified"; else fail "304 is missing Last-Modified"; fi
+if [ -n "$(header "$TMP/h304" cache-control)" ]; then ok "304 carries Cache-Control"; else fail "304 is missing Cache-Control"; fi
+expect_status "If-Modified-Since (captured Last-Modified) -> 304" 304 -H "If-Modified-Since: $LM" "$URL"
+expect_status "If-None-Match (other tag) -> 200" 200 -H 'If-None-Match: "nope"' "$URL"
+expect_status "If-Modified-Since (stale) -> 200" 200 -H "If-Modified-Since: Mon, 01 Jan 2024 00:00:00 GMT" "$URL"
 expect_status "authenticated datafile path -> 200" 200 -H 'Authorization: Bearer x' "$CDN/datafiles/auth/MOCK_SDK_KEY.json"
 expect_status "unknown path -> 404" 404 "$CDN/nope"
 
