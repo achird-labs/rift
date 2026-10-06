@@ -119,6 +119,13 @@ record.
 
 ### Fixed
 
+- **A `_rift.conditional` change within the previous one's second is no longer answered `304`**
+  (#1301). `Last-Modified: load` and `If-Modified-Since` are whole seconds, so two changes inside
+  one second shared a stamp, and a client that revalidates with `If-Modified-Since` alone (the
+  Optimizely Java and Python SDKs) kept the old body until the content changed again. An admin or
+  reload change in the same second is now stamped one second later, also across a reload that
+  restarts the imposter and a delete and re-create on the same port.
+
 - **An admin stub replace that changes nothing no longer moves `Last-Modified: load`** (#1294).
   `PUT /imposters/{port}/stubs/{index}`, `…/stubs/by-id/{id}` and `PUT /imposters/{port}/stubs`
   re-stamped every stub they touched, so `_rift.conditional` pollers re-downloaded a body that had

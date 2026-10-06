@@ -442,7 +442,12 @@ impl Imposter {
                     let mut merged = stubs[idx].stub.clone();
                     merged.responses.extend(stub.responses);
                     let total = merged.responses.len();
-                    stubs[idx] = Arc::new(stubs[idx].with_stub(merged));
+                    // Recording stays on the wall clock, not the load clock (issue #1301): it builds
+                    // a state per proxied request, and one stamp each would push the clock a second
+                    // ahead per request. But never stamp earlier than the stub already served — an
+                    // admin change may have left that stamp ahead of the wall clock.
+                    let at = stubs[idx].loaded_at().max(chrono::Utc::now());
+                    stubs[idx] = Arc::new(stubs[idx].with_stub(merged).with_loaded_at(at));
                     debug!(
                         "Appended response to existing stub at index {idx} (proxyAlways mode, {total} total responses)"
                     );

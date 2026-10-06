@@ -319,6 +319,13 @@ pub struct ImposterManager {
     /// (issue #1158) — otherwise a second write could share its temp file, or a delete could run
     /// before its late rename.
     persist_lock: Arc<tokio::sync::Mutex<()>>,
+    /// The last `_rift.conditional` load stamp, in seconds, of each port's deleted imposter (issue
+    /// #1301). A client polls a URL, not an imposter, so the next imposter on that port continues
+    /// the clock instead of stamping from the wall clock again — which would answer `304` for new
+    /// content when the re-create lands in the second the old imposter last stamped. Covers every
+    /// re-create: a reload that rewrites most stubs, `PUT /imposters`, delete + create. One entry
+    /// per port ever deleted: at most 65,536, never evicted.
+    load_floors: parking_lot::Mutex<std::collections::HashMap<u16, i64>>,
     /// TLS defaults for HTTPS imposters (issue #206)
     tls_defaults: TlsDefaults,
     /// Observer for config mutations (issue #316)
@@ -387,6 +394,7 @@ impl ImposterManager {
             shutdown_tx,
             datadir: datadir.map(Arc::new),
             persist_lock: Arc::new(tokio::sync::Mutex::new(())),
+            load_floors: parking_lot::Mutex::new(std::collections::HashMap::new()),
             tls_defaults: TlsDefaults::default(),
             event_listener: None,
             response_decorator: None,
@@ -872,6 +880,10 @@ impl ImposterManager {
         )
         .map_err(|e| ImposterError::FlowStoreConfig(format!("{e:#}")))?;
         imposter.set_persistence(persistence);
+        let floor = self.load_floors.lock().get(&port).copied();
+        if let Some(floor) = floor {
+            imposter.continue_load_clock(floor);
+        }
 
         // Inject the shared proxy-recording store, if one is registered (issue #315);
         // otherwise the imposter keeps its private per-mode LocalProxyStore.
@@ -1425,6 +1437,18 @@ impl ImposterManager {
 
     /// Delete without emitting an event, so a wholesale replace in `apply_config` reports one
     /// `Replaced` instead of Deleted+Created. `unlink_file` removes the imposter's `{port}.json`.
+    /// Keep `imposter`'s load clock for the next imposter on `port` (issue #1301). Recorded before
+    /// the imposter leaves the map, so a same-port create that wins the freed slot already sees it;
+    /// a delete that then fails leaves a floor behind, which is harmless — floors only rise.
+    fn record_load_floor(&self, port: u16, imposter: &Imposter) {
+        let floor = imposter.load_clock.floor_secs();
+        self.load_floors
+            .lock()
+            .entry(port)
+            .and_modify(|f| *f = (*f).max(floor))
+            .or_insert(floor);
+    }
+
     async fn delete_imposter_inner(
         &self,
         port: u16,
@@ -1439,10 +1463,12 @@ impl ImposterManager {
             let _persist = self.persist_lock.lock().await;
             let imposter = self.get_imposter(port)?;
             self.remove_persisted_imposter(&imposter).await?;
+            self.record_load_floor(port, &imposter);
             self.imposters
                 .remove_if_same(port, &imposter)
                 .ok_or(ImposterError::NotFound(port))?
         } else {
+            self.record_load_floor(port, &*self.get_imposter(port)?);
             self.imposters
                 .remove(port)
                 .ok_or(ImposterError::NotFound(port))?

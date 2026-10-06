@@ -499,10 +499,17 @@ A client that polls with validators (a CDN-hosted datafile, a feature-flag SDK) 
   tokens. A templated or behavior-altered body gets its own tag per request. The tag is the same on
   every process and node for the same bytes.
 - **`lastModified`** (default `"load"`): `"load"` is the time the stub was loaded: when it was
-  created, or last changed by the admin API (a replace that leaves the stub byte-identical keeps it) or a reload. A reload that leaves the stub unchanged
-  keeps it; one that rewrites most of an imposter's stubs restarts the imposter, which re-stamps
-  them all, as does a restart. Otherwise an HTTP-date in the `Sat, 03 Oct 2026 12:00:00 GMT` form,
-  served verbatim. Any other string is refused when the config is loaded.
+  created, or last changed by the admin API (a replace that leaves the stub byte-identical keeps
+  it) or a reload. A reload that leaves the stub unchanged keeps it; one that rewrites most of an
+  imposter's stubs restarts the imposter, which re-stamps them all, as does a restart. Otherwise an
+  HTTP-date in the `Sat, 03 Oct 2026 12:00:00 GMT` form, served verbatim. Any other string is
+  refused when the config is loaded.
+
+  `"load"` stamps are whole seconds, and a change made through the admin API or a reload in the
+  same second as the previous one is stamped one second after it — including across a reload that
+  restarts the imposter and a delete and re-create on the same port (not across a process restart). A client that revalidates with
+  `If-Modified-Since` alone (the Optimizely SDKs do) therefore always sees a change. The cost is
+  that rapid changes can stamp `Last-Modified` up to a second per change ahead of `Date`.
 
 On a script-only response, or behind a non-GET method predicate, it never fires; `rift-lint` W019 says so.
 
