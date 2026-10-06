@@ -563,6 +563,16 @@ jobs:
             "sdk-conformance-${{ steps.version.outputs.VERSION }}.tar.gz"
           ls -l sdk-conformance-*.tar.gz*
 
+      # Issue #1281: package rift-templates-<version>.tar.gz — the vendor-mock template catalog
+      # (templates/), each template's requires.rift stamped to this release. CI's `templates` job
+      # proves every template boots and passes its smoke test on this commit; here we only package.
+      # Users extract it and run `rift --configfile rift-templates-<version>/<name>/imposters.json`.
+      - name: Generate vendor-mock templates
+        run: |
+          ./scripts/gen-templates.sh "${{ steps.version.outputs.VERSION }}" \
+            "rift-templates-${{ steps.version.outputs.VERSION }}.tar.gz"
+          ls -l rift-templates-*.tar.gz*
+
       - name: Generate release notes
         id: notes
         run: |
@@ -673,6 +683,8 @@ jobs:
             ffi-manifest.json
             sdk-conformance-*.tar.gz
             sdk-conformance-*.tar.gz.sha256
+            rift-templates-*.tar.gz
+            rift-templates-*.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

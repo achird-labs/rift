@@ -158,6 +158,56 @@ fn the_documented_examples_directory_lint_passes() {
     assert_eq!(out.status.code(), Some(0), "{report}");
 }
 
+/// Issue #1281: every vendor-mock template's entrypoint lints clean. Each entrypoint is linted as a
+/// *file*: a directory run would read the template's `template.json` manifest as an imposter. The
+/// templates are found by glob, so a new one is gated without editing this test.
+#[test]
+fn the_shipped_templates_lint_clean() {
+    let templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates");
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&templates)
+        .expect("templates/ exists")
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    assert!(!dirs.is_empty(), "templates/ moved or emptied?");
+    for dir in dirs {
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("template.json")).expect("read template.json"),
+        )
+        .expect("template.json is JSON");
+        let entrypoint = dir.join(
+            manifest["entrypoint"]
+                .as_str()
+                .expect("template.json has a string `entrypoint`"),
+        );
+        let out = Command::new(BIN)
+            .args([entrypoint.to_str().unwrap(), "-o", "json"])
+            .output()
+            .expect("run rift-lint");
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "stdout is not JSON ({e}); stderr: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+        assert_eq!(
+            report["errors"],
+            0,
+            "rift-lint {} reported errors: {report}",
+            entrypoint.display()
+        );
+        assert_eq!(
+            report["warnings"],
+            0,
+            "rift-lint {} reported warnings: {report}",
+            entrypoint.display()
+        );
+        assert_eq!(report["files_checked"], 1, "{report}");
+        assert_eq!(out.status.code(), Some(0), "{report}");
+    }
+}
+
 /// Issue #1091: run the binary over a directory of single-imposter files, one per `(name, port)`.
 fn lint_ports_dir(ports: &[(&str, &str)]) -> (serde_json::Value, Option<i32>) {
     let files: Vec<(&str, String)> = ports

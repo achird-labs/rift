@@ -53,3 +53,6 @@ demos in [`../docs/demo/`](../docs/demo/), each of which comes up in one command
 - `docker-compose-intercept.yml` — the standalone HTTPS intercept proxy
 
 See also the [Features documentation](https://achird-labs.github.io/rift/features/).
+
+To mock a third-party SaaS that your code reaches through the vendor's SDK, start from a vendor-mock
+template in [`../templates/`](../templates/) (catalog, rules and layout in its `README.md`).
