@@ -360,7 +360,8 @@ Replace a stub at a specific index. The body is the bare stub, with no `{"stub":
 
 ### DELETE /imposters/{port}/stubs/{index}
 
-Delete a stub at a specific index. **Response:** `200 OK` with the imposter detail.
+Delete a stub at a specific index. **Response:** `200 OK` with the imposter detail. The stubs behind
+it get a new `_rift.conditional` `Last-Modified: load`, since they may now answer its requests.
 
 ---
 

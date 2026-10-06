@@ -150,6 +150,48 @@ impl LoadClock {
     }
 }
 
+/// Whether `a` and `b` are eligible for exactly the same requests (issue #1303): the predicates and
+/// the gates evaluated next to them. Responses, `id` and `route_pattern` (which only fills path
+/// params) cannot change which stub answers a request, so they are not compared.
+pub(crate) fn matches_alike(a: &Stub, b: &Stub) -> bool {
+    a.predicates == b.predicates
+        && a.space == b.space
+        && a.scenario_name == b.scenario_name
+        && a.required_scenario_state == b.required_scenario_state
+}
+
+/// Stamp the states in `range` as loaded at `at`, keeping cycler and slot (issue #1303): first
+/// match wins, so when a stub ahead of these is removed, moved or narrowed, they may now answer
+/// requests it answered, and a client holding its newer stamp must not be told `304`.
+pub(crate) fn restamp(
+    stubs: &mut [Arc<StubState>],
+    range: impl std::ops::RangeBounds<usize>,
+    at: chrono::DateTime<chrono::Utc>,
+) {
+    for state in &mut stubs[(range.start_bound().cloned(), range.end_bound().cloned())] {
+        *state = Arc::new(StubState::clone(state).with_loaded_at(at));
+    }
+}
+
+/// The first position at which `old` and `new` stop being eligible for the same requests, stub by
+/// stub (issue #1303). Every stub from there on may answer requests differently, so it takes the
+/// operation's stamp. Positional on purpose: an insert in the middle also re-stamps the stubs
+/// behind it, which costs a poller one refetch but never serves a stale `304`.
+pub(crate) fn first_divergence<'a>(
+    old: impl IntoIterator<Item = &'a Stub>,
+    new: impl IntoIterator<Item = &'a Stub>,
+) -> usize {
+    let mut new = new.into_iter();
+    let mut k = 0;
+    for a in old {
+        match new.next() {
+            Some(b) if matches_alike(a, b) => k += 1,
+            _ => return k,
+        }
+    }
+    k
+}
+
 #[derive(Debug, Clone)]
 pub struct StubState {
     pub(crate) stub: Stub,
@@ -591,34 +633,26 @@ impl Imposter {
             if stubs.iter().all(|s| s.loaded_at.timestamp() > floor_secs) {
                 return;
             }
-            let at = self.load_clock.next();
-            for state in stubs.iter_mut() {
-                *state = Arc::new(StubState::clone(state).with_loaded_at(at));
-            }
+            restamp(stubs, .., self.load_clock.next());
         });
     }
 
-    /// Replace all stubs. Every slot is new, so every response cycle restarts; a stub whose
-    /// content was already present keeps that content's `Last-Modified: load` (issue #1294), and
-    /// the rest share one stamp from the load clock (issue #1301).
+    /// Replace all stubs. Every slot is new, so every response cycle restarts. Stamps are aligned
+    /// by position: up to the first position where the old and new stubs stop matching alike, a
+    /// stub with unchanged content keeps its `Last-Modified: load` (issue #1294); every other stub
+    /// shares one stamp from the load clock (issues #1301, #1303) — a stub that moved keeps nothing,
+    /// since what it answers may have changed.
     pub fn replace_stubs(&self, new_stubs: Vec<Stub>) {
         self.mutate_stubs(|stubs| {
-            let mut loaded: std::collections::HashMap<u64, chrono::DateTime<chrono::Utc>> =
-                std::collections::HashMap::with_capacity(stubs.len());
-            for state in stubs.iter() {
-                loaded
-                    .entry(state.content_hash())
-                    .and_modify(|at| *at = (*at).min(state.loaded_at()))
-                    .or_insert(state.loaded_at());
-            }
-            stubs.clear();
-            // Taken on the first new content only: an identical bulk replace must not push the clock.
+            let k = first_divergence(stubs.iter().map(|s| &s.stub), new_stubs.iter());
+            let old: Vec<Arc<StubState>> = std::mem::take(stubs);
+            // Taken on the first stub that needs it only: an identical replace must not push the clock.
             let mut fresh: Option<chrono::DateTime<chrono::Utc>> = None;
-            stubs.extend(new_stubs.into_iter().map(|s| {
+            stubs.extend(new_stubs.into_iter().enumerate().map(|(p, s)| {
                 let hash = crate::imposter::reconcile::content_hash(&s);
-                let at = match loaded.get(&hash) {
-                    Some(at) => *at,
-                    None => *fresh.get_or_insert_with(|| self.load_clock.next()),
+                let at = match old.get(p) {
+                    Some(prev) if p < k && prev.content_hash() == hash => prev.loaded_at(),
+                    _ => *fresh.get_or_insert_with(|| self.load_clock.next()),
                 };
                 Arc::new(StubState::with_hash(s, hash).with_loaded_at(at))
             }));
@@ -866,6 +900,84 @@ pub use verify::{ClosestMatch, FailedPredicate, VerifyOptions, VerifyOutcome};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ===== Issue #1303: positional alignment =====
+
+    fn stub_json(v: serde_json::Value) -> Stub {
+        serde_json::from_value(v).expect("stub")
+    }
+
+    #[test]
+    fn stubs_differing_only_in_responses_match_alike() {
+        let a = stub_json(
+            serde_json::json!({ "id": "a", "predicates": [{ "equals": { "path": "/x" } }],
+            "responses": [{ "is": { "body": "1" } }] }),
+        );
+        let b = stub_json(
+            serde_json::json!({ "id": "b", "predicates": [{ "equals": { "path": "/x" } }],
+            "responses": [{ "is": { "body": "2" } }] }),
+        );
+        assert!(matches_alike(&a, &b));
+    }
+
+    #[test]
+    fn a_predicate_or_a_scenario_gate_changes_what_a_stub_matches() {
+        let base = serde_json::json!({ "predicates": [{ "equals": { "path": "/x" } }],
+            "responses": [{ "is": { "body": "1" } }] });
+        let a = stub_json(base.clone());
+        let mut narrowed = base.clone();
+        narrowed["predicates"] = serde_json::json!([{ "equals": { "path": "/y" } }]);
+        assert!(!matches_alike(&a, &stub_json(narrowed)));
+        let mut gated = base;
+        gated["scenarioName"] = serde_json::json!("s");
+        gated["requiredScenarioState"] = serde_json::json!("Started");
+        assert!(!matches_alike(&a, &stub_json(gated)));
+    }
+
+    #[test]
+    fn first_divergence_is_the_first_position_that_matches_differently() {
+        let on = |path: &str| {
+            stub_json(serde_json::json!({
+            "predicates": [{ "equals": { "path": path } }], "responses": [{ "is": {} }] }))
+        };
+        let old = [on("/a"), on("/b"), on("/c")];
+        assert_eq!(first_divergence(&old, &old), 3, "identical");
+        assert_eq!(first_divergence(&old, &[on("/a"), on("/c")]), 1, "a delete");
+        assert_eq!(
+            first_divergence(&old, &[on("/b"), on("/a"), on("/c")]),
+            0,
+            "a move"
+        );
+        assert_eq!(
+            first_divergence(&old, &[on("/a"), on("/b"), on("/c"), on("/d")]),
+            3,
+            "an append"
+        );
+        assert_eq!(
+            first_divergence(&old, &[on("/a"), on("/b")]),
+            2,
+            "the last deleted"
+        );
+    }
+
+    #[test]
+    fn restamp_touches_exactly_the_range() {
+        let imposter = Imposter::new(
+            serde_json::from_value(serde_json::json!({
+                "port": 0, "protocol": "http",
+                "stubs": [{ "responses": [{ "is": {} }] }, { "responses": [{ "is": {} }] },
+                          { "responses": [{ "is": {} }] }]
+            }))
+            .expect("config"),
+        )
+        .expect("imposter");
+        let mut stubs = imposter.snapshot().stubs().to_vec();
+        let before = stubs[0].loaded_at();
+        let later = before + chrono::Duration::seconds(5);
+        restamp(&mut stubs, 1..=1, later);
+        let stamps: Vec<_> = stubs.iter().map(|s| s.loaded_at()).collect();
+        assert_eq!(stamps, vec![before, later, before]);
+    }
 
     // ===== Issue #1301: LoadClock =====
 
