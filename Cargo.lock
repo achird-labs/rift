@@ -3380,6 +3380,7 @@ dependencies = [
  "libc",
  "mimalloc",
  "num_cpus",
+ "p12",
  "parking_lot",
  "port_check",
  "prometheus",
@@ -3487,6 +3488,7 @@ dependencies = [
  "sxd-xpath",
  "tempfile",
  "thiserror 2.0.17",
+ "time",
  "tokio",
  "tokio-rustls",
  "tokio-test",
@@ -3496,6 +3498,7 @@ dependencies = [
  "tracing-test",
  "urlencoding",
  "uuid",
+ "x509-parser",
  "yasna",
 ]
 

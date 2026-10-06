@@ -88,3 +88,6 @@ pub mod runtime;
 /// `rift healthcheck` (issue #664): the container HEALTHCHECK probe, built into the binary so the
 /// image needs no shell or curl.
 pub mod healthcheck;
+
+/// `rift intercept-ca` (issue #1274): make a persistent intercept CA and its truststores offline.
+pub mod intercept_ca_cli;

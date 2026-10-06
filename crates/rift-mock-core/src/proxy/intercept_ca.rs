@@ -114,12 +114,51 @@ impl CaSource {
     }
 }
 
+/// How [`CertificateAuthority::generate_with`] shapes a CA an operator means to keep (issue
+/// #1274): its subject name and how long it stays valid from now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerateOptions {
+    pub common_name: String,
+    pub validity: std::time::Duration,
+}
+
+/// Backdating applied to a kept CA's `notBefore`, so a SUT whose clock runs a little behind the
+/// machine that generated it does not see a not-yet-valid anchor.
+const CLOCK_SKEW_ALLOWANCE: time::Duration = time::Duration::minutes(5);
+
 impl CertificateAuthority {
-    /// Generate a fresh in-memory CA.
+    /// Generate a fresh in-memory CA. Keeps rcgen's default validity (1975 to 4096), which suits
+    /// an anchor that lives as long as one listener and never meets a SUT with a skewed clock.
     pub fn generate() -> anyhow::Result<Self> {
+        Self::generate_params("Rift Intercept CA", None)
+    }
+
+    /// Generate a CA meant to be written out and kept (issue #1274): named `common_name`, valid
+    /// from five minutes ago until `validity` from now.
+    pub fn generate_with(options: &GenerateOptions) -> anyhow::Result<Self> {
+        let now = time::OffsetDateTime::now_utc();
+        let validity = time::Duration::try_from(options.validity)
+            .map_err(|e| anyhow::anyhow!("CA validity out of range: {e}"))?;
+        let not_after = now
+            .checked_add(validity)
+            .ok_or_else(|| anyhow::anyhow!("CA validity out of range"))?;
+        Self::generate_params(
+            &options.common_name,
+            Some((now - CLOCK_SKEW_ALLOWANCE, not_after)),
+        )
+    }
+
+    fn generate_params(
+        common_name: &str,
+        validity: Option<(time::OffsetDateTime, time::OffsetDateTime)>,
+    ) -> anyhow::Result<Self> {
         let key = KeyPair::generate().map_err(|e| anyhow::anyhow!("generate CA key: {e}"))?;
         let mut params = CertificateParams::new(Vec::<String>::new())
             .map_err(|e| anyhow::anyhow!("build CA params: {e}"))?;
+        if let Some((not_before, not_after)) = validity {
+            params.not_before = not_before;
+            params.not_after = not_after;
+        }
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.key_usages = vec![
             KeyUsagePurpose::KeyCertSign,
@@ -128,7 +167,7 @@ impl CertificateAuthority {
         ];
         params
             .distinguished_name
-            .push(DnType::CommonName, "Rift Intercept CA");
+            .push(DnType::CommonName, common_name);
         let cert = params
             .self_signed(&key)
             .map_err(|e| anyhow::anyhow!("self-sign CA: {e}"))?;
@@ -584,6 +623,51 @@ mod tests {
         assert!(
             keys.iter().all(|k| Arc::ptr_eq(k, &canonical)),
             "all concurrent callers must converge on the single cached key"
+        );
+    }
+
+    // ===== Issue #1274: a CA meant to be kept gets a real validity window and name =====
+
+    #[test]
+    fn generate_with_sets_the_name_and_a_validity_window_from_now() {
+        let before = time::OffsetDateTime::now_utc();
+        let ca = CertificateAuthority::generate_with(&GenerateOptions {
+            common_name: "Acme Test CA".to_string(),
+            validity: std::time::Duration::from_secs(10 * 86_400),
+        })
+        .expect("generate");
+        let after = time::OffsetDateTime::now_utc();
+        let params = CertificateParams::from_ca_cert_der(ca.ca_cert_der()).expect("parse CA");
+        assert!(matches!(params.is_ca, IsCa::Ca(_)));
+        let cn = params
+            .distinguished_name
+            .get(&DnType::CommonName)
+            .expect("CN");
+        assert_eq!(cn, &rcgen::DnValue::Utf8String("Acme Test CA".to_string()));
+        // Five minutes back for clock skew, at whole-second precision.
+        assert!(params.not_before <= before - time::Duration::minutes(5));
+        assert!(
+            params.not_before >= before - time::Duration::minutes(5) - time::Duration::seconds(2)
+        );
+        assert!(params.not_after >= before + time::Duration::days(10) - time::Duration::seconds(2));
+        assert!(params.not_after <= after + time::Duration::days(10));
+        // And it still mints leaves that chain to it.
+        let ck = ca.mint_leaf("cdn.example.com").expect("mint");
+        assert_chains_to_ca(&ca, &ck.cert[0], &[], "cdn.example.com");
+    }
+
+    #[test]
+    fn generate_keeps_the_in_memory_defaults() {
+        let ca = CertificateAuthority::generate().expect("generate");
+        let params = CertificateParams::from_ca_cert_der(ca.ca_cert_der()).expect("parse CA");
+        assert_eq!(
+            params.distinguished_name.get(&DnType::CommonName),
+            Some(&rcgen::DnValue::Utf8String("Rift Intercept CA".to_string()))
+        );
+        assert_eq!(
+            params.not_before.year(),
+            1975,
+            "the listener's ephemeral CA is unchanged"
         );
     }
 }
