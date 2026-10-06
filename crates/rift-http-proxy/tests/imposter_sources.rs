@@ -1706,3 +1706,38 @@ fn registry_refuses_an_embedder_shadowing_a_builtin() {
         "the error must name the contested scheme: {err}"
     );
 }
+
+/// Issue #1271: a 304 serves the cached document whole — its `intercept` and `routes` blocks
+/// too. Answering `None` for them made an unchanged source read as one that had dropped both
+/// blocks, so a reload where another source changed emptied the front door's route table and
+/// reported the intercept block as removed.
+#[tokio::test]
+async fn http_source_304_keeps_the_cached_intercept_and_routes_blocks() {
+    let doc = r#"{
+        "imposters": [ { "port": 21407, "protocol": "http", "stubs": [] } ],
+        "intercept": { "port": 0, "rules": [ { "host": "a.test",
+                       "action": { "serve": { "statusCode": 200 } } } ] },
+        "routes": { "routes": [ { "id": "svc", "match": { "host": "svc.test" },
+                                   "target": { "port": 21407 } } ] }
+    }"#;
+    let origin = Origin::start(Reply::Etagged {
+        body: doc.to_string(),
+        etag: "\"v1\"".to_string(),
+    });
+    let source = HttpSource::new().unwrap();
+    let r = SourceRef::new(origin.uri());
+    let first = source.fetch(&r).await.expect("first fetch");
+    assert!(first.intercept.is_some() && first.routes.is_some());
+
+    let second = source.fetch(&r).await.expect("a 304 is not an error");
+    assert!(second.unchanged);
+    let intercept = second
+        .intercept
+        .expect("the cached intercept block is served");
+    assert_eq!(intercept.rules.len(), 1);
+    assert_eq!(intercept.rules[0].host.as_deref(), Some("a.test"));
+    assert_eq!(
+        second.routes, first.routes,
+        "the cached routes block is served"
+    );
+}

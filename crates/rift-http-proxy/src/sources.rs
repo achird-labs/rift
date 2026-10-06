@@ -185,11 +185,14 @@ impl ImposterSource for FileSource {
     }
 }
 
-/// What [`HttpSource`] remembers per URI so a later fetch can be conditional.
+/// What [`HttpSource`] remembers per URI so a later fetch can be conditional: the whole parsed
+/// document, so a `304` answers with everything the `200` did — blocks included (issue #1271).
 #[derive(Debug, Clone)]
 struct CachedResponse {
     etag: String,
     configs: Vec<ImposterConfig>,
+    intercept: Option<InterceptStartOptions>,
+    routes: Option<crate::front_door::RouteTable>,
 }
 
 /// `http:`/`https:` — fetch a document over HTTP, honouring `ETag`/`If-None-Match`.
@@ -320,10 +323,8 @@ impl ImposterSource for HttpSource {
                 };
                 return Ok(FetchedImposters {
                     configs: cached.configs,
-                    // Blocks are boot-only, and a 304 can only happen on a re-fetch, which is
-                    // always past boot — so there is nothing a cached block could start.
-                    intercept: None,
-                    routes: None,
+                    intercept: cached.intercept,
+                    routes: cached.routes,
                     meta: SourceMeta {
                         version: Some(cached.etag),
                         fetched_at: SystemTime::now(),
@@ -355,6 +356,8 @@ impl ImposterSource for HttpSource {
                         CachedResponse {
                             etag: etag.clone(),
                             configs: loaded.imposters.clone(),
+                            intercept: loaded.intercept.clone(),
+                            routes: loaded.routes.clone(),
                         },
                     );
             }

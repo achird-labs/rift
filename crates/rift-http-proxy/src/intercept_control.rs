@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::admin_api::{AdminExposurePolicy, check_intercept_exposure};
 use crate::intercept::InterceptListener;
-use crate::intercept_rules::{InterceptRule, InterceptRules, InterceptState, RulesAtCapacity};
+use crate::intercept_rules::{
+    InterceptRule, InterceptRules, InterceptState, RulesAtCapacity, SeededReplaced,
+};
 use rift_mock_core::proxy::OutboundTls;
 use rift_mock_core::proxy::intercept_ca::{CaSource, CertificateAuthority, SniCertResolver};
 use serde::Serialize;
@@ -39,6 +41,102 @@ pub struct InterceptPlane {
     /// up can still be applied to it (issue #1149) — see
     /// [`InterceptControl::check_running_exposure`].
     pub has_auth: bool,
+    /// Which door started it and with what listener fields — what a reload compares a config
+    /// file's `intercept` block against before touching the rules (issue #1271).
+    origin: InterceptOrigin,
+    spec: ListenerSpec,
+}
+
+/// The door a running listener was started through (issue #1271). Only a listener the config file
+/// started takes that file's rules on reload; one started by the flags or at runtime is not the
+/// file's to change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterceptOrigin {
+    /// `--intercept-port` and its sibling flags.
+    Flags,
+    /// The config file's `intercept` block (CLI `--configfile`, FFI `configFile`).
+    ConfigFile,
+    /// `POST /intercept` or `rift_start_intercept`.
+    Runtime,
+}
+
+/// The listener-shaping fields of a start, as requested: what has to stay the same for a reload
+/// to apply a block's rules to the running listener, since rebinding, changing the credential or
+/// swapping the CA would be a lifecycle change reload does not own (issue #1271).
+#[derive(Clone, PartialEq, Eq)]
+struct ListenerSpec {
+    host: String,
+    port: u16,
+    /// Username and password; compared, never rendered.
+    auth: Option<(String, String)>,
+    ca: CaSpec,
+}
+
+impl std::fmt::Debug for ListenerSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The password is secret material; the username is an identity, as in `InterceptAuth`.
+        f.debug_struct("ListenerSpec")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("auth_user", &self.auth.as_ref().map(|(user, _)| user))
+            .field("ca", &self.ca)
+            .finish()
+    }
+}
+
+/// The CA source by identity, not content: a file pair by its paths (rotating a CA in place is a
+/// restart), inline PEM by its certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CaSpec {
+    Generated,
+    Paths { cert: String, key: String },
+    Pem { cert: String },
+}
+
+impl ListenerSpec {
+    fn of(opts: &InterceptStartOptions) -> Self {
+        let ca = match (&opts.ca_cert_path, &opts.ca_key_path, &opts.ca_cert_pem) {
+            (Some(cert), Some(key), _) => CaSpec::Paths {
+                cert: cert.clone(),
+                key: key.clone(),
+            },
+            (_, _, Some(cert)) => CaSpec::Pem { cert: cert.clone() },
+            _ => CaSpec::Generated,
+        };
+        Self {
+            host: opts.host.clone().unwrap_or_else(|| "127.0.0.1".to_string()),
+            port: opts.port.unwrap_or(0),
+            auth: opts
+                .auth
+                .as_ref()
+                .map(|a| (a.username.clone(), a.password.clone())),
+            ca,
+        }
+    }
+
+    /// The names of the fields that differ, in a fixed order.
+    fn differences(&self, other: &Self) -> Vec<&'static str> {
+        [
+            ("host", self.host != other.host),
+            ("port", self.port != other.port),
+            ("auth", self.auth != other.auth),
+            ("ca", self.ca != other.ca),
+        ]
+        .into_iter()
+        .filter_map(|(name, differs)| differs.then_some(name))
+        .collect()
+    }
+}
+
+/// What a reload did with the config file's `intercept` block (issue #1271).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockReapplied {
+    /// Nothing to report: no block, and no listener the file started.
+    Nothing,
+    /// The block's rules replaced the seeded prefix.
+    Applied(SeededReplaced),
+    /// The rules were left as they were, for the stated reason — for the reload reply.
+    NotApplied(String),
 }
 
 /// Why [`InterceptControl::install`] would not take the slot. Carries the listener back so the
@@ -84,7 +182,7 @@ struct InterceptPolicy {
 /// fallback that would defeat the caller's intended CA reuse. A pre-#593 engine's
 /// `deny_unknown_fields` also gives SDKs deterministic feature detection: an unknown `caCertPem`
 /// or `returnCaKey` is a hard 400 naming the field, not a silent ignore.
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InterceptStartOptions {
     /// Bind host, default `127.0.0.1`.
@@ -372,10 +470,21 @@ impl InterceptControl {
         &self,
         opts: InterceptStartOptions,
     ) -> Result<StartedIntercept, InterceptStartError> {
+        self.start_from(opts, InterceptOrigin::Runtime).await
+    }
+
+    /// [`start`](Self::start), recording which door it came through so a reload knows whether the
+    /// config file's block owns this listener's rules (issue #1271).
+    pub async fn start_from(
+        &self,
+        opts: InterceptStartOptions,
+        origin: InterceptOrigin,
+    ) -> Result<StartedIntercept, InterceptStartError> {
         if self.is_occupied() {
             return Err(InterceptStartError::AlreadyRunning);
         }
 
+        let spec = ListenerSpec::of(&opts);
         let host = opts.host.as_deref().unwrap_or("127.0.0.1");
         let addr =
             rift_mock_core::proxy::bind_addr(host, opts.port.unwrap_or(0)).ok_or_else(|| {
@@ -439,7 +548,7 @@ impl InterceptControl {
         // construction — and an over-capacity batch fails the start rather than binding a listener
         // with a partial rule set.
         let rules = InterceptRules::new();
-        rules.extend(opts.rules).map_err(|e| {
+        rules.seed(opts.rules).map_err(|e| {
             tracing::warn!(error = %e, "intercept start: rule seeding failed");
             InterceptStartError::Rules(e)
         })?;
@@ -458,6 +567,8 @@ impl InterceptControl {
             listener,
             state: InterceptState { rules, ca },
             has_auth: auth_required,
+            origin,
+            spec,
         }) {
             Ok(()) => Ok(StartedIntercept {
                 addr: bound,
@@ -518,6 +629,69 @@ impl InterceptControl {
             return Ok(());
         };
         check_intercept_exposure(addr, has_auth, exposure)
+    }
+
+    /// Re-apply a reloaded config file's `intercept` block (issue #1271): its rules replace the
+    /// seeded prefix of a listener that same file started, provided the block's listener fields
+    /// still describe it. The listener itself is never rebound, re-keyed or stopped here; every
+    /// case that would need that is reported instead. The caller has already refused a block whose
+    /// rules `--allowInjection` gates.
+    pub fn reapply_config_block(&self, block: Option<InterceptStartOptions>) -> BlockReapplied {
+        let guard = self.lock();
+        let Some(plane) = guard.as_ref() else {
+            return match block {
+                Some(_) => BlockReapplied::NotApplied(
+                    "the config file declares an `intercept` block but no listener is running; \
+                     the listener is started at boot only, so restart to bind it"
+                        .to_string(),
+                ),
+                None => BlockReapplied::Nothing,
+            };
+        };
+        let Some(block) = block else {
+            return if plane.origin == InterceptOrigin::ConfigFile {
+                BlockReapplied::NotApplied(
+                    "the config file no longer declares an `intercept` block; the listener it \
+                     started keeps running with its rules (stop it with DELETE /intercept, or \
+                     restart)"
+                        .to_string(),
+                )
+            } else {
+                BlockReapplied::Nothing
+            };
+        };
+        match plane.origin {
+            InterceptOrigin::ConfigFile => {}
+            InterceptOrigin::Flags => {
+                return BlockReapplied::NotApplied(
+                    "the intercept listener was started from the --intercept-* flags, so the \
+                     config file's `intercept` block was NOT applied; use one source and restart"
+                        .to_string(),
+                );
+            }
+            InterceptOrigin::Runtime => {
+                return BlockReapplied::NotApplied(
+                    "the intercept listener was started at runtime (POST /intercept or FFI), so \
+                     the config file's `intercept` block was NOT applied; change its rules with \
+                     /intercept/rules"
+                        .to_string(),
+                );
+            }
+        }
+        let changed = plane.spec.differences(&ListenerSpec::of(&block));
+        if !changed.is_empty() {
+            return BlockReapplied::NotApplied(format!(
+                "the config file changed the intercept listener's {}; the listener is started at \
+                 boot only, so its rules were NOT re-applied — restart to apply the block",
+                changed.join(", ")
+            ));
+        }
+        match plane.state.rules.replace_seeded(block.rules) {
+            Ok(outcome) => BlockReapplied::Applied(outcome),
+            Err(e) => BlockReapplied::NotApplied(format!(
+                "the config file's intercept rules were NOT re-applied: {e}"
+            )),
+        }
     }
 
     /// A clone of the running plane's [`InterceptState`] for the rules/CA/truststore handlers.
@@ -1055,6 +1229,8 @@ mod tests {
             listener,
             state: InterceptState { rules, ca },
             has_auth: false,
+            origin: InterceptOrigin::Runtime,
+            spec: ListenerSpec::of(&InterceptStartOptions::default()),
         }
     }
 
@@ -1111,5 +1287,116 @@ mod tests {
             clone_taken_early.outbound_tls().is_configured(),
             "the clone must see the trust the control was given afterwards"
         );
+    }
+
+    // ===== Issue #1271: re-applying a config file's block =====
+
+    fn block(json: serde_json::Value) -> InterceptStartOptions {
+        serde_json::from_value(json).expect("valid block")
+    }
+
+    fn serve(host: &str) -> serde_json::Value {
+        serde_json::json!({ "host": host, "action": { "serve": { "statusCode": 200 } } })
+    }
+
+    fn hosts(control: &InterceptControl) -> Vec<String> {
+        control
+            .state()
+            .expect("running")
+            .rules
+            .list()
+            .into_iter()
+            .filter_map(|r| r.host)
+            .collect()
+    }
+
+    /// An omitted `host`/`port` means the defaults the listener was started with, so an unchanged
+    /// file whose block leaves them out is applied, not reported as changed.
+    #[tokio::test]
+    async fn reapply_treats_omitted_listener_fields_as_their_defaults() {
+        let control = InterceptControl::default();
+        control
+            .start_from(
+                block(serde_json::json!({ "rules": [serve("a.test")] })),
+                InterceptOrigin::ConfigFile,
+            )
+            .await
+            .expect("start");
+        let explicit = block(
+            serde_json::json!({ "host": "127.0.0.1", "port": 0, "rules": [serve("b.test")] }),
+        );
+        assert_eq!(
+            control.reapply_config_block(Some(explicit)),
+            BlockReapplied::Applied(SeededReplaced {
+                seeded: 1,
+                runtime: 0
+            })
+        );
+        assert_eq!(hosts(&control), vec!["b.test"]);
+        control.stop().await;
+    }
+
+    #[tokio::test]
+    async fn reapply_names_a_changed_host_or_ca_and_keeps_the_rules() {
+        let control = InterceptControl::default();
+        control
+            .start_from(
+                block(serde_json::json!({ "rules": [serve("a.test")] })),
+                InterceptOrigin::ConfigFile,
+            )
+            .await
+            .expect("start");
+        let ca = CertificateAuthority::generate().expect("CA");
+        let changed = block(serde_json::json!({
+            "host": "::1",
+            "caCertPem": ca.ca_cert_pem(),
+            "caKeyPem": ca.ca_key_pem(),
+            "rules": [serve("b.test")]
+        }));
+        match control.reapply_config_block(Some(changed)) {
+            BlockReapplied::NotApplied(warning) => {
+                assert!(warning.contains("host, ca"), "{warning}");
+                assert!(
+                    !warning.contains("port") && !warning.contains("auth"),
+                    "{warning}"
+                );
+            }
+            other => panic!("expected a warning, got {other:?}"),
+        }
+        assert_eq!(hosts(&control), vec!["a.test"]);
+        control.stop().await;
+    }
+
+    #[tokio::test]
+    async fn reapply_over_the_cap_is_a_warning_and_keeps_the_rules() {
+        let control = InterceptControl::default();
+        control
+            .start_from(
+                block(serde_json::json!({ "rules": [serve("a.test")] })),
+                InterceptOrigin::ConfigFile,
+            )
+            .await
+            .expect("start");
+        let too_many = block(serde_json::json!({
+            "rules": vec![serve("x.test"); crate::intercept_rules::MAX_RULES + 1]
+        }));
+        match control.reapply_config_block(Some(too_many)) {
+            BlockReapplied::NotApplied(warning) => {
+                assert!(warning.contains("capacity"), "{warning}")
+            }
+            other => panic!("expected a warning, got {other:?}"),
+        }
+        assert_eq!(hosts(&control), vec!["a.test"]);
+        control.stop().await;
+    }
+
+    #[test]
+    fn reapply_without_a_listener_or_a_block_has_nothing_to_say() {
+        let control = InterceptControl::default();
+        assert_eq!(control.reapply_config_block(None), BlockReapplied::Nothing);
+        assert!(matches!(
+            control.reapply_config_block(Some(block(serde_json::json!({ "rules": [] })))),
+            BlockReapplied::NotApplied(w) if w.contains("no listener is running")
+        ));
     }
 }

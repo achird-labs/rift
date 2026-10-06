@@ -224,10 +224,16 @@ fn port_declared_by_both(
 /// swaps the config file's `routes` block into it — an absent block becomes the empty table, as
 /// at startup — after the imposters are applied, so a new route never points at an imposter the
 /// same reload has not created yet (issue #1160). A failed reload leaves the old table serving.
+///
+/// `intercept` is the server's intercept control, when it has one. The file's `intercept.rules`
+/// replace the config-seeded rules of a listener that file started, after the imposters and
+/// routes, keeping runtime rules; the listener itself is boot-only, so any other case is reported
+/// in `warnings` instead (issue #1271).
 pub async fn handle_reload(
     manager: Arc<ImposterManager>,
     config_source: Option<crate::sources::ReloadSource>,
     front_door_routes: Option<&crate::front_door::FrontDoorRoutes>,
+    intercept: Option<&crate::intercept_control::InterceptControl>,
     allow_injection: bool,
 ) -> Response<Full<Bytes>> {
     let Some(source) = config_source else {
@@ -242,12 +248,12 @@ pub async fn handle_reload(
     // `persisted` holds the imposters that belong to the datadir, `ephemeral` those re-read from a
     // source (issue #1122); the two are applied as one set, so neither store's sweep removes
     // what only the other declares.
-    let (persisted, ephemeral, intercept_declared, routes, all_unchanged) = match source {
+    let (persisted, ephemeral, intercept_block, routes, all_unchanged) = match source {
         crate::sources::ReloadSource::Legacy(source) => match read_blocking(source).await {
             Ok(loaded) => (
                 loaded.imposters,
                 Vec::new(),
-                loaded.intercept.is_some(),
+                loaded.intercept,
                 loaded.routes,
                 false,
             ),
@@ -287,12 +293,11 @@ pub async fn handle_reload(
                 }
                 None => Vec::new(),
             };
-            // `intercept` is boot-only; reload deliberately does not re-apply it, and the warning
-            // below is driven off its presence. `routes` is re-applied (issue #1160).
+            // `routes` is re-applied (issue #1160), and so are `intercept.rules` (issue #1271).
             (
                 persisted,
                 merged.imposters,
-                merged.intercept.is_some(),
+                merged.intercept,
                 merged.routes,
                 unchanged,
             )
@@ -317,21 +322,11 @@ pub async fn handle_reload(
         );
     }
 
-    // The `intercept` block is applied at boot only (issue #655): re-seeding would duplicate or
-    // clobber rules added at runtime, and rebinding the listener is a lifecycle change reload does
-    // not own. The party that needs to know is the client that just asked for the reload, and a
-    // server-side log is invisible to it (doubly so over FFI, where tracing may go nowhere) — so
-    // the response body carries the warning and the log is a `warn!`, not an `info!`: the caller
-    // asked for something that deliberately did not happen.
+    // Whatever reload declines to do is reported to the client that asked for it: a server-side log
+    // is invisible to that client (doubly so over FFI, where tracing may go nowhere), so the
+    // response body carries the warning and the log is a `warn!`, not an `info!`.
     let mut warnings: Vec<String> = Vec::new();
-    if intercept_declared {
-        let warning = "the config file's `intercept` block is applied at startup only and was NOT \
-                       re-applied; imposters were reloaded. Use /intercept/rules to change rules \
-                       at runtime, or restart to re-read the block.";
-        warn!("Reload: {warning}");
-        warnings.push(warning.to_string());
-    }
-    // Same reasoning as `intercept`: the client asked for routes that will not serve.
+    // The client asked for routes that will not serve.
     if routes.is_some() && front_door_routes.is_none() {
         warn!("Reload: {}", crate::front_door::ROUTES_WITHOUT_FRONT_DOOR);
         warnings.push(crate::front_door::ROUTES_WITHOUT_FRONT_DOOR.to_string());
@@ -352,8 +347,18 @@ pub async fn handle_reload(
     }
 
     // Validate-before-touch: refuse a gated config before anything mutates, so a refused reload
-    // leaves the running imposters exactly as they were (issue #612).
-    if reload_is_gated(&persisted, allow_injection) || reload_is_gated(&ephemeral, allow_injection)
+    // leaves the running imposters exactly as they were (issue #612). The intercept rules are part
+    // of the same document and get the same all-or-nothing answer (issue #1271).
+    let intercept_gated = !allow_injection
+        && intercept_block.as_ref().is_some_and(|block| {
+            block
+                .rules
+                .iter()
+                .any(crate::injection_gate::intercept_rule_uses_script_surface)
+        });
+    if intercept_gated
+        || reload_is_gated(&persisted, allow_injection)
+        || reload_is_gated(&ephemeral, allow_injection)
     {
         return crate::admin_api::handlers::imposters::injection_disallowed_response();
     }
@@ -369,6 +374,30 @@ pub async fn handle_reload(
                     &routes.unwrap_or_default(),
                 )));
             }
+            // After imposters and routes, so a re-seeded `forward` never points at an imposter
+            // this reload has not created yet.
+            let mut reapplied = None;
+            let outcome = match intercept {
+                Some(control) => control.reapply_config_block(intercept_block),
+                None if intercept_block.is_some() => {
+                    crate::intercept_control::BlockReapplied::NotApplied(
+                        "the config file declares an `intercept` block but this server has no \
+                         intercept surface; it was NOT applied"
+                            .to_string(),
+                    )
+                }
+                None => crate::intercept_control::BlockReapplied::Nothing,
+            };
+            match outcome {
+                crate::intercept_control::BlockReapplied::Nothing => {}
+                crate::intercept_control::BlockReapplied::Applied(seeded) => {
+                    reapplied = Some(seeded);
+                }
+                crate::intercept_control::BlockReapplied::NotApplied(warning) => {
+                    warn!("Reload: {warning}");
+                    warnings.push(warning);
+                }
+            }
             let mut body = serde_json::json!({
                 "message": format!("Reloaded {count} imposter(s)"),
                 "created": report.created,
@@ -376,6 +405,9 @@ pub async fn handle_reload(
                 "stubPatched": report.stub_patched,
                 "deleted": report.deleted,
             });
+            if let Some(seeded) = reapplied {
+                body["intercept"] = serde_json::json!(seeded);
+            }
             // Additive: absent entirely when there is nothing to warn about, so existing clients
             // and their parsers are unaffected.
             if !warnings.is_empty() {
@@ -520,7 +552,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_reload_no_source_is_noop() {
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager, None, None, false).await;
+        let resp = handle_reload(manager, None, None, None, false).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -557,6 +589,7 @@ mod tests {
             Arc::new(ImposterManager::new()),
             Some(source),
             Some(&table),
+            None,
             false,
         )
         .await;
@@ -599,7 +632,7 @@ mod tests {
         ));
 
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
@@ -652,7 +685,7 @@ mod tests {
         let manager = Arc::new(ImposterManager::new());
 
         // Initial reload creates the imposter with the first script version resolved.
-        let resp = handle_reload(manager.clone(), Some(source.clone()), None, true).await;
+        let resp = handle_reload(manager.clone(), Some(source.clone()), None, None, true).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let script_code = |manager: &ImposterManager| {
             let imposter = manager.get_imposter(19479).expect("imposter exists");
@@ -672,7 +705,7 @@ mod tests {
         // Edit the referenced file (the configfile itself is untouched) and reload again.
         std::fs::write(&script_path, r#"fn respond(ctx) { http(503, "second") }"#)
             .expect("write script (second version)");
-        let resp = handle_reload(manager.clone(), Some(source), None, true).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, true).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             script_code(&manager).as_deref(),
@@ -719,7 +752,7 @@ mod tests {
         ));
 
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager.clone(), Some(source.clone()), None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source.clone()), None, None, false).await;
         assert_eq!(resp.status(), StatusCode::OK, "clean config reloads");
         assert!(manager.get_imposter(19481).is_ok());
 
@@ -733,7 +766,7 @@ mod tests {
         )
         .expect("write scripted config");
 
-        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
         assert_eq!(
             resp.status(),
             StatusCode::BAD_REQUEST,
@@ -783,7 +816,7 @@ mod tests {
         ));
 
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager.clone(), Some(source), None, true).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, true).await;
         assert_eq!(
             resp.status(),
             StatusCode::OK,
@@ -863,7 +896,7 @@ mod tests {
             format!("file:{}", file.display()),
             &datadir,
         );
-        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
         let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -937,7 +970,7 @@ mod tests {
         let source = sources_and_datadir(registry, "unchanged:x".to_string(), &datadir);
 
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(body["created"], serde_json::json!([23741]), "got: {body}");
@@ -964,7 +997,7 @@ mod tests {
         };
 
         let manager = Arc::new(ImposterManager::new());
-        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(
@@ -999,7 +1032,7 @@ mod tests {
             format!("file:{}", file.display()),
             &datadir,
         );
-        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
         let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -1032,7 +1065,7 @@ mod tests {
             &datadir,
         );
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(manager.get_imposter(23745).is_err());
 
@@ -1055,7 +1088,7 @@ mod tests {
             &datadir,
         );
         let manager = Arc::new(ImposterManager::with_datadir(Some(datadir.clone())));
-        let resp = handle_reload(manager.clone(), Some(source), None, false).await;
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(manager.count(), 1);
         let written: Vec<_> = std::fs::read_dir(&datadir)
@@ -1091,7 +1124,7 @@ mod tests {
         );
 
         for source in [legacy, both] {
-            let resp = handle_reload(manager.clone(), Some(source), None, false).await;
+            let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
             assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
             let body = body_json(resp).await;
             let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -1125,7 +1158,7 @@ mod tests {
         );
 
         for source in [legacy, both] {
-            let resp = handle_reload(manager.clone(), Some(source), None, false).await;
+            let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
             assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
             let body = body_json(resp).await;
             let message = body["errors"][0]["message"].as_str().unwrap_or_default();
@@ -1135,5 +1168,42 @@ mod tests {
             );
             assert_eq!(manager.count(), 0, "nothing was applied");
         }
+    }
+
+    /// Issue #1271: a server with no intercept surface cannot apply a block; the reply says so.
+    #[tokio::test]
+    async fn reload_of_a_block_without_an_intercept_surface_warns() {
+        use http_body_util::BodyExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{ "imposters": [], "intercept": { "port": 0, "rules": [] } }"#,
+        )
+        .unwrap();
+        let source = crate::sources::ReloadSource::Legacy(Arc::new(
+            crate::config_loader::ConfigSource::File {
+                path,
+                no_parse: false,
+            },
+        ));
+        let resp = handle_reload(
+            Arc::new(ImposterManager::new()),
+            Some(source),
+            None,
+            None,
+            false,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert!(
+            body["warnings"]
+                .to_string()
+                .contains("no intercept surface"),
+            "{body}"
+        );
+        assert!(body.get("intercept").is_none(), "{body}");
     }
 }

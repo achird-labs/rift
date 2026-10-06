@@ -168,62 +168,118 @@ pub struct RulesAtCapacity {
 /// Shared, mutable rule store. Cheap to clone (an `Arc` inside) so the listener and the admin API
 /// can each hold a handle to the same rules.
 #[derive(Debug, Clone, Default)]
-pub struct InterceptRules(Arc<RwLock<Vec<InterceptRule>>>);
+pub struct InterceptRules(Arc<RwLock<RuleSet>>);
+
+/// The rules plus how many of them, from the front, a config file seeded (issue #1271). Kept
+/// under one lock so a reload can swap exactly the seeded prefix while runtime rules stay behind
+/// it. Invariant: `seeded <= rules.len()`.
+#[derive(Debug, Default)]
+struct RuleSet {
+    rules: Vec<InterceptRule>,
+    seeded: usize,
+}
+
+/// What [`InterceptRules::replace_seeded`] left in the store: the config-seeded rules now at the
+/// front, and the runtime rules kept after them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct SeededReplaced {
+    #[serde(rename = "rulesSeeded")]
+    pub seeded: usize,
+    #[serde(rename = "rulesRuntime")]
+    pub runtime: usize,
+}
 
 impl InterceptRules {
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Install a config-seeded set in place of whatever is stored (issue #1271): what a listener
+    /// started from a config file begins with, and what a reload later replaces. Over
+    /// [`MAX_RULES`] it is refused and the store left as it was.
+    pub fn seed(&self, new_rules: Vec<InterceptRule>) -> Result<(), RulesAtCapacity> {
+        if new_rules.len() > MAX_RULES {
+            return Err(RulesAtCapacity { limit: MAX_RULES });
+        }
+        let mut set = self.write();
+        set.seeded = new_rules.len();
+        set.rules = new_rules;
+        Ok(())
+    }
+
+    /// Swap the config-seeded prefix for `new_rules`, keeping every runtime rule after it, in one
+    /// write lock (issue #1271). The runtime rules count toward [`MAX_RULES`]; a set that would not
+    /// fit beside them is refused and the store left as it was.
+    pub fn replace_seeded(
+        &self,
+        new_rules: Vec<InterceptRule>,
+    ) -> Result<SeededReplaced, RulesAtCapacity> {
+        let mut set = self.write();
+        let runtime = set.rules.len() - set.seeded;
+        if new_rules.len() + runtime > MAX_RULES {
+            return Err(RulesAtCapacity { limit: MAX_RULES });
+        }
+        let seeded = new_rules.len();
+        let old_seeded = set.seeded;
+        set.rules.splice(0..old_seeded, new_rules);
+        set.seeded = seeded;
+        Ok(SeededReplaced { seeded, runtime })
+    }
+
     /// Append a rule, rejecting it once the store is at [`MAX_RULES`] (issue #554). The check and
     /// the push happen under the same write lock so the cap holds under concurrent adds.
     pub fn add(&self, rule: InterceptRule) -> Result<(), RulesAtCapacity> {
-        let mut rules = self.write();
-        if rules.len() >= MAX_RULES {
+        let mut set = self.write();
+        if set.rules.len() >= MAX_RULES {
             return Err(RulesAtCapacity { limit: MAX_RULES });
         }
-        rules.push(rule);
+        set.rules.push(rule);
         Ok(())
     }
 
     /// Append many rules atomically: either the whole batch fits under [`MAX_RULES`] and is added,
     /// or none of it is and the capacity error is returned (no partial batch).
     pub fn extend(&self, new_rules: Vec<InterceptRule>) -> Result<(), RulesAtCapacity> {
-        let mut rules = self.write();
-        if rules.len() + new_rules.len() > MAX_RULES {
+        let mut set = self.write();
+        if set.rules.len() + new_rules.len() > MAX_RULES {
             return Err(RulesAtCapacity { limit: MAX_RULES });
         }
-        rules.extend(new_rules);
+        set.rules.extend(new_rules);
         Ok(())
     }
 
     /// Replace the whole set atomically (issue #1272), returning how many rules were replaced. The
     /// swap happens under one write lock, so a request matched concurrently sees the old set or the
     /// new one, never an empty store. A batch over [`MAX_RULES`] is refused and the old set kept;
-    /// an empty batch is a valid replace and leaves the store empty.
+    /// an empty batch is a valid replace and leaves the store empty. Every rule it installs is a
+    /// runtime rule: a later reload re-seeds the config file's rules in front of them (#1271).
     pub fn replace(&self, new_rules: Vec<InterceptRule>) -> Result<usize, RulesAtCapacity> {
         if new_rules.len() > MAX_RULES {
             return Err(RulesAtCapacity { limit: MAX_RULES });
         }
-        Ok(std::mem::replace(&mut *self.write(), new_rules).len())
+        let mut set = self.write();
+        set.seeded = 0;
+        Ok(std::mem::replace(&mut set.rules, new_rules).len())
     }
 
     /// A snapshot clone of all current rules, in insertion order.
     pub fn list(&self) -> Vec<InterceptRule> {
-        self.read().clone()
+        self.read().rules.clone()
     }
 
-    /// Remove all rules.
+    /// Remove all rules, seeded ones included.
     pub fn clear(&self) {
-        self.write().clear();
+        let mut set = self.write();
+        set.rules.clear();
+        set.seeded = 0;
     }
 
     pub fn len(&self) -> usize {
-        self.read().len()
+        self.read().rules.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.read().is_empty()
+        self.read().rules.is_empty()
     }
 
     /// The action of the first rule whose host matches (or has no host filter) AND whose
@@ -238,8 +294,8 @@ impl InterceptRules {
         headers: &HashMap<String, Vec<String>>,
         body: Option<&str>,
     ) -> Option<InterceptAction> {
-        let rules = self.read();
-        rules
+        let set = self.read();
+        set.rules
             .iter()
             .find(|rule| {
                 let host_matches = rule
@@ -273,12 +329,13 @@ impl InterceptRules {
     }
 
     /// Recover a poisoned lock rather than propagate the panic — a reader/writer panicking while
-    /// holding the lock does not corrupt the `Vec`, so continuing to serve rules is safe.
-    fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<InterceptRule>> {
+    /// holding the lock does not corrupt the set — every mutation above completes its checks before
+    /// changing anything — so continuing to serve rules is safe.
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, RuleSet> {
         self.0.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Vec<InterceptRule>> {
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, RuleSet> {
         self.0.write().unwrap_or_else(|e| e.into_inner())
     }
 }
@@ -855,5 +912,99 @@ mod tests {
             );
         }
         writer.join().expect("writer thread");
+    }
+
+    // ===== Issue #1271: the config-seeded prefix =====
+
+    #[test]
+    fn seed_then_add_keeps_the_seeded_prefix() {
+        let rules = InterceptRules::new();
+        rules.seed(vec![serve_rule("a.test", "v1")]).expect("seed");
+        rules.add(serve_rule("b.test", "runtime")).expect("add");
+        let outcome = rules
+            .replace_seeded(vec![serve_rule("a.test", "v2"), serve_rule("c.test", "c")])
+            .expect("fits");
+        assert_eq!(
+            outcome,
+            SeededReplaced {
+                seeded: 2,
+                runtime: 1
+            }
+        );
+        let hosts: Vec<_> = rules.list().into_iter().map(|r| r.host.unwrap()).collect();
+        assert_eq!(hosts, vec!["a.test", "c.test", "b.test"]);
+        // A second reload replaces exactly the two seeded rules, not the runtime one.
+        rules
+            .replace_seeded(vec![serve_rule("a.test", "v3")])
+            .expect("fits");
+        let hosts: Vec<_> = rules.list().into_iter().map(|r| r.host.unwrap()).collect();
+        assert_eq!(hosts, vec!["a.test", "b.test"]);
+        assert_eq!(served_body(&rules, "a.test").as_deref(), Some("v3"));
+    }
+
+    #[test]
+    fn clear_and_replace_reset_the_seeded_prefix() {
+        let rules = InterceptRules::new();
+        rules.seed(vec![serve_rule("a.test", "v1")]).expect("seed");
+        rules.clear();
+        rules.add(serve_rule("b.test", "runtime")).expect("add");
+        rules
+            .replace_seeded(vec![serve_rule("a.test", "v2")])
+            .expect("fits");
+        let hosts: Vec<_> = rules.list().into_iter().map(|r| r.host.unwrap()).collect();
+        assert_eq!(
+            hosts,
+            vec!["a.test", "b.test"],
+            "nothing seeded survived the clear"
+        );
+
+        rules
+            .replace(vec![serve_rule("x.test", "x")])
+            .expect("fits");
+        rules
+            .replace_seeded(vec![serve_rule("a.test", "v3")])
+            .expect("fits");
+        let hosts: Vec<_> = rules.list().into_iter().map(|r| r.host.unwrap()).collect();
+        assert_eq!(
+            hosts,
+            vec!["a.test", "x.test"],
+            "a PUT made every rule runtime"
+        );
+    }
+
+    #[test]
+    fn replace_seeded_counts_runtime_rules_against_the_cap() {
+        let rules = InterceptRules::new();
+        rules.seed(vec![serve_rule("a.test", "v1")]).expect("seed");
+        rules
+            .extend(vec![serve_rule("r.test", "r"); MAX_RULES - 1])
+            .expect("fill to the cap");
+        // Swapping one seeded rule for one fits exactly; two do not.
+        assert!(
+            rules
+                .replace_seeded(vec![serve_rule("a.test", "v2")])
+                .is_ok()
+        );
+        assert_eq!(
+            rules.replace_seeded(vec![serve_rule("a.test", "v3"), serve_rule("b.test", "b")]),
+            Err(RulesAtCapacity { limit: MAX_RULES })
+        );
+        assert_eq!(
+            served_body(&rules, "a.test").as_deref(),
+            Some("v2"),
+            "refusal keeps the set"
+        );
+        assert_eq!(rules.len(), MAX_RULES);
+    }
+
+    #[test]
+    fn seed_over_the_cap_is_refused() {
+        let rules = InterceptRules::new();
+        assert!(
+            rules
+                .seed(vec![serve_rule("x.test", "x"); MAX_RULES + 1])
+                .is_err()
+        );
+        assert!(rules.is_empty());
     }
 }

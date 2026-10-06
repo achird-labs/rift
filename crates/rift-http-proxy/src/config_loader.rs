@@ -39,9 +39,8 @@ pub struct LoadedConfig {
 /// Parse the source into imposter configs without creating any imposters. A parse error is
 /// returned so the caller (startup or hot-reload) decides whether to apply the result.
 ///
-/// Imposters only: the `intercept` block is boot-only, so `POST /admin/reload` — which goes through
-/// here — keeps reloading imposters and leaves the running listener alone (issue #655). Callers that
-/// need the block use [`load_configs_full`].
+/// Imposters only. Callers that need the `intercept` or `routes` block — startup and
+/// `POST /admin/reload` — use [`load_configs_full`].
 pub fn load_configs(source: &ConfigSource) -> anyhow::Result<Vec<ImposterConfig>> {
     load_configs_full(source).map(|loaded| loaded.imposters)
 }
@@ -631,9 +630,8 @@ mod tests {
         assert!(loaded.intercept.is_none());
     }
 
-    /// AC5: `POST /admin/reload` goes through `load_configs`, which must keep returning imposters
-    /// only — the block is boot-only, and a config carrying one must still reload its imposters
-    /// rather than erroring.
+    /// AC5: `load_configs` returns imposters only, and a config carrying a block must still yield
+    /// them rather than erroring.
     #[test]
     fn load_configs_returns_imposters_only_for_a_config_with_a_block() {
         let dir = tempfile::tempdir().unwrap();
