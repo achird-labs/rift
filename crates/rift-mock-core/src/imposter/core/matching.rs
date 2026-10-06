@@ -652,7 +652,18 @@ impl Imposter {
         // Snapshot scenario names BEFORE pruning stubs: a scenario declared only on this space's
         // stubs would otherwise vanish from scenario_names() and its state would never be reset.
         let scenarios = self.scenario_names();
-        self.mutate_stubs(|stubs| stubs.retain(|s| s.stub.space.as_deref() != Some(space)));
+        self.mutate_stubs(|stubs| {
+            let first = stubs
+                .iter()
+                .position(|s| s.stub.space.as_deref() == Some(space));
+            stubs.retain(|s| s.stub.space.as_deref() != Some(space));
+            // The stubs that moved up may now answer this space's requests (issue #1303).
+            if let Some(i) = first
+                && i < stubs.len()
+            {
+                restamp(stubs, i.., self.load_clock.next());
+            }
+        });
         // Best-effort across the slice's clears so one failure doesn't leave later scenarios
         // stale, but the first failure still surfaces (issues #318, #330) — never report a
         // clean teardown while stale recorded requests or scenario state persist in the backend.

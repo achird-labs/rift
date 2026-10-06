@@ -16,8 +16,13 @@ impl Imposter {
             if to >= stubs.len() {
                 return Err(ImposterError::StubIndexOutOfBounds(to));
             }
-            let state = stubs.remove(from);
-            stubs.insert(to, state);
+            if from != to {
+                let state = stubs.remove(from);
+                stubs.insert(to, state);
+                // Every stub between the two positions now has a different stub set ahead of it
+                // (issue #1303); those past the range do not.
+                restamp(stubs, from.min(to)..=from.max(to), self.load_clock.next());
+            }
             Ok(())
         })
     }
@@ -84,12 +89,20 @@ impl Imposter {
                     // Swap a fresh Arc that reuses the slot's cycler + slot token, so the slot's
                     // response-cycling state is kept and in-flight requests holding the old Arc keep
                     // serving their snapshot (issue #287).
-                    stubs[i] = replaced_state(&stubs[i], stub, &self.load_clock);
+                    replace_at(stubs, i, stub, &self.load_clock);
                     true
                 }
                 None => false,
             }
         })
+    }
+
+    /// After removing the stub at `i`, stamp the stubs that moved up into its place: they may now
+    /// answer requests it answered (issue #1303). Nothing behind the last stub, nothing stamped.
+    fn restamp_exposed(&self, stubs: &mut [Arc<StubState>], i: usize) {
+        if i < stubs.len() {
+            restamp(stubs, i.., self.load_clock.next());
+        }
     }
 
     /// Delete the stub with `id`. Returns `false` if no such id.
@@ -99,6 +112,7 @@ impl Imposter {
             match stubs.iter().position(|s| s.stub.id.as_deref() == Some(id)) {
                 Some(i) => {
                     stubs.remove(i);
+                    self.restamp_exposed(stubs, i);
                     true
                 }
                 None => false,
@@ -122,7 +136,7 @@ impl Imposter {
                 return Err(ImposterError::StubIndexOutOfBounds(index));
             }
             // Reuse the slot's cycler + slot token (issue #287); see `replace_stub_by_id`.
-            stubs[index] = replaced_state(&stubs[index], stub, &self.load_clock);
+            replace_at(stubs, index, stub, &self.load_clock);
             Ok(())
         })
     }
@@ -134,6 +148,7 @@ impl Imposter {
                 return Err(ImposterError::StubIndexOutOfBounds(index));
             }
             stubs.remove(index);
+            self.restamp_exposed(stubs, index);
             Ok(())
         })
     }
@@ -181,18 +196,20 @@ impl Imposter {
     }
 }
 
-/// The state for replacing `old`'s stub with `stub` at one position: `old` itself when the content
-/// is identical, so an admin replace that changes nothing does not move `Last-Modified: load`
-/// (issue #1294) or the load clock; otherwise a state carrying `stub` with `old`'s cycler and slot
-/// (issue #287), stamped from `clock` (issue #1301).
-fn replaced_state(old: &Arc<StubState>, stub: Stub, clock: &LoadClock) -> Arc<StubState> {
+/// Replace the stub at `i` with `stub`. Identical content keeps the state, so an admin replace that
+/// changes nothing moves neither `Last-Modified: load` nor the load clock (issue #1294). Otherwise
+/// the slot keeps its cycler and slot token (issue #287) and takes a stamp from `clock` (issue
+/// #1301) — and when the new stub is eligible for different requests, so do the stubs behind it,
+/// which may now answer requests it answered (issue #1303).
+fn replace_at(stubs: &mut [Arc<StubState>], i: usize, stub: Stub, clock: &LoadClock) {
     let hash = crate::imposter::reconcile::content_hash(&stub);
-    if old.content_hash() == hash {
-        Arc::clone(old)
-    } else {
-        Arc::new(
-            old.with_stub_hashed(stub, hash)
-                .with_loaded_at(clock.next()),
-        )
+    if stubs[i].content_hash() == hash {
+        return;
+    }
+    let at = clock.next();
+    let exposes = !matches_alike(&stubs[i].stub, &stub);
+    stubs[i] = Arc::new(stubs[i].with_stub_hashed(stub, hash).with_loaded_at(at));
+    if exposes {
+        restamp(stubs, i + 1.., at);
     }
 }
