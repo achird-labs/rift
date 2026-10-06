@@ -232,6 +232,97 @@ services:
 See [TLS/HTTPS]({{ site.baseurl }}/features/tls/) for per-imposter certificates, mutual TLS and the
 self-signed fallback.
 
+### Intercepting HTTPS from another container
+
+To mock an external HTTPS host your application hard-codes, run the
+[intercept listener]({{ site.baseurl }}/features/intercept-proxy/) beside it and send the app's
+HTTPS through it. Declare the listener and its rules in the config file, so it is correct the moment
+`rift` is healthy:
+
+```json
+{
+  "imposters": [
+    { "port": 4545, "protocol": "http",
+      "stubs": [{ "responses": [{ "is": { "statusCode": 200, "body": "{\"featureX\":\"ON\"}" } }] }] }
+  ],
+  "intercept": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "caCertPath": "/ca/ca-cert.pem",
+    "caKeyPath": "/ca/ca-key.pem",
+    "rules": [
+      { "host": "cdn.example.com", "action": { "forward": { "port": 4545 } } }
+    ]
+  }
+}
+```
+
+The CA for a config-file listener comes from the block: `caCertPath` / `caKeyPath` (files, as here)
+or `caCertPem` / `caKeyPem` (inline). The `RIFT_INTERCEPT_*` variables and `--intercept-*` flags
+belong to the other way of starting a listener -- `--intercept-port` with no block, rules added over
+the admin API afterwards. Setting any of them **alongside a block is a startup error**, so do not put
+`RIFT_INTERCEPT_CA_CERT_PEM` (or any `RIFT_INTERCEPT_*`) in the environment of a container that loads
+a block. Make the CA once with `rift intercept-ca generate --out-dir ./ca` (see
+[`intercept-ca`]({{ site.baseurl }}/configuration/cli/#intercept-ca)) and mount it:
+
+```yaml
+services:
+  rift:
+    image: zainalpour/rift-proxy:latest
+    volumes:
+      - ./mock.json:/config/mock.json:ro
+      - ./ca:/ca:ro                      # ca-cert.pem + ca-key.pem from `intercept-ca generate`
+    command: ["--configfile", "/config/mock.json"]
+    # No `ports:` for 8080 -- only the app, on the compose network, needs the listener.
+    healthcheck:
+      test: ["CMD", "rift", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      rift:
+        condition: service_healthy
+    environment:
+      HTTPS_PROXY: http://rift:8080
+      NO_PROXY: localhost,127.0.0.1
+      SSL_CERT_FILE: /certs/ca.pem          # curl, Go, OpenSSL clients
+      REQUESTS_CA_BUNDLE: /certs/ca.pem     # Python requests
+      NODE_EXTRA_CA_CERTS: /certs/ca.pem    # Node
+    volumes:
+      - ./ca/ca-cert.pem:/certs/ca.pem:ro
+```
+
+A JVM app reads its truststore once at startup, so give it a JKS built ahead of time:
+`rift intercept-ca export --cert ./ca/ca-cert.pem --format jks --out truststore.jks --merge-system-cas /etc/ssl/certs/ca-certificates.crt`
+(password from `RIFT_TRUSTSTORE_PASSWORD`), then `-Djavax.net.ssl.trustStore=…`. Which variable adds
+to the default roots and which replaces them is spelled out under
+[Trusting the CA from the SUT]({{ site.baseurl }}/features/intercept-proxy/#trusting-the-ca-from-the-sut);
+it is not repeated here.
+
+Three things that fail quietly in containers:
+
+- **The bind host.** `POST /intercept` defaults to `127.0.0.1`, which another container cannot
+  reach. Name `"host": "0.0.0.0"` in the config block (as above); a bare `--intercept-port` binds
+  on `--host`, default `0.0.0.0`, and warns unless `--intercept-auth` is set. Keep the listener off
+  published ports unless something outside the network needs it.
+- **Key file permissions.** The image runs as uid 1000, and `intercept-ca generate` writes the key
+  `0600` as you, so on a Linux bind mount rift cannot read it and fails at startup. For a CI or demo
+  CA only, `chmod 644 ca/ca-key.pem` (or run the container with a `user:` / group that matches the
+  file's owner); never loosen a real key. See the note in
+  [`generate-certs.sh`](https://github.com/achird-labs/rift/blob/master/docs/demo/generate-certs.sh)
+  for the trap.
+- **`forward` reaches the rift container.** A rule's `forward` defaults to `127.0.0.1:{port}`
+  inside the rift container. To reach an imposter elsewhere, name it:
+  `{"forward": {"host": "mock-svc", "port": 4600, "scheme": "https"}}` -- see
+  [Forward to one of your imposters]({{ site.baseurl }}/features/intercept-proxy/#forward-to-one-of-your-imposters).
+
+Changing a rule needs only an edited file and `POST /admin/reload`; the listener itself (host, port,
+CA) is fixed at boot. The CI-verified, runnable version of this setup is the
+[HTTPS intercept demo](https://github.com/achird-labs/rift/tree/master/docs/demo#demo-6-https-intercept-proxy-standalone).
+
 ---
 
 ## Integration Testing Setup

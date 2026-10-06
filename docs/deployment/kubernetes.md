@@ -288,6 +288,86 @@ spec:
             name: my-app-mocks
 ```
 
+### Intercept listener as a sidecar
+
+To mock an external HTTPS host the app hard-codes, run the
+[intercept listener]({{ site.baseurl }}/features/intercept-proxy/) in the sidecar. Containers in a pod
+share a network namespace, so the app reaches it on `127.0.0.1`. Keep the CA pair in a `Secret`
+(made with `rift intercept-ca generate --out-dir ca`, see
+[`intercept-ca`]({{ site.baseurl }}/configuration/cli/#intercept-ca)). Rift reads it from a mounted
+volume through the config block's `caCertPath` / `caKeyPath`, and the app trusts the certificate from
+its own mount. Do not also set `RIFT_INTERCEPT_*` env vars on the sidecar: with an `intercept` block
+that is a startup error.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rift-intercept-ca
+stringData:
+  ca-cert.pem: |
+    -----BEGIN CERTIFICATE-----
+    ...
+  ca-key.pem: |
+    -----BEGIN PRIVATE KEY-----
+    ...
+---
+# in the Deployment's pod spec
+securityContext:
+  fsGroup: 1000                  # rift runs as uid 1000; lets it read the 0440 key
+containers:
+  - name: app
+    image: my-app:latest
+    env:
+      - name: HTTPS_PROXY
+        value: http://127.0.0.1:8080
+      - name: NO_PROXY
+        value: localhost,127.0.0.1,.svc,.cluster.local   # in-cluster hosts bypass the proxy
+      - name: SSL_CERT_FILE
+        value: /certs/ca-cert.pem
+    volumeMounts:
+      - name: ca
+        mountPath: /certs
+        readOnly: true
+  - name: rift
+    image: zainalpour/rift-proxy:latest
+    args: ["--configfile", "/config/mock.json"]   # holds the `intercept` block and its rules
+    volumeMounts:
+      - name: mock-config
+        mountPath: /config
+      - name: ca-pair
+        mountPath: /ca
+        readOnly: true
+volumes:
+  - name: ca
+    secret:
+      secretName: rift-intercept-ca
+      items: [{ key: ca-cert.pem, path: ca-cert.pem }]   # the app never gets the key
+  - name: ca-pair
+    secret:
+      secretName: rift-intercept-ca
+      defaultMode: 0440
+      items:
+        - { key: ca-cert.pem, path: ca-cert.pem }
+        - { key: ca-key.pem, path: ca-key.pem }
+  - name: mock-config
+    configMap:
+      name: my-app-mocks
+```
+
+The `intercept` block in `mock.json` is the one shown under
+[Docker]({{ site.baseurl }}/deployment/docker/#intercepting-https-from-another-container), with
+`"caCertPath": "/ca/ca-cert.pem"` and `"caKeyPath": "/ca/ca-key.pem"`; the listener can bind
+`127.0.0.1` here since only the pod's own app connects. Other trust variables
+(`NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, a JVM truststore) and which of them replace the default
+roots: [Trusting the CA from the SUT]({{ site.baseurl }}/features/intercept-proxy/#trusting-the-ca-from-the-sut).
+A `forward` rule reaches the sidecar's own `127.0.0.1` unless it names a `host`
+([details]({{ site.baseurl }}/features/intercept-proxy/#forward-to-one-of-your-imposters)).
+
+Each replica has its own listener and its own rules, like everything else in a replicated Rift (see
+[High Availability](#high-availability)). Editing the ConfigMap and calling `POST /admin/reload`
+re-applies the rules; the listener itself is boot-only.
+
 ---
 
 ## High Availability

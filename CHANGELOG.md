@@ -13,6 +13,8 @@ record.
 
 ### Added
 
+- **Docs: intercept proxy in containers** (#1275): a new [ECS / Fargate deployment page](docs/deployment/ecs-fargate.md) (a reference task definition), plus intercept sections in the Docker and Kubernetes guides, the `RIFT_INTERCEPT_*` variables in the deployment table and the image's `Dockerfile` comments.
+
 - **A runnable standalone intercept demo** (#1276): `docs/demo/docker-compose-intercept.yml` puts a
   SUT container behind `HTTPS_PROXY`, with a CA made by `rift intercept-ca generate` and a datafile
   imposter that a reload swaps. The SUT's healthcheck fetches the datafile through the MITM, so the

@@ -42,7 +42,14 @@ rift-lint examples/
 ## Where to go next
 
 These cover the Mountebank-compatible surface. For Rift's own features — fault injection, scripting,
-scenarios, flow state, the front door, the TLS intercept proxy (Demo 6, a SUT container behind
-`HTTPS_PROXY`) — see the runnable `docker-compose` demos in [`../docs/demo/`](../docs/demo/), each
-of which comes up in one command, and the
-[Features documentation](https://achird-labs.github.io/rift/features/).
+scenarios, flow state, the front door, the TLS intercept proxy — see the runnable `docker-compose`
+demos in [`../docs/demo/`](../docs/demo/), each of which comes up in one command:
+
+- `docker-compose.yml` — the basic imposter set
+- `docker-compose-https.yml` — HTTPS imposters with generated certificates
+- `docker-compose-retry-proxy.yml` — retry and proxy behaviour
+- `docker-compose-rift-features.yml` — Rift's `_rift` extensions
+- `docker-compose-scripting.yml` and `docker-compose-scripting-engines.yml` — scripting
+- `docker-compose-intercept.yml` — the standalone HTTPS intercept proxy
+
+See also the [Features documentation](https://achird-labs.github.io/rift/features/).
