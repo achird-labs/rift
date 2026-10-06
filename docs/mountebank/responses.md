@@ -518,6 +518,8 @@ The `304` carries `ETag`, `Last-Modified`, `Cache-Control`, `Vary`, `Expires` an
 `Content-Location` from the configured response when present, and `x-rift-imposter: true`, with no
 body, `Content-Type` or `Content-Length`. CORS headers are added as on any response.
 
+The [Optimizely template](https://github.com/achird-labs/rift/tree/master/templates/optimizely) is a worked example: its datafile CDN is one `is` stub with `_rift.conditional: true`.
+
 What a `304` still does:
 
 - **It consumes a cycle position.** The response is chosen before the request's validators are

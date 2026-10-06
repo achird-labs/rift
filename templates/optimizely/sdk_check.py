@@ -57,6 +57,19 @@ def main() -> None:
     check(config is not None and config.revision == "1", "SDK fetched datafile revision 1 from the mock CDN")
     check(set(config.features_map) == {"checkout_redesign", "vip_support", "legacy_search"}, "flags visible through OptimizelyConfig")
 
+    # Conditional polling: the SDK echoes the Last-Modified it was given as If-Modified-Since.
+    first_last_modified = config_manager.last_modified
+    check(bool(first_last_modified), f"first fetch stored Last-Modified ({first_last_modified})")
+    config_manager.fetch_datafile()
+    polls = requests.get(f"{ADMIN}/imposters/4600/savedRequests", timeout=5).json()
+    polls = [r for r in polls if r["path"].startswith("/datafiles/")]
+    check(len(polls) == 2, f"CDN recorded 2 datafile fetches ({len(polls)})")
+    hdrs = {k.lower(): v for k, v in polls[1]["headers"].items()}
+    sent = hdrs.get("if-modified-since")
+    sent = sent[0] if isinstance(sent, list) else sent
+    check(sent == first_last_modified, f"second fetch sent If-Modified-Since: {sent}")
+    check(polls[1].get("status") == 304, f"second fetch answered {polls[1].get('status')} (want 304)")
+
     # Rollout to everyone: enabled, default variable.
     anon = client.create_user_context("user-42", {"plan": "free"})
     d = anon.decide("checkout_redesign")

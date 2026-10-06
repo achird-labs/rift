@@ -90,6 +90,10 @@ record.
   `ImposterError::ExplicitPortRequired`, a new variant of that public enum, and neither deletes.
   `apply_config` now runs the same per-port code. Documented in `docs/embedding/server.md`.
 
+### Changed
+
+- **templates/optimizely: the datafile CDN now uses `_rift.conditional`** (#1295): `Last-Modified` is the stub's load time and an `ETag` is served; a reload that changes `fixtures/datafile.json` invalidates pollers without touching `imposters.json`. Wire-visible: the fixed `Sat, 03 Oct 2026 12:00:00 GMT` stamp is gone, so a test that copied it as an `If-Modified-Since` will now get a 200 or a different 304 timing.
+
 ### Performance
 
 - **Re-applying an unchanged imposter set costs a fraction of creating it** (#1254). Every
