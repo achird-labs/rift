@@ -121,6 +121,14 @@ record.
 
 ### Fixed
 
+- **Deleting, moving or narrowing a `_rift.conditional` stub no longer exposes an older stamp**
+  (#1303). The first stub that matches answers, so removing or moving one — or changing its
+  predicates — let a stub behind it answer the same URL with its own, older `Last-Modified`, and an
+  `If-Modified-Since` client was told `304` for a different body. The stubs that may now answer
+  differently are re-stamped (admin delete, `PUT /imposters/{port}/stubs` reorders, predicate
+  changes, reloads, a correlation-space teardown); a reorder through `PUT /imposters/{port}/stubs` no longer keeps a moved stub's
+  old stamp.
+
 - **A failed `enabled` toggle is no longer reported as toggled** (#1304): when pausing or resuming an imposter during an apply or reload failed to persist, the port was listed in both `failed` and `toggled`; it is now in `failed` only.
 
 - **A `_rift.conditional` change within the previous one's second is no longer answered `304`**
@@ -133,8 +141,9 @@ record.
 - **An admin stub replace that changes nothing no longer moves `Last-Modified: load`** (#1294).
   `PUT /imposters/{port}/stubs/{index}`, `…/stubs/by-id/{id}` and `PUT /imposters/{port}/stubs`
   re-stamped every stub they touched, so `_rift.conditional` pollers re-downloaded a body that had
-  not changed. A byte-identical stub now keeps its stamp; the bulk `PUT …/stubs` still restarts
-  every response cycle, as before.
+  not changed. A byte-identical stub now keeps its stamp (for the bulk `PUT …/stubs`, when it also
+  keeps its position and nothing ahead of it changes — see #1303); the bulk `PUT …/stubs` still
+  restarts every response cycle, as before.
 
 - **A config file that fails to parse after a `stringify` now says why** (#1279). Written without
   quotes, `"body": <%- stringify('datafile.json') %>` failed with only serde's

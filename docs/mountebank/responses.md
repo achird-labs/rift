@@ -500,7 +500,7 @@ A client that polls with validators (a CDN-hosted datafile, a feature-flag SDK) 
   every process and node for the same bytes.
 - **`lastModified`** (default `"load"`): `"load"` is the time the stub was loaded: when it was
   created, or last changed by the admin API (a replace that leaves the stub byte-identical keeps
-  it) or a reload. A reload that leaves the stub unchanged keeps it; one that rewrites most of an
+  it) or a reload. A reload that leaves the stub, and everything ahead of it, unchanged keeps it; one that rewrites most of an
   imposter's stubs restarts the imposter, which re-stamps them all, as does a restart. Otherwise an
   HTTP-date in the `Sat, 03 Oct 2026 12:00:00 GMT` form, served verbatim. Any other string is
   refused when the config is loaded.
@@ -510,6 +510,13 @@ A client that polls with validators (a CDN-hosted datafile, a feature-flag SDK) 
   restarts the imposter and a delete and re-create on the same port (not across a process restart). A client that revalidates with
   `If-Modified-Since` alone (the Optimizely SDKs do) therefore always sees a change. The cost is
   that rapid changes can stamp `Last-Modified` up to a second per change ahead of `Date`.
+
+  A stub is also re-stamped when it may now answer requests another stub answered: when a stub
+  ahead of it is deleted or moved, or has its predicates (or `space` / scenario gate) changed —
+  through the admin API, `PUT /imposters/{port}/stubs` or a reload. The first stub that matches
+  wins, so otherwise a client holding the removed stub's newer stamp would be told `304` for a
+  different body. Stubs ahead of the change keep their stamps; deleting the last stub, or
+  changing only a stub's responses, re-stamps nothing else.
 
 On a script-only response, or behind a non-GET method predicate, it never fires; `rift-lint` W019 says so.
 

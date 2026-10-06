@@ -1005,3 +1005,254 @@ async fn recreating_the_imposter_within_one_second_moves_last_modified() {
     assert!(secs(&stamp_c) > secs(&stamp_b));
     manager.delete_all().await;
 }
+
+// ===== Issue #1303: a stub newly exposed by a delete, move or predicate change is re-stamped =====
+
+fn stub_on(id: &str, path: &str, body: &str) -> Value {
+    json!({
+        "id": id,
+        "predicates": [{ "equals": { "path": path } }],
+        "responses": [{ "is": { "statusCode": 200, "body": body }, "_rift": { "conditional": true } }]
+    })
+}
+
+async fn get_path(port: u16, path: &str, since: Option<&str>) -> (u16, String, String) {
+    let headers: Vec<(&str, &str)> = since
+        .map(|s| ("If-Modified-Since", s))
+        .into_iter()
+        .collect();
+    let response = send(reqwest::Method::GET, port, path, &headers).await;
+    let status = response.status().as_u16();
+    let lm = header(&response, "last-modified").unwrap_or_default();
+    (status, lm, response.text().await.expect("body"))
+}
+
+/// `front` answers `path` ahead of the stubs `behind` it, and carries the newer stamp: it is added
+/// after the imposter (and the stubs behind) were loaded, so the load clock stamps it later.
+async fn front_over(
+    manager: &ImposterManager,
+    front: Value,
+    behind: Vec<Value>,
+    path: &str,
+) -> (u16, String) {
+    let port = imposter_with(manager, behind).await;
+    manager
+        .add_stub(port, stub(front), Some(0))
+        .await
+        .expect("add");
+    let (status, stamp, _) = get_path(port, path, None).await;
+    assert_eq!(status, 200);
+    (port, stamp)
+}
+
+#[tokio::test]
+async fn deleting_a_stub_restamps_the_stubs_it_exposed() {
+    let manager = ImposterManager::new();
+    let (port, t_a) = front_over(&manager, one_stub("a", "a"), vec![one_stub("b", "b")], "/").await;
+    manager.delete_stub(port, 0).await.expect("delete");
+    let (status, t_b, body) = get_path(port, "/", Some(&t_a)).await;
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "b"),
+        "a different body is not 'not modified'"
+    );
+    assert!(secs(&t_b) > secs(&t_a), "{t_b} after {t_a}");
+    manager.delete_all().await;
+}
+
+#[tokio::test]
+async fn deleting_a_stub_by_id_restamps_the_stubs_it_exposed() {
+    let manager = ImposterManager::new();
+    let (port, t_a) = front_over(&manager, one_stub("a", "a"), vec![one_stub("b", "b")], "/").await;
+    manager.delete_stub_by_id(port, "a").await.expect("delete");
+    let (status, _, body) = get_path(port, "/", Some(&t_a)).await;
+    assert_eq!((status, body.as_str()), (200, "b"));
+    manager.delete_all().await;
+}
+
+/// Nothing is behind the last stub, so deleting it touches no stamp.
+#[tokio::test]
+async fn deleting_the_last_stub_leaves_earlier_stamps_alone() {
+    let manager = ImposterManager::new();
+    let (port, t_a) = front_over(&manager, one_stub("a", "a"), vec![one_stub("b", "b")], "/").await;
+    manager.delete_stub(port, 1).await.expect("delete");
+    let (status, t_after, _) = get_path(port, "/", Some(&t_a)).await;
+    assert_eq!(status, 304, "the stub that answers did not change");
+    assert_eq!(t_after, t_a);
+    manager.delete_all().await;
+}
+
+#[tokio::test]
+async fn moving_a_stub_restamps_the_moved_range_only() {
+    let manager = ImposterManager::new();
+    let (port, t_a) = front_over(
+        &manager,
+        stub_on("a", "/x", "a"),
+        vec![stub_on("b", "/x", "b"), stub_on("c", "/c", "c")],
+        "/x",
+    )
+    .await;
+    let (_, t_c, _) = get_path(port, "/c", None).await;
+    manager.move_stub(port, 1, 0).await.expect("move");
+    let (status, _, body) = get_path(port, "/x", Some(&t_a)).await;
+    assert_eq!((status, body.as_str()), (200, "b"));
+    let (status_c, t_c_after, _) = get_path(port, "/c", Some(&t_c)).await;
+    assert_eq!(
+        (status_c, t_c_after),
+        (304, t_c),
+        "a stub behind the moved range keeps its stamp"
+    );
+    manager.delete_all().await;
+}
+
+#[tokio::test]
+async fn narrowing_a_stubs_predicates_restamps_the_stubs_behind_it() {
+    let manager = ImposterManager::new();
+    let (port, t_a) = front_over(
+        &manager,
+        one_stub("a", "a"),
+        vec![stub_on("b", "/x", "b")],
+        "/x",
+    )
+    .await;
+    manager
+        .replace_stub(port, 0, stub(stub_on("a", "/elsewhere", "a")))
+        .await
+        .expect("replace");
+    let (status, _, body) = get_path(port, "/x", Some(&t_a)).await;
+    assert_eq!((status, body.as_str()), (200, "b"));
+    manager.delete_all().await;
+}
+
+/// A responses-only edit cannot change which stub answers, so the stubs behind keep their stamps.
+#[tokio::test]
+async fn replacing_only_responses_leaves_the_stubs_behind_alone() {
+    let manager = ImposterManager::new();
+    let (port, _) = front_over(
+        &manager,
+        stub_on("a", "/a", "a"),
+        vec![stub_on("b", "/x", "b")],
+        "/a",
+    )
+    .await;
+    let (_, t_b, _) = get_path(port, "/x", None).await;
+    manager
+        .replace_stub(port, 0, stub(stub_on("a", "/a", "a2")))
+        .await
+        .expect("replace");
+    let (status, t_b_after, _) = get_path(port, "/x", Some(&t_b)).await;
+    assert_eq!((status, t_b_after), (304, t_b));
+    manager.delete_all().await;
+}
+
+#[tokio::test]
+async fn reordering_through_replace_stubs_restamps() {
+    let manager = ImposterManager::new();
+    let (port, t_a) = front_over(&manager, one_stub("a", "a"), vec![one_stub("b", "b")], "/").await;
+    manager
+        .replace_stubs(
+            port,
+            vec![stub(one_stub("b", "b")), stub(one_stub("a", "a"))],
+        )
+        .await
+        .expect("replace all");
+    let (status, _, body) = get_path(port, "/", Some(&t_a)).await;
+    assert_eq!((status, body.as_str()), (200, "b"));
+    manager.delete_all().await;
+}
+
+fn reload_config(port: u16, stubs: Vec<Value>) -> rift_mock_core::imposter::ImposterConfig {
+    serde_json::from_value(json!({ "port": port, "protocol": "http", "stubs": stubs }))
+        .expect("config")
+}
+
+/// Small enough a change that the reload patches in place rather than restarting the imposter.
+#[tokio::test]
+async fn a_reload_that_only_deletes_a_stub_restamps_the_stubs_behind_it() {
+    let manager = ImposterManager::new();
+    let rest = || {
+        vec![
+            one_stub("b", "b"),
+            stub_on("c", "/c", "c"),
+            stub_on("d", "/d", "d"),
+        ]
+    };
+    let (port, t_a) = front_over(&manager, one_stub("a", "a"), rest(), "/").await;
+    let report = manager
+        .apply_config(vec![reload_config(port, rest())])
+        .await
+        .expect("apply");
+    assert_eq!(report.stub_patched, vec![port], "a patch, not a restart");
+    let (status, _, body) = get_path(port, "/", Some(&t_a)).await;
+    assert_eq!((status, body.as_str()), (200, "b"));
+    manager.delete_all().await;
+}
+
+#[tokio::test]
+async fn a_reload_that_only_reorders_restamps_the_moved_range() {
+    let manager = ImposterManager::new();
+    let (port, t_a) = front_over(
+        &manager,
+        one_stub("a", "a"),
+        vec![
+            one_stub("b", "b"),
+            stub_on("c", "/c", "c"),
+            stub_on("d", "/d", "d"),
+        ],
+        "/",
+    )
+    .await;
+    let desired = vec![
+        one_stub("b", "b"),
+        one_stub("a", "a"),
+        stub_on("c", "/c", "c"),
+        stub_on("d", "/d", "d"),
+    ];
+    let report = manager
+        .apply_config(vec![reload_config(port, desired)])
+        .await
+        .expect("apply");
+    assert_eq!(report.stub_patched, vec![port], "a patch, not a restart");
+    let (status, _, body) = get_path(port, "/", Some(&t_a)).await;
+    assert_eq!((status, body.as_str()), (200, "b"));
+    manager.delete_all().await;
+}
+
+/// Tearing a correlation space down removes its stubs the same way a delete does.
+#[tokio::test]
+async fn tearing_down_a_space_restamps_the_stubs_it_exposed() {
+    let manager = ImposterManager::new();
+    let port = create(
+        &manager,
+        json!({ "port": 0, "protocol": "http",
+            "_rift": { "flowState": { "flowIdSource": "header:X-Session" } },
+            "stubs": [one_stub("global", "global")] }),
+    )
+    .await;
+    let mut scoped = one_stub("scoped", "scoped");
+    scoped["space"] = json!("s1");
+    manager
+        .add_stub(port, stub(scoped), Some(0))
+        .await
+        .expect("add");
+    let session = [("X-Session", "s1")];
+    let first = send(reqwest::Method::GET, port, "/", &session).await;
+    let t_x = header(&first, "last-modified").expect("Last-Modified");
+    assert_eq!(first.text().await.expect("body"), "scoped");
+
+    manager.teardown_space(port, "s1").await.expect("teardown");
+    let after = send(
+        reqwest::Method::GET,
+        port,
+        "/",
+        &[("X-Session", "s1"), ("If-Modified-Since", t_x.as_str())],
+    )
+    .await;
+    assert_eq!(
+        after.status().as_u16(),
+        200,
+        "a different body is not 'not modified'"
+    );
+    assert_eq!(after.text().await.expect("body"), "global");
+    manager.delete_all().await;
+}

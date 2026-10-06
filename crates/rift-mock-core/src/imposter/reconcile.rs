@@ -1,7 +1,7 @@
 //! Incremental config reconciliation (issue #316): stable stub identity, the order-aware
 //! stub edit script, apply reports, and imposter change events.
 
-use super::core::{LoadClock, StubState};
+use super::core::{LoadClock, StubState, first_divergence, restamp};
 use super::types::{ImposterError, Stub};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -340,7 +340,24 @@ pub(crate) fn plan_stub_reconcile(
             ),
             None => Arc::new(StubState::with_hash(stub.clone(), hash).with_loaded_at(stamp())),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    // Stamps are positional (issue #1303): what a request gets depends on which stub sits where,
+    // and a surviving state reused by key may have moved. From the first position where the old
+    // and new stubs stop matching alike, every stub takes the patch's stamp; before it, a position
+    // keeps the stamp it had only when it holds the same content it held.
+    let mut next = next;
+    let k = first_divergence(states.iter().map(|s| &s.stub), desired.iter());
+    for p in 0..next.len() {
+        let at = match states.get(p) {
+            Some(prev) if p < k && prev.content_hash() == next[p].content_hash() => {
+                prev.loaded_at()
+            }
+            _ => stamp(),
+        };
+        if next[p].loaded_at() != at {
+            restamp(&mut next, p..=p, at);
+        }
+    }
     let removed_keys = by_key
         .into_values()
         .map(|state| state.sequence_key())
