@@ -88,6 +88,7 @@ rel() {
 prereq_for() {
   case "$1" in
     docker-compose-https.yml) echo "generate-certs.sh" ;;
+    docker-compose-intercept.yml) echo "generate-intercept-ca.sh" ;;
     *) echo "" ;;
   esac
 }

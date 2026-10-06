@@ -305,6 +305,57 @@ curl -X POST http://localhost:4560/js/echo
 
 ---
 
+## Demo 6: HTTPS Intercept Proxy (standalone)
+
+A system under test in **its own container** sends its HTTPS traffic through rift's intercept
+listener, configured only by `HTTPS_PROXY`. Rift terminates TLS with a CA the SUT already trusts,
+and a rule forwards `cdn.optimizely.com` to an imposter serving an Optimizely-style datafile from
+disk. The config file declares the imposter, the listener and the rule; nothing calls the admin API.
+This is the shape of an ECS/Fargate task or a compose stack, where the SUT cannot be handed a CA
+after it starts.
+
+### Prerequisites
+
+The CA has to exist before either container starts. Rift makes it offline:
+
+```bash
+cd docs/demo
+./generate-intercept-ca.sh     # docker run … rift intercept-ca generate --out-dir intercept-ca
+```
+
+`rift intercept-ca` is newer than the last release; until the next one, build and retag the image
+first (see the note at the top).
+
+### Start
+
+```bash
+docker compose -f docker-compose-intercept.yml up -d --wait
+```
+
+`--wait` returns once the SUT container is healthy, and its healthcheck *is* the interception: a
+`curl https://cdn.optimizely.com/datafiles/demo.json` through the proxy that must return the
+datafile. CI boots this demo on every change to `docs/demo/`, so a broken intercept path fails the
+build.
+
+### Test
+
+```bash
+./test-intercept.sh
+```
+
+It fetches the datafile from the SUT container, checks rift serves the CA the SUT trusts, edits
+`fixtures/datafile.json` and runs `POST /admin/reload` (the SUT then sees the new revision — no
+rule or listener change), and adds a rule at runtime over the admin API. The intercept port (8080)
+is not published to the host on purpose; the SUT reaches it over the compose network.
+
+### Cleanup
+
+```bash
+docker compose -f docker-compose-intercept.yml down
+```
+
+---
+
 ## Configuration Files
 
 | File | Description |
@@ -318,6 +369,10 @@ curl -X POST http://localhost:4560/js/echo
 | `docker-compose-rift-features.yml` | Fault injection demo |
 | `docker-compose-scripting.yml` | Scripting with flow state demo |
 | `generate-certs.sh` | Certificate generation script |
+| `imposters-intercept.json` | Intercept demo: datafile imposter plus the `intercept` block |
+| `docker-compose-intercept.yml` | Intercept demo: rift plus a curl SUT container |
+| `generate-intercept-ca.sh` | Makes the intercept demo's CA with `rift intercept-ca generate` |
+| `test-intercept.sh` | Intercept demo end-to-end check (datafile edit + reload) |
 
 ---
 

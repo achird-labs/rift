@@ -1,0 +1,52 @@
+# Rift Demo - HTTPS intercept proxy, standalone
+#
+# A system under test in its own container sends its HTTPS traffic through rift's intercept
+# listener (HTTPS_PROXY). Rift terminates TLS with a CA the SUT already trusts, and a rule forwards
+# cdn.optimizely.com to an imposter that serves a datafile from disk. Nothing calls the admin API:
+# the config file declares the imposter, the listener and the rule.
+#
+# Prerequisites (the CA must exist before either container starts):
+#   ./generate-intercept-ca.sh
+#
+# Quick Start:
+#   docker compose -f docker-compose-intercept.yml up -d --wait
+#   ./test-intercept.sh          # edits the datafile, reloads, and shows the SUT sees the change
+#
+# The intercept port (8080) is deliberately not published: the SUT reaches it over the compose
+# network, as a SUT in another container (or another ECS task container) would.
+
+services:
+  rift:
+    image: zainalpour/rift-proxy:latest
+    container_name: rift-intercept-demo
+    ports:
+      - "2525:2525"    # Admin API
+    volumes:
+      - ./imposters-intercept.json:/config/imposters-intercept.json:ro
+      - ./fixtures:/config/fixtures:ro
+      - ./intercept-ca:/intercept-ca:ro
+    command: ["--configfile", "/config/imposters-intercept.json"]
+    healthcheck:
+      test: ["CMD", "rift", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # The system under test: plain curl, configured only by environment, the way an app container
+  # is. Its healthcheck is the assertion CI enforces: the datafile arrives through the MITM.
+  sut:
+    image: curlimages/curl:8.11.1
+    container_name: rift-intercept-demo-sut
+    depends_on:
+      rift:
+        condition: service_healthy
+    environment:
+      - HTTPS_PROXY=http://rift:8080
+    volumes:
+      - ./intercept-ca/ca-cert.pem:/certs/rift-ca.pem:ro
+    command: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -fsS --cacert /certs/rift-ca.pem https://cdn.optimizely.com/datafiles/demo.json | grep -q '\"revision\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 6

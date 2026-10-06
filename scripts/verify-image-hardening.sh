@@ -172,16 +172,43 @@ check_static_has_no_os_packages() {
 }
 
 # --- 6. no compose healthcheck shells out to curl ---------------------------
+# The services in a compose file (or a markdown page's compose snippet) that probe with curl and
+# run the rift image. Only those: a demo's other containers — the intercept demo's curl-based SUT
+# (issue #1276) — bring their own curl, and the rift image is what stopped shipping it. A service
+# with no `image:` (a `build:`) cannot be told apart from a rift one, so it counts as one.
+curl_probing_rift_services() {
+  awk '
+    function flush() {
+      if (inblk && curl && (rift || !hasimage)) print svc
+      inblk = 0; rift = 0; curl = 0; hasimage = 0
+    }
+    FNR == 1 { flush(); insvc = 0; svcind = -1 }
+    /^[[:space:]]*services:[[:space:]]*$/ { flush(); insvc = 1; svcind = -1; next }
+    insvc && NF {
+      match($0, /^ */); ind = RLENGTH
+      if (svcind >= 0 && ind < svcind) { flush(); insvc = 0; next }
+      if ($0 ~ /^ *[A-Za-z0-9_.-]+:[[:space:]]*$/ && (svcind < 0 || ind == svcind)) {
+        if (svcind < 0) svcind = ind
+        flush(); inblk = 1; svc = $1; next
+      }
+      if (inblk && $0 ~ /^ *image:/) { hasimage = 1; if ($0 ~ /rift/) rift = 1 }
+      if (inblk && $0 ~ /^ *test:/ && $0 ~ /curl/) curl = 1
+    }
+    END { flush() }
+  ' "$1"
+}
+
 check_compose_probes() {
-  echo "[6] no compose healthcheck shells out to curl"
-  local f found=0
+  echo "[6] no compose healthcheck of a rift container shells out to curl"
+  local f found=0 services
   for f in $(compose_files); do
-    if grep -nE '^[[:space:]]*test:' "$f" | grep -q 'curl'; then
-      fail "$(rel "$f") healthchecks with curl (image no longer ships it)"
+    services="$(curl_probing_rift_services "$f")"
+    if [ -n "$services" ]; then
+      fail "$(rel "$f") healthchecks with curl (image no longer ships it): $(echo $services)"
       found=1
     fi
   done
-  [ "$found" -eq 0 ] && ok "all compose healthchecks use the built-in probe"
+  [ "$found" -eq 0 ] && ok "all rift compose healthchecks use the built-in probe"
 }
 
 # --- 7. published images get SBOM + provenance + cosign ---------------------

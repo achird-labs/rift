@@ -13,6 +13,12 @@ record.
 
 ### Added
 
+- **A runnable standalone intercept demo** (#1276): `docs/demo/docker-compose-intercept.yml` puts a
+  SUT container behind `HTTPS_PROXY`, with a CA made by `rift intercept-ca generate` and a datafile
+  imposter that a reload swaps. The SUT's healthcheck fetches the datafile through the MITM, so the
+  demo-compose CI gate now fails if the standalone intercept path breaks — nothing in CI exercised
+  it in the published image before.
+
 - **Declarative conditional GET on `is` responses** (#1280). `_rift.conditional` adds a strong
   `ETag` (FNV-1a over the served bytes) and `Last-Modified` (stub load time or a fixed date) and
   answers `304` to a matching `If-None-Match` / `If-Modified-Since`, so datafile-style pollers
