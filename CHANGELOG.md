@@ -13,6 +13,12 @@ record.
 
 ### Added
 
+- **Intercept rules can be replaced atomically** (#1272). `PUT /intercept/rules` and
+  `rift_intercept_replace_rules` swap the whole rule set in one step and answer with the stored set.
+  Rules match first-to-last, so appending never overrides an installed rule, and `DELETE` then
+  `POST` left a window in which every host fell through to the no-rule response. A refused body
+  (bad JSON, a scripted rule without `--allowInjection`, more than 10,000 rules) keeps the old set.
+
 - **Embedders can decode configs the engine already admitted without re-admitting them**
   (#1267). The admission checks (predicate selectors and `matches` patterns, behaviors blocks that
   must parse, `copy`/`lookup` selectors) run inside `Deserialize`, so an embedder replaying configs

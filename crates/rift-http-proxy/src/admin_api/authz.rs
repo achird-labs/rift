@@ -444,6 +444,10 @@ mod tests {
             action_of(Method::DELETE, "/intercept/rules"),
             Some(actions::INTERCEPT_WRITE)
         );
+        assert_eq!(
+            action_of(Method::PUT, "/intercept/rules"),
+            Some(actions::INTERCEPT_WRITE)
+        );
     }
 
     #[test]

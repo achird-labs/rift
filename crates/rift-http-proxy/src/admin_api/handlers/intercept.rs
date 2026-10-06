@@ -46,6 +46,10 @@ pub async fn route(
             Some(state) => handle_add_rules(req, &state, allow_injection).await,
             None => not_running(),
         },
+        (&Method::PUT, "/rules") => match control.state() {
+            Some(state) => handle_replace_rules(req, &state, allow_injection).await,
+            None => not_running(),
+        },
         (&Method::GET, "/rules") => match control.state() {
             Some(state) => handle_list_rules(&state),
             None => not_running(),
@@ -165,7 +169,7 @@ async fn handle_stop(control: &InterceptControl) -> Response<Full<Bytes>> {
         })
 }
 
-/// A single rule or a batch — `POST /intercept/rules` accepts either shape.
+/// A single rule or a batch — `POST` and `PUT /intercept/rules` accept either shape.
 #[derive(Debug, serde::Deserialize)]
 #[serde(untagged)]
 enum RuleOrRules {
@@ -240,6 +244,49 @@ fn add_rules_from_bytes(
         }
     };
     json_response(StatusCode::CREATED, &added)
+}
+
+/// `PUT /intercept/rules` — replace the whole set with one rule (a bare object) or many (an array)
+/// in a single swap (issue #1272). First-match-wins means appending can never override an existing
+/// rule, so this is the only race-free way to change one.
+async fn handle_replace_rules(
+    req: Request<Incoming>,
+    state: &InterceptState,
+    allow_injection: bool,
+) -> Response<Full<Bytes>> {
+    let body = match collect_body(req).await {
+        Ok(b) => b,
+        Err(e) => return error_response(e.status_code(), &e.to_string()),
+    };
+    replace_rules_from_bytes(&body, state, allow_injection)
+}
+
+/// Parse, gate and swap in a replacement set. Every refusal (`400` parse or gate, `429` capacity)
+/// leaves the old set in place; success answers `200` with the stored set, the shape `GET` lists.
+fn replace_rules_from_bytes(
+    body: &[u8],
+    state: &InterceptState,
+    allow_injection: bool,
+) -> Response<Full<Bytes>> {
+    let rules = match serde_json::from_slice(body) {
+        Ok(RuleOrRules::One(rule)) => vec![rule],
+        Ok(RuleOrRules::Many(rules)) => rules,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid intercept rule JSON: {e}"),
+            );
+        }
+    };
+    if rules_are_gated(&rules, allow_injection) {
+        return crate::admin_api::handlers::imposters::injection_disallowed_response();
+    }
+    // Rendered before the move into the store, so the body is exactly the set being installed.
+    let stored = json_response(StatusCode::OK, &rules);
+    match state.rules.replace(rules) {
+        Ok(_) => stored,
+        Err(e) => error_response(StatusCode::TOO_MANY_REQUESTS, &e.to_string()),
+    }
 }
 
 /// `GET /intercept/rules` — list all current rules.
@@ -909,5 +956,107 @@ mod tests {
         let resp = start_from_bytes(b"{\"port\":0}", &control, false).await;
         assert_eq!(resp.status(), StatusCode::CREATED);
         control.stop().await;
+    }
+
+    // ── Issue #1272: PUT /intercept/rules replaces the set atomically ─────────────────────────────
+
+    const RULE_V1: &[u8] =
+        br#"{"host":"a.test","action":{"serve":{"statusCode":200,"body":"v1"}}}"#;
+
+    #[tokio::test]
+    async fn replace_rules_from_bytes_swaps_the_set_and_answers_200_with_it() {
+        let state = test_state();
+        assert_eq!(
+            add_rules_from_bytes(RULE_V1, &state, true).status(),
+            StatusCode::CREATED
+        );
+        let new_set = br#"[{"host":"a.test","action":{"serve":{"statusCode":200,"body":"v2"}}},
+                           {"host":"b.test","action":{"forward":{"port":4600}}}]"#;
+        let resp = replace_rules_from_bytes(new_set, &state, true);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&read_body(resp).await).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!([
+                {"host":"a.test","predicates":[],
+                 "action":{"serve":{"statusCode":200,"headers":{},"body":"v2"}}},
+                {"host":"b.test","predicates":[],"action":{"forward":{"port":4600}}}
+            ]),
+            "the body is the stored set, the same shape GET returns"
+        );
+        let stored = state.rules.list();
+        assert_eq!(stored.len(), 2, "the old v1 rule is gone, not appended to");
+        assert_eq!(stored[0].host.as_deref(), Some("a.test"));
+        assert_eq!(stored[1].host.as_deref(), Some("b.test"));
+    }
+
+    /// A bare object is accepted like POST's, and replaces the set with that one rule.
+    #[test]
+    fn replace_rules_from_bytes_accepts_a_single_object() {
+        let state = test_state();
+        add_rules_from_bytes(RULE_V1, &state, true);
+        add_rules_from_bytes(RULE_V1, &state, true);
+        let resp = replace_rules_from_bytes(
+            br#"{"host":"c.test","action":{"serve":{"statusCode":204}}}"#,
+            &state,
+            true,
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
+        let stored = state.rules.list();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].host.as_deref(), Some("c.test"));
+    }
+
+    #[test]
+    fn replace_rules_from_bytes_with_an_empty_array_clears() {
+        let state = test_state();
+        add_rules_from_bytes(RULE_V1, &state, true);
+        let resp = replace_rules_from_bytes(b"[]", &state, true);
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.rules.is_empty());
+    }
+
+    #[test]
+    fn replace_rules_from_bytes_bad_json_is_400_and_keeps_the_set() {
+        let state = test_state();
+        add_rules_from_bytes(RULE_V1, &state, true);
+        let resp = replace_rules_from_bytes(b"{not json", &state, true);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(state.rules.len(), 1, "a rejected replace changes nothing");
+    }
+
+    #[test]
+    fn replace_rules_from_bytes_over_the_cap_is_429_and_keeps_the_set() {
+        use crate::intercept_rules::MAX_RULES;
+        let state = test_state();
+        add_rules_from_bytes(RULE_V1, &state, true);
+        let one = r#"{"action":{"serve":{"statusCode":200}}}"#;
+        let too_many = format!("[{}]", vec![one; MAX_RULES + 1].join(","));
+        let resp = replace_rules_from_bytes(too_many.as_bytes(), &state, true);
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(state.rules.len(), 1, "a refused replace keeps the old set");
+        assert_eq!(state.rules.list()[0].host.as_deref(), Some("a.test"));
+    }
+
+    #[test]
+    fn replace_rules_from_bytes_with_a_gated_rule_is_refused_and_keeps_the_set() {
+        let state = test_state();
+        add_rules_from_bytes(RULE_V1, &state, false);
+        let inject = br#"[{"host":"a.test","action":{"serve":{"statusCode":200}}},
+            {"predicates":[{"inject":"function (r) { return true; }"}],
+             "action":{"serve":{"statusCode":200}}}]"#;
+        let resp = replace_rules_from_bytes(inject, &state, false);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            state.rules.len(),
+            1,
+            "one gated rule refuses the whole replace"
+        );
+        assert_eq!(
+            replace_rules_from_bytes(inject, &state, true).status(),
+            StatusCode::OK,
+            "--allowInjection admits it"
+        );
+        assert_eq!(state.rules.len(), 2);
     }
 }

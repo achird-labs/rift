@@ -277,8 +277,9 @@ The block is the same shape as the `POST /intercept` body — `host`, `port`, th
 - **No `returnCaKey`.** A config file has no response to return a generated CA key in, so
   `"returnCaKey": true` fails the load, naming the key (`rift-lint` `E050`); `false` or absent loads.
   Bootstrap a CA over the admin API instead.
-- **Runtime rules still layer on top.** `POST /intercept/rules` adds to the config-seeded set and
-  `DELETE /intercept/rules` clears it; `GET` lists both.
+- **Runtime rules still layer on top.** `POST /intercept/rules` adds to the config-seeded set,
+  `PUT /intercept/rules` replaces both with its body, and `DELETE /intercept/rules` clears it; `GET`
+  lists both.
 - **`rules` works over the admin API and FFI too.** `POST /intercept` and `rift_start_intercept`
   accept the same optional `rules` array, so any surface can start-and-seed in one call.
 - **Boot-only.** `POST /admin/reload` re-applies imposters only. When the reloaded file carries an
@@ -368,8 +369,9 @@ curl -sX DELETE http://localhost:2525/intercept
 > loopback HTTP and no Rust code** — see [FFI (C-ABI)]({{ site.baseurl }}/embedding/ffi/#intercept-proxy-over-ffi).
 > `rift_start_intercept` starts the listener, `rift_stop_intercept` stops it, and the
 > `rift_intercept_*` control-plane functions — `rift_intercept_add_rules`,
-> `rift_intercept_list_rules`, `rift_intercept_clear_rules`, `rift_intercept_export_truststore`, and
-> `rift_intercept_ca_pem` — add rules, list them, export a truststore, and fetch the CA PEM, all
+> `rift_intercept_list_rules`, `rift_intercept_replace_rules`, `rift_intercept_clear_rules`,
+> `rift_intercept_export_truststore`, and `rift_intercept_ca_pem` — add, list, replace and clear
+> rules, export a truststore, and fetch the CA PEM, all
 > over C-ABI. The listener started this way is the *same* one `rift_serve_admin`'s `/intercept`
 > routes see: `rift_start_intercept` then `GET /intercept` reports it, and a double-start across the
 > two surfaces conflicts consistently (409 / `-1`).
@@ -412,8 +414,8 @@ of a repeated header. Declarative predicates (`equals`, `contains`, `matches`, �
 > `--allowInjection` gates on imposter stubs. Without the flag, a rule carrying one (however deeply
 > nested under `not`/`or`/`and`) is refused with `400` and the whole request is rejected: a batch
 > containing one such rule stores none of it. This holds on every door that admits a rule —
-> `POST /intercept/rules`, the `rules` array on `POST /intercept`, and the `--configfile`
-> `intercept` block. `serve` and `forward` actions carry no script and are never gated.
+> `POST` and `PUT /intercept/rules`, the `rules` array on `POST /intercept`, and the
+> `--configfile` `intercept` block. `serve` and `forward` actions carry no script and are never gated.
 
 ### Serve an inline stub
 
@@ -474,11 +476,17 @@ curl -X POST http://localhost:2525/intercept/rules -d '{
 | Verb & path | Effect |
 |:--|:--|
 | `POST /intercept/rules` | Add one rule (object) or many (array). Rejected with `429 Too Many Requests` once the store holds 10,000 rules — `DELETE` rules before adding more. |
+| `PUT /intercept/rules` | Replace the whole set with one rule (object) or many (array) in a single swap; `200` with the stored set. An empty array clears. A refused body (bad JSON, scripted rule, over 10,000 rules) leaves the old set in place. |
 | `GET /intercept/rules` | List all rules |
 | `DELETE /intercept/rules` | Remove all rules |
 
 The rule store is capped at 10,000 rules to bound both memory and the per-request match scan; a
 batch `POST` that would exceed the cap is rejected in full (no partial add).
+
+Rules match first-to-last and the first match wins, so appending a rule can never override one
+that is already installed. To change a rule — point a host at a different imposter, swap a served
+body — `PUT` the whole new set. The swap is atomic: a request in flight is matched against the old
+set or the new one, never an empty store, which a `DELETE` followed by a `POST` cannot promise.
 
 When no rule matches, the request falls through to a default `200` with a `text/plain` body
 `rift intercepted <METHOD> <path> for <host>`, so an unconfigured host is answered rather than

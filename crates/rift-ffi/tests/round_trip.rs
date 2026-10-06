@@ -1527,6 +1527,92 @@ fn ffi_intercept_serve_and_forward() {
     }
 }
 
+/// Issue #1272: `rift_intercept_replace_rules` swaps the whole set; the replacement is listed and
+/// served, and a malformed or not-started call fails with `-1` without touching the store.
+#[test]
+fn ffi_intercept_replace_rules() {
+    unsafe {
+        let h = rift_start();
+        assert_eq!(
+            rift_intercept_replace_rules(h, cstr("[]").as_ptr()),
+            -1,
+            "replace before the listener starts is an error"
+        );
+        assert!(take_last_error().contains("intercept not started"));
+
+        let started = take_json(rift_start_intercept(h, cstr(r#"{"port":0}"#).as_ptr()));
+        let started: serde_json::Value = serde_json::from_str(&started).unwrap();
+        let intercept_port = started["interceptPort"].as_u64().unwrap() as u16;
+        let ca_pem = take_json(rift_intercept_ca_pem(h));
+
+        let v1 = cstr(
+            r#"[ { "host": "a.example.com", "action": { "serve": { "statusCode": 200, "body": "v1" } } },
+                 { "host": "b.example.com", "action": { "serve": { "statusCode": 200, "body": "b" } } } ]"#,
+        );
+        assert_eq!(rift_intercept_add_rules(h, v1.as_ptr()), 0);
+
+        let v2 = cstr(
+            r#"{ "host": "a.example.com", "action": { "serve": { "statusCode": 200, "body": "v2" } } }"#,
+        );
+        assert_eq!(rift_intercept_replace_rules(h, v2.as_ptr()), 0);
+
+        let listed: serde_json::Value =
+            serde_json::from_str(&take_json(rift_intercept_list_rules(h))).unwrap();
+        let listed = listed.as_array().unwrap();
+        assert_eq!(
+            listed.len(),
+            1,
+            "both old rules are replaced by the one new rule"
+        );
+        assert_eq!(listed[0]["action"]["serve"]["body"], "v2");
+
+        assert_eq!(
+            rift_intercept_replace_rules(h, cstr("{not json").as_ptr()),
+            -1
+        );
+        assert!(take_last_error().contains("invalid rule JSON"));
+        assert_eq!(
+            rift_intercept_replace_rules(h, std::ptr::null()),
+            -1,
+            "a null rules pointer is an error, not a clear"
+        );
+        let one = r#"{"action":{"serve":{"statusCode":200}}}"#;
+        let too_many = format!("[{}]", vec![one; 10_001].join(","));
+        assert_eq!(
+            rift_intercept_replace_rules(h, cstr(&too_many).as_ptr()),
+            -1,
+            "a set over the 10,000-rule cap is refused"
+        );
+        assert!(take_last_error().contains("10000 rules"));
+        let still: serde_json::Value =
+            serde_json::from_str(&take_json(rift_intercept_list_rules(h))).unwrap();
+        assert_eq!(
+            still.as_array().unwrap().len(),
+            1,
+            "failed replaces change nothing"
+        );
+        assert_eq!(still[0]["action"]["serve"]["body"], "v2");
+
+        rt().block_on(async {
+            let client = reqwest::Client::builder()
+                .proxy(reqwest::Proxy::https(format!("http://127.0.0.1:{intercept_port}")).unwrap())
+                .add_root_certificate(reqwest::Certificate::from_pem(ca_pem.as_bytes()).unwrap())
+                .build()
+                .unwrap();
+            let served = client.get("https://a.example.com/x").send().await.unwrap();
+            assert_eq!(served.text().await.unwrap(), "v2");
+            let gone = client.get("https://b.example.com/x").send().await.unwrap();
+            assert_eq!(
+                gone.text().await.unwrap(),
+                "rift intercepted GET /x for b.example.com\n",
+                "b.example.com's rule was replaced away, so it falls through to the no-rule answer"
+            );
+        });
+
+        rift_stop(h);
+    }
+}
+
 /// Issue #593: over FFI, `rift_start_intercept` with `returnCaKey` hands back a generated CA pair,
 /// and that pair, supplied inline on a later start, reconstructs the same trust anchor.
 #[test]
