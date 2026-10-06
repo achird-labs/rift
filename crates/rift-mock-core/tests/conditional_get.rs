@@ -729,3 +729,279 @@ async fn replace_with_changed_content_moves_last_modified() {
     assert_ne!(after_all, after_one, "replace_stubs with new content");
     manager.delete_all().await;
 }
+
+// ===== Issue #1301: a change inside the previous stamp's second still moves it =====
+
+/// Wait for the start of a wall-clock second, so the next few hundred milliseconds of changes all
+/// land in one second — the case `Last-Modified`'s whole seconds cannot tell apart.
+async fn at_start_of_a_second() {
+    let ms = chrono::Utc::now().timestamp_subsec_millis();
+    if ms > 300 {
+        tokio::time::sleep(Duration::from_millis(u64::from(1000 - ms) + 20)).await;
+    }
+}
+
+fn secs(http_date: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc2822(http_date)
+        .expect("an HTTP-date")
+        .timestamp()
+}
+
+/// What an `If-Modified-Since`-only client (the Optimizely Java SDK) sees after revalidating with
+/// the stamp it holds.
+async fn revalidate(port: u16, since: &str) -> (u16, String, String) {
+    let response = get(port, &[("If-Modified-Since", since)]).await;
+    let status = response.status().as_u16();
+    let lm = header(&response, "last-modified").unwrap_or_default();
+    (status, lm, response.text().await.expect("body"))
+}
+
+fn one_stub(id: &str, body: &str) -> Value {
+    json!({
+        "id": id,
+        "responses": [{ "is": { "statusCode": 200, "body": body }, "_rift": { "conditional": true } }]
+    })
+}
+
+async fn imposter_with(manager: &ImposterManager, stubs: Vec<Value>) -> u16 {
+    create(
+        manager,
+        json!({ "port": 0, "protocol": "http", "stubs": stubs }),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn replace_stub_twice_within_one_second_moves_last_modified_both_times() {
+    let manager = ImposterManager::new();
+    let port = imposter_with(&manager, vec![one_stub("s", "a")]).await;
+    at_start_of_a_second().await;
+    manager
+        .replace_stub(port, 0, stub(one_stub("s", "b")))
+        .await
+        .expect("replace");
+    let (stamp_b, body) = last_modified_and_body(port).await;
+    assert_eq!(body, "b");
+
+    manager
+        .replace_stub(port, 0, stub(one_stub("s", "c")))
+        .await
+        .expect("replace");
+    let (status, stamp_c, body) = revalidate(port, &stamp_b).await;
+    assert_eq!(status, 200, "a change in the same second is still a change");
+    assert_eq!(body, "c");
+    assert!(secs(&stamp_c) > secs(&stamp_b), "{stamp_c} after {stamp_b}");
+    manager.delete_all().await;
+}
+
+#[tokio::test]
+async fn replace_stub_by_id_twice_within_one_second_moves_last_modified_both_times() {
+    let manager = ImposterManager::new();
+    let port = imposter_with(&manager, vec![one_stub("s", "a")]).await;
+    at_start_of_a_second().await;
+    manager
+        .replace_stub_by_id(port, "s", stub(one_stub("s", "b")))
+        .await
+        .expect("replace");
+    let (stamp_b, _) = last_modified_and_body(port).await;
+    manager
+        .replace_stub_by_id(port, "s", stub(one_stub("s", "c")))
+        .await
+        .expect("replace");
+    let (status, stamp_c, body) = revalidate(port, &stamp_b).await;
+    assert_eq!((status, body.as_str()), (200, "c"));
+    assert!(secs(&stamp_c) > secs(&stamp_b));
+    manager.delete_all().await;
+}
+
+#[tokio::test]
+async fn replace_stubs_twice_within_one_second_moves_last_modified_both_times() {
+    let manager = ImposterManager::new();
+    let port = imposter_with(&manager, vec![one_stub("s", "a")]).await;
+    at_start_of_a_second().await;
+    manager
+        .replace_stubs(port, vec![stub(one_stub("s", "b"))])
+        .await
+        .expect("replace all");
+    let (stamp_b, _) = last_modified_and_body(port).await;
+    manager
+        .replace_stubs(port, vec![stub(one_stub("s", "c"))])
+        .await
+        .expect("replace all");
+    let (status, stamp_c, body) = revalidate(port, &stamp_b).await;
+    assert_eq!((status, body.as_str()), (200, "c"));
+    assert!(secs(&stamp_c) > secs(&stamp_b));
+    manager.delete_all().await;
+}
+
+/// The lead is per operation: every stub one bulk replace changes gets the same stamp.
+#[tokio::test]
+async fn one_bulk_replace_stamps_every_changed_stub_alike() {
+    let manager = ImposterManager::new();
+    let port = create(
+        &manager,
+        json!({ "port": 0, "protocol": "http", "stubs": [
+            { "predicates": [{ "equals": { "path": "/x" } }],
+              "responses": [{ "is": { "body": "x1" }, "_rift": { "conditional": true } }] },
+            { "predicates": [{ "equals": { "path": "/y" } }],
+              "responses": [{ "is": { "body": "y1" }, "_rift": { "conditional": true } }] }
+        ]}),
+    )
+    .await;
+    at_start_of_a_second().await;
+    let changed = |x: &str, y: &str| {
+        vec![
+            stub(json!({ "predicates": [{ "equals": { "path": "/x" } }],
+                "responses": [{ "is": { "body": x }, "_rift": { "conditional": true } }] })),
+            stub(json!({ "predicates": [{ "equals": { "path": "/y" } }],
+                "responses": [{ "is": { "body": y }, "_rift": { "conditional": true } }] })),
+        ]
+    };
+    manager
+        .replace_stubs(port, changed("x2", "y2"))
+        .await
+        .expect("replace all");
+    manager
+        .replace_stubs(port, changed("x3", "y3"))
+        .await
+        .expect("replace all");
+    let lm = |path: &'static str| async move {
+        let r = send(reqwest::Method::GET, port, path, &[]).await;
+        header(&r, "last-modified").expect("Last-Modified")
+    };
+    assert_eq!(lm("/x").await, lm("/y").await);
+    manager.delete_all().await;
+}
+
+/// An identical replace is not a change (#1294), so it must not push the clock either: the next
+/// real change is one second past the last one, not two.
+#[tokio::test]
+async fn an_identical_replace_does_not_advance_the_clock() {
+    let manager = ImposterManager::new();
+    let port = imposter_with(&manager, vec![one_stub("s", "a")]).await;
+    at_start_of_a_second().await;
+    manager
+        .replace_stub(port, 0, stub(one_stub("s", "b")))
+        .await
+        .expect("replace");
+    let (stamp_b, _) = last_modified_and_body(port).await;
+    manager
+        .replace_stub(port, 0, stub(one_stub("s", "b")))
+        .await
+        .expect("identical");
+    manager
+        .replace_stub(port, 0, stub(one_stub("s", "c")))
+        .await
+        .expect("replace");
+    let (stamp_c, _) = last_modified_and_body(port).await;
+    assert_eq!(secs(&stamp_c), secs(&stamp_b) + 1, "{stamp_b} -> {stamp_c}");
+    manager.delete_all().await;
+}
+
+#[tokio::test]
+async fn adding_a_stub_within_one_second_of_a_change_stamps_it_later() {
+    let manager = ImposterManager::new();
+    let port = imposter_with(&manager, vec![one_stub("s", "a")]).await;
+    at_start_of_a_second().await;
+    manager
+        .replace_stub(port, 0, stub(one_stub("s", "b")))
+        .await
+        .expect("replace");
+    let (stamp_b, _) = last_modified_and_body(port).await;
+    // Inserted first, so it answers from now on.
+    manager
+        .add_stub(port, stub(one_stub("t", "added")), Some(0))
+        .await
+        .expect("add");
+    let (status, stamp_t, body) = revalidate(port, &stamp_b).await;
+    assert_eq!((status, body.as_str()), (200, "added"));
+    assert!(secs(&stamp_t) > secs(&stamp_b));
+    manager.delete_all().await;
+}
+
+/// A reload that patches the stub in place (`StubPlan::Patched`).
+#[tokio::test]
+async fn a_patching_reload_within_one_second_of_a_change_moves_last_modified() {
+    let manager = ImposterManager::new();
+    let others = || {
+        vec![
+            one_stub("o1", "o1"),
+            one_stub("o2", "o2"),
+            one_stub("o3", "o3"),
+        ]
+    };
+    let config = |body: &str, port: u16| {
+        let mut stubs = vec![one_stub("s", body)];
+        stubs.extend(others());
+        serde_json::from_value(json!({ "port": port, "protocol": "http", "stubs": stubs }))
+            .expect("config")
+    };
+    let mut initial = vec![one_stub("s", "a")];
+    initial.extend(others());
+    let port = imposter_with(&manager, initial).await;
+    at_start_of_a_second().await;
+    manager
+        .replace_stub_by_id(port, "s", stub(one_stub("s", "b")))
+        .await
+        .expect("replace");
+    let (stamp_b, _) = last_modified_and_body(port).await;
+    let report = manager
+        .apply_config(vec![config("c", port)])
+        .await
+        .expect("apply");
+    assert_eq!(report.stub_patched, vec![port], "a patch, not a restart");
+    let (status, stamp_c, body) = revalidate(port, &stamp_b).await;
+    assert_eq!((status, body.as_str()), (200, "c"));
+    assert!(secs(&stamp_c) > secs(&stamp_b));
+    manager.delete_all().await;
+}
+
+/// A reload that rewrites most stubs restarts the imposter (`StubPlan::Degenerate`): the new
+/// imposter must carry the old one's clock, or it would stamp the wall clock again.
+#[tokio::test]
+async fn a_restarting_reload_within_one_second_of_a_change_moves_last_modified() {
+    let manager = ImposterManager::new();
+    let port = imposter_with(&manager, vec![one_stub("s", "a")]).await;
+    at_start_of_a_second().await;
+    manager
+        .replace_stub(port, 0, stub(one_stub("s", "b")))
+        .await
+        .expect("replace");
+    let (stamp_b, _) = last_modified_and_body(port).await;
+    let desired = serde_json::from_value(
+        json!({ "port": port, "protocol": "http", "stubs": [one_stub("s", "c")] }),
+    )
+    .expect("config");
+    let report = manager.apply_config(vec![desired]).await.expect("apply");
+    assert_eq!(report.replaced, vec![port], "a restart, not a patch");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (status, stamp_c, body) = revalidate(port, &stamp_b).await;
+    assert_eq!((status, body.as_str()), (200, "c"));
+    assert!(secs(&stamp_c) > secs(&stamp_b));
+    manager.delete_all().await;
+}
+
+/// A client knows the URL, not the imposter: a delete and re-create on the same port continues
+/// the port's clock.
+#[tokio::test]
+async fn recreating_the_imposter_within_one_second_moves_last_modified() {
+    let manager = ImposterManager::new();
+    let port = imposter_with(&manager, vec![one_stub("s", "a")]).await;
+    at_start_of_a_second().await;
+    manager
+        .replace_stub(port, 0, stub(one_stub("s", "b")))
+        .await
+        .expect("replace");
+    let (stamp_b, _) = last_modified_and_body(port).await;
+    manager.delete_imposter(port).await.expect("delete");
+    let recreated = create(
+        &manager,
+        json!({ "port": port, "protocol": "http", "stubs": [one_stub("s", "c")] }),
+    )
+    .await;
+    assert_eq!(recreated, port);
+    let (status, stamp_c, body) = revalidate(port, &stamp_b).await;
+    assert_eq!((status, body.as_str()), (200, "c"));
+    assert!(secs(&stamp_c) > secs(&stamp_b));
+    manager.delete_all().await;
+}

@@ -48,7 +48,7 @@ Edit `fixtures/datafile.json` (flip a rollout, change a variable, add a flag), t
 curl -X POST http://localhost:2525/admin/reload      # re-reads the file; the CDN stub is rebuilt and its ETag / Last-Modified move with it
 ```
 
-The validators follow the body: `_rift.conditional` serves an `ETag` over the served bytes and a `Last-Modified` equal to the stub's load time, so a reload that changes the datafile makes pollers refetch with no stamp to bump (an unchanged reload keeps both, so pollers keep getting 304). The Python SDK polls with `If-Modified-Since` only; the `ETag` serves other clients (Java/Go SDKs, curl). Bump `revision` in the datafile so `OptimizelyConfig.revision` moves.
+The validators follow the body: `_rift.conditional` serves an `ETag` over the served bytes and a `Last-Modified` equal to the stub's load time, so a reload that changes the datafile makes pollers refetch with no stamp to bump (an unchanged reload keeps both, so pollers keep getting 304). The Python and Java SDKs poll with `If-Modified-Since` only; the `ETag` serves clients that send `If-None-Match` (curl, CDNs, browsers). A datafile swapped twice within one second (admin API or reload) still reaches them: the second swap is stamped a second later. Bump `revision` in the datafile so `OptimizelyConfig.revision` moves.
 
 ## Intercept mode: zero code changes
 

@@ -25,7 +25,7 @@ use anyhow::Context;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -105,6 +105,51 @@ pub fn build_upstream_client(
 /// global counter avoids threading imposter context into every construction site.
 static NEXT_STUB_SLOT: AtomicU64 = AtomicU64::new(1);
 
+/// Per-imposter source of `_rift.conditional` load stamps (issue #1301).
+///
+/// `Last-Modified` and its `If-Modified-Since` comparison are whole seconds, so two content changes
+/// inside one second would share a stamp, and a client that revalidates with `If-Modified-Since`
+/// alone (the Optimizely SDKs) would be told `304` about the second one. Stamps from this clock are
+/// therefore strictly increasing at whole-second resolution: the wall clock when it has moved past
+/// the last stamp, else the last stamp plus one second. The price is that rapid changes can stamp a
+/// second or so ahead of the wall clock.
+///
+/// Take exactly one stamp per content-changing operation, and none for an operation that changes
+/// nothing — a no-op must not push the clock ahead. Callers hold the imposter's `stubs_write`, or
+/// own the imposter outright while constructing it.
+#[derive(Debug)]
+pub(crate) struct LoadClock(AtomicI64);
+
+impl LoadClock {
+    pub(crate) fn new() -> Self {
+        Self(AtomicI64::new(i64::MIN))
+    }
+
+    /// The last stamp handed out, in seconds.
+    pub(crate) fn floor_secs(&self) -> i64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// Never stamp at or below `floor_secs` from now on.
+    fn raise_to(&self, floor_secs: i64) {
+        self.0.fetch_max(floor_secs, Ordering::Relaxed);
+    }
+
+    /// The stamp for one content-changing operation.
+    pub(crate) fn next(&self) -> chrono::DateTime<chrono::Utc> {
+        let now = chrono::Utc::now();
+        let floor = self.floor_secs();
+        let at = if now.timestamp() > floor {
+            now
+        } else {
+            // Only `None` past year 262143, where `now` is as good an answer as any.
+            chrono::DateTime::from_timestamp(floor.saturating_add(1), 0).unwrap_or(now)
+        };
+        self.raise_to(at.timestamp());
+        at
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StubState {
     pub(crate) stub: Stub,
@@ -120,7 +165,8 @@ pub struct StubState {
     /// When this content was loaded: `_rift.conditional`'s `"lastModified": "load"` (issue #1280).
     /// Set wherever a state gets new content and never otherwise, so a reconcile that keeps an
     /// unchanged stub's state (#1265) keeps its `Last-Modified` too. The admin replace doors decide
-    /// "new" by content hash (#1294).
+    /// "new" by content hash (#1294), and take the stamp from the imposter's [`LoadClock`] (#1301);
+    /// the constructors' wall-clock default is only what proxy recording keeps.
     loaded_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -232,6 +278,8 @@ pub struct Imposter {
     /// lose a concurrent update (issue #291). Off the request hot path — held only by admin /
     /// reload / proxy-record mutations, never by readers.
     stubs_write: Mutex<()>,
+    /// Where new content's `Last-Modified: load` comes from (issue #1301).
+    pub(crate) load_clock: LoadClock,
     /// Proxy-recording backend (issue #315); defaults to a private port-scoped
     /// [`LocalProxyStore`] for this imposter's mode, or the embedder's shared store injected
     /// via [`ImposterManager::with_proxy_store`](crate::imposter::ImposterManager::with_proxy_store).
@@ -373,10 +421,12 @@ impl Imposter {
         journal: Option<Arc<dyn crate::imposter::journal::RequestJournal>>,
         backends: &crate::extensions::flow_state::FlowStoreBackends,
     ) -> anyhow::Result<Self> {
+        let load_clock = LoadClock::new();
+        let loaded_at = load_clock.next();
         let stubs: Vec<Arc<StubState>> = config
             .stubs
             .iter()
-            .map(|stub| Arc::new(StubState::new(stub.clone())))
+            .map(|stub| Arc::new(StubState::new(stub.clone()).with_loaded_at(loaded_at)))
             .collect();
         // Extract proxy mode from stubs (use first proxy response's mode)
         // Keys parsed but not acted on (issues #999, #1152). They are KEPT rather than deleted:
@@ -409,6 +459,7 @@ impl Imposter {
             config,
             stubs_snapshot: ArcSwap::from_pointee(StubSnapshot::build(stubs)),
             stubs_write: Mutex::new(()),
+            load_clock,
             proxy_store: Arc::new(LocalProxyStore::new(proxy_mode)),
             upstream_client: None,
             event_bus: None,
@@ -531,8 +582,25 @@ impl Imposter {
         arc
     }
 
+    /// Continue the load clock of the imposter this one replaces on the same port (issue #1301): a
+    /// client knows the URL, not the imposter, so a re-created imposter must not stamp its stubs at
+    /// or before what the old one served. Restamps this imposter's stubs when they would.
+    pub(crate) fn continue_load_clock(&self, floor_secs: i64) {
+        self.mutate_stubs(|stubs| {
+            self.load_clock.raise_to(floor_secs);
+            if stubs.iter().all(|s| s.loaded_at.timestamp() > floor_secs) {
+                return;
+            }
+            let at = self.load_clock.next();
+            for state in stubs.iter_mut() {
+                *state = Arc::new(StubState::clone(state).with_loaded_at(at));
+            }
+        });
+    }
+
     /// Replace all stubs. Every slot is new, so every response cycle restarts; a stub whose
-    /// content was already present keeps that content's `Last-Modified: load` (issue #1294).
+    /// content was already present keeps that content's `Last-Modified: load` (issue #1294), and
+    /// the rest share one stamp from the load clock (issue #1301).
     pub fn replace_stubs(&self, new_stubs: Vec<Stub>) {
         self.mutate_stubs(|stubs| {
             let mut loaded: std::collections::HashMap<u64, chrono::DateTime<chrono::Utc>> =
@@ -544,13 +612,15 @@ impl Imposter {
                     .or_insert(state.loaded_at());
             }
             stubs.clear();
+            // Taken on the first new content only: an identical bulk replace must not push the clock.
+            let mut fresh: Option<chrono::DateTime<chrono::Utc>> = None;
             stubs.extend(new_stubs.into_iter().map(|s| {
                 let hash = crate::imposter::reconcile::content_hash(&s);
-                let state = StubState::with_hash(s, hash);
-                Arc::new(match loaded.get(&hash) {
-                    Some(at) => state.with_loaded_at(*at),
-                    None => state,
-                })
+                let at = match loaded.get(&hash) {
+                    Some(at) => *at,
+                    None => *fresh.get_or_insert_with(|| self.load_clock.next()),
+                };
+                Arc::new(StubState::with_hash(s, hash).with_loaded_at(at))
             }));
         });
     }
@@ -796,6 +866,81 @@ pub use verify::{ClosestMatch, FailedPredicate, VerifyOptions, VerifyOutcome};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ===== Issue #1301: LoadClock =====
+
+    #[test]
+    fn a_fresh_load_clock_stamps_the_wall_clock() {
+        let clock = LoadClock::new();
+        let before = chrono::Utc::now();
+        let at = clock.next();
+        assert!(at >= before && at <= chrono::Utc::now(), "{at} vs {before}");
+        assert_eq!(clock.floor_secs(), at.timestamp());
+    }
+
+    #[test]
+    fn load_clock_stamps_strictly_increase_at_whole_seconds() {
+        let clock = LoadClock::new();
+        // A floor ahead of the wall clock stands in for "already stamped this second".
+        let ahead = chrono::Utc::now().timestamp() + 5;
+        clock.raise_to(ahead);
+        let first = clock.next();
+        let second = clock.next();
+        assert_eq!(first.timestamp(), ahead + 1);
+        assert_eq!(second.timestamp(), ahead + 2);
+        assert_eq!(
+            first.timestamp_subsec_nanos(),
+            0,
+            "a lead stamp is a whole second"
+        );
+    }
+
+    #[test]
+    fn raising_the_floor_never_lowers_it() {
+        let clock = LoadClock::new();
+        clock.raise_to(100);
+        clock.raise_to(50);
+        assert_eq!(clock.floor_secs(), 100);
+    }
+
+    #[test]
+    fn continuing_an_older_clock_keeps_the_stubs_stamps() {
+        let imposter = Imposter::new(
+            serde_json::from_value(serde_json::json!({
+                "port": 0, "protocol": "http",
+                "stubs": [{ "responses": [{ "is": { "body": "a" } }] }]
+            }))
+            .expect("config"),
+        )
+        .expect("imposter");
+        let before = imposter.snapshot().stubs()[0].loaded_at();
+        imposter.continue_load_clock(before.timestamp() - 10);
+        assert_eq!(imposter.snapshot().stubs()[0].loaded_at(), before);
+    }
+
+    #[test]
+    fn continuing_a_newer_clock_restamps_every_stub_past_it() {
+        let imposter = Imposter::new(
+            serde_json::from_value(serde_json::json!({
+                "port": 0, "protocol": "http",
+                "stubs": [
+                    { "responses": [{ "is": { "body": "a" } }] },
+                    { "responses": [{ "is": { "body": "b" } }] }
+                ]
+            }))
+            .expect("config"),
+        )
+        .expect("imposter");
+        let ahead = chrono::Utc::now().timestamp() + 5;
+        imposter.continue_load_clock(ahead);
+        let snapshot = imposter.snapshot();
+        let states = snapshot.stubs();
+        assert!(
+            states
+                .iter()
+                .all(|s| s.loaded_at().timestamp() == ahead + 1)
+        );
+    }
     use crate::imposter::types::ImposterConfig;
     use serde_json::json;
 

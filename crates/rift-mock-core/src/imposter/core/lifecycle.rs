@@ -30,7 +30,7 @@ impl Imposter {
     pub(crate) fn reconcile_stubs(&self, desired: &[Stub]) -> StubReconcile {
         let _writer = self.stubs_write.lock();
         let current = self.stubs_snapshot.load();
-        match plan_stub_reconcile(current.stubs(), desired) {
+        match plan_stub_reconcile(current.stubs(), desired, &self.load_clock) {
             StubPlan::Unchanged => StubReconcile::Unchanged,
             StubPlan::Degenerate => StubReconcile::Degenerate,
             StubPlan::Patched { next, removed_keys } => {
@@ -46,7 +46,10 @@ impl Imposter {
     pub fn add_stub(&self, stub: Stub, index: Option<usize>) {
         self.mutate_stubs(|stubs| {
             let idx = index.unwrap_or(stubs.len()).min(stubs.len());
-            stubs.insert(idx, Arc::new(StubState::new(stub)));
+            stubs.insert(
+                idx,
+                Arc::new(StubState::new(stub).with_loaded_at(self.load_clock.next())),
+            );
         });
     }
 
@@ -62,7 +65,10 @@ impl Imposter {
                 return false;
             }
             let idx = index.unwrap_or(stubs.len()).min(stubs.len());
-            stubs.insert(idx, Arc::new(StubState::new(stub)));
+            stubs.insert(
+                idx,
+                Arc::new(StubState::new(stub).with_loaded_at(self.load_clock.next())),
+            );
             true
         })
     }
@@ -78,7 +84,7 @@ impl Imposter {
                     // Swap a fresh Arc that reuses the slot's cycler + slot token, so the slot's
                     // response-cycling state is kept and in-flight requests holding the old Arc keep
                     // serving their snapshot (issue #287).
-                    stubs[i] = replaced_state(&stubs[i], stub);
+                    stubs[i] = replaced_state(&stubs[i], stub, &self.load_clock);
                     true
                 }
                 None => false,
@@ -116,7 +122,7 @@ impl Imposter {
                 return Err(ImposterError::StubIndexOutOfBounds(index));
             }
             // Reuse the slot's cycler + slot token (issue #287); see `replace_stub_by_id`.
-            stubs[index] = replaced_state(&stubs[index], stub);
+            stubs[index] = replaced_state(&stubs[index], stub, &self.load_clock);
             Ok(())
         })
     }
@@ -177,12 +183,16 @@ impl Imposter {
 
 /// The state for replacing `old`'s stub with `stub` at one position: `old` itself when the content
 /// is identical, so an admin replace that changes nothing does not move `Last-Modified: load`
-/// (issue #1294); otherwise a state carrying `stub` with `old`'s cycler and slot (issue #287).
-fn replaced_state(old: &Arc<StubState>, stub: Stub) -> Arc<StubState> {
+/// (issue #1294) or the load clock; otherwise a state carrying `stub` with `old`'s cycler and slot
+/// (issue #287), stamped from `clock` (issue #1301).
+fn replaced_state(old: &Arc<StubState>, stub: Stub, clock: &LoadClock) -> Arc<StubState> {
     let hash = crate::imposter::reconcile::content_hash(&stub);
     if old.content_hash() == hash {
         Arc::clone(old)
     } else {
-        Arc::new(old.with_stub_hashed(stub, hash))
+        Arc::new(
+            old.with_stub_hashed(stub, hash)
+                .with_loaded_at(clock.next()),
+        )
     }
 }
