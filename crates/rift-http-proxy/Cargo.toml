@@ -132,6 +132,8 @@ rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-featur
 rift-lint = { path = "../rift-lint", version = "0.1.0" }
 tempfile = "3.8"
 rcgen = "0.13"
+# Reads the PKCS#12 stores `rift intercept-ca export` writes (issue #1274); already in the tree.
+p12 = "0.6"
 
 # Integration testing
 reqwest = { workspace = true, features = ["http2"] }

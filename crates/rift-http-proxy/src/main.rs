@@ -48,6 +48,7 @@ use rift_http_proxy::bootstrap::{
     stop_server,
 };
 use rift_http_proxy::healthcheck;
+use rift_http_proxy::intercept_ca_cli;
 use rift_http_proxy::runtime;
 use rift_http_proxy::script_cli;
 use rift_http_proxy::server::{Cli, Commands, ServerBuilder};
@@ -62,6 +63,10 @@ fn main() -> Result<(), anyhow::Error> {
     // (and `cli.command`) stay intact for the Stop/Restart/Save/Replay dispatch below.
     if let Some(Commands::Script { action }) = cli.command.clone() {
         return script_cli::dispatch(action);
+    }
+    // Likewise `intercept-ca` (issue #1274): file work only, nothing to bootstrap.
+    if let Some(Commands::InterceptCa { action }) = cli.command.clone() {
+        intercept_ca_cli::dispatch(action);
     }
 
     // Apply rcfile defaults before using CLI values (only for fields at their clap defaults).
@@ -188,6 +193,8 @@ fn main() -> Result<(), anyhow::Error> {
                 cli.api_key.as_deref(),
             );
         }
+        // Already handled above; `dispatch` never returns.
+        Some(Commands::InterceptCa { action }) => intercept_ca_cli::dispatch(action.clone()),
         Some(Commands::Start) | None => {
             // Default behavior - start in Mountebank mode
         }

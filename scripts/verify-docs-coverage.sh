@@ -77,13 +77,15 @@ extract_flags() {
   ' "$SERVER_RS" | sort -u
 }
 
-# Subcommand variant names from `enum Commands { … }` → lowercased.
+# Subcommand variant names from `enum Commands { … }` → kebab-cased, which is how clap spells
+# them: `InterceptCa` is `rift intercept-ca` (issue #1274), not `rift interceptca`.
 extract_subcommands() {
   awk '
     /enum[[:space:]]+Commands[[:space:]]*\{/ { inblk = 1; next }
     inblk && /^\}/                           { inblk = 0 }
     inblk && /^[[:space:]]+[A-Z]/ {
       v = $1; gsub(/[^A-Za-z0-9].*/, "", v)
+      gsub(/[A-Z]/, "-&", v); sub(/^-/, "", v)
       if (v != "") print tolower(v)
     }
   ' "$SERVER_RS" | sort -u
@@ -191,6 +193,7 @@ pub struct Cli {
 }
 enum Commands {
     Sentinelcmd,
+    TwoWordSentinel,
 }
 RS
   mkdir -p "$tmp/docs"
@@ -204,7 +207,7 @@ RS
   fi
   local expect
   for expect in "--sentinel-flag" "--multiline-flag" "--renamed-sentinel" "--stacked-flag" \
-                "RIFT_SENTINEL_ENV" "subcommand:sentinelcmd"; do
+                "RIFT_SENTINEL_ENV" "subcommand:sentinelcmd" "subcommand:two-word-sentinel"; do
     if ! grep -qF -- "$expect" <<<"$out"; then
       echo "SELF-TEST FAILED: expected the checker to flag '$expect'. Got:" >&2
       echo "$out" >&2
