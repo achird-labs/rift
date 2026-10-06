@@ -473,6 +473,12 @@ curl -X POST http://localhost:2525/intercept/rules -d '{
 }'
 ```
 
+The imposter receives the request with the `Host` the SUT sent (falling back to the `CONNECT`
+authority when it sent none), so its stubs can match on the intercepted host and its recorded
+requests show which host was dialed — one imposter can stand in for several hosts with a
+`{"equals": {"headers": {"Host": "cdn.example.com"}}}` predicate per host. The proxy's own
+`Proxy-Authorization` credential is not passed on. `requestFrom` is the proxy's loopback address.
+
 | Verb & path | Effect |
 |:--|:--|
 | `POST /intercept/rules` | Add one rule (object) or many (array). Rejected with `429 Too Many Requests` once the store holds 10,000 rules — `DELETE` rules before adding more. |
