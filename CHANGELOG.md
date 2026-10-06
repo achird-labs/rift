@@ -13,6 +13,8 @@ record.
 
 ### Added
 
+- **W019 and `conditional_never_runs` for a `_rift.conditional` that can never fire** (#1296): `rift-lint` and the engine's `_rift.warnings` now flag it on a script-only response, or on an `is` response behind a top-level `method` predicate that excludes GET and HEAD.
+
 - **A config-file `intercept` block can take its CA from environment variables** (#1293):
   `"caCertPemEnv": "INTERCEPT_CA_CERT", "caKeyPemEnv": "INTERCEPT_CA_KEY"` names two variables
   holding the PEMs, read when the listener starts (also accepted by `POST /intercept` and

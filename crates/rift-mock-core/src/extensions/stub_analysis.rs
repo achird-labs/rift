@@ -70,6 +70,11 @@ pub enum WarningType {
     /// reachable case is a `RiftScript` response — which also covers the bare-`_rift` "flat" form
     /// (no `is`/`proxy`/`inject`/`fault`), since that too parses to `RiftScript`.
     StateOpsNeverRuns,
+    /// `_rift.conditional` (issue #1280) that can never answer 304 (issue #1296): it is read only
+    /// on an `is` response, and only for GET/HEAD. Raised for a script-only response, and for an
+    /// `is` response in a stub whose top-level `method` predicate excludes GET and HEAD. A
+    /// `proxy`/`inject`/`fault` response gets [`WarningType::ConfigKeyIgnored`] instead.
+    ConditionalNeverRuns,
     /// A key this engine parses and does not act on (issue #1152). The value reads back unchanged,
     /// so without this nothing distinguishes "honoured" from "dropped". See
     /// [`ignored_config_keys`] for the list.
@@ -315,8 +320,9 @@ pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
         }
 
         // `_rift.stateOps` on a response shape that never runs it (issue #969). `proxy`/`inject`
-        // drop `_rift` entirely during parsing, so the only reachable shape here is `RiftScript`
-        // (which also covers the bare-`_rift` "flat" form — see `WarningType::StateOpsNeverRuns`).
+        // keep their `_rift` as `ignored_rift` (reported as `ConfigKeyIgnored`), so the only
+        // reachable shape here is `RiftScript` (which also covers the bare-`_rift` "flat" form —
+        // see `WarningType::StateOpsNeverRuns`).
         for response in &stub.responses {
             if let StubResponse::RiftScript { rift, .. } = response
                 && !rift.state_ops.is_empty()
@@ -336,6 +342,40 @@ pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
                     },
                 );
             }
+        }
+
+        // `_rift.conditional` that can never answer 304 (issue #1296).
+        let excluded_method = non_get_head_method(&stub.predicates);
+        for response in &stub.responses {
+            let message = match response {
+                StubResponse::RiftScript { rift, .. } if declares_conditional(rift) => format!(
+                    "Stub at index {index} has _rift.conditional on a script-only response; \
+                     conditional GET applies only to an `is` response (move it to an `is`, or \
+                     drop it)"
+                ),
+                StubResponse::Is {
+                    rift: Some(rift), ..
+                } if declares_conditional(rift) => {
+                    let Some(method) = excluded_method else {
+                        continue;
+                    };
+                    format!(
+                        "Stub at index {index} has _rift.conditional but its method predicate \
+                         ({method}) excludes GET and HEAD, so it never answers 304"
+                    )
+                }
+                _ => continue,
+            };
+            push(
+                &mut result.warnings,
+                StubWarning {
+                    warning_type: WarningType::ConditionalNeverRuns,
+                    message,
+                    stub_index: Some(index),
+                    stub_id: stub.id.clone(),
+                    shadowed_by_index: None,
+                },
+            );
         }
 
         // Exact predicate duplicates — O(1) hash lookup against the first stub with this key.
@@ -440,6 +480,36 @@ pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
 /// Canonical key for a predicate list that matches [`predicates_equal`] semantics: two lists share
 /// a key iff they have the same length and the same order-independent set of canonicalized
 /// predicates. Used for O(n) exact-duplicate detection (issue #423).
+/// `_rift.conditional` is declared and not switched off with `false`.
+fn declares_conditional(rift: &crate::imposter::RiftResponseExtension) -> bool {
+    !matches!(
+        rift.conditional,
+        None | Some(crate::imposter::ConditionalGet::Enabled(false))
+    )
+}
+
+/// The value of a top-level `equals`/`deepEquals` `method` predicate that is a single string other
+/// than GET/HEAD (compared case-insensitively), so conditional GET can never apply behind it.
+///
+/// Deliberately narrow: a `method` under `or`/`not`/`and`, a `matches`/`exists`, a non-string value
+/// or a predicate with `except`/a selector is not judged. A false negative is fine; a false
+/// positive on a working stub is not.
+fn non_get_head_method(predicates: &[Predicate]) -> Option<&str> {
+    predicates.iter().find_map(|p| {
+        let (PredicateOperation::Equals(fields) | PredicateOperation::DeepEquals(fields)) =
+            &p.operation
+        else {
+            return None;
+        };
+        if !p.parameters.except.is_empty() || p.parameters.selector.is_some() {
+            return None;
+        }
+        let method = fields.get("method")?.as_str()?;
+        (!method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD"))
+            .then_some(method)
+    })
+}
+
 fn predicate_key(predicates: &[Predicate]) -> String {
     let mut set: Vec<String> = predicates
         .iter()
@@ -1067,6 +1137,102 @@ mod tests {
             "stateOps on an `is` response must not warn: {:?}",
             result.warnings
         );
+    }
+
+    // ─── Issue #1296: `_rift.conditional` that can never fire ───────────────────────────────
+
+    fn conditional_stub(predicates: serde_json::Value, script_only: bool) -> Stub {
+        let rift: RiftResponseExtension = serde_json::from_value(json!({
+            "conditional": true,
+            "script": { "code": "response.body = 'x';" }
+        }))
+        .expect("parses");
+        let response = if script_only {
+            StubResponse::RiftScript {
+                rift: Box::new(rift),
+                ignored_behaviors: None,
+            }
+        } else {
+            crate::imposter::StubResponse::new_is(
+                crate::imposter::IsResponse {
+                    status_code: 200,
+                    headers: Default::default(),
+                    body: None,
+                    mode: Default::default(),
+                },
+                None,
+                Some(Box::new(rift)),
+            )
+        };
+        Stub {
+            id: None,
+            route_pattern: None,
+            predicates: serde_json::from_value(predicates).expect("predicates parse"),
+            responses: vec![response],
+            scenario_name: None,
+            required_scenario_state: None,
+            new_scenario_state: None,
+            space: None,
+            recorded_from: None,
+            verify: None,
+        }
+    }
+
+    fn conditional_warnings(stub: Stub) -> Vec<StubWarning> {
+        analyze_stubs(&[stub])
+            .warnings
+            .into_iter()
+            .filter(|w| w.warning_type == WarningType::ConditionalNeverRuns)
+            .collect()
+    }
+
+    #[test]
+    fn conditional_on_script_only_warns() {
+        let w = conditional_warnings(conditional_stub(json!([]), true));
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].message.contains("script-only"), "{}", w[0].message);
+    }
+
+    #[test]
+    fn conditional_behind_a_post_method_predicate_warns() {
+        let w = conditional_warnings(conditional_stub(
+            json!([{ "equals": { "method": "post" } }]),
+            false,
+        ));
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].message.contains("post"), "{}", w[0].message);
+        let w = conditional_warnings(conditional_stub(
+            json!([{ "deepEquals": { "method": "POST" } }]),
+            false,
+        ));
+        assert_eq!(w.len(), 1, "{w:?}");
+    }
+
+    #[test]
+    fn conditional_on_a_get_stub_is_quiet() {
+        for preds in [
+            json!([]),
+            json!([{ "equals": { "method": "GET" } }]),
+            json!([{ "equals": { "method": "head" } }]),
+            json!([{ "equals": { "path": "/x" } }]),
+        ] {
+            let w = conditional_warnings(conditional_stub(preds.clone(), false));
+            assert!(w.is_empty(), "{preds}: {w:?}");
+        }
+    }
+
+    #[test]
+    fn conditional_under_or_is_not_judged() {
+        for preds in [
+            json!([{ "or": [{ "equals": { "method": "POST" } }, { "equals": { "method": "GET" } }] }]),
+            json!([{ "not": { "equals": { "method": "GET" } } }]),
+            json!([{ "matches": { "method": "^P" } }]),
+            json!([{ "exists": { "method": true } }]),
+            json!([{ "equals": { "method": 5 } }]),
+        ] {
+            let w = conditional_warnings(conditional_stub(preds.clone(), false));
+            assert!(w.is_empty(), "{preds}: {w:?}");
+        }
     }
 
     #[test]

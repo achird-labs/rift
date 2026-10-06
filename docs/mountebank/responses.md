@@ -504,6 +504,8 @@ A client that polls with validators (a CDN-hosted datafile, a feature-flag SDK) 
   them all, as does a restart. Otherwise an HTTP-date in the `Sat, 03 Oct 2026 12:00:00 GMT` form,
   served verbatim. Any other string is refused when the config is loaded.
 
+On a script-only response, or behind a non-GET method predicate, it never fires; `rift-lint` W019 says so.
+
 It applies only to a `GET` or `HEAD` that the stub answers with a 2xx; any other request or status
 is served unchanged, without validators. The validators replace any `ETag` or `Last-Modified` the
 response declares in `headers`. The response is `304` when:

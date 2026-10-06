@@ -571,6 +571,7 @@ curl http://localhost:2525/imposters/4545
 | `catch_all` | Stub with empty predicates matches all requests |
 | `catch_all_not_last` | Catch-all stub is not at the end of the list |
 | `state_ops_never_runs` | `_rift.stateOps` is on a response shape that never runs it |
+| `conditional_never_runs` | `_rift.conditional` is on a script-only response, or behind a `method` predicate that excludes GET and HEAD (lint W019) |
 | `truncated` | More warnings were produced than are retained |
 
 See [Stub Analysis](../features/stub-analysis.md) for details.

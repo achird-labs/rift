@@ -143,6 +143,7 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | W002-W016 | Potential issues, including lossy number literals (W012), unset EJS env vars (W013) and state used without `_rift.flowState` (W014) |
 | W017 | A key the engine accepts but ignores (`_rift.metrics`, `_rift.proxy`, `recordMatches: true`, ...) |
 | W018 | A `behaviors` array element that sets several behaviors, which run in a fixed order |
+| W019 | `_rift.conditional` that can never answer 304 (script-only response, or a `method` predicate excluding GET and HEAD) |
 
 ### Info
 
