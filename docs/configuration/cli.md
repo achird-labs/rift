@@ -484,6 +484,7 @@ wins over the built-in default (and over an `--rcfile` value — see [RC file](#
 | `RIFT_INTERCEPT_CA_KEY` | PEM CA private key **file** for interception | |
 | `RIFT_INTERCEPT_CA_CERT_PEM` | Inline PEM CA certificate (the bytes, not a path; with `RIFT_INTERCEPT_CA_KEY_PEM`) — mutually exclusive with the `_CA_CERT`/`_CA_KEY` file pair | |
 | `RIFT_INTERCEPT_CA_KEY_PEM` | Inline PEM CA private key for interception | |
+| `RIFT_TRUSTSTORE_PASSWORD` | Password for `rift intercept-ca export` (same as `--password`, kept out of argv) | `changeit` |
 | `RIFT_DISABLE_HTTP2` | Force HTTP/1-only listeners, disabling HTTP/2 & h2c auto-negotiation (truthy: `1`/`true`/`yes`/`on`). On HTTPS listeners it also removes `h2` from the ALPN offer, so a client offering both protocols negotiates `http/1.1` instead of being handed an `h2` the server will not speak. A client offering **only** `h2` is refused at the handshake with `no_application_protocol` — a loud failure rather than a protocol mismatch | off |
 | `RIFT_TCP_BACKLOG` | Listen backlog for the accept loop (positive integer) | `1024` |
 | `RIFT_TCP_NODELAY` | `TCP_NODELAY` on accepted sockets; `true`/`1`/`on` enables, `false`/`0`/`off` disables (case-insensitive) | on |
@@ -833,6 +834,53 @@ with no key configured says which setting to add.
 |:-----|:------------|:--------|
 | `--url <URL>` | URL to probe instead of the admin API's `/health` | (from `--host`/`--port`) |
 | `--timeout <SECONDS>` | Give up and report unhealthy after this long. Kept under the images' `HEALTHCHECK --timeout=3s` so a hung server makes the probe report the verdict itself instead of being killed mid-probe | `2` |
+
+### intercept-ca
+
+Make a persistent [intercept CA]({{ site.baseurl }}/features/intercept-proxy/#the-intercept-ca) and
+the truststores a SUT needs, offline — no server starts and nothing touches the admin API. This is
+for a SUT that has to trust the CA *before* rift runs (a container whose JVM reads its truststore
+once at startup), where the CA a listener generates for itself arrives too late.
+
+```bash
+rift intercept-ca generate --out-dir ./ca --cn "Acme CI Intercept CA" --validity-days 365
+rift intercept-ca export --cert ./ca/ca-cert.pem --format jks --out ./truststore.jks \
+  --merge-system-cas /etc/ssl/certs/ca-certificates.crt
+rift intercept-ca export --cert ./ca/ca-cert.pem --format pkcs12 --out ./truststore.p12 --password s3cret
+```
+
+`generate` writes `ca-cert.pem` and `ca-key.pem` (the key with mode `0600` on Unix) and prints how to
+start rift with them. The key is never printed. The CA is an ECDSA P-256 CA valid from five minutes
+ago (for clock skew) until `--validity-days` from now.
+
+`export` reads the certificate only — it never needs the key — and writes one trusted entry for the
+CA plus, with `--merge-system-cas`, one per certificate in each PEM bundle, named by its subject CN
+(lower-cased, de-duplicated). Without a bundle the store trusts the intercept CA alone, so a JVM that
+uses it as its default truststore can no longer reach anything real. The JDK's `cacerts` is a
+keystore, not a PEM bundle; pass a PEM bundle such as Debian's `/etc/ssl/certs/ca-certificates.crt`.
+
+Neither verb overwrites an existing file unless `--force` is given; `generate` stages both files and
+moves them into place together, so a failed run never leaves a new key beside an old certificate.
+`--merge-system-cas` accepts plain `CERTIFICATE` blocks only and refuses a bundle holding anything
+else (OpenSSL's `TRUSTED CERTIFICATE` format, keys) or a block that is not a valid certificate,
+rather than writing a store that trusts less than asked or that the SUT cannot load. A certificate
+that appears twice (or is the CA itself) is stored once.
+
+Exit codes: `0` done; `2` refused (an output exists, an input cannot be read or holds no valid
+certificate, an invalid option); `1` generating or writing the output failed.
+
+| Verb | Flag | Description | Default |
+|:-----|:-----|:------------|:--------|
+| `generate` | `--out-dir <DIR>` | Directory for `ca-cert.pem` and `ca-key.pem` (created if missing) | (required) |
+| `generate` | `--cn <NAME>` | The CA's subject common name | `Rift Intercept CA` |
+| `generate` | `--validity-days <DAYS>` | How long the CA stays valid, from now (at least 1) | `3650` |
+| both | `--force` | Overwrite existing output files | off |
+| `export` | `--cert <FILE>` | The CA certificate PEM | (required) |
+| `export` | `--format <jks\|pkcs12>` | Truststore format | (required) |
+| `export` | `--out <FILE>` | Where to write the truststore | (required) |
+| `export` | `--password <PASSWORD>` | Truststore password; prefer `RIFT_TRUSTSTORE_PASSWORD`, since argv shows in `ps` | `changeit` |
+| `export` | `--merge-system-cas <BUNDLE>` | Also trust every certificate in this PEM bundle; repeatable | none |
+| `export` | `--alias <ALIAS>` | The CA's alias in the store (lower-case: the JVM lowercases JKS aliases) | `rift-intercept-ca` |
 
 ---
 

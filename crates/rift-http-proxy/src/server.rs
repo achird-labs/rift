@@ -397,6 +397,84 @@ pub enum Commands {
         #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEALTHCHECK_TIMEOUT_SECS)]
         timeout: u64,
     },
+
+    /// Make a persistent intercept CA and its truststores offline, with no server (issue #1274)
+    #[command(name = "intercept-ca")]
+    InterceptCa {
+        #[command(subcommand)]
+        action: InterceptCaAction,
+    },
+}
+
+/// `rift intercept-ca <generate|export>` (issue #1274): a container SUT reads its truststore once
+/// at TLS init, so the intercept CA has to exist before either side starts — which a running
+/// listener cannot provide.
+#[derive(Subcommand, Debug, Clone)]
+pub enum InterceptCaAction {
+    /// Write a new CA as ca-cert.pem and ca-key.pem (key mode 0600 on Unix). Exits 2 if either
+    /// file exists, unless --force.
+    Generate {
+        /// Directory to write ca-cert.pem and ca-key.pem into (created if missing)
+        #[arg(long, value_name = "DIR")]
+        out_dir: PathBuf,
+
+        /// The CA's subject common name
+        #[arg(long, value_name = "NAME", default_value = "Rift Intercept CA")]
+        cn: String,
+
+        /// How long the CA stays valid, from now
+        #[arg(long, value_name = "DAYS", default_value_t = 3650)]
+        validity_days: u32,
+
+        /// Overwrite an existing ca-cert.pem / ca-key.pem
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Write a JKS or PKCS#12 truststore holding the CA certificate, optionally merged with a PEM
+    /// root bundle. Needs the certificate only, never the key.
+    Export {
+        /// The CA certificate PEM (e.g. the ca-cert.pem `generate` wrote)
+        #[arg(long, value_name = "FILE")]
+        cert: PathBuf,
+
+        /// Truststore format
+        #[arg(long, value_enum)]
+        format: TruststoreFormat,
+
+        /// Where to write the truststore. Exits 2 if it exists, unless --force
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+
+        /// Truststore password (prefer the env var: argv is visible in `ps`)
+        #[arg(
+            long,
+            value_name = "PASSWORD",
+            env = "RIFT_TRUSTSTORE_PASSWORD",
+            default_value = "changeit",
+            hide_env_values = true
+        )]
+        password: String,
+
+        /// Also trust every certificate in this PEM bundle (e.g. /etc/ssl/certs/ca-certificates.crt); repeatable
+        #[arg(long, value_name = "BUNDLE")]
+        merge_system_cas: Vec<PathBuf>,
+
+        /// The CA's alias in the store (lower-case)
+        #[arg(long, value_name = "ALIAS", default_value = "rift-intercept-ca")]
+        alias: String,
+
+        /// Overwrite an existing --out file
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+/// The truststore formats `rift intercept-ca export` writes.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TruststoreFormat {
+    Jks,
+    Pkcs12,
 }
 
 /// `rift script <check|run>` (issue #360): scripting DX tools that need neither an admin API nor

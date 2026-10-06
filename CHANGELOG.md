@@ -24,6 +24,14 @@ record.
   `intercept` and `routes` blocks; it answered none, so a reload where another source changed
   emptied the front door's routes.
 
+- **`rift intercept-ca` makes a persistent intercept CA and its truststores offline** (#1274).
+  `generate` writes `ca-cert.pem` and `ca-key.pem` (key mode `0600`, a validity window from now
+  rather than rcgen's 1975–4096 default), and `export` writes a JKS or PKCS#12 truststore from the
+  certificate alone, optionally merged with a PEM root bundle (`--merge-system-cas`) so a JVM keeps
+  the public roots. A SUT in its own container needs the CA before either side starts, and a
+  running listener was the only thing that could mint one, so every consumer rebuilt it with
+  `keytool` or `openssl`.
+
 - **Intercept rules can be replaced atomically** (#1272). `PUT /intercept/rules` and
   `rift_intercept_replace_rules` swap the whole rule set in one step and answer with the stored set.
   Rules match first-to-last, so appending never overrides an installed rule, and `DELETE` then

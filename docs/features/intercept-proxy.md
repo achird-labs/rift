@@ -107,6 +107,24 @@ several certificates pins the **first** as the CA (and logs a warning). Nothing 
 private key you supplied: `GET /intercept`, the CA export and the truststores carry the certificate
 only.
 
+**A CA that exists before anything starts.** A SUT in its own container (ECS/Fargate task, compose
+service) reads its truststore once at TLS init, so the CA has to be in its image or task definition
+before either side boots — the generated per-listener CA arrives too late. Make one offline with the
+binary itself; no listener or admin API is involved:
+
+```bash
+rift intercept-ca generate --out-dir ./ca                       # ca/ca-cert.pem + ca/ca-key.pem (0600)
+rift intercept-ca export --cert ./ca/ca-cert.pem --format jks --out ./truststore.jks \
+  --merge-system-cas /etc/ssl/certs/ca-certificates.crt         # the CA plus the public roots
+rift --intercept-port 8080 --intercept-ca-cert ./ca/ca-cert.pem --intercept-ca-key ./ca/ca-key.pem
+```
+
+Bake the certificate (or the exported truststore) into the SUT image, and give rift the pair — as
+files, or as `RIFT_INTERCEPT_CA_CERT_PEM`/`RIFT_INTERCEPT_CA_KEY_PEM` from a secret store. Merge the
+public roots unless the SUT talks to nothing real: a JVM pointed at a store holding the intercept CA
+alone loses every public root. `--merge-system-cas` takes a **PEM** bundle; the JDK's own `cacerts`
+is a keystore, not PEM. See [`rift intercept-ca`]({{ site.baseurl }}/configuration/cli/#intercept-ca).
+
 To bring your own CA, create a proper CA certificate — `CA:TRUE`, allowed to sign certificates:
 
 ```bash
