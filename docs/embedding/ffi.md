@@ -250,8 +250,8 @@ per handle; `rift_stop_intercept` stops it, and `rift_stop` shuts it down with t
 
 An embedder calls `rift_start_intercept`, reads `interceptPort`, adds rules and fetches the CA /
 truststore (all over FFI), then points a CA-trusting SUT's HTTPS proxy at `interceptPort` — with no
-loopback HTTP. `Forward { port }` rules reach any imposter on that localhost port, including
-FFI-created ones. Errors set `rift_last_error`. A handle that never calls `rift_start_intercept` is
+loopback HTTP. A `forward` rule reaches any imposter on that localhost port, including FFI-created
+ones, or a named `host`/`scheme` elsewhere ([forward targets]({{ site.baseurl }}/features/intercept-proxy/#forward-to-one-of-your-imposters)). Errors set `rift_last_error`. A handle that never calls `rift_start_intercept` is
 unaffected.
 
 The intercept listener and the handle's embedded admin plane share one slot (#493): if you also call

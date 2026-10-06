@@ -1427,12 +1427,27 @@ pub unsafe extern "C" fn rift_space_recorded(
 // entirely over C-ABI — no loopback HTTP admin plane needed. One listener per handle.
 
 /// A single rule or a batch — `rift_intercept_add_rules` and `rift_intercept_replace_rules` accept
-/// either shape.
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
+/// either shape. Chosen by the JSON shape rather than `#[serde(untagged)]`, which would replace the
+/// rule's own error (a bad forward `host`, issue #1273) with "data did not match any variant".
 enum RuleOrRules {
     One(InterceptRule),
     Many(Vec<InterceptRule>),
+}
+
+impl<'de> serde::Deserialize<'de> for RuleOrRules {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.is_array() {
+            serde_json::from_value(value)
+                .map(RuleOrRules::Many)
+                .map_err(D::Error::custom)
+        } else {
+            serde_json::from_value(value)
+                .map(RuleOrRules::One)
+                .map_err(D::Error::custom)
+        }
+    }
 }
 
 /// Start the intercept/TLS-MITM forward-proxy listener on this handle's runtime. The intercept CA

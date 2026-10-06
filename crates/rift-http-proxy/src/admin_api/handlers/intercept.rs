@@ -170,11 +170,30 @@ async fn handle_stop(control: &InterceptControl) -> Response<Full<Bytes>> {
 }
 
 /// A single rule or a batch — `POST` and `PUT /intercept/rules` accept either shape.
-#[derive(Debug, serde::Deserialize)]
-#[serde(untagged)]
+///
+/// Chosen by the JSON shape (array or not) rather than `#[serde(untagged)]`: an untagged enum
+/// reports any failure as "data did not match any variant", hiding the field that was wrong — a
+/// bad forward `host` (#1273) or a `serve` body (#933) — from the caller who has to fix it.
+#[derive(Debug)]
 enum RuleOrRules {
     One(InterceptRule),
     Many(Vec<InterceptRule>),
+}
+
+impl<'de> serde::Deserialize<'de> for RuleOrRules {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.is_array() {
+            serde_json::from_value(value)
+                .map(RuleOrRules::Many)
+                .map_err(D::Error::custom)
+        } else {
+            serde_json::from_value(value)
+                .map(RuleOrRules::One)
+                .map_err(D::Error::custom)
+        }
+    }
 }
 
 /// True when `rules` carry a scripting surface `--allowInjection` has not enabled (issue #657) —

@@ -499,6 +499,33 @@ requests show which host was dialed — one imposter can stand in for several ho
 `{"equals": {"headers": {"Host": "cdn.example.com"}}}` predicate per host. The proxy's own
 `Proxy-Authorization` credential is not passed on. `requestFrom` is the proxy's loopback address.
 
+The target defaults to a plain-HTTP imposter in the same process. To reach one elsewhere — another
+container on the compose network, a second container in the same ECS task, a TLS-only vendor
+mock — name it:
+
+```bash
+curl -X POST http://localhost:2525/intercept/rules -d '{
+  "host": "cdn.example.com",
+  "action": { "forward": { "host": "mock-svc", "port": 4600, "scheme": "https" } }
+}'
+```
+
+| `forward` key | Meaning | Default |
+|:--|:--|:--|
+| `port` | The imposter's port, 1–65535 | (required) |
+| `host` | A hostname, an IPv4 literal or a bracketed IPv6 literal (`[::1]`) — the host only, no scheme, port or path | `127.0.0.1` |
+| `scheme` | `http` or `https` | `http` |
+
+An `https` target is verified with the listener's outbound trust — the same `--upstream-ca-file`
+(`upstreamCaFile`/`upstreamCaPem`) and `--upstream-tls-skip-verify` the WebSocket relay uses. An
+imposter with a self-signed certificate therefore needs its CA there, or skip-verify; an untrusted
+target answers the SUT `502`, like any failed forward. The imposter still sees the SUT's `Host`.
+
+Any other key in `forward` is refused with `400` (and fails a config file's startup), as is a
+target that cannot be dialled: port `0`, or a `host` carrying a scheme, port or path. An engine
+older than this ignores `host` and `scheme` and forwards to `127.0.0.1`, so an SDK that needs them
+should read the rule back from `GET /intercept/rules`: an engine that supports them echoes them.
+
 | Verb & path | Effect |
 |:--|:--|
 | `POST /intercept/rules` | Add one rule (object) or many (array). Rejected with `429 Too Many Requests` once the store holds 10,000 rules — `DELETE` rules before adding more. |
