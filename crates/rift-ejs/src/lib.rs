@@ -60,6 +60,66 @@ pub struct Rendered {
     /// Each `<%= process.env.VAR %>` whose variable could not be substituted: unset with no default,
     /// or set to a value that is not valid Unicode.
     pub unset_env: Vec<UnsetEnv>,
+    /// Where each `<%- stringify %>` substitution landed in `text`, so a parse error positioned in
+    /// the rendered text can be traced back to the tag that produced it (issue #1279).
+    pub stringified: Vec<StringifiedSpan>,
+}
+
+/// One `<%- stringify('file') %>` substitution in [`Rendered::text`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringifiedSpan {
+    /// The escaped file contents within the rendered text.
+    pub range: std::ops::Range<usize>,
+    /// The tag as written.
+    pub tag: String,
+    /// Where the tag is in the source, e.g. `at imposters.json:40`.
+    pub place: String,
+    /// Whether the tag sat between double quotes, as its output must.
+    pub quoted: bool,
+}
+
+impl Rendered {
+    /// Explain a parse error at 1-based `line`/`column` of [`Self::text`] when it falls inside (or
+    /// just after) a stringified substitution: which tag produced the text there, and — when the
+    /// tag was not written inside quotes — that it must be. `None` when the position is not in
+    /// stringified text, so the caller adds nothing it cannot back up.
+    #[must_use]
+    pub fn explain_parse_error(&self, line: usize, column: usize) -> Option<String> {
+        let line_start = if line <= 1 {
+            0
+        } else {
+            self.text
+                .match_indices('\n')
+                .nth(line - 2)
+                .map(|(i, _)| i + 1)?
+        };
+        let offset = line_start + column.saturating_sub(1);
+        let span = self
+            .stringified
+            .iter()
+            // An unquoted substitution's error often lands one byte past it; a quoted one's closing
+            // quote is the author's own text, so an error there is not the tag's.
+            .find(|span| {
+                let end = if span.quoted {
+                    span.range.end
+                } else {
+                    span.range.end + 1
+                };
+                span.range.start <= offset && offset <= end
+            })?;
+        let mut explained = format!(
+            "the JSON error is in the text the {} tag {} inserted",
+            span.tag, span.place
+        );
+        if !span.quoted {
+            explained.push_str(&format!(
+                "; stringify yields the file's contents escaped for a JSON string, so it must be \
+                 written inside quotes, as in Mountebank: \"{}\"",
+                span.tag
+            ));
+        }
+        Some(explained)
+    }
 }
 
 /// An environment variable a tag read but could not substitute.
@@ -166,6 +226,7 @@ pub fn render(
         return Ok(Rendered {
             text: content.to_string(),
             unset_env: Vec::new(),
+            stringified: Vec::new(),
         });
     }
 
@@ -193,6 +254,7 @@ pub fn render(
     let expanded = expand_includes(content, config_dir)?;
     let locate = |offset: usize| expanded.locate(offset, content, config_path);
     let mut unset_env = Vec::new();
+    let mut stringified = Vec::new();
     let text = render_tags(
         &expanded.text,
         TagScope::Document,
@@ -200,8 +262,13 @@ pub fn render(
         file_access,
         &locate,
         &mut unset_env,
+        &mut stringified,
     )?;
-    Ok(Rendered { text, unset_env })
+    Ok(Rendered {
+        text,
+        unset_env,
+        stringified,
+    })
 }
 
 /// A document with its `<% include %>` tags replaced by the files they name.
@@ -306,6 +373,7 @@ fn render_tags(
     file_access: FileAccess,
     locate: &dyn Fn(usize) -> String,
     unset_env: &mut Vec<UnsetEnv>,
+    stringified_spans: &mut Vec<StringifiedSpan>,
 ) -> Result<String, EjsError> {
     let mut out = String::with_capacity(text.len());
     let mut from = 0;
@@ -337,6 +405,7 @@ fn render_tags(
         } else if let Some(rel_path) = whole_tag_capture(&EJS_STRINGIFY_RE, tag)
             && scope == TagScope::Document
         {
+            let start = out.len();
             out.push_str(&stringified(
                 rel_path,
                 config_dir,
@@ -344,6 +413,12 @@ fn render_tags(
                 &|inner| format!("{}, stringified {}", inner, locate(offset)),
                 unset_env,
             )?);
+            stringified_spans.push(StringifiedSpan {
+                range: start..out.len(),
+                tag: tag.to_string(),
+                place: locate(offset),
+                quoted: text[..offset].ends_with('"') && text[end..].starts_with('"'),
+            });
         } else {
             let note = if whole_tag_capture(&EJS_INCLUDE_RE, tag).is_some() {
                 " (an include inside an included or stringified file is not evaluated)"
@@ -368,8 +443,9 @@ fn render_tags(
 }
 
 /// The file `rel_path` names, rendered and escaped for use inside a JSON string (issue #355 Item
-/// 7). The template supplies the surrounding quotes (`"inject": "<%- stringify('inject.js') %>"`),
-/// so only the escaped inner content is returned. `outer` wraps a place in the file with where the
+/// 7), trimmed of surrounding whitespace as Mountebank's is. The template supplies the surrounding
+/// quotes (`"inject": "<%- stringify('inject.js') %>"`), so only the escaped inner content is
+/// returned — Mountebank's contract too. `outer` wraps a place in the file with where the
 /// stringify tag is.
 fn stringified(
     rel_path: &str,
@@ -385,6 +461,7 @@ fn stringified(
         io,
     })?;
     let locate = |offset: usize| outer(format!("at {rel_path}:{}", line_of(&contents, offset)));
+    // A stringified file never evaluates a stringify of its own, so it records no spans.
     let rendered = render_tags(
         &contents,
         TagScope::Stringified,
@@ -392,8 +469,11 @@ fn stringified(
         file_access,
         &locate,
         unset_env,
+        &mut Vec::new(),
     )?;
-    let json_quoted = serde_json::to_string(&rendered).map_err(|json| EjsError::Encode {
+    // Trimmed as Mountebank's `stringify` does (issue #1279), so a file's trailing newline is not
+    // served as part of a verbatim string body.
+    let json_quoted = serde_json::to_string(rendered.trim()).map_err(|json| EjsError::Encode {
         file: rel_path.to_string(),
         json,
     })?;
@@ -733,5 +813,69 @@ mod tests {
         assert!(has_tags("a <% b"));
         assert!(!has_tags("{\"port\": 4545}"));
         assert!(!has_tags("% > <"));
+    }
+
+    // ===== Issue #1279 =====
+
+    fn render_with(fixture: &str, doc: &str) -> Rendered {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.json"), fixture).unwrap();
+        let path = dir.path().join("doc.json");
+        render(doc, &path, FileAccess::Allowed).expect("renders")
+    }
+
+    #[test]
+    fn stringify_trims_like_mountebank() {
+        let rendered = render_with("  {\"a\":1}\n\n", r#"{"b": "<%- stringify('f.json') %>"}"#);
+        assert_eq!(rendered.text, r#"{"b": "{\"a\":1}"}"#);
+    }
+
+    #[test]
+    fn stringified_spans_record_the_tag_and_whether_it_is_quoted() {
+        let rendered = render_with(
+            "v",
+            "{\"q\": \"<%- stringify('f.json') %>\",\n\"u\": <%- stringify('f.json') %>}",
+        );
+        assert_eq!(rendered.stringified.len(), 2);
+        assert!(rendered.stringified[0].quoted);
+        assert!(!rendered.stringified[1].quoted);
+        assert_eq!(rendered.stringified[1].tag, "<%- stringify('f.json') %>");
+        assert!(
+            rendered.stringified[1].place.ends_with("doc.json:2"),
+            "{}",
+            rendered.stringified[1].place
+        );
+        assert_eq!(&rendered.text[rendered.stringified[1].range.clone()], "v");
+    }
+
+    #[test]
+    fn explain_parse_error_maps_a_position_to_the_tag() {
+        let rendered = render_with("{\"a\":1}", "{\"x\":1,\n\"b\": <%- stringify('f.json') %>}");
+        // Line 2 is `"b": {\"a\":1}}`; serde reports `key must be a string` at the backslash.
+        let column = "\"b\": {\\".len();
+        let explained = rendered
+            .explain_parse_error(2, column)
+            .expect("the position is inside the stringified text");
+        assert!(
+            explained.contains("<%- stringify('f.json') %>"),
+            "{explained}"
+        );
+        assert!(
+            explained.contains("must be written inside quotes"),
+            "{explained}"
+        );
+        assert_eq!(
+            rendered.explain_parse_error(1, 3),
+            None,
+            "line 1 is nowhere near it"
+        );
+    }
+
+    #[test]
+    fn an_untagged_document_records_no_spans() {
+        let dir = tempfile::tempdir().unwrap();
+        let rendered = render("{}", &dir.path().join("d.json"), FileAccess::Allowed).unwrap();
+        assert!(rendered.stringified.is_empty());
+        assert_eq!(rendered.explain_parse_error(1, 1), None);
     }
 }

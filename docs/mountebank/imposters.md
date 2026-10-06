@@ -479,9 +479,11 @@ with parts of it missing. If a `<%` is meant literally, for example in a respons
 an EJS page, load the file with `--no-parse`. A document fetched from an `https:` source is always
 preprocessed, so it cannot carry a literal `<%`.
 
-`<% include 'path' %>` inlines another file, and `<%- stringify('path') %>` inlines a file's contents
-escaped for use inside a JSON string. A stringified file is rendered first, so `process.env` tags in it
-are substituted. `--no-parse` turns preprocessing off; see the
+`<% include 'path' %>` inlines another file, and `<%- stringify('path') %>` inlines a file's contents,
+trimmed and escaped for use inside a JSON string — so the tag goes inside quotes, as in Mountebank:
+`"body": "<%- stringify('datafile.json') %>"` (see
+[Configuration]({{ site.baseurl }}/configuration/#document-shapes-and-formats) for what an unquoted tag reports). A
+stringified file is rendered first, so `process.env` tags in it are substituted. `--no-parse` turns preprocessing off; see the
 [CLI reference]({{ site.baseurl }}/configuration/cli/). `rift-lint` renders a templated file the same
 way before it checks it; see [Linting]({{ site.baseurl }}/features/linting/#templated-files).
 
