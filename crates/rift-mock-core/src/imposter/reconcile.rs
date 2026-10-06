@@ -146,8 +146,9 @@ pub(crate) fn content_hash(stub: &Stub) -> u64 {
     hasher.0
 }
 
-/// Streaming FNV-1a 64, so the canonical JSON is hashed without materializing a `String`.
-struct Fnv1a(u64);
+/// Streaming FNV-1a 64, so the canonical JSON is hashed without materializing a `String`. Also the
+/// `_rift.conditional` ETag (issue #1280), which must be the same on every process and node.
+pub(crate) struct Fnv1a(u64);
 
 impl Default for Fnv1a {
     fn default() -> Self {
@@ -156,7 +157,11 @@ impl Default for Fnv1a {
 }
 
 impl Fnv1a {
-    fn update(&mut self, bytes: &[u8]) {
+    pub(crate) fn finish(&self) -> u64 {
+        self.0
+    }
+
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
         const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
         self.0 = bytes.iter().fold(self.0, |hash, byte| {
             (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)

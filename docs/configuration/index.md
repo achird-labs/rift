@@ -81,6 +81,21 @@ document fetched over `https:` may not do, and
 [Data directory]({{ site.baseurl }}/configuration/cli/#data-directory---datadir) for the stricter
 rules on `--datadir` files.
 
+`<%- stringify('file') %>` yields the file's contents, trimmed and **escaped for the inside of a JSON
+string** — you write the quotes, as in Mountebank:
+
+```json
+{ "is": { "body": "<%- stringify('fixtures/datafile.json') %>" } }
+```
+
+The result is a *string* body, served byte-for-byte as the file has it (keys unsorted — see
+[object vs string bodies]({{ site.baseurl }}/mountebank/responses/#body-types)). Written without the quotes,
+`"body": <%- stringify('fixtures/datafile.json') %>`, the document does not parse; the load error
+then names the tag, where it is, and the quoted form, and says its line and column are in the
+rendered document. Run with `--loglevel debug` to see that rendered document — it includes every
+stringified file, so a stringified private key appears in that log. The tag can also sit
+inside a longer string: `"x <%- stringify('f') %> y"`.
+
 An imposter with no `port`, or `"port": 0`, gets a free port assigned; imposters that declare a port
 are always created first.
 

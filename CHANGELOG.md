@@ -14,6 +14,21 @@ record.
 ### Added
 
 - **Docs: intercept proxy in containers** (#1275): a new [ECS / Fargate deployment page](docs/deployment/ecs-fargate.md) (a reference task definition), plus intercept sections in the Docker and Kubernetes guides, the `RIFT_INTERCEPT_*` variables in the deployment table and the image's `Dockerfile` comments.
+
+- **A runnable standalone intercept demo** (#1276): `docs/demo/docker-compose-intercept.yml` puts a
+  SUT container behind `HTTPS_PROXY`, with a CA made by `rift intercept-ca generate` and a datafile
+  imposter that a reload swaps. The SUT's healthcheck fetches the datafile through the MITM, so the
+  demo-compose CI gate now fails if the standalone intercept path breaks — nothing in CI exercised
+  it in the published image before.
+
+- **Declarative conditional GET on `is` responses** (#1280). `_rift.conditional` adds a strong
+  `ETag` (FNV-1a over the served bytes) and `Last-Modified` (stub load time or a fixed date) and
+  answers `304` to a matching `If-None-Match` / `If-Modified-Since`, so datafile-style pollers
+  (Optimizely, LaunchDarkly…) need no hand-synced validators. `GET`/`HEAD` with a 2xx only;
+  `If-None-Match` takes precedence; a `304` consumes a cycle position, runs `wait`, and is
+  journaled as `304`. A fixed `lastModified` that is not an HTTP-date is refused at admission, not
+  at decode, so `deserialize_replayed` still reads it.
+
 - **An intercept `forward` rule can name its target's `host` and `scheme`** (#1273):
   `{"forward": {"host": "mock-svc", "port": 4600, "scheme": "https"}}`. It could only reach
   `http://127.0.0.1:{port}`, so an imposter in another container, a rift-cluster node or a TLS-only
@@ -83,6 +98,14 @@ record.
   sequencer also stops serializing the matched stub on every response decision.
 
 ### Fixed
+
+- **A config file that fails to parse after a `stringify` now says why** (#1279). Written without
+  quotes, `"body": <%- stringify('datafile.json') %>` failed with only serde's
+  `key must be a string at line 40 column 26`, a position in text the author never saw. The error
+  now keeps that message, says the line and column are in the rendered document, names the tag
+  and where it is, and shows the quoted form; the rendered document is logged at `debug`.
+  `stringify` also now trims the file as Mountebank's does — **wire-visible**: a stringified string
+  body no longer ends with the file's trailing newline.
 
 - **Intercept leaf certificates now carry an Authority Key Identifier** (#1277). Python 3.13+
   (strict X.509 verification by default) and any `openssl verify -x509_strict` client rejected the

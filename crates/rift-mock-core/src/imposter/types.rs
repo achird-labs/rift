@@ -531,7 +531,8 @@ pub fn admission_check(config: &ImposterConfig) -> Result<(), String> {
 /// the stub's predicates, so this is the order a door reports in.
 pub fn admission_check_stub(stub: &Stub) -> Result<(), String> {
     stub.responses.iter().try_for_each(|response| {
-        refuse_unparseable_behaviors(response.behaviors_block(), Admission::Checked)
+        refuse_unparseable_behaviors(response.behaviors_block(), Admission::Checked)?;
+        refuse_bad_conditional(response.rift_block(), Admission::Checked)
     })?;
     validate_predicates(&stub.predicates)
 }
@@ -824,6 +825,17 @@ impl StubResponse {
         }
     }
 
+    /// The `_rift` block written on this response, whatever its type.
+    pub(crate) fn rift_block(&self) -> Option<&RiftResponseExtension> {
+        match self {
+            StubResponse::Is { rift, .. } => rift.as_deref(),
+            StubResponse::RiftScript { rift, .. } => Some(rift),
+            StubResponse::Proxy { ignored_rift, .. }
+            | StubResponse::Inject { ignored_rift, .. }
+            | StubResponse::Fault { ignored_rift, .. } => ignored_rift.as_deref(),
+        }
+    }
+
     /// The compiled behaviors program on this response, whatever its type — also where `repeat` is
     /// read from (issues #1188, #1198).
     pub(crate) fn behaviors_block(&self) -> Option<&serde_json::Value> {
@@ -1072,6 +1084,36 @@ fn refuse_unparseable_behaviors(
     }
 }
 
+/// A fixed `_rift.conditional.lastModified` must be an IMF-fixdate (issue #1280): one that does not
+/// parse could never be compared with an `If-Modified-Since`, and is served verbatim as a header no
+/// cache can read. An admission check (issue #1268), so a replayed decode skips it and
+/// [`admission_check_stub`] runs it with the same message. Checked on every response type, like the
+/// behaviors block, since the `_rift` block is read before the type is chosen.
+fn refuse_bad_conditional(
+    rift: Option<&RiftResponseExtension>,
+    admission: Admission,
+) -> Result<(), String> {
+    if admission == Admission::Skipped {
+        return Ok(());
+    }
+    let fixed = rift
+        .and_then(|r| r.conditional.as_ref())
+        .and_then(ConditionalGet::resolved)
+        .and_then(|(_, last_modified)| match last_modified {
+            LastModified::Fixed(date) => Some(date),
+            LastModified::Load => None,
+        });
+    match fixed {
+        Some(date) if crate::imposter::conditional::parse_imf_fixdate(date).is_none() => {
+            Err(format!(
+                "`_rift.conditional.lastModified` must be \"load\" or an HTTP-date such as \
+             \"Sat, 03 Oct 2026 12:00:00 GMT\"; got \"{date}\""
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn refuse_unparseable_object(block: &serde_json::Value) -> Result<(), String> {
     let Some(keys) = block.as_object() else {
         return Ok(());
@@ -1232,6 +1274,9 @@ impl TryFrom<StubResponseRaw> for StubResponse {
             program.push(alone);
             behaviors = compile_behaviors(serde_json::Value::Array(program));
         }
+        // After the behaviors, top-level `repeat` included: `admission_check_stub` checks the
+        // compiled behaviors first, and a door must name the same first failure it does.
+        refuse_bad_conditional(raw.rift.as_ref(), admission())?;
         // Priority: is > proxy > inject > fault > rift-script-only
         Ok(if let Some(is_raw) = raw.is {
             StubResponse::new_is(
@@ -2059,6 +2104,82 @@ pub struct RiftResponseExtension {
     /// every response whether or not one was written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset: Option<Box<crate::behaviors::DatasetBinding>>,
+    /// Declarative conditional GET (issue #1280): an `ETag` and a `Last-Modified` on the response,
+    /// and a `304 Not Modified` to a request whose `If-None-Match` / `If-Modified-Since` matches
+    /// them. **`is` responses only**, and only for a `GET`/`HEAD` answered with a 2xx (see
+    /// `crate::imposter::conditional`). Echoed exactly as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditional: Option<ConditionalGet>,
+}
+
+/// `_rift.conditional`: `true`/`false`, or the validators spelled out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ConditionalGet {
+    /// `true` is `{"etag": true, "lastModified": "load"}`; `false` turns the feature off.
+    Enabled(bool),
+    Validators(ConditionalValidators),
+}
+
+/// The spelled-out form of [`ConditionalGet`]. Both fields keep their absence, so the admin API
+/// echoes what was declared rather than the defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConditionalValidators {
+    /// Whether to send a strong `ETag` over the served bytes. Absent means `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<bool>,
+    /// Where `Last-Modified` comes from. Absent means [`LastModified::Load`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<LastModified>,
+}
+
+/// `lastModified`: `"load"`, or a fixed HTTP-date served verbatim.
+///
+/// Any string decodes: a fixed date that does not parse is refused by
+/// [`admission_check_stub`], never by the decode, so a stored config always replays (issue #1268).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum LastModified {
+    /// The time the stub was loaded: set when it was created or last changed, kept across a
+    /// reload that leaves it unchanged.
+    Load,
+    Fixed(String),
+}
+
+impl From<String> for LastModified {
+    fn from(value: String) -> Self {
+        if value == "load" {
+            LastModified::Load
+        } else {
+            LastModified::Fixed(value)
+        }
+    }
+}
+
+impl From<LastModified> for String {
+    fn from(value: LastModified) -> Self {
+        match value {
+            LastModified::Load => "load".to_owned(),
+            LastModified::Fixed(date) => date,
+        }
+    }
+}
+
+impl ConditionalGet {
+    /// `(etag, lastModified)` with the defaults applied, or `None` when switched off.
+    #[must_use]
+    pub fn resolved(&self) -> Option<(bool, &LastModified)> {
+        const LOAD: &LastModified = &LastModified::Load;
+        match self {
+            ConditionalGet::Enabled(false) => None,
+            ConditionalGet::Enabled(true) => Some((true, LOAD)),
+            ConditionalGet::Validators(v) => Some((
+                v.etag.unwrap_or(true),
+                v.last_modified.as_ref().unwrap_or(LOAD),
+            )),
+        }
+    }
 }
 
 /// Fault injection configuration for responses

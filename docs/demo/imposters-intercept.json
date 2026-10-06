@@ -1,0 +1,32 @@
+{
+  "imposters": [
+    {
+      "port": 4590,
+      "protocol": "http",
+      "name": "Optimizely datafile CDN",
+      "stubs": [
+        {
+          "predicates": [{ "equals": { "method": "GET", "path": "/datafiles/demo.json" } }],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "headers": { "Content-Type": "application/json" },
+                "body": "<%- stringify('fixtures/datafile.json') %>"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "intercept": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "caCertPath": "/intercept-ca/ca-cert.pem",
+    "caKeyPath": "/intercept-ca/ca-key.pem",
+    "rules": [
+      { "host": "cdn.optimizely.com", "action": { "forward": { "port": 4590 } } }
+    ]
+  }
+}
