@@ -94,15 +94,16 @@ all off again.
 
 ### The intercept CA
 
-The CA comes from one of three places, chosen when the listener starts:
+The CA comes from one of four places, chosen when the listener starts:
 
 | Source | How | Notes |
 |:--|:--|:--|
 | Generated (default) | nothing to configure | An ECDSA P-256 CA named `Rift Intercept CA`, held in memory. A new one every time the listener starts, so re-export it after a restart — or bootstrap it once with [`returnCaKey`](#runtime-lifecycle-admin-api) and supply it back. |
 | PEM files | `--intercept-ca-cert`/`--intercept-ca-key`, or `caCertPath`/`caKeyPath` | Paths on the engine's filesystem. |
 | Inline PEM | `RIFT_INTERCEPT_CA_CERT_PEM`/`RIFT_INTERCEPT_CA_KEY_PEM`, or `caCertPem`/`caKeyPem` | No file or volume needed. |
+| Env-named PEM | `caCertPemEnv`/`caKeyPemEnv` (config block, `POST /intercept`, FFI) | The *names* of two environment variables holding the PEMs, read when the listener starts — for a secret store that delivers secrets only as environment variables (ECS/Fargate). An unset variable fails the start, naming it. In a config-file block, use names other than `RIFT_INTERCEPT_*`: those are the flags' own variables, and a block refuses to share the listener with a flag. |
 
-Each pair is both-or-neither, and the file pair and the PEM pair cannot be combined. A PEM holding
+Each pair is both-or-neither, and only one pair may be supplied. A PEM holding
 several certificates pins the **first** as the CA (and logs a warning). Nothing ever hands out a
 private key you supplied: `GET /intercept`, the CA export and the truststores carry the certificate
 only.
@@ -284,7 +285,8 @@ rift --configfile /config/optimizely.json   # listener up + rules installed; no 
 ```
 
 The block is the same shape as the `POST /intercept` body — `host`, `port`, the CA fields
-(`caCertPath`/`caKeyPath` or inline `caCertPem`/`caKeyPem`), plus `rules[]` using the
+(`caCertPath`/`caKeyPath`, inline `caCertPem`/`caKeyPem`, or env-named `caCertPemEnv`/`caKeyPemEnv`),
+plus `rules[]` using the
 [rule schema](#configuring-rules-admin-api) verbatim. Notes:
 
 - **Optional and additive.** A config file without an `intercept` block behaves exactly as before.
@@ -294,7 +296,9 @@ The block is the same shape as the `POST /intercept` body — `host`, `port`, th
   imposter, using `[]` if the file declares none. A bare top-level array, and a YAML config (which
   is the array form), have nowhere to put a block at all.
 - **One source of truth.** Supplying the block *and* any `--intercept-*` flag is a startup error
-  rather than a silent precedence guess. Use one or the other.
+  rather than a silent precedence guess. Use one or the other. Each flag has a `RIFT_INTERCEPT_*`
+  environment variable that counts as the flag, so a block that takes its CA from the environment
+  names *other* variables with `caCertPemEnv`/`caKeyPemEnv`.
 - **No `returnCaKey`.** A config file has no response to return a generated CA key in, so
   `"returnCaKey": true` fails the load, naming the key (`rift-lint` `E050`); `false` or absent loads.
   Bootstrap a CA over the admin API instead.

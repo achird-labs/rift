@@ -13,6 +13,14 @@ record.
 
 ### Added
 
+- **A config-file `intercept` block can take its CA from environment variables** (#1293):
+  `"caCertPemEnv": "INTERCEPT_CA_CERT", "caKeyPemEnv": "INTERCEPT_CA_KEY"` names two variables
+  holding the PEMs, read when the listener starts (also accepted by `POST /intercept` and
+  `rift_start_intercept`). ECS/Fargate delivers secrets only as environment variables, and the
+  `RIFT_INTERCEPT_CA_*_PEM` variables count as flags that a block refuses to share the listener with,
+  so a task had to write the secret to a file in a shell entrypoint first. An unset variable fails
+  the start, naming it.
+
 - **Docs: intercept proxy in containers** (#1275): a new [ECS / Fargate deployment page](docs/deployment/ecs-fargate.md) (a reference task definition), plus intercept sections in the Docker and Kubernetes guides, the `RIFT_INTERCEPT_*` variables in the deployment table and the image's `Dockerfile` comments.
 
 - **A runnable standalone intercept demo** (#1276): `docs/demo/docker-compose-intercept.yml` puts a

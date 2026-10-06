@@ -150,8 +150,9 @@ already set up, so reload never does any of them. When it cannot apply the block
 rules stay as they were, there is no `intercept` field, and `warnings` (absent otherwise) says why:
 
 - the block changed a listener field — the warning names which (`host`, `port`, `auth`, `ca`);
-  restart to apply it. A CA file pair is compared by its paths, so rotating the files in place also
-  needs a restart;
+  restart to apply it. A CA file pair is compared by its paths and an env-named pair
+  (`caCertPemEnv`/`caKeyPemEnv`) by the variable names, so rotating the files in place, or the
+  secret behind the same name, also needs a restart;
 - no listener is running (it was stopped with `DELETE /intercept`); restart to bind it;
 - the listener was started from the `--intercept-*` flags, or at runtime with `POST /intercept` or
   FFI — the file's block does not own its rules;

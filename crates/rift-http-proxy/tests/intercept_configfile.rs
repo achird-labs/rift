@@ -778,3 +778,57 @@ async fn a_reload_after_put_puts_the_file_rules_in_front() {
     assert_eq!(rule_hosts(admin).await, vec!["a.test", "p.test"]);
     server.shutdown().await;
 }
+
+// ===== Issue #1293: the block names env vars for its CA =====
+
+/// The ECS/Fargate shape: the CA arrives as two environment variables (secrets), and the block
+/// names them. No `--intercept-*` flag is involved, so there is no block-vs-flags conflict.
+#[tokio::test]
+async fn configfile_block_takes_its_ca_from_env_vars() {
+    let ca = rift_mock_core::proxy::intercept_ca::CertificateAuthority::generate().unwrap();
+    // SAFETY: set_var races any concurrent getenv; the names are unique to this test, as
+    // elsewhere in this suite, so no other test depends on the values.
+    unsafe {
+        std::env::set_var("RIFT_TEST_1293_CFG_CERT", ca.ca_cert_pem());
+        std::env::set_var("RIFT_TEST_1293_CFG_KEY", ca.ca_key_pem());
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        &dir,
+        r#"{ "imposters": [], "intercept": { "port": 0,
+               "caCertPemEnv": "RIFT_TEST_1293_CFG_CERT", "caKeyPemEnv": "RIFT_TEST_1293_CFG_KEY",
+               "rules": [] } }"#,
+    );
+    let server = ServerBuilder::from_cli(cli_with_config(&path, &[]))
+        .start()
+        .await
+        .expect("server starts");
+    let served = reqwest::get(format!("http://{}/intercept/ca.pem", server.admin_addr()))
+        .await
+        .expect("ca.pem")
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(
+        served,
+        ca.ca_cert_pem(),
+        "the listener uses the CA from the environment"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn configfile_block_naming_an_unset_variable_fails_startup_naming_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        &dir,
+        r#"{ "imposters": [], "intercept": { "port": 0,
+               "caCertPemEnv": "RIFT_TEST_1293_UNSET_CERT", "caKeyPemEnv": "RIFT_TEST_1293_UNSET_KEY" } }"#,
+    );
+    let err = start_expecting_error(
+        cli_with_config(&path, &[]),
+        "a block naming an unset CA variable must not start",
+    )
+    .await;
+    assert!(err.contains("RIFT_TEST_1293_UNSET_CERT"), "{err}");
+}
