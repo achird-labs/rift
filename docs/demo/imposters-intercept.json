@@ -1,7 +1,7 @@
 {
   "imposters": [
     {
-      "port": 4600,
+      "port": 4590,
       "protocol": "http",
       "name": "Optimizely datafile CDN",
       "stubs": [
@@ -26,7 +26,7 @@
     "caCertPath": "/intercept-ca/ca-cert.pem",
     "caKeyPath": "/intercept-ca/ca-key.pem",
     "rules": [
-      { "host": "cdn.optimizely.com", "action": { "forward": { "port": 4600 } } }
+      { "host": "cdn.optimizely.com", "action": { "forward": { "port": 4590 } } }
     ]
   }
 }
