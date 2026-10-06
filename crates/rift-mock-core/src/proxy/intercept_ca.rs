@@ -232,6 +232,14 @@ impl CertificateAuthority {
             .map_err(|e| anyhow::anyhow!("build leaf params for {host}: {e}"))?;
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        // RFC 5280 4.2.1.1 requires an AKI on a CA-issued certificate, and OpenSSL's strict mode
+        // (Python's `ssl` default since 3.13) rejects a leaf without one; webpki does not check
+        // it, so only a parser-level test notices (issue #1277). rcgen derives the AKI from the
+        // issuer's key identifier method, which `load_pem` sets to the loaded CA's own SKI when the
+        // CA carries one (a CA without an SKI fails strict verification on its own anyway).
+        params.use_authority_key_identifier_extension = true;
+        params.is_ca = IsCa::ExplicitNoCa;
+        params.distinguished_name.push(DnType::CommonName, host);
         let leaf = params
             .signed_by(&leaf_key, &self.issuer, &self.key)
             .map_err(|e| anyhow::anyhow!("sign leaf for {host}: {e}"))?;
@@ -585,5 +593,136 @@ mod tests {
             keys.iter().all(|k| Arc::ptr_eq(k, &canonical)),
             "all concurrent callers must converge on the single cached key"
         );
+    }
+
+    // ===== Issue #1277: leaves carry an Authority Key Identifier (strict X.509 clients) =====
+
+    use x509_parser::extensions::{BasicConstraints as X509BasicConstraints, ParsedExtension};
+    use x509_parser::prelude::{FromDer, X509Certificate};
+
+    struct LeafIds {
+        aki: Option<Vec<u8>>,
+        ski: Option<Vec<u8>>,
+        ca: Option<bool>,
+        subject_cn: Option<String>,
+    }
+
+    fn leaf_ids(der: &[u8]) -> LeafIds {
+        let (_, cert) = X509Certificate::from_der(der).expect("parse leaf DER");
+        let mut ids = LeafIds {
+            aki: None,
+            ski: None,
+            ca: None,
+            subject_cn: cert
+                .subject()
+                .iter_common_name()
+                .next()
+                .and_then(|cn| cn.as_str().ok())
+                .map(str::to_string),
+        };
+        for ext in cert.extensions() {
+            match ext.parsed_extension() {
+                ParsedExtension::AuthorityKeyIdentifier(aki) => {
+                    ids.aki = aki.key_identifier.as_ref().map(|k| k.0.to_vec());
+                }
+                ParsedExtension::SubjectKeyIdentifier(ski) => ids.ski = Some(ski.0.to_vec()),
+                ParsedExtension::BasicConstraints(X509BasicConstraints { ca, .. }) => {
+                    ids.ca = Some(*ca);
+                }
+                _ => {}
+            }
+        }
+        ids
+    }
+
+    #[test]
+    fn minted_leaf_carries_aki_matching_ca_ski() {
+        let ca = CertificateAuthority::generate().expect("generate CA");
+        let ca_ski = leaf_ids(ca.ca_cert_der())
+            .ski
+            .expect("the CA carries an SKI");
+        let ck = ca.mint_leaf("cdn.example.com").expect("mint leaf");
+        let leaf = leaf_ids(&ck.cert[0]);
+        assert_eq!(
+            leaf.aki.as_deref(),
+            Some(ca_ski.as_slice()),
+            "the leaf's AKI must name the CA's SKI (RFC 5280 4.2.1.1; Python 3.13+ strict mode)"
+        );
+        assert!(leaf.ski.is_some(), "the leaf carries its own SKI");
+        assert_eq!(leaf.ca, Some(false), "the leaf says CA:FALSE explicitly");
+        assert_eq!(
+            leaf.subject_cn.as_deref(),
+            Some("cdn.example.com"),
+            "the subject names the host, not rcgen's default"
+        );
+    }
+
+    /// A loaded CA whose SKI is not rcgen's own SHA-256 derivation: the leaf's AKI must still equal
+    /// that CA's SKI — i.e. it is carried over from the certificate, not recomputed from the key.
+    #[test]
+    fn loaded_ca_leaf_aki_equals_the_original_ski() {
+        let ski = vec![0xAB; 20];
+        let key = KeyPair::generate().expect("CA key");
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "Operator CA");
+        params.key_identifier_method = rcgen::KeyIdMethod::PreSpecified(ski.clone());
+        let cert = params.self_signed(&key).expect("self-sign");
+        assert_eq!(leaf_ids(cert.der()).ski.as_deref(), Some(ski.as_slice()));
+
+        let ca = CertificateAuthority::load_pem(&cert.pem(), &key.serialize_pem()).expect("load");
+        let ck = ca.mint_leaf("api.example.com").expect("mint leaf");
+        assert_eq!(leaf_ids(&ck.cert[0]).aki, Some(vec![0xAB; 20]));
+        assert_chains_to_ca(&ca, &ck.cert[0], &[], "api.example.com");
+    }
+
+    /// The check that models the failing client: OpenSSL's strict verifier, which is what Python's
+    /// `ssl` enforces by default since 3.13. Skipped (with a note) when no OpenSSL is on PATH.
+    #[test]
+    fn minted_leaf_verifies_under_openssl_x509_strict() {
+        let openssl = std::process::Command::new("openssl")
+            .arg("version")
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).starts_with("OpenSSL "));
+        if !openssl {
+            eprintln!("skipping: OpenSSL not on PATH (LibreSSL does not enforce AKI)");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ca = CertificateAuthority::generate().expect("generate CA");
+        let ck = ca.mint_leaf("cdn.example.com").expect("mint leaf");
+        let leaf_pem = format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            base64_lines(&ck.cert[0])
+        );
+        let ca_path = dir.path().join("ca.pem");
+        let leaf_path = dir.path().join("leaf.pem");
+        std::fs::write(&ca_path, ca.ca_cert_pem()).expect("write CA");
+        std::fs::write(&leaf_path, leaf_pem).expect("write leaf");
+        let out = std::process::Command::new("openssl")
+            .args(["verify", "-x509_strict", "-CAfile"])
+            .arg(&ca_path)
+            .arg(&leaf_path)
+            .output()
+            .expect("run openssl verify");
+        assert!(
+            out.status.success(),
+            "openssl verify -x509_strict rejected the leaf: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn base64_lines(der: &[u8]) -> String {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+        b64.as_bytes()
+            .chunks(64)
+            .map(|c| std::str::from_utf8(c).expect("base64 is ASCII"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

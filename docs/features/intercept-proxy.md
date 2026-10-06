@@ -559,6 +559,12 @@ curl "http://localhost:2525/intercept/truststore.jks?password=changeit" -o ts.jk
 The truststore endpoints return the store bytes plus an `x-truststore-password` response header
 echoing the password used (default `changeit`, override with `?password=`).
 
+Each leaf the listener mints names the host in its subject and carries the extensions strict
+X.509 verifiers require — an Authority Key Identifier matching the CA's Subject Key Identifier, its
+own SKI, and `CA:FALSE` — so it verifies under `openssl verify -x509_strict` and under Python 3.13+,
+whose default `ssl` context enables `VERIFY_X509_STRICT`. This holds for a generated CA and for one
+you supply (`--intercept-ca-cert`/`caCertPath`/`caCertPem`), provided that CA carries an SKI.
+
 **JVM SUT — one-line wiring** (trust the CA and route HTTPS through the intercept listener):
 
 ```
