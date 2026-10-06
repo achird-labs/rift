@@ -321,6 +321,7 @@ mod tests {
             responses: vec![StubResponse::RiftScript {
                 rift: Box::new(RiftResponseExtension {
                     dataset: None,
+                    conditional: None,
                     fault: None,
                     script: Some(script_config),
                     templated: false,
@@ -659,6 +660,7 @@ mod tests {
                 None,
                 Some(Box::new(RiftResponseExtension {
                     dataset: None,
+                    conditional: None,
                     fault: None,
                     script: Some(script(None, None, Some("failTwice"))),
                     templated: false,

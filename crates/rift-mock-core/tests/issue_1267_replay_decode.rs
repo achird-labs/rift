@@ -48,6 +48,18 @@ const BAD_COPY_ON_PROXY: &str = r#"{
     }]
 }"#;
 
+/// A fixed `_rift.conditional.lastModified` that is not an HTTP-date (issue #1280), on an `is`
+/// response and on a `proxy` response, where the block is ignored but still checked.
+const BAD_CONDITIONAL_DATE: &str = r#"{
+    "responses": [{ "is": { "statusCode": 200 },
+                    "_rift": { "conditional": { "lastModified": "Saturday" } } }]
+}"#;
+
+const BAD_CONDITIONAL_DATE_ON_PROXY: &str = r#"{
+    "responses": [{ "proxy": { "to": "http://127.0.0.1:9" },
+                    "_rift": { "conditional": { "etag": false, "lastModified": "2026-10-03" } } }]
+}"#;
+
 const BAD_COPY_ON_FAULT: &str = r#"{
     "responses": [{
         "fault": "CONNECTION_RESET_BY_PEER",
@@ -90,6 +102,14 @@ fn each_admission_refusal_is_skipped_on_replay_and_reported_by_admission_check()
         (
             BAD_COPY_ON_FAULT,
             "`copy` behavior `jsonpath` selector `$[[[bad` is invalid",
+        ),
+        (
+            BAD_CONDITIONAL_DATE,
+            "`_rift.conditional.lastModified` must be \"load\" or an HTTP-date",
+        ),
+        (
+            BAD_CONDITIONAL_DATE_ON_PROXY,
+            "`_rift.conditional.lastModified` must be \"load\" or an HTTP-date",
         ),
     ];
     for (stub, refusal) in cases {

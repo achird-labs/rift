@@ -17,6 +17,7 @@
 //! - `core`: Core Imposter struct and implementation
 
 mod behavior_pipeline;
+mod conditional;
 mod core;
 mod datadir_file;
 pub mod events;
@@ -36,14 +37,14 @@ mod tests;
 // Re-export public types (used by external consumers like admin_api)
 #[allow(unused_imports)]
 pub use types::{
-    DebugImposter, DebugMatchResult, DebugRequest, DebugResponse, DebugResponsePreview,
-    DebugStubInfo, ImposterConfig, ImposterError, IsResponse, MAX_TRIED_STUBS, MatchOutcome,
-    PathRewrite, Predicate, PredicateOperation, PredicateParameters, PredicateSelector,
-    ProxyResponse, RecordedRequest, ResponseMode, RiftConfig, RiftConnectionPoolConfig,
-    RiftErrorFault, RiftFaultConfig, RiftFlowStateConfig, RiftLatencyFault, RiftMetricsConfig,
-    RiftProxyConfig, RiftRedisConfig, RiftResponseExtension, RiftScriptConfig,
-    RiftScriptEngineConfig, RiftTcpFault, RiftUpstreamConfig, Stub, StubResponse, TriedStub,
-    TriedWhy, admission_check, admission_check_stub, deserialize_replayed,
+    ConditionalGet, ConditionalValidators, DebugImposter, DebugMatchResult, DebugRequest,
+    DebugResponse, DebugResponsePreview, DebugStubInfo, ImposterConfig, ImposterError, IsResponse,
+    LastModified, MAX_TRIED_STUBS, MatchOutcome, PathRewrite, Predicate, PredicateOperation,
+    PredicateParameters, PredicateSelector, ProxyResponse, RecordedRequest, ResponseMode,
+    RiftConfig, RiftConnectionPoolConfig, RiftErrorFault, RiftFaultConfig, RiftFlowStateConfig,
+    RiftLatencyFault, RiftMetricsConfig, RiftProxyConfig, RiftRedisConfig, RiftResponseExtension,
+    RiftScriptConfig, RiftScriptEngineConfig, RiftTcpFault, RiftUpstreamConfig, Stub, StubResponse,
+    TriedStub, TriedWhy, admission_check, admission_check_stub, deserialize_replayed,
 };
 
 // Re-export script `file:`/`ref:` resolution (issue #356)

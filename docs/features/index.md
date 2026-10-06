@@ -28,6 +28,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 - **Fault Injection** - Probabilistic latency, error, and TCP fault injection
 - **Scripting** - Rhai and JavaScript engines for dynamic behavior
 - **Response Templates** - Date tokens and the `_rift.templated` `{% raw %}{{ }}{% endraw %}` function grammar
+- **Conditional GET** - `ETag` / `Last-Modified` and `304 Not Modified` on an `is` response with `_rift.conditional`
 - **Scenarios (FSM)** - Stateful stubs as declarative state machines
 - **Flow State** - Per-flow key/value store with InMemory or Redis backends, written by scripts or declaratively with `_rift.stateOps`
 - **Correlated Isolation (Spaces)** - Per-flow stub and state partitioning
@@ -61,6 +62,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 | Probabilistic Faults | Via injection | ✅ `_rift.fault` |
 | Rhai/JS Scripting | — | ✅ `_rift.script` |
 | Response Templates | `${request.*}` | ✅ `{% raw %}{{NOW}}{% endraw %}`, `_rift.templated` |
+| Conditional GET (`ETag`, `304`) | Two stubs, hand-synced | ✅ `_rift.conditional` |
 | Scenarios (FSM) | Via injection | ✅ stub `scenarioName` |
 | Flow State | Via injection | ✅ `_rift.flowState` |
 | Correlated Isolation | — | ✅ stub `space` |
@@ -88,6 +90,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 - [Correlated Isolation (Spaces)]({{ site.baseurl }}/features/spaces/) - Per-flow stub and state partitioning
 - [Flow State]({{ site.baseurl }}/features/flow-state/) - Per-flow key/value store for stateful mocks
 - [Response Templates]({{ site.baseurl }}/features/date-templates/) - date tokens and the `_rift.templated` `{% raw %}{{ }}{% endraw %}` function grammar
+- [Conditional GET]({{ site.baseurl }}/mountebank/responses/#conditional-get) - `ETag`, `Last-Modified` and `304` with `_rift.conditional`
 - [Stub-by-ID]({{ site.baseurl }}/features/stub-by-id/) - Address stubs by stable id
 - [Single-Port Gateway]({{ site.baseurl }}/features/gateway/) - Reach every imposter through the admin port
 - [Front Door]({{ site.baseurl }}/features/front-door/) - One listener routing to many imposters by host, path, header or method

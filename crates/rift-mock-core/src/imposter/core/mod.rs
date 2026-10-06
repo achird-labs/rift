@@ -117,6 +117,10 @@ pub struct StubState {
     /// cannot go stale. Lazy so a mutation that builds states (proxy recording appends a response
     /// per request) pays nothing unless a reconcile or a sequencer asks for the key.
     content_hash: OnceLock<u64>,
+    /// When this content was loaded: `_rift.conditional`'s `"lastModified": "load"` (issue #1280).
+    /// Set wherever a state gets new content and never otherwise, so a reconcile that keeps an
+    /// unchanged stub's state (#1265) keeps its `Last-Modified` too.
+    loaded_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl StubState {
@@ -127,7 +131,13 @@ impl StubState {
             cycler: Arc::new(RuleCycler::new()),
             slot: NEXT_STUB_SLOT.fetch_add(1, Ordering::Relaxed),
             content_hash: OnceLock::new(),
+            loaded_at: chrono::Utc::now(),
         }
+    }
+
+    /// When this stub's content was loaded (see the field).
+    pub(crate) fn loaded_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.loaded_at
     }
 
     /// A new slot for `stub`, whose content hash the caller already computed.
@@ -182,6 +192,7 @@ impl StubState {
             cycler: Arc::clone(&self.cycler),
             slot: self.slot,
             content_hash: OnceLock::new(),
+            loaded_at: chrono::Utc::now(),
         }
     }
 

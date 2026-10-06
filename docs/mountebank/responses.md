@@ -477,6 +477,56 @@ Now each user experiences their own retry sequence:
 
 See [Scripting]({{ site.baseurl }}/features/scripting/) and [Fault Injection]({{ site.baseurl }}/features/fault-injection/) for more examples.
 
+### Conditional GET
+
+{: .rift-only }
+> **Rift-Only**: `_rift.conditional` on an `is` response.
+
+A client that polls with validators (a CDN-hosted datafile, a feature-flag SDK) expects `ETag` /
+`Last-Modified` on the response and a `304 Not Modified` when it already holds the current copy.
+`_rift.conditional` gives a stub both without a second stub or a hand-picked validator:
+
+```json
+"_rift": { "conditional": true }
+"_rift": { "conditional": { "etag": true, "lastModified": "load" } }
+"_rift": { "conditional": { "etag": false, "lastModified": "Sat, 03 Oct 2026 12:00:00 GMT" } }
+```
+
+`true` is the second form. `false` or no block turns it off.
+
+- **`etag`** (default `true`): a strong `ETag`, `"fnv1a64-<16 hex digits>"`, the FNV-1a 64 hash of
+  the bytes served, after `_rift.templated`, `${request.*}` substitution, behaviors and date
+  tokens. A templated or behavior-altered body gets its own tag per request. The tag is the same on
+  every process and node for the same bytes.
+- **`lastModified`** (default `"load"`): `"load"` is the time the stub was loaded: when it was
+  created, or last changed by the admin API or a reload. A reload that leaves the stub unchanged
+  keeps it; one that rewrites most of an imposter's stubs restarts the imposter, which re-stamps
+  them all, as does a restart. Otherwise an HTTP-date in the `Sat, 03 Oct 2026 12:00:00 GMT` form,
+  served verbatim. Any other string is refused when the config is loaded.
+
+It applies only to a `GET` or `HEAD` that the stub answers with a 2xx; any other request or status
+is served unchanged, without validators. The validators replace any `ETag` or `Last-Modified` the
+response declares in `headers`. The response is `304` when:
+
+1. the request has `If-None-Match` and one of its tags matches the `ETag` (weak comparison, so
+   `W/"…"` matches; a list or `*` is accepted). `If-Modified-Since` is then ignored, whatever it
+   says; otherwise
+2. the request has `If-Modified-Since`, it parses as an HTTP-date, and `Last-Modified` is not later
+   than it (to the second).
+
+The `304` carries `ETag`, `Last-Modified`, `Cache-Control`, `Vary`, `Expires` and
+`Content-Location` from the configured response when present, and `x-rift-imposter: true`, with no
+body, `Content-Type` or `Content-Length`. CORS headers are added as on any response.
+
+What a `304` still does:
+
+- **It consumes a cycle position.** The response is chosen before the request's validators are
+  read, so with several responses a `304` for one of them moves the cycle on like a `200` would.
+- **It runs `wait`** and every other behavior: the ETag is computed over the body the behaviors
+  produce. A `_rift.fault` still fires instead, and `_rift.stateOps` still run.
+- **It is journaled as `304`**, the status the client received, so `verify` can assert that a
+  client polled with validators.
+
 ---
 
 ## Proxy Responses

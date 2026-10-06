@@ -4,6 +4,7 @@
 //! debug mode, proxy handling, inject execution, and response generation.
 
 use super::behavior_pipeline::{BehaviorOutcome, BehaviorRun, ServedParts};
+use super::conditional::{self, ConditionalSpec};
 use super::core::Imposter;
 use super::core::{ProxiedResponse, ProxyOutcome};
 use super::headers::sanitize_header_value;
@@ -1692,7 +1693,11 @@ async fn handle_request_inner(
             ..
         }) = response
         {
-            return Ok(prepared.serve());
+            return Ok(prepared
+                .serve_request(&method, &request_headers, stub_state.loaded_at())
+                .unwrap_or_else(|e| {
+                    build_failure_response(&e, "stub response build failed (bad Last-Modified?)")
+                }));
         }
 
         if let Some((
@@ -1877,10 +1882,18 @@ async fn handle_request_inner(
                 body = spliced_body.into_text();
                 headers = plain_headers(spliced_headers);
             }
+            // `_rift.conditional` (issue #1280), decided on the status behaviors left. Its
+            // validators replace any the response declares.
+            let conditional =
+                ConditionalSpec::from_config(rift_ext.and_then(|r| r.conditional.as_ref()))
+                    .filter(|_| conditional::applies(&method, status));
             let mut response = Response::builder().status(status);
 
             // One header line per value (issue #238 multi-value headers, e.g. multiple Set-Cookie).
             for (k, values) in &headers {
+                if conditional.is_some() && conditional::is_validator(k) {
+                    continue;
+                }
                 for v in values {
                     response = response.header(k, v);
                 }
@@ -1950,6 +1963,29 @@ async fn handle_request_inner(
                     } else {
                         backend_error_response(&e)
                     });
+                }
+            }
+
+            // After the fault and `stateOps`, so a fault still wins and a 304 still writes state;
+            // the ETag is over the final bytes, after templating, behaviors and date tokens.
+            if let Some(spec) = &conditional {
+                let etag = spec
+                    .wants_etag()
+                    .then(|| conditional::etag_for(&body_bytes));
+                let validators = spec.validators(etag, stub_state.loaded_at());
+                if validators.not_modified(&request_headers) {
+                    let kept = headers
+                        .iter()
+                        .filter(|(name, _)| conditional::kept_on_304(name))
+                        .flat_map(|(name, values)| {
+                            values.iter().map(move |v| (name.as_str(), v.as_str()))
+                        });
+                    return Ok(validators.not_modified_response(kept).unwrap_or_else(|e| {
+                        build_failure_response(&e, "304 response build failed (bad stub header?)")
+                    }));
+                }
+                for (name, value) in validators.headers() {
+                    response = response.header(name, value);
                 }
             }
 
