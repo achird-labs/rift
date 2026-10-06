@@ -119,7 +119,8 @@ pub struct StubState {
     content_hash: OnceLock<u64>,
     /// When this content was loaded: `_rift.conditional`'s `"lastModified": "load"` (issue #1280).
     /// Set wherever a state gets new content and never otherwise, so a reconcile that keeps an
-    /// unchanged stub's state (#1265) keeps its `Last-Modified` too.
+    /// unchanged stub's state (#1265) keeps its `Last-Modified` too. The admin replace doors decide
+    /// "new" by content hash (#1294).
     loaded_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -138,6 +139,13 @@ impl StubState {
     /// When this stub's content was loaded (see the field).
     pub(crate) fn loaded_at(&self) -> chrono::DateTime<chrono::Utc> {
         self.loaded_at
+    }
+
+    /// This state, stamped as loaded at `at`: for a fresh slot whose content is not new.
+    #[must_use]
+    pub(crate) fn with_loaded_at(mut self, at: chrono::DateTime<chrono::Utc>) -> Self {
+        self.loaded_at = at;
+        self
     }
 
     /// A new slot for `stub`, whose content hash the caller already computed.
@@ -523,11 +531,27 @@ impl Imposter {
         arc
     }
 
-    /// Replace all stubs
+    /// Replace all stubs. Every slot is new, so every response cycle restarts; a stub whose
+    /// content was already present keeps that content's `Last-Modified: load` (issue #1294).
     pub fn replace_stubs(&self, new_stubs: Vec<Stub>) {
         self.mutate_stubs(|stubs| {
+            let mut loaded: std::collections::HashMap<u64, chrono::DateTime<chrono::Utc>> =
+                std::collections::HashMap::with_capacity(stubs.len());
+            for state in stubs.iter() {
+                loaded
+                    .entry(state.content_hash())
+                    .and_modify(|at| *at = (*at).min(state.loaded_at()))
+                    .or_insert(state.loaded_at());
+            }
             stubs.clear();
-            stubs.extend(new_stubs.into_iter().map(|s| Arc::new(StubState::new(s))));
+            stubs.extend(new_stubs.into_iter().map(|s| {
+                let hash = crate::imposter::reconcile::content_hash(&s);
+                let state = StubState::with_hash(s, hash);
+                Arc::new(match loaded.get(&hash) {
+                    Some(at) => state.with_loaded_at(*at),
+                    None => state,
+                })
+            }));
         });
     }
 

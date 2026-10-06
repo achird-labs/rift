@@ -78,7 +78,7 @@ impl Imposter {
                     // Swap a fresh Arc that reuses the slot's cycler + slot token, so the slot's
                     // response-cycling state is kept and in-flight requests holding the old Arc keep
                     // serving their snapshot (issue #287).
-                    stubs[i] = Arc::new(stubs[i].with_stub(stub));
+                    stubs[i] = replaced_state(&stubs[i], stub);
                     true
                 }
                 None => false,
@@ -116,7 +116,7 @@ impl Imposter {
                 return Err(ImposterError::StubIndexOutOfBounds(index));
             }
             // Reuse the slot's cycler + slot token (issue #287); see `replace_stub_by_id`.
-            stubs[index] = Arc::new(stubs[index].with_stub(stub));
+            stubs[index] = replaced_state(&stubs[index], stub);
             Ok(())
         })
     }
@@ -172,5 +172,17 @@ impl Imposter {
     /// Check if enabled
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::SeqCst)
+    }
+}
+
+/// The state for replacing `old`'s stub with `stub` at one position: `old` itself when the content
+/// is identical, so an admin replace that changes nothing does not move `Last-Modified: load`
+/// (issue #1294); otherwise a state carrying `stub` with `old`'s cycler and slot (issue #287).
+fn replaced_state(old: &Arc<StubState>, stub: Stub) -> Arc<StubState> {
+    let hash = crate::imposter::reconcile::content_hash(&stub);
+    if old.content_hash() == hash {
+        Arc::clone(old)
+    } else {
+        Arc::new(old.with_stub_hashed(stub, hash))
     }
 }
