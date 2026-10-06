@@ -289,14 +289,14 @@ async fn put_imposters_success_carries_the_apply_report() {
     let r = reqwest::Client::new()
         .put(format!("{admin}/imposters"))
         .header("content-type", "application/json")
-        .body(r#"{"imposters":[{"port":19783,"protocol":"http","stubs":[]}]}"#)
+        .body(r#"{"imposters":[{"port":21309,"protocol":"http","stubs":[]}]}"#)
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
     let body: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(body["imposters"][0]["port"], 19783, "{body}");
-    assert_eq!(body["created"], serde_json::json!([19783]), "{body}");
+    assert_eq!(body["imposters"][0]["port"], 21309, "{body}");
+    assert_eq!(body["created"], serde_json::json!([21309]), "{body}");
     assert_eq!(body["toggled"], serde_json::json!([]), "{body}");
 
     manager.delete_all().await;

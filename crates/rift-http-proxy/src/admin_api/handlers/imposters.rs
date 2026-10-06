@@ -2202,7 +2202,7 @@ mod replace_all_tests {
     #[tokio::test]
     async fn put_success_body_carries_the_apply_report() {
         let manager = Arc::new(ImposterManager::new());
-        for (port, body) in [(19770, "a"), (19771, "b"), (19773, "d")] {
+        for (port, body) in [(21304, "a"), (21305, "b"), (21307, "d")] {
             let config = serde_json::from_value(serde_json::json!({
                 "port": port, "protocol": "http",
                 "stubs": [{"responses": [{"is": {"statusCode": 200, "body": body}}]}]
@@ -2217,7 +2217,7 @@ mod replace_all_tests {
             })
         };
         let body =
-            serde_json::json!({"imposters": [imp(19770, "a"), imp(19771, "b2"), imp(19772, "c")]})
+            serde_json::json!({"imposters": [imp(21304, "a"), imp(21305, "b2"), imp(21306, "c")]})
                 .to_string();
         let resp =
             replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
@@ -2231,19 +2231,19 @@ mod replace_all_tests {
             .filter_map(|i| i["port"].as_u64())
             .collect();
         assert_eq!(listed.len(), 3, "{json}");
-        for p in [19770, 19771, 19772] {
+        for p in [21304, 21305, 21306] {
             assert!(listed.contains(&p), "{json}");
         }
-        assert_eq!(ports_in(&json, "created"), vec![19772]);
-        assert_eq!(ports_in(&json, "deleted"), vec![19773]);
+        assert_eq!(ports_in(&json, "created"), vec![21306]);
+        assert_eq!(ports_in(&json, "deleted"), vec![21307]);
         assert_eq!(ports_in(&json, "toggled"), Vec::<u64>::new());
         let changed: Vec<u64> = ["replaced", "stubPatched"]
             .iter()
             .flat_map(|f| ports_in(&json, f))
             .collect();
-        assert!(changed.contains(&19771), "{json}");
+        assert!(changed.contains(&21305), "{json}");
         assert!(
-            !changed.contains(&19770),
+            !changed.contains(&21304),
             "unchanged imposter in a list: {json}"
         );
         manager.delete_all().await;
@@ -2251,9 +2251,9 @@ mod replace_all_tests {
 
     #[tokio::test]
     async fn put_success_reports_a_toggle() {
-        let manager = manager_with_http(19774).await;
+        let manager = manager_with_http(21308).await;
         let body = serde_json::json!({"imposters": [
-            {"port": 19774, "protocol": "http", "enabled": false, "stubs": []}
+            {"port": 21308, "protocol": "http", "enabled": false, "stubs": []}
         ]})
         .to_string();
         let resp =
@@ -2261,7 +2261,7 @@ mod replace_all_tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(ports_in(&json, "toggled"), vec![19774], "{json}");
+        assert_eq!(ports_in(&json, "toggled"), vec![21308], "{json}");
         for field in ["created", "replaced", "stubPatched", "deleted"] {
             assert!(ports_in(&json, field).is_empty(), "{field}: {json}");
         }
