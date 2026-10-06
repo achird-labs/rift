@@ -1,7 +1,7 @@
 //! System handlers: health, metrics, config, logs.
 
 use crate::admin_api::types::*;
-use crate::imposter::ImposterManager;
+use crate::imposter::{ApplyReport, ImposterManager};
 use crate::response::ErrorKind;
 use bytes::Bytes;
 use http_body_util::Full;
@@ -312,13 +312,10 @@ pub async fn handle_reload(
     if all_unchanged {
         return json_response(
             StatusCode::OK,
-            &serde_json::json!({
-                "message": "No source changed; imposters left as they are",
-                "created": [],
-                "replaced": [],
-                "stubPatched": [],
-                "deleted": [],
-            }),
+            &report_body(
+                &ApplyReport::default(),
+                "No source changed; imposters left as they are",
+            ),
         );
     }
 
@@ -398,13 +395,7 @@ pub async fn handle_reload(
                     warnings.push(warning);
                 }
             }
-            let mut body = serde_json::json!({
-                "message": format!("Reloaded {count} imposter(s)"),
-                "created": report.created,
-                "replaced": report.replaced,
-                "stubPatched": report.stub_patched,
-                "deleted": report.deleted,
-            });
+            let mut body = report_body(&report, &format!("Reloaded {count} imposter(s)"));
             if let Some(seeded) = reapplied {
                 body["intercept"] = serde_json::json!(seeded);
             }
@@ -431,20 +422,19 @@ pub async fn handle_reload(
                 })
                 .collect();
             // Mountebank error envelope (like `error_response`) plus the apply report.
+            let mut body = report.port_lists();
+            body.insert(
+                "errors".to_owned(),
+                serde_json::json!([{
+                    "code": StatusCode::INTERNAL_SERVER_ERROR.as_str(),
+                    "type": ErrorKind::InternalError.slug(),
+                    "message": format!("Reload partially failed: {}", failures.join("; ")),
+                }]),
+            );
+            body.insert("failed".to_owned(), serde_json::json!(failures));
             json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &serde_json::json!({
-                    "errors": [{
-                        "code": StatusCode::INTERNAL_SERVER_ERROR.as_str(),
-                        "type": ErrorKind::InternalError.slug(),
-                        "message": format!("Reload partially failed: {}", failures.join("; ")),
-                    }],
-                    "failed": failures,
-                    "created": report.created,
-                    "replaced": report.replaced,
-                    "stubPatched": report.stub_patched,
-                    "deleted": report.deleted,
-                }),
+                &serde_json::Value::Object(body),
             )
         }
         // Plain `{e}` here, unlike the two sites above: this is an `ImposterError`, whose own
@@ -456,6 +446,14 @@ pub async fn handle_reload(
             &format!("Reload failed (imposters unchanged): {e}"),
         ),
     }
+}
+
+/// A successful reload body: `message` plus the report's port lists (see
+/// [`ApplyReport::port_lists`]).
+fn report_body(report: &ApplyReport, message: &str) -> serde_json::Value {
+    let mut body = report.port_lists();
+    body.insert("message".to_owned(), serde_json::json!(message));
+    serde_json::Value::Object(body)
 }
 
 #[cfg(test)]
@@ -649,6 +647,7 @@ mod tests {
             serde_json::json!([19477]),
             "sibling applied"
         );
+        assert_eq!(body["toggled"], serde_json::json!([]), "got: {body}");
         assert!(manager.get_imposter(19477).is_ok());
         assert!(manager.get_imposter(19478).is_err());
 
@@ -979,6 +978,44 @@ mod tests {
         manager.delete_all().await;
     }
 
+    // Issue #1304: `toggled` is a port array on every reload reply, and lists a port whose only
+    // change is the `enabled` flag.
+    #[tokio::test]
+    async fn reload_reports_a_toggled_port() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("imposters.json");
+        let write = |enabled: bool| {
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"imposters":[{{"port":23751,"protocol":"http","enabled":{enabled},"stubs":[]}}]}}"#
+                ),
+            )
+            .expect("write config");
+        };
+        let source = crate::sources::ReloadSource::Legacy(Arc::new(
+            crate::config_loader::ConfigSource::File {
+                path: path.clone(),
+                no_parse: false,
+            },
+        ));
+        let manager = Arc::new(ImposterManager::new());
+        write(true);
+        let resp = handle_reload(manager.clone(), Some(source.clone()), None, None, false).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        write(false);
+        let resp = handle_reload(manager.clone(), Some(source), None, None, false).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["toggled"], serde_json::json!([23751]), "got: {body}");
+        for field in ["created", "replaced", "stubPatched", "deleted"] {
+            assert_eq!(body[field], serde_json::json!([]), "{field}: {body}");
+        }
+
+        manager.delete_all().await;
+    }
+
     // Issue #1237: the no-change reply is the same report as a change, with nothing in it. Typing
     // the four fields as the integer `0` here and as port arrays everywhere else broke any client
     // that decodes the report against one schema.
@@ -1004,7 +1041,7 @@ mod tests {
             body["message"], "No source changed; imposters left as they are",
             "got: {body}"
         );
-        for field in ["created", "replaced", "stubPatched", "deleted"] {
+        for field in ["created", "replaced", "stubPatched", "toggled", "deleted"] {
             assert_eq!(
                 body[field],
                 serde_json::json!([]),

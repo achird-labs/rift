@@ -275,6 +275,33 @@ async fn create_imposter_rejects_non_positive_ttl_seconds() {
     assert!(r.text().await.unwrap().contains("ttlSeconds"));
 }
 
+// Issue #1304: `PUT /imposters` carries the apply report beside `imposters` on success.
+#[tokio::test]
+async fn put_imposters_success_carries_the_apply_report() {
+    let manager = std::sync::Arc::new(ImposterManager::new());
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
+
+    let r = reqwest::Client::new()
+        .put(format!("{admin}/imposters"))
+        .header("content-type", "application/json")
+        .body(r#"{"imposters":[{"port":21309,"protocol":"http","stubs":[]}]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["imposters"][0]["port"], 21309, "{body}");
+    assert_eq!(body["created"], serde_json::json!([21309]), "{body}");
+    assert_eq!(body["toggled"], serde_json::json!([]), "{body}");
+
+    manager.delete_all().await;
+}
+
 // Issue #546: a request body past MAX_ADMIN_BODY_BYTES is rejected with 413 by
 // the live admin route, proving the cap is wired into the real request path (not
 // just the collect_body unit) — the size check fires before JSON parsing.

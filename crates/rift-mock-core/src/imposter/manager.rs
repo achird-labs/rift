@@ -1826,10 +1826,11 @@ impl ImposterManager {
         // recorded requests, which a wholesale replace would. Compared
         // against the live flag, not the retained boot value.
         if existing.is_enabled() != config.enabled {
-            if let Err(e) = self.set_imposter_enabled(port, config.enabled).await {
-                report.failed.push((port, e));
+            // `toggled` means applied in place: a failed toggle is reported in `failed` alone.
+            match self.set_imposter_enabled(port, config.enabled).await {
+                Ok(()) => report.toggled.push(port),
+                Err(e) => report.failed.push((port, e)),
             }
-            report.toggled.push(port);
         }
 
         match existing.reconcile_stubs(&config.stubs) {
@@ -4734,6 +4735,40 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&stubs[2]).unwrap()["responses"][0]["is"]["body"],
             "c2"
+        );
+
+        manager.delete_all().await;
+    }
+
+    // Issue #1304: `toggled` means "applied in place". A toggle whose persist fails is reported
+    // in `failed`; listing it in `toggled` too claims an apply that did not complete.
+    #[tokio::test]
+    async fn a_failed_enabled_toggle_is_reported_as_failed_not_toggled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let datadir = dir.path().join("datadir");
+        std::fs::create_dir(&datadir).expect("mk datadir");
+        let manager = ImposterManager::with_datadir(Some(datadir.clone()));
+        manager
+            .create_imposter(imposter_cfg(json!({
+                "protocol": "http", "port": 19454, "stubs": [stub_json("a")]
+            })))
+            .await
+            .expect("create succeeds with a writable datadir");
+        std::fs::remove_dir_all(&datadir).expect("break the datadir");
+
+        let paused = imposter_cfg(json!({
+            "protocol": "http", "port": 19454, "enabled": false, "stubs": [stub_json("a")]
+        }));
+        let report = manager.apply_config(vec![paused]).await.expect("apply");
+        assert!(
+            matches!(report.failed[..], [(19454, ImposterError::PersistError(_))]),
+            "{:?}",
+            report.failed
+        );
+        assert!(
+            report.toggled.is_empty(),
+            "a failed toggle must not be reported as toggled: {:?}",
+            report.toggled
         );
 
         manager.delete_all().await;

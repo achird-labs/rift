@@ -21,7 +21,7 @@ an imposter in a file and reloading no longer tears every imposter down.
   `{"message": "No config source configured; nothing to reload"}`.
 - When every `--imposters` source reports it is unchanged (an `http(s):` source answering
   `304 Not Modified`) and there is no `--datadir`, the reload returns `200` without touching
-  anything; that body carries the same `created`/`replaced`/`stubPatched`/`deleted` port arrays as
+  anything; that body carries the same `created`/`replaced`/`stubPatched`/`toggled`/`deleted` port arrays as
   any other reload report, all empty.
 - The new config is **validated in full before** any running imposter is mutated. If it fails to
   parse or has duplicate ports / unsupported protocols, the running imposters are left untouched and
@@ -100,6 +100,9 @@ Rift computes the change set per port and classifies each imposter:
   imposter starts with fresh runtime state.
 - **stubPatched** — an imposter whose stubs changed only modestly; the differing stubs are patched
   in place and every unchanged stub keeps its cursor/scenario state.
+- **toggled** — an imposter whose only change is the `enabled` flag; it is paused or resumed in
+  place with all runtime state intact. A toggle that fails to persist is reported under `failed`,
+  not here.
 
 Stubs are matched across a reload by a **stable key**: a stub's explicit `id` if it has one,
 otherwise a content hash. Reordering stubs or editing a neighbour therefore preserves the state of
@@ -115,6 +118,7 @@ A successful reload returns `200` with the change set:
   "created": [4547],
   "replaced": [4545],
   "stubPatched": [4546],
+  "toggled": [],
   "deleted": [4544]
 }
 ```
@@ -132,7 +136,7 @@ the new ones, never neither. The response reports it:
 ```json
 {
   "message": "Reloaded 3 imposter(s)",
-  "created": [], "replaced": [4600], "stubPatched": [], "deleted": [],
+  "created": [], "replaced": [4600], "stubPatched": [], "toggled": [], "deleted": [],
   "intercept": { "rulesSeeded": 2, "rulesRuntime": 1 }
 }
 ```
@@ -164,7 +168,7 @@ rules stay as they were, there is no `intercept` field, and `warnings` (absent o
   "warnings": [
     "the config file changed the intercept listener's port; the listener is started at boot only, so its rules were NOT re-applied — restart to apply the block"
   ],
-  "created": [], "replaced": [], "stubPatched": [], "deleted": []
+  "created": [], "replaced": [], "stubPatched": [], "toggled": [], "deleted": []
 }
 ```
 
@@ -186,6 +190,7 @@ did apply and the ones that failed:
   "created": [],
   "replaced": [],
   "stubPatched": [],
+  "toggled": [],
   "deleted": []
 }
 ```

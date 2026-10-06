@@ -13,6 +13,8 @@ record.
 
 ### Added
 
+- **`PUT /imposters` returns the apply report, and `toggled` is reported everywhere** (#1304): a successful `PUT /imposters` still answers `200 {"imposters":[...]}`, now with `created`, `replaced`, `stubPatched`, `toggled` and `deleted` port arrays beside it (the same lists `POST /admin/reload` reports). `toggled` (ports whose only change was `enabled`) was computed but never serialized; it is now present on every reload reply, the `PUT /imposters` replies and `rift_apply_config`. No ABI bump.
+
 - **W019 and `conditional_never_runs` for a `_rift.conditional` that can never fire** (#1296): `rift-lint` and the engine's `_rift.warnings` now flag it on a script-only response, or on an `is` response behind a top-level `method` predicate that excludes GET and HEAD.
 
 - **A config-file `intercept` block can take its CA from environment variables** (#1293):
@@ -126,6 +128,8 @@ record.
   differently are re-stamped (admin delete, `PUT /imposters/{port}/stubs` reorders, predicate
   changes, reloads, a correlation-space teardown); a reorder through `PUT /imposters/{port}/stubs` no longer keeps a moved stub's
   old stamp.
+
+- **A failed `enabled` toggle is no longer reported as toggled** (#1304): when pausing or resuming an imposter during an apply or reload failed to persist, the port was listed in both `failed` and `toggled`; it is now in `failed` only.
 
 - **A `_rift.conditional` change within the previous one's second is no longer answered `304`**
   (#1301). `Last-Modified: load` and `If-Modified-Since` are whole seconds, so two changes inside

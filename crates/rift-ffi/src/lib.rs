@@ -2141,9 +2141,11 @@ async fn build_admin_plane_inner(
 }
 
 /// Incrementally reconcile the manager toward the given config (issue #316/#343). Input is
-/// `{"imposters":[...]}` or a bare array. Returns (caller frees) a report with the same field
-/// names as `POST /admin/reload`:
-/// `{"created":[..],"replaced":[..],"stubPatched":[..],"deleted":[..],"failed":[{"port":0,"error":".."}]}`.
+/// `{"imposters":[...]}` or a bare array. Returns (caller frees) a report:
+/// `{"created":[..],"replaced":[..],"stubPatched":[..],"toggled":[..],"deleted":[..],"failed":[{"port":0,"error":".."}]}`.
+/// The five port lists are the same as `POST /admin/reload` and `PUT /imposters` report; `failed`
+/// is `[{"port","error"}]` here and `["<port>: <error>"]` over HTTP; `message`, `warnings` and
+/// `intercept` are HTTP-only.
 /// Returns null only on invalid input / up-front validation failure — then nothing was mutated
 /// and the reason is in [`rift_last_error`]. Partial per-port failures come back in `failed`.
 ///
@@ -2184,14 +2186,9 @@ pub unsafe extern "C" fn rift_apply_config(
                     .iter()
                     .map(|(port, e)| json!({"port": port, "error": e.to_string()}))
                     .collect();
-                let out = json!({
-                    "created": report.created,
-                    "replaced": report.replaced,
-                    "stubPatched": report.stub_patched,
-                    "deleted": report.deleted,
-                    "failed": failed,
-                });
-                into_c_string(out.to_string())
+                let mut out = report.port_lists();
+                out.insert("failed".to_owned(), Value::Array(failed));
+                into_c_string(Value::Object(out).to_string())
             }
             Err(e) => {
                 set_last_error(format!("rift_apply_config: {e}"));

@@ -169,16 +169,36 @@ pub async fn handle_list(
     query: Option<&str>,
     base_url: &str,
 ) -> Response<Full<Bytes>> {
+    match imposter_list_value(&manager, query, base_url) {
+        Ok(body) => json_response(StatusCode::OK, &body),
+        Err(resp) => *resp,
+    }
+}
+
+/// The `{"imposters": [...]}` body of `GET /imposters` (in the shape `query` selects), shared with
+/// the `PUT /imposters` success reply. A body that cannot render is the `500` to serve instead.
+fn imposter_list_value(
+    manager: &ImposterManager,
+    query: Option<&str>,
+    base_url: &str,
+) -> Result<serde_json::Value, Box<Response<Full<Bytes>>>> {
     let params = ImposterQueryParams::parse(query);
     let imposters = manager.list_imposters();
+    let render = |v: Result<serde_json::Value, serde_json::Error>| {
+        v.map_err(|e| {
+            Box::new(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to serialize response body: {e}"),
+            ))
+        })
+    };
 
     if params.replayable {
         let configs: Vec<ImposterConfig> = imposters
             .iter()
             .map(|i| replayable_config(i, params.remove_proxies))
             .collect();
-        let body = serde_json::json!({ "imposters": configs });
-        json_response(StatusCode::OK, &body)
+        render(serde_json::to_value(&configs).map(|v| serde_json::json!({ "imposters": v })))
     } else if params.list {
         // Mountebank-compatible abbreviated listing: port, protocol, name, numberOfRequests, _links
         let entries: Vec<ImposterListEntry> = imposters
@@ -193,7 +213,7 @@ pub async fn handle_list(
                 })
             })
             .collect();
-        json_response(StatusCode::OK, &serde_json::json!({ "imposters": entries }))
+        render(serde_json::to_value(&entries).map(|v| serde_json::json!({ "imposters": v })))
     } else {
         let summaries: Vec<ImposterSummary> = imposters
             .iter()
@@ -210,11 +230,9 @@ pub async fn handle_list(
                 })
             })
             .collect();
-
-        let response = ListImpostersResponse {
+        render(serde_json::to_value(ListImpostersResponse {
             imposters: summaries,
-        };
-        json_response(StatusCode::OK, &response)
+        }))
     }
 }
 
@@ -299,7 +317,19 @@ async fn replace_all_from_bytes(
     // anything, only replaces what actually changed (an unchanged imposter keeps its runtime
     // state, like POST /admin/reload), and reports per-port failures instead of log-and-continue.
     match manager.apply_config(batch.imposters).await {
-        Ok(report) if report.failed.is_empty() => handle_list(manager, None, base_url).await,
+        // The report rides beside `imposters` (Mountebank clients read `imposters`; the port
+        // lists mirror `POST /admin/reload`).
+        Ok(report) if report.failed.is_empty() => {
+            match imposter_list_value(&manager, None, base_url) {
+                Ok(mut body) => {
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.extend(report.port_lists());
+                    }
+                    json_response(StatusCode::OK, &body)
+                }
+                Err(resp) => *resp,
+            }
+        }
         // Residual per-port apply failures (e.g. a bind race): the other ports are already
         // reconciled, so carry the full report — a partial failure is exactly when the client
         // needs to know what did apply (same contract as POST /admin/reload).
@@ -313,23 +343,19 @@ async fn replace_all_from_bytes(
                     port => format!("{port}: {e}"),
                 })
                 .collect();
+            let mut body = report.port_lists();
+            body.insert(
+                "errors".to_owned(),
+                serde_json::json!([{
+                    "code": StatusCode::INTERNAL_SERVER_ERROR.as_str(),
+                    "type": ErrorKind::InternalError.slug(),
+                    "message": format!("Replace partially failed: {}", failures.join("; ")),
+                }]),
+            );
+            body.insert("failed".to_owned(), serde_json::json!(failures));
             json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &serde_json::json!({
-                    "errors": [{
-                        "code": StatusCode::INTERNAL_SERVER_ERROR.as_str(),
-                        "type": ErrorKind::InternalError.slug(),
-                        "message": format!(
-                            "Replace partially failed: {}",
-                            failures.join("; ")
-                        ),
-                    }],
-                    "failed": failures,
-                    "created": report.created,
-                    "replaced": report.replaced,
-                    "stubPatched": report.stub_patched,
-                    "deleted": report.deleted,
-                }),
+                &serde_json::Value::Object(body),
             )
         }
         // Set-level validation failure (bad protocol, duplicate port, duplicate stub id): a bad
@@ -2122,6 +2148,7 @@ mod replace_all_tests {
             "the failing port must be identified in the report: {json}"
         );
         assert_eq!(json["errors"][0]["code"], "500");
+        assert_eq!(json["toggled"], serde_json::json!([]), "{json}");
         assert!(
             manager.get_imposter(19760).is_ok(),
             "the unchanged imposter must survive the partial failure"
@@ -2153,8 +2180,91 @@ mod replace_all_tests {
             .filter_map(|i| i["port"].as_u64())
             .collect();
         assert_eq!(ports, vec![22619]);
+        for field in ["created", "replaced", "stubPatched", "toggled", "deleted"] {
+            assert!(json[field].is_array(), "`{field}` must be an array: {json}");
+        }
         assert!(manager.get_imposter(22617).is_err(), "old set replaced");
         assert!(manager.get_imposter(22619).is_ok());
+        manager.delete_all().await;
+    }
+
+    fn ports_in(json: &serde_json::Value, field: &str) -> Vec<u64> {
+        json[field]
+            .as_array()
+            .unwrap_or_else(|| panic!("`{field}` must be an array: {json}"))
+            .iter()
+            .filter_map(|p| p.as_u64())
+            .collect()
+    }
+
+    // Issue #1304: the apply report is computed on every PUT; success must carry it beside
+    // `imposters` instead of discarding it.
+    #[tokio::test]
+    async fn put_success_body_carries_the_apply_report() {
+        let manager = Arc::new(ImposterManager::new());
+        for (port, body) in [(21304, "a"), (21305, "b"), (21307, "d")] {
+            let config = serde_json::from_value(serde_json::json!({
+                "port": port, "protocol": "http",
+                "stubs": [{"responses": [{"is": {"statusCode": 200, "body": body}}]}]
+            }))
+            .expect("config");
+            manager.create_imposter(config).await.expect("create");
+        }
+        let imp = |port: u16, body: &str| {
+            serde_json::json!({
+                "port": port, "protocol": "http",
+                "stubs": [{"responses": [{"is": {"statusCode": 200, "body": body}}]}]
+            })
+        };
+        let body =
+            serde_json::json!({"imposters": [imp(21304, "a"), imp(21305, "b2"), imp(21306, "c")]})
+                .to_string();
+        let resp =
+            replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let listed: Vec<u64> = json["imposters"]
+            .as_array()
+            .expect("imposters array")
+            .iter()
+            .filter_map(|i| i["port"].as_u64())
+            .collect();
+        assert_eq!(listed.len(), 3, "{json}");
+        for p in [21304, 21305, 21306] {
+            assert!(listed.contains(&p), "{json}");
+        }
+        assert_eq!(ports_in(&json, "created"), vec![21306]);
+        assert_eq!(ports_in(&json, "deleted"), vec![21307]);
+        assert_eq!(ports_in(&json, "toggled"), Vec::<u64>::new());
+        let changed: Vec<u64> = ["replaced", "stubPatched"]
+            .iter()
+            .flat_map(|f| ports_in(&json, f))
+            .collect();
+        assert!(changed.contains(&21305), "{json}");
+        assert!(
+            !changed.contains(&21304),
+            "unchanged imposter in a list: {json}"
+        );
+        manager.delete_all().await;
+    }
+
+    #[tokio::test]
+    async fn put_success_reports_a_toggle() {
+        let manager = manager_with_http(21308).await;
+        let body = serde_json::json!({"imposters": [
+            {"port": 21308, "protocol": "http", "enabled": false, "stubs": []}
+        ]})
+        .to_string();
+        let resp =
+            replace_all_from_bytes(body.as_bytes(), BASE, Arc::clone(&manager), false, None).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(ports_in(&json, "toggled"), vec![21308], "{json}");
+        for field in ["created", "replaced", "stubPatched", "deleted"] {
+            assert!(ports_in(&json, field).is_empty(), "{field}: {json}");
+        }
         manager.delete_all().await;
     }
 
