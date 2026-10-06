@@ -107,6 +107,9 @@ papaya = "0.2.4"
 
 [dev-dependencies]
 tempfile = "3.8"
+# Issue #1277: parse minted certificates to assert extensions webpki does not check (AKI). Already
+# in the tree through rcgen's `x509-parser` feature, which does not re-export it.
+x509-parser = "0.16"
 reqwest.workspace = true
 tokio-test = "0.4"
 serial_test = "3.0"

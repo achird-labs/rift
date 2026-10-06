@@ -3496,6 +3496,7 @@ dependencies = [
  "tracing-test",
  "urlencoding",
  "uuid",
+ "x509-parser",
  "yasna",
 ]
 
