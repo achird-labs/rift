@@ -63,6 +63,21 @@ record.
 
 ### Fixed
 
+- **Intercept leaf certificates now carry an Authority Key Identifier** (#1277). Python 3.13+
+  (strict X.509 verification by default) and any `openssl verify -x509_strict` client rejected the
+  forged leaf with "Missing Authority Key Identifier", so `requests`/`urllib3` calls through the
+  intercept proxy failed the handshake even with the CA trusted. Leaves now carry an AKI matching
+  the CA's SKI, their own SKI and `CA:FALSE`, and name the host in their subject instead of
+  `rcgen self signed cert`.
+
+- **An intercept `forward` rule now delivers the SUT's original `Host` to the imposter** (#1278).
+  It arrived as `127.0.0.1:<port>`, so one imposter could not serve several intercepted hosts with
+  host-keyed stubs, and recorded requests lost which host the SUT dialed. The imposter now sees the
+  `Host` the client sent (the `:authority` under HTTP/2, else the `CONNECT` authority), as the
+  WebSocket relay, gateway and front door already did. Wire-visible to the imposter: a stub that
+  predicated on `Host: 127.0.0.1:<port>` no longer matches. `Proxy-Authorization` is no longer
+  forwarded to the imposter.
+
 - **A `copy` or `lookup` behavior whose selector does not compile is refused at load** (#1258). A
   `using` regex, JSONPath or XPath selector with a syntax error was accepted, and on every request
   the behavior extracted nothing: the token was replaced with an empty string, or the lookup found no

@@ -491,6 +491,12 @@ curl -X POST http://localhost:2525/intercept/rules -d '{
 }'
 ```
 
+The imposter receives the request with the `Host` the SUT sent (falling back to the `CONNECT`
+authority when it sent none), so its stubs can match on the intercepted host and its recorded
+requests show which host was dialed — one imposter can stand in for several hosts with a
+`{"equals": {"headers": {"Host": "cdn.example.com"}}}` predicate per host. The proxy's own
+`Proxy-Authorization` credential is not passed on. `requestFrom` is the proxy's loopback address.
+
 | Verb & path | Effect |
 |:--|:--|
 | `POST /intercept/rules` | Add one rule (object) or many (array). Rejected with `429 Too Many Requests` once the store holds 10,000 rules — `DELETE` rules before adding more. |
@@ -584,6 +590,12 @@ curl "http://localhost:2525/intercept/truststore.jks?password=changeit" -o ts.jk
 
 The truststore endpoints return the store bytes plus an `x-truststore-password` response header
 echoing the password used (default `changeit`, override with `?password=`).
+
+Each leaf the listener mints names the host in its subject and carries the extensions strict
+X.509 verifiers require — an Authority Key Identifier matching the CA's Subject Key Identifier, its
+own SKI, and `CA:FALSE` — so it verifies under `openssl verify -x509_strict` and under Python 3.13+,
+whose default `ssl` context enables `VERIFY_X509_STRICT`. This holds for a generated CA and for one
+you supply (`--intercept-ca-cert`/`caCertPath`/`caCertPem`), provided that CA carries an SKI.
 
 **JVM SUT — one-line wiring** (trust the CA and route HTTPS through the intercept listener):
 
