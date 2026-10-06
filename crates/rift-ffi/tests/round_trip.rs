@@ -1613,6 +1613,30 @@ fn ffi_intercept_replace_rules() {
     }
 }
 
+/// Issue #1273: the FFI door refuses a forward target that cannot be dialled, naming it, exactly
+/// as the admin API does — the check lives in the rule's own decoding.
+#[test]
+fn ffi_intercept_add_rules_refuses_an_undiallable_forward_host() {
+    unsafe {
+        let h = rift_start();
+        take_json(rift_start_intercept(h, cstr(r#"{"port":0}"#).as_ptr()));
+        let bad = cstr(r#"{"host":"a.test","action":{"forward":{"port":4600,"host":"http://x"}}}"#);
+        assert_eq!(rift_intercept_add_rules(h, bad.as_ptr()), -1);
+        assert!(take_last_error().contains("http://x"));
+        let good = cstr(
+            r#"{"host":"a.test","action":{"forward":{"port":4600,"host":"mock-svc","scheme":"https"}}}"#,
+        );
+        assert_eq!(rift_intercept_add_rules(h, good.as_ptr()), 0);
+        let listed: serde_json::Value =
+            serde_json::from_str(&take_json(rift_intercept_list_rules(h))).unwrap();
+        assert_eq!(
+            listed[0]["action"],
+            serde_json::json!({"forward": {"port": 4600, "host": "mock-svc", "scheme": "https"}})
+        );
+        rift_stop(h);
+    }
+}
+
 /// Issue #593: over FFI, `rift_start_intercept` with `returnCaKey` hands back a generated CA pair,
 /// and that pair, supplied inline on a later start, reconstructs the same trust anchor.
 #[test]

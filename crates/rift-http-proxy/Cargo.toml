@@ -74,6 +74,9 @@ clap = { workspace = true, features = ["env"] }
 # `stream` (U-12): the https imposter source enforces its size cap while reading, not from a
 # Content-Length header the source itself supplies. No new crate — reqwest is already here.
 reqwest = { workspace = true, features = ["stream"] }
+# Admission check for an intercept `forward` host (issue #1273): the same parser reqwest dials
+# with, so a host that is admitted is a host that can be reached. Already in the tree via reqwest.
+url = "2"
 
 # Utils
 bytes.workspace = true

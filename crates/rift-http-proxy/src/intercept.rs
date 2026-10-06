@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::intercept_control::InterceptAuth;
-use crate::intercept_rules::{InterceptAction, InterceptRules, ServeStub};
+use crate::intercept_rules::{ForwardTarget, InterceptAction, InterceptRules, ServeStub};
 use base64::Engine;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
@@ -157,7 +157,7 @@ impl InterceptListener {
         // rather than a process-wide static so the pool dies with `stop()` and embedded
         // multi-instance use keeps pools independent; building here also surfaces a failure as a
         // start error instead of a lazy-init panic.
-        let forward_client = build_forward_client()?;
+        let forward_client = build_forward_client(&outbound_tls)?;
         // Built here rather than per connection for the same reason as `forward_client`: assembling
         // it parses the OS trust store, and nothing about it varies per connection. Building it at
         // bind also surfaces a bad `--upstream-ca-file` as a start error rather than as a failed
@@ -279,8 +279,18 @@ fn log_accept_loop_exit(result: Result<(), tokio::task::JoinError>) {
 /// verbatim: never follow redirects (a 3xx from the imposter is a response to hand back, not to
 /// chase). `.timeout` is reqwest's per-request total-time bound, so sharing one client across
 /// requests keeps each forward bounded by `IO_TIMEOUT` individually — it is not a client lifetime.
-fn build_forward_client() -> anyhow::Result<reqwest::Client> {
-    reqwest::Client::builder()
+///
+/// It carries the listener's outbound trust (`--upstream-ca-file`, `--upstream-tls-skip-verify`),
+/// which an `https` forward target needs (issue #1273); a plain-`http` target never uses it.
+fn build_forward_client(
+    outbound_tls: &rift_mock_core::proxy::OutboundTls,
+) -> anyhow::Result<reqwest::Client> {
+    // `no_proxy`: the target is an imposter the rule names, never something to reach through an
+    // `HTTP(S)_PROXY` that happens to be set in rift's own environment — a container that shares
+    // the SUT's environment would otherwise send every forward back out through a proxy.
+    outbound_tls
+        .reqwest_builder()?
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(IO_TIMEOUT)
         .build()
@@ -623,7 +633,7 @@ async fn handle_tunnel_request(
                 query.as_deref(),
                 &headers,
                 body_bytes.as_deref(),
-                forward.port,
+                &forward,
                 &ctx,
             )
             .await
@@ -632,7 +642,7 @@ async fn handle_tunnel_request(
                 Err(e) => {
                     tracing::warn!(
                         host = %ctx.host,
-                        port = forward.port,
+                        target = %forward.url(""),
                         error = %format_args!("{e:#}"),
                         "intercept forward failed"
                     );
@@ -968,8 +978,9 @@ fn stub_response(stub: &ServeStub) -> Response<Full<Bytes>> {
     response
 }
 
-/// Forward the decrypted request to `http://127.0.0.1:{port}{path}[?query]` and return the
-/// upstream status, headers, and body as the tunnel's response. Returns `Err` on any connection or
+/// Forward the decrypted request to the rule's target — `http://127.0.0.1:{port}` unless the rule
+/// names a `host` or `scheme` (issue #1273) — and return the upstream status, headers, and body as
+/// the tunnel's response. Returns `Err` on any connection or
 /// I/O failure so the caller can answer `502 Bad Gateway` without panicking.
 async fn forward_response(
     method: &str,
@@ -977,13 +988,14 @@ async fn forward_response(
     query: Option<&str>,
     headers: &HashMap<String, Vec<String>>,
     body: Option<&[u8]>,
-    port: u16,
+    target: &ForwardTarget,
     ctx: &TunnelCtx,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
     let url = match query {
-        Some(q) => format!("http://127.0.0.1:{port}{path}?{q}"),
-        None => format!("http://127.0.0.1:{port}{path}"),
+        Some(q) => target.url(&format!("{path}?{q}")),
+        None => target.url(path),
     };
+    let upstream_name = target.url("");
     let reqwest_method = reqwest::Method::from_bytes(method.as_bytes())
         .map_err(|e| anyhow::anyhow!("invalid method '{method}': {e}"))?;
 
@@ -1006,7 +1018,7 @@ async fn forward_response(
         }
     }
     // `host` is hop-by-hop above because the client stack would otherwise derive it from the
-    // loopback URL; set it explicitly so the imposter sees what the SUT addressed, as the
+    // target URL; set it explicitly so the imposter sees what the SUT addressed, as the
     // WebSocket relay, gateway and front door already do (issue #1278). hyper-util only inserts
     // `Host` when it is absent, so this one wins.
     builder = builder.header(
@@ -1020,16 +1032,15 @@ async fn forward_response(
     let upstream = builder
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("forward to 127.0.0.1:{port} failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("forward to {upstream_name} failed: {e}"))?;
 
-    let status = StatusCode::from_u16(upstream.status().as_u16()).map_err(|e| {
-        anyhow::anyhow!("upstream 127.0.0.1:{port} returned an invalid status: {e}")
-    })?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())
+        .map_err(|e| anyhow::anyhow!("upstream {upstream_name} returned an invalid status: {e}"))?;
     let upstream_headers = upstream.headers().clone();
     let body_bytes = upstream
         .bytes()
         .await
-        .map_err(|e| anyhow::anyhow!("reading upstream body from 127.0.0.1:{port}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("reading upstream body from {upstream_name}: {e}"))?;
 
     let len = body_bytes.len();
     let mut response = Response::new(Full::new(body_bytes));
@@ -1999,9 +2010,7 @@ mod tests {
             .add(InterceptRule {
                 host: None,
                 predicates: vec![],
-                action: InterceptAction::Forward(ForwardTarget {
-                    port: upstream_port,
-                }),
+                action: InterceptAction::Forward(ForwardTarget::loopback(upstream_port)),
             })
             .unwrap();
         let (listener, ca_pem) = start_listener(rules).await;
@@ -2135,9 +2144,7 @@ mod tests {
             .add(InterceptRule {
                 host: None,
                 predicates: vec![],
-                action: InterceptAction::Forward(ForwardTarget {
-                    port: imposter_port,
-                }),
+                action: InterceptAction::Forward(ForwardTarget::loopback(imposter_port)),
             })
             .unwrap();
         let (listener, ca_pem) = start_listener(rules).await;
@@ -2206,9 +2213,7 @@ mod tests {
             .add(InterceptRule {
                 host: None,
                 predicates: vec![],
-                action: InterceptAction::Forward(ForwardTarget {
-                    port: imposter_port,
-                }),
+                action: InterceptAction::Forward(ForwardTarget::loopback(imposter_port)),
             })
             .unwrap();
         let (listener, ca_pem) = start_listener(rules).await;
@@ -2276,14 +2281,14 @@ mod tests {
             .add(InterceptRule {
                 host: Some("dead.example.com".to_string()),
                 predicates: vec![],
-                action: InterceptAction::Forward(ForwardTarget { port: dead_port }),
+                action: InterceptAction::Forward(ForwardTarget::loopback(dead_port)),
             })
             .unwrap();
         rules
             .add(InterceptRule {
                 host: Some("live.example.com".to_string()),
                 predicates: vec![],
-                action: InterceptAction::Forward(ForwardTarget { port: live_port }),
+                action: InterceptAction::Forward(ForwardTarget::loopback(live_port)),
             })
             .unwrap();
         let (listener, ca_pem) = start_listener(rules).await;
@@ -2334,7 +2339,7 @@ mod tests {
             .add(InterceptRule {
                 host: None,
                 predicates: vec![],
-                action: InterceptAction::Forward(ForwardTarget { port: CLOSED_PORT }),
+                action: InterceptAction::Forward(ForwardTarget::loopback(CLOSED_PORT)),
             })
             .unwrap();
         let (listener, ca_pem) = start_listener(rules).await;
