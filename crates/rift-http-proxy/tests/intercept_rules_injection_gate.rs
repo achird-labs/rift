@@ -151,3 +151,52 @@ async fn intercept_rules_inject_executes_with_allow_injection() {
 
     server.shutdown().await;
 }
+
+/// Issue #1272: `PUT /intercept/rules` asks the same gate as `POST`, and a refusal leaves the
+/// existing set exactly as it was — the replace is all-or-nothing.
+#[tokio::test]
+async fn intercept_rules_put_with_inject_is_refused_and_keeps_the_old_set() {
+    let server = ServerBuilder::from_cli(cli(&[]))
+        .start()
+        .await
+        .expect("start");
+    let admin = server.admin_addr();
+    let c = reqwest::Client::new();
+    let keep = r#"{"host":"keep.example.com","action":{"serve":{"statusCode":200,"body":"kept"}}}"#;
+    assert_eq!(
+        c.post(format!("http://{admin}/intercept/rules"))
+            .body(keep)
+            .send()
+            .await
+            .expect("post")
+            .status(),
+        201
+    );
+
+    let resp = c
+        .put(format!("http://{admin}/intercept/rules"))
+        .body(format!("[{INJECT_RULE}]"))
+        .send()
+        .await
+        .expect("put");
+    assert_eq!(resp.status(), 400);
+    assert!(
+        resp.text()
+            .await
+            .unwrap_or_default()
+            .contains("allowInjection")
+    );
+
+    let listed: serde_json::Value = c
+        .get(format!("http://{admin}/intercept/rules"))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
+    assert_eq!(listed[0]["host"], "keep.example.com");
+
+    server.shutdown().await;
+}
