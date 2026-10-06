@@ -13,6 +13,7 @@ use crate::behaviors::{
 // Fallback-only (issue #357 Item 6): the real JS `config =>` decorate path is Boa
 // (`execute_mountebank_config_decorate`); this textual transpiler is used only when the
 // `javascript` feature is disabled and no JS engine is available.
+use super::conditional::{self, ConditionalSpec};
 #[cfg(not(feature = "javascript"))]
 use crate::behaviors::rewrite_js_config_to_rhai;
 use crate::imposter::Predicate;
@@ -213,6 +214,15 @@ pub struct PreparedResponse {
     status: hyper::StatusCode,
     headers: hyper::HeaderMap,
     body: bytes::Bytes,
+    /// `_rift.conditional` (issue #1280) on a 2xx. The body is fixed, so its ETag is computed here
+    /// once; `Last-Modified: load` belongs to the stub state, so it is supplied at serve time.
+    conditional: Option<PreparedConditional>,
+}
+
+#[derive(Debug)]
+struct PreparedConditional {
+    spec: ConditionalSpec,
+    etag: Option<String>,
 }
 
 impl PreparedResponse {
@@ -293,11 +303,54 @@ impl PreparedResponse {
         );
 
         let status = hyper::StatusCode::from_u16(is.status_code).ok()?;
+        let conditional = ConditionalSpec::from_config(rift.and_then(|r| r.conditional.as_ref()))
+            .filter(|_| status.is_success())
+            .map(|spec| PreparedConditional {
+                etag: spec
+                    .wants_etag()
+                    .then(|| conditional::etag_for(body_string.as_bytes())),
+                spec,
+            });
         Some(PreparedResponse {
             status,
             headers,
             body: bytes::Bytes::from(body_string),
+            conditional,
         })
+    }
+
+    /// [`serve`](Self::serve) for a request: a conditional response (issue #1280) answers `304`
+    /// when the request's preconditions match, and otherwise carries its validators. Errs only on a
+    /// fixed `Last-Modified` that is not a valid header value.
+    pub(crate) fn serve_request(
+        &self,
+        method: &str,
+        request_headers: &crate::util::FastMap<String, Vec<String>>,
+        loaded_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<hyper::Response<http_body_util::Full<bytes::Bytes>>, hyper::http::Error> {
+        let Some(prepared) = self
+            .conditional
+            .as_ref()
+            .filter(|_| conditional::method_applies(method))
+        else {
+            return Ok(self.serve());
+        };
+        let validators = prepared.spec.validators(prepared.etag.clone(), loaded_at);
+        if validators.not_modified(request_headers) {
+            return validators.not_modified_response(
+                self.headers
+                    .iter()
+                    .filter(|(name, _)| conditional::kept_on_304(name.as_str())),
+            );
+        }
+        let mut response = self.serve();
+        let headers = response.headers_mut();
+        headers.remove(hyper::header::ETAG);
+        headers.remove(hyper::header::LAST_MODIFIED);
+        for (name, value) in validators.headers() {
+            headers.insert(name, hyper::header::HeaderValue::from_str(value)?);
+        }
+        Ok(response)
     }
 
     /// Serve the prepared response: a status copy plus refcounted `HeaderMap`/`Bytes` clones, with

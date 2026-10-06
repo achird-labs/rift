@@ -13,6 +13,14 @@ record.
 
 ### Added
 
+- **Declarative conditional GET on `is` responses** (#1280). `_rift.conditional` adds a strong
+  `ETag` (FNV-1a over the served bytes) and `Last-Modified` (stub load time or a fixed date) and
+  answers `304` to a matching `If-None-Match` / `If-Modified-Since`, so datafile-style pollers
+  (Optimizely, LaunchDarkly…) need no hand-synced validators. `GET`/`HEAD` with a 2xx only;
+  `If-None-Match` takes precedence; a `304` consumes a cycle position, runs `wait`, and is
+  journaled as `304`. A fixed `lastModified` that is not an HTTP-date is refused at admission, not
+  at decode, so `deserialize_replayed` still reads it.
+
 - **An intercept `forward` rule can name its target's `host` and `scheme`** (#1273):
   `{"forward": {"host": "mock-svc", "port": 4600, "scheme": "https"}}`. It could only reach
   `http://127.0.0.1:{port}`, so an imposter in another container, a rift-cluster node or a TLS-only
