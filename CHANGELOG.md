@@ -83,6 +83,14 @@ record.
 
 ### Fixed
 
+- **A config file that fails to parse after a `stringify` now says why** (#1279). Written without
+  quotes, `"body": <%- stringify('datafile.json') %>` failed with only serde's
+  `key must be a string at line 40 column 26`, a position in text the author never saw. The error
+  now keeps that message, says the line and column are in the rendered document, names the tag
+  and where it is, and shows the quoted form; the rendered document is logged at `debug`.
+  `stringify` also now trims the file as Mountebank's does — **wire-visible**: a stringified string
+  body no longer ends with the file's trailing newline.
+
 - **Intercept leaf certificates now carry an Authority Key Identifier** (#1277). Python 3.13+
   (strict X.509 verification by default) and any `openssl verify -x509_strict` client rejected the
   forged leaf with "Missing Authority Key Identifier", so `requests`/`urllib3` calls through the

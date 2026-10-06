@@ -61,12 +61,12 @@ pub fn load_configs_full(source: &ConfigSource) -> anyhow::Result<LoadedConfig> 
 
 fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<LoadedConfig> {
     let raw = std::fs::read_to_string(path)?;
-    let (content, unset_env) = if no_parse {
-        (raw, Vec::new())
+    let rendered = if no_parse || !rift_ejs::has_tags(&raw) {
+        None
     } else {
-        let rendered = render_ejs(&raw, path, EjsFileAccess::Allowed)?;
-        (rendered.text, rendered.unset_env)
+        Some(render_ejs(&raw, path, EjsFileAccess::Allowed)?)
     };
+    let content = rendered.as_ref().map_or(raw.as_str(), |r| r.text.as_str());
 
     // `_rift.script` `file:`/`ref:` sources (issue #356) resolve relative to the config file's
     // own directory, so a parse error and a resolve error are both surfaced up front, and
@@ -76,7 +76,40 @@ fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<LoadedConfig> {
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf(),
     );
-    name_unset_env_on_failure(parse_document(&content, &base), &unset_env)
+    let parsed = parse_document(content, &base)
+        .map_err(|e| explain_rendered_parse_error(e, rendered.as_ref()));
+    let unset_env = rendered
+        .as_ref()
+        .map_or(&[][..], |r| r.unset_env.as_slice());
+    name_unset_env_on_failure(parsed, unset_env)
+}
+
+/// Point a JSON parse error at what the author wrote (issue #1279). In a rendered document the
+/// error's line and column are in text the author never saw, so say so, and — when the position is
+/// inside a `stringify` substitution — name the tag and, if it was not quoted, the fix. The
+/// rendered text is logged at `debug` rather than put in the error: a stringify commonly inlines a
+/// TLS private key. A document with no tags was not rendered, and is returned as it was.
+fn explain_rendered_parse_error(
+    err: anyhow::Error,
+    rendered: Option<&rift_ejs::Rendered>,
+) -> anyhow::Error {
+    let Some(rendered) = rendered else {
+        return err;
+    };
+    let Some(json) = err
+        .downcast_ref::<serde_json::Error>()
+        .filter(|json| json.line() > 0)
+    else {
+        return err;
+    };
+    tracing::debug!(rendered = %rendered.text, "config document after EJS rendering failed to parse");
+    let mut message = format!("{json} (line and column are in the rendered document)");
+    if let Some(explained) = rendered.explain_parse_error(json.line(), json.column()) {
+        message.push_str("; ");
+        message.push_str(&explained);
+    }
+    message.push_str("; run with --loglevel debug to see the rendered document");
+    anyhow::anyhow!(message)
 }
 
 /// Parse a document fetched from a source that is not the local filesystem (U-12's `https:`
@@ -92,10 +125,10 @@ fn load_file(path: &Path, no_parse: bool) -> anyhow::Result<LoadedConfig> {
 /// `uri` is used only to name the source in error messages.
 pub fn parse_remote_document(content: &str, uri: &str) -> anyhow::Result<LoadedConfig> {
     let rendered = render_ejs(content, Path::new(uri), EjsFileAccess::Denied)?;
-    name_unset_env_on_failure(
-        parse_document(&rendered.text, &ScriptBaseDir::Unconfigured),
-        &rendered.unset_env,
-    )
+    let parsed = parse_document(&rendered.text, &ScriptBaseDir::Unconfigured).map_err(|e| {
+        explain_rendered_parse_error(e, rift_ejs::has_tags(content).then_some(&rendered))
+    });
+    name_unset_env_on_failure(parsed, &rendered.unset_env)
 }
 
 /// The shared parse path: format sniffing, the Mountebank document shapes, and script resolution
@@ -933,7 +966,8 @@ mod tests {
         let content = r#"{"key": "<%- stringify('server.key') %>"}"#;
         assert_eq!(
             preprocess_ejs(content, &path, EjsFileAccess::Allowed).unwrap(),
-            r#"{"key": "-----BEGIN KEY-----\nabc\n-----END KEY-----\n"}"#
+            r#"{"key": "-----BEGIN KEY-----\nabc\n-----END KEY-----"}"#,
+            "stringify trims the file, as Mountebank's does (issue #1279)"
         );
     }
 
@@ -1412,5 +1446,97 @@ mod tests {
         let loaded =
             parse_document(&doc(false), &ScriptBaseDir::Unconfigured).expect("false loads");
         assert!(loaded.intercept.is_some());
+    }
+
+    // ===== Issue #1279: a parse failure after `stringify` names the tag and the quoting rule =====
+
+    fn load_with_fixture(config: &str, fixture: &str) -> anyhow::Result<LoadedConfig> {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "f.json", fixture);
+        let path = write(dir.path(), "imposters.json", config);
+        load_configs_full(&ConfigSource::File {
+            path,
+            no_parse: false,
+        })
+    }
+
+    #[test]
+    fn unquoted_stringify_parse_error_names_the_tag_and_the_fix() {
+        let err = load_with_fixture(
+            r#"{"port":9000,"stubs":[{"responses":[{"is":{"body": <%- stringify('f.json') %>}}]}]}"#,
+            r#"{"a":1}"#,
+        )
+        .expect_err("an unquoted stringify does not parse");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("key must be a string"),
+            "serde's message stays first: {msg}"
+        );
+        assert!(
+            msg.contains("(line and column are in the rendered document)"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("<%- stringify('f.json') %>"),
+            "names the tag: {msg}"
+        );
+        assert!(
+            msg.contains("imposters.json:1"),
+            "says where the tag is: {msg}"
+        );
+        assert!(
+            msg.contains(r#""<%- stringify('f.json') %>""#),
+            "shows the quoted form: {msg}"
+        );
+    }
+
+    #[test]
+    fn quoted_stringify_loads_as_a_verbatim_string_body() {
+        let loaded = load_with_fixture(
+            r#"{"port":9000,"stubs":[{"responses":[{"is":{"body": "<%- stringify('f.json') %>"}}]}]}"#,
+            "{\"b\": 2, \"a\": 1}\n",
+        )
+        .expect("the quoted form loads");
+        let body = serde_json::to_value(&loaded.imposters[0].stubs[0].responses[0]).unwrap();
+        assert_eq!(
+            body["is"]["body"], "{\"b\": 2, \"a\": 1}",
+            "verbatim, trimmed: {body}"
+        );
+    }
+
+    /// Concatenation inside a string is legal in Mountebank; no refusal keyed on the quotes.
+    #[test]
+    fn stringify_inside_a_longer_string_still_loads() {
+        let loaded = load_with_fixture(
+            r#"{"port":9000,"stubs":[{"responses":[{"is":{"body": "x <%- stringify('f.json') %> y"}}]}]}"#,
+            "mid",
+        )
+        .expect("loads");
+        let body = serde_json::to_value(&loaded.imposters[0].stubs[0].responses[0]).unwrap();
+        assert_eq!(body["is"]["body"], "x mid y");
+    }
+
+    /// An error elsewhere in a rendered document is labelled as a rendered position, without
+    /// blaming a stringify tag it is nowhere near.
+    #[test]
+    fn a_parse_error_away_from_the_tag_is_labelled_but_not_blamed_on_it() {
+        let err = load_with_fixture(
+            "{\"port\":9000,\"name\": \"<%- stringify('f.json') %>\",\n\"stubs\": [,]}",
+            "x",
+        )
+        .expect_err("broken JSON");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("(line and column are in the rendered document)"),
+            "{msg}"
+        );
+        assert!(!msg.contains("must be written inside quotes"), "{msg}");
+    }
+
+    /// A document with no tags is not rendered, so its positions are the author's own.
+    #[test]
+    fn a_parse_error_in_an_unrendered_document_has_no_rendered_note() {
+        let err = load_with_fixture("{\"port\": 9000,,}", "x").expect_err("broken JSON");
+        assert!(!format!("{err:#}").contains("rendered document"), "{err:#}");
     }
 }
