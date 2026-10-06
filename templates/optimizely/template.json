@@ -1,0 +1,62 @@
+{
+  "name": "optimizely",
+  "version": "0.1.0",
+  "summary": "Local stand-in for the three SaaS hosts an Optimizely Feature Experimentation SDK (or Optimizely Agent) talks to: datafile CDN, event ingest, and ODP real-time segments.",
+  "vendor": "Optimizely",
+  "product": "Feature Experimentation (SDKs v3+, Agent v2+)",
+  "entrypoint": "imposters.json",
+  "requires": {
+    "rift": ">=0.20.0",
+    "flags": []
+  },
+  "ports": { "first": 4600, "last": 4619 },
+  "imposters": [
+    {
+      "port": 4600,
+      "standsInFor": "https://cdn.optimizely.com",
+      "surface": "GET /datafiles/{sdkKey}.json (+ /datafiles/auth/), Last-Modified / If-Modified-Since -> 304"
+    },
+    {
+      "port": 4601,
+      "standsInFor": "https://logx.optimizely.com",
+      "surface": "POST /v1/events -> 204"
+    },
+    {
+      "port": 4602,
+      "standsInFor": "https://api.zaius.com",
+      "surface": "POST /v3/graphql (segments), POST /v3/events (identify), x-api-key check"
+    },
+    {
+      "port": 4610,
+      "standsInFor": "(TLS intercept forward proxy)",
+      "surface": "CONNECT proxy; forwards cdn/config.optimizely.com -> 4600, logx/eu.logx -> 4601, api.zaius.com -> 4602. LocalStack-style zero-code mode: HTTPS_PROXY + trust GET /intercept/ca.pem"
+    }
+  ],
+  "fixtures": {
+    "datafile": "fixtures/datafile.json"
+  },
+  "knobs": {
+    "sdkKey": "any value; the path regex accepts every key (fixture declares MOCK_SDK_KEY)",
+    "odpPublicKey": "mock-odp-public-key (must equal integrations[odp].publicKey in the datafile)",
+    "users": {
+      "user-vip": "qualifies for high_value_customers",
+      "user-unknown": "ODP InvalidIdentifierException",
+      "*": "no segments"
+    },
+    "lastModified": "Sat, 03 Oct 2026 12:00:00 GMT (in imposters.json: one predicate, two headers; bump together with the datafile revision to force pollers to refetch)",
+    "odpHost": "env OPTLY_ODP_HOST at rift start: default http://localhost:4602 (direct mode); set https://api.zaius.com for intercept mode"
+  },
+  "modes": {
+    "direct": "SDK configured with the mock URLs (2 overrides per SDK)",
+    "intercept": "unmodified SDK, HTTPS_PROXY -> 4610, trust the Rift CA"
+  },
+  "verify": {
+    "blackBox": "smoke.sh (curl + python3; gated in CI by scripts/verify-templates.sh)",
+    "realSdk": "sdk_check.py (optimizely-sdk >= 5.x, Python; direct mode)",
+    "realSdkZeroOverride": "sdk_check_localstack.py (optimizely-sdk >= 5.x, Python; intercept mode: HTTPS_PROXY + REQUESTS_CA_BUNDLE only)"
+  },
+  "verifiedAgainst": {
+    "rift": "7966a4d (master, 2026-10-06)",
+    "optimizely-sdk": "5.7.0 (Python 3.14)"
+  }
+}

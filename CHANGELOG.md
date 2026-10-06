@@ -29,6 +29,12 @@ record.
   journaled as `304`. A fixed `lastModified` that is not an HTTP-date is refused at admission, not
   at decode, so `deserialize_replayed` still reads it.
 
+- **Vendor-mock templates** (#1281). `templates/optimizely/` stands in for Optimizely's datafile
+  CDN, event ingest and ODP (direct and TLS-intercept modes), with a smoke test and real-SDK checks;
+  `rift-templates-<ver>.tar.gz` is published with each release. CI boots every template under
+  `templates/` and runs its smoke test (`scripts/verify-templates.sh`). Catalog and rules in
+  `templates/README.md`; documented in `docs/templates/index.md`.
+
 - **An intercept `forward` rule can name its target's `host` and `scheme`** (#1273):
   `{"forward": {"host": "mock-svc", "port": 4600, "scheme": "https"}}`. It could only reach
   `http://127.0.0.1:{port}`, so an imposter in another container, a rift-cluster node or a TLS-only

@@ -15,6 +15,9 @@ Ready-to-use examples for common use cases.
 > [`docs/demo/`](https://github.com/achird-labs/rift/tree/master/docs/demo) (start with its
 > `README.md`).
 
+> **Vendor mocks.** To stand in for a third-party SaaS (Optimizely's datafile CDN, event ingest and
+> ODP) with its real SDK unchanged, start from a [vendor-mock template]({{ site.baseurl }}/templates/).
+
 ---
 
 ## REST API Mock

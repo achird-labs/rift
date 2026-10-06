@@ -3602,6 +3602,14 @@ fn shipped_fixtures_have_no_e028() {
             }
         }
     }
+    // Vendor-mock templates (#1281): lint each entrypoint, never the directory (its manifest is
+    // not an imposter).
+    for entry in std::fs::read_dir(root.join("templates")).expect("templates dir exists") {
+        let p = entry.expect("dir entry").path().join("imposters.json");
+        if p.is_file() {
+            files.push(p);
+        }
+    }
     assert!(
         files.len() > 10,
         "fixture dirs moved? found {}",

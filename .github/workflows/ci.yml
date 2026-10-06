@@ -322,6 +322,41 @@ jobs:
           ./scripts/verify-docs-examples.sh --self-test
           ./scripts/verify-docs-examples.sh
 
+  templates:
+    name: Templates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v6
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-templates-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build rift
+        run: cargo build -p rift-http-proxy
+
+      # Issue #1281: boot the built rift on every vendor-mock template under templates/ (found by
+      # glob, so a new template is gated by default) and run the template's own smoke.sh. The cargo
+      # tests cover parse/lint/ports; this proves each template serves. --self-test first proves the
+      # gate rejects a broken template; the packager self-test proves the release tarball builds.
+      - name: Run template gate
+        run: |
+          export RIFT_BIN="$PWD/target/debug/rift-http-proxy"
+          ./scripts/verify-templates.sh --self-test
+          ./scripts/verify-templates.sh
+          ./scripts/gen-templates.sh --self-test
+
   ffi-manifest:
     name: FFI Manifest
     runs-on: ubuntu-latest

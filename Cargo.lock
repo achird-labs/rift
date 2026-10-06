@@ -3474,6 +3474,7 @@ dependencies = [
  "regex-automata",
  "reqwest",
  "rhai",
+ "rift-ejs",
  "rift-types",
  "ring",
  "rustls",

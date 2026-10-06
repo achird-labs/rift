@@ -1,0 +1,205 @@
+{
+  "imposters": [
+    {
+      "port": 4600,
+      "protocol": "http",
+      "name": "cdn.optimizely.com",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "id": "datafile-not-modified",
+          "predicates": [
+            { "equals": { "method": "GET" } },
+            { "matches": { "path": "^/datafiles/(auth/)?[A-Za-z0-9+/=_:-]+\\.json$" } },
+            { "equals": { "headers": { "If-Modified-Since": "Sat, 03 Oct 2026 12:00:00 GMT" } } }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 304,
+                "headers": { "Last-Modified": "Sat, 03 Oct 2026 12:00:00 GMT" }
+              }
+            }
+          ]
+        },
+        {
+          "id": "datafile",
+          "predicates": [
+            { "equals": { "method": "GET" } },
+            { "matches": { "path": "^/datafiles/(auth/)?[A-Za-z0-9+/=_:-]+\\.json$" } }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "headers": {
+                  "Content-Type": "application/json",
+                  "Last-Modified": "Sat, 03 Oct 2026 12:00:00 GMT",
+                  "Cache-Control": "max-age=0, no-cache"
+                },
+                "body": "<%- stringify('fixtures/datafile.json') %>"
+              }
+            }
+          ]
+        }
+      ],
+      "defaultResponse": {
+        "statusCode": 404,
+        "headers": { "Content-Type": "application/json" },
+        "body": { "error": "optimizely-cdn mock: only GET /datafiles/{sdkKey}.json is served" }
+      }
+    },
+    {
+      "port": 4601,
+      "protocol": "http",
+      "name": "logx.optimizely.com",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "id": "events-accepted",
+          "predicates": [
+            { "equals": { "method": "POST", "path": "/v1/events" } },
+            { "jsonpath": { "selector": "$.visitors[*].visitor_id" }, "exists": { "body": true } }
+          ],
+          "responses": [{ "is": { "statusCode": 204 } }]
+        },
+        {
+          "id": "events-bad-request",
+          "predicates": [{ "equals": { "method": "POST", "path": "/v1/events" } }],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 400,
+                "headers": { "Content-Type": "application/json" },
+                "body": { "error": "optimizely-logx mock: event batch has no visitors[].visitor_id" }
+              }
+            }
+          ]
+        }
+      ],
+      "defaultResponse": {
+        "statusCode": 404,
+        "headers": { "Content-Type": "application/json" },
+        "body": { "error": "optimizely-logx mock: only POST /v1/events is served" }
+      }
+    },
+    {
+      "port": 4602,
+      "protocol": "http",
+      "name": "api.zaius.com",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "id": "odp-unauthorized",
+          "predicates": [
+            { "startsWith": { "path": "/v3/" } },
+            { "not": { "equals": { "headers": { "x-api-key": "mock-odp-public-key" } } } }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 403,
+                "headers": { "Content-Type": "application/json" },
+                "body": { "title": "Forbidden", "status": 403, "detail": "optimizely-odp mock: x-api-key must match integrations[odp].publicKey in the datafile" }
+              }
+            }
+          ]
+        },
+        {
+          "id": "odp-segments-vip",
+          "predicates": [
+            { "equals": { "method": "POST", "path": "/v3/graphql" } },
+            { "contains": { "body": "user-vip" } }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "headers": { "Content-Type": "application/json" },
+                "body": {
+                  "data": {
+                    "customer": {
+                      "audiences": {
+                        "edges": [
+                          { "node": { "name": "high_value_customers", "state": "qualified" } }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "odp-segments-unknown-user",
+          "predicates": [
+            { "equals": { "method": "POST", "path": "/v3/graphql" } },
+            { "contains": { "body": "user-unknown" } }
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "headers": { "Content-Type": "application/json" },
+                "body": {
+                  "errors": [
+                    {
+                      "message": "Exception while fetching data (/customer) : java.lang.RuntimeException: could not resolve _fs_user_id = user-unknown",
+                      "locations": [{ "line": 1, "column": 8 }],
+                      "path": ["customer"],
+                      "extensions": { "classification": "InvalidIdentifierException" }
+                    }
+                  ],
+                  "data": { "customer": null }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "odp-segments-default",
+          "predicates": [{ "equals": { "method": "POST", "path": "/v3/graphql" } }],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "headers": { "Content-Type": "application/json" },
+                "body": { "data": { "customer": { "audiences": { "edges": [] } } } }
+              }
+            }
+          ]
+        },
+        {
+          "id": "odp-events-accepted",
+          "predicates": [{ "equals": { "method": "POST", "path": "/v3/events" } }],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "headers": { "Content-Type": "application/json" },
+                "body": { "title": "Accepted", "status": 202, "timestamp": "{{NOW}}" }
+              }
+            }
+          ]
+        }
+      ],
+      "defaultResponse": {
+        "statusCode": 404,
+        "headers": { "Content-Type": "application/json" },
+        "body": { "error": "optimizely-odp mock: only POST /v3/graphql and POST /v3/events are served" }
+      }
+    }
+  ],
+  "intercept": {
+    "host": "127.0.0.1",
+    "port": 4610,
+    "rules": [
+      { "host": "cdn.optimizely.com",    "action": { "forward": { "port": 4600 } } },
+      { "host": "config.optimizely.com", "action": { "forward": { "port": 4600 } } },
+      { "host": "logx.optimizely.com",   "action": { "forward": { "port": 4601 } } },
+      { "host": "eu.logx.optimizely.com","action": { "forward": { "port": 4601 } } },
+      { "host": "api.zaius.com",         "action": { "forward": { "port": 4602 } } }
+    ]
+  }
+}
