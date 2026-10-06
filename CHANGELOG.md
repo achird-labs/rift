@@ -13,6 +13,12 @@ record.
 
 ### Added
 
+- **Intercept rules can be replaced atomically** (#1272). `PUT /intercept/rules` and
+  `rift_intercept_replace_rules` swap the whole rule set in one step and answer with the stored set.
+  Rules match first-to-last, so appending never overrides an installed rule, and `DELETE` then
+  `POST` left a window in which every host fell through to the no-rule response. A refused body
+  (bad JSON, a scripted rule without `--allowInjection`, more than 10,000 rules) keeps the old set.
+
 - **Embedders can decode configs the engine already admitted without re-admitting them**
   (#1267). The admission checks (predicate selectors and `matches` patterns, behaviors blocks that
   must parse, `copy`/`lookup` selectors) run inside `Deserialize`, so an embedder replaying configs
@@ -48,6 +54,13 @@ record.
   sequencer also stops serializing the matched stub on every response decision.
 
 ### Fixed
+
+- **Intercept leaf certificates now carry an Authority Key Identifier** (#1277). Python 3.13+
+  (strict X.509 verification by default) and any `openssl verify -x509_strict` client rejected the
+  forged leaf with "Missing Authority Key Identifier", so `requests`/`urllib3` calls through the
+  intercept proxy failed the handshake even with the CA trusted. Leaves now carry an AKI matching
+  the CA's SKI, their own SKI and `CA:FALSE`, and name the host in their subject instead of
+  `rcgen self signed cert`.
 
 - **An intercept `forward` rule now delivers the SUT's original `Host` to the imposter** (#1278).
   It arrived as `127.0.0.1:<port>`, so one imposter could not serve several intercepted hosts with

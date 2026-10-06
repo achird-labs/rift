@@ -154,10 +154,13 @@ pub struct ForwardTarget {
 /// every intercepted request's `match_request` scan; the cap bounds both (issue #554).
 pub const MAX_RULES: usize = 10_000;
 
-/// Returned by [`InterceptRules::add`] / [`InterceptRules::extend`] when the store already holds
-/// [`MAX_RULES`] rules. The admin handler maps this to `429 Too Many Requests`.
+/// Returned by [`InterceptRules::add`] / [`InterceptRules::extend`] / [`InterceptRules::replace`]
+/// when the resulting set would exceed [`MAX_RULES`] rules. The admin handler maps this to
+/// `429 Too Many Requests`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("intercept rule store is at capacity ({limit} rules); delete rules before adding more")]
+#[error(
+    "intercept rule set would exceed the capacity of {limit} rules; delete rules or send fewer"
+)]
 pub struct RulesAtCapacity {
     pub limit: usize,
 }
@@ -192,6 +195,17 @@ impl InterceptRules {
         }
         rules.extend(new_rules);
         Ok(())
+    }
+
+    /// Replace the whole set atomically (issue #1272), returning how many rules were replaced. The
+    /// swap happens under one write lock, so a request matched concurrently sees the old set or the
+    /// new one, never an empty store. A batch over [`MAX_RULES`] is refused and the old set kept;
+    /// an empty batch is a valid replace and leaves the store empty.
+    pub fn replace(&self, new_rules: Vec<InterceptRule>) -> Result<usize, RulesAtCapacity> {
+        if new_rules.len() > MAX_RULES {
+            return Err(RulesAtCapacity { limit: MAX_RULES });
+        }
+        Ok(std::mem::replace(&mut *self.write(), new_rules).len())
     }
 
     /// A snapshot clone of all current rules, in insertion order.
@@ -746,5 +760,100 @@ mod tests {
             .extend(vec![any_rule(); 1])
             .expect("filling exactly to the cap is allowed");
         assert_eq!(rules.len(), MAX_RULES);
+    }
+
+    // ===== Issue #1272: atomic replace-all =====
+
+    fn serve_rule(host: &str, body: &str) -> InterceptRule {
+        serde_json::from_value(serde_json::json!({
+            "host": host,
+            "action": { "serve": { "statusCode": 200, "body": body } }
+        }))
+        .expect("valid serve rule")
+    }
+
+    fn served_body(rules: &InterceptRules, host: &str) -> Option<String> {
+        match rules.match_request(host, "GET", "/", None, &HashMap::new(), None)? {
+            InterceptAction::Serve(stub) => Some(stub.body_str().to_string()),
+            other => panic!("expected a serve action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replace_swaps_the_whole_set_and_reports_the_old_count() {
+        let rules = InterceptRules::new();
+        rules
+            .extend(vec![serve_rule("a.test", "v1"), serve_rule("b.test", "b1")])
+            .expect("seed");
+        let replaced = rules
+            .replace(vec![serve_rule("a.test", "v2")])
+            .expect("replace fits");
+        assert_eq!(replaced, 2, "the count is of the rules that were replaced");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(served_body(&rules, "a.test").as_deref(), Some("v2"));
+        assert_eq!(
+            served_body(&rules, "b.test"),
+            None,
+            "a rule absent from the new set is gone, not kept"
+        );
+    }
+
+    #[test]
+    fn replace_with_an_empty_set_clears() {
+        let rules = InterceptRules::new();
+        rules.add(serve_rule("a.test", "v1")).expect("seed");
+        assert_eq!(rules.replace(Vec::new()), Ok(1));
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn replace_over_the_cap_is_refused_and_keeps_the_old_set() {
+        let rules = InterceptRules::new();
+        rules.add(serve_rule("a.test", "v1")).expect("seed");
+        let too_many = vec![serve_rule("x.test", "x"); MAX_RULES + 1];
+        assert_eq!(
+            rules.replace(too_many),
+            Err(RulesAtCapacity { limit: MAX_RULES })
+        );
+        assert_eq!(
+            rules.len(),
+            1,
+            "a refused replace leaves the old set intact"
+        );
+        assert_eq!(served_body(&rules, "a.test").as_deref(), Some("v1"));
+    }
+
+    #[test]
+    fn replace_at_exactly_the_cap_is_accepted() {
+        let rules = InterceptRules::new();
+        rules.add(serve_rule("a.test", "v1")).expect("seed");
+        let full = vec![serve_rule("x.test", "x"); MAX_RULES];
+        assert_eq!(rules.replace(full), Ok(1));
+        assert_eq!(rules.len(), MAX_RULES);
+    }
+
+    /// The point of replace over clear-then-add: a matcher racing the swap sees the old rule or the
+    /// new one, never an empty store.
+    #[test]
+    fn replace_never_exposes_an_empty_set() {
+        let rules = InterceptRules::new();
+        rules.add(serve_rule("a.test", "v0")).expect("seed");
+        let writer = {
+            let rules = rules.clone();
+            std::thread::spawn(move || {
+                for i in 0..2_000 {
+                    rules
+                        .replace(vec![serve_rule("a.test", &format!("v{i}"))])
+                        .expect("replace fits");
+                }
+            })
+        };
+        for _ in 0..10_000 {
+            assert!(
+                served_body(&rules, "a.test").is_some(),
+                "a request racing replace must never fall through to no-rule"
+            );
+        }
+        writer.join().expect("writer thread");
     }
 }

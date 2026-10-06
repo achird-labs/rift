@@ -173,6 +173,7 @@ pub static ADMIN_ROUTES: &[AdminRoute] = &[
     route(Method::GET, "/intercept", Intercept),
     route(Method::DELETE, "/intercept", Intercept),
     route(Method::POST, "/intercept/rules", Intercept),
+    route(Method::PUT, "/intercept/rules", Intercept),
     route(Method::GET, "/intercept/rules", Intercept),
     route(Method::DELETE, "/intercept/rules", Intercept),
     route(Method::GET, "/intercept/ca.pem", Intercept),
@@ -386,7 +387,7 @@ mod tests {
         assert_eq!(count(Imposters), 30);
         assert_eq!(count(FlowState), 4);
         assert_eq!(count(Events), 2);
-        assert_eq!(count(Intercept), 9);
+        assert_eq!(count(Intercept), 10);
         for entry in ADMIN_ROUTES {
             let prefix_ok = match entry.family {
                 Intercept => entry.path.starts_with("/intercept"),

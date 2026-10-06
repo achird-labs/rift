@@ -1426,7 +1426,8 @@ pub unsafe extern "C" fn rift_space_recorded(
 // Start an intercept forward-proxy on the handle's runtime and drive its rule store + CA export
 // entirely over C-ABI — no loopback HTTP admin plane needed. One listener per handle.
 
-/// A single rule or a batch — `rift_intercept_add_rules` accepts either shape.
+/// A single rule or a batch — `rift_intercept_add_rules` and `rift_intercept_replace_rules` accept
+/// either shape.
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum RuleOrRules {
@@ -1584,6 +1585,45 @@ pub unsafe extern "C" fn rift_intercept_add_rules(
         };
         if let Err(e) = result {
             set_last_error(format!("rift_intercept_add_rules: {e}"));
+            return -1;
+        }
+        0
+    })
+}
+
+/// Replace the whole intercept rule set with one rule (a bare object) or many (a JSON array) in a
+/// single swap — the `PUT /intercept/rules` admin route (issue #1272). An empty array clears the
+/// set. Returns `0` on success, `-1` on any error; on error the existing rules are left untouched.
+///
+/// # Safety
+/// `h` must be a live handle (or null); `rules_json` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rift_intercept_replace_rules(
+    h: *mut RiftHandle,
+    rules_json: *const c_char,
+) -> i32 {
+    ffi_guard!("rift_intercept_replace_rules", -1, unsafe {
+        clear_last_error();
+        let (Some(handle), Some(rules_json)) = (handle(h), c_str(rules_json)) else {
+            set_last_error("rift_intercept_replace_rules: null handle or rules pointer");
+            return -1;
+        };
+        let rules = match serde_json::from_str(rules_json) {
+            Ok(RuleOrRules::One(rule)) => vec![rule],
+            Ok(RuleOrRules::Many(rules)) => rules,
+            Err(e) => {
+                set_last_error(format!(
+                    "rift_intercept_replace_rules: invalid rule JSON: {e}"
+                ));
+                return -1;
+            }
+        };
+        let Some(state) = handle.intercept.state() else {
+            set_last_error("rift_intercept_replace_rules: intercept not started");
+            return -1;
+        };
+        if let Err(e) = state.rules.replace(rules) {
+            set_last_error(format!("rift_intercept_replace_rules: {e}"));
             return -1;
         }
         0

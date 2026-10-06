@@ -350,6 +350,16 @@ int32_t rift_stop_intercept(RiftHandle *h);
 int32_t rift_intercept_add_rules(RiftHandle *h, const char *rules_json);
 
 /**
+ * Replace the whole intercept rule set with one rule (a bare object) or many (a JSON array) in a
+ * single swap — the `PUT /intercept/rules` admin route (issue #1272). An empty array clears the
+ * set. Returns `0` on success, `-1` on any error; on error the existing rules are left untouched.
+ *
+ * # Safety
+ * `h` must be a live handle (or null); `rules_json` must be null or a valid C string.
+ */
+int32_t rift_intercept_replace_rules(RiftHandle *h, const char *rules_json);
+
+/**
  * Remove all intercept rules. Returns `0` on success, `-1` on any error.
  *
  * # Safety

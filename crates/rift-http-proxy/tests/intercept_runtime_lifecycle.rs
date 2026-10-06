@@ -453,3 +453,107 @@ async fn ca_bootstrap_round_trip_over_admin_api() {
 
     admin.shutdown().await;
 }
+
+/// Issue #1272: `PUT /intercept/rules` replaces the whole set, and the replacement is what the
+/// proxy serves — appending could never do this, since the first matching rule wins.
+#[tokio::test]
+async fn put_replaces_the_rule_set_and_the_new_rule_serves() {
+    let (base, _admin) = admin_without_intercept_flag().await;
+    let c = reqwest::Client::new();
+    let started: serde_json::Value = c
+        .post(format!("{base}/intercept"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let intercept_url = started["interceptUrl"].as_str().unwrap().to_string();
+    let ca_pem = c
+        .get(format!("{base}/intercept/ca.pem"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let sut = trusting_client(&intercept_url, &ca_pem);
+
+    let v1 = r#"{"host":"a.test","action":{"serve":{"statusCode":200,"body":"v1"}}}"#;
+    let post = c
+        .post(format!("{base}/intercept/rules"))
+        .body(v1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post.status(), 201);
+    let served = sut.get("https://a.test/x").send().await.unwrap();
+    assert_eq!(served.text().await.unwrap(), "v1");
+
+    let v2 = r#"[{"host":"a.test","action":{"serve":{"statusCode":200,"body":"v2"}}}]"#;
+    let put = c
+        .put(format!("{base}/intercept/rules"))
+        .body(v2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 200);
+    let put_body: serde_json::Value = put.json().await.unwrap();
+
+    let listed: serde_json::Value = c
+        .get(format!("{base}/intercept/rules"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed, put_body, "PUT answers with exactly what GET lists");
+    assert_eq!(
+        listed.as_array().unwrap().len(),
+        1,
+        "v1 was replaced, not kept"
+    );
+    assert_eq!(listed[0]["action"]["serve"]["body"], "v2");
+
+    let served = sut.get("https://a.test/x").send().await.unwrap();
+    assert_eq!(served.status(), 200);
+    assert_eq!(served.text().await.unwrap(), "v2");
+
+    // An empty array is a valid replace: the set is cleared.
+    let cleared = c
+        .put(format!("{base}/intercept/rules"))
+        .body("[]")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cleared.status(), 200);
+    assert_eq!(cleared.text().await.unwrap().trim(), "[]");
+    let listed = c
+        .get(format!("{base}/intercept/rules"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(listed.trim(), "[]");
+}
+
+/// Issue #1272: with no listener running, PUT is the same actionable 404 as the other rule verbs.
+#[tokio::test]
+async fn put_rules_without_a_listener_is_404() {
+    let (base, _admin) = admin_without_intercept_flag().await;
+    let resp = reqwest::Client::new()
+        .put(format!("{base}/intercept/rules"))
+        .body("[]")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("intercept listener not running"),
+        "PUT must reach the rule route, not the generic unknown-path 404: {body}"
+    );
+}

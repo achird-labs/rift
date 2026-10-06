@@ -6,8 +6,9 @@
 //! The gate used to live behind the admin API only, so the same document was refused by an HTTP
 //! POST and executed when loaded from a file.
 //!
-//! The intercept **rule** doors ask it too (issue #657): `POST /intercept/rules`, the `rules` array
-//! on `POST /intercept`, and the `--configfile` `intercept` block (issue #655). A rule's predicates
+//! The intercept **rule** doors ask it too (issue #657): `POST /intercept/rules`,
+//! `PUT /intercept/rules` (issue #1272), the `rules` array on `POST /intercept`, and the
+//! `--configfile` `intercept` block (issue #655). A rule's predicates
 //! are evaluated per intercepted request, so an `inject` there is executable code arriving over the
 //! same boundaries — the #612 sweep missed this door, and the same predicate was refused by
 //! `POST /imposters` and executed by `POST /intercept/rules`.
@@ -18,7 +19,7 @@
 //! The gate's subject is the *document*, not the caller: it asks whether config that crossed a
 //! trust boundary carries executable surface. In-process config supplied by an embedding host
 //! (`rift_apply_config`, `rift_create_imposter`, `rift_add_stub`, `rift_replace_stubs`,
-//! `rift_intercept_add_rules`, `rift_start_intercept`, and `rift_serve_admin`'s inline `config`)
+//! `rift_intercept_add_rules`, `rift_intercept_replace_rules`, `rift_start_intercept`, and `rift_serve_admin`'s inline `config`)
 //! is the trusted host path and is deliberately never gated (issue #492) — that host can already
 //! execute code in the process, so gating its own JSON would restrict nobody.
 //!
@@ -64,8 +65,8 @@ pub fn gated_offender_ports(configs: &[ImposterConfig]) -> Vec<String> {
 /// An intercept rule's only executable surface is a predicate `inject`: its `serve` action is a
 /// fixed status/headers/body stub and `forward` is a port number, so neither can carry script — a
 /// serve body that merely looks like JavaScript is inert data. Every door that admits a rule asks
-/// this — `POST /intercept/rules`, the `rules` array on `POST /intercept`, and the `--configfile`
-/// `intercept` block — the same question `--configfile` imposters answer via
+/// this — `POST` and `PUT /intercept/rules`, the `rules` array on `POST /intercept`, and the
+/// `--configfile` `intercept` block — the same question `--configfile` imposters answer via
 /// [`config_uses_script_surface`], so one document cannot be refused as an imposter stub and
 /// executed as an intercept predicate.
 pub fn intercept_rule_uses_script_surface(rule: &crate::intercept_rules::InterceptRule) -> bool {

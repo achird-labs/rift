@@ -759,6 +759,7 @@ Authorization actions are `intercept.read` / `intercept.write`.
 | `GET` | `/intercept` | `200` + `{"interceptPort","interceptUrl"}` | `404` not running |
 | `DELETE` | `/intercept` | `204`, idempotent. Drops rules and the CA. | — |
 | `POST` | `/intercept/rules` | `201` + the added rules as an array. The body is one rule object or an array of rules. | `400` bad JSON or scripted rule; `404` not running; `429` rule store full |
+| `PUT` | `/intercept/rules` | `200` + the stored rules as an array. Replaces the whole set atomically with one rule object or an array (`[]` clears); first-match-wins means this, not `POST`, is how to change a rule. | `400` bad JSON or scripted rule; `404` not running; `429` more than 10,000 rules — every error leaves the old set in place |
 | `GET` | `/intercept/rules` | `200` + array of rules | `404` not running |
 | `DELETE` | `/intercept/rules` | `200` + `{"deleted": N}` | `404` not running |
 | `GET` | `/intercept/ca.pem` | `200`, `application/x-pem-file` | `404` not running |
