@@ -2,7 +2,8 @@
 //! (epic #394, slice 4/5).
 //!
 //! A rule is a `(host?, predicates)` match against the intercepted request paired with an
-//! [`InterceptAction`]: serve an inline stub, or forward the request to a named imposter port.
+//! [`InterceptAction`]: serve an inline stub, or forward the request to an imposter — on this
+//! engine's loopback by default, or at a named `host`/`scheme` (issue #1273).
 //! Rules reuse the existing Mountebank-compatible predicate engine
 //! ([`rift_mock_core::imposter::predicates::stub_matches`]) so the same predicate JSON shape works
 //! here as everywhere else in Rift.
@@ -34,7 +35,8 @@ pub struct InterceptRule {
 pub enum InterceptAction {
     /// Answer inline with a fixed stub response.
     Serve(ServeStub),
-    /// Forward the request to a named imposter port on localhost.
+    /// Forward the request to an imposter: `http://127.0.0.1:{port}` unless the target names a
+    /// `host` or `scheme`.
     Forward(ForwardTarget),
 }
 
@@ -143,10 +145,120 @@ fn default_status() -> u16 {
     200
 }
 
-/// A localhost imposter port to forward an intercepted request to.
+/// Where a `forward` rule sends an intercepted request: `{scheme}://{host}:{port}`, defaulting to
+/// `http://127.0.0.1` so a rule written as `{"port": N}` means what it always has (issue #1273).
+///
+/// Validated on the way in, at every door (admin API, FFI, config file): an unknown key is refused
+/// rather than ignored — a typo such as `"hots"` used to forward silently to loopback — and so is
+/// a target that cannot be dialled (port 0, a host carrying a scheme, port or path). Intercept
+/// rules are never replayed from stored bytes, so refusing at decode breaks nothing stored.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", try_from = "ForwardTargetRaw")]
 pub struct ForwardTarget {
     pub port: u16,
+    /// A hostname, an IPv4 literal or a bracketed IPv6 literal. `None` is `127.0.0.1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// `None` is `http`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<ForwardScheme>,
+}
+
+/// The scheme a `forward` rule dials its target with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ForwardScheme {
+    Http,
+    Https,
+}
+
+impl ForwardTarget {
+    /// A target on the engine's own loopback, as every rule before #1273 was.
+    pub fn loopback(port: u16) -> Self {
+        Self {
+            port,
+            host: None,
+            scheme: None,
+        }
+    }
+
+    /// The URL of `path_and_query` on this target.
+    pub fn url(&self, path_and_query: &str) -> String {
+        let scheme = match self.scheme {
+            Some(ForwardScheme::Https) => "https",
+            Some(ForwardScheme::Http) | None => "http",
+        };
+        let host = self.host.as_deref().unwrap_or("127.0.0.1");
+        format!("{scheme}://{host}:{}{path_and_query}", self.port)
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ForwardTargetRaw {
+    port: u16,
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    scheme: Option<ForwardScheme>,
+}
+
+impl TryFrom<ForwardTargetRaw> for ForwardTarget {
+    type Error = String;
+
+    fn try_from(raw: ForwardTargetRaw) -> Result<Self, String> {
+        if raw.port == 0 {
+            return Err("forward port must be 1-65535, not 0".to_string());
+        }
+        if let Some(host) = &raw.host {
+            check_forward_host(host)?;
+        }
+        Ok(Self {
+            port: raw.port,
+            host: raw.host,
+            scheme: raw.scheme,
+        })
+    }
+}
+
+/// A forward host is only the host: a name, an IPv4 literal, or an IPv6 literal in brackets. The
+/// port and scheme have their own keys, so anything that looks like a URL is a mistake to report.
+fn check_forward_host(host: &str) -> Result<(), String> {
+    let refuse = |why: &str| Err(format!("forward host {host:?} {why}"));
+    if host.is_empty() {
+        return refuse("is empty");
+    }
+    if let Some(inner) = host.strip_prefix('[') {
+        return match inner.strip_suffix(']') {
+            Some(ip) if ip.parse::<std::net::Ipv6Addr>().is_ok() => Ok(()),
+            _ => refuse("is not a bracketed IPv6 literal"),
+        };
+    }
+    if host.contains("://") {
+        return refuse("carries a scheme; put it in `scheme`");
+    }
+    if host.contains(':') {
+        return refuse(
+            "carries a port (or is an unbracketed IPv6 literal); put the port in `port`",
+        );
+    }
+    if let Some(bad) = host
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')))
+    {
+        return refuse(&format!(
+            "contains {bad:?}; it must be only a hostname or IP literal"
+        ));
+    }
+    // What reqwest will actually dial. The URL parser reads `1.2.3` as 1.2.0.3 and `0x7f.1` as
+    // 127.0.0.1, and refuses `999.0.0.1` on every request, so a host is admitted only when the
+    // parser reads it back as written.
+    match url::Host::parse(host) {
+        Ok(url::Host::Domain(domain)) if domain.eq_ignore_ascii_case(host) => Ok(()),
+        Ok(url::Host::Ipv4(ip)) if ip.to_string() == host => Ok(()),
+        Ok(url::Host::Ipv6(_)) => Ok(()),
+        _ => refuse("is not a hostname or IP address a URL can carry as written"),
+    }
 }
 
 /// Maximum number of intercept rules the store retains. `POST /intercept/rules` is unauthenticated
@@ -360,9 +472,9 @@ mod tests {
     // ===== Issue #933: `serve` bodies accept any JSON value, like `is.body` on the stub path =====
 
     /// Deserialize a whole rule rather than a bare `ServeStub`, so a rule-level serde change
-    /// cannot pass this gate while breaking real input. The admin API's untagged `RuleOrRules`
-    /// wrapper — the layer that turned this issue's failure into an opaque error — is private to
-    /// `admin_api::handlers::intercept` and is covered by a test there.
+    /// cannot pass this gate while breaking real input. The admin API's `RuleOrRules` wrapper
+    /// (untagged until #1273), the layer that turned this issue's failure into an opaque error, is
+    /// private to `admin_api::handlers::intercept` and is covered by a test there.
     fn serve_stub_from_action(action: serde_json::Value) -> ServeStub {
         let rule: InterceptRule =
             serde_json::from_value(serde_json::json!({ "action": { "serve": action } }))
@@ -727,7 +839,7 @@ mod tests {
             .add(InterceptRule {
                 host: None,
                 predicates: vec![predicate_path_equals("/only-this")],
-                action: InterceptAction::Forward(ForwardTarget { port: 4545 }),
+                action: InterceptAction::Forward(ForwardTarget::loopback(4545)),
             })
             .unwrap();
 
@@ -736,7 +848,7 @@ mod tests {
             rules.match_request("any.example.com", "GET", "/only-this", None, &headers, None);
         assert_eq!(
             matched,
-            Some(InterceptAction::Forward(ForwardTarget { port: 4545 }))
+            Some(InterceptAction::Forward(ForwardTarget::loopback(4545)))
         );
 
         let unmatched =
@@ -751,7 +863,7 @@ mod tests {
             .add(InterceptRule {
                 host: Some("CDN.example.com".to_string()),
                 predicates: vec![],
-                action: InterceptAction::Forward(ForwardTarget { port: 1 }),
+                action: InterceptAction::Forward(ForwardTarget::loopback(1)),
             })
             .unwrap();
         let headers = HashMap::new();
@@ -771,7 +883,7 @@ mod tests {
         InterceptRule {
             host: None,
             predicates: vec![],
-            action: InterceptAction::Forward(ForwardTarget { port: 1 }),
+            action: InterceptAction::Forward(ForwardTarget::loopback(1)),
         }
     }
 

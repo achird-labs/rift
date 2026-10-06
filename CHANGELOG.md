@@ -13,6 +13,15 @@ record.
 
 ### Added
 
+- **An intercept `forward` rule can name its target's `host` and `scheme`** (#1273):
+  `{"forward": {"host": "mock-svc", "port": 4600, "scheme": "https"}}`. It could only reach
+  `http://127.0.0.1:{port}`, so an imposter in another container, a rift-cluster node or a TLS-only
+  vendor mock was out of reach. `https` targets use the listener's outbound trust
+  (`--upstream-ca-file`, `--upstream-tls-skip-verify`). Existing rules read back unchanged. An
+  unknown key in `forward` (a typo such as `hots`) is now refused with `400` instead of being
+  ignored, as is a target that cannot be dialled; rule errors over the admin API and FFI now name
+  the offending field rather than "data did not match any variant".
+
 - **`POST /admin/reload` re-applies the config file's `intercept.rules`** (#1271). A standalone rig
   that keeps its whole mock in one file had to call the admin API to change a rule, though an edit
   to an imposter in the same file reloaded. The block's rules now replace the rules the file

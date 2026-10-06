@@ -3419,6 +3419,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "tracing-test",
+ "url",
  "urlencoding",
  "uuid",
 ]
