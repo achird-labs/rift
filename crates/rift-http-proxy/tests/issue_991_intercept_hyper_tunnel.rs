@@ -1624,3 +1624,172 @@ async fn a_413_with_a_large_unread_remainder_closes_the_tunnel() {
     );
     server.shutdown().await;
 }
+
+// ===== Issue #1278: a forward rule delivers the SUT's original Host to the imposter =====
+
+/// A recording imposter with `stubs`; returns its port.
+async fn recording_imposter(admin: SocketAddr, stubs: serde_json::Value) -> u64 {
+    let created: serde_json::Value = reqwest::Client::new()
+        .post(format!("http://{admin}/imposters"))
+        .json(&serde_json::json!({"protocol": "http", "recordRequests": true, "stubs": stubs}))
+        .send()
+        .await
+        .expect("create imposter")
+        .json()
+        .await
+        .expect("imposter json");
+    created["port"].as_u64().expect("assigned port")
+}
+
+/// The headers of every request `port` recorded, names lower-cased, single values unwrapped.
+async fn recorded_headers(admin: SocketAddr, port: u64) -> Vec<Vec<(String, String)>> {
+    let recorded: serde_json::Value = reqwest::get(format!("http://{admin}/imposters/{port}"))
+        .await
+        .expect("read imposter")
+        .json()
+        .await
+        .expect("imposter json");
+    recorded["requests"]
+        .as_array()
+        .expect("recordRequests is on")
+        .iter()
+        .map(|entry| {
+            let mut out = Vec::new();
+            for (name, value) in entry["headers"].as_object().expect("headers object") {
+                let values = match value {
+                    serde_json::Value::Array(a) => a.clone(),
+                    other => vec![other.clone()],
+                };
+                for v in values {
+                    out.push((
+                        name.to_ascii_lowercase(),
+                        v.as_str().unwrap_or_default().to_string(),
+                    ));
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+fn header_values<'a>(headers: &'a [(String, String)], name: &str) -> Vec<&'a str> {
+    headers
+        .iter()
+        .filter(|(n, _)| n == name)
+        .map(|(_, v)| v.as_str())
+        .collect()
+}
+
+#[tokio::test]
+async fn forwarded_request_keeps_the_intercepted_host_h1() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    let port = recording_imposter(
+        admin,
+        serde_json::json!([{"responses": [{"is": {"statusCode": 200, "body": "from-imposter"}}]}]),
+    )
+    .await;
+    add_rule(
+        admin,
+        &format!(r#"{{"host":"cdn.example.com","action":{{"forward":{{"port":{port}}}}}}}"#),
+    )
+    .await;
+
+    let response = raw_tunnel_one_response(
+        intercept,
+        &ca,
+        "cdn.example.com",
+        "GET /datafiles/x.json HTTP/1.1\r\nHost: cdn.example.com\r\n\
+         Proxy-Authorization: Basic c2VjcmV0OnNlY3JldA==\r\n\r\n",
+    )
+    .await;
+    assert!(response.contains("from-imposter"), "forwarded: {response}");
+
+    let recorded = recorded_headers(admin, port).await;
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        header_values(&recorded[0], "host"),
+        vec!["cdn.example.com"],
+        "the imposter sees the host the SUT dialed, not 127.0.0.1:{port}"
+    );
+    assert!(
+        header_values(&recorded[0], "proxy-authorization").is_empty(),
+        "the proxy credential never reaches the imposter: {:?}",
+        recorded[0]
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn forwarded_request_keeps_the_intercepted_host_h2() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    let port = recording_imposter(
+        admin,
+        serde_json::json!([{"responses": [{"is": {"statusCode": 200, "body": "from-imposter"}}]}]),
+    )
+    .await;
+    add_rule(
+        admin,
+        &format!(r#"{{"host":"cdn.example.com","action":{{"forward":{{"port":{port}}}}}}}"#),
+    )
+    .await;
+
+    let response = proxy_client(intercept, &ca)
+        .get("https://cdn.example.com/thing")
+        .send()
+        .await
+        .expect("intercepted");
+    assert_eq!(response.version(), reqwest::Version::HTTP_2);
+    assert_eq!(response.text().await.expect("body"), "from-imposter");
+
+    let recorded = recorded_headers(admin, port).await;
+    assert_eq!(
+        header_values(&recorded[0], "host"),
+        vec!["cdn.example.com"],
+        "an h2 request's :authority reaches the imposter as its Host"
+    );
+    server.shutdown().await;
+}
+
+/// The capability the issue asks for: one imposter serving two intercepted hosts, its stubs keyed
+/// on the Host the SUT dialed.
+#[tokio::test]
+async fn one_imposter_serves_two_intercepted_hosts_by_host_predicate() {
+    let server = start_intercept().await;
+    let admin = server.admin_addr();
+    let intercept = server.intercept_addr().expect("intercept bound");
+    let ca = ca_pem(admin).await;
+    let port = recording_imposter(
+        admin,
+        serde_json::json!([
+            {"predicates": [{"equals": {"headers": {"Host": "cdn.example.com"}}}],
+             "responses": [{"is": {"statusCode": 200, "body": "cdn"}}]},
+            {"predicates": [{"equals": {"headers": {"Host": "config.example.com"}}}],
+             "responses": [{"is": {"statusCode": 200, "body": "config"}}]},
+            {"responses": [{"is": {"statusCode": 404, "body": "no host matched"}}]}
+        ]),
+    )
+    .await;
+    for host in ["cdn.example.com", "config.example.com"] {
+        add_rule(
+            admin,
+            &format!(r#"{{"host":"{host}","action":{{"forward":{{"port":{port}}}}}}}"#),
+        )
+        .await;
+    }
+    let client = proxy_client(intercept, &ca);
+    for (host, body) in [("cdn.example.com", "cdn"), ("config.example.com", "config")] {
+        let response = client
+            .get(format!("https://{host}/datafile"))
+            .send()
+            .await
+            .expect("intercepted");
+        assert_eq!(response.text().await.expect("body"), body, "host {host}");
+    }
+    server.shutdown().await;
+}

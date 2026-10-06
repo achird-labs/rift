@@ -624,7 +624,7 @@ async fn handle_tunnel_request(
                 &headers,
                 body_bytes.as_deref(),
                 forward.port,
-                &ctx.forward_client,
+                &ctx,
             )
             .await
             {
@@ -978,7 +978,7 @@ async fn forward_response(
     headers: &HashMap<String, Vec<String>>,
     body: Option<&[u8]>,
     port: u16,
-    client: &reqwest::Client,
+    ctx: &TunnelCtx,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
     let url = match query {
         Some(q) => format!("http://127.0.0.1:{port}{path}?{q}"),
@@ -987,9 +987,16 @@ async fn forward_response(
     let reqwest_method = reqwest::Method::from_bytes(method.as_bytes())
         .map_err(|e| anyhow::anyhow!("invalid method '{method}': {e}"))?;
 
-    let mut builder = client.request(reqwest_method, &url);
+    let mut builder = ctx.forward_client.request(reqwest_method, &url);
     for (name, values) in headers {
         if is_hop_by_hop(name) {
+            continue;
+        }
+        // The tunnel's own credential (issue #878) is checked on the `CONNECT` head; like the
+        // WebSocket relay, never hand it on to the imposter's journal (issue #1278).
+        if name.eq_ignore_ascii_case("proxy-authorization")
+            || name.eq_ignore_ascii_case("proxy-connection")
+        {
             continue;
         }
         // One `.header()` call per value (issue #994) — `RequestBuilder::header` appends, so a
@@ -998,6 +1005,14 @@ async fn forward_response(
             builder = builder.header(name, value);
         }
     }
+    // `host` is hop-by-hop above because the client stack would otherwise derive it from the
+    // loopback URL; set it explicitly so the imposter sees what the SUT addressed, as the
+    // WebSocket relay, gateway and front door already do (issue #1278). hyper-util only inserts
+    // `Host` when it is absent, so this one wins.
+    builder = builder.header(
+        reqwest::header::HOST,
+        forwarded_host(headers, &ctx.host, ctx.port),
+    );
     if let Some(bytes) = body {
         builder = builder.body(bytes.to_vec());
     }
@@ -1035,6 +1050,27 @@ async fn forward_response(
     // length of what we buffered is always what goes out.
     out.insert(CONTENT_LENGTH, HeaderValue::from(len));
     Ok(response)
+}
+
+/// The `Host` a forwarded request carries: the one the client sent (under h2, the `:authority` the
+/// matcher already folded into `host`), else the `CONNECT` authority — without the port when it is
+/// the HTTPS default, as a client would write it. An empty `Host` counts as none. Of repeated `Host`
+/// values the first is used, the same one rule matching sees first.
+fn forwarded_host(
+    headers: &HashMap<String, Vec<String>>,
+    connect_host: &str,
+    connect_port: u16,
+) -> String {
+    let sent = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .and_then(|(_, values)| values.first())
+        .filter(|host| !host.is_empty());
+    match sent {
+        Some(host) => host.clone(),
+        None if connect_port == 443 => connect_host.to_string(),
+        None => format!("{connect_host}:{connect_port}"),
+    }
 }
 
 /// Hop-by-hop / connection-management headers we recompute ourselves rather than pass through
@@ -2313,5 +2349,46 @@ mod tests {
         assert_eq!(resp.status(), 502);
 
         listener.shutdown().await;
+    }
+
+    // ===== Issue #1278: the Host a forward delivers =====
+
+    fn headers_with(pairs: &[(&str, &str)]) -> HashMap<String, Vec<String>> {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for (k, v) in pairs {
+            map.entry((*k).to_string())
+                .or_default()
+                .push((*v).to_string());
+        }
+        map
+    }
+
+    #[test]
+    fn forwarded_host_is_the_host_the_client_sent() {
+        let headers = headers_with(&[("host", "cdn.example.com")]);
+        assert_eq!(
+            forwarded_host(&headers, "other.example.com", 443),
+            "cdn.example.com"
+        );
+    }
+
+    #[test]
+    fn forwarded_host_falls_back_to_the_connect_authority() {
+        let none = headers_with(&[("accept", "*/*")]);
+        assert_eq!(
+            forwarded_host(&none, "cdn.example.com", 443),
+            "cdn.example.com"
+        );
+        assert_eq!(
+            forwarded_host(&none, "cdn.example.com", 8443),
+            "cdn.example.com:8443"
+        );
+        assert_eq!(forwarded_host(&none, "[::1]", 8443), "[::1]:8443");
+        let empty = headers_with(&[("host", "")]);
+        assert_eq!(
+            forwarded_host(&empty, "cdn.example.com", 443),
+            "cdn.example.com",
+            "an empty Host is no Host"
+        );
     }
 }
