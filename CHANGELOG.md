@@ -109,6 +109,12 @@ record.
 
 ### Fixed
 
+- **An admin stub replace that changes nothing no longer moves `Last-Modified: load`** (#1294).
+  `PUT /imposters/{port}/stubs/{index}`, `…/stubs/by-id/{id}` and `PUT /imposters/{port}/stubs`
+  re-stamped every stub they touched, so `_rift.conditional` pollers re-downloaded a body that had
+  not changed. A byte-identical stub now keeps its stamp; the bulk `PUT …/stubs` still restarts
+  every response cycle, as before.
+
 - **A config file that fails to parse after a `stringify` now says why** (#1279). Written without
   quotes, `"body": <%- stringify('datafile.json') %>` failed with only serde's
   `key must be a string at line 40 column 26`, a position in text the author never saw. The error
