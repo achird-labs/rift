@@ -111,6 +111,8 @@ Two stubs have identical predicates. The second stub will never match:
 }
 ```
 
+A stub gated on a different `requiredScenarioState` or `space` is not a duplicate, since only one of them is eligible at a time (for example the `Started` and `paid` stubs of a [scenario](scenarios.md)). An ungated stub ahead of a gated one still is.
+
 ### potentially_shadowed
 
 A stub may be unreachable because an earlier stub matches a superset of requests:
@@ -133,6 +135,8 @@ A stub may be unreachable because an earlier stub matches a superset of requests
   "shadowedByIndex": 0
 }
 ```
+
+A stub gated on a different `requiredScenarioState` or `space` is not shadowed, since only one of them is eligible at a time. An ungated stub ahead still shadows a gated one.
 
 ### catch_all
 

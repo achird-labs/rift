@@ -566,7 +566,7 @@ curl http://localhost:2525/imposters/4545
 | Type | Description |
 |:-----|:------------|
 | `duplicate_id` | Multiple stubs have the same ID |
-| `exact_duplicate` | Stub predicates are identical to another stub |
+| `exact_duplicate` | Stub predicates **and gates** (`space`, `requiredScenarioState`) are identical to another stub's |
 | `potentially_shadowed` | Stub may be unreachable due to earlier stub |
 | `catch_all` | Stub with empty predicates matches all requests |
 | `catch_all_not_last` | Catch-all stub is not at the end of the list |

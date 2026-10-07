@@ -121,6 +121,8 @@ record.
 
 ### Fixed
 
+- **Stub analysis honours scenario and space gates** (#1308): two stubs with identical predicates but different `requiredScenarioState` (or `space`), such as the `Started`/`paid` pair in the scenarios guide, are no longer reported as `exact_duplicate` or `potentially_shadowed` in `_rift.warnings` and the add-stub preview. An ungated stub ahead of a gated one still is. The engine's `matches_alike` (#1303) and the analysis now share one `Gate` notion.
+
 - **Deleting, moving or narrowing a `_rift.conditional` stub no longer exposes an older stamp**
   (#1303). The first stub that matches answers, so removing or moving one — or changing its
   predicates — let a stub behind it answer the same URL with its own, older `Last-Modified`, and an
