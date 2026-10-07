@@ -25,8 +25,17 @@ async fn create(manager: &ImposterManager, cfg: Value) -> u16 {
     port
 }
 
+/// One client for the whole file: a client per request opens its own pool and TLS roots, and 50
+/// concurrent ones exhaust a 256-descriptor limit (the macOS shell default).
+static CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(reqwest::Client::new);
+
+/// Held by each 50-way concurrency test: run together they open ~200 sockets at once, past the
+/// 256-descriptor default of a macOS shell. Each still races 50 requests internally.
+static CONCURRENCY_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn get(port: u16, path: &str, session: &str) -> reqwest::Response {
-    reqwest::Client::new()
+    CLIENT
         .get(format!("http://127.0.0.1:{port}{path}"))
         .header("X-Session", session)
         .send()
@@ -217,6 +226,7 @@ async fn body_in_the_same_response_reads_the_pre_op_value() {
 // be serialized by the runtime itself and prove nothing about the atomicity claimed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_increments_lose_none() {
+    let _one_at_a_time = CONCURRENCY_TESTS.lock().await;
     const N: usize = 50;
     let manager = ImposterManager::new();
     let port = create(
@@ -248,6 +258,7 @@ async fn concurrent_increments_lose_none() {
 // loop under a real thundering herd on one key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_previous_value_appends_lose_none() {
+    let _one_at_a_time = CONCURRENCY_TESTS.lock().await;
     const N: usize = 50;
     let manager = ImposterManager::new();
     let port = create(
