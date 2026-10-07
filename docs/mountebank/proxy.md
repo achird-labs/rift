@@ -13,7 +13,7 @@ Proxy mode forwards requests to real servers and optionally records responses fo
 
 ## Basic Proxy
 
-Forward all requests to a backend server:
+Forward every request to a backend server:
 
 ```json
 {
@@ -22,12 +22,16 @@ Forward all requests to a backend server:
   "stubs": [{
     "responses": [{
       "proxy": {
-        "to": "https://api.example.com"
+        "to": "https://api.example.com",
+        "mode": "proxyTransparent"
       }
     }]
   }]
 }
 ```
+
+Without `"mode": "proxyTransparent"` the proxy is `proxyOnce`: it forwards the first request for
+each method, path and query, then replays that response (see [Proxy Modes](#proxy-modes)).
 
 ---
 
@@ -44,9 +48,12 @@ What a proxy records depends on whether it has `predicateGenerators` (or `addWai
   `proxyTransparent` forward every request.
 - **`proxyTransparent`** never records, with or without generators.
 
-If you leave `mode` out, a proxy without generators forwards every request, and a proxy with
-generators records as `proxyOnce` does. Set `"mode": "proxyOnce"` explicitly if you want replay
-without generators. (Mountebank defaults to `proxyOnce` in both cases.)
+If you leave `mode` out, it is `proxyOnce`, as in Mountebank: with generators it records stubs,
+and without them it replays from the internal store. Set `"mode": "proxyTransparent"` to forward
+every request. The value is read case-insensitively (`proxyalways` works; `rift-lint` W007 suggests
+the canonical spelling). An unknown value such as `"proxyEverything"` is refused — `400` from
+`POST /imposters` and the stub routes, a startup error from `--configfile` or `--datadir` — and `rift-lint` reports it as E052. This diverges from Mountebank, which treats an
+unknown mode as `proxyOnce`.
 
 ### proxyAlways
 
@@ -424,6 +431,7 @@ Route v2 API calls to v1 backend during migration:
     "responses": [{
       "proxy": {
         "to": "https://legacy-api.example.com",
+        "mode": "proxyTransparent",
         "pathRewrite": {
           "from": "/api/v2",
           "to": "/api/v1"
@@ -442,6 +450,7 @@ Remove a prefix from paths:
 {
   "proxy": {
     "to": "https://backend.internal",
+    "mode": "proxyTransparent",
     "pathRewrite": {
       "from": "/gateway/service",
       "to": ""

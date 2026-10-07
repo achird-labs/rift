@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Maximum allowed proxy response body size (10 MB)
 const MAX_PROXY_RESPONSE_BODY_SIZE: usize = 10 * 1024 * 1024;
@@ -888,12 +888,13 @@ impl Imposter {
         for stub in stubs {
             for response in &stub.responses {
                 if let StubResponse::Proxy { proxy, .. } = response {
-                    return match proxy.mode.to_lowercase().as_str() {
-                        "proxyonce" => ProxyMode::ProxyOnce,
-                        "proxyalways" => ProxyMode::ProxyAlways,
-                        "proxytransparent" | "" => ProxyMode::ProxyTransparent,
-                        _ => ProxyMode::ProxyTransparent,
-                    };
+                    // A config door refuses an unknown mode (issue #1314); one that reaches here
+                    // was replayed from an older engine's store. Run it as Mountebank does
+                    // (proxyOnce), but say so: an older engine ran it as pass-through.
+                    return proxy.mode().unwrap_or_else(|e| {
+                        error!("{e}; this replayed config runs as proxyOnce");
+                        ProxyMode::default()
+                    });
                 }
             }
         }

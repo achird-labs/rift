@@ -242,11 +242,15 @@ pub fn latency_meets_threshold(elapsed_ms: u128, configured_ms: u64) -> bool {
 /// `proxyAlways` with a non-empty `predicateGenerators` (issue #251 / conformance.sh). Without
 /// `predicateGenerators` the engine replays internally but does not prepend a stub.
 pub fn proxy_records_stub(proxy: &serde_json::Value) -> bool {
-    let mode = proxy
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("proxyOnce");
-    let records = matches!(mode, "proxyOnce" | "proxyAlways");
+    // Parsed as the engine parses it (issue #1314): case-insensitive, omitted = proxyOnce.
+    let mode = proxy.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+    let records = matches!(
+        rift_http_proxy::recording::ProxyMode::parse(mode),
+        Some(
+            rift_http_proxy::recording::ProxyMode::ProxyOnce
+                | rift_http_proxy::recording::ProxyMode::ProxyAlways
+        )
+    );
     let has_generators = proxy
         .get("predicateGenerators")
         .and_then(|v| v.as_array())

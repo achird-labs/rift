@@ -114,7 +114,7 @@ const LEDGER: &[(&str, &str, usize)] = &[
     (
         "crates/rift-mock-core/src/imposter/types.rs",
         "decode fn `?`",
-        17,
+        18,
     ),
     (
         "crates/rift-mock-core/src/imposter/types.rs",

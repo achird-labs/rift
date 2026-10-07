@@ -19,6 +19,28 @@ record.
 
 - **Breaking for Rust embedders of `rift-http-proxy`** (#1316): `server::Commands::Replay` is now a unit variant (it took `configfile`), `server::ScriptAction::Check` no longer has a `no_parse` field, and `script_cli::dispatch` takes the global `no_parse` as a second argument. The command line itself is unchanged except as described above.
 
+- **A proxy that omits `mode` now records and replays as `proxyOnce`, Mountebank's default**
+  (#1314). It used to forward every request when it had no `predicateGenerators`, while the same
+  omitted `mode` recorded stubs as `proxyOnce` when it had them. Set `"mode": "proxyTransparent"`
+  to keep forwarding every request. `mode` is now read case-insensitively and trimmed in one place,
+  and an unknown value (`"bogus"`) is refused — `400` from `POST`/`PUT /imposters` and the stub
+  routes, a startup error from `--configfile` or `--datadir` — instead of
+  silently becoming pass-through (Mountebank treats it as `proxyOnce`); `rift-lint` reports it as **E052**, and **W007** now only nudges a
+  non-canonical spelling (`proxyalways`) toward the canonical name. Configs an older engine admitted
+  still replay (rift-cluster). `recording::ProxyMode::default()` is now `ProxyOnce`.
+
+### Fixed
+
+- **`proxyAlways` written in another case placed its recorded stub before the proxy stub**
+  (#1314), so the proxy never ran again: the replay store read the mode case-insensitively but the
+  stub placement compared it case-sensitively.
+- **`defaultForward`, and a stub that is itself `proxyTransparent`, could replay a response another
+  stub's `proxyOnce` had recorded** (#1314): the replay store's mode is imposter-wide, taken from
+  the first proxy stub, and both paths consulted it. They now forward every request.
+- **`rift-verify` skipped its recorded-stub check for `proxyalways`** and other non-canonical
+  spellings; it now reads `mode` as the engine does.
+
+
 ## [0.20.0] - 2026-10-07
 
 ### Added

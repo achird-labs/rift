@@ -387,7 +387,9 @@ impl Imposter {
     /// [`StubPublication`] handed to a publishing store both go through here, so the position a
     /// publisher is told to reproduce can never drift from the one the engine would use.
     fn placement_for_mode(proxy_mode: &str) -> StubPlacement {
-        if proxy_mode == "proxyAlways" {
+        // Parsed like every other reader of the mode (issue #1314): `proxyalways` used to get a
+        // proxyAlways store but proxyOnce placement.
+        if ProxyMode::parse(proxy_mode).unwrap_or_default() == ProxyMode::ProxyAlways {
             StubPlacement::AfterProxyMerging
         } else {
             StubPlacement::BeforeProxy
@@ -536,44 +538,52 @@ impl Imposter {
         // Consult the proxy-recording gate. `AlreadyRecorded` replays; `Claimed` grants the
         // right to record; `InFlight` (a concurrent proxyOnce loser) and an unavailable
         // store proxy upstream without recording.
-        let claim = match self.proxy_store.try_claim(port, &signature) {
-            Ok(ClaimOutcome::AlreadyRecorded) => {
-                if let Some(recorded) = self.proxy_store.lookup(port, &signature) {
-                    debug!("Returning recorded proxy response (proxyOnce mode)");
-                    return Ok(ProxyOutcome::Served(ProxiedResponse {
-                        status: recorded.status,
-                        headers: recorded.headers,
-                        body: recorded.body,
-                        latency_ms: recorded.latency_ms,
-                    }));
+        // The store's mode is imposter-wide (from the first proxy stub), so a response that is
+        // itself `proxyTransparent` — or a `defaultForward` — must not consult it, or it would
+        // replay what another stub's `proxyOnce` recorded (issue #1314).
+        let transparent = proxy_config.mode().unwrap_or_default() == ProxyMode::ProxyTransparent;
+        let claim = if transparent {
+            None
+        } else {
+            match self.proxy_store.try_claim(port, &signature) {
+                Ok(ClaimOutcome::AlreadyRecorded) => {
+                    if let Some(recorded) = self.proxy_store.lookup(port, &signature) {
+                        debug!("Returning recorded proxy response (proxyOnce mode)");
+                        return Ok(ProxyOutcome::Served(ProxiedResponse {
+                            status: recorded.status,
+                            headers: recorded.headers,
+                            body: recorded.body,
+                            latency_ms: recorded.latency_ms,
+                        }));
+                    }
+                    // AlreadyRecorded but nothing to replay: a race (concurrent clear) or a
+                    // misbehaving backend. Forward without recording rather than fail, but leave
+                    // a trace since this is not an expected outcome.
+                    warn!(
+                        "Proxy store reported AlreadyRecorded but lookup found nothing; forwarding without recording"
+                    );
+                    None
                 }
-                // AlreadyRecorded but nothing to replay: a race (concurrent clear) or a
-                // misbehaving backend. Forward without recording rather than fail, but leave
-                // a trace since this is not an expected outcome.
-                warn!(
-                    "Proxy store reported AlreadyRecorded but lookup found nothing; forwarding without recording"
-                );
-                None
-            }
-            Ok(ClaimOutcome::InFlight) => None,
-            Ok(ClaimOutcome::Claimed(token)) => Some(HeldClaim::new(
-                self.proxy_store.as_ref(),
-                port,
-                &signature,
-                token,
-            )),
-            // The store arbitrates exactly-once and could not answer: fail the request rather
-            // than forward it. Forwarding here would call the upstream while *nothing* is
-            // serializing claims, so the duplicate is bounded by the outage, not by one racing
-            // window — the outcome `proxyOnce` exists to prevent. The `BackendUnavailable` rides
-            // the chain so the response boundary can answer 503 through the #318 door.
-            Err(ProxyStoreError::Refused(cause)) => {
-                return Err(anyhow::Error::new(cause)
-                    .context("proxyOnce claim refused; request not forwarded"));
-            }
-            Err(e) => {
-                warn!("Proxy recording store unavailable; forwarding without recording: {e}");
-                None
+                Ok(ClaimOutcome::InFlight) => None,
+                Ok(ClaimOutcome::Claimed(token)) => Some(HeldClaim::new(
+                    self.proxy_store.as_ref(),
+                    port,
+                    &signature,
+                    token,
+                )),
+                // The store arbitrates exactly-once and could not answer: fail the request rather
+                // than forward it. Forwarding here would call the upstream while *nothing* is
+                // serializing claims, so the duplicate is bounded by the outage, not by one racing
+                // window — the outcome `proxyOnce` exists to prevent. The `BackendUnavailable` rides
+                // the chain so the response boundary can answer 503 through the #318 door.
+                Err(ProxyStoreError::Refused(cause)) => {
+                    return Err(anyhow::Error::new(cause)
+                        .context("proxyOnce claim refused; request not forwarded"));
+                }
+                Err(e) => {
+                    warn!("Proxy recording store unavailable; forwarding without recording: {e}");
+                    None
+                }
             }
         };
 
@@ -708,7 +718,7 @@ impl Imposter {
         // Generate and insert stub if predicateGenerators, addWaitBehavior, or addDecorateBehavior is configured
         // (Mountebank generates stubs automatically when these are enabled) — never for
         // `proxyTransparent`, which forwards every request and records nothing.
-        if !proxy_config.mode.eq_ignore_ascii_case("proxyTransparent")
+        if proxy_config.mode().unwrap_or_default() != ProxyMode::ProxyTransparent
             && (!proxy_config.predicate_generators.is_empty()
                 || proxy_config.add_wait_behavior
                 || proxy_config.add_decorate_behavior.is_some())
@@ -796,11 +806,8 @@ impl Imposter {
                     // Insert or append the stub based on proxy mode
                     // proxyOnce: Insert new stub before the proxy stub
                     // proxyAlways: Append response to existing stub with matching predicates
-                    let mode = if proxy_config.mode.is_empty() {
-                        "proxyOnce"
-                    } else {
-                        &proxy_config.mode
-                    };
+                    // `placement_for_mode` parses it, so the string is passed as written.
+                    let mode = proxy_config.mode.as_str();
 
                     // Settle the claim now that the stub exists, and before it is published, so a
                     // publishing store can refuse to commit "Recorded" if publication fails.

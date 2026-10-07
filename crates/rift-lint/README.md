@@ -134,6 +134,7 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | E049 | The engine would refuse to preprocess the file (unsupported EJS tag, unreadable include) |
 | E050 | A config file's `intercept` sets `returnCaKey: true` |
 | E051 | A `copy`, `lookup`, `decorate` or `shellTransform` value the engine cannot read |
+| E052 | An unknown proxy `mode` the engine refuses |
 
 ### Warnings
 

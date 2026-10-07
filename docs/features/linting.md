@@ -157,6 +157,7 @@ Errors indicate issues that will prevent the imposter from loading correctly.
 | E049 | The engine would refuse to preprocess the file: an EJS tag it does not evaluate, or an `include`/`stringify` file that cannot be read. The message is the engine's own | `"body": "<% for (x) %>"`, `<% include 'missing.json' %>` |
 | E050 | A config file's `intercept` block sets `returnCaKey: true`. The engine refuses the file, because a config file has no response to return the generated CA key in | `"intercept": {"returnCaKey": true}` |
 | E051 | A behavior value the engine refuses the file for, on any response type: a `copy` or `lookup` item that is not an object; a missing or malformed `using` (an object with `method` `regex`, `jsonpath` or `xpath`, a string `selector`, boolean regex `options`), or a regex `selector` that does not compile (the engine also refuses a JSONPath or XPath selector that does not compile, which `rift-lint` does not check); a `from` that is neither a field name nor an object of names; a non-string `into`; a `fromDataSource` without a `csv` object of string `path` and `keyColumn` and a one-character `delimiter`; a `decorate` that is not a string; a `shellTransform` that is neither a command string nor an array of them | `"copy": {"from": "path", "into": "${P}"}` |
+| E052 | An unknown proxy `mode` — Rift refuses the imposter; use `proxyOnce`, `proxyAlways` or `proxyTransparent`, or omit `mode` for `proxyOnce` | `"mode": "proxyEverything"` |
 
 ### Warnings
 
@@ -170,7 +171,7 @@ Warnings indicate potential issues that may cause unexpected behavior.
 | W004 | Invalid JSON body | Body isn't JSON but Content-Type is application/json. Not reported when `_rift.templated` or a `copy`/`lookup`/`decorate`/`shellTransform` behavior rewrites the body before it is served |
 | W005 | Header value is null | `"X-Request-Id": null` |
 | W006 | `Content-Length` header is a numeric string below 10 | `"Content-Length": "5"` |
-| W007 | Unknown proxy mode | `"mode": "proxyEverything"` |
+| W007 | A proxy mode in a non-canonical spelling — Rift reads `mode` case-insensitively, so it works, but the canonical names are `proxyOnce`, `proxyAlways`, `proxyTransparent` | `"mode": "proxyalways"` |
 | W008 | `shellTransform` contains a potentially dangerous command | `"shellTransform": "rm -rf /tmp/x"` |
 | W009 | Non-function behavior | `"wait": "return 100"` without function wrapper |
 | W010 | Protocol `tcp` is not yet implemented and will fail at runtime | `"protocol": "tcp"` |

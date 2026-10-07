@@ -60,6 +60,10 @@ const BAD_CONDITIONAL_DATE_ON_PROXY: &str = r#"{
                     "_rift": { "conditional": { "etag": false, "lastModified": "2026-10-03" } } }]
 }"#;
 
+const BAD_PROXY_MODE: &str = r#"{
+    "responses": [{ "proxy": { "to": "http://127.0.0.1:9", "mode": "bogus" } }]
+}"#;
+
 const BAD_COPY_ON_FAULT: &str = r#"{
     "responses": [{
         "fault": "CONNECTION_RESET_BY_PEER",
@@ -111,6 +115,7 @@ fn each_admission_refusal_is_skipped_on_replay_and_reported_by_admission_check()
             BAD_CONDITIONAL_DATE_ON_PROXY,
             "`_rift.conditional.lastModified` must be \"load\" or an HTTP-date",
         ),
+        (BAD_PROXY_MODE, "unknown proxy mode `bogus`"),
     ];
     for (stub, refusal) in cases {
         let door = serde_json::from_str::<Stub>(stub)

@@ -735,12 +735,26 @@ fn e024_proxy_missing_to() {
     assert!(has_code(&r, "E024"));
 }
 
+/// The engine refuses an unknown mode (issue #1314), so lint reports it as an error.
 #[test]
-fn w007_unknown_proxy_mode() {
+fn e052_unknown_proxy_mode() {
     let proxy = json!({ "to": "http://example.com", "mode": "mirror" });
     let mut r = LintResult::new();
     validate_proxy_response(path(), &proxy, "loc", &mut r);
-    assert!(has_code(&r, "W007"));
+    assert!(has_code(&r, "E052"), "got {:?}", codes(&r));
+    assert!(!has_code(&r, "W007"));
+}
+
+/// The engine accepts any casing (issue #1314); lint nudges toward the canonical spelling.
+#[test]
+fn w007_non_canonical_casing_of_a_known_mode() {
+    let proxy = json!({ "to": "http://example.com", "mode": "proxyalways" });
+    let mut r = LintResult::new();
+    validate_proxy_response(path(), &proxy, "loc", &mut r);
+    assert!(has_code(&r, "W007"), "got {:?}", codes(&r));
+    assert!(!has_code(&r, "E052"));
+    let issue = r.issues.iter().find(|i| i.code == "W007").expect("W007");
+    assert!(issue.message.contains("proxyAlways"), "{}", issue.message);
 }
 
 #[test]
@@ -750,6 +764,7 @@ fn w007_not_fired_for_known_modes() {
         let mut r = LintResult::new();
         validate_proxy_response(path(), &proxy, "loc", &mut r);
         assert!(!has_code(&r, "W007"), "W007 fired for mode {mode}");
+        assert!(!has_code(&r, "E052"), "E052 fired for mode {mode}");
     }
 }
 
