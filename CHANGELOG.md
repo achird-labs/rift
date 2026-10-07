@@ -11,6 +11,8 @@ record.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-07
+
 ### Added
 
 - **Server flags are accepted after a subcommand** (#1316): `rift start --port 2525 --configfile imposters.json`, `rift save --port …` and `rift restart …` now parse, matching Mountebank's command line; the flags are also still accepted before the subcommand. `rift replay` and `rift script check` no longer carry their own `--configfile` / `--no-parse`: they take the global ones, and `rift replay` without a config file exits with `rift replay needs --configfile <file>`.
@@ -4104,7 +4106,8 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/achird-labs/rift/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/achird-labs/rift/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/achird-labs/rift/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/achird-labs/rift/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/achird-labs/rift/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/achird-labs/rift/compare/v0.18.0...v0.18.1

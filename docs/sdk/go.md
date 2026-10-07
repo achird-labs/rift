@@ -16,7 +16,7 @@ no C toolchain is needed, and cross-compilation is unaffected.
 
 ```bash
 go get github.com/achird-labs/rift-go
-go run github.com/achird-labs/rift-go/cmd/rift-fetch@latest -version v0.20.0
+go run github.com/achird-labs/rift-go/cmd/rift-fetch@latest -version v0.21.0
 ```
 
 The second line downloads and SHA-256-verifies the native library for the embedded transport; the
