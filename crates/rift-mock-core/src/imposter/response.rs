@@ -326,7 +326,8 @@ impl PreparedResponse {
         &self,
         method: &str,
         request_headers: &crate::util::FastMap<String, Vec<String>>,
-        loaded_at: chrono::DateTime<chrono::Utc>,
+        // Only read for a conditional response (issue #1307 makes it more than a field read).
+        loaded_at: impl FnOnce() -> chrono::DateTime<chrono::Utc>,
     ) -> Result<hyper::Response<http_body_util::Full<bytes::Bytes>>, hyper::http::Error> {
         let Some(prepared) = self
             .conditional
@@ -335,7 +336,7 @@ impl PreparedResponse {
         else {
             return Ok(self.serve());
         };
-        let validators = prepared.spec.validators(prepared.etag.clone(), loaded_at);
+        let validators = prepared.spec.validators(prepared.etag.clone(), loaded_at());
         if validators.not_modified(request_headers) {
             return validators.not_modified_response(
                 self.headers

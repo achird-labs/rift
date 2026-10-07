@@ -1256,3 +1256,240 @@ async fn tearing_down_a_space_restamps_the_stubs_it_exposed() {
     assert_eq!(after.text().await.expect("body"), "global");
     manager.delete_all().await;
 }
+
+// ===== Issue #1307: a scenario transition re-stamps what it exposes =====
+
+const SESSION: (&str, &str) = ("X-Session", "s1");
+
+fn gated(id: &str, scenario: &str, state: &str, body: &str) -> Value {
+    json!({
+        "id": id,
+        "scenarioName": scenario,
+        "requiredScenarioState": state,
+        "responses": [{ "is": { "statusCode": 200, "body": body }, "_rift": { "conditional": true } }]
+    })
+}
+
+/// The scenario FSM pair as it is naturally written: both stubs in one config, so one load stamp.
+async fn scenario_imposter(manager: &ImposterManager, stubs: Vec<Value>) -> u16 {
+    create(
+        manager,
+        json!({ "port": 0, "protocol": "http",
+            "_rift": { "flowState": { "flowIdSource": "header:X-Session" } },
+            "stubs": stubs }),
+    )
+    .await
+}
+
+async fn session_get(port: u16, since: Option<&str>) -> (u16, String, String) {
+    let mut headers = vec![SESSION];
+    if let Some(s) = since {
+        headers.push(("If-Modified-Since", s));
+    }
+    let response = send(reqwest::Method::GET, port, "/", &headers).await;
+    let status = response.status().as_u16();
+    let lm = header(&response, "last-modified").unwrap_or_default();
+    (status, lm, response.text().await.expect("body"))
+}
+
+#[tokio::test]
+async fn a_scenario_transition_restamps_the_stub_it_exposes() {
+    let manager = ImposterManager::new();
+    let port = scenario_imposter(
+        &manager,
+        vec![
+            gated("v1", "flag", "Started", "v1"),
+            gated("v2", "flag", "Flipped", "v2"),
+        ],
+    )
+    .await;
+    let (_, t, body) = session_get(port, None).await;
+    assert_eq!(body, "v1");
+    manager
+        .get_imposter(port)
+        .expect("imposter")
+        .set_scenario_state("s1", "flag", "Flipped")
+        .expect("transition");
+    let (status, t2, body) = session_get(port, Some(&t)).await;
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "v2"),
+        "the switch is a change"
+    );
+    assert!(secs(&t2) > secs(&t), "{t2} after {t}");
+    manager.delete_all().await;
+}
+
+#[tokio::test]
+async fn a_transition_back_moves_the_stamp_again() {
+    let manager = ImposterManager::new();
+    let port = scenario_imposter(
+        &manager,
+        vec![
+            gated("v1", "flag", "Started", "v1"),
+            gated("v2", "flag", "Flipped", "v2"),
+        ],
+    )
+    .await;
+    let imposter = manager.get_imposter(port).expect("imposter");
+    imposter
+        .set_scenario_state("s1", "flag", "Flipped")
+        .expect("flip");
+    let (_, t2, body) = session_get(port, None).await;
+    assert_eq!(body, "v2");
+    imposter
+        .set_scenario_state("s1", "flag", "Started")
+        .expect("flip back");
+    let (status, t3, body) = session_get(port, Some(&t2)).await;
+    assert_eq!((status, body.as_str()), (200, "v1"));
+    assert!(secs(&t3) > secs(&t2));
+    manager.delete_all().await;
+}
+
+#[tokio::test]
+async fn an_ungated_fallback_behind_a_gated_stub_is_restamped() {
+    let manager = ImposterManager::new();
+    let port = scenario_imposter(
+        &manager,
+        vec![
+            gated("v1", "flag", "Started", "v1"),
+            one_stub("fallback", "fallback"),
+        ],
+    )
+    .await;
+    let (_, t, _) = session_get(port, None).await;
+    manager
+        .get_imposter(port)
+        .expect("imposter")
+        .set_scenario_state("s1", "flag", "Flipped")
+        .expect("transition");
+    let (status, _, body) = session_get(port, Some(&t)).await;
+    assert_eq!((status, body.as_str()), (200, "fallback"));
+    manager.delete_all().await;
+}
+
+/// The transition a request makes through `newScenarioState`, not the admin API.
+#[tokio::test]
+async fn a_transition_through_a_stub_restamps_too() {
+    let manager = ImposterManager::new();
+    let mut flip = json!({
+        "predicates": [{ "equals": { "path": "/flip" } }],
+        "scenarioName": "flag",
+        "requiredScenarioState": "Started",
+        "newScenarioState": "Flipped",
+        "responses": [{ "is": { "statusCode": 204 } }]
+    });
+    flip["id"] = json!("flip");
+    let port = scenario_imposter(
+        &manager,
+        vec![
+            flip,
+            gated("v1", "flag", "Started", "v1"),
+            gated("v2", "flag", "Flipped", "v2"),
+        ],
+    )
+    .await;
+    let (_, t, _) = session_get(port, None).await;
+    let flipped = send(reqwest::Method::POST, port, "/flip", &[SESSION]).await;
+    assert_eq!(flipped.status().as_u16(), 204);
+    let (status, _, body) = session_get(port, Some(&t)).await;
+    assert_eq!((status, body.as_str()), (200, "v2"));
+    manager.delete_all().await;
+}
+
+/// A reset (and a space teardown) deletes the state: the scenario is back at `Started`.
+#[tokio::test]
+async fn resetting_a_scenario_restamps() {
+    let manager = ImposterManager::new();
+    let port = scenario_imposter(
+        &manager,
+        vec![
+            gated("v1", "flag", "Started", "v1"),
+            gated("v2", "flag", "Flipped", "v2"),
+        ],
+    )
+    .await;
+    let imposter = manager.get_imposter(port).expect("imposter");
+    imposter
+        .set_scenario_state("s1", "flag", "Flipped")
+        .expect("flip");
+    let (_, t2, _) = session_get(port, None).await;
+    imposter.delete_scenario_state("s1", "flag").expect("reset");
+    let (status, _, body) = session_get(port, Some(&t2)).await;
+    assert_eq!((status, body.as_str()), (200, "v1"));
+    manager.delete_all().await;
+}
+
+/// Only a transition of a scenario that gates something at or ahead of the answering stub counts.
+#[tokio::test]
+async fn an_unrelated_scenarios_transition_keeps_the_304() {
+    let manager = ImposterManager::new();
+    let port = scenario_imposter(&manager, vec![gated("v1", "flag", "Started", "v1")]).await;
+    let (_, t, _) = session_get(port, None).await;
+    manager
+        .get_imposter(port)
+        .expect("imposter")
+        .set_scenario_state("s1", "other", "Moved")
+        .expect("unrelated transition");
+    let (status, t_after, _) = session_get(port, Some(&t)).await;
+    assert_eq!((status, t_after), (304, t));
+    manager.delete_all().await;
+}
+
+/// Writing the state a scenario already has changes nothing, so it must not move the stamp.
+#[tokio::test]
+async fn re_setting_the_current_state_keeps_the_304() {
+    let manager = ImposterManager::new();
+    let port = scenario_imposter(
+        &manager,
+        vec![
+            gated("v1", "flag", "Started", "v1"),
+            gated("v2", "flag", "Flipped", "v2"),
+        ],
+    )
+    .await;
+    let imposter = manager.get_imposter(port).expect("imposter");
+    imposter
+        .set_scenario_state("s1", "flag", "Flipped")
+        .expect("flip");
+    let (_, t2, _) = session_get(port, None).await;
+    imposter
+        .set_scenario_state("s1", "flag", "Flipped")
+        .expect("same state");
+    let (status, t_after, _) = session_get(port, Some(&t2)).await;
+    assert_eq!((status, t_after), (304, t2));
+    manager.delete_all().await;
+}
+
+/// A scenario gating only stubs behind every conditional stub cannot change a conditional answer,
+/// so its transitions take no stamp — a busy FSM must not run the load clock ahead.
+#[tokio::test]
+async fn a_scenario_gating_nothing_ahead_of_a_conditional_stub_takes_no_stamp() {
+    let manager = ImposterManager::new();
+    let behind = json!({
+        "id": "behind",
+        "predicates": [{ "equals": { "path": "/other" } }],
+        "scenarioName": "busy",
+        "requiredScenarioState": "Started",
+        "responses": [{ "is": { "statusCode": 200, "body": "other" } }]
+    });
+    let port = scenario_imposter(&manager, vec![one_stub("v1", "v1"), behind]).await;
+    let (_, t, _) = session_get(port, None).await;
+    let imposter = manager.get_imposter(port).expect("imposter");
+    for state in ["A", "B", "A", "B"] {
+        imposter
+            .set_scenario_state("s1", "busy", state)
+            .expect("transition");
+    }
+    // A content change now is stamped from the wall clock, not pushed out by the transitions.
+    manager
+        .replace_stub(port, 0, stub(one_stub("v1", "v1b")))
+        .await
+        .expect("replace");
+    let (_, t2, _) = session_get(port, None).await;
+    assert!(
+        secs(&t2) <= secs(&t) + 1,
+        "{t} -> {t2}: transitions ran the clock ahead"
+    );
+    manager.delete_all().await;
+}
