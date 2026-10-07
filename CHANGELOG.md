@@ -11,7 +11,13 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **Server flags are accepted after a subcommand** (#1316): `rift start --port 2525 --configfile imposters.json`, `rift save --port …` and `rift restart …` now parse, matching Mountebank's command line; the flags are also still accepted before the subcommand. `rift replay` and `rift script check` no longer carry their own `--configfile` / `--no-parse`: they take the global ones, and `rift replay` without a config file exits with `rift replay needs --configfile <file>`.
+
 ### Changed
+
+- **Breaking for Rust embedders of `rift-http-proxy`** (#1316): `server::Commands::Replay` is now a unit variant (it took `configfile`), `server::ScriptAction::Check` no longer has a `no_parse` field, and `script_cli::dispatch` takes the global `no_parse` as a second argument. The command line itself is unchanged except as described above.
 
 - **A proxy that omits `mode` now records and replays as `proxyOnce`, Mountebank's default**
   (#1314). It used to forward every request when it had no `predicateGenerators`, while the same
@@ -33,6 +39,7 @@ record.
   the first proxy stub, and both paths consulted it. They now forward every request.
 - **`rift-verify` skipped its recorded-stub check for `proxyalways`** and other non-canonical
   spellings; it now reads `mode` as the engine does.
+
 
 ## [0.20.0] - 2026-10-07
 
