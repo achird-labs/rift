@@ -1,7 +1,7 @@
 //! Issue #999 gate: every metric family `docs/features/metrics.md` documents must actually be
 //! written by a real serve path.
 //!
-//! Nine of the thirteen documented families had no writer at all. Because the `lazy_static!`
+//! Nine of the thirteen documented families had no writer at all. Because the lazily-initialised
 //! families register on first *touch*, nothing touching them meant they were **absent** from the
 //! scrape rather than zero — so `absent()` alerts fired and `rate()` queries returned nothing.
 //!

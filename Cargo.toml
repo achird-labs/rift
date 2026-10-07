@@ -36,6 +36,16 @@ all = "warn"
 uninlined_format_args = "warn"
 manual_let_else = "warn"
 unnecessary_map_or = "warn"
+# Clean today, so free to hold: `a + b / 2`-style midpoints overflow (use `midpoint`, stable since
+# 1.85/1.87), an `#[ignore]` must say why (`#[ignore = "..."]`), and `.cloned()` on `Copy` items
+# hides that nothing is cloned.
+manual_midpoint = "warn"
+ignore_without_reason = "warn"
+cloned_instead_of_copied = "warn"
+
+[workspace.lints.rust]
+# A lifetime that is provably equal to another (`'a: 'b, 'b: 'a`) is noise; clean today.
+redundant_lifetimes = "warn"
 
 [workspace.dependencies]
 # Async runtime — version pinned here; each crate selects its own tokio features.

@@ -65,7 +65,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender = "0.2"
 prometheus = "0.13"
-lazy_static = "1.4"
 
 # CLI
 clap = { workspace = true, features = ["env"] }

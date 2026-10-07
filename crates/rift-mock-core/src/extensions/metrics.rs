@@ -1,136 +1,160 @@
 //! Prometheus metrics for rift-http-proxy.
 //!
 //! Tracks fault injection activity, script execution, and proxy performance.
-use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use prometheus::{
     Counter, CounterVec, Encoder, GaugeVec, HistogramVec, TextEncoder, register_counter_vec,
     register_gauge_vec, register_histogram_vec,
 };
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
-lazy_static! {
-    /// Total number of requests processed
-    pub static ref REQUESTS_TOTAL: CounterVec = register_counter_vec!(
+/// Total number of requests processed
+pub static REQUESTS_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
+    register_counter_vec!(
         "rift_requests_total",
         "Total number of requests processed by the proxy",
         &["method", "status"]
     )
-    .unwrap();
+    .unwrap()
+});
 
-    /// Connections accepted per accept-loop slot (issue #746). Under `--runtime per-core`
-    /// the slot index IS the worker index, which makes SO_REUSEPORT 4-tuple skew observable
-    /// in production instead of inferred; in the default topology every accept lands on
-    /// slot 0. Resolved to a plain Counter once per accept loop, so the hot path pays one
-    /// atomic inc per accepted connection and no label lookup.
-    pub static ref ACCEPTED_CONNECTIONS_TOTAL: CounterVec = register_counter_vec!(
+/// Connections accepted per accept-loop slot (issue #746). Under `--runtime per-core`
+/// the slot index IS the worker index, which makes SO_REUSEPORT 4-tuple skew observable
+/// in production instead of inferred; in the default topology every accept lands on
+/// slot 0. Resolved to a plain Counter once per accept loop, so the hot path pays one
+/// atomic inc per accepted connection and no label lookup.
+pub static ACCEPTED_CONNECTIONS_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
+    register_counter_vec!(
         "rift_accepted_connections_total",
         "Connections accepted, labeled by accept-loop worker slot (RFC-712 skew observability)",
         &["worker"]
     )
-    .unwrap();
+    .unwrap()
+});
 
-    /// Total number of faults injected
-    /// Accept errors, by listener and class (issue #838). Since the accept loops classify and
-    /// retry rather than terminate, a wedged listener stays bound and answers nothing — this is
-    /// the live signal that it is degraded. `class` is `transient` or `systemic`. Fatal (broken-fd)
-    /// errors are excluded on the admin, metrics and proxy listeners because they end the loop and
-    /// surface through its owner; the imposter loops have no fatal class by design (a dying imposter
-    /// loop is recoverable through the still-live admin API), so there they count as `systemic`.
-    /// Deliberately no port label: per-port cardinality is unbounded, and the logs carry the port.
-    pub static ref ACCEPT_ERRORS_TOTAL: CounterVec = register_counter_vec!(
+/// Total number of faults injected
+/// Accept errors, by listener and class (issue #838). Since the accept loops classify and
+/// retry rather than terminate, a wedged listener stays bound and answers nothing — this is
+/// the live signal that it is degraded. `class` is `transient` or `systemic`. Fatal (broken-fd)
+/// errors are excluded on the admin, metrics and proxy listeners because they end the loop and
+/// surface through its owner; the imposter loops have no fatal class by design (a dying imposter
+/// loop is recoverable through the still-live admin API), so there they count as `systemic`.
+/// Deliberately no port label: per-port cardinality is unbounded, and the logs carry the port.
+pub static ACCEPT_ERRORS_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
+    register_counter_vec!(
         "rift_accept_errors_total",
         "Accept errors by listener and class",
         &["listener", "class"]
     )
-    .expect("metric can be created");
+    .expect("metric can be created")
+});
 
-    /// Connections dropped before an HTTP/1-or-HTTP/2 decision could be made, by listener and
-    /// cause (issue #1045). The `kind` label is the whole point: `timeout` and `eof` are ordinary
-    /// client behaviour — a connection went quiet, a client hung up — while `io` can mean a
-    /// systemic fault, e.g. every read erroring after a bad cert or a resolver rollout. The call
-    /// sites log any of them at `debug!` and must keep doing so: the trigger is entirely
-    /// client-controlled, so a per-connection `warn!` would hand a hostile client an unbounded
-    /// log-volume lever (#718). A counter is the only way to tell those two situations apart
-    /// without raising verbosity, which is exactly what this issue is for.
-    ///
-    /// Failures only. Successes are already countable as
-    /// `rift_accepted_connections_total` minus these; counting them again would double the
-    /// per-connection label lookup for nothing. No `port` label, for the same unbounded-cardinality
-    /// reason as `ACCEPT_ERRORS_TOTAL`.
-    pub static ref PREFACE_FAILURES_TOTAL: CounterVec = register_counter_vec!(
+/// Connections dropped before an HTTP/1-or-HTTP/2 decision could be made, by listener and
+/// cause (issue #1045). The `kind` label is the whole point: `timeout` and `eof` are ordinary
+/// client behaviour — a connection went quiet, a client hung up — while `io` can mean a
+/// systemic fault, e.g. every read erroring after a bad cert or a resolver rollout. The call
+/// sites log any of them at `debug!` and must keep doing so: the trigger is entirely
+/// client-controlled, so a per-connection `warn!` would hand a hostile client an unbounded
+/// log-volume lever (#718). A counter is the only way to tell those two situations apart
+/// without raising verbosity, which is exactly what this issue is for.
+///
+/// Failures only. Successes are already countable as
+/// `rift_accepted_connections_total` minus these; counting them again would double the
+/// per-connection label lookup for nothing. No `port` label, for the same unbounded-cardinality
+/// reason as `ACCEPT_ERRORS_TOTAL`.
+pub static PREFACE_FAILURES_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
+    register_counter_vec!(
         "rift_preface_failures_total",
         "Connections dropped before an HTTP/1-or-HTTP/2 decision, by listener and cause",
         &["listener", "kind"]
     )
-    .expect("metric can be created");
+    .expect("metric can be created")
+});
 
-    /// Whether a listener is currently in a systemic accept-error outage (1) or not (0),
-    /// issue #838 — the gauge to alert on.
-    pub static ref ACCEPT_ERROR_OUTAGE: GaugeVec = register_gauge_vec!(
+/// Whether a listener is currently in a systemic accept-error outage (1) or not (0),
+/// issue #838 — the gauge to alert on.
+pub static ACCEPT_ERROR_OUTAGE: LazyLock<GaugeVec> = LazyLock::new(|| {
+    register_gauge_vec!(
         "rift_accept_error_outage",
         "1 while a listener is in a systemic accept-error outage, 0 otherwise",
         &["listener"]
     )
-    .expect("metric can be created");
+    .expect("metric can be created")
+});
 
-    pub static ref FAULTS_INJECTED_TOTAL: CounterVec = register_counter_vec!(
+pub static FAULTS_INJECTED_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
+    register_counter_vec!(
         "rift_faults_injected_total",
         "Total number of faults injected",
-        &["type", "rule_id", "source"]  // type: latency|error|tcp, source: rift|script
+        &["type", "rule_id", "source"] // type: latency|error|tcp, source: rift|script
     )
-    .unwrap();
+    .unwrap()
+});
 
-    /// Latency fault duration in milliseconds
-    pub static ref LATENCY_INJECTED_MS: HistogramVec = register_histogram_vec!(
+/// Latency fault duration in milliseconds
+pub static LATENCY_INJECTED_MS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!(
         "rift_latency_injected_ms",
         "Histogram of injected latency in milliseconds",
         &["rule_id"],
-        vec![10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0]
+        vec![
+            10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0
+        ]
     )
-    .unwrap();
+    .unwrap()
+});
 
-    /// Error fault status codes
-    pub static ref ERROR_STATUS_TOTAL: CounterVec = register_counter_vec!(
+/// Error fault status codes
+pub static ERROR_STATUS_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
+    register_counter_vec!(
         "rift_error_status_total",
         "Count of error status codes injected",
         &["status", "rule_id"]
     )
-    .unwrap();
+    .unwrap()
+});
 
-    /// Script execution duration
-    pub static ref SCRIPT_EXECUTION_DURATION_MS: HistogramVec = register_histogram_vec!(
+/// Script execution duration
+pub static SCRIPT_EXECUTION_DURATION_MS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!(
         "rift_script_execution_duration_ms",
         "Histogram of script execution time in milliseconds",
-        &["rule_id", "result"],  // result: pass|fault|error
+        &["rule_id", "result"], // result: pass|fault|error
         vec![0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0]
     )
-    .unwrap();
+    .unwrap()
+});
 
-    /// Flow state operations
-    pub static ref FLOW_STATE_OPS_TOTAL: CounterVec = register_counter_vec!(
+/// Flow state operations
+pub static FLOW_STATE_OPS_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
+    register_counter_vec!(
         "rift_flow_state_ops_total",
         "Total number of flow state operations",
-        &["operation", "result"]  // operation: one per FlowStore method, result: success|error
+        &["operation", "result"] // operation: one per FlowStore method, result: success|error
     )
-    .unwrap();
+    .unwrap()
+});
 
-    /// Upstream request duration (without faults)
-    pub static ref UPSTREAM_REQUEST_DURATION_MS: HistogramVec = register_histogram_vec!(
+/// Upstream request duration (without faults)
+pub static UPSTREAM_REQUEST_DURATION_MS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!(
         "rift_upstream_request_duration_ms",
         "Duration of upstream requests (excluding fault injection)",
         &["method", "status"]
     )
-    .unwrap();
+    .unwrap()
+});
 
-    /// Script compilation errors
-    pub static ref SCRIPT_ERRORS_TOTAL: CounterVec = register_counter_vec!(
+/// Script compilation errors
+pub static SCRIPT_ERRORS_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
+    register_counter_vec!(
         "rift_script_errors_total",
         "Total number of script execution errors",
-        &["rule_id", "error_type"]  // error_type: syntax|runtime|flow_state
+        &["rule_id", "error_type"] // error_type: syntax|runtime|flow_state
     )
-    .unwrap();
-}
+    .unwrap()
+});
 
 /// Collect and return all metrics in Prometheus text format
 pub fn collect_metrics() -> String {
@@ -205,18 +229,16 @@ pub fn record_flow_state_op(operation: &str, success: bool) {
         .inc();
 }
 
-lazy_static! {
-    /// How many accept loops are currently inside a systemic outage, per listener (issue #838).
-    ///
-    /// The gauge cannot simply be `set(0)` by whoever recovers first: one `listener` label covers
-    /// **many** loops — the imposter plane runs one accept loop per imposter *and* one per accept
-    /// runtime under per-core fan-out (SO_REUSEPORT). Systemic errors are dominated by process-wide
-    /// fd exhaustion, so those loops wedge together and recover asynchronously; a plain `set(0)`
-    /// would clear the gauge on the first recovery while the rest are still down, under-reporting
-    /// exactly the outage the gauge exists to report. Counting depth makes it "any loop wedged".
-    static ref ACCEPT_OUTAGE_DEPTH: Mutex<HashMap<&'static str, usize>> =
-        Mutex::new(HashMap::new());
-}
+/// How many accept loops are currently inside a systemic outage, per listener (issue #838).
+///
+/// The gauge cannot simply be `set(0)` by whoever recovers first: one `listener` label covers
+/// **many** loops — the imposter plane runs one accept loop per imposter *and* one per accept
+/// runtime under per-core fan-out (SO_REUSEPORT). Systemic errors are dominated by process-wide
+/// fd exhaustion, so those loops wedge together and recover asynchronously; a plain `set(0)`
+/// would clear the gauge on the first recovery while the rest are still down, under-reporting
+/// exactly the outage the gauge exists to report. Counting depth makes it "any loop wedged".
+static ACCEPT_OUTAGE_DEPTH: LazyLock<Mutex<HashMap<&'static str, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Tracks one accept loop's outage state and keeps [`ACCEPT_ERROR_OUTAGE`] consistent (issue #838).
 ///

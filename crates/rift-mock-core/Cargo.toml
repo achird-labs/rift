@@ -62,7 +62,6 @@ boa_engine = { version = "0.20", optional = true }
 # Logging & Observability
 tracing.workspace = true
 prometheus = "0.13"
-lazy_static = "1.4"
 
 # HTTP client (proxy forwarding)
 reqwest.workspace = true

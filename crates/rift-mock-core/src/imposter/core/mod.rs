@@ -143,25 +143,22 @@ impl LoadClock {
         let now = chrono::Utc::now();
         // One atomic step, so two concurrent callers can never be handed the same second — a
         // scenario transition stamps from the request path, outside `stubs_write` (issue #1307).
-        // A compare-exchange loop rather than `fetch_update`, which newer toolchains deprecate.
-        let mut floor = self.0.load(Ordering::Relaxed);
-        loop {
-            let at = if now.timestamp() > floor {
+        let stamp_above = |floor: i64| {
+            if now.timestamp() > floor {
                 now
             } else {
                 // Only `None` past year 262143, where `now` is as good an answer as any.
                 chrono::DateTime::from_timestamp(floor.saturating_add(1), 0).unwrap_or(now)
-            };
-            match self.0.compare_exchange_weak(
-                floor,
-                at.timestamp(),
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return at,
-                Err(current) => floor = current,
             }
-        }
+        };
+        // `update` returns the floor the winning CAS replaced; `stamp_above` is a pure function of
+        // it, so recomputing yields exactly the stamp that was stored.
+        let floor = self
+            .0
+            .update(Ordering::Relaxed, Ordering::Relaxed, |floor| {
+                stamp_above(floor).timestamp()
+            });
+        stamp_above(floor)
     }
 }
 

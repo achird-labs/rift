@@ -62,26 +62,19 @@ impl RuleCycler {
         // ordering the sibling per-imposter cross-request state already uses (`enabled`, journal
         // counts). The window is invisible under load-free / spawn transports but real on the
         // in-process embedded runtime on loaded runners.
-        // An explicit CAS loop rather than `fetch_update`, which Rust 1.99 deprecated in favour of
-        // `try_update` (not available at the 1.92 MSRV); the step itself cannot fail.
-        let mut old_value = self.0.load(Ordering::SeqCst);
-        loop {
-            let (mut resp_idx, repeat_idx) = split(old_value);
-            if resp_idx >= response_count {
-                resp_idx = response_count.saturating_sub(1);
-            }
-            let repeat_count = repeat_for_response(resp_idx).unwrap_or(1).max(1);
-            let (resp_idx, repeat_idx) =
-                advance((resp_idx, repeat_idx), response_count, repeat_count);
-            let next = join(resp_idx, repeat_idx);
-            match self
-                .0
-                .compare_exchange_weak(old_value, next, Ordering::SeqCst, Ordering::SeqCst)
-            {
-                Ok(_) => break,
-                Err(actual) => old_value = actual,
-            }
-        }
+        // `update` (the infallible CAS loop): the step itself cannot fail.
+        let old_value = self
+            .0
+            .update(Ordering::SeqCst, Ordering::SeqCst, |old_value| {
+                let (mut resp_idx, repeat_idx) = split(old_value);
+                if resp_idx >= response_count {
+                    resp_idx = response_count.saturating_sub(1);
+                }
+                let repeat_count = repeat_for_response(resp_idx).unwrap_or(1).max(1);
+                let (resp_idx, repeat_idx) =
+                    advance((resp_idx, repeat_idx), response_count, repeat_count);
+                join(resp_idx, repeat_idx)
+            });
         split(old_value).0
     }
 }
