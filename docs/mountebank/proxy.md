@@ -33,6 +33,21 @@ Forward all requests to a backend server:
 
 ## Proxy Modes
 
+What a proxy records depends on whether it has `predicateGenerators` (or `addWaitBehavior` /
+`addDecorateBehavior`):
+
+- **With generators**, the proxy records each response as a new stub in the imposter, which then
+  answers later matching requests. This is the Mountebank behaviour.
+- **Without generators**, the imposter's `stubs` never change. `"mode": "proxyOnce"` still replays:
+  it keeps the first response for each request in an internal store, so the upstream sees each
+  request once. `DELETE /imposters/{port}/savedProxyResponses` clears that store. `proxyAlways` and
+  `proxyTransparent` forward every request.
+- **`proxyTransparent`** never records, with or without generators.
+
+If you leave `mode` out, a proxy without generators forwards every request, and a proxy with
+generators records as `proxyOnce` does. Set `"mode": "proxyOnce"` explicitly if you want replay
+without generators. (Mountebank defaults to `proxyOnce` in both cases.)
+
 ### proxyAlways
 
 Always forward requests; record a new stub for each unique request:
@@ -136,6 +151,9 @@ This generates stubs that match method and path, ignoring query and body.
   }]
 }
 ```
+
+A generated predicate is case-sensitive when `caseSensitive` is omitted. Set `"caseSensitive": false`
+to record a predicate that ignores case.
 
 ### Generation Failures
 
@@ -307,9 +325,9 @@ live proxied response also carries an `x-rift-proxy-latency: <ms>` header when i
 
 The origin's certificate is verified against the operating system trust store, and the connection
 offers `http/1.1` only. A TLS failure on this hop (an untrusted issuer, a name mismatch) answers the
-client `502` with an `x-rift-proxy-error: true` header and a `Proxy error: …` body naming the
-upstream. The TLS cause itself, e.g. `invalid peer certificate: UnknownIssuer`, goes to the server
-log only.
+client `502` with an `x-rift-proxy-error: true` header and a JSON error envelope (`type`
+`upstream failure`) whose `message` starts with `Proxy error: …` and names the upstream. The TLS
+cause itself, e.g. `invalid peer certificate: UnknownIssuer`, goes to the server log only.
 
 ### Trusting a Private CA
 

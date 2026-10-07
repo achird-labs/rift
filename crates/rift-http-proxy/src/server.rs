@@ -118,7 +118,7 @@ pub struct Cli {
     #[arg(long)]
     pub nologfile: bool,
 
-    /// Log file path (default: mb.log in current directory)
+    /// Also write logs to this file (off unless set; logs always go to stdout)
     #[arg(long, value_name = "FILE")]
     pub log: Option<PathBuf>,
 

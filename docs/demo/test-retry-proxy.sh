@@ -33,7 +33,8 @@ make_request() {
 
 # Reset counter first
 echo "Resetting counter for flow: $FLOW_ID"
-curl -s -X DELETE -H "X-Flow-Id: $FLOW_ID" "$RIFT_URL/api/reset" | jq . 2>/dev/null || cat
+reset=$(curl -s -X DELETE -H "X-Flow-Id: $FLOW_ID" "$RIFT_URL/api/reset")
+echo "$reset" | jq . 2>/dev/null || echo "$reset"
 echo ""
 echo ""
 

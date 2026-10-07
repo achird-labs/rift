@@ -47,7 +47,7 @@ Options:
   -a, --admin-url <ADMIN_URL>    Admin API URL [env: RIFT_ADMIN_URL] [default: http://localhost:2525]
   -r, --refresh-ms <REFRESH_MS>  Refresh interval in milliseconds [default: 1000]
   -h, --help                     Print help
-  -V, --version          Print version
+  -V, --version                  Print version
 ```
 
 ---
@@ -222,7 +222,8 @@ Press `/` to activate search mode:
 - Press `Esc` to clear search
 
 Search matches against:
-- Imposter port and name
+- Imposter port, name and protocol
+- Stub scenario name
 - Stub predicates (path, method)
 - Response content
 

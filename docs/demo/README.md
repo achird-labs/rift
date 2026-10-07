@@ -271,7 +271,7 @@ Demonstrates both scripting engines (Rhai, JavaScript) with equivalent functiona
 ```bash
 # Using local binary. --allowInjection is required: this demo runs inject/_rift.script, and the
 # configfile door enforces the same injection gate as the admin API (issue #612).
-./target/release/rift --configfile docs/demo/imposters-scripting-engines.json --allowInjection
+./target/release/rift-http-proxy --configfile docs/demo/imposters-scripting-engines.json --allowInjection
 
 # Or using Docker
 docker run -p 2525:2525 -p 4560:4560 \
@@ -323,8 +323,8 @@ cd docs/demo
 ./generate-intercept-ca.sh     # docker run … rift intercept-ca generate --out-dir intercept-ca
 ```
 
-`rift intercept-ca` is newer than the last release; until the next one, build and retag the image
-first (see the note at the top).
+`rift intercept-ca` first shipped after v0.19.0. With the published `latest` image from an older
+release, build and retag the image first (see the note at the top).
 
 ### Start
 
@@ -356,6 +356,37 @@ docker compose -f docker-compose-intercept.yml down
 
 ---
 
+## Demo 7: Retry Proxy Simulation
+
+A Rhai script fails the first two requests of a flow with `503` and answers `200` from the third
+on, the way a service that recovers after a hiccup would. Use it to test a client's retry logic.
+The flow is identified by the `X-Flow-Id` header, so each flow counts its own attempts.
+
+### Start
+
+```bash
+docker compose -f docker-compose-retry-proxy.yml up -d
+```
+
+### Test
+
+```bash
+./test-retry-proxy.sh
+```
+
+The script resets the counter for a new flow ID, sends four requests to port 4560, and prints each
+status. Attempts 1 and 2 return `503` with a `Retry-After` header. Attempts 3 and 4 return `200`
+with a success body. The script needs `curl`; it uses `jq` for the reset reply when `jq` is
+installed.
+
+### Cleanup
+
+```bash
+docker compose -f docker-compose-retry-proxy.yml down
+```
+
+---
+
 ## Configuration Files
 
 | File | Description |
@@ -364,10 +395,15 @@ docker compose -f docker-compose-intercept.yml down
 | `imposters-rift-features.json` | Fault injection demo config |
 | `imposters-scripting.json` | Scripting with flow state demo config |
 | `imposters-scripting-engines.json` | Multi-engine scripting demo (Rhai, JS) |
+| `imposters-https.json` | HTTPS/TLS demo config |
+| `imposters-retry-proxy.json` | Retry proxy demo config |
 | `docker-compose.yml` | HTTP demo |
 | `docker-compose-https.yml` | HTTPS/TLS demo |
 | `docker-compose-rift-features.yml` | Fault injection demo |
 | `docker-compose-scripting.yml` | Scripting with flow state demo |
+| `docker-compose-scripting-engines.yml` | Multi-engine scripting demo (Docker alternative for Demo 5) |
+| `docker-compose-retry-proxy.yml` | Retry proxy demo |
+| `test-retry-proxy.sh` | Retry proxy demo check |
 | `generate-certs.sh` | Certificate generation script |
 | `imposters-intercept.json` | Intercept demo: datafile imposter plus the `intercept` block |
 | `docker-compose-intercept.yml` | Intercept demo: rift plus a curl SUT container |

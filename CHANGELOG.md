@@ -121,6 +121,15 @@ record.
 
 ### Fixed
 
+- **`proxyTransparent` no longer records a stub when the proxy declares `predicateGenerators`**
+  (or `addWaitBehavior` / `addDecorateBehavior`). The recording branch never checked the mode, so
+  a transparent proxy with generators recorded the first response and replayed it, and the
+  upstream saw only the first request. It now forwards every request and records nothing, as
+  documented and as Mountebank does.
+- **Smaller corrections found by the docs audit:** the error for a `routes` block in a
+  single-imposter document now shows the real wrapper shape (`"routes": {"routes": [...]}`), and
+  `rift --help` no longer claims `--log` defaults to `mb.log` (it is off unless set).
+
 - **Stub analysis honours scenario and space gates** (#1308): two stubs with identical predicates but different `requiredScenarioState` (or `space`), such as the `Started`/`paid` pair in the scenarios guide, are no longer reported as `exact_duplicate` or `potentially_shadowed` in `_rift.warnings` and the add-stub preview. An ungated stub ahead of a gated one still is. The engine's `matches_alike` (#1303) and the analysis now share one `Gate` notion.
 
 - **Deleting, moving or narrowing a `_rift.conditional` stub no longer exposes an older stamp**

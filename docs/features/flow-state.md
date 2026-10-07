@@ -230,10 +230,12 @@ op, empty when it had none. Anywhere else (a response body or header) it renders
 
 `stateOps` belongs to an `is` response. A `proxy`, `inject`, or script-only (`_rift.script`)
 response has its own means of touching state (a script reaches `ctx.state` directly); `stateOps` on
-one of those never runs. On a `proxy`, `inject` or bare `fault` response the whole `_rift` block is dropped when
-the imposter is parsed. On a script-only `_rift` response it is kept, and `GET /imposters/:port`
-reports a [`state_ops_never_runs`]({{ site.baseurl }}/features/stub-analysis/#state_ops_never_runs)
-stub-analysis warning. `rift-lint` does not flag either case.
+one of those never runs. On a `proxy`, `inject` or bare `fault` response the `_rift` block is kept and
+read back, but it has no effect: `GET /imposters/:port` reports a
+[`config_key_ignored`]({{ site.baseurl }}/features/stub-analysis/#config_key_ignored) warning and
+`rift-lint` reports `W017`. On a script-only `_rift` response the engine reports a
+[`state_ops_never_runs`]({{ site.baseurl }}/features/stub-analysis/#state_ops_never_runs)
+stub-analysis warning. `rift-lint` does not flag that case.
 
 ### Not run when the response never serves
 

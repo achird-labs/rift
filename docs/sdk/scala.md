@@ -15,13 +15,13 @@ surface that matches your stack rather than adapting to someone else's.
 
 ```scala
 // ZIO 2
-libraryDependencies += "io.github.achird-labs" %% "rift-scala-zio" % "0.1.4" % Test
+libraryDependencies += "io.github.achird-labs" %% "rift-scala-zio" % "0.3.2" % Test
 
 // Cats Effect 3 (+ FS2)
-libraryDependencies += "io.github.achird-labs" %% "rift-scala-cats" % "0.1.4" % Test
+libraryDependencies += "io.github.achird-labs" %% "rift-scala-cats" % "0.3.2" % Test
 
 // No effect system — Either-based, Using-friendly
-libraryDependencies += "io.github.achird-labs" %% "rift-scala-pure" % "0.1.4" % Test
+libraryDependencies += "io.github.achird-labs" %% "rift-scala-pure" % "0.3.2" % Test
 ```
 
 Requires JDK 21+. The embedded transport comes through the rift-java bridge, so it needs JDK 22+

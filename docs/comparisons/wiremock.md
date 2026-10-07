@@ -22,7 +22,7 @@ better, where WireMock is genuinely better, and where you should not switch.
 | | WireMock | Rift |
 |:--|:--|:--|
 | Implementation | Java / JVM (Jetty) | Rust |
-| Maturity | Mature, ~a decade, company-backed | **Beta** (v0.17), single maintainer |
+| Maturity | Mature, ~a decade, company-backed | **Beta** (pre-1.0), single maintainer |
 | Ecosystem | Large — extensions, Cloud, Spring, a decade of answers | Small |
 | Throughput at 1 stub | 83,048 RPS | 334,025 RPS |
 | Throughput at 310 stubs | 24,264 RPS (**−71%**) | 326,779 RPS (**−2%**) |
@@ -161,7 +161,7 @@ Stated plainly, because you should not find these out after migrating.
 
 WireMock has been in production use for roughly a decade, has a company behind it, and has an
 extension ecosystem, a Kotlin DSL, a Cloud product, deep Spring Boot integration, and years of
-accumulated Stack Overflow answers. Rift is **beta**, at v0.17, and small. For a lot of teams
+accumulated Stack Overflow answers. Rift is **beta** (pre-1.0) and small. For a lot of teams
 that difference outweighs everything in the section above, and that is a reasonable call.
 
 ### Commercial support

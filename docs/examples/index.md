@@ -58,9 +58,9 @@ Mock a typical REST API with CRUD operations:
         },
         "_behaviors": {
           "copy": {
-            "from": { "path": "/api/users/(\\d+)" },
+            "from": "path",
             "into": "${id}",
-            "using": { "method": "regex", "selector": "$1" }
+            "using": { "method": "regex", "selector": "/api/users/(\\d+)" }
           }
         }
       }]
@@ -170,7 +170,7 @@ Mock a webhook endpoint for testing:
       "predicates": [{
         "and": [
           { "equals": { "method": "POST", "path": "/webhooks/payment" } },
-          { "jsonpath": { "selector": "$.event", "equals": "payment.completed" } }
+          { "jsonpath": { "selector": "$.event" }, "equals": { "body": "payment.completed" } }
         ]
       }],
       "responses": [{ "is": { "statusCode": 200, "body": "OK" } }]
@@ -179,7 +179,7 @@ Mock a webhook endpoint for testing:
       "predicates": [{
         "and": [
           { "equals": { "method": "POST", "path": "/webhooks/payment" } },
-          { "jsonpath": { "selector": "$.event", "equals": "payment.failed" } }
+          { "jsonpath": { "selector": "$.event" }, "equals": { "body": "payment.failed" } }
         ]
       }],
       "responses": [{ "is": { "statusCode": 200, "body": "Acknowledged" } }]
@@ -192,7 +192,7 @@ Mock a webhook endpoint for testing:
 
 ## Service with Latency
 
-Simulate slow service for timeout testing:
+Simulate slow service for timeout testing. The `/random-latency` stub computes its delay with a JavaScript function, so start Rift with `--allow-injection`; without it, Rift refuses to load the imposter.
 
 ```json
 {

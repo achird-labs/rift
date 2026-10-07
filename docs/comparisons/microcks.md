@@ -26,7 +26,7 @@ so it cannot be relicensed out from under you.
 |:--|:--|:--|
 | Implementation | Java / JVM (Spring Boot) | Rust |
 | Governance | CNCF Incubating, Apache-2.0 | Apache-2.0, single maintainer |
-| Maturity | Mature, CNCF-backed, named enterprise users | **Beta** (v0.17) |
+| Maturity | Mature, CNCF-backed, named enterprise users | **Beta** (pre-1.0) |
 | Authoring model | **Spec-driven** — OpenAPI, AsyncAPI, Postman, gRPC, GraphQL, SoapUI | **Stub-driven** — Mountebank `imposters.json` (JSON or YAML) + `_rift` extensions |
 | Throughput at 2 stubs | 16,192 RPS | 347,604 RPS |
 | Throughput at 310 stubs | 6,420 RPS (**−60%**) | 338,404 RPS (**−3%**) |

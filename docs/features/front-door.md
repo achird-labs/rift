@@ -7,7 +7,7 @@ nav_order: 27
 
 # Front Door
 
-The [single-port gateway](gateway.md) lets one port reach every imposter, but the *client* has to
+The [single-port gateway]({{ site.baseurl }}/features/gateway/) lets one port reach every imposter, but the *client* has to
 name the target (`/__rift/4545/api/users`). That is fine when the client is a test harness driving
 Rift on purpose. It is wrong when the client is an unmodified system under test that believes it is
 calling `payments.example.com`.

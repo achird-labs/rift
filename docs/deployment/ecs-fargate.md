@@ -31,8 +31,10 @@ namespace, so the app reaches Rift on `localhost` -- the same arrangement as the
   `"caKeyPemEnv": "INTERCEPT_CA_KEY"`. The variables are deliberately **not** named
   `RIFT_INTERCEPT_*`: those are the flags' own variables, and setting one alongside a config
   `intercept` block is a startup error.
-- The app trusts the **same certificate**, so it must be baked into the app image (below) -- a JVM
-  in particular reads its truststore once, at startup.
+- The app trusts the **same certificate**, so it must reach the app before the app opens its first
+  connection -- baked into the app image (below) or copied in by an init container. A JVM in
+  particular reads its truststore once, at startup. A JVM also ignores `HTTPS_PROXY`: map it onto
+  `https.proxyHost` / `https.proxyPort` (and `NO_PROXY` onto `http.nonProxyHosts`) in the app.
 
 ## Task definition
 
@@ -58,7 +60,7 @@ namespace, so the app reaches Rift on `localhost` -- the same arrangement as the
           "valueFrom": "arn:aws:secretsmanager:eu-west-1:123456789012:secret:rift-intercept-ca-key" }
       ],
       "healthCheck": {
-        "command": ["CMD", "rift", "healthcheck"],
+        "command": ["CMD", "/usr/local/bin/rift", "healthcheck"],
         "interval": 5,
         "timeout": 3,
         "retries": 10,
@@ -99,7 +101,7 @@ the rules with a one-shot `PUT /intercept/rules` against `localhost:2525`. That 
 costs a bootstrap call and a window where the app's first calls can race the missing rules; with
 `caCertPemEnv` the block path needs no shell either, so prefer it.
 
-Remember that `execute-command` and the task role are separate from this: the execution role needs
+ECS reads the secrets with the **execution** role, not the task role, so the execution role needs
 `secretsmanager:GetSecretValue` on both secrets.
 
 ## Getting the config file in
@@ -122,8 +124,9 @@ Two ways:
    with `volumes: [{ "name": "config" }]` on the task and the same `mountPoints` entry on `rift`,
    plus `"dependsOn": [{ "containerName": "fetch-config", "condition": "SUCCESS" }]`. The task role
    needs `s3:GetObject`. A running task can then pick up an edited file with `POST /admin/reload` on
-   its admin port (`localhost:2525`), which re-applies the file's `intercept.rules`; the listener
-   itself (host, port, CA) is fixed at boot.
+   its admin port (`localhost:2525`), which re-applies the file's `intercept.rules`. The listener
+   itself (host, port, auth, CA) is fixed at boot; an edit that also changes one of those applies
+   nothing from the block until a restart.
 
 ## Putting the CA in the app image
 
@@ -148,6 +151,13 @@ runtime at it. Which variable adds to the default roots and which replaces them,
 are under
 [Trusting the CA from the SUT]({{ site.baseurl }}/features/intercept-proxy/#trusting-the-ca-from-the-sut).
 Keep `ca-key.pem` out of the app image -- only Rift needs it.
+
+**Alternative: an init container.** Rift serves the CA it is actually using at
+`GET /intercept/ca.pem` on the admin port. A non-essential container that depends on `rift` with
+`"condition": "HEALTHY"` can `curl` that file into a task volume shared with the app, and `app`
+then depends on it with `"condition": "SUCCESS"` and mounts the volume read-only. The app still has
+to turn the PEM into trust for its own runtime (a JVM needs a truststore). This layout needs no
+shell in either image, so it works with a distroless Rift image and a distroless app.
 
 ## Stopping the task
 

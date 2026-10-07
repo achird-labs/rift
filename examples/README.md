@@ -9,8 +9,8 @@ Six ready-to-run configs, each a single self-contained Mountebank-format file. C
 | [`task-management-api.json`](task-management-api.json) | 4550 | A fuller REST surface: regex path predicates, path parameters, and per-resource responses. |
 | [`authentication-api.json`](authentication-api.json) | 4547 | Login / logout / token validation, using `scenarioName` so a session advances through states. |
 | [`feature-flags-api.json`](feature-flags-api.json) | 4546 | Flag lookup with a catch-all regex for unknown keys. |
-| [`error-testing.json`](error-testing.json) | 4548 | Every error status your client should handle — 400, 401, 403, 404, 429, 500, 502, 503. |
-| [`latency-testing.json`](latency-testing.json) | 4549 | Fixed and random delays plus a timeout endpoint, for exercising client retry and timeout logic. |
+| [`error-testing.json`](error-testing.json) | 4548 | Every error status your client should handle — 400, 401, 403, 404, 429, 500, 502, 503, 504. |
+| [`latency-testing.json`](latency-testing.json) | 4549 | Fixed and random delays plus a timeout endpoint, for exercising client retry and timeout logic. The random delay is a JavaScript function, so start Rift with `--allow-injection` (`MB_ALLOW_INJECTION=true` in Docker). |
 
 Each example has its own port, so any of them can run side by side.
 
