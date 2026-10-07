@@ -141,21 +141,27 @@ impl LoadClock {
     /// The stamp for one content-changing operation.
     pub(crate) fn next(&self) -> chrono::DateTime<chrono::Utc> {
         let now = chrono::Utc::now();
-        let mut at = now;
         // One atomic step, so two concurrent callers can never be handed the same second — a
         // scenario transition stamps from the request path, outside `stubs_write` (issue #1307).
-        let _ = self
-            .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |floor| {
-                at = if now.timestamp() > floor {
-                    now
-                } else {
-                    // Only `None` past year 262143, where `now` is as good an answer as any.
-                    chrono::DateTime::from_timestamp(floor.saturating_add(1), 0).unwrap_or(now)
-                };
-                Some(at.timestamp())
-            });
-        at
+        // A compare-exchange loop rather than `fetch_update`, which newer toolchains deprecate.
+        let mut floor = self.0.load(Ordering::Relaxed);
+        loop {
+            let at = if now.timestamp() > floor {
+                now
+            } else {
+                // Only `None` past year 262143, where `now` is as good an answer as any.
+                chrono::DateTime::from_timestamp(floor.saturating_add(1), 0).unwrap_or(now)
+            };
+            match self.0.compare_exchange_weak(
+                floor,
+                at.timestamp(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return at,
+                Err(current) => floor = current,
+            }
+        }
     }
 }
 
