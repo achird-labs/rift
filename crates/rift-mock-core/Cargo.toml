@@ -84,7 +84,6 @@ quamina = { version = "0.6", optional = true }
 memchr.workspace = true
 rand.workspace = true
 urlencoding = "2.1"
-similar = "2.6"
 anyhow.workspace = true
 thiserror.workspace = true
 socket2 = "0.5"
@@ -115,9 +114,8 @@ tempfile = "3.8"
 rift-ejs = { path = "../rift-ejs", version = "0.1.0" }
 reqwest.workspace = true
 tokio-test = "0.4"
-serial_test = "3.0"
 tracing-test = "0.2"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "imposter_matcher_bench"

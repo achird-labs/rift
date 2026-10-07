@@ -75,7 +75,7 @@ fn spawn_wss_echo_origin(port: u16, cert_pem: String, key_pem: String, count: us
                     if msg.is_text() {
                         let text = msg.into_text().expect("text");
                         if ws
-                            .send(tokio_tungstenite::tungstenite::Message::Text(format!(
+                            .send(tokio_tungstenite::tungstenite::Message::text(format!(
                                 "echo:{text}"
                             )))
                             .await
@@ -180,7 +180,7 @@ async fn a_websocket_conversation_survives_the_intercept_tunnel() {
             "the origin's 101 must reach the client, not be swallowed by the proxy"
         );
 
-        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        ws.send(tokio_tungstenite::tungstenite::Message::text(
             "hello".to_string(),
         ))
         .await
@@ -405,7 +405,7 @@ async fn listener_shutdown_terminates_a_live_relay() {
 
     // Prove the relay is actually carrying traffic before we tear it down, or "it ended" would be
     // satisfied by a relay that never started.
-    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+    ws.send(tokio_tungstenite::tungstenite::Message::text(
         "alive".to_string(),
     ))
     .await
@@ -476,7 +476,7 @@ async fn the_relay_uses_outbound_trust_set_after_a_clone_was_taken() {
                 .expect("websocket handshake through the tunnel");
         assert_eq!(response.status(), 101);
 
-        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        ws.send(tokio_tungstenite::tungstenite::Message::text(
             "hello".to_string(),
         ))
         .await

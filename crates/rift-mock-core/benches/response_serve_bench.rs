@@ -11,11 +11,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use http_body_util::Full;
 use hyper::Response;
 use rift_mock_core::extensions::apply_date_templates;
 use rift_mock_core::imposter::{IsResponse, PreparedResponse, ResponseMode};
+use std::hint::black_box;
 
 /// A representative static JSON stub: a handful of headers and a small object body — the dominant
 /// mock workload.

@@ -275,7 +275,7 @@ impl StubEditor {
                 KeyCode::Char('x') => {
                     let yanked = self.editor.yank_text();
                     if !yanked.is_empty() {
-                        self.editor.input(crossterm_key_to_input(key));
+                        self.editor.input(ratatui_textarea::Input::from(key));
                         return Some(EditorAction::Cut(yanked));
                     }
                     return None;
@@ -286,51 +286,8 @@ impl StubEditor {
                 _ => {}
             }
         }
-        self.editor.input(crossterm_key_to_input(key));
+        self.editor.input(ratatui_textarea::Input::from(key));
         None
-    }
-}
-
-/// Convert a `crossterm::event::KeyEvent` to `ratatui_textarea::Input`.
-///
-/// ratatui-textarea uses its own re-exported crossterm types which differ from
-/// the standalone `crossterm` crate used by the rest of the app.
-pub(super) fn crossterm_key_to_input(key: KeyEvent) -> ratatui_textarea::Input {
-    use ratatui_textarea::{Input, Key};
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-    let k = match key.code {
-        KeyCode::Char(c) => Key::Char(c),
-        KeyCode::Backspace => Key::Backspace,
-        KeyCode::Enter => Key::Enter,
-        KeyCode::Left => Key::Left,
-        KeyCode::Right => Key::Right,
-        KeyCode::Up => Key::Up,
-        KeyCode::Down => Key::Down,
-        KeyCode::Tab => Key::Tab,
-        KeyCode::BackTab => {
-            return Input {
-                key: Key::Tab,
-                ctrl,
-                alt,
-                shift: true,
-            };
-        }
-        KeyCode::Delete => Key::Delete,
-        KeyCode::Home => Key::Home,
-        KeyCode::End => Key::End,
-        KeyCode::PageUp => Key::PageUp,
-        KeyCode::PageDown => Key::PageDown,
-        KeyCode::Esc => Key::Esc,
-        KeyCode::F(n) => Key::F(n),
-        _ => Key::Null,
-    };
-    Input {
-        key: k,
-        ctrl,
-        alt,
-        shift,
     }
 }
 
@@ -1002,43 +959,5 @@ pub(crate) mod tests {
         let content = editor.editor.lines().join("\n");
         // Pretty-printed JSON should be multi-line
         assert!(content.lines().count() > 1);
-    }
-
-    // ─── crossterm_key_to_input ───────────────────────────────────────────────
-
-    #[test]
-    fn test_key_to_input_converts_char() {
-        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
-        let input = crossterm_key_to_input(key);
-        assert!(matches!(input.key, ratatui_textarea::Key::Char('a')));
-        assert!(!input.ctrl);
-    }
-
-    #[test]
-    fn test_key_to_input_ctrl_modifier() {
-        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
-        let input = crossterm_key_to_input(key);
-        assert!(input.ctrl);
-    }
-
-    #[test]
-    fn test_key_to_input_special_keys() {
-        use ratatui_textarea::Key;
-        let cases = [
-            (KeyCode::Enter, Key::Enter),
-            (KeyCode::Backspace, Key::Backspace),
-            (KeyCode::Esc, Key::Esc),
-            (KeyCode::Home, Key::Home),
-            (KeyCode::End, Key::End),
-        ];
-        for (code, expected) in cases {
-            let key = KeyEvent::new(code, KeyModifiers::NONE);
-            let input = crossterm_key_to_input(key);
-            assert_eq!(
-                std::mem::discriminant(&input.key),
-                std::mem::discriminant(&expected),
-                "Key {code:?} should map to {expected:?}"
-            );
-        }
     }
 }

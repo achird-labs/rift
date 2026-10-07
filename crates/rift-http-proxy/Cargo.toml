@@ -64,7 +64,6 @@ uuid.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender = "0.2"
-prometheus = "0.13"
 
 # CLI
 clap = { workspace = true, features = ["env"] }
@@ -87,12 +86,10 @@ arc-swap = "1.7"
 subtle = "2"
 chrono.workspace = true
 regex = "1.11"
-rand.workspace = true
 urlencoding = "2.1"
-similar = "2.6"
+similar = "3"
 anyhow.workspace = true
 thiserror.workspace = true
-socket2 = "0.5"
 num_cpus = "1.16"
 libc = "0.2"
 parking_lot = "0.12"
@@ -106,7 +103,7 @@ core_affinity = "0.8"
 mimalloc = { version = "0.1", optional = true }
 # Allocator bake-off candidate (issue #717): opt-in alternative to mimalloc for A/B
 # throughput/RSS comparison; never both wired as the active allocator (see [features]).
-tikv-jemallocator = { version = "0.6", optional = true }
+tikv-jemallocator = { version = "0.7", optional = true }
 
 # XML/XPath support for Mountebank compatibility
 sxd-document = "0.3"
@@ -125,7 +122,7 @@ features = ["test-util"]
 # Test-only: drives a real WebSocket handshake and real frames through the intercept tunnel
 # (issue #997). `handshake` only — the TLS legs are built from the repo's own rustls config, so
 # none of this crate's TLS features are wanted.
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 # `WebSocketStream` is a `Stream`/`Sink`; the combinators come from here.
 futures-util = "0.3"
 # Turn on the failing flow-store backend for backend-outage tests (issue #318)
@@ -141,9 +138,9 @@ p12 = "0.6"
 reqwest = { workspace = true, features = ["http2"] }
 tokio-test = "0.4"
 assert-json-diff = "2.0"
-serial_test = "3.0"
+serial_test = "4"
 tracing-test = "0.2"
-port_check = "0.2"
+port_check = "0.3"
 
 [features]
 default = ["redis-backend", "javascript", "mimalloc", "quamina-matching"]
