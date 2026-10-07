@@ -6,7 +6,7 @@
 use super::behavior_pipeline::{BehaviorOutcome, BehaviorRun, ServedParts};
 use super::conditional::{self, ConditionalSpec};
 use super::core::Imposter;
-use super::core::{ProxiedResponse, ProxyOutcome};
+use super::core::{ProxiedResponse, ProxyBody, ProxyOutcome};
 use super::headers::sanitize_header_value;
 use super::predicates::parse_query_string;
 use super::response::{execute_stub_response_with_rift, get_rift_script_config};
@@ -59,6 +59,12 @@ enum BodyReadError {
     /// The body could not be read to completion — a client transmission failure (`400`). The cause
     /// is kept boxed, not stringified (the #688 lesson), so the log site renders it in full.
     Read(Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// Pair the request's bytes with their string form for the proxy (issue #1321). Both are `Some`
+/// together by construction in `handle_request_inner`.
+fn proxy_body<'a>(raw: Option<&'a Bytes>, text: Option<&'a str>) -> Option<ProxyBody<'a>> {
+    raw.zip(text).map(|(raw, text)| ProxyBody { raw, text })
 }
 
 /// Collect a request body under a size cap, distinguishing the cap breach from a read failure.
@@ -1182,7 +1188,7 @@ async fn handle_request_inner(
                     method_str,
                     &uri,
                     &request_headers,
-                    body_string.as_deref(),
+                    proxy_body(body_bytes.as_ref(), body_string.as_deref()),
                     run.as_ref(),
                 )
                 .await
@@ -2022,7 +2028,7 @@ async fn handle_request_inner(
                 method_str,
                 &uri,
                 &request_headers,
-                body_string.as_deref(),
+                proxy_body(body_bytes.as_ref(), body_string.as_deref()),
                 None,
             )
             .await

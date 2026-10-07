@@ -12,6 +12,17 @@ use std::hash::BuildHasher;
 /// `(status, headers, body, latency_ms)`.
 type ForwardedResponse = (u16, Vec<(String, String)>, bytes::Bytes, u64);
 
+/// The request body as the handler already holds it (issue #1321). `raw` is what the client sent:
+/// it is forwarded and keyed on, and is a `Bytes` handle so forwarding it is a refcount bump.
+/// `text` is the form the journal and predicates use: the body as-is when it is UTF-8, its base64
+/// otherwise (issue #636). A generated `body` predicate must use `text`, because the matcher
+/// compares it against the next request's text form.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProxyBody<'a> {
+    pub raw: &'a bytes::Bytes,
+    pub text: &'a str,
+}
+
 /// A proxied response ready to serve: the upstream's, or a recorded one replayed.
 #[derive(Debug)]
 pub(crate) struct ProxiedResponse {
@@ -489,7 +500,7 @@ impl Imposter {
         method: &str,
         uri: &hyper::Uri,
         headers: &HashMap<String, Vec<String>, SH>,
-        body: Option<&str>,
+        body: Option<ProxyBody<'_>>,
         behaviors: Option<&BehaviorRun<'_, SH>>,
     ) -> anyhow::Result<ProxyOutcome>
     where
@@ -537,7 +548,7 @@ impl Imposter {
         // chose the identity and the key is unchanged.
         let mut signature = RequestSignature::new(method, uri.path(), uri.query(), &[]);
         if proxy_config.predicate_generators.is_empty() {
-            signature = signature.with_body(body.unwrap_or_default().as_bytes());
+            signature = signature.with_body(body.map_or(&[][..], |b| b.raw.as_ref()));
         }
         let port = self.journal_port();
 
@@ -627,8 +638,8 @@ impl Imposter {
             }
 
             // Add body if present
-            if let Some(body_str) = body {
-                request = request.body(body_str.to_string());
+            if let Some(proxy_body) = body {
+                request = request.body(proxy_body.raw.clone());
             }
 
             // Send request
@@ -747,7 +758,7 @@ impl Imposter {
                         let method = method.to_string();
                         let path = uri.path().to_string();
                         let headers = headers.clone();
-                        let body = body.map(str::to_string);
+                        let body = body.map(|b| b.text.to_string());
                         let query = uri.query().map(str::to_string);
                         let timeout = std::time::Duration::from_millis(
                             crate::scripting::resolve_script_timeout_ms(&self.config),
@@ -782,7 +793,7 @@ impl Imposter {
                             method,
                             uri.path(),
                             headers,
-                            body,
+                            body.map(|b| b.text),
                             uri.query(),
                         )
                         .map_err(|e| (e.kind(), e.to_string()))

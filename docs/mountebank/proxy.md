@@ -280,6 +280,8 @@ anything is recorded, as in Mountebank. The client, the proxy recording and the 
   configuration did not ask for.
 - A body that is not UTF-8 reaches the behaviors base64-encoded, as a `_mode: "binary"` body
   does, and is decoded before it is served.
+- A request body that is not UTF-8 reaches the upstream as the bytes the client sent. Only the
+  request journal, the predicates and the behaviors see its base64 form.
 - The upstream's `content-length` is dropped when behaviors run, since they can change the body's
   length; the served length is computed from the body.
 
