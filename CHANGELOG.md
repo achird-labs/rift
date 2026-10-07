@@ -130,6 +130,15 @@ record.
   decompression or system-proxy support was added; `HTTP(S)_PROXY`/`NO_PROXY` are honoured as
   before.
 
+- **Dependency majors.** boa_engine 0.20 → 0.22 (the `inject`/JS engine; its new default
+  features — Temporal, float16 — stay off, so the script environment is unchanged), redis 0.26 →
+  1.x (`rift-store-redis`; a wildcard host such as `redis://0.0.0.0:6379` is now refused at
+  connect), rcgen 0.13 → 0.14 (intercept CA and leaves are minted as before), rand 0.10, base64
+  0.23, prometheus 0.14, quamina 0.7, socket2 0.6, x509-parser 0.18, crossterm 0.29, dirs 7,
+  similar 3, tikv-jemallocator 0.7, and test/bench tooling (criterion 0.8, testcontainers 0.28,
+  tokio-tungstenite 0.30, serial_test 4, port_check 0.3). `lazy_static`, `fake` and several unused
+  direct dependencies are gone.
+
 - **templates/optimizely: the datafile CDN now uses `_rift.conditional`** (#1295): `Last-Modified` is the stub's load time and an `ETag` is served; a reload that changes `fixtures/datafile.json` invalidates pollers without touching `imposters.json`. Wire-visible: the fixed `Sat, 03 Oct 2026 12:00:00 GMT` stamp is gone, so a test that copied it as an `If-Modified-Since` will now get a 200 or a different 304 timing.
 
 ### Performance
