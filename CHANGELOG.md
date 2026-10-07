@@ -11,6 +11,8 @@ record.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-07
+
 ### Added
 
 - **`PUT /imposters` returns the apply report, and `toggled` is reported everywhere** (#1304): a successful `PUT /imposters` still answers `200 {"imposters":[...]}`, now with `created`, `replaced`, `stubPatched`, `toggled` and `deleted` port arrays beside it (the same lists `POST /admin/reload` reports). `toggled` (ports whose only change was `enabled`) was computed but never serialized; it is now present on every reload reply, the `PUT /imposters` replies and `rift_apply_config`. No ABI bump.
@@ -4057,7 +4059,8 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/achird-labs/rift/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/achird-labs/rift/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/achird-labs/rift/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/achird-labs/rift/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/achird-labs/rift/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/achird-labs/rift/compare/v0.17.0...v0.18.0
