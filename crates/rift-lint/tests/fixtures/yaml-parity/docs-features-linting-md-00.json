@@ -1,0 +1,19 @@
+{
+  "name": "docs-features-linting-md-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": [
+        {
+          "name": "Lint Imposters",
+          "uses": "docker://zainalpour/rift-lint:latest",
+          "with": {
+            "args": "./imposters/ --strict"
+          }
+        }
+      ]
+    }
+  },
+  "source": "docs/features/linting.md",
+  "yaml": "- name: Lint Imposters\n  uses: docker://zainalpour/rift-lint:latest\n  with:\n    args: ./imposters/ --strict\n"
+}

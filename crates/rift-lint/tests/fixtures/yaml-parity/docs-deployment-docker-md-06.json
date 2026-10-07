@@ -1,0 +1,29 @@
+{
+  "name": "docs-deployment-docker-md-06",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "services": {
+          "rift": {
+            "deploy": {
+              "resources": {
+                "limits": {
+                  "cpus": "2",
+                  "memory": "512M"
+                },
+                "reservations": {
+                  "cpus": "0.5",
+                  "memory": "128M"
+                }
+              }
+            },
+            "image": "zainalpour/rift-proxy:latest"
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/docker.md",
+  "yaml": "services:\n  rift:\n    image: zainalpour/rift-proxy:latest\n    deploy:\n      resources:\n        limits:\n          cpus: '2'\n          memory: 512M\n        reservations:\n          cpus: '0.5'\n          memory: 128M\n"
+}

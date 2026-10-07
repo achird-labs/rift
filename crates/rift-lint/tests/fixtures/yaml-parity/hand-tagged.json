@@ -1,0 +1,8 @@
+{
+  "name": "hand-tagged",
+  "outcome": {
+    "error": "d: invalid type: enum, expected any JSON value at line 4 column 4"
+  },
+  "source": "hand-written",
+  "yaml": "a: !!str 123\nb: !!int '7'\nc: !!float 1\nd: !custom foo\n"
+}

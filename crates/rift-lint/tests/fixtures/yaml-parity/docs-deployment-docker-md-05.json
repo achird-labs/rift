@@ -1,0 +1,50 @@
+{
+  "name": "docs-deployment-docker-md-05",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "services": {
+          "rift": {
+            "healthcheck": {
+              "interval": "5s",
+              "retries": 10,
+              "test": [
+                "CMD",
+                "rift",
+                "healthcheck"
+              ],
+              "timeout": "3s"
+            },
+            "image": "zainalpour/rift-proxy:latest",
+            "ports": [
+              "2525:2525",
+              "4545:4545"
+            ]
+          },
+          "tests": {
+            "build": {
+              "context": ".",
+              "dockerfile": "Dockerfile.test"
+            },
+            "command": [
+              "npm",
+              "test"
+            ],
+            "depends_on": {
+              "rift": {
+                "condition": "service_healthy"
+              }
+            },
+            "environment": [
+              "MOCK_SERVER_URL=http://rift:4545",
+              "MOCK_ADMIN_URL=http://rift:2525"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/docker.md",
+  "yaml": "services:\n  rift:\n    image: zainalpour/rift-proxy:latest\n    ports:\n      - \"2525:2525\"\n      - \"4545:4545\"\n    healthcheck:\n      test: [\"CMD\", \"rift\", \"healthcheck\"]\n      interval: 5s\n      timeout: 3s\n      retries: 10\n\n  tests:\n    build:\n      context: .\n      dockerfile: Dockerfile.test\n    environment:\n      - MOCK_SERVER_URL=http://rift:4545\n      - MOCK_ADMIN_URL=http://rift:2525\n    depends_on:\n      rift:\n        condition: service_healthy\n    command: [\"npm\", \"test\"]\n"
+}

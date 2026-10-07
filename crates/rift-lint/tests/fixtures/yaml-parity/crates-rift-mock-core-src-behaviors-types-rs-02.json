@@ -1,0 +1,14 @@
+{
+  "name": "crates-rift-mock-core-src-behaviors-types-rs-02",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "shellTransform": "echo 'transformed'",
+        "wait": 100
+      }
+    }
+  },
+  "source": "crates/rift-mock-core/src/behaviors/types.rs",
+  "yaml": "\nwait: 100\nshellTransform: \"echo 'transformed'\"\n"
+}

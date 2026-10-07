@@ -1,0 +1,23 @@
+{
+  "name": "docs-features-linting-md-02",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "lint": {
+          "artifacts": {
+            "reports": {
+              "codequality": "lint-results.json"
+            }
+          },
+          "image": "zainalpour/rift-lint:latest",
+          "script": [
+            "rift-lint ./imposters/ --output json > lint-results.json"
+          ]
+        }
+      }
+    }
+  },
+  "source": "docs/features/linting.md",
+  "yaml": "lint:\n  image: zainalpour/rift-lint:latest\n  script:\n    - rift-lint ./imposters/ --output json > lint-results.json\n  artifacts:\n    reports:\n      codequality: lint-results.json\n"
+}

@@ -1,0 +1,16 @@
+{
+  "name": "hand-float-whole",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": [
+        {
+          "port": 3000.0,
+          "protocol": "http"
+        }
+      ]
+    }
+  },
+  "source": "hand-written",
+  "yaml": "- port: 3000.0\n  protocol: http\n"
+}

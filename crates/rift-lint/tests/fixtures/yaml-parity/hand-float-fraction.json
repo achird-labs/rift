@@ -1,0 +1,15 @@
+{
+  "name": "hand-float-fraction",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": [
+        {
+          "port": 3000.5
+        }
+      ]
+    }
+  },
+  "source": "hand-written",
+  "yaml": "- port: 3000.5\n"
+}

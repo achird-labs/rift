@@ -1,0 +1,16 @@
+{
+  "name": "hand-quoted-strings",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "a": "x\tyé\n",
+        "b": "it's",
+        "c": "",
+        "d": ""
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "a: \"x\\ty\\u00e9\\n\"\nb: 'it''s'\nc: \"\"\nd: ''\n"
+}

@@ -1,0 +1,58 @@
+{
+  "name": "docs-features-tls-md-01",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+          "name": "rift"
+        },
+        "spec": {
+          "containers": [
+            {
+              "args": [
+                "--configfile",
+                "/config/imposters.json",
+                "--default-tls-cert",
+                "/certs/tls.crt",
+                "--default-tls-key",
+                "/certs/tls.key"
+              ],
+              "image": "zainalpour/rift-proxy:latest",
+              "name": "rift",
+              "volumeMounts": [
+                {
+                  "mountPath": "/certs",
+                  "name": "tls",
+                  "readOnly": true
+                },
+                {
+                  "mountPath": "/config",
+                  "name": "config"
+                }
+              ]
+            }
+          ],
+          "volumes": [
+            {
+              "name": "tls",
+              "secret": {
+                "secretName": "rift-tls"
+              }
+            },
+            {
+              "configMap": {
+                "name": "rift-config"
+              },
+              "name": "config"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "source": "docs/features/tls.md",
+  "yaml": "apiVersion: v1\nkind: Pod\nmetadata:\n  name: rift\nspec:\n  containers:\n    - name: rift\n      image: zainalpour/rift-proxy:latest\n      args: [\"--configfile\", \"/config/imposters.json\",\n             \"--default-tls-cert\", \"/certs/tls.crt\",\n             \"--default-tls-key\", \"/certs/tls.key\"]\n      volumeMounts:\n        - name: tls\n          mountPath: /certs\n          readOnly: true\n        - name: config\n          mountPath: /config\n  volumes:\n    - name: tls\n      secret:\n        secretName: rift-tls\n    - name: config\n      configMap:\n        name: rift-config\n"
+}

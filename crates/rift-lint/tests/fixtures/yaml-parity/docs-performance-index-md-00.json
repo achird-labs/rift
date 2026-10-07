@@ -1,0 +1,22 @@
+{
+  "name": "docs-performance-index-md-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "resources": {
+          "limits": {
+            "cpu": "2000m",
+            "memory": "512Mi"
+          },
+          "requests": {
+            "cpu": "1000m",
+            "memory": "256Mi"
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/performance/index.md",
+  "yaml": "# Recommended for high throughput\nresources:\n  requests:\n    cpu: 1000m\n    memory: 256Mi\n  limits:\n    cpu: 2000m\n    memory: 512Mi\n"
+}

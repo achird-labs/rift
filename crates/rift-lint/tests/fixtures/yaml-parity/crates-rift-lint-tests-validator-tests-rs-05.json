@@ -1,0 +1,35 @@
+{
+  "name": "crates-rift-lint-tests-validator-tests-rs-05",
+  "outcome": {
+    "ok": {
+      "duplicates": [
+        [
+          "[0].stubs[0].responses[0].proxy.injectHeaders",
+          "X-Id"
+        ]
+      ],
+      "value": [
+        {
+          "port": 3000,
+          "protocol": "http",
+          "stubs": [
+            {
+              "responses": [
+                {
+                  "proxy": {
+                    "injectHeaders": {
+                      "X-Id": "b"
+                    },
+                    "to": "http://x"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "source": "crates/rift-lint/tests/validator_tests.rs",
+  "yaml": "- port: 3000\n  protocol: http\n  stubs:\n    - responses:\n        - proxy:\n            to: http://x\n            injectHeaders:\n              X-Id: a\n              X-Id: b\n"
+}

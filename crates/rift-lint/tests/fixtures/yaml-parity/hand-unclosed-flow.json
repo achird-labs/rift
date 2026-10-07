@@ -1,0 +1,8 @@
+{
+  "name": "hand-unclosed-flow",
+  "outcome": {
+    "error": "did not find expected ',' or ']' at line 2 column 1, while parsing a flow sequence at line 1 column 7"
+  },
+  "source": "hand-written",
+  "yaml": "port: [unclosed"
+}

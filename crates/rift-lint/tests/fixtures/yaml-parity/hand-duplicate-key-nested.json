@@ -1,0 +1,23 @@
+{
+  "name": "hand-duplicate-key-nested",
+  "outcome": {
+    "ok": {
+      "duplicates": [
+        [
+          "[0].headers",
+          "X"
+        ]
+      ],
+      "value": [
+        {
+          "headers": {
+            "X": "b"
+          },
+          "port": 1
+        }
+      ]
+    }
+  },
+  "source": "hand-written",
+  "yaml": "- port: 1\n  headers:\n    X: a\n    X: b\n"
+}

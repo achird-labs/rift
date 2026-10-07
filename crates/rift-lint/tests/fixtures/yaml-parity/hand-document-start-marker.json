@@ -1,0 +1,13 @@
+{
+  "name": "hand-document-start-marker",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "a": 1
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "---\na: 1\n"
+}

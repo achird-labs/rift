@@ -1,0 +1,58 @@
+{
+  "name": "docs-deployment-kubernetes-md-03",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "rift"
+        },
+        "spec": {
+          "template": {
+            "spec": {
+              "containers": [
+                {
+                  "args": [
+                    "--configfile",
+                    "/config/imposters.json"
+                  ],
+                  "image": "zainalpour/rift-proxy:latest",
+                  "name": "rift",
+                  "ports": [
+                    {
+                      "containerPort": 2525,
+                      "name": "admin"
+                    },
+                    {
+                      "containerPort": 4545,
+                      "name": "imposter"
+                    }
+                  ],
+                  "volumeMounts": [
+                    {
+                      "mountPath": "/config",
+                      "name": "config",
+                      "readOnly": true
+                    }
+                  ]
+                }
+              ],
+              "volumes": [
+                {
+                  "configMap": {
+                    "name": "rift-imposters"
+                  },
+                  "name": "config"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/kubernetes.md",
+  "yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: rift\nspec:\n  template:\n    spec:\n      containers:\n        - name: rift\n          image: zainalpour/rift-proxy:latest\n          args: [\"--configfile\", \"/config/imposters.json\"]\n          ports:\n            - name: admin\n              containerPort: 2525\n            - name: imposter\n              containerPort: 4545\n          volumeMounts:\n            - name: config\n              mountPath: /config\n              readOnly: true\n      volumes:\n        - name: config\n          configMap:\n            name: rift-imposters\n"
+}

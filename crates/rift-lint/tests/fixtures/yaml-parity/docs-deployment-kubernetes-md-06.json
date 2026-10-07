@@ -1,0 +1,62 @@
+{
+  "name": "docs-deployment-kubernetes-md-06",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "my-app"
+        },
+        "spec": {
+          "template": {
+            "spec": {
+              "containers": [
+                {
+                  "env": [
+                    {
+                      "name": "EXTERNAL_API_URL",
+                      "value": "http://localhost:4545"
+                    }
+                  ],
+                  "image": "my-app:latest",
+                  "name": "app"
+                },
+                {
+                  "args": [
+                    "--configfile",
+                    "/config/imposters.json"
+                  ],
+                  "image": "zainalpour/rift-proxy:latest",
+                  "name": "rift",
+                  "ports": [
+                    {
+                      "containerPort": 4545
+                    }
+                  ],
+                  "volumeMounts": [
+                    {
+                      "mountPath": "/config",
+                      "name": "mock-config"
+                    }
+                  ]
+                }
+              ],
+              "volumes": [
+                {
+                  "configMap": {
+                    "name": "my-app-mocks"
+                  },
+                  "name": "mock-config"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/kubernetes.md",
+  "yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-app\nspec:\n  template:\n    spec:\n      containers:\n        # Main application\n        - name: app\n          image: my-app:latest\n          env:\n            - name: EXTERNAL_API_URL\n              value: \"http://localhost:4545\"\n\n        # Rift sidecar\n        - name: rift\n          image: zainalpour/rift-proxy:latest\n          args: [\"--configfile\", \"/config/imposters.json\"]\n          ports:\n            - containerPort: 4545\n          volumeMounts:\n            - name: mock-config\n              mountPath: /config\n\n      volumes:\n        - name: mock-config\n          configMap:\n            name: my-app-mocks\n"
+}

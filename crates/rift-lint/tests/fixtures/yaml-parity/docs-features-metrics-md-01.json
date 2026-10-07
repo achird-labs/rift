@@ -1,0 +1,31 @@
+{
+  "name": "docs-features-metrics-md-01",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "scrape_configs": [
+          {
+            "job_name": "rift",
+            "kubernetes_sd_configs": [
+              {
+                "role": "pod"
+              }
+            ],
+            "relabel_configs": [
+              {
+                "action": "keep",
+                "regex": "rift",
+                "source_labels": [
+                  "__meta_kubernetes_pod_label_app"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "source": "docs/features/metrics.md",
+  "yaml": "scrape_configs:\n  - job_name: 'rift'\n    kubernetes_sd_configs:\n      - role: pod\n    relabel_configs:\n      - source_labels: [__meta_kubernetes_pod_label_app]\n        regex: rift\n        action: keep\n"
+}

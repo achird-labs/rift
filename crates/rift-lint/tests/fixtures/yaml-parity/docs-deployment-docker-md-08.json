@@ -1,0 +1,18 @@
+{
+  "name": "docs-deployment-docker-md-08",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "services": {
+          "rift": {
+            "image": "zainalpour/rift-proxy:latest",
+            "restart": "unless-stopped"
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/docker.md",
+  "yaml": "services:\n  rift:\n    image: zainalpour/rift-proxy:latest\n    restart: unless-stopped\n"
+}

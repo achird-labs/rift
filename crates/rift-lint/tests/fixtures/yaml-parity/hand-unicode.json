@@ -1,0 +1,13 @@
+{
+  "name": "hand-unicode",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "kéy": "välue 😀"
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "kéy: \"välue 😀\"\n"
+}

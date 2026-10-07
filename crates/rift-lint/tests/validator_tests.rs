@@ -2917,7 +2917,7 @@ fn malformed_yaml_is_e001_naming_yaml() {
     );
 }
 
-/// `serde_yaml` refuses a multi-document stream, which is the same answer `--configfile` gives.
+/// `serde_norway` refuses a multi-document stream, which is the same answer `--configfile` gives.
 #[test]
 fn a_multi_document_yaml_stream_is_e001() {
     let two = "\

@@ -1,0 +1,49 @@
+{
+  "name": "docs-deployment-kubernetes-md-13",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+          "name": "rift-policy",
+          "namespace": "test-mocks"
+        },
+        "spec": {
+          "ingress": [
+            {
+              "from": [
+                {
+                  "namespaceSelector": {
+                    "matchLabels": {
+                      "name": "test-runners"
+                    }
+                  }
+                }
+              ],
+              "ports": [
+                {
+                  "port": 2525
+                },
+                {
+                  "port": 4545
+                }
+              ]
+            }
+          ],
+          "podSelector": {
+            "matchLabels": {
+              "app": "rift"
+            }
+          },
+          "policyTypes": [
+            "Ingress"
+          ]
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/kubernetes.md",
+  "yaml": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: rift-policy\n  namespace: test-mocks\nspec:\n  podSelector:\n    matchLabels:\n      app: rift\n  policyTypes:\n    - Ingress\n  ingress:\n    - from:\n        - namespaceSelector:\n            matchLabels:\n              name: test-runners\n      ports:\n        - port: 2525\n        - port: 4545\n"
+}

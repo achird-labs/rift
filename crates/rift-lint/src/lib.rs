@@ -192,7 +192,7 @@ pub struct Document {
     ///
     /// Keyed off the **content**, not the file extension, because that is what the engine keys off:
     /// `config_loader::parse_document` sniffs the first non-whitespace byte and sends `{` and `[`
-    /// to `serde_json`, everything else to `serde_yaml`. A `.yaml` file holding a JSON object is
+    /// to `serde_json`, everything else to the YAML backend. A `.yaml` file holding a JSON object is
     /// therefore loaded happily by the engine, and must not be reported.
     yaml_sequence_required: bool,
 }
@@ -245,6 +245,31 @@ pub fn parse_document(text: &str) -> Result<Document, serde_json::Error> {
     })
 }
 
+/// A YAML syntax or structure error from [`parse_yaml_document`].
+///
+/// Owned by rift-lint so the public API does not name the YAML crate: the backend has been swapped
+/// once already (`serde_yaml` was archived), and swapping it again must not break embedders. The
+/// message is the backend's, and may be reworded by a backend change.
+pub struct YamlError(serde_norway::Error);
+
+impl std::fmt::Debug for YamlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl std::fmt::Display for YamlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for YamlError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
 /// Parse `text` as YAML into a [`Document`], recording byte-identical duplicate keys before they
 /// collapse. The YAML sibling of [`parse_document`] — kept separate rather than folded into it
 /// because the two fail with different error types (`serde_json::Error` is public API on
@@ -252,13 +277,15 @@ pub fn parse_document(text: &str) -> Result<Document, serde_json::Error> {
 ///
 /// # Errors
 ///
-/// Returns the `serde_yaml::Error` for text that is not valid YAML, including a multi-document
-/// stream (`serde_yaml` refuses those itself — the same answer `rift --configfile` gives).
-pub fn parse_yaml_document(text: &str) -> Result<Document, serde_yaml::Error> {
-    let duplicates = duplicate_keys::find_yaml(text)?;
-    let value = serde_yaml::from_str::<serde_json::Value>(text)?;
+/// Returns a [`YamlError`] for text that is not valid YAML, including a multi-document stream
+/// (the YAML backend refuses those itself — the same answer `rift --configfile` gives).
+pub fn parse_yaml_document(text: &str) -> Result<Document, YamlError> {
+    // `map_err`, not a `From` impl: a public `From<serde_norway::Error>` would put the backend's
+    // type back into the API this wrapper exists to keep it out of.
+    let duplicates = duplicate_keys::find_yaml(text).map_err(YamlError)?;
+    let value = serde_norway::from_str::<serde_json::Value>(text).map_err(YamlError)?;
     // The engine sniffs the first non-whitespace byte, not the extension: `{` and `[` go to
-    // `serde_json`, everything else to `serde_yaml` (`config_loader::parse_document`). A `.yaml`
+    // `serde_json`, everything else to the YAML backend (`config_loader::parse_document`). A `.yaml`
     // file holding a JSON document is loaded fine, so `E046` must not fire for it.
     let trimmed = text.trim_start();
     Ok(Document {

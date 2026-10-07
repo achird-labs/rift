@@ -1,0 +1,54 @@
+{
+  "name": "docs-demo-docker-compose-retry-proxy-yml-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "services": {
+          "rift": {
+            "command": [
+              "--configfile",
+              "/imposters.json",
+              "--loglevel",
+              "debug",
+              "--allow-injection"
+            ],
+            "depends_on": [
+              "upstream"
+            ],
+            "healthcheck": {
+              "interval": "5s",
+              "retries": 5,
+              "test": [
+                "CMD",
+                "rift",
+                "healthcheck"
+              ],
+              "timeout": "3s"
+            },
+            "image": "zainalpour/rift-proxy:latest",
+            "ports": [
+              "2525:2525",
+              "4560:4560"
+            ],
+            "volumes": [
+              "./imposters-retry-proxy.json:/imposters.json:ro"
+            ]
+          },
+          "upstream": {
+            "command": [
+              "-text",
+              "{\"status\":\"success\",\"message\":\"Request reached upstream service\"}"
+            ],
+            "image": "hashicorp/http-echo:latest",
+            "ports": [
+              "8080:5678"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/demo/docker-compose-retry-proxy.yml",
+  "yaml": "services:\n  # Rift proxy with retry simulation\n  rift:\n    image: zainalpour/rift-proxy:latest\n    ports:\n      - \"2525:2525\"   # Admin API\n      - \"4560:4560\"   # Retry proxy imposter\n    volumes:\n      - ./imposters-retry-proxy.json:/imposters.json:ro\n    # --allow-injection: this demo uses inject/_rift.script, which the configfile door\n    # gates since issue #612 — without it rift refuses to start.\n    command: [\"--configfile\", \"/imposters.json\", \"--loglevel\", \"debug\", \"--allow-injection\"]\n    healthcheck:\n      test: [\"CMD\", \"rift\", \"healthcheck\"]\n      interval: 5s\n      timeout: 3s\n      retries: 5\n    depends_on:\n      - upstream\n\n  # Simple upstream service that returns success\n  upstream:\n    image: hashicorp/http-echo:latest\n    # http-echo serves one fixed string. It runs no shell and cannot template, and compose escapes\n    # `$(` to `$$(` anyway, so a `$(date -Iseconds)` here was echoed to the client verbatim rather\n    # than as a time (issue #676). Dropping the field rather than freezing it: this demo has you\n    # send the same request several times, and `test-retry-proxy.sh` prints every response — an\n    # identical timestamp on each one would read as a cached reply, which is the opposite of what a\n    # retry demo is teaching. That the retried request reached the upstream at all is the point, and\n    # `message` already says so.\n    command: [\"-text\", \"{\\\"status\\\":\\\"success\\\",\\\"message\\\":\\\"Request reached upstream service\\\"}\"]\n    ports:\n      - \"8080:5678\"\n"
+}

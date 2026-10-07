@@ -1,0 +1,11 @@
+{
+  "name": "hand-scalar-root",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": "just text"
+    }
+  },
+  "source": "hand-written",
+  "yaml": "just text\n"
+}

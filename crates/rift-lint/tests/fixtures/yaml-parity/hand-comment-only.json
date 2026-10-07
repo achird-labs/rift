@@ -1,0 +1,8 @@
+{
+  "name": "hand-comment-only",
+  "outcome": {
+    "error": "invalid type: Option value, expected any JSON value at line 2 column 1"
+  },
+  "source": "hand-written",
+  "yaml": "# nothing\n"
+}

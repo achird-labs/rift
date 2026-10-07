@@ -1,0 +1,24 @@
+{
+  "name": "crates-rift-mock-core-src-behaviors-types-rs-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "copy": [
+          {
+            "from": "path",
+            "into": "${PATH}",
+            "using": {
+              "method": "regex",
+              "selector": ".*"
+            }
+          }
+        ],
+        "repeat": 3,
+        "wait": 500
+      }
+    }
+  },
+  "source": "crates/rift-mock-core/src/behaviors/types.rs",
+  "yaml": "\nwait: 500\nrepeat: 3\ncopy:\n  - from: path\n    into: \"${PATH}\"\n    using:\n      method: regex\n      selector: \".*\"\n"
+}

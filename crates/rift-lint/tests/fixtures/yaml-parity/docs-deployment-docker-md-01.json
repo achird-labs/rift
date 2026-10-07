@@ -1,0 +1,31 @@
+{
+  "name": "docs-deployment-docker-md-01",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "services": {
+          "rift": {
+            "command": [
+              "--configfile",
+              "/imposters.json"
+            ],
+            "image": "zainalpour/rift-proxy:latest",
+            "ports": [
+              "2525:2525",
+              "4545:4545",
+              "4546:4546",
+              "4547:4547",
+              "9090:9090"
+            ],
+            "volumes": [
+              "./imposters.json:/imposters.json:ro"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/docker.md",
+  "yaml": "services:\n  rift:\n    image: zainalpour/rift-proxy:latest\n    ports:\n      - \"2525:2525\"    # Admin\n      - \"4545:4545\"    # User Service\n      - \"4546:4546\"    # Order Service\n      - \"4547:4547\"    # Payment Service\n      - \"9090:9090\"    # Metrics\n    volumes:\n      - ./imposters.json:/imposters.json:ro\n    command: [\"--configfile\", \"/imposters.json\"]\n"
+}

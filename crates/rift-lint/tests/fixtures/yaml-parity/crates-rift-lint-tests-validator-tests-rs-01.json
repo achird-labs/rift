@@ -1,0 +1,30 @@
+{
+  "name": "crates-rift-lint-tests-validator-tests-rs-01",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": [
+        {
+          "port": 3000,
+          "protocol": "http",
+          "stubs": [
+            {
+              "responses": [
+                {
+                  "is": {
+                    "headers": {
+                      "Content-Length": 256
+                    },
+                    "statusCode": 200
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "source": "crates/rift-lint/tests/validator_tests.rs",
+  "yaml": "- port: 3000\n  protocol: http\n  stubs:\n    - responses:\n        - is:\n            statusCode: 200\n            headers:\n              Content-Length: 256\n"
+}

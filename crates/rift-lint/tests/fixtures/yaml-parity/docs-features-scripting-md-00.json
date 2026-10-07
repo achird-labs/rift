@@ -1,0 +1,37 @@
+{
+  "name": "docs-features-scripting-md-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": [
+        {
+          "_rift": {
+            "flowState": {
+              "backend": "inmemory",
+              "flowIdSource": "header:X-Flow-Id",
+              "ttlSeconds": 300
+            }
+          },
+          "port": 4545,
+          "protocol": "http",
+          "stubs": [
+            {
+              "responses": [
+                {
+                  "_rift": {
+                    "script": {
+                      "code": "fn respond(ctx) {\n  let attempts = ctx.state.incr(\"attempts\");\n  if attempts <= 2 {\n    http(503, #{ error: \"Temporary failure\", attempt: attempts })\n  } else {\n    pass()\n  }\n}\n",
+                      "engine": "rhai"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "source": "docs/features/scripting.md",
+  "yaml": "- port: 4545\n  protocol: http\n  _rift:\n    flowState: { backend: inmemory, ttlSeconds: 300, flowIdSource: \"header:X-Flow-Id\" }\n  stubs:\n    - responses:\n        - _rift:\n            script:\n              engine: rhai\n              # Block scalar: the exact retry logic from the JSON example above, just readable.\n              code: |\n                fn respond(ctx) {\n                  let attempts = ctx.state.incr(\"attempts\");\n                  if attempts <= 2 {\n                    http(503, #{ error: \"Temporary failure\", attempt: attempts })\n                  } else {\n                    pass()\n                  }\n                }\n"
+}

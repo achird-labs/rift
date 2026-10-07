@@ -311,7 +311,7 @@ enum LoadError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
-    Yaml(#[from] serde_yaml::Error),
+    Yaml(#[from] rift_lint::YamlError),
 }
 
 /// A file read for linting (issue #1108). `rendered` is whether its text had EJS tags that were

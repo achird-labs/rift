@@ -1,0 +1,34 @@
+{
+  "name": "hand-anchor-alias",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "base": {
+          "headers": {
+            "A": "b"
+          },
+          "statusCode": 200
+        },
+        "list": [
+          {
+            "headers": {
+              "A": "b"
+            },
+            "statusCode": 200
+          },
+          5,
+          5
+        ],
+        "use": {
+          "headers": {
+            "A": "b"
+          },
+          "statusCode": 200
+        }
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "base: &b\n  statusCode: 200\n  headers: {A: b}\nuse: *b\nlist:\n  - *b\n  - &c 5\n  - *c\n"
+}

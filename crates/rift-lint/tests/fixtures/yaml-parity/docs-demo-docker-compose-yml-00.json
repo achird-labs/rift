@@ -1,0 +1,46 @@
+{
+  "name": "docs-demo-docker-compose-yml-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "services": {
+          "rift": {
+            "command": [
+              "--configfile",
+              "/imposters.json"
+            ],
+            "container_name": "rift-demo",
+            "environment": [
+              "MB_PORT=2525",
+              "MB_ALLOW_INJECTION=true",
+              "RUST_LOG=info"
+            ],
+            "healthcheck": {
+              "interval": "10s",
+              "retries": 3,
+              "test": [
+                "CMD",
+                "rift",
+                "healthcheck"
+              ],
+              "timeout": "5s"
+            },
+            "image": "zainalpour/rift-proxy:latest",
+            "ports": [
+              "2525:2525",
+              "4545:4545",
+              "4546:4546",
+              "9090:9090"
+            ],
+            "volumes": [
+              "./imposters.json:/imposters.json:ro"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/demo/docker-compose.yml",
+  "yaml": "# Rift Demo - Mountebank-Compatible Mode\n#\n# Quick Start:\n#   docker compose up -d\n#   curl http://localhost:4545/health\n#\n# This demo shows Rift running in Mountebank-compatible mode with\n# two mock API services (User API on 4545, Order API on 4546).\n\nservices:\n  rift:\n    image: zainalpour/rift-proxy:latest\n    container_name: rift-demo\n    ports:\n      - \"2525:2525\"    # Admin API\n      - \"4545:4545\"    # User API Mock\n      - \"4546:4546\"    # Order API Mock\n      - \"9090:9090\"    # Metrics\n    environment:\n      - MB_PORT=2525\n      - MB_ALLOW_INJECTION=true\n      - RUST_LOG=info\n    volumes:\n      - ./imposters.json:/imposters.json:ro\n    command: [\"--configfile\", \"/imposters.json\"]\n    healthcheck:\n      test: [\"CMD\", \"rift\", \"healthcheck\"]\n      interval: 10s\n      timeout: 5s\n      retries: 3\n"
+}

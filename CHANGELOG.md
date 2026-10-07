@@ -29,6 +29,8 @@ record.
   non-canonical spelling (`proxyalways`) toward the canonical name. Configs an older engine admitted
   still replay (rift-cluster). `recording::ProxyMode::default()` is now `ProxyOnce`.
 
+- **YAML parsing moved from the archived `serde_yaml` to `serde_norway`** (#1315): `serde_yaml` is deprecated and unmaintained upstream. `serde_norway` is a rename fork with the same API, backed by `unsafe-libyaml-norway` (replacing `unsafe-libyaml` in the lock). No parsing change: a golden corpus generated with the old crate (`crates/rift-lint/tests/fixtures/yaml-parity/`, 100 cases: the top-level YAML blocks in `docs/`, the inline YAML in the tests, the demo compose files, and hand-written float, anchor, duplicate-key and multi-document cases) parses to the same values and fails on the same inputs. **Rust embedders of `rift-lint`:** `parse_yaml_document` now returns the new `rift_lint::YamlError` (implements `Display` and `std::error::Error`, does not expose the YAML crate's type) instead of `serde_yaml::Error`, so the backend can change again without another break. `rift-mock-core` now uses the YAML crate in tests only (dev-dependency).
+
 ### Fixed
 
 - **`proxyAlways` written in another case placed its recorded stub before the proxy stub**

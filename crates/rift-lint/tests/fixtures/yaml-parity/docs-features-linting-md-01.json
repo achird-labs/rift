@@ -1,0 +1,16 @@
+{
+  "name": "docs-features-linting-md-01",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": [
+        {
+          "name": "Lint Imposters",
+          "run": "docker run --rm -v ${% raw %}{{ github.workspace }}{% endraw %}:/imposters \\\n  zainalpour/rift-lint:latest . --strict\n"
+        }
+      ]
+    }
+  },
+  "source": "docs/features/linting.md",
+  "yaml": "- name: Lint Imposters\n  run: |\n    docker run --rm -v ${% raw %}{{ github.workspace }}{% endraw %}:/imposters \\\n      zainalpour/rift-lint:latest . --strict\n"
+}

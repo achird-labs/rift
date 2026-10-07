@@ -1,0 +1,8 @@
+{
+  "name": "docs-deployment-kubernetes-md-12",
+  "outcome": {
+    "error": "deserializing from YAML containing more than one document is not supported"
+  },
+  "source": "docs/deployment/kubernetes.md",
+  "yaml": "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: test-mocks\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: rift\n  namespace: test-mocks\nspec:\n  # ... deployment spec\n"
+}

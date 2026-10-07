@@ -1,0 +1,8 @@
+{
+  "name": "hand-bad-indent",
+  "outcome": {
+    "error": "did not find expected key at line 3 column 2, while parsing a block mapping"
+  },
+  "source": "hand-written",
+  "yaml": "a:\n  b: 1\n c: 2\n"
+}

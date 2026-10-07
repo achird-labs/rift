@@ -1,0 +1,30 @@
+{
+  "name": "docs-deployment-kubernetes-md-01",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "livenessProbe": {
+          "exec": {
+            "command": [
+              "rift",
+              "healthcheck"
+            ]
+          },
+          "timeoutSeconds": 3
+        },
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "rift",
+              "healthcheck"
+            ]
+          },
+          "timeoutSeconds": 3
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/kubernetes.md",
+  "yaml": "          livenessProbe:\n            exec:\n              command: [\"rift\", \"healthcheck\"]\n            timeoutSeconds: 3\n          readinessProbe:\n            exec:\n              command: [\"rift\", \"healthcheck\"]\n            timeoutSeconds: 3\n"
+}

@@ -382,11 +382,11 @@ mod tests {
     #[test]
     fn test_wait_behavior_serde() {
         let yaml = "100";
-        let wait: WaitBehavior = serde_yaml::from_str(yaml).unwrap();
+        let wait: WaitBehavior = serde_norway::from_str(yaml).unwrap();
         assert!(matches!(wait, WaitBehavior::Fixed(100)));
 
         let yaml = "min: 100\nmax: 200";
-        let wait: WaitBehavior = serde_yaml::from_str(yaml).unwrap();
+        let wait: WaitBehavior = serde_norway::from_str(yaml).unwrap();
         assert!(matches!(
             wait,
             WaitBehavior::Range {

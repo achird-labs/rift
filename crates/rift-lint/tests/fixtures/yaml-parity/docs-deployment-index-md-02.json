@@ -1,0 +1,28 @@
+{
+  "name": "docs-deployment-index-md-02",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "livenessProbe": {
+          "httpGet": {
+            "path": "/health",
+            "port": 2525
+          },
+          "initialDelaySeconds": 5,
+          "periodSeconds": 10
+        },
+        "readinessProbe": {
+          "httpGet": {
+            "path": "/health",
+            "port": 2525
+          },
+          "initialDelaySeconds": 5,
+          "periodSeconds": 5
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/index.md",
+  "yaml": "livenessProbe:\n  httpGet:\n    path: /health\n    port: 2525\n  initialDelaySeconds: 5\n  periodSeconds: 10\n\nreadinessProbe:\n  httpGet:\n    path: /health\n    port: 2525\n  initialDelaySeconds: 5\n  periodSeconds: 5\n"
+}

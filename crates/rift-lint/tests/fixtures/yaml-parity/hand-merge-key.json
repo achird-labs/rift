@@ -1,0 +1,23 @@
+{
+  "name": "hand-merge-key",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "base": {
+          "x": 1,
+          "y": 2
+        },
+        "derived": {
+          "<<": {
+            "x": 1,
+            "y": 2
+          },
+          "y": 3
+        }
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "base: &b\n  x: 1\n  y: 2\nderived:\n  <<: *b\n  y: 3\n"
+}

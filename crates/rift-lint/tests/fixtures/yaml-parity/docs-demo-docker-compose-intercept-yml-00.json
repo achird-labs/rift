@@ -1,0 +1,70 @@
+{
+  "name": "docs-demo-docker-compose-intercept-yml-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "services": {
+          "rift": {
+            "command": [
+              "--configfile",
+              "/config/imposters-intercept.json"
+            ],
+            "container_name": "rift-intercept-demo",
+            "healthcheck": {
+              "interval": "5s",
+              "retries": 10,
+              "test": [
+                "CMD",
+                "rift",
+                "healthcheck"
+              ],
+              "timeout": "3s"
+            },
+            "image": "zainalpour/rift-proxy:latest",
+            "ports": [
+              "2525:2525"
+            ],
+            "volumes": [
+              "./imposters-intercept.json:/config/imposters-intercept.json:ro",
+              "./fixtures:/config/fixtures:ro",
+              "./intercept-ca:/intercept-ca:ro"
+            ]
+          },
+          "sut": {
+            "command": [
+              "sleep",
+              "infinity"
+            ],
+            "container_name": "rift-intercept-demo-sut",
+            "depends_on": {
+              "rift": {
+                "condition": "service_healthy"
+              }
+            },
+            "environment": [
+              "HTTPS_PROXY=http://rift:8080"
+            ],
+            "healthcheck": {
+              "interval": "5s",
+              "retries": 6,
+              "test": [
+                "CMD",
+                "sh",
+                "-c",
+                "curl -fsS --cacert /certs/rift-ca.pem https://cdn.optimizely.com/datafiles/demo.json | grep -q '\"revision\"'"
+              ],
+              "timeout": "5s"
+            },
+            "image": "curlimages/curl:8.11.1",
+            "volumes": [
+              "./intercept-ca/ca-cert.pem:/certs/rift-ca.pem:ro"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/demo/docker-compose-intercept.yml",
+  "yaml": "# Rift Demo - HTTPS intercept proxy, standalone\n#\n# A system under test in its own container sends its HTTPS traffic through rift's intercept\n# listener (HTTPS_PROXY). Rift terminates TLS with a CA the SUT already trusts, and a rule forwards\n# cdn.optimizely.com to an imposter that serves a datafile from disk. Nothing calls the admin API:\n# the config file declares the imposter, the listener and the rule.\n#\n# Prerequisites (the CA must exist before either container starts):\n#   ./generate-intercept-ca.sh\n#\n# Quick Start:\n#   docker compose -f docker-compose-intercept.yml up -d --wait\n#   ./test-intercept.sh          # edits the datafile, reloads, and shows the SUT sees the change\n#\n# The intercept port (8080) is deliberately not published: the SUT reaches it over the compose\n# network, as a SUT in another container (or another ECS task container) would.\n\nservices:\n  rift:\n    image: zainalpour/rift-proxy:latest\n    container_name: rift-intercept-demo\n    ports:\n      - \"2525:2525\"    # Admin API\n    volumes:\n      - ./imposters-intercept.json:/config/imposters-intercept.json:ro\n      - ./fixtures:/config/fixtures:ro\n      - ./intercept-ca:/intercept-ca:ro\n    command: [\"--configfile\", \"/config/imposters-intercept.json\"]\n    healthcheck:\n      test: [\"CMD\", \"rift\", \"healthcheck\"]\n      interval: 5s\n      timeout: 3s\n      retries: 10\n\n  # The system under test: plain curl, configured only by environment, the way an app container\n  # is. Its healthcheck is the assertion CI enforces: the datafile arrives through the MITM.\n  sut:\n    image: curlimages/curl:8.11.1\n    container_name: rift-intercept-demo-sut\n    depends_on:\n      rift:\n        condition: service_healthy\n    environment:\n      - HTTPS_PROXY=http://rift:8080\n    volumes:\n      - ./intercept-ca/ca-cert.pem:/certs/rift-ca.pem:ro\n    command: [\"sleep\", \"infinity\"]\n    healthcheck:\n      test: [\"CMD\", \"sh\", \"-c\", \"curl -fsS --cacert /certs/rift-ca.pem https://cdn.optimizely.com/datafiles/demo.json | grep -q '\\\"revision\\\"'\"]\n      interval: 5s\n      timeout: 5s\n      retries: 6\n"
+}

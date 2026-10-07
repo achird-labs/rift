@@ -1,0 +1,8 @@
+{
+  "name": "docs-deployment-kubernetes-md-07",
+  "outcome": {
+    "error": "deserializing from YAML containing more than one document is not supported"
+  },
+  "source": "docs/deployment/kubernetes.md",
+  "yaml": "apiVersion: v1\nkind: Secret\nmetadata:\n  name: rift-intercept-ca\nstringData:\n  ca-cert.pem: |\n    -----BEGIN CERTIFICATE-----\n    ...\n  ca-key.pem: |\n    -----BEGIN PRIVATE KEY-----\n    ...\n---\n# in the Deployment's pod spec\nsecurityContext:\n  fsGroup: 1000                  # rift runs as uid 1000; lets it read the 0440 key\ncontainers:\n  - name: app\n    image: my-app:latest\n    env:\n      - name: HTTPS_PROXY\n        value: http://127.0.0.1:8080\n      - name: NO_PROXY\n        value: localhost,127.0.0.1,.svc,.cluster.local   # in-cluster hosts bypass the proxy\n      - name: SSL_CERT_FILE\n        value: /certs/ca-cert.pem\n    volumeMounts:\n      - name: ca\n        mountPath: /certs\n        readOnly: true\n  - name: rift\n    image: zainalpour/rift-proxy:latest\n    args: [\"--configfile\", \"/config/mock.json\"]   # holds the `intercept` block and its rules\n    volumeMounts:\n      - name: mock-config\n        mountPath: /config\n      - name: ca-pair\n        mountPath: /ca\n        readOnly: true\nvolumes:\n  - name: ca\n    secret:\n      secretName: rift-intercept-ca\n      items: [{ key: ca-cert.pem, path: ca-cert.pem }]   # the app never gets the key\n  - name: ca-pair\n    secret:\n      secretName: rift-intercept-ca\n      defaultMode: 0440\n      items:\n        - { key: ca-cert.pem, path: ca-cert.pem }\n        - { key: ca-key.pem, path: ca-key.pem }\n  - name: mock-config\n    configMap:\n      name: my-app-mocks\n"
+}

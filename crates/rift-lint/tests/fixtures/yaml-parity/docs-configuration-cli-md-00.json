@@ -1,0 +1,35 @@
+{
+  "name": "docs-configuration-cli-md-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "services": {
+          "rift": {
+            "command": [
+              "--configfile",
+              "/imposters.json"
+            ],
+            "environment": [
+              "MB_PORT=2525",
+              "MB_ALLOW_INJECTION=true",
+              "RUST_LOG=info"
+            ],
+            "image": "zainalpour/rift-proxy:latest",
+            "ports": [
+              "2525:2525",
+              "4545:4545",
+              "9090:9090"
+            ],
+            "volumes": [
+              "./imposters.json:/imposters.json"
+            ]
+          }
+        },
+        "version": "3.8"
+      }
+    }
+  },
+  "source": "docs/configuration/cli.md",
+  "yaml": "version: '3.8'\nservices:\n  rift:\n    image: zainalpour/rift-proxy:latest\n    ports:\n      - \"2525:2525\"\n      - \"4545:4545\"\n      - \"9090:9090\"\n    environment:\n      - MB_PORT=2525\n      - MB_ALLOW_INJECTION=true\n      - RUST_LOG=info\n    volumes:\n      - ./imposters.json:/imposters.json\n    command: [\"--configfile\", \"/imposters.json\"]\n"
+}

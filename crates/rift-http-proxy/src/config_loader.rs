@@ -202,7 +202,7 @@ fn parse_document(content: &str, base: &ScriptBaseDir) -> anyhow::Result<LoadedC
     } else if trimmed.starts_with('[') {
         serde_json::from_str(content)?
     } else {
-        serde_yaml::from_str(content)?
+        serde_norway::from_str(content)?
     };
 
     for config in &mut configs {
