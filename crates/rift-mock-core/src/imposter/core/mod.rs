@@ -154,10 +154,7 @@ impl LoadClock {
 /// the gates evaluated next to them. Responses, `id` and `route_pattern` (which only fills path
 /// params) cannot change which stub answers a request, so they are not compared.
 pub(crate) fn matches_alike(a: &Stub, b: &Stub) -> bool {
-    a.predicates == b.predicates
-        && a.space == b.space
-        && a.scenario_name == b.scenario_name
-        && a.required_scenario_state == b.required_scenario_state
+    a.predicates == b.predicates && a.gate() == b.gate()
 }
 
 /// Stamp the states in `range` as loaded at `at`, keeping cycler and slot (issue #1303): first

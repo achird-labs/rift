@@ -11,6 +11,7 @@
 //! detection or warnings. It silently uses first-match-wins semantics.
 //! These features are Rift extensions for improved developer experience.
 
+use crate::imposter::Gate;
 use crate::imposter::StubResponse;
 use crate::imposter::{ImposterConfig, Stub};
 use crate::imposter::{Predicate, PredicateOperation};
@@ -273,9 +274,16 @@ pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
     // O(n) instead of the old O(n²) pairwise scan (issue #423): the key encodes exactly what
     // `predicates_equal` compares — the predicate count plus the order-independent, de-duplicated
     // set of canonicalized predicates — so a hash hit means the same match set.
-    let mut seen_predicates: HashMap<String, usize> = HashMap::new();
-    // Index of the first catch-all (empty-predicate) stub seen so far.
+    // Each key holds every `(gate, index)` first seen with it: a stub is a duplicate only of an
+    // earlier stub whose gate covers its own (issue #1308), so the bucket is scanned for one.
+    let mut seen_predicates: HashMap<String, Vec<(Gate<'_>, usize)>> = HashMap::new();
+    // Index of the first catch-all (empty-predicate) stub seen so far, of any gate. Drives the
+    // `CatchAll` / `CatchAllNotLast` summaries.
     let mut first_catch_all: Option<usize> = None;
+    // The catch-alls that shadow later stubs (issue #1308): the first ungated one covers every
+    // gate; a gated one covers only stubs behind its exact gate.
+    let mut first_ungated_catch_all: Option<usize> = None;
+    let mut first_catch_all_by_gate: HashMap<Gate<'_>, usize> = HashMap::new();
     // The subset-shadowing heuristic is the only remaining quadratic scan; gate it by size.
     let run_shadow_heuristic = stubs.len() <= SHADOW_HEURISTIC_MAX_STUBS;
 
@@ -304,6 +312,12 @@ pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
         if stub.predicates.is_empty() {
             if first_catch_all.is_none() {
                 first_catch_all = Some(index);
+            }
+            let gate = stub.gate();
+            if gate.is_open() {
+                first_ungated_catch_all.get_or_insert(index);
+            } else {
+                first_catch_all_by_gate.entry(gate).or_insert(index);
             }
             push(
                 &mut result.warnings,
@@ -380,8 +394,10 @@ pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
 
         // Exact predicate duplicates — O(1) hash lookup against the first stub with this key.
         let key = predicate_key(&stub.predicates);
-        match seen_predicates.get(&key) {
-            Some(&first_index) => push(
+        let gate = stub.gate();
+        let bucket = seen_predicates.entry(key).or_default();
+        match bucket.iter().find(|(earlier, _)| earlier.covers(&gate)) {
+            Some(&(_, first_index)) => push(
                 &mut result.warnings,
                 StubWarning {
                     warning_type: WarningType::ExactDuplicate,
@@ -393,15 +409,16 @@ pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
                     shadowed_by_index: Some(first_index),
                 },
             ),
-            None => {
-                seen_predicates.insert(key, index);
-            }
+            None => bucket.push((gate, index)),
         }
 
         // Potential shadowing of a specific (non-empty) stub by an earlier one.
         if !stub.predicates.is_empty() {
-            // Any earlier catch-all shadows this stub — O(1) via the first-catch-all index.
-            if let Some(catch_all_index) = first_catch_all {
+            // An earlier catch-all shadows this stub when its gate covers the stub's: the first
+            // ungated one always does, else the one behind the stub's exact gate — O(1).
+            let catch_all = first_ungated_catch_all
+                .or_else(|| first_catch_all_by_gate.get(&stub.gate()).copied());
+            if let Some(catch_all_index) = catch_all {
                 push(
                     &mut result.warnings,
                     StubWarning {
@@ -419,6 +436,7 @@ pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
             if run_shadow_heuristic {
                 for (earlier_index, earlier_stub) in stubs[..index].iter().enumerate() {
                     if !earlier_stub.predicates.is_empty()
+                        && earlier_stub.gate().covers(&stub.gate())
                         && is_subset_predicates(&stub.predicates, &earlier_stub.predicates)
                     {
                         push(
@@ -586,6 +604,15 @@ pub fn analyze_new_stub(
             } else {
                 (insert_index, index)
             };
+            // Only the earlier of the two can kill the later, and only when its gate covers it.
+            let (earlier_gate, later_gate) = if index < insert_index {
+                (stub.gate(), new_stub.gate())
+            } else {
+                (new_stub.gate(), stub.gate())
+            };
+            if !earlier_gate.covers(&later_gate) {
+                continue;
+            }
             result.add_warning(StubWarning {
                 warning_type: WarningType::ExactDuplicate,
                 message: format!(
@@ -604,7 +631,7 @@ pub fn analyze_new_stub(
             if index >= insert_index {
                 break;
             }
-            if stub.predicates.is_empty() {
+            if stub.predicates.is_empty() && stub.gate().covers(&new_stub.gate()) {
                 result.add_warning(StubWarning {
                     warning_type: WarningType::PotentiallyShadowed,
                     message: format!(
@@ -1257,5 +1284,142 @@ mod tests {
         let a = predicates_from_jsons(a);
         let b = predicates_from_jsons(b);
         assert!(!predicates_equal(&a, &b));
+    }
+
+    // Issue #1308: the analysis must read the same gates the matcher does.
+    fn gated_stub(
+        space: Option<&str>,
+        scenario: Option<(&str, &str)>,
+        predicates: Vec<serde_json::Value>,
+    ) -> Stub {
+        let mut stub = stub_with_predicates(predicates);
+        stub.space = space.map(str::to_string);
+        if let Some((name, state)) = scenario {
+            stub.scenario_name = Some(name.to_string());
+            stub.required_scenario_state = Some(state.to_string());
+        }
+        stub
+    }
+
+    fn count(result: &StubAnalysisResult, ty: WarningType) -> usize {
+        result
+            .warnings
+            .iter()
+            .filter(|w| w.warning_type == ty)
+            .count()
+    }
+
+    fn pay() -> Vec<serde_json::Value> {
+        vec![json!({"equals": {"method": "POST", "path": "/pay"}})]
+    }
+
+    #[test]
+    fn a_scenario_gated_pair_with_identical_predicates_is_not_a_duplicate() {
+        let stubs = vec![
+            gated_stub(None, Some(("checkout", "Started")), pay()),
+            gated_stub(None, Some(("checkout", "paid")), pay()),
+        ];
+        let result = analyze_stubs(&stubs);
+        assert_eq!(count(&result, WarningType::ExactDuplicate), 0);
+        assert_eq!(count(&result, WarningType::PotentiallyShadowed), 0);
+    }
+
+    #[test]
+    fn stubs_in_different_spaces_are_neither_duplicates_nor_shadowing() {
+        let stubs = vec![
+            gated_stub(Some("a"), None, vec![]),
+            gated_stub(Some("b"), None, vec![]),
+            gated_stub(Some("a"), None, pay()),
+            gated_stub(Some("b"), None, pay()),
+            gated_stub(
+                Some("c"),
+                None,
+                vec![json!({"startsWith": {"path": "/api"}})],
+            ),
+            gated_stub(
+                Some("d"),
+                None,
+                vec![json!({"equals": {"path": "/api/users"}})],
+            ),
+        ];
+        let result = analyze_stubs(&stubs);
+        assert_eq!(count(&result, WarningType::ExactDuplicate), 0);
+        // stubs 2 and 3 are shadowed by their own space's catch-all, and nothing else.
+        let shadowed: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| w.warning_type == WarningType::PotentiallyShadowed)
+            .map(|w| (w.stub_index, w.shadowed_by_index))
+            .collect();
+        assert_eq!(shadowed, vec![(Some(2), Some(0)), (Some(3), Some(1))]);
+    }
+
+    #[test]
+    fn a_gated_catch_all_does_not_shadow_an_ungated_stub() {
+        let stubs = vec![
+            gated_stub(None, Some(("s", "Started")), vec![]),
+            gated_stub(None, None, vec![json!({"equals": {"path": "/x"}})]),
+        ];
+        let result = analyze_stubs(&stubs);
+        assert_eq!(count(&result, WarningType::PotentiallyShadowed), 0);
+    }
+
+    #[test]
+    fn the_subset_heuristic_honours_gates() {
+        let stubs = vec![
+            gated_stub(
+                None,
+                Some(("s", "Started")),
+                vec![json!({"startsWith": {"path": "/api"}})],
+            ),
+            gated_stub(
+                None,
+                Some(("s", "paid")),
+                vec![json!({"equals": {"path": "/api/users"}})],
+            ),
+        ];
+        let result = analyze_stubs(&stubs);
+        assert_eq!(count(&result, WarningType::PotentiallyShadowed), 0);
+    }
+
+    #[test]
+    fn analyze_new_stub_honours_gates_for_duplicates_and_catch_alls() {
+        let started = gated_stub(None, Some(("s", "Started")), pay());
+        let paid = gated_stub(None, Some(("s", "paid")), pay());
+        let result = analyze_new_stub(std::slice::from_ref(&started), &paid, 1);
+        assert_eq!(count(&result, WarningType::ExactDuplicate), 0);
+
+        let gated_catch_all = gated_stub(None, Some(("s", "Started")), vec![]);
+        let ungated = stub_with_predicates(pay());
+        let result = analyze_new_stub(std::slice::from_ref(&gated_catch_all), &ungated, 1);
+        assert_eq!(count(&result, WarningType::PotentiallyShadowed), 0);
+
+        let same_gate = gated_stub(None, Some(("s", "Started")), pay());
+        let result = analyze_new_stub(std::slice::from_ref(&gated_catch_all), &same_gate, 1);
+        assert_eq!(count(&result, WarningType::PotentiallyShadowed), 1);
+    }
+
+    #[test]
+    fn an_ungated_twin_ahead_still_makes_a_gated_stub_a_duplicate() {
+        let stubs = vec![
+            stub_with_predicates(pay()),
+            gated_stub(None, Some(("s", "paid")), pay()),
+        ];
+        let result = analyze_stubs(&stubs);
+        assert_eq!(count(&result, WarningType::ExactDuplicate), 1);
+        let result = analyze_new_stub(&stubs[..1], &stubs[1], 1);
+        assert_eq!(count(&result, WarningType::ExactDuplicate), 1);
+    }
+
+    #[test]
+    fn an_ungated_catch_all_still_shadows_a_gated_stub() {
+        let stubs = vec![
+            stub_with_predicates(vec![]),
+            gated_stub(None, Some(("s", "paid")), pay()),
+        ];
+        let result = analyze_stubs(&stubs);
+        assert_eq!(count(&result, WarningType::PotentiallyShadowed), 1);
+        let result = analyze_new_stub(&stubs[..1], &stubs[1], 1);
+        assert_eq!(count(&result, WarningType::PotentiallyShadowed), 1);
     }
 }

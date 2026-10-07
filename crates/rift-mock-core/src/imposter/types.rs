@@ -318,6 +318,43 @@ pub struct Stub {
     pub verify: Option<serde_json::Value>,
 }
 
+/// What decides a stub's eligibility before its predicates run (issue #1308): the correlation
+/// space and the scenario gate. A stub with no `requiredScenarioState` has no scenario gate,
+/// whatever its `scenarioName` says (that name alone only sets state).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Gate<'a> {
+    space: Option<&'a str>,
+    /// `(scenario_name, required_scenario_state)`
+    scenario: Option<(&'a str, &'a str)>,
+}
+
+impl Stub {
+    /// The gates the matcher evaluates before this stub's predicates.
+    pub(crate) fn gate(&self) -> Gate<'_> {
+        Gate {
+            space: self.space.as_deref(),
+            scenario: self
+                .required_scenario_state
+                .as_deref()
+                .map(|state| (self.scenario_name.as_deref().unwrap_or(""), state)),
+        }
+    }
+}
+
+impl Gate<'_> {
+    /// No space and no scenario gate: eligible for every request, so it covers every gate.
+    pub(crate) fn is_open(&self) -> bool {
+        self.space.is_none() && self.scenario.is_none()
+    }
+
+    /// `self`'s stub is eligible whenever `other`'s is: no space or the same space, and no
+    /// scenario gate or the same one. The relation an earlier stub needs to shadow a later one.
+    pub(crate) fn covers(&self, other: &Gate<'_>) -> bool {
+        (self.space.is_none() || self.space == other.space)
+            && (self.scenario.is_none() || self.scenario == other.scenario)
+    }
+}
+
 /// Raw deserialization type for Stub — handles alternative field names and format conversions:
 /// - `rules` as an alias for `predicates`
 /// - `delayRange` array (stub-level latency) converted to per-response `wait` behavior
@@ -4469,5 +4506,53 @@ mod mountebank_output_tests {
                 "{written}: writing is not stable"
             );
         }
+    }
+
+    // Issue #1308: `Gate::covers` truth table.
+    #[test]
+    fn gate_covers_truth_table() {
+        let stub = |space: Option<&str>, scenario: Option<(&str, &str)>| -> Stub {
+            let mut v = json!({ "predicates": [] });
+            if let Some(space) = space {
+                v["space"] = json!(space);
+            }
+            if let Some((name, state)) = scenario {
+                v["scenarioName"] = json!(name);
+                v["requiredScenarioState"] = json!(state);
+            }
+            serde_json::from_value(v).expect("stub")
+        };
+        let open = stub(None, None);
+        let a = stub(Some("a"), None);
+        let b = stub(Some("b"), None);
+        let started = stub(None, Some(("s", "Started")));
+        let paid = stub(None, Some(("s", "paid")));
+        let other_scenario = stub(None, Some(("t", "Started")));
+        let a_started = stub(Some("a"), Some(("s", "Started")));
+
+        // none/none
+        assert!(open.gate().covers(&open.gate()));
+        // none covers some, some does not cover none
+        assert!(open.gate().covers(&a.gate()));
+        assert!(open.gate().covers(&started.gate()));
+        assert!(open.gate().covers(&a_started.gate()));
+        assert!(!a.gate().covers(&open.gate()));
+        assert!(!started.gate().covers(&open.gate()));
+        // same/same
+        assert!(a.gate().covers(&a.gate()));
+        assert!(started.gate().covers(&started.gate()));
+        // different
+        assert!(!a.gate().covers(&b.gate()));
+        assert!(!started.gate().covers(&paid.gate()));
+        assert!(!started.gate().covers(&other_scenario.gate()));
+        // cross-space/scenario: each axis is checked independently
+        assert!(a.gate().covers(&a_started.gate()));
+        assert!(started.gate().covers(&a_started.gate()));
+        assert!(!a_started.gate().covers(&a.gate()));
+        assert!(!a.gate().covers(&started.gate()));
+        // a scenario name alone gates nothing
+        let name_only: Stub =
+            serde_json::from_value(json!({ "scenarioName": "s", "predicates": [] })).expect("stub");
+        assert_eq!(name_only.gate(), open.gate());
     }
 }

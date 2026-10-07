@@ -30,6 +30,7 @@ mod reconcile;
 mod response;
 mod script_resolve;
 mod types;
+pub(crate) use types::Gate;
 
 #[cfg(test)]
 mod tests;
