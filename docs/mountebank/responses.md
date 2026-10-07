@@ -518,6 +518,18 @@ A client that polls with validators (a CDN-hosted datafile, a feature-flag SDK) 
   different body. Stubs ahead of the change keep their stamps; deleting the last stub, or
   changing only a stub's responses, re-stamps nothing else.
 
+  A scenario transition changes which stub answers with no stub changing, so it counts too: the
+  served `Last-Modified` is the later of the stub's own stamp and the last transition of any
+  scenario gating that stub or a stub ahead of it — through a `newScenarioState`, the scenarios
+  admin API, a reset or a space teardown. Writing the state a scenario already has is not a
+  transition, and only scenarios gating a stub at or ahead of a `_rift.conditional` stub are
+  tracked. A transition in one flow moves the stamp for every flow of that scenario (one extra
+  `200` for the others), and it is per process: a transition made by another node sharing a Redis
+  flow store does not move this node's stamp. State written around the scenario API is not seen
+  either: `_rift.stateOps`, a script's `ctx.state`, and the raw `…/flow-state` routes (including
+  clearing a flow) change scenario state without moving `Last-Modified` — revalidate with
+  `If-None-Match` (the `ETag` follows the body) if your scenarios are driven that way.
+
 On a script-only response, or behind a non-GET method predicate, it never fires; `rift-lint` W019 says so.
 
 It applies only to a `GET` or `HEAD` that the stub answers with a 2xx; any other request or status

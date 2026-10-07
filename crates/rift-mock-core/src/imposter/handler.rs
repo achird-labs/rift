@@ -1037,6 +1037,9 @@ async fn handle_request_inner(
     // the trace would be built and thrown away. That also means an imposter with recording off
     // pays exactly what it paid before.
     let want_trace = journal_index.is_some();
+    // Before the scenario gates are read, so a transition landing mid-request cannot stamp the
+    // answer it replaced (issue #1307).
+    let scenario_transitions = imposter.scenario_transitions();
     let (mut matched, mut trace) = match imposter
         .find_matching_stub_with_client_bounded_inner(
             method_str,
@@ -1694,7 +1697,9 @@ async fn handle_request_inner(
         }) = response
         {
             return Ok(prepared
-                .serve_request(&method, &request_headers, stub_state.loaded_at())
+                .serve_request(&method, &request_headers, || {
+                    imposter.served_load_stamp(&stub_state, stub_index, &scenario_transitions)
+                })
                 .unwrap_or_else(|e| {
                     build_failure_response(&e, "stub response build failed (bad Last-Modified?)")
                 }));
@@ -1972,7 +1977,10 @@ async fn handle_request_inner(
                 let etag = spec
                     .wants_etag()
                     .then(|| conditional::etag_for(&body_bytes));
-                let validators = spec.validators(etag, stub_state.loaded_at());
+                let validators = spec.validators(
+                    etag,
+                    imposter.served_load_stamp(&stub_state, stub_index, &scenario_transitions),
+                );
                 if validators.not_modified(&request_headers) {
                     let kept = headers
                         .iter()

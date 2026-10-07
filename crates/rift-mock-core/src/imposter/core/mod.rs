@@ -116,7 +116,10 @@ static NEXT_STUB_SLOT: AtomicU64 = AtomicU64::new(1);
 ///
 /// Take exactly one stamp per content-changing operation, and none for an operation that changes
 /// nothing — a no-op must not push the clock ahead. Callers hold the imposter's `stubs_write`, or
-/// own the imposter outright while constructing it.
+/// own the imposter outright while constructing it — except a scenario transition (issue #1307),
+/// which changes what is served without a stub write and stamps from the request path; `next` is a
+/// single atomic step, so that cannot hand two callers the same second. Transitions stamp only for
+/// scenarios gating a conditional stub, which keeps a busy FSM from running the clock ahead.
 #[derive(Debug)]
 pub(crate) struct LoadClock(AtomicI64);
 
@@ -138,14 +141,20 @@ impl LoadClock {
     /// The stamp for one content-changing operation.
     pub(crate) fn next(&self) -> chrono::DateTime<chrono::Utc> {
         let now = chrono::Utc::now();
-        let floor = self.floor_secs();
-        let at = if now.timestamp() > floor {
-            now
-        } else {
-            // Only `None` past year 262143, where `now` is as good an answer as any.
-            chrono::DateTime::from_timestamp(floor.saturating_add(1), 0).unwrap_or(now)
-        };
-        self.raise_to(at.timestamp());
+        let mut at = now;
+        // One atomic step, so two concurrent callers can never be handed the same second — a
+        // scenario transition stamps from the request path, outside `stubs_write` (issue #1307).
+        let _ = self
+            .0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |floor| {
+                at = if now.timestamp() > floor {
+                    now
+                } else {
+                    // Only `None` past year 262143, where `now` is as good an answer as any.
+                    chrono::DateTime::from_timestamp(floor.saturating_add(1), 0).unwrap_or(now)
+                };
+                Some(at.timestamp())
+            });
         at
     }
 }
@@ -322,6 +331,12 @@ pub struct Imposter {
     stubs_write: Mutex<()>,
     /// Where new content's `Last-Modified: load` comes from (issue #1301).
     pub(crate) load_clock: LoadClock,
+    /// When each scenario last changed state, by scenario name (issue #1307). A transition changes
+    /// which stub answers with no stub changing, so the served `Last-Modified` folds in the
+    /// transitions of every scenario gating the answering stub or a stub ahead of it. Keyed by name,
+    /// not by flow: config-bounded, where flows are unbounded.
+    /// Copied on write: read once per request before matching, without a lock.
+    scenario_transitions: ArcSwap<HashMap<String, chrono::DateTime<chrono::Utc>>>,
     /// Proxy-recording backend (issue #315); defaults to a private port-scoped
     /// [`LocalProxyStore`] for this imposter's mode, or the embedder's shared store injected
     /// via [`ImposterManager::with_proxy_store`](crate::imposter::ImposterManager::with_proxy_store).
@@ -502,6 +517,7 @@ impl Imposter {
             stubs_snapshot: ArcSwap::from_pointee(StubSnapshot::build(stubs)),
             stubs_write: Mutex::new(()),
             load_clock,
+            scenario_transitions: ArcSwap::from_pointee(HashMap::new()),
             proxy_store: Arc::new(LocalProxyStore::new(proxy_mode)),
             upstream_client: None,
             event_bus: None,

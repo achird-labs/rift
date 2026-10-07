@@ -513,23 +513,99 @@ impl Imposter {
         }
     }
 
-    /// Set scenario state for `(flow_id, scenario)`.
+    /// Set scenario state for `(flow_id, scenario)`. Writing the state the scenario already has is
+    /// not a transition and leaves `Last-Modified` alone (issue #1307).
     pub fn set_scenario_state(
         &self,
         flow_id: &str,
         scenario: &str,
         state: &str,
     ) -> anyhow::Result<()> {
+        // Read the current state only when a transition could matter to a conditional response.
+        // An unreadable value (a non-string written out-of-band) is what this write repairs, so it
+        // must not block it: count it as a change, which at worst costs a poller one extra `200`.
+        let changed = self.is_conditional_gate(scenario)
+            && self
+                .scenario_state(flow_id, scenario)
+                .map_or(true, |current| current != state);
         self.flow_store.set(
             flow_id,
             scenario,
             serde_json::Value::String(state.to_string()),
-        )
+        )?;
+        if changed {
+            self.stamp_scenario_transition(scenario);
+        }
+        Ok(())
     }
 
     /// Delete a scenario's state for a flow (so it reads back as the initial state).
     pub fn delete_scenario_state(&self, flow_id: &str, scenario: &str) -> anyhow::Result<()> {
-        self.flow_store.delete(flow_id, scenario)
+        let changed = self.is_conditional_gate(scenario)
+            && self
+                .scenario_state(flow_id, scenario)
+                .map_or(true, |current| current != INITIAL_SCENARIO_STATE);
+        self.flow_store.delete(flow_id, scenario)?;
+        if changed {
+            self.stamp_scenario_transition(scenario);
+        }
+        Ok(())
+    }
+
+    /// Whether a transition of `scenario` can change which stub answers a conditional request.
+    fn is_conditional_gate(&self, scenario: &str) -> bool {
+        self.snapshot().is_conditional_gate(scenario)
+    }
+
+    /// Record that `scenario` changed state (issue #1307), after the store write: a request that
+    /// copied the stamps before matching then either saw the old state with the old stamps, or
+    /// the new state — never the old answer under the new stamp, which would leave its client on
+    /// `304` for the new one.
+    fn stamp_scenario_transition(&self, scenario: &str) {
+        let at = self.load_clock.next();
+        self.scenario_transitions.rcu(|current| {
+            let mut next = HashMap::clone(current);
+            next.insert(scenario.to_string(), at);
+            next
+        });
+    }
+
+    /// The scenario transition stamps, copied before matching (issue #1307) — see
+    /// [`Self::served_load_stamp`].
+    pub(crate) fn scenario_transitions(
+        &self,
+    ) -> Arc<HashMap<String, chrono::DateTime<chrono::Utc>>> {
+        self.scenario_transitions.load_full()
+    }
+
+    /// `Last-Modified: load` as served for the stub at `stub_index` (issues #1280, #1307): its own
+    /// load stamp, or the latest transition of a scenario gating it or any stub ahead of it,
+    /// whichever is later. The scenario gates run before predicates, so these are the gates that
+    /// can have changed which stub answers; counting every one ahead of the match, evaluated or
+    /// not, can only cost a poller one extra `200`. `transitions` must be the copy taken before
+    /// matching. The matched stub's own gate is added explicitly, so a concurrent stub edit that
+    /// shifts indices cannot drop it.
+    pub(crate) fn served_load_stamp(
+        &self,
+        stub_state: &StubState,
+        stub_index: usize,
+        transitions: &HashMap<String, chrono::DateTime<chrono::Utc>>,
+    ) -> chrono::DateTime<chrono::Utc> {
+        let own = stub_state.loaded_at();
+        if transitions.is_empty() {
+            return own;
+        }
+        let own_gate = stub_state
+            .stub
+            .required_scenario_state
+            .as_ref()
+            .map(|_| stub_state.stub.scenario_name.as_deref().unwrap_or(""));
+        let snapshot = self.snapshot();
+        snapshot
+            .conditional_gates_through(stub_index)
+            .chain(own_gate)
+            .filter_map(|scenario| transitions.get(scenario))
+            .fold(own, |latest, at| latest.max(*at))
     }
 
     /// Apply a matched stub's `newScenarioState` transition (no-op if unset). A backend
@@ -554,13 +630,21 @@ impl Imposter {
 
         let new_value = serde_json::Value::String(next.to_string());
         let expected = serde_json::Value::String(required.to_string());
+        // Leaving a state for itself is not a transition (issue #1307).
+        let changes = required != next && self.is_conditional_gate(scenario);
+        let applied = || {
+            if changes {
+                self.stamp_scenario_transition(scenario);
+            }
+            Ok(())
+        };
         match self.flow_store.compare_and_set(
             flow_id,
             scenario,
             Some(&expected),
             new_value.clone(),
         )? {
-            CasOutcome::Applied => Ok(()),
+            CasOutcome::Applied => applied(),
             // The initial state is normally stored as ABSENCE — retry expecting that
             // representation before concluding the state moved.
             CasOutcome::Conflict(None) if required == INITIAL_SCENARIO_STATE => {
@@ -568,7 +652,7 @@ impl Imposter {
                     .flow_store
                     .compare_and_set(flow_id, scenario, None, new_value)?
                 {
-                    CasOutcome::Applied => Ok(()),
+                    CasOutcome::Applied => applied(),
                     CasOutcome::Conflict(current) => {
                         Self::log_dropped_transition(flow_id, scenario, required, next, &current);
                         Ok(())
