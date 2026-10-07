@@ -1,0 +1,16 @@
+{
+  "name": "crates-rift-http-proxy-src-config-loader-rs-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": [
+        {
+          "port": 3000.5,
+          "protocol": "http"
+        }
+      ]
+    }
+  },
+  "source": "crates/rift-http-proxy/src/config_loader.rs",
+  "yaml": "- port: 3000.5\n  protocol: http\n"
+}

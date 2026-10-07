@@ -1,0 +1,23 @@
+{
+  "name": "hand-floats-misc",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "a": 1000.0,
+        "b": 0.5,
+        "c": -0.0,
+        "d": null,
+        "e": null,
+        "f": null,
+        "g": "1_000",
+        "h": 31,
+        "i": 15,
+        "j": "017",
+        "k": 0.01
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "a: 1e3\nb: .5\nc: -0.0\nd: .inf\ne: -.inf\nf: .nan\ng: 1_000\nh: 0x1F\ni: 0o17\nj: 017\nk: 1.0e-2\n"
+}

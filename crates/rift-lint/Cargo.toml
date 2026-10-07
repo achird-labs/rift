@@ -21,7 +21,7 @@ base64 = "0.23"
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
+serde_norway.workspace = true
 
 # Regex for pattern validation
 regex = "1"

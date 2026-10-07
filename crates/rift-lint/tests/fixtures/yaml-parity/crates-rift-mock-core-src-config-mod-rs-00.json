@@ -1,0 +1,19 @@
+{
+  "name": "crates-rift-mock-core-src-config-mod-rs-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "backend": "redis",
+        "redis": {
+          "key_prefix": "rift:",
+          "pool_size": 3,
+          "url": "redis://127.0.0.1:6379"
+        },
+        "ttl_seconds": 42
+      }
+    }
+  },
+  "source": "crates/rift-mock-core/src/config/mod.rs",
+  "yaml": "backend: redis\nttl_seconds: 42\nredis:\n  url: redis://127.0.0.1:6379\n  pool_size: 3\n  key_prefix: 'rift:'\n"
+}

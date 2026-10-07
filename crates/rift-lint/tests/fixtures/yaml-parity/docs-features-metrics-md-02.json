@@ -1,0 +1,42 @@
+{
+  "name": "docs-features-metrics-md-02",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "groups": [
+          {
+            "name": "rift",
+            "rules": [
+              {
+                "alert": "RiftHighErrorRate",
+                "annotations": {
+                  "summary": "High 5xx rate in Rift"
+                },
+                "expr": "sum(rate(rift_requests_total{status=~\"5..\"}[5m]))\n/\nsum(rate(rift_requests_total[5m])) > 0.05\n",
+                "for": "5m",
+                "labels": {
+                  "severity": "warning"
+                }
+              },
+              {
+                "alert": "RiftScriptErrors",
+                "annotations": {
+                  "description": "error_type={% raw %}{{ $labels.error_type }}{% endraw %}",
+                  "summary": "Script errors in Rift"
+                },
+                "expr": "rate(rift_script_errors_total[5m]) > 0",
+                "for": "1m",
+                "labels": {
+                  "severity": "critical"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "source": "docs/features/metrics.md",
+  "yaml": "groups:\n  - name: rift\n    rules:\n      - alert: RiftHighErrorRate\n        expr: |\n          sum(rate(rift_requests_total{status=~\"5..\"}[5m]))\n          /\n          sum(rate(rift_requests_total[5m])) > 0.05\n        for: 5m\n        labels: { severity: warning }\n        annotations:\n          summary: \"High 5xx rate in Rift\"\n\n      - alert: RiftScriptErrors\n        expr: rate(rift_script_errors_total[5m]) > 0\n        for: 1m\n        labels: { severity: critical }\n        annotations:\n          summary: \"Script errors in Rift\"\n          description: \"error_type={% raw %}{{ $labels.error_type }}{% endraw %}\"\n"
+}

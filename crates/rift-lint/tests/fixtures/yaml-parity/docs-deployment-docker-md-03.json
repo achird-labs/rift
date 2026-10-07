@@ -1,0 +1,53 @@
+{
+  "name": "docs-deployment-docker-md-03",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "services": {
+          "app": {
+            "build": ".",
+            "depends_on": {
+              "rift": {
+                "condition": "service_healthy"
+              }
+            },
+            "environment": {
+              "HTTPS_PROXY": "http://rift:8080",
+              "NODE_EXTRA_CA_CERTS": "/certs/ca.pem",
+              "NO_PROXY": "localhost,127.0.0.1",
+              "REQUESTS_CA_BUNDLE": "/certs/ca.pem",
+              "SSL_CERT_FILE": "/certs/ca.pem"
+            },
+            "volumes": [
+              "./ca/ca-cert.pem:/certs/ca.pem:ro"
+            ]
+          },
+          "rift": {
+            "command": [
+              "--configfile",
+              "/config/mock.json"
+            ],
+            "healthcheck": {
+              "interval": "5s",
+              "retries": 10,
+              "test": [
+                "CMD",
+                "rift",
+                "healthcheck"
+              ],
+              "timeout": "3s"
+            },
+            "image": "zainalpour/rift-proxy:latest",
+            "volumes": [
+              "./mock.json:/config/mock.json:ro",
+              "./ca:/ca:ro"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/docker.md",
+  "yaml": "services:\n  rift:\n    image: zainalpour/rift-proxy:latest\n    volumes:\n      - ./mock.json:/config/mock.json:ro\n      - ./ca:/ca:ro                      # ca-cert.pem + ca-key.pem from `intercept-ca generate`\n    command: [\"--configfile\", \"/config/mock.json\"]\n    # No `ports:` for 8080 -- only the app, on the compose network, needs the listener.\n    healthcheck:\n      test: [\"CMD\", \"rift\", \"healthcheck\"]\n      interval: 5s\n      timeout: 3s\n      retries: 10\n\n  app:\n    build: .\n    depends_on:\n      rift:\n        condition: service_healthy\n    environment:\n      HTTPS_PROXY: http://rift:8080\n      NO_PROXY: localhost,127.0.0.1\n      SSL_CERT_FILE: /certs/ca.pem          # curl, Go, OpenSSL clients\n      REQUESTS_CA_BUNDLE: /certs/ca.pem     # Python requests\n      NODE_EXTRA_CA_CERTS: /certs/ca.pem    # Node\n    volumes:\n      - ./ca/ca-cert.pem:/certs/ca.pem:ro\n"
+}

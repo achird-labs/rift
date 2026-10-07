@@ -272,7 +272,7 @@ copy:
       method: regex
       selector: ".*"
 "#;
-        let behaviors: ResponseBehaviors = serde_yaml::from_str(yaml).unwrap();
+        let behaviors: ResponseBehaviors = serde_norway::from_str(yaml).unwrap();
         assert!(matches!(behaviors.wait, Some(WaitBehavior::Fixed(500))));
         assert_eq!(behaviors.repeat, Some(3));
         assert_eq!(behaviors.copy.len(), 1);
@@ -333,7 +333,7 @@ copy:
             "shellTransform": null, "copy": null, "lookup": null
         }))
         .expect("every null key parses");
-        let yaml: ResponseBehaviors = serde_yaml::from_str(
+        let yaml: ResponseBehaviors = serde_norway::from_str(
             "wait: ~\nrepeat: ~\ndecorate: ~\nshellTransform: ~\ncopy: ~\nlookup: ~\n",
         )
         .expect("every null key parses from YAML");
@@ -363,7 +363,7 @@ copy:
 wait: 100
 shellTransform: "echo 'transformed'"
 "#;
-        let behaviors: ResponseBehaviors = serde_yaml::from_str(yaml).unwrap();
+        let behaviors: ResponseBehaviors = serde_norway::from_str(yaml).unwrap();
         assert!(matches!(behaviors.wait, Some(WaitBehavior::Fixed(100))));
         assert_eq!(behaviors.shell_transform, vec!["echo 'transformed'"]);
     }
@@ -375,7 +375,7 @@ shellTransform:
   - "./transform1.sh"
   - "./transform2.sh"
 "#;
-        let behaviors: ResponseBehaviors = serde_yaml::from_str(yaml).unwrap();
+        let behaviors: ResponseBehaviors = serde_norway::from_str(yaml).unwrap();
         assert_eq!(
             behaviors.shell_transform,
             vec!["./transform1.sh", "./transform2.sh"]
@@ -388,7 +388,7 @@ shellTransform:
 wait: 100
 decorate: "response.body = 'decorated';"
 "#;
-        let behaviors: ResponseBehaviors = serde_yaml::from_str(yaml).unwrap();
+        let behaviors: ResponseBehaviors = serde_norway::from_str(yaml).unwrap();
         assert!(matches!(behaviors.wait, Some(WaitBehavior::Fixed(100))));
         assert_eq!(
             behaviors.decorate,

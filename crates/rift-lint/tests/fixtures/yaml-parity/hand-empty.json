@@ -1,0 +1,8 @@
+{
+  "name": "hand-empty",
+  "outcome": {
+    "error": "invalid type: Option value, expected any JSON value"
+  },
+  "source": "hand-written",
+  "yaml": ""
+}

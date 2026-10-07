@@ -1,0 +1,31 @@
+{
+  "name": "docs-deployment-kubernetes-md-10",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "apiVersion": "monitoring.coreos.com/v1",
+        "kind": "ServiceMonitor",
+        "metadata": {
+          "name": "rift"
+        },
+        "spec": {
+          "endpoints": [
+            {
+              "interval": "15s",
+              "path": "/metrics",
+              "port": "metrics"
+            }
+          ],
+          "selector": {
+            "matchLabels": {
+              "app": "rift"
+            }
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/kubernetes.md",
+  "yaml": "apiVersion: monitoring.coreos.com/v1\nkind: ServiceMonitor\nmetadata:\n  name: rift\nspec:\n  selector:\n    matchLabels:\n      app: rift\n  endpoints:\n    - port: metrics\n      interval: 15s\n      path: /metrics\n"
+}

@@ -1,0 +1,8 @@
+{
+  "name": "docs-deployment-kubernetes-md-05",
+  "outcome": {
+    "error": "deserializing from YAML containing more than one document is not supported"
+  },
+  "source": "docs/deployment/kubernetes.md",
+  "yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: rift-https-config\ndata:\n  imposters.json: |\n    {\n      \"imposters\": [{\n        \"port\": 4545,\n        \"protocol\": \"https\",\n        \"key\": \"<%- stringify('/tls/tls.key') %>\",\n        \"cert\": \"<%- stringify('/tls/tls.crt') %>\",\n        \"stubs\": [...]\n      }]\n    }\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: rift\nspec:\n  template:\n    spec:\n      containers:\n        - name: rift\n          image: zainalpour/rift-proxy:latest\n          args: [\"--configfile\", \"/config/imposters.json\"]\n          volumeMounts:\n            - name: config\n              mountPath: /config\n            - name: tls\n              mountPath: /tls\n              readOnly: true\n      volumes:\n        - name: config\n          configMap:\n            name: rift-https-config\n        - name: tls\n          secret:\n            secretName: rift-tls\n"
+}

@@ -1,0 +1,8 @@
+{
+  "name": "crates-rift-lint-tests-validator-tests-rs-04",
+  "outcome": {
+    "error": "deserializing from YAML containing more than one document is not supported"
+  },
+  "source": "crates/rift-lint/tests/validator_tests.rs",
+  "yaml": "- port: 3000\n  protocol: http\n  stubs: []\n---\n- port: 3001\n  protocol: http\n  stubs: []\n"
+}

@@ -19,7 +19,7 @@
 //! real object. It is off, and `numbers_of_every_shape_scan_as_scalars` below is what fails first
 //! if it is ever turned on.
 //!
-//! [`find_yaml`] reuses the same `Scan`/`ScanVisitor` over a `serde_yaml::Deserializer` (issue
+//! [`find_yaml`] reuses the same `Scan`/`ScanVisitor` over a `serde_norway::Deserializer` (issue
 //! #1071). A YAML alias (`*ok`) is walked as its expanded anchor content, not as a second
 //! occurrence of the anchor's keys, so aliasing a clean mapping is never reported as a duplicate.
 
@@ -54,10 +54,10 @@ pub(crate) fn find(text: &str) -> Result<Vec<Duplicate>, serde_json::Error> {
 /// Every byte-identical repeated key in `text`, read as YAML.
 ///
 /// Fails only when `text` is not valid YAML for this scan (including a multi-document stream,
-/// which `serde_yaml::Deserializer` itself refuses). Unlike [`find`], there is no `end()` call to
-/// make: `serde_yaml::Deserializer::from_str` already rejects more than one document.
-pub(crate) fn find_yaml(text: &str) -> Result<Vec<Duplicate>, serde_yaml::Error> {
-    let scan = Scan::deserialize(serde_yaml::Deserializer::from_str(text))?;
+/// which `serde_norway::Deserializer` itself refuses). Unlike [`find`], there is no `end()` call to
+/// make: `serde_norway::Deserializer::from_str` already rejects more than one document.
+pub(crate) fn find_yaml(text: &str) -> Result<Vec<Duplicate>, serde_norway::Error> {
+    let scan = Scan::deserialize(serde_norway::Deserializer::from_str(text))?;
     Ok(scan.0)
 }
 

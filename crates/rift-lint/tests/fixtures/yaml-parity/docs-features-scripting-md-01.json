@@ -1,0 +1,40 @@
+{
+  "name": "docs-features-scripting-md-01",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": [
+        {
+          "_rift": {
+            "flowState": {
+              "backend": "inmemory",
+              "ttlSeconds": 300
+            },
+            "scripts": {
+              "failTwice": {
+                "file": "scripts/fail-twice.rhai"
+              }
+            }
+          },
+          "port": 4545,
+          "protocol": "http",
+          "stubs": [
+            {
+              "responses": [
+                {
+                  "_rift": {
+                    "script": {
+                      "ref": "failTwice"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "source": "docs/features/scripting.md",
+  "yaml": "- port: 4545\n  protocol: http\n  _rift:\n    flowState: { backend: inmemory, ttlSeconds: 300 }\n    # Named registry: give a script a name once, `ref:` it from any response.\n    scripts:\n      failTwice:\n        file: scripts/fail-twice.rhai   # engine inferred from the extension: .rhai -> rhai\n  stubs:\n    - responses:\n        - _rift:\n            script:\n              ref: failTwice\n"
+}

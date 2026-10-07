@@ -1,0 +1,22 @@
+{
+  "name": "docs-deployment-kubernetes-md-04",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "apiVersion": "v1",
+        "data": {
+          "tls.crt": "<base64-encoded-cert>",
+          "tls.key": "<base64-encoded-key>"
+        },
+        "kind": "Secret",
+        "metadata": {
+          "name": "rift-tls"
+        },
+        "type": "kubernetes.io/tls"
+      }
+    }
+  },
+  "source": "docs/deployment/kubernetes.md",
+  "yaml": "apiVersion: v1\nkind: Secret\nmetadata:\n  name: rift-tls\ntype: kubernetes.io/tls\ndata:\n  tls.crt: <base64-encoded-cert>\n  tls.key: <base64-encoded-key>\n"
+}

@@ -1,0 +1,16 @@
+{
+  "name": "crates-rift-mock-core-src-behaviors-types-rs-03",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "shellTransform": [
+          "./transform1.sh",
+          "./transform2.sh"
+        ]
+      }
+    }
+  },
+  "source": "crates/rift-mock-core/src/behaviors/types.rs",
+  "yaml": "\nshellTransform:\n  - \"./transform1.sh\"\n  - \"./transform2.sh\"\n"
+}

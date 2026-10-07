@@ -1,0 +1,49 @@
+{
+  "name": "docs-deployment-docker-md-04",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "services": {
+          "app": {
+            "build": ".",
+            "depends_on": {
+              "rift": {
+                "condition": "service_healthy"
+              }
+            },
+            "environment": [
+              "USER_SERVICE_URL=http://rift:4545",
+              "ORDER_SERVICE_URL=http://rift:4546"
+            ]
+          },
+          "rift": {
+            "command": [
+              "--configfile",
+              "/mocks/imposters.json"
+            ],
+            "healthcheck": {
+              "interval": "5s",
+              "retries": 10,
+              "test": [
+                "CMD",
+                "rift",
+                "healthcheck"
+              ],
+              "timeout": "3s"
+            },
+            "image": "zainalpour/rift-proxy:latest",
+            "ports": [
+              "2525:2525"
+            ],
+            "volumes": [
+              "./test/mocks:/mocks:ro"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/docker.md",
+  "yaml": "services:\n  # Your application\n  app:\n    build: .\n    environment:\n      - USER_SERVICE_URL=http://rift:4545\n      - ORDER_SERVICE_URL=http://rift:4546\n    depends_on:\n      rift:\n        condition: service_healthy\n\n  # Mock server\n  rift:\n    image: zainalpour/rift-proxy:latest\n    ports:\n      - \"2525:2525\"\n    volumes:\n      - ./test/mocks:/mocks:ro\n    command: [\"--configfile\", \"/mocks/imposters.json\"]\n    healthcheck:\n      test: [\"CMD\", \"rift\", \"healthcheck\"]\n      interval: 5s\n      timeout: 3s\n      retries: 10\n"
+}

@@ -1,0 +1,16 @@
+{
+  "name": "hand-crlf",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "a": 1,
+        "b": [
+          "x"
+        ]
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "a: 1\r\nb:\r\n  - x\r\n"
+}

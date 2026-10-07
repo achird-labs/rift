@@ -1,0 +1,28 @@
+{
+  "name": "docs-getting-started-migration-md-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [
+        [
+          null,
+          "services"
+        ]
+      ],
+      "value": {
+        "services": {
+          "rift": {
+            "environment": [
+              "MB_ALLOW_INJECTION=true"
+            ],
+            "image": "zainalpour/rift-proxy:latest",
+            "ports": [
+              "2525:2525"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/getting-started/migration.md",
+  "yaml": "# Before (Mountebank)\nservices:\n  mountebank:\n    image: bbyars/mountebank:2.9.2\n    ports:\n      - \"2525:2525\"\n    command: [\"start\", \"--allowInjection\"]\n\n# After (Rift)\nservices:\n  rift:\n    image: zainalpour/rift-proxy:latest\n    ports:\n      - \"2525:2525\"\n    environment:\n      - MB_ALLOW_INJECTION=true\n"
+}

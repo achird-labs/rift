@@ -1,0 +1,13 @@
+{
+  "name": "hand-bom",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "a": 1
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "﻿a: 1\n"
+}

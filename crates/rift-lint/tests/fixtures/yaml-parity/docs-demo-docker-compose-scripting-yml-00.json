@@ -1,0 +1,43 @@
+{
+  "name": "docs-demo-docker-compose-scripting-yml-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "services": {
+          "rift": {
+            "command": [
+              "--configfile",
+              "/imposters.json",
+              "--allow-injection"
+            ],
+            "environment": [
+              "RUST_LOG=info",
+              "MB_PORT=2525"
+            ],
+            "healthcheck": {
+              "interval": "5s",
+              "retries": 5,
+              "test": [
+                "CMD",
+                "rift",
+                "healthcheck"
+              ],
+              "timeout": "3s"
+            },
+            "image": "zainalpour/rift-proxy:latest",
+            "ports": [
+              "2525:2525",
+              "4550:4550"
+            ],
+            "volumes": [
+              "./imposters-scripting.json:/imposters.json:ro"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/demo/docker-compose-scripting.yml",
+  "yaml": "services:\n  rift:\n    image: zainalpour/rift-proxy:latest\n    ports:\n      - \"2525:2525\"   # Admin API\n      - \"4550:4550\"   # Scripting demo\n    volumes:\n      - ./imposters-scripting.json:/imposters.json:ro\n    environment:\n      - RUST_LOG=info\n      - MB_PORT=2525\n    # --allow-injection: this demo uses inject/_rift.script, which the configfile door\n    # gates since issue #612 — without it rift refuses to start.\n    command: [\"--configfile\", \"/imposters.json\", \"--allow-injection\"]\n    healthcheck:\n      test: [\"CMD\", \"rift\", \"healthcheck\"]\n      interval: 5s\n      timeout: 3s\n      retries: 5\n"
+}

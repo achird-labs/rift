@@ -1,0 +1,8 @@
+{
+  "name": "hand-complex-key",
+  "outcome": {
+    "error": "invalid type: sequence, expected a string at line 1 column 3"
+  },
+  "source": "hand-written",
+  "yaml": "? [a, b]\n: v\n"
+}

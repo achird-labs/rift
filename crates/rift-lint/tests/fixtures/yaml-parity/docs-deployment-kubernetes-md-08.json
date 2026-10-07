@@ -1,0 +1,47 @@
+{
+  "name": "docs-deployment-kubernetes-md-08",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "rift"
+        },
+        "spec": {
+          "replicas": 3,
+          "template": {
+            "spec": {
+              "affinity": {
+                "podAntiAffinity": {
+                  "preferredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                      "podAffinityTerm": {
+                        "labelSelector": {
+                          "matchLabels": {
+                            "app": "rift"
+                          }
+                        },
+                        "topologyKey": "kubernetes.io/hostname"
+                      },
+                      "weight": 100
+                    }
+                  ]
+                }
+              },
+              "containers": [
+                {
+                  "image": "zainalpour/rift-proxy:latest",
+                  "name": "rift"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/kubernetes.md",
+  "yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: rift\nspec:\n  replicas: 3\n  template:\n    spec:\n      affinity:\n        podAntiAffinity:\n          preferredDuringSchedulingIgnoredDuringExecution:\n            - weight: 100\n              podAffinityTerm:\n                labelSelector:\n                  matchLabels:\n                    app: rift\n                topologyKey: kubernetes.io/hostname\n      containers:\n        - name: rift\n          image: zainalpour/rift-proxy:latest\n"
+}

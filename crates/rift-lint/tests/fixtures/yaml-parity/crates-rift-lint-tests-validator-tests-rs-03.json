@@ -1,0 +1,19 @@
+{
+  "name": "crates-rift-lint-tests-validator-tests-rs-03",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "imposters": [
+          {
+            "port": 3000,
+            "protocol": "http",
+            "stubs": []
+          }
+        ]
+      }
+    }
+  },
+  "source": "crates/rift-lint/tests/validator_tests.rs",
+  "yaml": "imposters:\n  - port: 3000\n    protocol: http\n    stubs: []\n"
+}

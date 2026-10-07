@@ -1,0 +1,27 @@
+{
+  "name": "docs-deployment-docker-md-07",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "services": {
+          "rift": {
+            "environment": [
+              "MB_LOGLEVEL=warn"
+            ],
+            "image": "zainalpour/rift-proxy:latest",
+            "logging": {
+              "driver": "json-file",
+              "options": {
+                "max-file": "3",
+                "max-size": "10m"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/docker.md",
+  "yaml": "services:\n  rift:\n    image: zainalpour/rift-proxy:latest\n    logging:\n      driver: json-file\n      options:\n        max-size: \"10m\"\n        max-file: \"3\"\n    environment:\n      - MB_LOGLEVEL=warn\n"
+}

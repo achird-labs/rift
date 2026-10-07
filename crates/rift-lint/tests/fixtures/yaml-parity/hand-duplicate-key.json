@@ -1,0 +1,18 @@
+{
+  "name": "hand-duplicate-key",
+  "outcome": {
+    "ok": {
+      "duplicates": [
+        [
+          null,
+          "a"
+        ]
+      ],
+      "value": {
+        "a": 2
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "a: 1\na: 2\n"
+}

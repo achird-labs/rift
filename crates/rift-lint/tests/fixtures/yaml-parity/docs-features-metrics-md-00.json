@@ -1,0 +1,25 @@
+{
+  "name": "docs-features-metrics-md-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "scrape_configs": [
+          {
+            "job_name": "rift",
+            "scrape_interval": "15s",
+            "static_configs": [
+              {
+                "targets": [
+                  "localhost:9090"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "source": "docs/features/metrics.md",
+  "yaml": "# prometheus.yml\nscrape_configs:\n  - job_name: 'rift'\n    static_configs:\n      - targets: ['localhost:9090']\n    scrape_interval: 15s\n"
+}

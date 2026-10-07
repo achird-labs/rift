@@ -1,0 +1,42 @@
+{
+  "name": "docs-demo-docker-compose-rift-features-yml-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "services": {
+          "rift": {
+            "command": [
+              "--configfile",
+              "/imposters.json"
+            ],
+            "environment": [
+              "RUST_LOG=info",
+              "MB_PORT=2525"
+            ],
+            "healthcheck": {
+              "interval": "5s",
+              "retries": 5,
+              "test": [
+                "CMD",
+                "rift",
+                "healthcheck"
+              ],
+              "timeout": "3s"
+            },
+            "image": "zainalpour/rift-proxy:latest",
+            "ports": [
+              "2525:2525",
+              "4547:4547"
+            ],
+            "volumes": [
+              "./imposters-rift-features.json:/imposters.json:ro"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/demo/docker-compose-rift-features.yml",
+  "yaml": "services:\n  rift:\n    image: zainalpour/rift-proxy:latest\n    ports:\n      - \"2525:2525\"   # Admin API\n      - \"4547:4547\"   # Fault Injection demo\n    volumes:\n      - ./imposters-rift-features.json:/imposters.json:ro\n    environment:\n      - RUST_LOG=info\n      - MB_PORT=2525\n    command: [\"--configfile\", \"/imposters.json\"]\n    healthcheck:\n      test: [\"CMD\", \"rift\", \"healthcheck\"]\n      interval: 5s\n      timeout: 3s\n      retries: 5\n"
+}

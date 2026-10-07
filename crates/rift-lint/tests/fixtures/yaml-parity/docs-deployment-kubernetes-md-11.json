@@ -1,0 +1,30 @@
+{
+  "name": "docs-deployment-kubernetes-md-11",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "apiVersion": "monitoring.coreos.com/v1",
+        "kind": "PodMonitor",
+        "metadata": {
+          "name": "rift"
+        },
+        "spec": {
+          "podMetricsEndpoints": [
+            {
+              "interval": "15s",
+              "port": "metrics"
+            }
+          ],
+          "selector": {
+            "matchLabels": {
+              "app": "rift"
+            }
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/kubernetes.md",
+  "yaml": "apiVersion: monitoring.coreos.com/v1\nkind: PodMonitor\nmetadata:\n  name: rift\nspec:\n  selector:\n    matchLabels:\n      app: rift\n  podMetricsEndpoints:\n    - port: metrics\n      interval: 15s\n"
+}

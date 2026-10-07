@@ -1,0 +1,101 @@
+{
+  "name": "tests-compatibility-docker-compose-yml-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "networks": {
+          "default": {
+            "name": "rift-compat-test"
+          }
+        },
+        "services": {
+          "mountebank": {
+            "command": [
+              "start",
+              "--allowInjection",
+              "--loglevel",
+              "info"
+            ],
+            "container_name": "mb-original",
+            "healthcheck": {
+              "interval": "5s",
+              "retries": 15,
+              "start_period": "10s",
+              "test": [
+                "CMD",
+                "wget",
+                "--spider",
+                "-q",
+                "http://localhost:2525/"
+              ],
+              "timeout": "10s"
+            },
+            "image": "bbyars/mountebank:2.9.2",
+            "ports": [
+              "2525:2525",
+              "4545:4545",
+              "4546:4546",
+              "4547:4547"
+            ]
+          },
+          "redis": {
+            "container_name": "rift-redis",
+            "healthcheck": {
+              "interval": "5s",
+              "retries": 5,
+              "test": [
+                "CMD",
+                "redis-cli",
+                "ping"
+              ],
+              "timeout": "5s"
+            },
+            "image": "redis:7-alpine",
+            "ports": [
+              "6379:6379"
+            ]
+          },
+          "rift": {
+            "build": {
+              "context": "../..",
+              "dockerfile": "crates/rift-http-proxy/Dockerfile"
+            },
+            "container_name": "rift-proxy",
+            "depends_on": {
+              "redis": {
+                "condition": "service_healthy"
+              }
+            },
+            "environment": [
+              "MB_PORT=2525",
+              "MB_ALLOW_INJECTION=true",
+              "RUST_LOG=debug",
+              "RIFT_REDIS_URL=redis://redis:6379"
+            ],
+            "healthcheck": {
+              "interval": "5s",
+              "retries": 15,
+              "start_period": "5s",
+              "test": [
+                "CMD",
+                "rift",
+                "healthcheck"
+              ],
+              "timeout": "10s"
+            },
+            "ports": [
+              "3525:2525",
+              "5545:4545",
+              "5546:4546",
+              "5547:4547",
+              "9090:9090"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "source": "tests/compatibility/docker-compose.yml",
+  "yaml": "# Side-by-side comparison test environment for Mountebank and Rift\n#\n# Usage:\n#   docker compose up -d\n#   ./run-tests.sh\n#   docker compose down\n\nservices:\n  # Original Mountebank\n  mountebank:\n    image: bbyars/mountebank:2.9.2\n    container_name: mb-original\n    ports:\n      - \"2525:2525\" # Admin API\n      - \"4545:4545\" # Test imposter port 1\n      - \"4546:4546\" # Test imposter port 2\n      - \"4547:4547\" # Test imposter port 3\n    command: [\"start\", \"--allowInjection\", \"--loglevel\", \"info\"]\n    healthcheck:\n      # Use wget since curl is not available in the mountebank image\n      test: [\"CMD\", \"wget\", \"--spider\", \"-q\", \"http://localhost:2525/\"]\n      interval: 5s\n      timeout: 10s\n      retries: 15\n      start_period: 10s\n\n  # Redis for flow state backend\n  redis:\n    image: redis:7-alpine\n    container_name: rift-redis\n    ports:\n      - \"6379:6379\"\n    healthcheck:\n      test: [\"CMD\", \"redis-cli\", \"ping\"]\n      interval: 5s\n      timeout: 5s\n      retries: 5\n\n  # Rift (Mountebank-compatible mode)\n  rift:\n    build:\n      context: ../..\n      dockerfile: crates/rift-http-proxy/Dockerfile\n    container_name: rift-proxy\n    ports:\n      - \"3525:2525\" # Admin API (mapped to different host port)\n      - \"5545:4545\" # Test imposter port 1\n      - \"5546:4546\" # Test imposter port 2\n      - \"5547:4547\" # Test imposter port 3\n      - \"9090:9090\" # Metrics\n    environment:\n      - MB_PORT=2525\n      - MB_ALLOW_INJECTION=true\n      - RUST_LOG=debug\n      - RIFT_REDIS_URL=redis://redis:6379\n    depends_on:\n      redis:\n        condition: service_healthy\n    healthcheck:\n      test: [\"CMD\", \"rift\", \"healthcheck\"]\n      interval: 5s\n      timeout: 10s\n      retries: 15\n      start_period: 5s\n\nnetworks:\n  default:\n    name: rift-compat-test\n"
+}

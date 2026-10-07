@@ -1,0 +1,15 @@
+{
+  "name": "hand-block-literal",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "a": "line1\nline2\n",
+        "b": "x",
+        "c": "y\n\n"
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "a: |\n  line1\n  line2\n\nb: |-\n  x\n\nc: |+\n  y\n\n"
+}

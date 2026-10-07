@@ -1,0 +1,35 @@
+{
+  "name": "crates-rift-http-proxy-tests-issue-356-yaml-file-scripts-rs-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": [
+        {
+          "_rift": {
+            "flowState": {
+              "backend": "inmemory",
+              "ttlSeconds": 300
+            }
+          },
+          "port": 4545,
+          "protocol": "http",
+          "stubs": [
+            {
+              "responses": [
+                {
+                  "_rift": {
+                    "script": {
+                      "file": "fail-twice.rhai"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "source": "crates/rift-http-proxy/tests/issue_356_yaml_file_scripts.rs",
+  "yaml": "- port: 4545\n  protocol: http\n  _rift:\n    flowState:\n      backend: inmemory\n      ttlSeconds: 300\n  stubs:\n    - responses:\n        - _rift:\n            script:\n              file: fail-twice.rhai\n"
+}

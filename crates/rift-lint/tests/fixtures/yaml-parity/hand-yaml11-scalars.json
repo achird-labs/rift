@@ -1,0 +1,26 @@
+{
+  "name": "hand-yaml11-scalars",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "a": "yes",
+        "b": "no",
+        "c": "on",
+        "d": "off",
+        "e": "y",
+        "f": "n",
+        "g": null,
+        "h": null,
+        "i": true,
+        "j": true,
+        "k": "0755",
+        "l": "0755",
+        "m": "1:30",
+        "n": "2001-01-01"
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "a: yes\nb: no\nc: on\nd: off\ne: y\nf: n\ng: ~\nh: null\ni: true\nj: True\nk: 0755\nl: '0755'\nm: 1:30\nn: 2001-01-01\n"
+}

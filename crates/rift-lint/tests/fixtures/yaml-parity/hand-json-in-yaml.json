@@ -1,0 +1,14 @@
+{
+  "name": "hand-json-in-yaml",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "port": 3000,
+        "protocol": "http"
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "{\"port\": 3000, \"protocol\": \"http\"}"
+}

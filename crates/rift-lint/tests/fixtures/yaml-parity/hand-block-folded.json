@@ -1,0 +1,15 @@
+{
+  "name": "hand-block-folded",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "a": "one two\nthree\n",
+        "b": "f",
+        "c": "g\n\n"
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "a: >\n  one\n  two\n\n  three\nb: >-\n  f\nc: >+\n  g\n\n"
+}

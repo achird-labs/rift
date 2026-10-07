@@ -1,0 +1,14 @@
+{
+  "name": "crates-rift-lint-tests-validator-tests-rs-07",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "port": 3000,
+        "stubs": []
+      }
+    }
+  },
+  "source": "crates/rift-lint/tests/validator_tests.rs",
+  "yaml": "port: 3000\nstubs: []\n"
+}

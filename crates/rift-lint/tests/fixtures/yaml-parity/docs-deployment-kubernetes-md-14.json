@@ -1,0 +1,38 @@
+{
+  "name": "docs-deployment-kubernetes-md-14",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "config": {
+          "allowInjection": true,
+          "logLevel": "info"
+        },
+        "image": {
+          "pullPolicy": "IfNotPresent",
+          "repository": "zainalpour/rift-proxy",
+          "tag": "latest"
+        },
+        "imposters": "{\n  \"imposters\": []\n}\n",
+        "replicaCount": 1,
+        "resources": {
+          "limits": {
+            "cpu": "1000m",
+            "memory": "512Mi"
+          },
+          "requests": {
+            "cpu": "250m",
+            "memory": "128Mi"
+          }
+        },
+        "service": {
+          "adminPort": 2525,
+          "metricsPort": 9090,
+          "type": "ClusterIP"
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/kubernetes.md",
+  "yaml": "replicaCount: 1\n\nimage:\n  repository: zainalpour/rift-proxy\n  tag: latest\n  pullPolicy: IfNotPresent\n\nservice:\n  type: ClusterIP\n  adminPort: 2525\n  metricsPort: 9090\n\nresources:\n  limits:\n    cpu: 1000m\n    memory: 512Mi\n  requests:\n    cpu: 250m\n    memory: 128Mi\n\nconfig:\n  allowInjection: true\n  logLevel: info\n\nimposters: |\n  {\n    \"imposters\": []\n  }\n"
+}

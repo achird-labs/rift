@@ -1,0 +1,8 @@
+{
+  "name": "hand-big-ints",
+  "outcome": {
+    "error": "b: JSON number out of range at line 2 column 4"
+  },
+  "source": "hand-written",
+  "yaml": "a: 18446744073709551615\nb: 18446744073709551616\nc: -9223372036854775808\nd: 123456789012345678901234567890\n"
+}

@@ -1,0 +1,18 @@
+{
+  "name": "crates-rift-mock-core-src-behaviors-types-rs-01",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "copy": null,
+        "decorate": null,
+        "lookup": null,
+        "repeat": null,
+        "shellTransform": null,
+        "wait": null
+      }
+    }
+  },
+  "source": "crates/rift-mock-core/src/behaviors/types.rs",
+  "yaml": "wait: ~\nrepeat: ~\ndecorate: ~\nshellTransform: ~\ncopy: ~\nlookup: ~\n"
+}

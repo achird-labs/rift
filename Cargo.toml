@@ -60,7 +60,7 @@ serde = { version = "1.0", features = ["derive"] }
 # (issue #1085). Costs ~2x on float parsing only. Pinned by rift-types'
 # `serde_json_parses_floats_correctly_rounded`. `arbitrary_precision` and `preserve_order` stay off.
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
-serde_yaml = "0.9"
+serde_norway = "0.9"
 
 # Scripting — pinned to =1.21.0 to match rift-mock-core's deliberate exact pin
 rhai = { version = "=1.21.0", features = ["sync", "serde"] }

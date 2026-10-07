@@ -1,0 +1,33 @@
+{
+  "name": "docs-deployment-docker-md-02",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "services": {
+          "rift": {
+            "command": [
+              "--configfile",
+              "/imposters.json",
+              "--default-tls-cert",
+              "/certs/server.pem",
+              "--default-tls-key",
+              "/certs/server-key.pem"
+            ],
+            "image": "zainalpour/rift-proxy:latest",
+            "ports": [
+              "2525:2525",
+              "4545:4545"
+            ],
+            "volumes": [
+              "./imposters.json:/imposters.json:ro",
+              "./certs:/certs:ro"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "source": "docs/deployment/docker.md",
+  "yaml": "services:\n  rift:\n    image: zainalpour/rift-proxy:latest\n    ports:\n      - \"2525:2525\"\n      - \"4545:4545\"\n    volumes:\n      - ./imposters.json:/imposters.json:ro\n      - ./certs:/certs:ro\n    command:\n      - \"--configfile\"\n      - \"/imposters.json\"\n      - \"--default-tls-cert\"\n      - \"/certs/server.pem\"\n      - \"--default-tls-key\"\n      - \"/certs/server-key.pem\"\n"
+}

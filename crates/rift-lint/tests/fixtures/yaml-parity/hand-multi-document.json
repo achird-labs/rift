@@ -1,0 +1,8 @@
+{
+  "name": "hand-multi-document",
+  "outcome": {
+    "error": "deserializing from YAML containing more than one document is not supported"
+  },
+  "source": "hand-written",
+  "yaml": "- a: 1\n---\n- b: 2\n"
+}

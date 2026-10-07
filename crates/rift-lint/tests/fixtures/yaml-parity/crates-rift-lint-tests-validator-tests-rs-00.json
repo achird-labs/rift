@@ -1,0 +1,17 @@
+{
+  "name": "crates-rift-lint-tests-validator-tests-rs-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": [
+        {
+          "port": "<%= process.env.{UNSET} || '4545' %>",
+          "protocol": "http",
+          "stubs": []
+        }
+      ]
+    }
+  },
+  "source": "crates/rift-lint/tests/validator_tests.rs",
+  "yaml": "- port: <%= process.env.{UNSET} || '4545' %>\n  protocol: http\n  stubs: []\n"
+}

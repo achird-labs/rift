@@ -1,0 +1,17 @@
+{
+  "name": "crates-rift-lint-tests-cli-output-rs-02",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": [
+        {
+          "port": 3000.5,
+          "protocol": "http",
+          "stubs": []
+        }
+      ]
+    }
+  },
+  "source": "crates/rift-lint/tests/cli_output.rs",
+  "yaml": "- port: 3000.5\n  protocol: http\n  stubs: []\n"
+}

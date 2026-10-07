@@ -1,0 +1,15 @@
+{
+  "name": "hand-null-key-and-empty-value",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "a": null,
+        "b": null,
+        "c": null
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "a:\nb: ~\nc: null\n"
+}

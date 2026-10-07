@@ -1,0 +1,8 @@
+{
+  "name": "docs-deployment-index-md-01",
+  "outcome": {
+    "error": "deserializing from YAML containing more than one document is not supported"
+  },
+  "source": "docs/deployment/index.md",
+  "yaml": "        - name: rift\n          image: zainalpour/rift-proxy:latest\n          env:\n            - name: RIFT_UPSTREAM_CA_FILE\n              value: /certs/corp-ca.pem\n          volumeMounts:\n            - name: corp-ca\n              mountPath: /certs\n              readOnly: true\n      volumes:\n        - name: corp-ca\n          configMap:\n            name: corp-ca            # key: corp-ca.pem\n"
+}

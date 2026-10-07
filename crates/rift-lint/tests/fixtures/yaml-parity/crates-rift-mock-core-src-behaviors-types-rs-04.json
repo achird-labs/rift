@@ -1,0 +1,14 @@
+{
+  "name": "crates-rift-mock-core-src-behaviors-types-rs-04",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "decorate": "response.body = 'decorated';",
+        "wait": 100
+      }
+    }
+  },
+  "source": "crates/rift-mock-core/src/behaviors/types.rs",
+  "yaml": "\nwait: 100\ndecorate: \"response.body = 'decorated';\"\n"
+}

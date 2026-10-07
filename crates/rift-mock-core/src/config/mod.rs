@@ -25,7 +25,7 @@ mod tests {
     // serde attributes accept.
     #[test]
     fn flow_state_config_still_deserializes_with_a_nested_redis_block() {
-        let cfg: FlowStateConfig = serde_yaml::from_str(
+        let cfg: FlowStateConfig = serde_norway::from_str(
             "backend: redis\nttl_seconds: 42\nredis:\n  url: redis://127.0.0.1:6379\n  pool_size: 3\n  key_prefix: 'rift:'\n",
         )
         .expect("FlowStateConfig parses");
@@ -39,7 +39,7 @@ mod tests {
 
     #[test]
     fn flow_state_config_defaults_are_unchanged() {
-        let cfg: FlowStateConfig = serde_yaml::from_str("{}").expect("empty parses");
+        let cfg: FlowStateConfig = serde_norway::from_str("{}").expect("empty parses");
         assert_eq!(cfg.backend, "inmemory");
         assert_eq!(cfg.ttl_seconds, 300);
         assert!(cfg.redis.is_none());

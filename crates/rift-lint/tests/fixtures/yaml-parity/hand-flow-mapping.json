@@ -1,0 +1,20 @@
+{
+  "name": "hand-flow-mapping",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "a": 1,
+        "b": [
+          1,
+          2,
+          {
+            "c": "d"
+          }
+        ]
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "{a: 1, b: [1, 2, {c: d}]}"
+}

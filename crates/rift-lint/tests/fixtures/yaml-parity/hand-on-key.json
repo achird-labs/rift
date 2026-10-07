@@ -1,0 +1,14 @@
+{
+  "name": "hand-on-key",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "on": "push",
+        "yes": 1
+      }
+    }
+  },
+  "source": "hand-written",
+  "yaml": "on: push\nyes: 1\n"
+}

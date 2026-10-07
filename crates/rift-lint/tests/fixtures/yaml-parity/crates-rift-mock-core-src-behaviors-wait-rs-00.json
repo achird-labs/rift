@@ -1,0 +1,14 @@
+{
+  "name": "crates-rift-mock-core-src-behaviors-wait-rs-00",
+  "outcome": {
+    "ok": {
+      "duplicates": [],
+      "value": {
+        "max": 200,
+        "min": 100
+      }
+    }
+  },
+  "source": "crates/rift-mock-core/src/behaviors/wait.rs",
+  "yaml": "min: 100\nmax: 200"
+}
