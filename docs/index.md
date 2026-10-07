@@ -11,7 +11,7 @@ permalink: /
 **High-performance Mountebank-compatible HTTP/HTTPS mock server written in Rust**
 {: .fs-6 .fw-300 }
 
-Rift is a drop-in replacement for [Mountebank](https://www.mbtest.dev/) that delivers **~20–150x faster throughput on typical workloads, and up to ~1,850x on large regex predicate sets** — while maintaining full API compatibility. Use your existing Mountebank configurations and enjoy faster test execution.
+Rift is a drop-in replacement for [Mountebank](https://www.mbtest.dev/) that delivers **~20–150x faster throughput on typical workloads, and up to ~1,820x on large regex predicate sets** — while maintaining full API compatibility. Use your existing Mountebank configurations and enjoy faster test execution.
 
 [Get Started]({{ site.baseurl }}/getting-started/){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
 [View on GitHub](https://github.com/achird-labs/rift){: .btn .fs-5 .mb-4 .mb-md-0 }
@@ -70,6 +70,7 @@ on top of a mock server:
 - **[TLS & Mutual TLS]({{ site.baseurl }}/features/tls/)** - HTTPS imposters that require and validate client certificates, plus a private-CA trust store for proxying
 - **[Response Templates]({{ site.baseurl }}/features/date-templates/)** - date tokens and the `_rift.templated` {% raw %}`{{ }}`{% endraw %} grammar, no script engine needed
 - **[Stub Analysis]({{ site.baseurl }}/features/stub-analysis/)** and **[Debug Mode]({{ site.baseurl }}/features/debug-mode/)** - find shadowed stubs, and see why a request matched
+- **[Conditional GET]({{ site.baseurl }}/mountebank/responses/#conditional-get)** and **[Vendor-Mock Templates]({{ site.baseurl }}/templates/)** - `ETag` / `304` without hand-synced validators, and ready-made mocks for third-party SaaS
 - **[Embedding & FFI]({{ site.baseurl }}/embedding/)** - run the engine in-process from Rust or any language over the C ABI
 
 The [Features]({{ site.baseurl }}/features/) section covers all of them.
@@ -258,9 +259,12 @@ hello-world for each, plus the transport and version-compatibility matrices.
 ### Deployment
 - [Docker]({{ site.baseurl }}/deployment/docker/) - Container deployment
 - [Kubernetes]({{ site.baseurl }}/deployment/kubernetes/) - K8s deployment patterns
+- [ECS / Fargate]({{ site.baseurl }}/deployment/ecs-fargate/) - Reference task definition, including the intercept proxy
 
 ### Reference
 - [REST API]({{ site.baseurl }}/api/) - Admin API reference
+- [Examples]({{ site.baseurl }}/examples/) - Ready-to-use imposter configurations
+- [Templates]({{ site.baseurl }}/templates/) - Vendor-mock templates for third-party SaaS
 - [Performance]({{ site.baseurl }}/performance/) - Benchmark results
 - [Rift vs WireMock]({{ site.baseurl }}/comparisons/wiremock/) - Where each one wins, and when not to switch
 - [Rift vs Microcks]({{ site.baseurl }}/comparisons/microcks/) - Spec-driven vs stub-driven, and where they overlap

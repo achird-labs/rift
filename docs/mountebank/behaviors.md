@@ -276,8 +276,9 @@ to JSON. `response.headers` holds one string per header name.
 
 ## shellTransform
 
-Pipe the response through one or more external shell commands. Useful for transforming a response
-body with an existing script or CLI tool.
+Run one or more external shell commands to build the response body. The command reads the request
+and the response from environment variables and writes the new body to its standard output. Useful
+for producing a body with an existing script or CLI tool.
 
 `shellTransform` accepts a single command string, or an array of commands that are **chained in
 sequence** (each command's output feeds the next):
@@ -286,10 +287,13 @@ sequence** (each command's output feeds the next):
 {
   "is": { "statusCode": 200, "body": "hello" },
   "_behaviors": {
-    "shellTransform": "tr a-z A-Z"
+    "shellTransform": "echo \"$MB_RESPONSE\" | tr a-z A-Z"
   }
 }
 ```
+
+This serves `{"BODY":"HELLO","STATUSCODE":200}`: the command receives no standard input, so a
+command that reads standard input, such as a bare `tr` or `cat`, produces an empty body.
 
 ```json
 {
@@ -312,7 +316,10 @@ object entirely rather than present as `""` (#1040). That is the same view `copy
 `decorate` and `${request.headers.*}` read, and the same one predicates match on — see
 [predicates](predicates.md).
 
-The command's **stdout becomes the new response body**. A non-zero exit is a failure: by default it
+The command's **stdout becomes the new response body**, as text and as written. Rift does not read it
+as a response object, so a command that prints `{"statusCode": 201, "body": "z"}` serves that text
+as the body and keeps the status code. This differs from Mountebank, which reads the output as a
+response object. A non-zero exit is a failure: by default it
 is lenient (the original body is served and an `x-rift-shelltransform-error: true` header is added);
 with `strictBehaviors` / `RIFT_STRICT_BEHAVIORS` it returns `500` (see
 [Error Semantics](#error-semantics)).

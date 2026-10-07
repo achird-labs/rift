@@ -266,7 +266,7 @@ fault is **advertised and served** over HTTP/1 only (HTTP/2 multiplexing is inco
 mid-stream connection aborts). On HTTPS that means the TLS handshake offers only `http/1.1`, so an
 h2-capable client is never led to commit to a protocol the imposter will not speak.
 
-The same faults fire through the [single-port gateway](gateway.md) (`/__rift/{port}/…` on the admin
+The same faults fire through the [single-port gateway]({{ site.baseurl }}/features/gateway/) (`/__rift/{port}/…` on the admin
 port) and the [front door](front-door.md). Over **HTTP/1** the client sees exactly what the
 imposter's own port would give it: a reset, an empty reply, garbage bytes, or a `200` head followed
 by a broken chunk. Those two listeners are shared by every imposter (and the admin API), so they

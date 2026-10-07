@@ -329,6 +329,7 @@ it merely *connected* to.
 POST   /intercept   body (optional): { "host"?: "127.0.0.1", "port"?: 0,
                                         "caCertPath"?: "...",  "caKeyPath"?: "...",
                                         "caCertPem"?: "...",   "caKeyPem"?: "...",
+                                        "caCertPemEnv"?: "VAR", "caKeyPemEnv"?: "VAR",
                                         "returnCaKey"?: false,
                                         "auth"?: { "username": "...", "password": "..." },
                                         "rules"?: [ ... ] }
@@ -352,11 +353,12 @@ DELETE /intercept   → 204 always (idempotent); stops the listener and drops it
 - The default bind host is `127.0.0.1` — **not** the admin server's host. A containerized,
   connect-transport caller that needs the proxy reachable off-box must pass `"host": "0.0.0.0"`
   explicitly.
-- **Supplying a CA.** Three mutually-exclusive options: none (a fresh CA is generated),
-  `caCertPath`/`caKeyPath` (PEM **files** on the engine's filesystem), or `caCertPem`/`caKeyPem`
-  (inline PEM **bytes** in the request body — issue #593). Inline PEM lets an SDK hand a
+- **Supplying a CA.** Four mutually-exclusive options: none (a fresh CA is generated),
+  `caCertPath`/`caKeyPath` (PEM **files** on the engine's filesystem), `caCertPem`/`caKeyPem`
+  (inline PEM **bytes** in the request body — issue #593), or `caCertPemEnv`/`caKeyPemEnv` (the
+  **names** of two environment variables that hold the PEMs). Inline PEM lets an SDK hand a
   containerized engine its CA over the admin API with no volume mount. Each pair is
-  both-or-neither, and the path pair and PEM pair cannot be combined. A half-supplied pair, both
+  both-or-neither, and only one pair may be given. A half-supplied pair, both
   pairs together, an unknown field, a bad CA, or an occupied port is a `400` with the standard error
   envelope; a supplied private key is never echoed back.
 - **Bootstrapping a CA (`returnCaKey`).** Set `"returnCaKey": true` (only when **no** CA source is
@@ -370,12 +372,12 @@ DELETE /intercept   → 204 always (idempotent); stops the listener and drops it
   `returnCaKey` with any supplied `caCert*`/`caKey*` is a `400` (it would otherwise let a caller echo
   back an arbitrary keypair from the engine's filesystem). Absent `returnCaKey`, the response carries
   no CA fields, exactly as before. **Security:** `caKeyPem` is CA private-key material — treat the
-  response as a secret, transport it over the `--apikey`-gated admin plane only, and prefer a
+  response as a secret, transport it over the `--api-key`-gated admin plane only, and prefer a
   pre-provisioned CA where policy requires the key never transit the API.
 - `DELETE` discards the CA along with the listener, so a later `POST` without a CA source mints a
   **fresh** CA — re-export `/intercept/ca.pem` (below), or bootstrap with `returnCaKey` and supply
   the pair back via `caCertPem`/`caKeyPem`, after any restart.
-- All three verbs are gated by `--apikey` like every other admin route.
+- All three verbs are gated by `--api-key` like every other admin route.
 - The rule and CA routes below (`/intercept/rules`, `/intercept/ca.pem`, `/intercept/truststore.*`)
   answer `404` with `intercept listener not running` when no listener is up.
 

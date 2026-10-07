@@ -14,7 +14,7 @@
       },
       "stubs": [
         {
-          "name": "Retry Simulation - Fail first 2 requests, pass 3rd to upstream",
+          "name": "Retry Simulation - Fail the first 2 requests, succeed from the 3rd",
           "predicates": [
             {
               "equals": {
@@ -27,13 +27,7 @@
               "_rift": {
                 "script": {
                   "engine": "rhai",
-                  "code": "fn respond(ctx) { let attempts = ctx.state.incr(\"attempts\"); if attempts <= 2 { http(503, #{ error: \"Service temporarily unavailable\", attempt: attempts, message: \"Retry after a moment\" }).header(\"Retry-After\", \"1\").header(\"X-Attempt\", `${attempts}`) } else { pass() } }"
-                }
-              },
-              "_behaviors": {
-                "proxy": {
-                  "to": "http://upstream:8080",
-                  "mode": "proxyAlways"
+                  "code": "fn respond(ctx) { let attempts = ctx.state.incr(\"attempts\"); if attempts <= 2 { http(503, #{ error: \"Service temporarily unavailable\", attempt: attempts, message: \"Retry after a moment\" }).header(\"Retry-After\", \"1\").header(\"X-Attempt\", `${attempts}`) } else { http(200, #{ status: \"success\", attempt: attempts, message: \"Request succeeded after retries\" }).header(\"X-Attempt\", `${attempts}`) } }"
                 }
               }
             }

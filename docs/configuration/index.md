@@ -45,7 +45,7 @@ docker run -v $(pwd)/imposters.json:/imposters.json \
 | Key | Purpose |
 |---|---|
 | `imposters` | The imposters to create — the Mountebank format above. |
-| `intercept` | *Optional, Rift extension.* Declares the [HTTPS intercept listener]({{ site.baseurl }}/features/intercept-proxy/#declare-it-in-the-config-file) and its rules, so a container needs no post-boot admin call to install them. Its keys are `host`, `port`, the CA pair (`caCertPath`/`caKeyPath`, **or** `caCertPem`/`caKeyPem`, **or** `caCertPemEnv`/`caKeyPemEnv` naming two environment variables), `rules`, and `auth`; any other key is a startup error. `returnCaKey: true` is refused too: a config file has no response to return a generated key in, so use `POST /intercept` for that. |
+| `intercept` | *Optional, Rift extension.* Declares the [HTTPS intercept listener]({{ site.baseurl }}/features/intercept-proxy/#declare-it-in-the-config-file) and its rules, so a container needs no post-boot admin call to install them. Its keys are `host` (default `127.0.0.1`), `port` (default `0`, which lets the OS pick), the CA pair (`caCertPath`/`caKeyPath`, **or** `caCertPem`/`caKeyPem`, **or** `caCertPemEnv`/`caKeyPemEnv` naming two environment variables), `rules`, and `auth`; any other key is a startup error. With no CA pair, Rift generates a CA at start. `returnCaKey: true` is refused too: a config file has no response to return a generated key in, so use `POST /intercept` for that. |
 | `routes` | *Optional, Rift extension.* The [front door]({{ site.baseurl }}/features/front-door/) route table, as `{"routes": [ ... ]}`. Validated at load, so a table that cannot route is a startup error. It only takes effect with `--front-door`. |
 
 `intercept.auth` (issue #878) is `{"username": "…", "password": "…"}` and requires
@@ -53,6 +53,17 @@ docker run -v $(pwd)/imposters.json:/imposters.json \
 see [Authenticating the proxy]({{ site.baseurl }}/features/intercept-proxy/#authenticating-the-proxy)
 for why that matters on a shared host. A blank username or password is a startup error, not a
 disabled gate. Certificate and CA handling is covered in [TLS/HTTPS]({{ site.baseurl }}/features/tls/).
+
+`caCertPemEnv` and `caKeyPemEnv` hold the *names* of two environment variables, not the PEM text. Rift
+reads the variables when the listener starts. Use them where a secret store delivers secrets only as
+environment variables, as ECS/Fargate does. If a named variable is unset, the start fails and the
+error names it.
+
+`POST /admin/reload` re-applies the file's `intercept.rules`, so you can change a rule by editing the
+file. The listener itself stays as booted: a change to `host`, `port`, `auth` or the CA source needs a
+restart, and the reload reply carries a warning that says so. If one edit changes the listener and
+the rules together, the rules are not re-applied either; restart to apply both. See
+[Hot reload]({{ site.baseurl }}/features/hot-reload/) for the reply format.
 
 Any other top-level key is ignored.
 

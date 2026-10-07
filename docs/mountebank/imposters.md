@@ -264,7 +264,7 @@ curl http://localhost:2525/imposters/4545
       "path": "/api/users",
       "query": {},
       "headers": {...},
-      "timestamp": "2024-01-15T10:30:00.000Z",
+      "timestamp": "2024-01-15T10:30:00.123456+00:00",
       "status": 200,
       "latencyMs": 0
     }
@@ -279,8 +279,10 @@ response existed. An error response is an answer and is recorded like any other;
 `latencyMs` of `0` is an ordinary sub-millisecond answer.
 `matchOutcome` (which stub matched, or why none did) may also appear.
 
-Each header name maps to the **list** of values the client sent, in order, so a header sent twice
-is recorded as `{"X-Test": ["first", "second"]}` rather than collapsing to one value.
+A header the client sent once is recorded as a string. A header it sent more than once is recorded
+as the **list** of its values, in order, so a header sent twice is recorded as
+`{"X-Test": ["first", "second"]}` rather than collapsing to one value. Names keep the spelling the
+client used.
 
 Header names are case-insensitive, so a document that spells one name two ways describes **one**
 header, not two. Rift merges such entries when it parses a **multi-valued** header object — a

@@ -75,6 +75,11 @@ rift-verify -p 4545 --show-curl --verbose
 | `--verify-dynamic` | | Assert dynamic stubs with a mock upstream, `_verify` sequences and fault checks | `false` |
 | `--status-only` | | Only verify status code (skip body/header checks) | `false` |
 | `--demo` | | Show enhanced error output examples | `false` |
+| `--gateway` | | Send requests through the single-port gateway (`{admin_url}/__rift/<port>/...`) instead of to each imposter port | `false` |
+| `--insecure` | | Accept self-signed or invalid TLS certificates (needed for `protocol: https` imposters that present a self-signed cert) | `false` |
+| `--space <SPACE>` | | Correlation value sent to correlated-isolation imposters: when an imposter declares `flowIdSource: "header:<Name>"`, every request carries `<Name>: <space>` | `rift-verify` |
+| `--flow-id-header <NAME>` | | Fallback correlation header name, used only when the imposter's `flowIdSource` cannot be read from `GET /imposters` | (none) |
+| `--output <FORMAT>` | `-o` | Output format: `text` or `json`. In `json` mode stdout carries only the final summary; progress and the banner go to stderr | `text` |
 | `--help` | `-h` | Print help information | |
 | `--version` | `-V` | Print version | |
 

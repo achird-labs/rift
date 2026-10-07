@@ -194,6 +194,8 @@ Regular expression match:
 Unlike the other operators, `matches` folds case per **Unicode**, not ASCII — see
 [caseSensitive](#casesensitive).
 
+The `path` field is the request path as the client sent it. Rift does not percent-decode it, so a request for `/caf%C3%A9` is matched as `/caf%C3%A9`.
+
 ### exists
 
 Check field existence:
@@ -417,8 +419,8 @@ Case-insensitive matching (the default) folds **ASCII** letters only (`A`–`Z` 
 `é`) are compared exactly.
 
 [`matches`](#matches) is the exception: its case-insensitive mode is the regex engine's, which
-applies full Unicode case folding. So `{"matches": {"path": "^/josé$"}}` matches a request for
-`/JOSÉ`, while `{"equals": {"path": "/josé"}}` does not.
+applies full Unicode case folding. So `{"matches": {"headers": {"X-Name": "^josé$"}}}` matches a request that
+sends `X-Name: JOSÉ`, while `{"equals": {"headers": {"X-Name": "josé"}}}` does not.
 
 **Migrating from Mountebank:** Mountebank folds Unicode for *all* of these operators, so it has no
 such split. Rift's string operators deviate deliberately (see below); `matches` is the one that

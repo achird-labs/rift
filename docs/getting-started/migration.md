@@ -110,7 +110,7 @@ go test ./...
 
 Rift provides significantly better performance:
 
-- **20-250x faster** request processing
+- **~20–150x faster** request processing on typical workloads (see [Performance]({{ site.baseurl }}/performance/))
 - **Consistent latency** regardless of stub count
 - **Lower memory usage** due to Rust's efficiency
 
