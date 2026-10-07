@@ -34,6 +34,12 @@ record.
 
 ### Fixed
 
+- **A binary (non-UTF-8) request body reached the proxy upstream base64-encoded** (#1321): the
+  forward path reused the request journal's string form (#636), so a protobuf, gzip or image
+  `POST` through a `proxy` response or `defaultForward` arrived as ASCII base64 with a matching,
+  wrong `content-length`. The upstream now gets the client's bytes. The no-generator `proxyOnce`
+  replay key (#1317) hashes the bytes too, so a text body that spells out a binary body's base64
+  no longer replays the binary body's response.
 - **A proxy without `predicateGenerators`, `addWaitBehavior` or `addDecorateBehavior` replayed one
   response for every body sent to the same path** (#1317): the replay store keyed on method, path and query only, so under `proxyOnce` a
   second `POST /orders` with a different body got the first body's response. The key now includes

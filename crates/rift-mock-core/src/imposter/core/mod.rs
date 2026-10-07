@@ -908,7 +908,7 @@ mod matching;
 mod stub_index;
 use stub_index::StubSnapshot;
 mod proxy;
-pub(crate) use proxy::{ProxiedResponse, ProxyOutcome};
+pub(crate) use proxy::{ProxiedResponse, ProxyBody, ProxyOutcome};
 mod recording;
 mod responses;
 mod verify;
