@@ -38,8 +38,9 @@ manual_let_else = "warn"
 unnecessary_map_or = "warn"
 
 [workspace.dependencies]
-# Async runtime — version pinned here; each crate selects its own tokio features
-tokio = { version = "1.41" }
+# Async runtime — version pinned here; each crate selects its own tokio features.
+# 1.50: `TcpStream::set_zero_linger` (fault_io RST injection; `set_linger` is deprecated).
+tokio = { version = "1.50" }
 tokio-util = "0.7"
 
 # Serialization

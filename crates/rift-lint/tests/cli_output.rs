@@ -1126,7 +1126,7 @@ fn fix_refuses_a_file_whose_integer_literal_would_be_rewritten() {
         "it names the literal and where it is, got: {stdout}"
     );
     assert!(
-        stdout.contains("1.2345678901234568e29"),
+        stdout.contains("1.2345678901234568e+29"),
         "it says what the literal would become, got: {stdout}"
     );
     assert!(stdout.contains("Applied 0 fixes"), "got: {stdout}");
@@ -1165,7 +1165,8 @@ fn fix_refuses_to_quote_a_header_whose_own_number_it_cannot_write_back() {
 
     assert_eq!(after, original);
     assert!(
-        stdout.contains("Skipped:") && stdout.contains("would be written as 1.2345678901234568e29"),
+        stdout.contains("Skipped:")
+            && stdout.contains("would be written as 1.2345678901234568e+29"),
         "the refusal itself names the number (W012 also prints the literal), got: {stdout}"
     );
 }

@@ -12,7 +12,6 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
 
 use hyper::Response;
 use parking_lot::Mutex;
@@ -187,13 +186,13 @@ impl FaultIo {
     /// Apply the fault to the raw socket. Returns the error used to abort the hyper connection so
     /// the socket is dropped (and closed) immediately afterwards. The raw socket calls are
     /// best-effort: on failure the connection still breaks, but the *observed* fault may degrade
-    /// (e.g. a failed `set_linger` reset becomes a graceful close), so each failure is logged.
+    /// (e.g. a failed `set_zero_linger` reset becomes a graceful close), so each failure is logged.
     fn trip(&self, kind: TcpFaultKind) -> io::Error {
         match kind {
             // SO_LINGER(0): dropping the socket now emits RST rather than a graceful FIN.
             TcpFaultKind::Reset => {
-                if let Err(e) = self.inner.set_linger(Some(Duration::ZERO)) {
-                    debug!("rift fault reset: set_linger(0) failed, degraded to graceful close: {e}");
+                if let Err(e) = self.inner.set_zero_linger() {
+                    debug!("rift fault reset: set_zero_linger failed, degraded to graceful close: {e}");
                 }
             }
             // Nothing written; the abort closes the connection with no response bytes.
