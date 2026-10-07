@@ -43,7 +43,7 @@ parking_lot = "0.12"
 [dev-dependencies]
 reqwest.workspace = true
 # Mint a committed CA (cert+key PEM) on disk in the intercept CA-reuse gate test (issue #429).
-rcgen = "0.13"
+rcgen = "0.14"
 # Write imposter config files on disk for the `configFile` allowInjection gate tests (issue #616).
 tempfile = "3.8"
 # Assert `warn_anyhow_failure` renders the whole cause chain, not just its outermost context (#683).

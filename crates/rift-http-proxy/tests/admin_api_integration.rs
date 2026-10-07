@@ -811,7 +811,7 @@ mod https {
             "127.0.0.1".to_string(),
         ])
         .unwrap();
-        (c.cert.pem(), c.key_pair.serialize_pem())
+        (c.cert.pem(), c.signing_key.serialize_pem())
     }
 
     fn stub_config(port: u16, protocol: &str, cert: Option<(&str, &str)>) -> serde_json::Value {
@@ -2555,7 +2555,7 @@ mod mutual_tls {
             .push(DnType::CommonName, "rift-977-client");
         let leaf_key = KeyPair::generate().expect("leaf key");
         let leaf_cert = leaf
-            .signed_by(&leaf_key, &ca_cert, &ca_key)
+            .signed_by(&leaf_key, &rcgen::Issuer::from_params(&ca_params, &ca_key))
             .expect("sign leaf");
 
         (ca_cert.pem(), leaf_cert.pem(), leaf_key.serialize_pem())
@@ -2567,7 +2567,7 @@ mod mutual_tls {
             "127.0.0.1".to_string(),
         ])
         .expect("server cert");
-        (c.cert.pem(), c.key_pair.serialize_pem())
+        (c.cert.pem(), c.signing_key.serialize_pem())
     }
 
     fn client_presenting(cert_pem: &str, key_pem: &str) -> reqwest::Client {

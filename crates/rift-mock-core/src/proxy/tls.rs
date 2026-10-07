@@ -371,7 +371,7 @@ pub fn generate_self_signed_acceptors(
             .map_err(|e| anyhow::anyhow!("Failed to generate self-signed certificate: {e}"))?;
     tls_acceptors_from_pem(
         cert.cert.pem().as_bytes(),
-        cert.key_pair.serialize_pem().as_bytes(),
+        cert.signing_key.serialize_pem().as_bytes(),
         client_auth,
     )
 }
@@ -396,7 +396,7 @@ mod tests {
         let certs = rustls_pemfile::certs(&mut cert.cert.pem().as_bytes())
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        let key = rustls_pemfile::private_key(&mut cert.key_pair.serialize_pem().as_bytes())
+        let key = rustls_pemfile::private_key(&mut cert.signing_key.serialize_pem().as_bytes())
             .unwrap()
             .unwrap();
         rustls::ServerConfig::builder()
@@ -439,7 +439,7 @@ mod tests {
             .expect("self-signed cert");
         tls_server_config_from_pem(
             cert.cert.pem().as_bytes(),
-            cert.key_pair.serialize_pem().as_bytes(),
+            cert.signing_key.serialize_pem().as_bytes(),
             &ClientAuth::Off,
         )
         .expect("server config")

@@ -130,9 +130,12 @@ rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-featur
 # Corpus lint gate (issue #460): lint every vendored fixture via the library API.
 rift-lint = { path = "../rift-lint", version = "0.1.0" }
 tempfile = "3.8"
-rcgen = "0.13"
+rcgen = "0.14"
 # Reads the PKCS#12 stores `rift intercept-ca export` writes (issue #1274); already in the tree.
 p12 = "0.6"
+# Reads a generated CA back (CN, validity) in the intercept-ca CLI tests; rcgen 0.14 no longer
+# parses certificates into `CertificateParams`. Already in the tree via rift-mock-core.
+x509-parser = "0.18"
 
 # Integration testing
 reqwest = { workspace = true, features = ["http2"] }

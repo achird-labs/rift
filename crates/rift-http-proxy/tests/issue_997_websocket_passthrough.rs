@@ -34,7 +34,7 @@ fn origin_cert() -> (String, String) {
     let c =
         rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
             .expect("generate origin cert");
-    (c.cert.pem(), c.key_pair.serialize_pem())
+    (c.cert.pem(), c.signing_key.serialize_pem())
 }
 
 fn origin_tls_acceptor(cert_pem: &str, key_pem: &str) -> tokio_rustls::TlsAcceptor {

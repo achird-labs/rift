@@ -37,13 +37,13 @@ rustls-pemfile = "2.0"
 # longer *also* reachable transitively — which is why hyper-rustls itself is gone from this list.
 rustls-native-certs = "0.8"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
-# x509-parser: needed to recover a loaded CA's distinguished name (CertificateParams::from_ca_cert_pem)
-rcgen = { version = "0.13", features = ["x509-parser"] }
+# x509-parser: needed to recover a loaded CA's distinguished name and SKI (Issuer::from_ca_cert_pem)
+rcgen = { version = "0.14", features = ["x509-parser"] }
 # Issue #1274: a CA meant to be kept gets a validity window from now (rcgen takes `time` types),
 # and a PEM bundle's certificates are named by their subject CN in an exported truststore. Both
 # crates are already in the tree through rcgen.
 time = "0.3"
-x509-parser = "0.16"
+x509-parser = "0.18"
 # Bounded LRU cache for per-SNI intercept leaves (issue #539 — MITM-intercept DoS)
 lru = "0.18"
 
@@ -102,6 +102,8 @@ sxd-xpath = "0.4"
 # JSONPath RFC 9535 support
 serde_json_path = "0.7"
 p12 = "0.6.3"
+# Pinned to p12's major: the PKCS#12 attribute and writer types we build (`ObjectIdentifier`,
+# `DERWriter`) must be the exact ones p12 0.6.3 (its last release) exposes, and it requires ^0.5.
 yasna = "0.5"
 ring = "0.17"
 # Lock-free concurrent HashMap for the predicate regex cache (issue #715): reads on the imposter

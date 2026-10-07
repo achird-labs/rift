@@ -238,7 +238,7 @@ mod tests {
         // returned error naming the flag, not a silent no-op that leaves the anchor missing.
         let key_only = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
             .expect("generate")
-            .key_pair
+            .signing_key
             .serialize_pem();
         let policy = OutboundTls {
             ca_pem: Some(key_only),

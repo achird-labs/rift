@@ -365,21 +365,25 @@ fn generate_writes_the_requested_name_and_validity() {
     let out = generate(dir.path(), &["--cn", "Acme CI CA", "--validity-days", "30"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let pem = std::fs::read_to_string(dir.path().join("ca-cert.pem")).unwrap();
-    let params = rcgen::CertificateParams::from_ca_cert_pem(&pem).expect("parse");
+    let (_, pem) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).expect("parse PEM");
+    let cert = pem.parse_x509().expect("parse certificate");
     assert_eq!(
-        params.distinguished_name.get(&rcgen::DnType::CommonName),
-        Some(&rcgen::DnValue::Utf8String("Acme CI CA".to_string()))
+        cert.subject()
+            .iter_common_name()
+            .next()
+            .and_then(|cn| cn.as_str().ok()),
+        Some("Acme CI CA")
     );
     let now = before
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    let lifetime = params.not_after.unix_timestamp() - now;
+    let lifetime = cert.validity().not_after.timestamp() - now;
     assert!(
         (30 * 86_400 - 5..=30 * 86_400 + 60).contains(&lifetime),
         "valid for 30 days from now, got {lifetime}s"
     );
-    assert!(params.not_before.unix_timestamp() <= now - 5 * 60);
+    assert!(cert.validity().not_before.timestamp() <= now - 5 * 60);
 }
 
 #[test]
