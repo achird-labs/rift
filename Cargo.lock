@@ -3012,9 +3012,9 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "quamina"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df76083668e1d8c46e9ae515d4f0281f47db222306904c6b7c6636f3c6c655c5"
+checksum = "0c4640d748fc9ced0ed8a0c37966b535d82d967914b1f95a40e77416b81ed25c"
 dependencies = [
  "arc-swap",
  "fast-float2",

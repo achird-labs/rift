@@ -80,7 +80,7 @@ regex-automata = "0.4"
 aho-corasick = "1.1"
 # Automaton-based JSON body-field matching (issue #767); default-on, droppable for
 # minimal/FFI builds via `--no-default-features`.
-quamina = { version = "0.6", optional = true }
+quamina = { version = "0.7", optional = true }
 memchr.workspace = true
 rand.workspace = true
 urlencoding = "2.1"
