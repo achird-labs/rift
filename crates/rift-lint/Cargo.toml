@@ -34,7 +34,7 @@ thiserror.workspace = true
 clap = { workspace = true, optional = true }
 
 # JavaScript validation (optional) — aligned with rift-mock-core's boa_engine pin
-boa_engine = { version = "0.20", optional = true }
+boa_engine = { version = "0.22", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

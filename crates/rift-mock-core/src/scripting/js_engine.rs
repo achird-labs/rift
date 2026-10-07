@@ -1563,7 +1563,7 @@ fn json_to_js_result(context: &mut Context, value: &Value) -> JsResult<JsValue> 
         }
         Value::String(s) => Ok(JsValue::from(js_string!(s.clone()))),
         Value::Array(arr) => {
-            let js_arr = JsArray::new(context);
+            let js_arr = JsArray::new(context)?;
             for (i, v) in arr.iter().enumerate() {
                 let js_val = json_to_js_result(context, v)?;
                 js_arr.set(i as u32, js_val, false, context)?;

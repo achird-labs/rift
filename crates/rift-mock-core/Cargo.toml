@@ -57,7 +57,7 @@ rift-types = { path = "../rift-types", version = "0.1.0" }
 
 # Scripting engines
 rhai.workspace = true
-boa_engine = { version = "0.20", optional = true }
+boa_engine = { version = "0.22", default-features = false, optional = true }
 
 # Logging & Observability
 tracing.workspace = true
