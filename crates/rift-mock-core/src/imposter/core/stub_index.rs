@@ -1364,7 +1364,7 @@ mod tests {
     use crate::imposter::core::Imposter;
     use crate::imposter::types::ImposterConfig;
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use serde_json::{Value, json};
     use std::collections::HashMap;
     use tracing_test::traced_test;
@@ -2184,9 +2184,9 @@ mod tests {
         const SEGS: &[&str] = &["/a", "/b", "/api/v1", "/api/v2", "/x/y", "/mid"];
         (0..n)
             .map(|_| {
-                let seg = SEGS[rng.gen_range(0..SEGS.len())];
-                let m = METHODS[rng.gen_range(0..METHODS.len())];
-                match rng.gen_range(0..36) {
+                let seg = SEGS[rng.random_range(0..SEGS.len())];
+                let m = METHODS[rng.random_range(0..METHODS.len())];
+                match rng.random_range(0..36) {
                     // Indexable on both dimensions (one predicate, two fields).
                     0 => json!([{"equals": {"method": m, "path": seg}}]),
                     // Indexable on both dimensions (two separate top-level predicates).
@@ -2293,15 +2293,15 @@ mod tests {
         for corpus_n in 0..8 {
             let imp = imposter(&random_corpus(&mut rng, 40));
             for _ in 0..1250 {
-                let m = METHODS[rng.gen_range(0..METHODS.len())];
-                let p = PATHS[rng.gen_range(0..PATHS.len())];
+                let m = METHODS[rng.random_range(0..METHODS.len())];
+                let p = PATHS[rng.random_range(0..PATHS.len())];
                 // Mix non-JSON, absent, and several JSON bodies — exact matches, a type-coercion
                 // variant, an array, a JSON-in-string leaf (the bail path), a nested object, and a
                 // superset body — so the body-hash (#708) AND body-field (#767) dimensions are both
                 // exercised against the linear oracle. `{"k":"1"}` (string) must still match a
                 // numeric equals stub; `{"k":1,"z":9}` matches the equals-subset stub but NOT the
                 // length-exact deepEquals stub, so the two body dimensions diverge on it.
-                let body = match rng.gen_range(0..9) {
+                let body = match rng.random_range(0..9) {
                     0 => Some("ping"),
                     1 => Some(r#"{"k":1}"#),
                     2 => Some(r#"{"k":"1"}"#),
@@ -2312,7 +2312,7 @@ mod tests {
                     7 => None,
                     _ => None,
                 };
-                let query = if rng.gen_bool(0.25) {
+                let query = if rng.random_bool(0.25) {
                     Some("a=1")
                 } else {
                     None

@@ -1,5 +1,5 @@
 //! Issue #1148: a `wait` whose `min` exceeds its `max` was accepted at creation and then panicked
-//! the tokio worker on *every* request to that stub — `gen_range` asserts a non-empty range, the
+//! the tokio worker on *every* request to that stub — `random_range` asserts a non-empty range, the
 //! draw ran on the request task with no `catch_unwind`, so the connection was dropped and the stub
 //! was permanently dead while the server stayed up and healthy.
 //!

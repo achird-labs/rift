@@ -78,7 +78,7 @@ url = "2"
 
 # Utils
 bytes.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 # Hot-swappable route table for the front door listener (issue #19 / U-11); same pin as
 # rift-mock-core's own use of it for the imposter manager's port slots.
 arc-swap = "1.7"

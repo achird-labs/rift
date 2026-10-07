@@ -61,14 +61,14 @@ boa_engine = { version = "0.20", optional = true }
 
 # Logging & Observability
 tracing.workspace = true
-prometheus = "0.13"
+prometheus = "0.14"
 
 # HTTP client (proxy forwarding)
 reqwest.workspace = true
 
 # Utils
 bytes.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 chrono.workspace = true
 regex = "1.11"
 # The multi-pattern engine behind `regex` (issue #709). Already in the tree transitively via
@@ -86,7 +86,7 @@ rand.workspace = true
 urlencoding = "2.1"
 anyhow.workspace = true
 thiserror.workspace = true
-socket2 = "0.5"
+socket2 = "0.6"
 num_cpus = "1.16"
 libc = "0.2"
 parking_lot = "0.12"

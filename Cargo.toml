@@ -94,7 +94,7 @@ bytes = "1.7"
 # SIMD substring search for fixed literals probed per request (issue #706).
 memchr = "2.7"
 uuid = { version = "1.8", features = ["v4", "serde"] }
-rand = "0.8"
+rand = "0.10"
 
 # Testing
 proptest = "1.4"

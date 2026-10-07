@@ -37,7 +37,7 @@ use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 
 use crate::util::FastMap;
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -2293,13 +2293,13 @@ async fn apply_rift_fault(
     let rule_id = port.to_string();
     // Generate all random values before any await points (ThreadRng is not Send)
     let (apply_latency, latency_delay_ms) = {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         if let Some(ref latency) = fault_config.latency {
-            if rng.r#gen::<f64>() < latency.probability {
+            if rng.random::<f64>() < latency.probability {
                 let delay_ms = if let Some(fixed_ms) = latency.ms {
                     fixed_ms
                 } else if latency.max_ms > latency.min_ms {
-                    rng.gen_range(latency.min_ms..=latency.max_ms)
+                    rng.random_range(latency.min_ms..=latency.max_ms)
                 } else {
                     latency.min_ms
                 };
@@ -2313,9 +2313,9 @@ async fn apply_rift_fault(
     };
 
     let apply_error = {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         if let Some(ref error) = fault_config.error {
-            rng.r#gen::<f64>() < error.probability
+            rng.random::<f64>() < error.probability
         } else {
             false
         }
@@ -2326,11 +2326,11 @@ async fn apply_rift_fault(
     // as absent for this request, falling through to the `error` fault and normal response — the
     // same semantics `latency`/`error` already use.
     let apply_tcp = {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         fault_config
             .tcp
             .as_ref()
-            .is_some_and(|tcp| rng.r#gen::<f64>() < tcp.probability())
+            .is_some_and(|tcp| rng.random::<f64>() < tcp.probability())
     };
 
     // Apply latency fault (this is async)
