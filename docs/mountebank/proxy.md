@@ -44,7 +44,9 @@ What a proxy records depends on whether it has `predicateGenerators` (or `addWai
   answers later matching requests. This is the Mountebank behaviour.
 - **Without generators**, the imposter's `stubs` never change. `"mode": "proxyOnce"` still replays:
   it keeps the first response for each request in an internal store, so the upstream sees each
-  request once. `DELETE /imposters/{port}/savedProxyResponses` clears that store. `proxyAlways` and
+  request once. A request is identified by its method, path, query string and request body;
+  headers are not part of the key, so use `predicateGenerators` (for example
+  `{"matches": {"headers": {"X-Tenant": true}}}`) to key on one. `DELETE /imposters/{port}/savedProxyResponses` clears that store. `proxyAlways` and
   `proxyTransparent` forward every request.
 - **`proxyTransparent`** never records, with or without generators.
 

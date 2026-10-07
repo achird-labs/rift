@@ -17,6 +17,7 @@ record.
 
 ### Changed
 
+- **Breaking for Rust embedders** (#1317): `recording::RequestSignature` gains `body_hash: Option<u64>` and is now `#[non_exhaustive]`, so it cannot be built with a struct literal outside `rift-mock-core`; use `RequestSignature::new` and the new `with_body`.
 - **Breaking for Rust embedders of `rift-http-proxy`** (#1316): `server::Commands::Replay` is now a unit variant (it took `configfile`), `server::ScriptAction::Check` no longer has a `no_parse` field, and `script_cli::dispatch` takes the global `no_parse` as a second argument. The command line itself is unchanged except as described above.
 
 - **A proxy that omits `mode` now records and replays as `proxyOnce`, Mountebank's default**
@@ -31,6 +32,12 @@ record.
 
 ### Fixed
 
+- **A proxy without `predicateGenerators`, `addWaitBehavior` or `addDecorateBehavior` replayed one
+  response for every body sent to the same path** (#1317): the replay store keyed on method, path and query only, so under `proxyOnce` a
+  second `POST /orders` with a different body got the first body's response. The key now includes
+  the request body; headers still do not (use `predicateGenerators` to key on one). With
+  generators the key is unchanged. A store that serializes the signature as its key misses
+  pre-upgrade recordings of requests with a body once.
 - **`proxyAlways` written in another case placed its recorded stub before the proxy stub**
   (#1314), so the proxy never ran again: the replay store read the mode case-insensitively but the
   stub placement compared it case-sensitively.
