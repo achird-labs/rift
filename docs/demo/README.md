@@ -323,8 +323,8 @@ cd docs/demo
 ./generate-intercept-ca.sh     # docker run … rift intercept-ca generate --out-dir intercept-ca
 ```
 
-`rift intercept-ca` first shipped after v0.19.0. With the published `latest` image from an older
-release, build and retag the image first (see the note at the top).
+`rift intercept-ca` first shipped in v0.20.0. With an image older than that, pull a current one or
+build and retag the image first (see the note at the top).
 
 ### Start
 
