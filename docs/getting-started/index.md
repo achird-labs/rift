@@ -77,7 +77,7 @@ these docs.
 
 ### Build from Source
 
-Requires Rust 1.92+ (see `rust-version` in `Cargo.toml`):
+Requires Rust 1.99+ (see `rust-version` in `Cargo.toml`):
 
 ```bash
 git clone https://github.com/achird-labs/rift.git

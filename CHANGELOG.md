@@ -104,6 +104,9 @@ record.
 
 ### Changed
 
+- **Minimum supported Rust is now 1.99** (was 1.92). Building from source, or depending on any
+  `rift-*` crate, needs a 1.99 toolchain; CI already ran on latest stable.
+
 - **templates/optimizely: the datafile CDN now uses `_rift.conditional`** (#1295): `Last-Modified` is the stub's load time and an `ETag` is served; a reload that changes `fixtures/datafile.json` invalidates pollers without touching `imposters.json`. Wire-visible: the fixed `Sat, 03 Oct 2026 12:00:00 GMT` stamp is gone, so a test that copied it as an `If-Modified-Since` will now get a 200 or a different 304 timing.
 
 ### Performance

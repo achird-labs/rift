@@ -23,7 +23,7 @@ license = "Apache-2.0"
 authors = ["Rift Contributors"]
 repository = "https://github.com/achird-labs/rift"
 homepage = "https://github.com/achird-labs/rift"
-rust-version = "1.92"
+rust-version = "1.99"
 
 # Centralized lint policy inherited by every crate via `[lints] workspace = true`.
 # Kept intentionally conservative: CI runs `clippy -- -D warnings`, which promotes any
