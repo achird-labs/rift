@@ -55,19 +55,37 @@ pub struct Cli {
 
     // === Mountebank-compatible options ===
     /// Port for the admin API (Mountebank mode)
-    #[arg(long, default_value_t = DEFAULT_ADMIN_PORT, env = "MB_PORT")]
+    #[arg(long, default_value_t = DEFAULT_ADMIN_PORT, env = "MB_PORT", global = true, help_heading = "Server options")]
     pub port: u16,
 
     /// IP address to bind the admin API to (IPv4, or IPv6 bare `::1` or bracketed `[::1]`)
-    #[arg(long, default_value = "0.0.0.0", env = "MB_HOST")]
+    #[arg(
+        long,
+        default_value = "0.0.0.0",
+        env = "MB_HOST",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub host: String,
 
     /// Load imposters from a config file on startup (JSON or EJS format)
-    #[arg(long, value_name = "FILE", env = "MB_CONFIGFILE")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        env = "MB_CONFIGFILE",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub configfile: Option<PathBuf>,
 
     /// Directory for persistent imposter storage
-    #[arg(long, value_name = "DIR", env = "MB_DATADIR")]
+    #[arg(
+        long,
+        value_name = "DIR",
+        env = "MB_DATADIR",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub datadir: Option<PathBuf>,
 
     /// Load imposters from one or more source URIs (U-12), comma-separated. `file:<path>` and a
@@ -75,94 +93,171 @@ pub struct Cli {
     /// `ETag`. Multiple sources are merged, and a port declared by two of them is a startup error
     /// naming both. `POST /admin/reload` re-fetches every source. `--configfile <p>` is sugar for
     /// `--imposters file:<p>`.
-    #[arg(long, value_name = "URI[,URI...]", env = "RIFT_IMPOSTERS")]
+    #[arg(
+        long,
+        value_name = "URI[,URI...]",
+        env = "RIFT_IMPOSTERS",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub imposters: Option<String>,
 
     /// Root directory `_rift.script` `file:` references resolve under for admin-API-created
     /// imposters (issue #356). A resolved path that escapes this root is rejected. Without it,
     /// admin-API `file:` script references are rejected outright (`--configfile`/`--datadir`
     /// loads are unaffected — those resolve relative to the config's own directory).
-    #[arg(long, value_name = "DIR", env = "RIFT_SCRIPTS_DIR")]
+    #[arg(
+        long,
+        value_name = "DIR",
+        env = "RIFT_SCRIPTS_DIR",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub scripts_dir: Option<PathBuf>,
 
     /// Allow JavaScript injection in responses (for inject and decorate)
-    #[arg(long, visible_alias = "allowInjection", env = "MB_ALLOW_INJECTION")]
+    #[arg(
+        long,
+        visible_alias = "allowInjection",
+        env = "MB_ALLOW_INJECTION",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub allow_injection: bool,
 
     /// Only accept requests from localhost
-    #[arg(long, env = "MB_LOCAL_ONLY")]
+    #[arg(
+        long,
+        env = "MB_LOCAL_ONLY",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub local_only: bool,
 
     /// Refuse to start when the admin API would bind a non-loopback address with no `--api-key`
     /// (issue #863). Off by default: `--host` defaults to `0.0.0.0` and containers need it, so the
     /// default is a startup warning instead.
-    #[arg(long, env = "RIFT_REQUIRE_ADMIN_AUTH")]
+    #[arg(
+        long,
+        env = "RIFT_REQUIRE_ADMIN_AUTH",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub require_admin_auth: bool,
 
     /// Log level: trace, debug, info, warn, error (an unrecognised value is refused)
-    #[arg(long, default_value = "info", env = "MB_LOGLEVEL")]
+    #[arg(
+        long,
+        default_value = "info",
+        env = "MB_LOGLEVEL",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub loglevel: String,
 
     /// Runtime topology: work-stealing (default) or per-core[=N] — N single-threaded worker
     /// runtimes with SO_REUSEPORT sharded accept (RFC-712; experimental, Linux-first: macOS
     /// falls back to work-stealing with a warning, Windows rejects it)
-    #[arg(long, value_name = "MODE", env = "RIFT_RUNTIME")]
+    #[arg(
+        long,
+        value_name = "MODE",
+        env = "RIFT_RUNTIME",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub runtime: Option<String>,
 
     /// Pin per-core worker threads to CPU cores (only meaningful with --runtime per-core;
     /// effective on Linux, advisory elsewhere)
-    #[arg(long, env = "RIFT_RUNTIME_AFFINITY")]
+    #[arg(
+        long,
+        env = "RIFT_RUNTIME_AFFINITY",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub runtime_affinity: bool,
 
     /// Don't write to log file (stdout only)
-    #[arg(long)]
+    #[arg(long, global = true, help_heading = "Server options")]
     pub nologfile: bool,
 
     /// Also write logs to this file (off unless set; logs always go to stdout)
-    #[arg(long, value_name = "FILE")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub log: Option<PathBuf>,
 
     /// PID file path. `global` so `stop`/`restart` bind the same value whether it is given
     /// before or after the subcommand (issue #827). Deliberately has NO `default_value`: a default
     /// here would make every plain `rift` start write `./rift.pid`. `stop`/`restart` apply
     /// [`bootstrap::DEFAULT_PIDFILE`](crate::bootstrap::DEFAULT_PIDFILE) at their dispatch site.
-    #[arg(long, value_name = "FILE", global = true)]
+    #[arg(
+        long,
+        value_name = "FILE",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub pidfile: Option<PathBuf>,
 
     /// Accepted for Mountebank compatibility; NOT implemented — the admin API sends no CORS headers
-    #[arg(long)]
+    #[arg(long, global = true, help_heading = "Server options")]
     pub origin: Option<String>,
 
     /// Accepted for Mountebank compatibility; no effect — set `recordRequests: true` per imposter
-    #[arg(long)]
+    #[arg(long, global = true, help_heading = "Server options")]
     pub mock: bool,
 
     /// Enable debug mode
-    #[arg(long)]
+    #[arg(long, global = true, help_heading = "Server options")]
     pub debug: bool,
 
     /// Metrics server port
-    #[arg(long, default_value = "9090", env = "RIFT_METRICS_PORT")]
+    #[arg(
+        long,
+        default_value = "9090",
+        env = "RIFT_METRICS_PORT",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub metrics_port: u16,
 
     /// Bind the front door (issue #19 / U-11): one listener serving every imposter, routed by
     /// host/path/header/method instead of by port. Accepts `HOST:PORT` (e.g. `0.0.0.0:8080`) or a
     /// bare port, which binds every interface like `--metrics-port` does. Off when unset — the
     /// single-port gateway and per-imposter ports are unaffected either way.
-    #[arg(long, value_name = "ADDR", env = "RIFT_FRONT_DOOR")]
+    #[arg(
+        long,
+        value_name = "ADDR",
+        env = "RIFT_FRONT_DOOR",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub front_door: Option<String>,
 
     // === Mountebank compatibility flags ===
     /// Disable EJS preprocessing of --configfile/file: sources; use it when a document contains a literal `<%`
-    #[arg(long, visible_alias = "noParse")]
+    #[arg(
+        long,
+        visible_alias = "noParse",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub no_parse: bool,
 
     /// Custom config formatter module name (Rift auto-detects JSON/YAML; accepted for compatibility)
-    #[arg(long)]
+    #[arg(long, global = true, help_heading = "Server options")]
     pub formatter: Option<String>,
 
     /// Custom protocol definitions file (custom protocols not yet supported; accepted for compatibility)
-    #[arg(long, value_name = "FILE")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub protofile: Option<PathBuf>,
 
     /// IP addresses allowed to connect (comma-separated). ACCEPTED AND NEVER ENFORCED
@@ -175,59 +270,127 @@ pub struct Cli {
     /// `X-Forwarded-For` — and trusting a client-settable header for an ACL is a vulnerability, not
     /// a feature. Use `--local-only` to bind loopback, `--api-key` to authenticate the admin plane,
     /// or `--require-admin-auth` (issue #863) to make an exposed keyless plane a startup failure.
-    #[arg(long, value_delimiter = ',')]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        global = true,
+        help_heading = "Server options"
+    )]
     pub ip_whitelist: Option<Vec<String>>,
 
     /// Require this token in the Authorization header for all admin API requests
-    #[arg(long, value_name = "TOKEN", env = "MB_APIKEY")]
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        env = "MB_APIKEY",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub api_key: Option<String>,
 
     /// RC file with default flag values (a subset: port/host/loglevel/allowInjection/localOnly/requireAdminAuth/apiKey/datadir/configfile/noParse); one that cannot be read or applied aborts startup
-    #[arg(long, value_name = "FILE")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub rcfile: Option<PathBuf>,
 
     /// Default TLS certificate (PEM) for HTTPS imposters that don't carry their own (issue #206)
-    #[arg(long, value_name = "FILE", env = "RIFT_DEFAULT_TLS_CERT")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        env = "RIFT_DEFAULT_TLS_CERT",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub default_tls_cert: Option<PathBuf>,
 
     /// Default TLS private key (PEM), paired with --default-tls-cert
-    #[arg(long, value_name = "FILE", env = "RIFT_DEFAULT_TLS_KEY")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        env = "RIFT_DEFAULT_TLS_KEY",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub default_tls_key: Option<PathBuf>,
 
     /// Disable the self-signed fallback: an HTTPS imposter without cert material becomes an error
     /// instead of serving with a generated self-signed cert (issue #206)
-    #[arg(long, env = "RIFT_NO_SELF_SIGNED_TLS")]
+    #[arg(
+        long,
+        env = "RIFT_NO_SELF_SIGNED_TLS",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub no_self_signed_tls: bool,
 
     /// Extra CA certificate(s) (PEM) trusted for outbound TLS — `proxy` stubs and `--configfile`
     /// URLs (issue #974). Appended to the OS trust store, so public roots keep working; prefer this
     /// over SSL_CERT_FILE, which REPLACES the store rather than adding to it.
-    #[arg(long, value_name = "FILE", env = "RIFT_UPSTREAM_CA_FILE")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        env = "RIFT_UPSTREAM_CA_FILE",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub upstream_ca_file: Option<PathBuf>,
 
     /// Accept any certificate on outbound TLS (issue #974). Development only: a recording proxy
     /// with verification off will faithfully record MITM'd traffic. Prefer --upstream-ca-file.
-    #[arg(long, env = "RIFT_UPSTREAM_TLS_SKIP_VERIFY")]
+    #[arg(
+        long,
+        env = "RIFT_UPSTREAM_TLS_SKIP_VERIFY",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub upstream_tls_skip_verify: bool,
 
     /// Start a TLS-MITM intercept/redirect proxy listener on this port (epic #394). Off when
     /// unset. Configure rules and export the CA via the admin API's `/intercept/*` routes.
-    #[arg(long, value_name = "PORT", env = "RIFT_INTERCEPT_PORT")]
+    #[arg(
+        long,
+        value_name = "PORT",
+        env = "RIFT_INTERCEPT_PORT",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub intercept_port: Option<u16>,
 
     /// Require `Proxy-Authorization: Basic <user:pass>` on every `CONNECT` to the intercept
     /// listener (issue #878). Off when unset — the proxy is then open, which is what it has always
     /// been. The value is `user:pass`; a value with no `:` is a startup error.
-    #[arg(long, value_name = "USER:PASS", env = "RIFT_INTERCEPT_AUTH")]
+    #[arg(
+        long,
+        value_name = "USER:PASS",
+        env = "RIFT_INTERCEPT_AUTH",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub intercept_auth: Option<String>,
 
     /// PEM CA certificate for interception. Used with `--intercept-ca-key`; a CA is generated
     /// in-memory when both are omitted.
-    #[arg(long, value_name = "FILE", env = "RIFT_INTERCEPT_CA_CERT")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        env = "RIFT_INTERCEPT_CA_CERT",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub intercept_ca_cert: Option<PathBuf>,
 
     /// PEM CA private key for interception. Required together with `--intercept-ca-cert`.
-    #[arg(long, value_name = "FILE", env = "RIFT_INTERCEPT_CA_KEY")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        env = "RIFT_INTERCEPT_CA_KEY",
+        global = true,
+        help_heading = "Server options"
+    )]
     pub intercept_ca_key: Option<PathBuf>,
 
     /// Inline CA certificate PEM for interception (issue #593) — the PEM text itself, not a path.
@@ -235,6 +398,8 @@ pub struct Cli {
     /// pair. Env is the intended vehicle (`RIFT_INTERCEPT_CA_CERT_PEM`).
     #[arg(
         long,
+        global = true,
+        help_heading = "Server options",
         value_name = "PEM",
         env = "RIFT_INTERCEPT_CA_CERT_PEM",
         conflicts_with = "intercept_ca_cert",
@@ -246,6 +411,8 @@ pub struct Cli {
     /// `--intercept-ca-cert-pem`; conflicts with the CA file pair.
     #[arg(
         long,
+        global = true,
+        help_heading = "Server options",
         value_name = "PEM",
         env = "RIFT_INTERCEPT_CA_KEY_PEM",
         conflicts_with = "intercept_ca_cert",
@@ -349,6 +516,14 @@ impl std::fmt::Debug for Cli {
     }
 }
 
+/// The file `rift replay` loads: the one global `--configfile`. clap cannot require a global flag
+/// for a single subcommand, so the requirement is decided here (issue #1316).
+pub fn replay_configfile(cli: &Cli) -> anyhow::Result<&Path> {
+    cli.configfile
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("rift replay needs --configfile <file>"))
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
     /// Start the Rift server (default command)
@@ -372,11 +547,10 @@ pub enum Commands {
     },
 
     /// Replay saved imposters
-    Replay {
-        /// Input file path
-        #[arg(long, required = true)]
-        configfile: PathBuf,
-    },
+    ///
+    /// Loads the global `--configfile` (before or after `replay`) and serves it; a missing
+    /// `--configfile` is refused by [`replay_configfile`].
+    Replay,
 
     /// Validate or run a script outside a running server (issue #360)
     Script {
@@ -495,11 +669,6 @@ pub enum ScriptAction {
         /// response-position script — so the flag is redundant rather than meaningful.
         #[arg(long, default_value = "respond")]
         hook: String,
-
-        /// Load a config file verbatim, skipping EJS preprocessing — the same as `rift --no-parse`,
-        /// for a config that contains a literal `<%`.
-        #[arg(long, visible_alias = "noParse")]
-        no_parse: bool,
     },
 
     /// Execute a script against a fixture request and seeded flow state — no server running.
@@ -2008,20 +2177,89 @@ mod tests {
     // exercise `CertificateAuthority` directly (its contract is unchanged).
     use rift_mock_core::proxy::intercept_ca::CertificateAuthority;
 
-    // Issue #1107: `rift script check` loads a config through the same path as `--configfile`, so
-    // it takes the same escape hatch, under both spellings.
+    // Issue #1107 / #1316: `rift script check` loads a config through the same path as
+    // `--configfile`, so it takes the same escape hatch under both spellings — and since #1316 that
+    // escape hatch IS the one global `--no-parse`, accepted on either side of the subcommand.
     #[test]
-    fn script_check_accepts_no_parse() {
+    fn script_check_no_parse_is_the_global_flag() {
         for flag in ["--no-parse", "--noParse"] {
-            let cli = Cli::try_parse_from(["rift", "script", "check", "imposters.json", flag])
-                .unwrap_or_else(|e| panic!("{flag} should be accepted: {e}"));
-            match cli.command {
-                Some(Commands::Script {
-                    action: ScriptAction::Check { no_parse, .. },
-                }) => assert!(no_parse, "{flag}"),
-                other => panic!("expected `script check`, got {other:?}"),
+            for argv in [
+                ["rift", "script", "check", "imposters.json", flag],
+                ["rift", flag, "script", "check", "imposters.json"],
+            ] {
+                let cli = Cli::try_parse_from(argv)
+                    .unwrap_or_else(|e| panic!("{argv:?} should be accepted: {e}"));
+                assert!(cli.no_parse, "{argv:?}");
+                assert!(
+                    matches!(
+                        cli.command,
+                        Some(Commands::Script {
+                            action: ScriptAction::Check { .. }
+                        })
+                    ),
+                    "{argv:?}"
+                );
             }
         }
+    }
+
+    // Issue #1316: Mountebank's grammar is `mb start|restart|save|replay|stop <flags>`, so a server
+    // flag must bind the same field on either side of the subcommand.
+    #[test]
+    fn server_flags_parse_after_start() {
+        let after = Cli::try_parse_from(["rift", "start", "--port", "3525", "--configfile", "x"])
+            .expect("flags after `start` must parse");
+        let before = Cli::try_parse_from(["rift", "--port", "3525", "--configfile", "x", "start"])
+            .expect("flags before `start` must parse");
+        assert_eq!(after.port, 3525);
+        assert_eq!(after.configfile.as_deref(), Some(Path::new("x")));
+        assert_eq!(after.port, before.port);
+        assert_eq!(after.configfile, before.configfile);
+        assert!(matches!(after.command, Some(Commands::Start)));
+    }
+
+    #[test]
+    fn server_flags_parse_after_restart_and_save() {
+        let cli = Cli::try_parse_from(["rift", "restart", "--configfile", "x"])
+            .expect("flags after `restart` must parse");
+        assert_eq!(cli.configfile.as_deref(), Some(Path::new("x")));
+        assert!(matches!(cli.command, Some(Commands::Restart)));
+
+        let cli = Cli::try_parse_from(["rift", "save", "--port", "3525", "--savefile", "s"])
+            .expect("flags after `save` must parse");
+        assert_eq!(cli.port, 3525);
+        match cli.command {
+            Some(Commands::Save { savefile, .. }) => assert_eq!(savefile, PathBuf::from("s")),
+            other => panic!("expected `save`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_takes_the_global_configfile() {
+        let cli = Cli::try_parse_from(["rift", "replay", "--configfile", "x"]).expect("parse");
+        assert!(matches!(cli.command, Some(Commands::Replay)));
+        assert_eq!(cli.configfile.as_deref(), Some(Path::new("x")));
+        assert_eq!(replay_configfile(&cli).expect("present"), Path::new("x"));
+
+        let cli = Cli::try_parse_from(["rift", "--configfile", "x", "replay"]).expect("parse");
+        assert_eq!(replay_configfile(&cli).expect("present"), Path::new("x"));
+
+        // clap cannot require a global for one subcommand, so the decision is a helper.
+        let cli = Cli::try_parse_from(["rift", "replay"]).expect("a bare replay still parses");
+        assert!(matches!(cli.command, Some(Commands::Replay)));
+        let err = replay_configfile(&cli).expect_err("no configfile must be refused");
+        assert_eq!(err.to_string(), "rift replay needs --configfile <file>");
+    }
+
+    #[test]
+    fn subcommand_help_groups_server_options() {
+        use clap::CommandFactory;
+        let err = Cli::command()
+            .try_get_matches_from(["rift", "intercept-ca", "export", "--help"])
+            .expect_err("--help short-circuits the parse");
+        let help = err.to_string();
+        assert!(help.contains("Server options"), "got: {help}");
+        assert!(help.contains("--port"), "got: {help}");
     }
 
     #[test]

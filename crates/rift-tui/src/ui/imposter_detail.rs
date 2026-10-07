@@ -537,14 +537,17 @@ fn get_response_type_with_info(response: &serde_json::Value) -> (&str, bool) {
         ("is", false)
     } else if let Some(proxy) = response.get("proxy") {
         // Get proxy mode if available
+        // The engine reads `mode` case-insensitively and an omitted one as proxyOnce (#1314).
         let mode = proxy
             .get("mode")
             .and_then(|m| m.as_str())
-            .unwrap_or("proxy");
-        let mode_display = match mode {
-            "proxyOnce" => "proxyOnce",
-            "proxyAlways" => "proxyAlways",
-            "proxyTransparent" => "transparent",
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let mode_display = match mode.as_str() {
+            "" | "proxyonce" => "proxyOnce",
+            "proxyalways" => "proxyAlways",
+            "proxytransparent" => "transparent",
             _ => "proxy",
         };
         (mode_display, true)

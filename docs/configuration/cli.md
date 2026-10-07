@@ -165,9 +165,9 @@ grow its own dialect of the config format.
 ## CLI Options
 
 ```bash
-rift [OPTIONS]
+rift [OPTIONS] [COMMAND]
 
-Options:
+Server options:
       --port <PORT>                Admin API port [default: 2525]
       --host <HOST>                IP address to bind the admin API to (IPv4, or IPv6 bare `::1` or bracketed `[::1]`) [default: 0.0.0.0]
       --configfile <FILE>          Load imposters from a JSON/YAML file on startup (sugar for --imposters file:<FILE>)
@@ -691,9 +691,11 @@ A server stopped by `SIGTERM` or `SIGINT` exits `0`: that is a clean shutdown, n
 
 Rift supports several subcommands for server management.
 
-Server flags such as `--port`, `--host`, `--rcfile` and `--api-key` go **before** the subcommand
-(`rift --port 3525 save`). Subcommands do not accept them. The environment variables work as usual.
-`--pidfile` is accepted on either side. Each subcommand takes only its own flags, listed below.
+Server flags such as `--port`, `--host`, `--configfile`, `--rcfile` and `--api-key` may go before
+or after the subcommand, matching Mountebank's `mb start --port 2525 --configfile imposters.json`:
+`rift --port 3525 save` and `rift save --port 3525` are the same command. A subcommand's `--help`
+lists them under "Server options". The environment variables work as usual. Each subcommand's own
+flags are listed below.
 
 ### start
 
@@ -702,6 +704,9 @@ Start the Rift server (default behavior when no subcommand is specified):
 ```bash
 rift start
 rift --port 3525 --configfile imposters.json start
+
+# The Mountebank form: server flags after the subcommand
+rift start --port 3525 --configfile imposters.json
 ```
 
 ### stop
@@ -735,8 +740,8 @@ given:
 ```bash
 rift restart --pidfile /var/run/rift.pid
 
-# Server flags go before the subcommand
-rift --configfile imposters.json restart --pidfile /var/run/rift.pid
+# Other server flags may go on either side of the subcommand
+rift restart --configfile imposters.json --pidfile /var/run/rift.pid
 ```
 
 A missing PID file is not an error for `restart` — there is nothing to stop, so it just starts.
@@ -753,8 +758,8 @@ rift save
 # Save to a named file
 rift save --savefile recorded.json
 
-# Save from a server on another port (the flag goes before the subcommand)
-rift --port 3525 save
+# Save from a server on another port
+rift save --port 3525
 
 # Drop `proxy` responses, keeping what they recorded (stubs left with no response are dropped)
 rift save --savefile mocks.json --remove-proxies
@@ -778,6 +783,8 @@ Start a server with the saved imposters loaded:
 rift replay --configfile recorded.json
 ```
 
+`replay` takes the global `--configfile` (before or after the subcommand; `MB_CONFIGFILE` and an
+`--rcfile` `configfile` also count). Without one it exits with status 1 and `Error: rift replay needs --configfile <file>`.
 This is `rift --configfile recorded.json` under another name: it starts a new server rather than
 switching a running Mountebank-style server from recording to replaying.
 
@@ -800,7 +807,11 @@ rift script check imposters.yaml            # every _rift.script in the config
 | Flag | Description | Default |
 |:-----|:------------|:--------|
 | `--hook <HOOK>` | Entrypoint to check a raw script against. Only `respond` is dispatched at request time, so any other value is rejected — for a config target too, where the flag is redundant because every `_rift.script` entry is `respond`-position | `respond` |
-| `--no-parse` | Load a config target verbatim, skipping EJS preprocessing, as `rift --no-parse` does — for a config that contains a literal `<%`. No effect on a raw script (alias: `--noParse`) | off |
+
+`rift script check` also honours the global `--no-parse` (alias `--noParse`, before or after the
+subcommand): it loads a config target verbatim, skipping EJS preprocessing, as `rift --no-parse`
+does — for a config that contains a literal `<%`. A raw script is never preprocessed, so the flag is
+refused there.
 
 **`rift script run <target>`** — execute a script against a fixture request and seeded flow state,
 printing the decision, the mutated flow state, captured `ctx.logger` output, and the execution
