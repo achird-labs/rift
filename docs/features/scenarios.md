@@ -131,3 +131,7 @@ curl -X POST http://localhost:2525/imposters/4602/scenarios/reset -d '{}'
 ```
 
 See the [API Reference]({{ site.baseurl }}/api/#scenarios) for the full endpoint contract.
+
+A stub serving `_rift.conditional` behind a scenario gate re-stamps its `Last-Modified` on every
+transition of that scenario, so a polling client sees the switch; see
+[Conditional GET]({{ site.baseurl }}/mountebank/responses/#conditional-get).

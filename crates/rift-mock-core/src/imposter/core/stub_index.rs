@@ -1248,6 +1248,23 @@ pub(crate) struct StubSnapshot {
     /// worker, so the bounded matcher offloads only when this is set — a scenario-free snapshot
     /// keeps the inline fast path even on a blocking backend (issue #475).
     has_scenario_gate: bool,
+    /// `(index, scenario)` of every scenario-gated stub at or ahead of the last stub serving
+    /// `_rift.conditional`, ascending (issue #1307). Only these gates can change which stub answers
+    /// a conditional request, so only their transitions are stamped; usually empty or tiny.
+    conditional_gates: Vec<(usize, Box<str>)>,
+}
+
+/// Whether `stub` has a response serving `_rift.conditional` (an `is` response; issue #1280).
+fn serves_conditional(stub: &crate::imposter::types::Stub) -> bool {
+    stub.responses.iter().any(|r| match r {
+        crate::imposter::types::StubResponse::Is {
+            rift: Some(rift), ..
+        } => !matches!(
+            rift.conditional,
+            None | Some(crate::imposter::types::ConditionalGet::Enabled(false))
+        ),
+        _ => false,
+    })
 }
 
 impl StubSnapshot {
@@ -1260,12 +1277,41 @@ impl StubSnapshot {
         let has_scenario_gate = stubs
             .iter()
             .any(|s| s.stub.required_scenario_state.is_some());
+        let conditional_gates = match stubs.iter().rposition(|s| serves_conditional(&s.stub)) {
+            None => Vec::new(),
+            Some(last) => stubs[..=last]
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    s.stub
+                        .required_scenario_state
+                        .as_ref()
+                        .map(|_| (i, s.stub.scenario_name.as_deref().unwrap_or("").into()))
+                })
+                .collect(),
+        };
         StubSnapshot {
             stubs,
             index,
             has_inject,
             has_scenario_gate,
+            conditional_gates,
         }
+    }
+
+    /// Whether a transition of `scenario` can change which stub answers a conditional request
+    /// (issue #1307).
+    pub(crate) fn is_conditional_gate(&self, scenario: &str) -> bool {
+        self.conditional_gates.iter().any(|(_, s)| &**s == scenario)
+    }
+
+    /// The scenarios gating a stub at or ahead of `index`, among those that matter to a
+    /// conditional response (issue #1307).
+    pub(crate) fn conditional_gates_through(&self, index: usize) -> impl Iterator<Item = &str> {
+        self.conditional_gates
+            .iter()
+            .take_while(move |(i, _)| *i <= index)
+            .map(|(_, s)| &**s)
     }
 
     /// The stubs this snapshot describes, in declaration order.
