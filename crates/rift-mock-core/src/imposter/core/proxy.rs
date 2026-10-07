@@ -532,7 +532,13 @@ impl Imposter {
         }
 
         // Create request signature for recording
-        let signature = RequestSignature::new(method, uri.path(), uri.query(), &[]);
+        // Without predicateGenerators nothing names the request's identity, so the replay key is
+        // method, path, query and body (issue #1317); headers stay out. With generators the user
+        // chose the identity and the key is unchanged.
+        let mut signature = RequestSignature::new(method, uri.path(), uri.query(), &[]);
+        if proxy_config.predicate_generators.is_empty() {
+            signature = signature.with_body(body.unwrap_or_default().as_bytes());
+        }
         let port = self.journal_port();
 
         // Consult the proxy-recording gate. `AlreadyRecorded` replays; `Claimed` grants the

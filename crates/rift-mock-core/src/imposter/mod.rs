@@ -26,7 +26,7 @@ mod handler;
 pub mod headers;
 mod manager;
 pub(crate) mod predicates;
-mod reconcile;
+pub(crate) mod reconcile;
 mod response;
 mod script_resolve;
 mod types;

@@ -200,6 +200,12 @@ pub trait ProxyRecordingStore: Send + Sync {
 Its typed error is `ProxyStoreError`, `#[non_exhaustive]`. Inject with
 `.with_proxy_store(Arc<dyn ProxyRecordingStore>)`.
 
+`RequestSignature` is `#[non_exhaustive]`: build it with `RequestSignature::new` (and `.with_body(&[u8])`),
+not a struct literal. It carries `body_hash: Option<u64>` (FNV-1a 64 of the request body, `None` for a
+body-less request, omitted from the serialized form when `None`). The engine sets it only for a proxy
+without `predicateGenerators` (issue #1317). A store that serializes the signature as its key misses
+pre-upgrade recordings of requests that had a body, once.
+
 | Variant | Engine response |
 |:--|:--|
 | `Unavailable(String)` | **Degrade**: forward upstream without recording. Use it when the store only helps persistence and the engine still enforces exactly-once itself. |
