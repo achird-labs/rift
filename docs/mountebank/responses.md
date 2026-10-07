@@ -369,12 +369,13 @@ Cycling works with any response type - you can mix `is`, `proxy`, and `inject`:
 {
   "responses": [
     { "is": { "statusCode": 200, "body": "Cached response" } },
-    { "proxy": { "to": "https://api.example.com" } }
+    { "proxy": { "to": "https://api.example.com", "mode": "proxyTransparent" } }
   ]
 }
 ```
 
-First request returns cached data, second proxies to real API, then cycles.
+First request returns cached data, second proxies to real API, then cycles. (Without
+`proxyTransparent` the proxy turn is `proxyOnce` and replays its first response on later cycles.)
 
 ---
 
@@ -564,6 +565,9 @@ What a `304` still does:
 Forward requests to real servers and optionally record for later playback.
 
 ### Proxy Modes
+
+`mode` defaults to `proxyOnce`, as in Mountebank; an unknown value is refused. See
+[Proxy Mode]({{ site.baseurl }}/mountebank/proxy/#proxy-modes) for what each mode records.
 
 **proxyAlways** - Always forward, record each response:
 ```json

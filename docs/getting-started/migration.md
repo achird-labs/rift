@@ -25,7 +25,7 @@ Rift maintains full compatibility with Mountebank's HTTP/HTTPS protocol support:
 | JSONPath | Yes | Yes | Same syntax; the jsonpath-plus shorthands `.[` and a `0` slice end are read as Mountebank reads them |
 | XPath | Yes | Yes | Same syntax |
 | Behaviors | Yes | Yes | wait, repeat, copy, lookup, decorate, shellTransform — on `is`, `inject` and `proxy` responses, in Mountebank's order |
-| Proxy Mode | Yes | Yes | Record and replay |
+| Proxy Mode | Yes | Yes | Record and replay; an omitted `mode` is `proxyOnce` in both. Rift refuses an unknown `mode`; Mountebank treats it as `proxyOnce` |
 | Injection | Yes | Yes | JavaScript functions |
 | TCP Protocol | Yes | No | `protocol` must be `http`/`https`; a `tcp` imposter is rejected |
 | SMTP Protocol | Yes | No | Not supported; an `smtp` imposter is rejected |

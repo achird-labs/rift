@@ -2105,17 +2105,40 @@ pub fn validate_proxy_response(
     }
 
     if let Some(mode) = proxy.get("mode").and_then(|v| v.as_str()) {
+        // The engine reads `mode` trimmed and case-insensitively, `""` as proxyOnce, and refuses
+        // anything else at the config door (issue #1314) — so an unknown mode is an error here,
+        // and a known one in another spelling only a nudge toward the canonical name.
         let valid_modes = ["proxyOnce", "proxyAlways", "proxyTransparent"];
-        if !valid_modes.contains(&mode) {
-            result.add_issue(
+        let trimmed = mode.trim();
+        match valid_modes
+            .iter()
+            .find(|valid| valid.eq_ignore_ascii_case(trimmed))
+        {
+            _ if trimmed.is_empty() => {}
+            Some(canonical) if *canonical == mode => {}
+            Some(canonical) => result.add_issue(
                 LintIssue::warning(
                     "W007",
-                    format!("Unknown proxy mode: {mode}"),
+                    format!(
+                        "Proxy mode `{mode}` works, but its canonical spelling is `{canonical}`"
+                    ),
                     file.to_path_buf(),
                 )
                 .with_location(format!("{location}.mode"))
-                .with_suggestion(format!("Use one of: {}", valid_modes.join(", "))),
-            );
+                .with_suggestion(format!("Use \"{canonical}\"")),
+            ),
+            None => result.add_issue(
+                LintIssue::error(
+                    "E052",
+                    format!("Unknown proxy mode: {mode} (Rift refuses the imposter)"),
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}.mode"))
+                .with_suggestion(format!(
+                    "Use one of: {}, or omit `mode` for proxyOnce",
+                    valid_modes.join(", ")
+                )),
+            ),
         }
     }
 }

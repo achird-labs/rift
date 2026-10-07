@@ -569,7 +569,13 @@ pub fn admission_check(config: &ImposterConfig) -> Result<(), String> {
 pub fn admission_check_stub(stub: &Stub) -> Result<(), String> {
     stub.responses.iter().try_for_each(|response| {
         refuse_unparseable_behaviors(response.behaviors_block(), Admission::Checked)?;
-        refuse_bad_conditional(response.rift_block(), Admission::Checked)
+        refuse_bad_conditional(response.rift_block(), Admission::Checked)?;
+        match response {
+            StubResponse::Proxy { proxy, .. } => {
+                refuse_unknown_proxy_mode(Some(proxy), Admission::Checked)
+            }
+            _ => Ok(()),
+        }
     })?;
     validate_predicates(&stub.predicates)
 }
@@ -1314,6 +1320,10 @@ impl TryFrom<StubResponseRaw> for StubResponse {
         // After the behaviors, top-level `repeat` included: `admission_check_stub` checks the
         // compiled behaviors first, and a door must name the same first failure it does.
         refuse_bad_conditional(raw.rift.as_ref(), admission())?;
+        // Only when the response really is a proxy (`is` wins the priority below).
+        if raw.is.is_none() {
+            refuse_unknown_proxy_mode(raw.proxy.as_ref(), admission())?;
+        }
         // Priority: is > proxy > inject > fault > rift-script-only
         Ok(if let Some(is_raw) = raw.is {
             StubResponse::new_is(
@@ -1636,6 +1646,32 @@ pub struct ProxyResponse {
     /// Path rewrite configuration for transforming the request path before proxying
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_rewrite: Option<PathRewrite>,
+}
+
+impl ProxyResponse {
+    /// The recording mode (issue #1314): see [`crate::recording::ProxyMode::parse`]. The string
+    /// field is kept as written, so `GET /imposters` echoes it and stored configs are unchanged.
+    pub fn mode(&self) -> Result<crate::recording::ProxyMode, String> {
+        crate::recording::ProxyMode::parse(&self.mode).ok_or_else(|| {
+            format!(
+                "unknown proxy mode `{}`; expected proxyOnce, proxyAlways or proxyTransparent \
+                 (or omit `mode` for proxyOnce)",
+                self.mode
+            )
+        })
+    }
+}
+
+/// Refuse a `proxy` response whose `mode` the engine does not know (issue #1314), at a config door
+/// only: a stored config an older engine admitted still decodes under [`Admission::Skipped`].
+fn refuse_unknown_proxy_mode(
+    proxy: Option<&ProxyResponse>,
+    admission: Admission,
+) -> Result<(), String> {
+    if admission == Admission::Skipped {
+        return Ok(());
+    }
+    proxy.map_or(Ok(()), |proxy| proxy.mode().map(|_| ()))
 }
 
 // ============================================================================
@@ -2526,6 +2562,48 @@ mod imposter_error_chain_tests {
 
 #[cfg(test)]
 mod tests {
+
+    // ===== Issue #1314: one parse for a proxy's `mode` =====
+
+    #[test]
+    fn proxy_mode_parses_once_with_mountebanks_default() {
+        use crate::recording::ProxyMode;
+        let mode = |m: &str| {
+            ProxyResponse {
+                mode: m.to_string(),
+                ..ProxyResponse::default()
+            }
+            .mode()
+        };
+        assert_eq!(mode(""), Ok(ProxyMode::ProxyOnce));
+        assert_eq!(mode("proxyOnce"), Ok(ProxyMode::ProxyOnce));
+        assert_eq!(mode("proxyAlways"), Ok(ProxyMode::ProxyAlways));
+        assert_eq!(mode("proxyTransparent"), Ok(ProxyMode::ProxyTransparent));
+        assert_eq!(mode("PROXYALWAYS"), Ok(ProxyMode::ProxyAlways));
+        assert_eq!(mode(" proxyOnce "), Ok(ProxyMode::ProxyOnce));
+        let err = mode("bogus").expect_err("unknown mode");
+        assert!(
+            err.contains("bogus") && err.contains("proxyTransparent"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_proxy_mode_is_refused_at_admission_but_decodes_when_replayed() {
+        let raw = serde_json::json!({
+            "responses": [{ "proxy": { "to": "http://127.0.0.1:9", "mode": "bogus" } }]
+        });
+        assert!(
+            serde_json::from_value::<Stub>(raw.clone()).is_err(),
+            "a config door refuses an unknown mode"
+        );
+        // rift-cluster replays configs an older engine admitted: they must still decode (#1268).
+        let stub: Stub = deserialize_replayed(raw).expect("a replayed stub decodes");
+        assert!(
+            admission_check_stub(&stub).is_err(),
+            "admission re-check refuses it"
+        );
+    }
     use super::*;
     use serde_json::json;
 

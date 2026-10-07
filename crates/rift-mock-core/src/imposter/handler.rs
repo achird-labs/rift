@@ -2009,8 +2009,11 @@ async fn handle_request_inner(
     // never cached/replayed. (The request still appears in the audit log when `recordRequests`
     // is enabled — that is the separate, opt-in recording feature.)
     if let Some(upstream) = &imposter.config.default_forward {
+        // Explicitly transparent: an omitted mode is proxyOnce (issue #1314), and a stub's
+        // recording mode must not reach the fallback.
         let proxy_config = ProxyResponse {
             to: upstream.clone(),
+            mode: "proxyTransparent".to_string(),
             ..Default::default()
         };
         return match imposter
