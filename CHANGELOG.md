@@ -11,6 +11,14 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **Server flags are accepted after a subcommand** (#1316): `rift start --port 2525 --configfile imposters.json`, `rift save --port …` and `rift restart …` now parse, matching Mountebank's command line; the flags are also still accepted before the subcommand. `rift replay` and `rift script check` no longer carry their own `--configfile` / `--no-parse`: they take the global ones, and `rift replay` without a config file exits with `rift replay needs --configfile <file>`.
+
+### Changed
+
+- **Breaking for Rust embedders of `rift-http-proxy`** (#1316): `server::Commands::Replay` is now a unit variant (it took `configfile`), `server::ScriptAction::Check` no longer has a `no_parse` field, and `script_cli::dispatch` takes the global `no_parse` as a second argument. The command line itself is unchanged except as described above.
+
 ## [0.20.0] - 2026-10-07
 
 ### Added

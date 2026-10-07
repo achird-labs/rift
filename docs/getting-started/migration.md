@@ -68,6 +68,9 @@ mb start --configfile imposters.json
 # Rift
 docker run -v $(pwd)/imposters.json:/imposters.json \
   zainalpour/rift-proxy:latest --configfile /imposters.json
+
+# Rift binary (same command line as Mountebank)
+rift start --configfile imposters.json
 ```
 
 ### Step 3: Update Environment Variables
@@ -186,6 +189,9 @@ docker run \
   -v $(pwd)/imposters.json:/imposters.json \
   zainalpour/rift-proxy:latest \
   --configfile /imposters.json
+
+# Rift binary (equivalent)
+rift start --port 2525 --allowInjection --loglevel warn --configfile imposters.json
 ```
 
 ### Docker Compose

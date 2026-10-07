@@ -51,7 +51,7 @@ use rift_http_proxy::healthcheck;
 use rift_http_proxy::intercept_ca_cli;
 use rift_http_proxy::runtime;
 use rift_http_proxy::script_cli;
-use rift_http_proxy::server::{Cli, Commands, ServerBuilder};
+use rift_http_proxy::server::{Cli, Commands, ServerBuilder, replay_configfile};
 use tracing::{info, warn};
 use tracing_subscriber::{Layer, fmt, prelude::*};
 
@@ -62,7 +62,7 @@ fn main() -> Result<(), anyhow::Error> {
     // just the CLI's own exit code (issue #360). Cloned rather than matched by value so `cli`
     // (and `cli.command`) stay intact for the Stop/Restart/Save/Replay dispatch below.
     if let Some(Commands::Script { action }) = cli.command.clone() {
-        return script_cli::dispatch(action);
+        return script_cli::dispatch(action, cli.no_parse);
     }
     // Likewise `intercept-ca` (issue #1274): file work only, nothing to bootstrap.
     if let Some(Commands::InterceptCa { action }) = cli.command.clone() {
@@ -169,17 +169,15 @@ fn main() -> Result<(), anyhow::Error> {
                 cli.api_key.as_deref(),
             );
         }
-        Some(Commands::Replay { configfile }) => {
-            // Load the config file and start
-            return run_mountebank_mode(Cli {
-                configfile: Some(configfile.clone()),
-                ..cli
-            });
+        Some(Commands::Replay) => {
+            // Load the (global) config file and start
+            replay_configfile(&cli)?;
+            return run_mountebank_mode(cli);
         }
         // Already handled (and returned) above, before the server bootstrap; kept here so the
         // match stays exhaustive and correct if that ever changes.
         Some(Commands::Script { action }) => {
-            return script_cli::dispatch(action.clone());
+            return script_cli::dispatch(action.clone(), cli.no_parse);
         }
         // Likewise already handled above — and it must stay that way: reaching here would mean the
         // probe had paid for the whole server bootstrap, and (since issue #1133) had computed its

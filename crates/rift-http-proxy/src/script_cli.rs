@@ -409,13 +409,9 @@ pub fn run_run(
 /// Handle `rift script <check|run>`: run the library function, print a human-readable report,
 /// and exit non-zero on failure. Returned `Err` is reserved for a usage/IO error (e.g. the
 /// target file doesn't exist) that never got as far as producing a report.
-pub fn dispatch(action: ScriptAction) -> Result<()> {
+pub fn dispatch(action: ScriptAction, no_parse: bool) -> Result<()> {
     match action {
-        ScriptAction::Check {
-            target,
-            hook,
-            no_parse,
-        } => {
+        ScriptAction::Check { target, hook } => {
             let report = run_check(&target, &hook, no_parse)?;
             print_check_report(&report);
             if report.is_ok() {
