@@ -513,7 +513,9 @@ pub async fn save_imposters_async(
     remove_proxies: bool,
     api_key: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    let client = reqwest::Client::new();
+    let client = crate::http_client_builder()
+        .build()
+        .context("failed to build the save client")?;
     let url = save_url(host, port, remove_proxies);
 
     let mut request = client.get(&url);

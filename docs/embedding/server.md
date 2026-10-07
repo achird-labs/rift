@@ -401,3 +401,10 @@ rift_http_proxy::install_default_crypto_provider();
 
 It is idempotent, so calling it more than once is safe. The `rift` binary does this for you; an
 embedding host must call it itself if it serves TLS.
+
+Call it before building any `reqwest::Client` of your own, too. Rift uses reqwest 0.13 with the
+`rustls-no-provider` feature (reqwest has no ring-backed one), so a default `Client` takes the
+process-default provider and panics at `build()` when none is installed. A client handed to
+`ImposterManager::with_upstream_client` must be a reqwest **0.13** `Client`; building it from
+`rift_mock_core::proxy::OutboundTls::reqwest_builder()` sidesteps the provider question, since that
+config names `ring` itself.

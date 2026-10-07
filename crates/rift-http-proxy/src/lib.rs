@@ -40,6 +40,49 @@ pub fn install_default_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+/// A reqwest builder for Rift's own command-line clients (`rift healthcheck`, `rift save`,
+/// `rift-verify`): the `ring` provider and the OS trust store, verified by webpki.
+///
+/// That is what reqwest 0.12's `rustls-tls-native-roots` gave every client, and what these
+/// clients keep under 0.13, whose own default would be `rustls-platform-verifier`. Two
+/// differences matter here: the platform verifier refuses to build at all on a host with an empty
+/// trust store (so `rift healthcheck` against `http://localhost` would fail in a CA-less image),
+/// and on macOS/Windows it defers to the OS policy engine instead of webpki.
+///
+/// reqwest 0.13 also reads the crypto provider from the process default rather than linking one
+/// itself, so this installs `ring` first (idempotent; a host's own choice wins). The trust anchors
+/// are read once per process. `add_root_certificate` and `danger_accept_invalid_certs` compose
+/// with the result as before. Imposter traffic does not use this: proxy stubs, config sources and
+/// intercept forwarding build their clients from [`proxy::OutboundTls`].
+pub fn http_client_builder() -> reqwest::ClientBuilder {
+    install_default_crypto_provider();
+    reqwest::Client::builder().tls_certs_only(native_root_certificates().iter().cloned())
+}
+
+/// The OS trust store as reqwest certificates, loaded once. Unreadable entries are skipped with a
+/// warning, as reqwest 0.12 skipped them; an empty store is not an error here (see
+/// [`http_client_builder`]), it just means no `https://` origin verifies.
+fn native_root_certificates() -> &'static [reqwest::Certificate] {
+    static ROOTS: std::sync::OnceLock<Vec<reqwest::Certificate>> = std::sync::OnceLock::new();
+    ROOTS.get_or_init(|| {
+        let native = rustls_native_certs::load_native_certs();
+        for error in &native.errors {
+            tracing::warn!(%error, "ignoring an unreadable entry in the OS trust store");
+        }
+        native
+            .certs
+            .iter()
+            .filter_map(|der| match reqwest::Certificate::from_der(der) {
+                Ok(cert) => Some(cert),
+                Err(error) => {
+                    tracing::warn!(%error, "ignoring an OS trust anchor reqwest cannot use");
+                    None
+                }
+            })
+            .collect()
+    })
+}
+
 // The `--allowInjection` classifier, shared by every door that admits an imposter config
 // (admin API, --configfile, --datadir, POST /admin/reload) so they cannot diverge (issue #612)
 pub mod injection_gate;

@@ -21,8 +21,18 @@ mod tests {
     use rift_store_redis::RedisFlowStore;
     use serde_json::json;
     use std::time::{Duration, Instant};
+    use testcontainers::core::{IntoContainerPort, WaitFor};
     use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::redis::Redis;
+    use testcontainers::{ContainerAsync, GenericImage};
+
+    /// The image testcontainers-modules' `Redis` used to start (`redis:5.0`, ready once it logs
+    /// "Ready to accept connections"), built directly: modules 0.15, its latest release, still
+    /// pins testcontainers 0.27.
+    fn redis_image() -> GenericImage {
+        GenericImage::new("redis", "5.0")
+            .with_exposed_port(6379.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+    }
 
     /// Outcome of probing for a Docker daemon. `Absent` is *definitive* (CLI missing, or
     /// `docker info` completed with non-success exit); `Timeout` is not — a loaded runner can
@@ -102,7 +112,7 @@ mod tests {
     /// unavailable so the caller can skip — except under `CI`, where a *definitively* absent
     /// Docker is a hard failure (so CI never silently loses Redis coverage). A probe timeout
     /// in CI is not treated as absence; see [`DockerProbe::disposition`].
-    async fn setup(ttl: i64) -> Option<(testcontainers::ContainerAsync<Redis>, RedisFlowStore)> {
+    async fn setup(ttl: i64) -> Option<(ContainerAsync<GenericImage>, RedisFlowStore)> {
         let (container, url) = setup_container().await?;
         let store = RedisFlowStore::new(&url, 5, "test:".to_string(), ttl).unwrap();
         Some((container, store))
@@ -111,7 +121,7 @@ mod tests {
     /// Start a Redis container and return it with its URL, for tests that need to build the store
     /// through a higher layer (the factory, the backend registry) rather than calling
     /// [`RedisFlowStore::new`] directly. Same Docker disposition rules as [`setup`].
-    async fn setup_container() -> Option<(testcontainers::ContainerAsync<Redis>, String)> {
+    async fn setup_container() -> Option<(ContainerAsync<GenericImage>, String)> {
         let in_ci = std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok();
         match docker_probe().disposition(in_ci) {
             Disposition::Proceed => {}
@@ -125,7 +135,7 @@ mod tests {
                 return None;
             }
         }
-        let container = Redis::default().start().await.unwrap();
+        let container = redis_image().start().await.unwrap();
         let port = container.get_host_port_ipv4(6379).await.unwrap();
         Some((container, format!("redis://127.0.0.1:{port}")))
     }

@@ -2524,7 +2524,7 @@ fn demo_enhanced_error_output() {
 /// the imposter proxy client, where #482 turned pooling ON deliberately: that one talks to a single
 /// stable upstream for the process lifetime.
 fn build_verify_client(timeout_secs: u64, insecure: bool) -> Result<Client, reqwest::Error> {
-    Client::builder()
+    rift_http_proxy::http_client_builder()
         .timeout(Duration::from_secs(timeout_secs))
         .danger_accept_invalid_certs(insecure)
         .pool_max_idle_per_host(0)

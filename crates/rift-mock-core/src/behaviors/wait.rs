@@ -58,8 +58,8 @@ impl WaitBehavior {
         match self {
             WaitBehavior::Fixed(ms) => *ms,
             WaitBehavior::Range { min_ms, max_ms } => {
-                use rand::Rng;
-                // `gen_range` asserts a non-empty range, and this runs on the request task with no
+                use rand::RngExt;
+                // `random_range` asserts a non-empty range, and this runs on the request task with no
                 // `catch_unwind` — an inverted range killed the worker on every request (#1148).
                 // The parse door refuses that shape, but this is a `pub` enum with `pub` fields, so
                 // the draw has to be total on its own. Clamp to `min` like the two sibling draw
@@ -74,7 +74,7 @@ impl WaitBehavior {
                     }
                     *min_ms
                 } else {
-                    rand::thread_rng().gen_range(*min_ms..=*max_ms)
+                    rand::rng().random_range(*min_ms..=*max_ms)
                 }
             }
             // Both spellings of a JS-function wait run the identical path (issue #608): same Boa
@@ -178,20 +178,18 @@ impl WaitBehavior {
 
             // Parse: Math.floor(Math.random() * N) + M
             if body.contains("Math.random()") {
-                use rand::Rng;
+                use rand::RngExt;
                 // Extract multiplier and offset using the cached constant patterns.
                 if let Some(caps) = WAIT_FLOOR_OFFSET_RE.captures(&body) {
                     let range = caps.get(1)?.as_str().parse::<u64>().ok()?;
                     let offset = caps.get(2)?.as_str().parse::<u64>().ok()?;
-                    return Some(
-                        rand::thread_rng().gen_range(offset..=offset.saturating_add(range)),
-                    );
+                    return Some(rand::rng().random_range(offset..=offset.saturating_add(range)));
                 }
 
                 // Simpler pattern: Math.random() * N
                 if let Some(caps) = WAIT_RANDOM_RE.captures(&body) {
                     let range = caps.get(1)?.as_str().parse::<u64>().ok()?;
-                    return Some(rand::thread_rng().gen_range(0..=range));
+                    return Some(rand::rng().random_range(0..=range));
                 }
             }
 
@@ -207,7 +205,7 @@ impl WaitBehavior {
     /// Parse Solo wait pattern:
     /// var min = Math.ceil(N); var max = Math.floor(M); var num = Math.floor(Math.random() * (max - min + 1)); var wait = (num + min); return wait;
     fn parse_solo_wait_pattern(body: &str) -> Option<u64> {
-        use rand::Rng;
+        use rand::RngExt;
 
         // Extract min value: var min = Math.ceil(N)
         let min_val = WAIT_SOLO_MIN_RE
@@ -225,7 +223,7 @@ impl WaitBehavior {
 
         // Generate random value in range [min, max]
         if max_val >= min_val {
-            Some(rand::thread_rng().gen_range(min_val..=max_val))
+            Some(rand::rng().random_range(min_val..=max_val))
         } else {
             Some(min_val)
         }
@@ -337,7 +335,7 @@ mod tests {
         }
     }
 
-    // Issue #1148: `gen_range` panics on an empty range, and this ran on the request task with no
+    // Issue #1148: `random_range` panics on an empty range, and this ran on the request task with no
     // `catch_unwind` — so an inverted range killed the worker and dropped the connection on every
     // request to that stub, permanently, while the server stayed healthy. The door refuses this
     // shape now, but `WaitBehavior` is a `pub` enum with `pub` fields, so the draw must be total on
@@ -375,7 +373,7 @@ mod tests {
         let js = "function() { return Math.floor(Math.random() * 18446744073709551615) + 5; }";
         // The draw is random, so the discriminating assertion is that there *is* a value at all:
         // before the fix `offset + range` overflowed, which panics in debug and wraps to an empty
-        // range — then panics inside `gen_range` — in release.
+        // range — then panics inside `random_range` — in release.
         let ms = WaitBehavior::execute_js_wait_function_regex(js)
             .expect("the fallback recognises the pattern");
         assert!(ms >= 5, "the draw starts at the offset, got {ms}");

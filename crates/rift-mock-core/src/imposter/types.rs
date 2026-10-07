@@ -2792,7 +2792,7 @@ mod tests {
         match resp {
             StubResponse::Is { rendered_body, .. } => assert_eq!(
                 rendered_body.as_deref(),
-                Some(r#"{"m":0.10018513143495411,"n":7e23,"s":1.23e-30}"#),
+                Some(r#"{"m":0.10018513143495411,"n":7e+23,"s":1.23e-30}"#),
             ),
             other => panic!("expected Is, got {other:?}"),
         }

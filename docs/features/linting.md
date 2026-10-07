@@ -248,12 +248,13 @@ held as the nearest double once parsed — so rewriting the file would change it
 
 | Written in the file | What a rewrite would write |
 |---|---|
-| `123456789012345678901234567890` | `1.2345678901234568e29` |
+| `123456789012345678901234567890` | `1.2345678901234568e+29` |
 | `0.1000000000000000055511151231257827` | `0.1` |
 | `0.30000000000000001` | `0.3` |
 
 An ordinary float is not affected: any number a double holds in its shortest form — `7e23`,
-`1.23e-30`, `0.10018513143495411` — is written back exactly.
+`1.23e-30`, `0.10018513143495411` — is written back with its digits intact (a positive exponent
+gains an explicit `+`: `7e23` is written as `7e+23`).
 
 `--fix` skips the file and names each such number with its line and column; every lint run, `--fix`
 or not, also reports each one as [W012](#warnings). The engine reads the

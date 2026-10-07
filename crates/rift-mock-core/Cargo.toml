@@ -37,13 +37,13 @@ rustls-pemfile = "2.0"
 # longer *also* reachable transitively — which is why hyper-rustls itself is gone from this list.
 rustls-native-certs = "0.8"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
-# x509-parser: needed to recover a loaded CA's distinguished name (CertificateParams::from_ca_cert_pem)
-rcgen = { version = "0.13", features = ["x509-parser"] }
+# x509-parser: needed to recover a loaded CA's distinguished name and SKI (Issuer::from_ca_cert_pem)
+rcgen = { version = "0.14", features = ["x509-parser"] }
 # Issue #1274: a CA meant to be kept gets a validity window from now (rcgen takes `time` types),
 # and a PEM bundle's certificates are named by their subject CN in an exported truststore. Both
 # crates are already in the tree through rcgen.
 time = "0.3"
-x509-parser = "0.16"
+x509-parser = "0.18"
 # Bounded LRU cache for per-SNI intercept leaves (issue #539 — MITM-intercept DoS)
 lru = "0.18"
 
@@ -57,19 +57,18 @@ rift-types = { path = "../rift-types", version = "0.1.0" }
 
 # Scripting engines
 rhai.workspace = true
-boa_engine = { version = "0.20", optional = true }
+boa_engine = { version = "0.22", default-features = false, optional = true }
 
 # Logging & Observability
 tracing.workspace = true
-prometheus = "0.13"
-lazy_static = "1.4"
+prometheus = "0.14"
 
 # HTTP client (proxy forwarding)
 reqwest.workspace = true
 
 # Utils
 bytes.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 chrono.workspace = true
 regex = "1.11"
 # The multi-pattern engine behind `regex` (issue #709). Already in the tree transitively via
@@ -81,14 +80,13 @@ regex-automata = "0.4"
 aho-corasick = "1.1"
 # Automaton-based JSON body-field matching (issue #767); default-on, droppable for
 # minimal/FFI builds via `--no-default-features`.
-quamina = { version = "0.6", optional = true }
+quamina = { version = "0.7", optional = true }
 memchr.workspace = true
 rand.workspace = true
 urlencoding = "2.1"
-similar = "2.6"
 anyhow.workspace = true
 thiserror.workspace = true
-socket2 = "0.5"
+socket2 = "0.6"
 num_cpus = "1.16"
 libc = "0.2"
 parking_lot = "0.12"
@@ -104,6 +102,8 @@ sxd-xpath = "0.4"
 # JSONPath RFC 9535 support
 serde_json_path = "0.7"
 p12 = "0.6.3"
+# Pinned to p12's major: the PKCS#12 attribute and writer types we build (`ObjectIdentifier`,
+# `DERWriter`) must be the exact ones p12 0.6.3 (its last release) exposes, and it requires ^0.5.
 yasna = "0.5"
 ring = "0.17"
 # Lock-free concurrent HashMap for the predicate regex cache (issue #715): reads on the imposter
@@ -114,11 +114,15 @@ papaya = "0.2.4"
 tempfile = "3.8"
 # Renders the shipped templates exactly as the config loader does (tests/shipped_templates_load.rs).
 rift-ejs = { path = "../rift-ejs", version = "0.1.0" }
-reqwest.workspace = true
+# Test builds only: reqwest 0.13's `rustls` feature gives the hundreds of ad-hoc test clients
+# (`reqwest::get`, `Client::new()`) a fallback crypto provider (aws-lc-rs), since reqwest no longer
+# links ring itself and a test binary has no `main` to install one. Dev-dependency features are
+# never unified into a normal build, so shipped artifacts stay ring-only; and every Rift code path
+# names its provider explicitly, so the engine under test still runs on ring.
+reqwest = { workspace = true, features = ["rustls"] }
 tokio-test = "0.4"
-serial_test = "3.0"
 tracing-test = "0.2"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "imposter_matcher_bench"

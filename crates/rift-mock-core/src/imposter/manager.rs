@@ -571,6 +571,9 @@ impl ImposterManager {
     /// [`OutboundTls`](crate::proxy::OutboundTls); the fallible part is realising the policy, which
     /// happens at the caller so a bad `--upstream-ca-file` fails at startup rather than on the
     /// first proxied request.
+    ///
+    /// The client must come from the same reqwest major this crate links (0.13): a `Client` from
+    /// any other major is a different type and does not compile here.
     #[must_use]
     pub fn with_upstream_client(self, client: Arc<reqwest::Client>) -> Self {
         self.upstream_client.store(Some(client));

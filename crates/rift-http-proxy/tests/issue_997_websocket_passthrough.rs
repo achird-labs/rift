@@ -34,7 +34,7 @@ fn origin_cert() -> (String, String) {
     let c =
         rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
             .expect("generate origin cert");
-    (c.cert.pem(), c.key_pair.serialize_pem())
+    (c.cert.pem(), c.signing_key.serialize_pem())
 }
 
 fn origin_tls_acceptor(cert_pem: &str, key_pem: &str) -> tokio_rustls::TlsAcceptor {
@@ -44,10 +44,14 @@ fn origin_tls_acceptor(cert_pem: &str, key_pem: &str) -> tokio_rustls::TlsAccept
     let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
         .expect("parse key")
         .expect("a key");
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .expect("server config");
+    let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring supports the default TLS versions")
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .expect("server config");
     tokio_rustls::TlsAcceptor::from(Arc::new(config))
 }
 
@@ -75,7 +79,7 @@ fn spawn_wss_echo_origin(port: u16, cert_pem: String, key_pem: String, count: us
                     if msg.is_text() {
                         let text = msg.into_text().expect("text");
                         if ws
-                            .send(tokio_tungstenite::tungstenite::Message::Text(format!(
+                            .send(tokio_tungstenite::tungstenite::Message::text(format!(
                                 "echo:{text}"
                             )))
                             .await
@@ -146,9 +150,13 @@ async fn connect_through_proxy(
     for cert in rustls_pemfile::certs(&mut intercept_ca_pem.as_bytes()) {
         roots.add(cert.expect("ca cert")).expect("add ca");
     }
-    let mut config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let mut config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring supports the default TLS versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     let host = authority.split(':').next().expect("host");
     let server_name = rustls::pki_types::ServerName::try_from(host.to_string()).expect("name");
@@ -180,7 +188,7 @@ async fn a_websocket_conversation_survives_the_intercept_tunnel() {
             "the origin's 101 must reach the client, not be swallowed by the proxy"
         );
 
-        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        ws.send(tokio_tungstenite::tungstenite::Message::text(
             "hello".to_string(),
         ))
         .await
@@ -405,7 +413,7 @@ async fn listener_shutdown_terminates_a_live_relay() {
 
     // Prove the relay is actually carrying traffic before we tear it down, or "it ended" would be
     // satisfied by a relay that never started.
-    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+    ws.send(tokio_tungstenite::tungstenite::Message::text(
         "alive".to_string(),
     ))
     .await
@@ -476,7 +484,7 @@ async fn the_relay_uses_outbound_trust_set_after_a_clone_was_taken() {
                 .expect("websocket handshake through the tunnel");
         assert_eq!(response.status(), 101);
 
-        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        ws.send(tokio_tungstenite::tungstenite::Message::text(
             "hello".to_string(),
         ))
         .await

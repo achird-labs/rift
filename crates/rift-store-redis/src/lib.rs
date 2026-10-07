@@ -49,7 +49,7 @@ impl r2d2::ManageConnection for RedisConnectionManager {
         // protocol stream may be inconsistent; report it invalid so r2d2 discards it.
         if conn.is_poisoned() {
             return Err(redis::RedisError::from((
-                redis::ErrorKind::IoError,
+                redis::ErrorKind::Io,
                 "pooled Redis connection mutex poisoned by a previous panic",
             )));
         }

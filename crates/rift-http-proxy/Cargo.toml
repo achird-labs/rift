@@ -34,13 +34,15 @@ http-body-util = { version = "0.1", features = ["channel"] }
 # tree via hyper, so this adds no crates to the build.
 httparse = "1.10"
 tower = { version = "0.5", features = ["full"] }
-# Pin the rustls crypto provider to `ring` everywhere. hyper-rustls/tokio-rustls
+# Pin the rustls crypto provider to `ring` everywhere. rustls/tokio-rustls
 # default to the `aws-lc-rs` provider, whose C build (aws-lc-sys) fails to compile
 # on the windows-msvc CI runner (C11 atomics). The runtime provider is ring
 # (see main.rs), so aws-lc-rs is dead weight; disabling it keeps the build portable.
-hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "native-tokio", "tls12", "logging"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2.0"
+# The OS trust store for the CLI clients (`http_client_builder`); already in the tree via
+# rift-mock-core's `OutboundTls`.
+rustls-native-certs = "0.8"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 
 # Serialization
@@ -64,8 +66,6 @@ uuid.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender = "0.2"
-prometheus = "0.13"
-lazy_static = "1.4"
 
 # CLI
 clap = { workspace = true, features = ["env"] }
@@ -80,7 +80,7 @@ url = "2"
 
 # Utils
 bytes.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 # Hot-swappable route table for the front door listener (issue #19 / U-11); same pin as
 # rift-mock-core's own use of it for the imposter manager's port slots.
 arc-swap = "1.7"
@@ -88,12 +88,10 @@ arc-swap = "1.7"
 subtle = "2"
 chrono.workspace = true
 regex = "1.11"
-rand.workspace = true
 urlencoding = "2.1"
-similar = "2.6"
+similar = "3"
 anyhow.workspace = true
 thiserror.workspace = true
-socket2 = "0.5"
 num_cpus = "1.16"
 libc = "0.2"
 parking_lot = "0.12"
@@ -107,7 +105,7 @@ core_affinity = "0.8"
 mimalloc = { version = "0.1", optional = true }
 # Allocator bake-off candidate (issue #717): opt-in alternative to mimalloc for A/B
 # throughput/RSS comparison; never both wired as the active allocator (see [features]).
-tikv-jemallocator = { version = "0.6", optional = true }
+tikv-jemallocator = { version = "0.7", optional = true }
 
 # XML/XPath support for Mountebank compatibility
 sxd-document = "0.3"
@@ -126,7 +124,7 @@ features = ["test-util"]
 # Test-only: drives a real WebSocket handshake and real frames through the intercept tunnel
 # (issue #997). `handshake` only — the TLS legs are built from the repo's own rustls config, so
 # none of this crate's TLS features are wanted.
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 # `WebSocketStream` is a `Stream`/`Sink`; the combinators come from here.
 futures-util = "0.3"
 # Turn on the failing flow-store backend for backend-outage tests (issue #318)
@@ -134,17 +132,25 @@ rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-featur
 # Corpus lint gate (issue #460): lint every vendored fixture via the library API.
 rift-lint = { path = "../rift-lint", version = "0.1.0" }
 tempfile = "3.8"
-rcgen = "0.13"
+rcgen = "0.14"
 # Reads the PKCS#12 stores `rift intercept-ca export` writes (issue #1274); already in the tree.
 p12 = "0.6"
+# Reads a generated CA back (CN, validity) in the intercept-ca CLI tests; rcgen 0.14 no longer
+# parses certificates into `CertificateParams`. Already in the tree via rift-mock-core.
+x509-parser = "0.18"
 
 # Integration testing
-reqwest = { workspace = true, features = ["http2"] }
+# Test builds only: reqwest 0.13's `rustls` feature gives the hundreds of ad-hoc test clients
+# (`reqwest::get`, `Client::new()`) a fallback crypto provider (aws-lc-rs), since reqwest no longer
+# links ring itself and a test binary has no `main` to install one. Dev-dependency features are
+# never unified into a normal build, so shipped artifacts stay ring-only; and every Rift code path
+# names its provider explicitly, so the engine under test still runs on ring.
+reqwest = { workspace = true, features = ["http2", "rustls"] }
 tokio-test = "0.4"
 assert-json-diff = "2.0"
-serial_test = "3.0"
+serial_test = "4"
 tracing-test = "0.2"
-port_check = "0.2"
+port_check = "0.3"
 
 [features]
 default = ["redis-backend", "javascript", "mimalloc", "quamina-matching"]

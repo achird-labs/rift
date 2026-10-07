@@ -45,7 +45,7 @@
 
 use crate::extensions::flow_state::FlowStore;
 use crate::extensions::template::RequestData;
-use rand::Rng;
+use rand::RngExt;
 use regex::Regex;
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -379,7 +379,7 @@ fn eval_base(head: &str, args: &[String], ctx: &TemplateContext<'_>) -> Result<S
                     "randomInt: lower bound {lo} is greater than upper bound {hi}"
                 ));
             }
-            Ok(rand::thread_rng().gen_range(lo..=hi).to_string())
+            Ok(rand::rng().random_range(lo..=hi).to_string())
         }
         _ => {
             if let Some(name) = head.strip_prefix("request.query.") {

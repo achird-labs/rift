@@ -23,7 +23,7 @@ license = "Apache-2.0"
 authors = ["Rift Contributors"]
 repository = "https://github.com/achird-labs/rift"
 homepage = "https://github.com/achird-labs/rift"
-rust-version = "1.92"
+rust-version = "1.99"
 
 # Centralized lint policy inherited by every crate via `[lints] workspace = true`.
 # Kept intentionally conservative: CI runs `clippy -- -D warnings`, which promotes any
@@ -36,10 +36,21 @@ all = "warn"
 uninlined_format_args = "warn"
 manual_let_else = "warn"
 unnecessary_map_or = "warn"
+# Clean today, so free to hold: `a + b / 2`-style midpoints overflow (use `midpoint`, stable since
+# 1.85/1.87), an `#[ignore]` must say why (`#[ignore = "..."]`), and `.cloned()` on `Copy` items
+# hides that nothing is cloned.
+manual_midpoint = "warn"
+ignore_without_reason = "warn"
+cloned_instead_of_copied = "warn"
+
+[workspace.lints.rust]
+# A lifetime that is provably equal to another (`'a: 'b, 'b: 'a`) is noise; clean today.
+redundant_lifetimes = "warn"
 
 [workspace.dependencies]
-# Async runtime — version pinned here; each crate selects its own tokio features
-tokio = { version = "1.41" }
+# Async runtime — version pinned here; each crate selects its own tokio features.
+# 1.50: `TcpStream::set_zero_linger` (fault_io RST injection; `set_linger` is deprecated).
+tokio = { version = "1.50" }
 tokio-util = "0.7"
 
 # Serialization
@@ -54,19 +65,19 @@ serde_yaml = "0.9"
 # Scripting — pinned to =1.21.0 to match rift-mock-core's deliberate exact pin
 rhai = { version = "=1.21.0", features = ["sync", "serde"] }
 
-# Faker
-fake = { version = "2.9", features = ["derive", "uuid", "http", "chrono"] }
-
 # CLI — base features; crates add `env` where needed
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
 
 # HTTP client — rustls everywhere (the project pins the ring crypto provider).
-# `rustls-tls-native-roots`, NOT `rustls-tls` (issue #974): the latter resolves to
-# `rustls-tls-webpki-roots`, i.e. a compiled-in Mozilla bundle that ignores the OS trust store, so a
-# privately-issued origin was unreachable however the host was configured. Native roots also honour
-# SSL_CERT_FILE / SSL_CERT_DIR, and drop `webpki-roots` from the tree entirely.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+# reqwest 0.13 has no ring-backed TLS feature: `rustls` means aws-lc-rs (whose C build fails on
+# the windows-msvc release runner) plus `rustls-platform-verifier`. `rustls-no-provider` keeps
+# ring: reqwest then uses the process-default provider, which every Rift entry point installs.
+# Trust is unchanged from 0.12's `rustls-tls-native-roots` (issue #974): imposter traffic builds
+# its clients from `OutboundTls` (OS store + `--upstream-ca-file`), and the CLI clients from
+# `rift_http_proxy::http_client_builder` (OS store via webpki). Defaults stay off as before: no
+# `http2`, `charset` or `system-proxy` (HTTP(S)_PROXY / NO_PROXY env vars are still honoured).
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 
 # Error handling
 anyhow = "1.0"
@@ -86,7 +97,7 @@ bytes = "1.7"
 # SIMD substring search for fixed literals probed per request (issue #706).
 memchr = "2.7"
 uuid = { version = "1.8", features = ["v4", "serde"] }
-rand = "0.8"
+rand = "0.10"
 
 # Testing
 proptest = "1.4"

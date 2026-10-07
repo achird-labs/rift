@@ -189,6 +189,25 @@ pub struct ImposterMetrics {
     pub requests_per_second: f64,
 }
 
+/// A reqwest builder with the trust policy reqwest 0.12's `rustls-tls-native-roots` gave this
+/// client: the `ring` provider and the OS trust store, verified by webpki. reqwest 0.13 takes the
+/// crypto provider from the process default and would otherwise use `rustls-platform-verifier`,
+/// which refuses to build on a host with an empty trust store even for an `http://` admin URL.
+/// Mirrors `rift_http_proxy::http_client_builder`, which this crate does not depend on.
+fn client_builder() -> reqwest::ClientBuilder {
+    static ROOTS: std::sync::OnceLock<Vec<reqwest::Certificate>> = std::sync::OnceLock::new();
+    // Idempotent: an already-installed provider (ours or a host's) is kept.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let roots = ROOTS.get_or_init(|| {
+        rustls_native_certs::load_native_certs()
+            .certs
+            .iter()
+            .filter_map(|der| reqwest::Certificate::from_der(der).ok())
+            .collect()
+    });
+    Client::builder().tls_certs_only(roots.iter().cloned())
+}
+
 /// HTTP client for the Rift Admin API
 pub struct ApiClient {
     client: Client,
@@ -199,7 +218,7 @@ impl ApiClient {
     /// Create a new API client
     pub fn new(base_url: &str) -> Self {
         Self {
-            client: Client::builder()
+            client: client_builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
                 .expect("Failed to create HTTP client"),

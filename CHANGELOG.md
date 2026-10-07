@@ -104,6 +104,41 @@ record.
 
 ### Changed
 
+- **Minimum supported Rust is now 1.99** (was 1.92). Building from source, or depending on any
+  `rift-*` crate, needs a 1.99 toolchain; CI already ran on latest stable.
+
+- **A float with a positive exponent is now served as `7e+23`, not `7e23`.** serde_json 1.0.146
+  replaced its float formatter (ryu → zmij), and boa_engine 0.22 requires serde_json ≥ 1.0.151, so
+  the old spelling cannot be kept by holding serde_json back. The digits are unchanged (issue #1085
+  still holds) and both spellings are the same JSON number; only a client comparing body *text*
+  sees a difference. Negative exponents (`1.23e-30`) and plain decimals are unaffected. `rift-lint`'s
+  W012 / `--fix` messages quote the new spelling too.
+
+- **Breaking for Rust embedders: reqwest 0.12 → 0.13.** `ImposterManager::with_upstream_client`
+  and `set_upstream_client` take an `Arc<reqwest::Client>`, so an embedder that builds its own
+  upstream client must build it with reqwest 0.13; a 0.12 `Client` no longer type-checks. reqwest
+  0.13 has no ring-backed TLS feature; Rift enables `rustls-no-provider`, under which a default
+  `Client` takes the process-default rustls provider and panics at `build()` if none is installed
+  (unless the embedder's own reqwest features add `rustls`/aws-lc-rs). An embedder that builds
+  clients before starting Rift should call `rift_http_proxy::install_default_crypto_provider()`
+  (or install its own provider) first. Clients built
+  from `OutboundTls` carry their provider and are unaffected. The C-ABI and the binaries do not
+  change. Outbound TLS trust is unchanged: imposter traffic still trusts the OS store plus
+  `--upstream-ca-file` (#974), and the CLI clients (`rift healthcheck`, `rift save`,
+  `rift-verify`, `rift-tui`) keep reqwest 0.12's OS-store/webpki policy rather than 0.13's
+  platform verifier, so they still start on a host with no CA bundle. No `http2`, `charset`,
+  decompression or system-proxy support was added; `HTTP(S)_PROXY`/`NO_PROXY` are honoured as
+  before.
+
+- **Dependency majors.** boa_engine 0.20 → 0.22 (the `inject`/JS engine; its new default
+  features — Temporal, float16 — stay off, so the script environment is unchanged), redis 0.26 →
+  1.x (`rift-store-redis`; a wildcard host such as `redis://0.0.0.0:6379` is now refused at
+  connect), rcgen 0.13 → 0.14 (intercept CA and leaves are minted as before), rand 0.10, base64
+  0.23, prometheus 0.14, quamina 0.7, socket2 0.6, x509-parser 0.18, crossterm 0.29, dirs 7,
+  similar 3, tikv-jemallocator 0.7, and test/bench tooling (criterion 0.8, testcontainers 0.28,
+  tokio-tungstenite 0.30, serial_test 4, port_check 0.3). `lazy_static`, `fake` and several unused
+  direct dependencies are gone.
+
 - **templates/optimizely: the datafile CDN now uses `_rift.conditional`** (#1295): `Last-Modified` is the stub's load time and an `ETag` is served; a reload that changes `fixtures/datafile.json` invalidates pollers without touching `imposters.json`. Wire-visible: the fixed `Sat, 03 Oct 2026 12:00:00 GMT` stamp is gone, so a test that copied it as an `If-Modified-Since` will now get a 200 or a different 304 timing.
 
 ### Performance

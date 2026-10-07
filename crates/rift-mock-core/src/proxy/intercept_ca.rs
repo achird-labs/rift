@@ -16,8 +16,8 @@ use lru::LruCache;
 
 use anyhow::Context;
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa,
-    KeyPair, KeyUsagePurpose,
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose,
 };
 use rustls::crypto::CryptoProvider;
 use rustls::crypto::ring::default_provider;
@@ -27,11 +27,10 @@ use rustls::sign::CertifiedKey;
 
 /// An in-memory certificate authority that mints per-host leaf certificates on demand.
 pub struct CertificateAuthority {
-    /// The issuing certificate. Its `params` (distinguished name, key-id method) drive the
-    /// issuer identity written into every minted leaf; when the CA is loaded from PEM this is
-    /// re-derived from the input so leaves chain to the original certificate.
-    issuer: Certificate,
-    key: KeyPair,
+    /// The issuer identity (distinguished name, key-id method) written into every minted leaf,
+    /// plus the CA's signing key. When the CA is loaded from PEM it is read straight from the
+    /// input certificate, so leaves chain to the original.
+    issuer: Issuer<'static, KeyPair>,
     cert_pem: String,
     cert_der: CertificateDer<'static>,
 }
@@ -260,13 +259,10 @@ impl CertificateAuthority {
         let cert = params
             .self_signed(&key)
             .map_err(|e| anyhow::anyhow!("self-sign CA: {e}"))?;
-        let cert_pem = cert.pem();
-        let cert_der = cert.der().clone();
         Ok(Self {
-            issuer: cert,
-            key,
-            cert_pem,
-            cert_der,
+            issuer: Issuer::new(params, key),
+            cert_pem: cert.pem(),
+            cert_der: cert.der().clone(),
         })
     }
 
@@ -276,18 +272,13 @@ impl CertificateAuthority {
     pub fn load_pem(cert_pem: &str, key_pem: &str) -> anyhow::Result<Self> {
         let key =
             KeyPair::from_pem(key_pem).map_err(|e| anyhow::anyhow!("parse CA key PEM: {e}"))?;
-        let params = CertificateParams::from_ca_cert_pem(cert_pem)
+        // The issuer identity (DN, and the SKI as the leaves' AKI) comes from the supplied
+        // certificate itself; the original PEM/DER remain the trust anchor consumers pin.
+        let issuer = Issuer::from_ca_cert_pem(cert_pem, key)
             .map_err(|e| anyhow::anyhow!("parse CA cert PEM: {e}"))?;
-        // Re-derive an issuing certificate from the parsed params so `signed_by` writes the
-        // original CA's distinguished name into leaves. The original PEM/DER remain the trust
-        // anchor consumers pin.
-        let issuer = params
-            .self_signed(&key)
-            .map_err(|e| anyhow::anyhow!("rebuild issuer from CA PEM: {e}"))?;
         let cert_der = pem_to_der(cert_pem)?;
         Ok(Self {
             issuer,
-            key,
             cert_pem: cert_pem.to_string(),
             cert_der,
         })
@@ -335,7 +326,7 @@ impl CertificateAuthority {
     /// The CA private key as PKCS#8 PEM. Secret material — only returned when a caller explicitly
     /// asks to bootstrap a fresh CA (issue #593); never logged and never exposed by `GET /intercept`.
     pub fn ca_key_pem(&self) -> String {
-        self.key.serialize_pem()
+        self.issuer.key().serialize_pem()
     }
 
     /// The CA certificate in DER form (the trust anchor).
@@ -369,7 +360,7 @@ impl CertificateAuthority {
         params.is_ca = IsCa::ExplicitNoCa;
         params.distinguished_name.push(DnType::CommonName, host);
         let leaf = params
-            .signed_by(&leaf_key, &self.issuer, &self.key)
+            .signed_by(&leaf_key, &self.issuer)
             .map_err(|e| anyhow::anyhow!("sign leaf for {host}: {e}"))?;
 
         let chain = vec![leaf.der().clone(), self.cert_der.clone()];
@@ -601,7 +592,7 @@ mod tests {
         let original = CertificateAuthority::generate().expect("generate CA");
         // Reconstruct PEMs a persisted CA would carry: cert PEM + key PEM.
         let cert_pem = original.ca_cert_pem().to_string();
-        let key_pem = original.key.serialize_pem();
+        let key_pem = original.issuer.key().serialize_pem();
 
         let loaded = CertificateAuthority::load_pem(&cert_pem, &key_pem).expect("load CA");
         assert_eq!(
@@ -734,20 +725,16 @@ mod tests {
         })
         .expect("generate");
         let after = time::OffsetDateTime::now_utc();
-        let params = CertificateParams::from_ca_cert_der(ca.ca_cert_der()).expect("parse CA");
-        assert!(matches!(params.is_ca, IsCa::Ca(_)));
-        let cn = params
-            .distinguished_name
-            .get(&DnType::CommonName)
-            .expect("CN");
-        assert_eq!(cn, &rcgen::DnValue::Utf8String("Acme Test CA".to_string()));
+        let fields = ca_fields(ca.ca_cert_der());
+        assert!(fields.is_ca);
+        assert_eq!(fields.common_name.as_deref(), Some("Acme Test CA"));
         // Five minutes back for clock skew, at whole-second precision.
-        assert!(params.not_before <= before - time::Duration::minutes(5));
+        assert!(fields.not_before <= before - time::Duration::minutes(5));
         assert!(
-            params.not_before >= before - time::Duration::minutes(5) - time::Duration::seconds(2)
+            fields.not_before >= before - time::Duration::minutes(5) - time::Duration::seconds(2)
         );
-        assert!(params.not_after >= before + time::Duration::days(10) - time::Duration::seconds(2));
-        assert!(params.not_after <= after + time::Duration::days(10));
+        assert!(fields.not_after >= before + time::Duration::days(10) - time::Duration::seconds(2));
+        assert!(fields.not_after <= after + time::Duration::days(10));
         // And it still mints leaves that chain to it.
         let ck = ca.mint_leaf("cdn.example.com").expect("mint");
         assert_chains_to_ca(&ca, &ck.cert[0], &[], "cdn.example.com");
@@ -756,13 +743,10 @@ mod tests {
     #[test]
     fn generate_keeps_the_in_memory_defaults() {
         let ca = CertificateAuthority::generate().expect("generate");
-        let params = CertificateParams::from_ca_cert_der(ca.ca_cert_der()).expect("parse CA");
+        let fields = ca_fields(ca.ca_cert_der());
+        assert_eq!(fields.common_name.as_deref(), Some("Rift Intercept CA"));
         assert_eq!(
-            params.distinguished_name.get(&DnType::CommonName),
-            Some(&rcgen::DnValue::Utf8String("Rift Intercept CA".to_string()))
-        );
-        assert_eq!(
-            params.not_before.year(),
+            fields.not_before.year(),
             1975,
             "the listener's ephemeral CA is unchanged"
         );
@@ -772,6 +756,30 @@ mod tests {
 
     use x509_parser::extensions::{BasicConstraints as X509BasicConstraints, ParsedExtension};
     use x509_parser::prelude::{FromDer, X509Certificate};
+
+    /// What the generate tests check on a CA certificate, read with a parser independent of the
+    /// minting library (rcgen 0.14 no longer parses a certificate back into `CertificateParams`).
+    struct CaFields {
+        is_ca: bool,
+        common_name: Option<String>,
+        not_before: time::OffsetDateTime,
+        not_after: time::OffsetDateTime,
+    }
+
+    fn ca_fields(der: &[u8]) -> CaFields {
+        let (_, cert) = X509Certificate::from_der(der).expect("parse CA DER");
+        CaFields {
+            is_ca: cert.is_ca(),
+            common_name: cert
+                .subject()
+                .iter_common_name()
+                .next()
+                .and_then(|cn| cn.as_str().ok())
+                .map(str::to_string),
+            not_before: cert.validity().not_before.to_datetime(),
+            not_after: cert.validity().not_after.to_datetime(),
+        }
+    }
 
     struct LeafIds {
         aki: Option<Vec<u8>>,

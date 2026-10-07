@@ -41,9 +41,14 @@ tracing.workspace = true
 parking_lot = "0.12"
 
 [dev-dependencies]
-reqwest.workspace = true
+# Test builds only: reqwest 0.13's `rustls` feature gives the hundreds of ad-hoc test clients
+# (`reqwest::get`, `Client::new()`) a fallback crypto provider (aws-lc-rs), since reqwest no longer
+# links ring itself and a test binary has no `main` to install one. Dev-dependency features are
+# never unified into a normal build, so shipped artifacts stay ring-only; and every Rift code path
+# names its provider explicitly, so the engine under test still runs on ring.
+reqwest = { workspace = true, features = ["rustls"] }
 # Mint a committed CA (cert+key PEM) on disk in the intercept CA-reuse gate test (issue #429).
-rcgen = "0.13"
+rcgen = "0.14"
 # Write imposter config files on disk for the `configFile` allowInjection gate tests (issue #616).
 tempfile = "3.8"
 # Assert `warn_anyhow_failure` renders the whole cause chain, not just its outermost context (#683).

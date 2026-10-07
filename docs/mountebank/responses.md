@@ -142,13 +142,13 @@ automatic `Content-Type`.
 **JSON body (auto-serialized):**
 
 A JSON body is re-serialized, so its numbers are printed from their parsed value. Rift parses floats
-with correct rounding, so `{"n": 7e23}` is served as `7e23` and a 17-digit double such as
-`0.10018513143495411` keeps its digits. Only a number wider than a 64-bit integer, or with more
+with correct rounding, so `{"n": 7e23}` is served as `7e+23` (same digits; a positive exponent is
+written with an explicit `+`) and a 17-digit double such as `0.10018513143495411` keeps its digits. Only a number wider than a 64-bit integer, or with more
 significant digits than a double holds, is served rounded; send such a value as a string body if
 it must be exact.
 
 Object keys are served **sorted** (by byte), at every depth, not in the order the stub wrote them:
-`{"f": 0.1, "big": 7e23}` is served as `{"big":7e23,"f":0.1}`. Mountebank serves
+`{"f": 0.1, "big": 7e23}` is served as `{"big":7e+23,"f":0.1}`. Mountebank serves
 `JSON.stringify(body)`, which keeps the order the stub declared, so a client or snapshot that
 compares the body *text* sees a different document from each engine; one that parses the JSON sees
 the same one. This is a deliberate divergence: Rift's JSON values are key-sorted throughout, and the

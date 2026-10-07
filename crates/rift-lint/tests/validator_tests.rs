@@ -3058,7 +3058,7 @@ fn w012_reports_each_number_the_engine_cannot_serve_as_written() {
 
     assert!(
         hits[0].message.contains("'123456789012345678901234567890'")
-            && hits[0].message.contains("1.2345678901234568e29"),
+            && hits[0].message.contains("1.2345678901234568e+29"),
         "names the literal and what is served, got: {}",
         hits[0].message
     );
@@ -3138,7 +3138,7 @@ fn w012_reports_a_number_outside_a_response_body_in_neutral_terms() {
     assert!(
         hits[0]
             .message
-            .contains("the engine reads it as the nearest double, 1.2345678901234568e29")
+            .contains("the engine reads it as the nearest double, 1.2345678901234568e+29")
             && !hits[0].message.contains("served"),
         "got: {}",
         hits[0].message
