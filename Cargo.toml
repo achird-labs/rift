@@ -70,11 +70,14 @@ clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
 
 # HTTP client — rustls everywhere (the project pins the ring crypto provider).
-# `rustls-tls-native-roots`, NOT `rustls-tls` (issue #974): the latter resolves to
-# `rustls-tls-webpki-roots`, i.e. a compiled-in Mozilla bundle that ignores the OS trust store, so a
-# privately-issued origin was unreachable however the host was configured. Native roots also honour
-# SSL_CERT_FILE / SSL_CERT_DIR, and drop `webpki-roots` from the tree entirely.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+# reqwest 0.13 has no ring-backed TLS feature: `rustls` means aws-lc-rs (whose C build fails on
+# the windows-msvc release runner) plus `rustls-platform-verifier`. `rustls-no-provider` keeps
+# ring: reqwest then uses the process-default provider, which every Rift entry point installs.
+# Trust is unchanged from 0.12's `rustls-tls-native-roots` (issue #974): imposter traffic builds
+# its clients from `OutboundTls` (OS store + `--upstream-ca-file`), and the CLI clients from
+# `rift_http_proxy::http_client_builder` (OS store via webpki). Defaults stay off as before: no
+# `http2`, `charset` or `system-proxy` (HTTP(S)_PROXY / NO_PROXY env vars are still honoured).
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 
 # Error handling
 anyhow = "1.0"

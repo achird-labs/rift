@@ -657,9 +657,13 @@ fn insecure_client_config() -> rustls::ClientConfig {
         }
     }
 
-    let mut cfg = rustls::ClientConfig::builder()
-        .with_root_certificates(rustls::RootCertStore::empty())
-        .with_no_client_auth();
+    let mut cfg = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring supports the default TLS versions")
+    .with_root_certificates(rustls::RootCertStore::empty())
+    .with_no_client_auth();
     cfg.dangerous()
         .set_certificate_verifier(std::sync::Arc::new(NoVerify));
     cfg

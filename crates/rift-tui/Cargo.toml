@@ -39,6 +39,12 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "fs
 
 # HTTP client for Admin API
 reqwest.workspace = true
+# reqwest 0.13 takes its rustls provider from the process default; `api::client_builder` installs
+# ring and loads the OS trust store itself. Both are already in the workspace lockfile;
+# ring matches the rest of the workspace (aws-lc-rs does not build on the
+# windows-msvc release runner).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-native-certs = "0.8"
 
 # Serialization
 serde.workspace = true

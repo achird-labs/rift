@@ -44,10 +44,14 @@ fn origin_tls_acceptor(cert_pem: &str, key_pem: &str) -> tokio_rustls::TlsAccept
     let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
         .expect("parse key")
         .expect("a key");
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .expect("server config");
+    let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring supports the default TLS versions")
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .expect("server config");
     tokio_rustls::TlsAcceptor::from(Arc::new(config))
 }
 
@@ -146,9 +150,13 @@ async fn connect_through_proxy(
     for cert in rustls_pemfile::certs(&mut intercept_ca_pem.as_bytes()) {
         roots.add(cert.expect("ca cert")).expect("add ca");
     }
-    let mut config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let mut config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring supports the default TLS versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     let host = authority.split(':').next().expect("host");
     let server_name = rustls::pki_types::ServerName::try_from(host.to_string()).expect("name");

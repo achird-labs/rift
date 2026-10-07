@@ -20,7 +20,7 @@ use std::time::Duration;
 /// A `ProbeKey::Sent` key is the raw `Authorization` value — the exact form the admin plane compares
 /// (no `Bearer` prefix) — when the server is keyed (issue #1154).
 pub async fn probe(url: &str, timeout: Duration, key: ProbeKey<'_>) -> Result<()> {
-    let client = reqwest::Client::builder()
+    let client = crate::http_client_builder()
         .timeout(timeout)
         .build()
         .context("failed to build the healthcheck client")?;

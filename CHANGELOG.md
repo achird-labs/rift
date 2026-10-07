@@ -114,6 +114,22 @@ record.
   sees a difference. Negative exponents (`1.23e-30`) and plain decimals are unaffected. `rift-lint`'s
   W012 / `--fix` messages quote the new spelling too.
 
+- **Breaking for Rust embedders: reqwest 0.12 → 0.13.** `ImposterManager::with_upstream_client`
+  and `set_upstream_client` take an `Arc<reqwest::Client>`, so an embedder that builds its own
+  upstream client must build it with reqwest 0.13; a 0.12 `Client` no longer type-checks. reqwest
+  0.13 has no ring-backed TLS feature; Rift enables `rustls-no-provider`, under which a default
+  `Client` takes the process-default rustls provider and panics at `build()` if none is installed
+  (unless the embedder's own reqwest features add `rustls`/aws-lc-rs). An embedder that builds
+  clients before starting Rift should call `rift_http_proxy::install_default_crypto_provider()`
+  (or install its own provider) first. Clients built
+  from `OutboundTls` carry their provider and are unaffected. The C-ABI and the binaries do not
+  change. Outbound TLS trust is unchanged: imposter traffic still trusts the OS store plus
+  `--upstream-ca-file` (#974), and the CLI clients (`rift healthcheck`, `rift save`,
+  `rift-verify`, `rift-tui`) keep reqwest 0.12's OS-store/webpki policy rather than 0.13's
+  platform verifier, so they still start on a host with no CA bundle. No `http2`, `charset`,
+  decompression or system-proxy support was added; `HTTP(S)_PROXY`/`NO_PROXY` are honoured as
+  before.
+
 - **templates/optimizely: the datafile CDN now uses `_rift.conditional`** (#1295): `Last-Modified` is the stub's load time and an `ETag` is served; a reload that changes `fixtures/datafile.json` invalidates pollers without touching `imposters.json`. Wire-visible: the fixed `Sat, 03 Oct 2026 12:00:00 GMT` stamp is gone, so a test that copied it as an `If-Modified-Since` will now get a 200 or a different 304 timing.
 
 ### Performance

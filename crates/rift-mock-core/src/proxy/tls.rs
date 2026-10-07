@@ -399,10 +399,14 @@ mod tests {
         let key = rustls_pemfile::private_key(&mut cert.signing_key.serialize_pem().as_bytes())
             .unwrap()
             .unwrap();
-        rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .unwrap()
+        rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default TLS versions")
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap()
     }
 
     #[test]
