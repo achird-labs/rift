@@ -706,10 +706,12 @@ impl Imposter {
         });
 
         // Generate and insert stub if predicateGenerators, addWaitBehavior, or addDecorateBehavior is configured
-        // (Mountebank generates stubs automatically when these are enabled)
-        if !proxy_config.predicate_generators.is_empty()
-            || proxy_config.add_wait_behavior
-            || proxy_config.add_decorate_behavior.is_some()
+        // (Mountebank generates stubs automatically when these are enabled) — never for
+        // `proxyTransparent`, which forwards every request and records nothing.
+        if !proxy_config.mode.eq_ignore_ascii_case("proxyTransparent")
+            && (!proxy_config.predicate_generators.is_empty()
+                || proxy_config.add_wait_behavior
+                || proxy_config.add_decorate_behavior.is_some())
         {
             // An `inject` generator executes a JS script; run the generator pass off the async
             // worker under the script deadline (issue #476). Script-free generator lists (the

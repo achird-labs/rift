@@ -663,8 +663,8 @@ Available properties in injection function:
 request.method    // "GET", "POST", etc.
 request.path      // "/api/users/123"
 request.query     // { page: "1" }
-request.headers   // { "content-type": "application/json" } - one value per name, the first sent
-request.body      // Request body as a string; call JSON.parse yourself for JSON
+request.headers   // { "Content-Type": "application/json" } - one value per name, the first sent, names as the client wrote them
+request.body      // Request body as a string; call JSON.parse yourself for JSON. `undefined` when the request has no body
 ```
 
 Rift also accepts Mountebank's current `function (config) { ... }` form: `config.request`,

@@ -288,7 +288,7 @@ with `Content-Type: application/json`:
 | The matching run exceeded `_rift.scriptEngine.timeoutMs` | `504` | `x-rift-script-timeout: true` | `{"errors":[{"code":"...","message":"Debug matching timed out"}]}` |
 
 The timeout answered `500` in earlier releases. It is now a `504`, consistent with every other script
-deadline (see [Scripting](scripting.md)), so a transient deadline miss is distinguishable from a
+deadline (see [Scripting]({{ site.baseurl }}/features/scripting/)), so a transient deadline miss is distinguishable from a
 permanent configuration error — a debug request that times out is worth retrying.
 
 Note the distinction from a normal debug response: an error here means the *inspection itself*

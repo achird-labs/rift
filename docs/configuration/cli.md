@@ -110,6 +110,10 @@ source reports no change the reload returns without touching the running imposte
 
 `toggled` lists ports whose only change was the `enabled` flag, applied in place.
 
+When the config file has an `intercept` block, the reply of a reload that applies changes also reports
+`"intercept": {"rulesSeeded": n, "rulesRuntime": m}`. See
+[Hot reload]({{ site.baseurl }}/features/hot-reload/#reload-response).
+
 When something did change, the existing incremental apply runs: unchanged imposters keep their
 recorded requests, scenario state and response cyclers; only changed ports are patched or replaced.
 
@@ -251,6 +255,13 @@ it starts the listener **with its rules already installed**, so a container need
 call. The block and these `--intercept-*` flags are two spellings of one listener — supplying both
 is a startup error rather than a silent precedence guess, so pick one. (Each flag also has a
 `RIFT_INTERCEPT_*` environment variable, which counts as supplying it.)
+
+The block can also take its CA from environment variables, by name: `"caCertPemEnv": "INTERCEPT_CA_CERT",
+"caKeyPemEnv": "INTERCEPT_CA_KEY"`. This suits ECS/Fargate, which delivers secrets only as environment
+variables. Unlike `RIFT_INTERCEPT_CA_CERT_PEM`, these variables are not flags, so the block may use
+them. An unset variable stops the start with an error that names it. `POST /admin/reload` re-applies
+the block's `rules` but never rebinds the listener or swaps its CA; an edit that changes the listener
+too applies neither until a restart.
 
 #### The intercept proxy is unauthenticated unless you say otherwise
 
@@ -486,6 +497,7 @@ wins over the built-in default (and over an `--rcfile` value — see [RC file](#
 | `RIFT_INTERCEPT_CA_KEY` | PEM CA private key **file** for interception | |
 | `RIFT_INTERCEPT_CA_CERT_PEM` | Inline PEM CA certificate (the bytes, not a path; with `RIFT_INTERCEPT_CA_KEY_PEM`) — mutually exclusive with the `_CA_CERT`/`_CA_KEY` file pair | |
 | `RIFT_INTERCEPT_CA_KEY_PEM` | Inline PEM CA private key for interception | |
+| `RIFT_ADMIN_URL` | Admin API URL that `rift-tui` connects to (env alias of its `--admin-url`; see [TUI]({{ site.baseurl }}/features/tui/)) | `http://localhost:2525` |
 | `RIFT_TRUSTSTORE_PASSWORD` | Password for `rift intercept-ca export` (same as `--password`, kept out of argv) | `changeit` |
 | `RIFT_DISABLE_HTTP2` | Force HTTP/1-only listeners, disabling HTTP/2 & h2c auto-negotiation (truthy: `1`/`true`/`yes`/`on`). On HTTPS listeners it also removes `h2` from the ALPN offer, so a client offering both protocols negotiates `http/1.1` instead of being handed an `h2` the server will not speak. A client offering **only** `h2` is refused at the handshake with `no_application_protocol` — a loud failure rather than a protocol mismatch | off |
 | `RIFT_TCP_BACKLOG` | Listen backlog for the accept loop (positive integer) | `1024` |
@@ -677,7 +689,11 @@ A server stopped by `SIGTERM` or `SIGINT` exits `0`: that is a clean shutdown, n
 
 ## Subcommands
 
-Rift supports several subcommands for server management:
+Rift supports several subcommands for server management.
+
+Server flags such as `--port`, `--host`, `--rcfile` and `--api-key` go **before** the subcommand
+(`rift --port 3525 save`). Subcommands do not accept them. The environment variables work as usual.
+`--pidfile` is accepted on either side. Each subcommand takes only its own flags, listed below.
 
 ### start
 
@@ -685,7 +701,7 @@ Start the Rift server (default behavior when no subcommand is specified):
 
 ```bash
 rift start
-rift start --port 3525 --configfile imposters.json
+rift --port 3525 --configfile imposters.json start
 ```
 
 ### stop
@@ -717,7 +733,10 @@ Stop the server named by the PID file, then start a new one in this process with
 given:
 
 ```bash
-rift restart --pidfile /var/run/rift.pid --configfile imposters.json
+rift restart --pidfile /var/run/rift.pid
+
+# Server flags go before the subcommand
+rift --configfile imposters.json restart --pidfile /var/run/rift.pid
 ```
 
 A missing PID file is not an error for `restart` — there is nothing to stop, so it just starts.
@@ -733,6 +752,9 @@ rift save
 
 # Save to a named file
 rift save --savefile recorded.json
+
+# Save from a server on another port (the flag goes before the subcommand)
+rift --port 3525 save
 
 # Drop `proxy` responses, keeping what they recorded (stubs left with no response are dropped)
 rift save --savefile mocks.json --remove-proxies

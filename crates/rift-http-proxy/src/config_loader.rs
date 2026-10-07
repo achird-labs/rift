@@ -187,7 +187,7 @@ fn parse_document(content: &str, base: &ScriptBaseDir) -> anyhow::Result<LoadedC
             // key here would be dropped without a word: no listener, no rule, no diagnostic, and a
             // green boot (issue #655). Refuse instead; the remedy is one line of JSON.
             None if value.get("routes").is_some() => anyhow::bail!(
-                "a `routes` block is only read from the `{{\"imposters\": [...], \"routes\": [...]}}` \
+                "a `routes` block is only read from the `{{\"imposters\": [...], \"routes\": {{\"routes\": [...]}}}}` \
                  wrapper form, but this document has no `imposters` key, so the block would be \
                  ignored. Wrap the imposter in `\"imposters\": [ ... ]` (use `[]` if the file \
                  declares none)."

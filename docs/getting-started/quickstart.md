@@ -451,10 +451,12 @@ Complete working examples are available in the [`examples/`](https://github.com/
 | `feature-flags-api.json` | Feature toggle service mock |
 | `authentication-api.json` | Login/logout with token validation |
 
-Load an example (from a checkout of the repository):
+Load an example from a checkout of the repository. The files use the `{"imposters": [...]}`
+wrapper, so load them with `PUT /imposters` (which replaces every running imposter) or
+`--configfile`, not `POST`.
 
 ```bash
-curl -X POST http://localhost:2525/imposters \
+curl -X PUT http://localhost:2525/imposters \
   -H "Content-Type: application/json" \
   -d @examples/task-management-api.json
 ```

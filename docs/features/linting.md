@@ -268,12 +268,10 @@ array.
 A number that only changes spelling — `0.10` → `0.1`, `1e2` → `100.0` — is formatting, not loss,
 and does not stop the rewrite.
 
-Two more things `--fix` does that are easy to miss: it rewrites the entire file, so object keys come
-back in sorted order and the original formatting is not preserved; and it only repairs headers under
-a top-level `stubs` array, so a config written in the `{"imposters": [...]}` wrapper or bare-array
-form is reported but never rewritten. Formatting is all a rewrite changes beyond the headers it
-reports: a file it would change in any other way — a repeated key, or one of the numbers above — is
-skipped instead.
+One more thing `--fix` does that is easy to miss: it rewrites the entire file, so object keys come
+back in sorted order and the original formatting is not preserved. Formatting is all a rewrite
+changes beyond the headers it reports: a file it would change in any other way — a repeated key, or
+one of the numbers above — is skipped instead.
 
 ---
 

@@ -57,8 +57,11 @@ curl http://localhost:2525/imposters/4545
 }
 ```
 
-Each `GET /imposters/:port` that returns warnings also logs them at `warn` level. Creating or
-changing stubs does not log them.
+Each `GET /imposters/:port` that returns warnings also logs them at `warn` level, except
+`config_key_ignored` (see below), which is logged once when the imposter loads. Creating an imposter
+or changing its stubs through the admin API logs them too, because those replies are built the same
+way as a `GET`. Loading through `--configfile`, `--datadir` or the C-ABI logs only the `config_key_ignored`
+warnings, until something reads the imposter.
 
 ---
 
@@ -111,7 +114,7 @@ Two stubs have identical predicates. The second stub will never match:
 }
 ```
 
-A stub gated on a different `requiredScenarioState` or `space` is not a duplicate, since only one of them is eligible at a time (for example the `Started` and `paid` stubs of a [scenario](scenarios.md)). An ungated stub ahead of a gated one still is.
+A stub gated on a different `requiredScenarioState` or `space` is not a duplicate, since only one of them is eligible at a time (for example the `Started` and `paid` stubs of a [scenario]({{ site.baseurl }}/features/scenarios/)). An ungated stub ahead of a gated one still is.
 
 ### potentially_shadowed
 
@@ -255,7 +258,7 @@ catch-all are still reported at any size.
 
 Because the analysis now lives in the engine, **embedded consumers get it too**: over the C-ABI,
 call `rift_stub_warnings(handle, port)` to retrieve the same warnings as a JSON array (see
-[Embedding — FFI](../embedding/ffi.md)).
+[Embedding — FFI]({{ site.baseurl }}/embedding/ffi/)).
 
 ---
 
@@ -449,6 +452,11 @@ of requests and expected outcomes to drive against a fresh copy of the imposter:
   }
 }
 ```
+
+`--verify-dynamic` runs the `_verify` sequence in addition to the ordinary request, not instead of it.
+The ordinary request still has to see a `2xx`, so the example above, whose first answer is `503`,
+reports one `FAIL` for that request even though both `_verify` steps pass. Add `--skip-dynamic` to
+report the ordinary request as a `SKIP` and let the `_verify` steps decide the result.
 
 Fields:
 

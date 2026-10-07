@@ -160,6 +160,8 @@ Everything Mountebank does:
 | [Flow State](docs/features/flow-state.md) | Per-flow key/value store, in-memory or Redis-backed |
 | [Correlated Isolation](docs/features/spaces.md) | Per-flow stub and state partitioning, so parallel tests don't collide |
 | [Front Door](docs/features/front-door.md) | One listener routing to many imposters by host, path, header or method |
+| [Conditional GET](docs/mountebank/responses.md#conditional-get) | `_rift.conditional` adds `ETag` / `Last-Modified` and answers `304`, so datafile-style pollers need no hand-synced validators |
+| [Vendor-Mock Templates](templates/README.md) | Ready-made mocks for third-party SaaS (Optimizely first) that keep the vendor's own SDK unchanged, in direct or intercept mode |
 | [Single-Port Gateway](docs/features/gateway.md) | Reach every imposter through the admin port |
 | [Intercept Proxy](docs/features/intercept-proxy.md) | TLS-MITM a hard-coded external HTTPS host over HTTP/1.1 or HTTP/2, with WebSocket upgrades relayed to the real origin — no mitmproxy needed |
 | [TLS & Mutual TLS](docs/features/tls.md) | HTTPS imposters that require and validate client certificates, and a private-CA trust store for proxying to internal origins |
@@ -430,6 +432,7 @@ hello-worlds, transport matrix and version-compatibility table.
 ### Deployment
 - [Docker](https://achird-labs.github.io/rift/deployment/docker) - Container deployment
 - [Kubernetes](https://achird-labs.github.io/rift/deployment/kubernetes) - K8s patterns
+- [ECS / Fargate](https://achird-labs.github.io/rift/deployment/ecs-fargate) - Reference task definition, including the intercept proxy
 
 ### Reference
 - [REST API](https://achird-labs.github.io/rift/api/) - Admin API reference

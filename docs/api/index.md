@@ -44,12 +44,14 @@ Get API information and links.
 ```json
 {
   "_links": {
-    "imposters": { "href": "/imposters" },
-    "config": { "href": "/config" },
-    "logs": { "href": "/logs" }
+    "imposters": { "href": "http://localhost:2525/imposters" },
+    "config": { "href": "http://localhost:2525/config" },
+    "logs": { "href": "http://localhost:2525/logs" }
   }
 }
 ```
+
+The links are absolute. They use the `Host` header of the request.
 
 ---
 
@@ -134,9 +136,16 @@ config without `--allowInjection` (`400 invalid injection`).
   "protocol": "http",
   "name": "My Service",
   "numberOfRequests": 0,
-  "stubs": [...]
+  "enabled": true,
+  "recordRequests": false,
+  "requests": [],
+  "stubs": [...],
+  "_links": { "self": { "href": "http://localhost:2525/imposters/4545" }, ... }
 }
 ```
+
+A port that another imposter already holds is a `400` (not a `409`); a port held by some other
+process fails to bind and is a `500`.
 
 **Example:**
 ```bash
@@ -222,7 +231,7 @@ Get imposter details.
       "method": "GET",
       "path": "/test",
       "headers": {...},
-      "timestamp": "2024-01-15T10:30:00.000Z"
+      "timestamp": "2024-01-15T10:30:00.123456+00:00"
     }
   ],
   "stubs": [...]
@@ -329,7 +338,8 @@ Add a stub to an existing imposter.
 }
 ```
 
-`index` is optional (it appends when omitted); an out-of-range index is a `400`.
+`index` is optional (it appends when omitted); an out-of-range index is a `400`. A stub `id` that
+another stub on the imposter already uses is a `409`.
 
 **Response:** `200 OK` with the imposter detail.
 
@@ -403,7 +413,8 @@ Re-enable a disabled imposter.
 
 ### POST /imposters/{port}/disable
 
-Disable an imposter — it stops matching stubs and returns a default response — without deleting it.
+Disable an imposter without deleting it. A disabled imposter stops matching stubs. Each request to
+its port gets `503` with an `imposter disabled` error and an `x-rift-imposter-disabled: true` header.
 
 Both answer `200` with `{"message": "Imposter enabled"}` / `{"message": "Imposter disabled"}`.
 
@@ -447,10 +458,10 @@ clustered embedder's journal sets it; single-node Rift never does.
     "path": "/api/users",
     "query": {},
     "headers": {
-      "host": "localhost:4545",
-      "user-agent": "curl/7.88.0"
+      "Host": "localhost:4545",
+      "User-Agent": "curl/7.88.0"
     },
-    "timestamp": "2024-01-15T10:30:00.000Z",
+    "timestamp": "2024-01-15T10:30:00.123456+00:00",
     "status": 404,
     "latencyMs": 0,
     "matchOutcome": {
@@ -811,7 +822,8 @@ dedicated metrics port (`--metrics-port`, default 9090).
 ### POST /admin/reload
 
 Hot-reload imposters from the startup config source (`--configfile` / `--datadir`), applying the
-difference incrementally. A no-op (200) when no config source was provided. New config is
+difference incrementally. When no config source was provided, it answers `200` with
+`{"message": "No config source configured; nothing to reload"}` and changes nothing. New config is
 validated before any running imposter is changed. With both `--configfile` (or `--imposters`) and
 `--datadir`, both are re-read and applied as one set. See [Hot Reload](../features/hot-reload.md).
 
@@ -1031,7 +1043,7 @@ request describes an imposter that cannot be created:
 
 The request body exceeds the admin API's size limit (64 MiB). The limit bounds
 how much of a single request Rift buffers into memory, since the admin plane
-binds `0.0.0.0` and `--apikey` is optional.
+binds `0.0.0.0` and `--api-key` is optional.
 
 ```json
 {

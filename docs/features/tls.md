@@ -547,7 +547,7 @@ openssl verify -CAfile ca.crt server.crt
 | `... alert certificate unknown` | The client certificate does not chain to the imposter's `ca` | Issue it from a CA listed in `ca`, or add that CA |
 | `certificate has expired` | Expired cert | Regenerate certificate |
 | hostname mismatch / `NotValidForName` | The name you call is not in the certificate's SAN | Add it to `subjectAltName` |
-| `TLS configuration error: https imposter must provide both cert and key, or neither` | Only one of `cert`/`key` set | Supply both, or neither |
+| ``TLS configuration error: https imposter must provide both `cert` and `key`, or neither`` | Only one of `cert`/`key` set | Supply both, or neither |
 | `TLS configuration error: Failed to parse ...` / `No private key found in key PEM` | `key` is not PEM, or JSON escaping broke its line breaks | Build the body with `jq --rawfile` or EJS `stringify` |
 | `TLS configuration error: ... (cert/key mismatch?)` | `key` does not belong to `cert` | Pair the key with its certificate |
 | `TLS configuration error: ... self-signed generation is disabled` | `--no-self-signed-tls` and no certificate from any source | Add `cert`/`key`, or `--default-tls-cert`/`--default-tls-key` |

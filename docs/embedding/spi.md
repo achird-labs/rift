@@ -278,6 +278,7 @@ pub enum ImposterEvent {
     Created(u16),      // port created
     Replaced(u16),     // port replaced (imposter-level change)
     StubsChanged(u16), // in-place stub patch
+    EnabledChanged { port: u16, enabled: bool }, // serve/pause flag flipped
     Deleted(u16),      // port deleted
     AllDeleted,        // every imposter removed (a partial delete-all emits Deleted per port instead)
 }
