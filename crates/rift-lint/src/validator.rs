@@ -2035,6 +2035,110 @@ pub fn validate_headers(file: &Path, headers: &Value, location: &str, result: &m
     }
 }
 
+/// The predicate-generator keys the engine reads (issue #1327).
+const PREDICATE_GENERATOR_KEYS: [&str; 8] = [
+    "inject",
+    "matches",
+    "caseSensitive",
+    "predicateOperator",
+    "except",
+    "jsonpath",
+    "xpath",
+    "ignore",
+];
+
+/// W020 for a predicate-generator key the engine does not read, W021 for a `jsonpath`, `xpath` or
+/// `ignore` whose shape the engine cannot use (issue #1327). Both are warnings: the engine loads
+/// the imposter, and records with the key ignored.
+fn validate_predicate_generator_keys(
+    file: &Path,
+    generator: &Value,
+    location: &str,
+    result: &mut LintResult,
+) {
+    let Some(generator) = generator.as_object() else {
+        return;
+    };
+    let mut unread: Vec<&str> = generator
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !PREDICATE_GENERATOR_KEYS.contains(key))
+        .collect();
+    unread.sort_unstable();
+    if !unread.is_empty() {
+        let listed = unread
+            .iter()
+            .map(|key| format!("`{key}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        result.add_issue(
+            LintIssue::warning(
+                "W020",
+                format!("predicateGenerator key(s) {listed} are not read by the engine"),
+                file.to_path_buf(),
+            )
+            .with_location(location)
+            .with_suggestion(
+                "The engine reads inject, matches, caseSensitive, predicateOperator, except, \
+                 jsonpath, xpath and ignore",
+            ),
+        );
+    }
+    let strings = |value: &Value| {
+        value
+            .as_object()
+            .is_some_and(|map| map.values().all(Value::is_string))
+    };
+    let selector_ok = |value: &Value, namespaced: bool| {
+        value.as_object().is_some_and(|map| {
+            map.get("selector").is_some_and(Value::is_string)
+                && (!namespaced || map.get("ns").is_none_or(|ns| ns.is_null() || strings(ns)))
+        })
+    };
+    let mut malformed = |key: &str, message: &str| {
+        result.add_issue(
+            LintIssue::warning("W021", message.to_string(), file.to_path_buf())
+                .with_location(format!("{location}.{key}")),
+        );
+    };
+    if generator
+        .get("jsonpath")
+        .is_some_and(|v| !selector_ok(v, false))
+    {
+        malformed(
+            "jsonpath",
+            "predicateGenerator `jsonpath` must be an object with a string `selector`; the engine \
+             captures the whole body instead",
+        );
+    }
+    if generator
+        .get("xpath")
+        .is_some_and(|v| !selector_ok(v, true))
+    {
+        malformed(
+            "xpath",
+            "predicateGenerator `xpath` must be an object with a string `selector` and an optional \
+             `ns` object of prefix → URI strings; the engine captures the whole body instead",
+        );
+    }
+    let ignore_ok = |value: &Value| {
+        value.as_object().is_some_and(|fields| {
+            fields.values().all(|filter| match filter {
+                Value::String(_) | Value::Object(_) => true,
+                Value::Array(keys) => keys.iter().all(Value::is_string),
+                _ => false,
+            })
+        })
+    };
+    if generator.get("ignore").is_some_and(|v| !ignore_ok(v)) {
+        malformed(
+            "ignore",
+            "predicateGenerator `ignore` must be an object mapping a field to a key, an array of \
+             keys or a nested object; the engine ignores what it cannot read",
+        );
+    }
+}
+
 /// Validate a proxy response.
 pub fn validate_proxy_response(
     file: &Path,
@@ -2057,6 +2161,12 @@ pub fn validate_proxy_response(
                     ScriptSite::Inject,
                 );
             }
+            validate_predicate_generator_keys(
+                file,
+                generator,
+                &format!("{location}.predicateGenerators[{idx}]"),
+                result,
+            );
         }
     }
 

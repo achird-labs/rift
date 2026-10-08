@@ -133,6 +133,41 @@ Control how requests are matched when generating stubs:
 | `headers` | Match request headers |
 | `body` | Match request body |
 
+### Generator Keys
+
+| Key | Description |
+|:----|:------------|
+| `matches` | Which request fields the generated predicate captures (table above) |
+| `predicateOperator` | The operator of the generated predicate; default `equals` |
+| `caseSensitive` | Default `true` (see [Case Sensitivity](#case-sensitivity)) |
+| `except` | A regex removed from the captured `path`, `method` and `body` |
+| `jsonpath` | `{"selector": "$.id"}`: capture only what the selector selects from the body, and scope the generated predicate with the same selector |
+| `xpath` | `{"selector": "//a:id", "ns": {"a": "urn:a"}}`: as `jsonpath`, for an XML body |
+| `ignore` | Keys to leave out of a captured object field: `{"query": "ts"}`, `{"query": ["ts", "nonce"]}`, `{"headers": "X-Request-Id"}` |
+| `inject` | A JavaScript function that returns the predicates (see [Generation Failures](#generation-failures)) |
+
+With `jsonpath` or `xpath`, the captured `body` is the selected value: one match is a string, several
+are an array (the recorded stub then matches a request that selects all of them), and nothing
+selected is `""`. A selector that does not compile is not carried and the whole body is captured, as
+without one. `ignore` applies to the object-valued fields (`query`, `headers`); it has no effect on
+a string body. Rift still builds one predicate per generator, combining every field in `matches`
+(see #1329 for Mountebank's one-predicate-per-field shape). A key not in this table is accepted,
+ignored when recording, and reported as [`config_key_ignored`](../features/stub-analysis.md#config_key_ignored)
+and by `rift-lint` `W020`.
+
+```json
+{
+  "predicateGenerators": [{
+    "matches": { "path": true, "body": true, "query": true },
+    "jsonpath": { "selector": "$.orderId" },
+    "ignore": { "query": "ts" }
+  }]
+}
+```
+
+A replay then matches any request to the same path whose body has the same `orderId` and whose
+query matches apart from `ts`.
+
 ### Selective Matching
 
 Match only specific aspects:

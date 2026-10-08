@@ -25,6 +25,12 @@ record.
   the flow in one call and is idempotent (an absent flow returns `0`). Before this an embedder had
   to loop over keys it already knew. Additive symbol; detect it by presence.
 
+- **Proxy `predicateGenerators` read Mountebank's `jsonpath`, `xpath` and `ignore`** (#1327).
+  `jsonpath`/`xpath` capture only the selected part of the request body and scope the recorded
+  predicate with the same selector, so a replay matches on that value alone; `ignore` drops keys
+  from the captured `query` and `headers`. Before this the three keys were accepted and dropped,
+  and a recorded stub matched the whole body.
+
 ### Fixed
 
 - **`rift-lint` no longer reports `keyCaseSensitive` as an unknown operator (E009)** (#1325): the engine decodes and honours the predicate modifier, but the linter's modifier set omitted it, so valid configs failed lint.
@@ -38,6 +44,10 @@ record.
 - **Breaking for Rust embedders** (#1326): `behaviors::ExtractionMethod::XPath` gains a
   `namespaces: Option<HashMap<String, String>>` field, so a pattern or literal naming only
   `selector` must add `..` / `namespaces: None`.
+- **Unread `predicateGenerators` keys are reported** (#1327): a generator key the engine does not
+  read (a typo such as `matchs`) appears as `config_key_ignored` in `_rift.warnings`, and
+  `rift-lint` reports it as `W020` and a malformed `jsonpath`/`xpath`/`ignore` as `W021`. The
+  imposter still loads.
 
 ## [0.21.0] - 2026-10-07
 

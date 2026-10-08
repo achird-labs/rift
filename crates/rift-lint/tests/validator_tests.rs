@@ -3836,3 +3836,66 @@ fn e051_copy_or_lookup_ns_map() {
         "`using.ns` only applies to `method: xpath`; the engine refuses the file"
     );
 }
+
+/// Issue #1327: predicate-generator keys the engine does not read (W020) and `jsonpath`/`xpath`/
+/// `ignore` shapes it cannot use (W021). Mountebank's three keys in their right shape are quiet.
+#[test]
+fn w020_w021_predicate_generator_keys() {
+    let lint = |generator: Value| {
+        let proxy = json!({ "to": "http://upstream.example", "predicateGenerators": [generator] });
+        let mut r = LintResult::new();
+        validate_proxy_response(path(), &proxy, "loc", &mut r);
+        r
+    };
+
+    let fine = lint(json!({
+        "matches": { "body": true, "query": true },
+        "xpath": { "selector": "//a:id", "ns": { "a": "urn:a" } },
+        "ignore": { "query": ["ts"], "headers": "X-Request-Id" },
+        "caseSensitive": false, "predicateOperator": "equals", "except": "\\d+"
+    }));
+    assert!(codes(&fine).is_empty(), "{:?}", fine.issues);
+    assert!(
+        codes(&lint(
+            json!({ "matches": { "body": true }, "jsonpath": { "selector": "$.id" } })
+        ))
+        .is_empty()
+    );
+
+    let typo = lint(json!({ "matchs": { "path": true }, "keyCaseSensitive": true }));
+    assert_eq!(codes(&typo), vec!["W020"]);
+    assert_eq!(
+        typo.issues[0].message,
+        "predicateGenerator key(s) `keyCaseSensitive`, `matchs` are not read by the engine"
+    );
+    assert_eq!(
+        typo.issues[0].location.as_deref(),
+        Some("loc.predicateGenerators[0]")
+    );
+
+    for (generator, key) in [
+        (
+            json!({ "matches": { "body": true }, "jsonpath": "$.id" }),
+            "jsonpath",
+        ),
+        (
+            json!({ "matches": { "body": true }, "xpath": { "selector": "//a", "ns": { "a": 1 } } }),
+            "xpath",
+        ),
+        (
+            json!({ "matches": { "query": true }, "ignore": "ts" }),
+            "ignore",
+        ),
+        (
+            json!({ "matches": { "query": true }, "ignore": { "query": [1] } }),
+            "ignore",
+        ),
+    ] {
+        let r = lint(generator.clone());
+        assert_eq!(codes(&r), vec!["W021"], "{generator}");
+        assert_eq!(
+            r.issues[0].location.as_deref(),
+            Some(format!("loc.predicateGenerators[0].{key}").as_str())
+        );
+    }
+}
