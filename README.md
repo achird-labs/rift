@@ -157,7 +157,7 @@ Everything Mountebank does:
 | [Scripting](docs/features/scripting.md) | Rhai and JavaScript engines for dynamic responses, with a `script check`/`script run` CLI |
 | [Response Templates](docs/features/date-templates.md) | Date tokens and the `_rift.templated` `{{ }}` grammar — request values, UUIDs, flow state — without a script engine |
 | [Scenarios (FSM)](docs/features/scenarios.md) | Declarative state machines instead of hand-rolled stateful injection |
-| [Flow State](docs/features/flow-state.md) | Per-flow key/value store, in-memory or Redis-backed |
+| [Flow State](docs/features/flow-state.md) | Per-flow key/value store, in-memory |
 | [Correlated Isolation](docs/features/spaces.md) | Per-flow stub and state partitioning, so parallel tests don't collide |
 | [Front Door](docs/features/front-door.md) | One listener routing to many imposters by host, path, header or method |
 | [Conditional GET](docs/mountebank/responses.md#conditional-get) | `_rift.conditional` adds `ETag` / `Last-Modified` and answers `304`, so datafile-style pollers need no hand-synced validators |

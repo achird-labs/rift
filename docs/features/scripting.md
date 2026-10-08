@@ -443,8 +443,8 @@ mistaken for "applied". This shape is identical in both engines; only the method
 differs to match each engine's naming convention — Rhai uses `get_or`/`incr_by` (snake_case), JS
 uses `getOr`/`incrBy` (camelCase); `cas` and `ttl` are spelled the same everywhere.
 
-Every `ctx.state` call is fail-loud: a store failure (a Redis connection dropping mid-request, for
-example) raises a script error and is logged — it is never silently swallowed into a default value.
+Every `ctx.state` call is fail-loud: a store failure (a networked store's connection dropping mid-request, for
+example, on an embedder-supplied store) raises a script error and is logged — it is never silently swallowed into a default value.
 See [Flow State]({{ site.baseurl }}/features/flow-state/) for how the underlying store is selected,
 including the in-memory auto-provisioning that lets `ctx.state` work with zero configuration.
 
@@ -566,8 +566,8 @@ chosen engine is written into the script, so `GET /imposters` shows it. An unkno
 ## Flow-Store Error Semantics
 
 `ctx.state` is always fail-loud: every op — `get`/`set`/`incr`/`exists`/`delete` and the atomic
-`get_or`/`incr_by`/`cas`/`ttl` — **raises** a script error on a backend failure (e.g. a Redis
-outage mid-request) and logs it, so a store outage is never silently returned as an empty/absent
+`get_or`/`incr_by`/`cas`/`ttl` — **raises** a script error on a backend failure (e.g. an outage of an
+embedder-supplied store mid-request) and logs it, so a store outage is never silently returned as an empty/absent
 value. The raised error propagates to the standard script-error path (`500` with
 `x-rift-script-error`).
 
@@ -600,5 +600,5 @@ only) and raw throughput (Rhai, compiled and cached).
    imposter port); pick a source that keys state per request/user/session to avoid collisions
 5. **Set appropriate TTLs** - Prevent unbounded state growth with `ttlSeconds` config. It must be
    **>= 1**; a non-positive value is rejected at construction rather than accepted, because it would
-   expire every write immediately (in-memory) or fail on the first write (Redis). This applies to
+   expire every write immediately (in-memory) or fail on the first write (a networked store). This applies to
    both the per-imposter `_rift.flowState` block and the server-level `flowState` config

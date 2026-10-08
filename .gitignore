@@ -272,8 +272,6 @@ TAGS
 *.sqlite
 *.sqlite3
 
-# Redis dump (if used)
-dump.rdb
 
 # Core dumps (files named "core" or "core.<pid>", but not core.rs source files)
 /core

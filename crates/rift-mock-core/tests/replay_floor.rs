@@ -605,3 +605,35 @@ fn a_replaced_block_repeat_is_the_doors_refusal_alone() {
     let decoded: Stub = replayed(stub).expect("replay admits");
     assert_eq!(admission_check_stub(&decoded), Ok(()));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Issue #1337: the removed Redis flow-state backend is an admission refusal, never a decode one.
+// ---------------------------------------------------------------------------------------------
+
+/// rift-cluster replays stored config bytes through `deserialize_replayed`. Configs admitted while
+/// the Redis backend existed name `backend: "redis"` and carry a `redis` block; if removing the
+/// backend made them undecodable, a node would stop starting (rift-cluster#657). The refusal lives
+/// in flow-store construction (`ImposterManager` admission), so these bytes must still decode and
+/// round-trip with the block intact.
+#[test]
+fn a_stored_config_naming_the_removed_redis_backend_still_decodes_on_replay() {
+    let stored = r#"{
+        "port": 4545, "protocol": "http", "stubs": [],
+        "_rift": { "flowState": { "backend": "redis", "ttlSeconds": 600,
+                                  "redis": { "url": "redis://cache:6379", "poolSize": 4 } } }
+    }"#;
+
+    let config: ImposterConfig = replayed(stored).expect("a stored redis config must still decode");
+    let flow_state = config
+        .rift
+        .as_ref()
+        .and_then(|r| r.flow_state.as_ref())
+        .expect("flowState decoded");
+    assert_eq!(flow_state.backend, "redis");
+    assert_eq!(flow_state.ttl_seconds, 600);
+    assert_eq!(
+        flow_state.extra.get("redis"),
+        Some(&serde_json::json!({ "url": "redis://cache:6379", "poolSize": 4 })),
+        "the leftover block is carried, not dropped, so a re-serialize is lossless"
+    );
+}

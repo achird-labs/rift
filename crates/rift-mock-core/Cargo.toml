@@ -138,10 +138,6 @@ harness = false
 
 [features]
 default = ["javascript", "quamina-matching"]
-# NOTE: there is deliberately no `redis-backend` feature here any more (issue #853). The Redis flow
-# store lives in the `rift-store-redis` crate and attaches through `FlowStoreBackendFactory`, so
-# this crate cannot pull `redis`/`r2d2` under any feature combination. The feature name survives on
-# `rift-http-proxy` and `rift-ffi`, where it now means "register the redis backend".
 javascript = ["boa_engine"]
 # Quamina-backed body-field candidate dimension (issue #767). Off ⇒ the dimension
 # compiles to a no-op that never prunes; Stage-2 still evaluates every body predicate.

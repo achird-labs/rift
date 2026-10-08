@@ -397,7 +397,6 @@ earlier `--allowInjection` run must fail closed without bricking startup for eve
 - ✅ Config file (positional argument)
 
 **Rift-Specific Additions:**
-- ✅ `--redis-url` - Redis backend for flow state
 - ✅ `--metrics-port` - Prometheus metrics endpoint
 - ✅ `--script-pool-size` - Script engine pool size
 - ✅ `--cache-size` - Decision cache size
@@ -609,8 +608,8 @@ rules:
    - **Benefit**: Production-grade monitoring
 
 6. **Flow State Backends** ✅
-   - **Feature**: In-memory + Redis
-   - **Benefit**: Distributed stateful testing
+   - **Feature**: In-memory flow store
+   - **Benefit**: Stateful testing (shared state across processes is a rift-cluster deployment)
 
 ---
 

@@ -24,18 +24,6 @@ services:
       retries: 15
       start_period: 10s
 
-  # Redis for flow state backend
-  redis:
-    image: redis:7-alpine
-    container_name: rift-redis
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   # Rift (Mountebank-compatible mode)
   rift:
     build:
@@ -52,10 +40,6 @@ services:
       - MB_PORT=2525
       - MB_ALLOW_INJECTION=true
       - RUST_LOG=debug
-      - RIFT_REDIS_URL=redis://redis:6379
-    depends_on:
-      redis:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "rift", "healthcheck"]
       interval: 5s

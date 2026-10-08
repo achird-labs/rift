@@ -34,17 +34,8 @@ MANIFEST="${MANIFEST:-$repo_root/Cargo.toml}"
 #
 # The invariant this gate encodes is "on by default in the library means on by default in what
 # ships", and it finds dependents structurally — anything taking rift-mock-core with
-# default-features = false. `rift-store-redis` (issue #853) matches that shape without being
-# something users run: it is a leaf *backend* crate, pulled in BY rift-http-proxy, and it needs core
-# only for the `FlowStore`/`FlowStoreBackendFactory` seams and the `RiftFlowStateConfig` type.
-# Nobody builds the engine through it, so forwarding the engine's own features would be inert — and
-# taking core with default features instead would drag boa_engine and quamina into a Redis client
-# crate, which is the dependency bloat #853 exists to remove. The propagation that does matter for
-# redis is checked by CHAINS below.
-DELIBERATELY_NOT_FORWARDED=(
-  "rift-store-redis:javascript=leaf backend crate (#853), not a shipped artifact; needs core only for the FlowStore seams"
-  "rift-store-redis:quamina-matching=leaf backend crate (#853), not a shipped artifact; needs core only for the FlowStore seams"
-)
+# default-features = false. Currently empty: every such dependent forwards every feature.
+DELIBERATELY_NOT_FORWARDED=()
 
 check() {
   local manifest="$1"
@@ -94,17 +85,10 @@ for feat in lib_defaults:
                 f"default = [...], so it is off unless a caller opts in.")
 
 # A feature can also be default-on in the library layer WITHOUT being one of rift-mock-core's own
-# features, in which case the loop above cannot see it at all. `redis-backend` became exactly that
-# in issue #853: the Redis store moved to the `rift-store-redis` crate, so rift-mock-core has no
-# such feature any more and the invariant above stopped covering redis entirely — silently
-# reopening the #777 blind spot it exists to close. These chains restore the coverage by naming the
-# hop explicitly: each entry is "crate:feature -> what it must enable".
-CHAINS = [
-    # The feature must actually pull the backend crate in, not just exist.
-    ("rift-http-proxy", "redis-backend", "dep:rift-store-redis"),
-    # ...and the C-ABI must forward it, since rift-ffi is what embedded SDKs load.
-    ("rift-ffi", "redis-backend", "rift-http-proxy/redis-backend"),
-]
+# features, in which case the loop above cannot see it at all (the #777 blind spot). Each entry
+# names such a hop explicitly: "crate", "feature", "what it must enable". Currently empty — the only
+# one was the Redis backend, removed in 0.22.0 (#1337).
+CHAINS = []
 
 for crate, feat, required in CHAINS:
     if crate not in pkgs:

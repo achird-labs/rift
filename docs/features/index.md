@@ -30,7 +30,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 - **Response Templates** - Date tokens and the `_rift.templated` `{% raw %}{{ }}{% endraw %}` function grammar
 - **Conditional GET** - `ETag` / `Last-Modified` and `304 Not Modified` on an `is` response with `_rift.conditional`
 - **Scenarios (FSM)** - Stateful stubs as declarative state machines
-- **Flow State** - Per-flow key/value store with InMemory or Redis backends, written by scripts or declaratively with `_rift.stateOps`
+- **Flow State** - Per-flow key/value store with the in-memory backend, written by scripts or declaratively with `_rift.stateOps`
 - **Correlated Isolation (Spaces)** - Per-flow stub and state partitioning
 - **Stub Analysis** - Overlap detection and conflict warnings
 - **Debug Mode** - Request matching diagnostics with `X-Rift-Debug` header

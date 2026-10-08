@@ -305,7 +305,7 @@ While Rift has protocol limitations, it offers significant advantages for HTTP w
 3. **Kubernetes Native**: Sidecar and reverse proxy deployment modes
 4. **Configuration Formats**: JSON + YAML support (vs JSON only)
 5. **Observability**: Native Prometheus metrics and Grafana dashboards
-6. **Flow State Backends**: In-memory + Redis (distributed stateful testing)
+6. **Flow State**: In-memory store (state shared across processes is a rift-cluster deployment)
 
 ## Recommendations
 

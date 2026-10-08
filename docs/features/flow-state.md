@@ -31,26 +31,21 @@ token (under `_rift.templated`) reads it back into a response body or header.
 
 | Field | Default | Notes |
 |:------|:--------|:------|
-| `backend` | `inmemory` | `inmemory` or `redis`. |
+| `backend` | `inmemory` | `inmemory` (the only built-in backend). `redis` was removed in 0.22.0 and is refused — see [Scope](#scope). |
 | `ttlSeconds` | `300` | Default entry TTL, in seconds. Must be `>= 1` (see [TTL semantics](#ttl-semantics)). |
 | `flowIdSource` | `imposter_port` | How the flow id is derived (`imposter_port` or `header:<Name>`). |
 
-With `backend: "redis"`, add a nested `redis` block: `url` (required), `poolSize` (default 10),
-and `keyPrefix` (default `"rift:"`). These keys belong **inside** `redis`, not directly under
-`flowState` — an unrecognised key directly under `flowState` is collected as an option for an
-embedder-supplied store and ignored by the built-in backends, so a flat `url` leaves the `redis`
-block missing and creation fails.
+An unrecognised key directly under `flowState` is collected as an option for an embedder-supplied
+store and ignored by the built-in `inmemory` backend.
 
-```json
-{
-  "_rift": {
-    "flowState": {
-      "backend": "redis",
-      "redis": { "url": "redis://localhost:6379", "poolSize": 10, "keyPrefix": "rift:" }
-    }
-  }
-}
-```
+### Scope
+
+No external store sits on the request path. The engine ships the in-memory flow store only; a
+deployment that needs scenario or flow state shared across processes is a
+[rift-cluster]({{ site.baseurl }}/deployment/kubernetes/#shared-state-across-pods) deployment, whose
+owner-replicated tier replaces this engine's former Redis backend (removed in 0.22.0). The
+`FlowStore` / `FlowStoreProvider` / `FlowStoreBackendFactory` seams stay, so an embedder can still
+bring any store (see [SPI]({{ site.baseurl }}/embedding/spi/)).
 
 ### Backend configuration is fail-loud
 
@@ -59,12 +54,13 @@ An explicit `flowState` block that can't be honored now **fails imposter creatio
 
 - An **unregistered backend** string is rejected at construction. The error names the backend and
   lists the ones this build can serve, e.g. `flowState.backend is "mystore" but no such backend is
-  registered (available: "inmemory", "redis")`.
-- A **`redis` backend that can't be created** — no redis config block, a connection/pool failure, or
-  a binary built without the `redis-backend` feature — fails creation too. In the last case the
-  error also tells you to rebuild with `--features redis-backend`.
+  registered (available: "inmemory")`.
+- **`backend: "redis"`** is refused at admission with its own message: `flowState backend "redis"
+  was removed in 0.22.0; state shared across processes is a rift-cluster deployment`. A stored
+  config that still names it keeps decoding (so a rift-cluster replay of old bytes does not break);
+  only creating or applying the imposter is refused.
 - A **non-positive `ttlSeconds`** (`< 1`) is rejected: a zero/negative default TTL would expire every
-  write the instant it lands (and errors on the first Redis `SETEX`), so it's caught up front rather
+  write the instant it lands (or errors on the first write, on a networked store), so it's caught up front rather
   than misbehaving later.
 
 Only imposters with genuinely **no state surface** stay on the silent no-op store: no `flowState`
@@ -78,8 +74,7 @@ or a `_rift.stateOps` block, but **no** `flowState` block, gets a real in-memory
 auto-provisioned at the default TTL (300s) — a `tracing::warn!` (target `rift::script` for a
 script stub, `rift::state_ops` for `stateOps`) is logged so this doesn't go unnoticed, and
 `rift-lint` flags the same condition statically as `W014`. State works out of the box; it just
-doesn't persist across restarts or get shared across a cluster the way an explicit `flowState`
-(especially `backend: "redis"`) would.
+doesn't persist across restarts or get shared across a cluster.
 
 ---
 
@@ -104,7 +99,7 @@ for the full surface:
 | `ctx.state.clear()` | remove **every** key in this flow |
 | `ctx.store.flow(id)` | a handle scoped to a **different** flow id (cross-flow access) |
 
-Every `ctx.state` call is **fail-loud**: a backend error (e.g. Redis dropping mid-request) raises a
+Every `ctx.state` call is **fail-loud**: a backend error (e.g. an embedder's networked store dropping mid-request) raises a
 script error and is logged — it is never silently swallowed into a default. In JavaScript the
 method names are camelCase (`getOr`/`incrBy`); `cas`/`ttl`/`clear` are spelled the same in both
 engines.
@@ -116,14 +111,13 @@ TTL is a **per-key** attribute, and every backend applies the same rules:
 - **Every write stamps the default TTL.** A `set`/`incr`/`incr_by`/applied-`cas` (re)stamps the key's
   expiry to `now + ttlSeconds`.
 - **Writes reset the TTL.** `ttl(key, s)` overrides a key's expiry, but a *subsequent* write to that
-  key re-stamps it back to the default `ttlSeconds` — TTLs are set by the last write (this is exactly
-  what Redis `SETEX` does; there is no sticky/`KEEPTTL` mode).
+  key re-stamps it back to the default `ttlSeconds` — TTLs are set by the last write (there is
+  no sticky/`KEEPTTL` mode).
 - **`seconds <= 0` expires immediately.** `ttl(key, 0)` (or negative) deletes the key now; flow-level
-  `ttl(0)` expires every current key in the flow. This mirrors Redis `EXPIRE`, giving scripts both
+  `ttl(0)` expires every current key in the flow. This mirrors the Redis `EXPIRE` primitive's semantics, giving scripts both
   "shrink the lifetime" (`ttl(key, 5)`) and "kill now" (`ttl(key, 0)`) with one primitive.
 - **Flow-level `ttl(seconds)` is a convenience** over the per-key primitive: it re-stamps every key
-  *currently* in the flow. On Redis it does an O(keys-in-flow) `SCAN` + `EXPIRE`; on both backends the
-  observable result is identical.
+  *currently* in the flow.
 - There is deliberately **no "no expiry" mode** — an unexpirable store is a memory leak by
   construction — so `ttlSeconds` is mandatory and must be `>= 1`.
 

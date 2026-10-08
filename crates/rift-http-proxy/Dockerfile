@@ -16,8 +16,8 @@ ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
 
 # Features to build (all features enabled by default for full functionality)
-# Available features: javascript, redis-backend
-ARG FEATURES=javascript,redis-backend
+# Available features: javascript
+ARG FEATURES=javascript
 
 # Ensure broad ARM64 compatibility for M1/M2/M3 Macs
 # This prevents "Illegal instruction" errors on Apple Silicon and other ARM64 CPUs
@@ -34,20 +34,17 @@ COPY crates/rift-types/Cargo.toml ./crates/rift-types/
 COPY crates/rift-ejs/Cargo.toml ./crates/rift-ejs/
 COPY crates/rift-mock-core/Cargo.toml ./crates/rift-mock-core/
 COPY crates/rift-ffi/Cargo.toml ./crates/rift-ffi/
-COPY crates/rift-store-redis/Cargo.toml ./crates/rift-store-redis/
 
 # Create dummy source files to build dependencies.
 # Every workspace member needs an entry here, even one this image does not run: cargo resolves the
 # whole workspace, so a member with no manifest/source fails the build outright.
 RUN mkdir -p crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches \
              crates/rift-mock-core/benches \
-             crates/rift-lint/src crates/rift-tui/src crates/rift-types/src crates/rift-ejs/src crates/rift-mock-core/src crates/rift-ffi/src \
-             crates/rift-store-redis/src && \
+             crates/rift-lint/src crates/rift-tui/src crates/rift-types/src crates/rift-ejs/src crates/rift-mock-core/src crates/rift-ffi/src && \
     echo "" > crates/rift-types/src/lib.rs && \
     echo "" > crates/rift-ejs/src/lib.rs && \
     echo "" > crates/rift-mock-core/src/lib.rs && \
     echo "" > crates/rift-ffi/src/lib.rs && \
-    echo "" > crates/rift-store-redis/src/lib.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/src/main.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/src/bin/verify.rs && \
     echo "fn main() {}" > crates/rift-mock-core/benches/imposter_matcher_bench.rs && \
@@ -72,7 +69,7 @@ COPY . .
 # the old globs into no-ops and let empty dummy rlibs reach the link (`no `extensions` in the root`).
 # Third-party dependency artifacts are untouched, so the dependency cache layer still pays off.
 RUN cargo clean --release \
-      --package rift-types --package rift-ejs --package rift-mock-core --package rift-store-redis \
+      --package rift-types --package rift-ejs --package rift-mock-core \
       --package rift-ffi --package rift-http-proxy && \
     cargo build --release --locked --package rift-http-proxy --features ${FEATURES}
 
@@ -96,10 +93,10 @@ COPY --from=builder /build/target/release/rift-http-proxy /usr/local/bin/rift
 ARG VERSION=dev
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
-ARG FEATURES=javascript,redis-backend
+ARG FEATURES=javascript
 LABEL \
   org.opencontainers.image.title="Rift HTTP Proxy" \
-  org.opencontainers.image.description="Mountebank-compatible HTTP chaos engineering proxy with Rhai/JavaScript scripting and Redis state backend." \
+  org.opencontainers.image.description="Mountebank-compatible HTTP chaos engineering proxy with Rhai/JavaScript scripting and an in-memory state backend." \
   org.opencontainers.image.url="https://github.com/achird-labs/rift" \
   org.opencontainers.image.source="https://github.com/achird-labs/rift" \
   org.opencontainers.image.version="$VERSION" \
@@ -194,7 +191,6 @@ ENV RIFT_METRICS_PORT=9090
 #
 # Flow state storage:
 # - In-memory: Built-in, always available
-# - Redis: Enabled via --features redis-backend
 #
 # Rift Extensions (_rift namespace):
 # - Flow state for stateful testing scenarios
@@ -217,10 +213,6 @@ ENV RIFT_METRICS_PORT=9090
 #   # With persistent data directory
 #   docker run -p 2525:2525 -v ./mb-data:/data \
 #     -e MB_DATADIR=/data rift-proxy
-#
-#   # With Redis backend for distributed flow state
-#   docker run -p 2525:2525 --network my-network \
-#     -e REDIS_URL=redis://redis:6379 rift-proxy
 #
 # CLI Reference (all flags work as environment variables with MB_ or RIFT_ prefix):
 #   --port <PORT>           Admin API port [env: MB_PORT] [default: 2525]

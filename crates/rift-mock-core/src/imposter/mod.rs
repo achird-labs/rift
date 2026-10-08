@@ -43,9 +43,9 @@ pub use types::{
     LastModified, MAX_TRIED_STUBS, MatchOutcome, PathRewrite, Predicate, PredicateOperation,
     PredicateParameters, PredicateSelector, ProxyResponse, RecordedRequest, ResponseMode,
     RiftConfig, RiftConnectionPoolConfig, RiftErrorFault, RiftFaultConfig, RiftFlowStateConfig,
-    RiftLatencyFault, RiftMetricsConfig, RiftProxyConfig, RiftRedisConfig, RiftResponseExtension,
-    RiftScriptConfig, RiftScriptEngineConfig, RiftTcpFault, RiftUpstreamConfig, Stub, StubResponse,
-    TriedStub, TriedWhy, admission_check, admission_check_stub, deserialize_replayed,
+    RiftLatencyFault, RiftMetricsConfig, RiftProxyConfig, RiftResponseExtension, RiftScriptConfig,
+    RiftScriptEngineConfig, RiftTcpFault, RiftUpstreamConfig, Stub, StubResponse, TriedStub,
+    TriedWhy, admission_check, admission_check_stub, deserialize_replayed,
 };
 
 // Re-export script `file:`/`ref:` resolution (issue #356)

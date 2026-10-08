@@ -23,8 +23,8 @@ let port = manager.create_imposter(config).await?; // port 0 is auto-assigned
 `ImposterManager` is also the extension point. Its `with_*` builders take the SPI traits — flow
 store, request journal, proxy-recording store, response sequencer, event listener, response
 decorator, no-match interceptor, exchange inspector — and the built-in behaviour stays in place for
-any you do not install. The Redis flow store lives in the separate `rift-store-redis` crate and
-plugs in through `with_flow_store_backends`, so this crate never depends on `redis`.
+any you do not install. The engine ships only the in-memory flow store; any other store plugs in through
+`with_flow_store_backends` or `with_flow_store_provider`.
 
 ## Features
 

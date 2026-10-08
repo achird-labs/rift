@@ -361,7 +361,7 @@ class DimensionSetIsAdditive(unittest.TestCase):
 
 class AllocatorBuildArgs(unittest.TestCase):
     """Issue #717: each allocator maps to cargo flags that swap ONLY the allocator, keeping the
-    functional feature set (redis-backend, javascript) identical so the comparison is fair."""
+    functional feature set (javascript) identical so the comparison is fair."""
 
     def test_mimalloc_is_the_default_build(self):
         self.assertEqual(bd.allocator_build_args("mimalloc"), [])
@@ -369,13 +369,13 @@ class AllocatorBuildArgs(unittest.TestCase):
     def test_jemalloc_swaps_allocator_only(self):
         self.assertEqual(
             bd.allocator_build_args("jemalloc"),
-            ["--no-default-features", "--features", "redis-backend,javascript,jemalloc"],
+            ["--no-default-features", "--features", "javascript,jemalloc"],
         )
 
     def test_system_drops_the_allocator_only(self):
         self.assertEqual(
             bd.allocator_build_args("system"),
-            ["--no-default-features", "--features", "redis-backend,javascript"],
+            ["--no-default-features", "--features", "javascript"],
         )
 
     def test_rejects_unknown_allocator(self):
@@ -768,7 +768,7 @@ class QuaminaVariant(unittest.TestCase):
         feats = args[args.index("--features") + 1]
         # Everything else the default build has must survive, or the two variants differ by more
         # than the one thing under test.
-        for keep in ("redis-backend", "javascript", "mimalloc"):
+        for keep in ("javascript", "mimalloc"):
             self.assertIn(keep, feats)
         self.assertNotIn("quamina", feats)
 

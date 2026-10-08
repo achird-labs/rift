@@ -10,7 +10,7 @@
 # Cargo.lock), so the release musl binaries are genuinely static and need no loader at runtime.
 #
 # Feature parity note: the musl release binaries are built `--no-default-features --features
-# javascript,redis-backend` (see release.yml), so scripting and the Redis backend are present but
+# javascript` (see release.yml), so scripting is present but
 # the mimalloc allocator is not — that is the one difference from the Debian flavor.
 #
 # Usage:

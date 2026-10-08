@@ -238,11 +238,39 @@ async fn create_imposter_rejects_an_unregistered_flow_state_backend() {
         body.contains("inmemory"),
         "the 400 must list the backends this build serves, got: {body}"
     );
-    // This test build has `redis-backend` on (a default feature), so redis is registered and must
-    // appear as available — which also proves `default_flow_store_backends()` actually registered it.
+}
+
+// Issue #1337: the Redis backend was removed; naming it is a 400 at admission (not at decode) whose
+// body says so and points at rift-cluster.
+#[tokio::test]
+async fn create_imposter_with_removed_redis_backend_is_400_with_a_pointer_to_rift_cluster() {
+    let manager = std::sync::Arc::new(ImposterManager::new());
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
+
+    let r = reqwest::Client::new()
+        .post(format!("{admin}/imposters"))
+        .json(&serde_json::json!({
+            "port": 0, "protocol": "http", "stubs": [],
+            "_rift": { "flowState": { "backend": "redis",
+                "redis": { "url": "redis://127.0.0.1:6379" } } }
+        }))
+        .send()
+        .await
+        .expect("post imposter");
+    assert_eq!(
+        r.status(),
+        400,
+        "backend \"redis\" must be refused at admission"
+    );
+    let body = r.text().await.expect("body");
     assert!(
-        body.contains("redis"),
-        "a redis-enabled build must advertise redis as available, got: {body}"
+        body.contains("removed in 0.22.0") && body.contains("rift-cluster"),
+        "the 400 must say the backend was removed and point at rift-cluster, got: {body}"
     );
 }
 
@@ -2553,12 +2581,12 @@ mod gateway {
 }
 
 // Issue #260: GET /imposters/:port exposes the imposter's flowState (so tools can read
-// flowIdSource), with the redis block redacted.
+// flowIdSource), with anything beyond the allowlist redacted.
 #[tokio::test]
 async fn get_imposter_exposes_flowstate_redacted() {
     let manager = std::sync::Arc::new(ImposterManager::new());
-    // inmemory backend ignores a stray `redis` block (no connection attempted) — include one with a
-    // credentialed URL to prove the GET projection actually strips it end-to-end.
+    // a leftover `redis` block (written before the backend was removed) still decodes into the
+    // flattened extras — include one with a credentialed URL to prove the GET projection strips it.
     let config = serde_json::from_value(serde_json::json!({
         "port": 22626, "protocol": "http",
         "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300,
@@ -2587,7 +2615,7 @@ async fn get_imposter_exposes_flowstate_redacted() {
     );
     assert!(
         v.pointer("/_rift/flowState/redis").is_none(),
-        "redis config must be redacted from the exposed flowState: {v}"
+        "a leftover redis block must be redacted from the exposed flowState: {v}"
     );
     assert!(
         !v.to_string().contains("topsecret"),

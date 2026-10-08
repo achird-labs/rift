@@ -3,7 +3,7 @@
 //! existing 500 (`x-rift-script-error`). Covered for both engines (Rhai / JS).
 //!
 //! The failing backend comes from rift-mock-core's `test-backend` feature: `_rift.flowState.backend =
-//! "failing"` installs a store whose ops fail. This needs no Docker/Redis.
+//! "failing"` installs a store whose ops fail. This needs no Docker.
 //!
 //! `ctx.state` is unconditionally fail-loud (issue #358).
 

@@ -123,7 +123,7 @@ Rift includes features not in Mountebank:
 
 1. **Native Metrics**: Built-in Prometheus metrics on `/metrics`
 2. **Rhai Scripting**: Lightweight embedded scripting (in addition to JavaScript)
-3. **Flow State**: Stateful testing with Redis backend support
+3. **Flow State**: Stateful testing with a per-process flow store
 
 ### Minor Differences
 

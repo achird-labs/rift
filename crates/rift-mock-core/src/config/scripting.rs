@@ -8,11 +8,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FlowStateConfig {
     #[serde(default = "default_backend_type")]
-    pub backend: String, // "inmemory", "redis"
+    pub backend: String, // "inmemory"
     #[serde(default = "default_ttl_seconds")]
     pub ttl_seconds: i64,
-    #[serde(default)]
-    pub redis: Option<RedisConfig>,
 }
 
 fn default_backend_type() -> String {
@@ -28,24 +26,6 @@ impl Default for FlowStateConfig {
         Self {
             backend: default_backend_type(),
             ttl_seconds: default_ttl_seconds(),
-            redis: None,
         }
     }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct RedisConfig {
-    pub url: String,
-    #[serde(default = "default_redis_pool_size")]
-    pub pool_size: usize,
-    #[serde(default = "default_redis_key_prefix")]
-    pub key_prefix: String,
-}
-
-fn default_redis_pool_size() -> usize {
-    10
-}
-
-fn default_redis_key_prefix() -> String {
-    "rift:".to_string()
 }

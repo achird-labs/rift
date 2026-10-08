@@ -212,7 +212,7 @@ jobs:
           set -euo pipefail
           for q in on off; do
             if [ "$q" = "on" ]; then FEATURES=(); else
-              FEATURES=(--no-default-features --features redis-backend,javascript,mimalloc); fi
+              FEATURES=(--no-default-features --features javascript,mimalloc); fi
             echo "===== building quamina=$q ====="
             cargo build --release -p rift-http-proxy --jobs 4 \
               --target-dir "target/quamina-$q" "${FEATURES[@]}"

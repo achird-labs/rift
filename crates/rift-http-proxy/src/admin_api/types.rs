@@ -124,8 +124,9 @@ pub struct RiftImposterExtensions {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<StubWarning>,
     /// The imposter's flow-state config (issue #260), so tools like `rift-verify` can learn the
-    /// correlated-isolation `flowIdSource` header. Redacted: the `redis` block (which may carry a
-    /// credentialed connection URL) is stripped before exposure.
+    /// correlated-isolation `flowIdSource` header. Redacted by allowlist: only `backend`, `ttlSeconds` and
+    /// `flowIdSource` are exposed; anything else under `flowState` (e.g. a credentialed block a
+    /// provider-backed store keeps there) is stripped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flow_state: Option<serde_json::Value>,
 }

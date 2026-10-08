@@ -9,7 +9,7 @@ nav_order: 2
 
 Rift's storage and observation seams are **traits** in `rift-mock-core`. An embedding host implements a
 trait and injects it through a builder method on `ImposterManager`; if you don't, Rift uses its
-built-in in-memory (or Redis, where applicable) implementation. The built-ins never fail — a custom
+built-in in-memory implementation. The built-ins never fail — a custom
 backend may, and Rift surfaces that failure explicitly (see [Backend errors](#backend-errors-and-annotations)).
 
 All injection is via `ImposterManager` builder methods:
@@ -37,7 +37,7 @@ Then pass `Arc::new(manager)` to `ServerBuilder::manager(...)` (see
 ## `FlowStoreProvider` — custom flow-state backend
 
 Provide a [flow-state]({{ site.baseurl }}/features/flow-state/) store per imposter, or return `None`
-to defer to the built-ins (in-memory / Redis).
+to defer to the built-ins (in-memory).
 
 ```rust
 pub trait FlowStoreProvider: Send + Sync {
@@ -57,13 +57,13 @@ store the *config* selects by name, and misconfiguration to fail loudly, use
 
 ## `FlowStoreBackendFactory` — a named flow-state backend
 
-Adds a `_rift.flowState.backend` name the config can select, with an error channel. This is how the
-Redis backend ships: it lives in the separate `rift-store-redis` crate, so `rift-mock-core` itself
-carries no `redis`/`r2d2` dependency under any feature combination.
+Adds a `_rift.flowState.backend` name the config can select, with an error channel. The engine ships
+only the built-in `"inmemory"` backend (the Redis backend was removed in 0.22.0), so a store that
+lives outside `rift-mock-core` attaches here.
 
 ```rust
 pub trait FlowStoreBackendFactory: Send + Sync {
-    /// The `_rift.flowState.backend` string this factory serves, e.g. "redis".
+    /// The `_rift.flowState.backend` string this factory serves, e.g. "mystore".
     fn name(&self) -> &'static str;
 
     /// Build a store for this imposter's flowState block. An `Err` fails imposter creation.
@@ -80,10 +80,9 @@ let backends = FlowStoreBackends::new().with(Arc::new(MyBackend));
 let manager = ImposterManager::new().with_flow_store_backends(backends);
 ```
 
-The `rift` binary and the C-ABI register their shipped backends automatically — with the default
-`redis-backend` feature that means `"redis"`, so `_rift.flowState.backend: "redis"` works out of the
-box. `rift_http_proxy::default_flow_store_backends()` returns that set if you are assembling a
-manager yourself and want the same vocabulary.
+The `rift` binary and the C-ABI register their shipped backends automatically — currently none
+beyond the built-in `"inmemory"`. `rift_http_proxy::default_flow_store_backends()` returns that set
+if you are assembling a manager yourself and want the same vocabulary.
 
 Choosing between the two seams:
 
@@ -110,8 +109,8 @@ implementation keeps compiling: `is_blocking`, `increment_by`, `set_key_ttl`, `c
 - **`flow_ids()` / `entry_count(flow_id)`** (issue #962): list the flow ids that have live state,
   and count the live keys under one. Both return `Result<Option<_>>`, and the default is
   `Ok(None)`, meaning "this store cannot enumerate". That is different from `Some(vec![])` / `Some(0)`,
-  which mean "it can, and there are none". The built-in in-memory store enumerates. The Redis store
-  deliberately returns `None`, because an admin screen should not trigger a `SCAN` over a shared
+  which mean "it can, and there are none". The built-in in-memory store enumerates. A networked store
+  may deliberately return `None`, because an admin screen should not trigger a scan over a shared
   keyspace. Keep the two answers distinct, so a UI shows "unsupported" rather than "empty".
 
 ## `ResponseSequencer` — custom response cycling
@@ -685,9 +684,9 @@ failed:
   "errors": [{
     "code": "503",
     "type": "backend unavailable",
-    "message": "flowState: redis connection refused",
+    "message": "flowState: store connection refused",
     "feature": "flowState",
-    "detail": "redis connection refused"
+    "detail": "store connection refused"
   }]
 }
 ```
@@ -698,7 +697,7 @@ failed:
 Per-request operational metadata travels through a tokio task-local annotation scope:
 `annotate(key: &'static str, value: String)` records a `(key, value)` that a `ResponseDecorator` later
 reads. It still arrives when the engine ran the work on `spawn_blocking` (a store with
-`is_blocking() == true`, such as Redis). Before #987, annotations made on that thread were silently
+`is_blocking() == true`, such as a networked one). Before #987, annotations made on that thread were silently
 dropped. This is the same mechanism behind the script/behavior error headers — e.g. a script that hits a
 down flow-store backend records an annotation, and a `ctx.state` call against that backend is
 **fail-loud**: it raises a script error that surfaces to the response rather than silently returning a

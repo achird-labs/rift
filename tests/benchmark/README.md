@@ -139,7 +139,7 @@ for alloc in mimalloc jemalloc system; do
 done
 ```
 
-The three variants differ **only** in the allocator — `redis-backend`+`javascript` stay enabled
+The three variants differ **only** in the allocator — `javascript` stays enabled
 in all of them — and each binary logs `Global allocator: <name>` at startup, so a report can
 never mislabel its build. Decision rule and result recording live in #717 (pre-registered: a
 default switch needs ≥5% RPS or ≥20% p999/RSS on the majority of scenarios, macOS numbers are

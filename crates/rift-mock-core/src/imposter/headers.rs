@@ -147,7 +147,7 @@ pub(crate) fn collect_response_headers(headers: &hyper::HeaderMap) -> Vec<(Strin
 /// `port`/`stub_id` on a `rift::script` event, so one grep finds a stub's lines on both targets.
 ///
 /// Explicit fields, not a tracing span: `render_template_parts` can run on a `spawn_blocking` pool
-/// thread (the Redis flow-store path), and a span's thread-local context does not follow a closure
+/// thread (the blocking flow-store path), and a span's thread-local context does not follow a closure
 /// across that hop — a span-based identity would silently go missing on exactly that path.
 #[derive(Debug, Clone, Copy)]
 pub struct StubRef<'a> {

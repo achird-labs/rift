@@ -151,7 +151,7 @@ pub fn backend_error_response(err: &anyhow::Error) -> Response<Full<Bytes>> {
                     "code": StatusCode::INTERNAL_SERVER_ERROR.as_str(),
                     "type": crate::response::ErrorKind::InternalError.slug(),
                     // "{err:#}" keeps the whole context chain — the outermost message alone
-                    // rarely says why ("Redis GET failed" without the refused connection).
+                    // rarely says why ("store GET failed" without the refused connection).
                     "message": format!("{err:#}"),
                 }],
             }),
@@ -285,7 +285,7 @@ mod tests {
     async fn backend_unavailable_maps_to_structured_503() {
         let err = anyhow::Error::new(BackendUnavailable {
             feature: "flowState",
-            detail: "redis connection refused".to_string(),
+            detail: "store connection refused".to_string(),
         });
         let resp = backend_error_response(&err);
         assert_eq!(resp.status(), hyper::StatusCode::SERVICE_UNAVAILABLE);
@@ -313,13 +313,13 @@ mod tests {
         // The exact join both docs promise — coverage previously carried by the deleted
         // dual-shape tripwire test, and independent of the legacy keys' existence.
         assert_eq!(
-            json["errors"][0]["message"], "flowState: redis connection refused",
+            json["errors"][0]["message"], "flowState: store connection refused",
             "message is the `feature: detail` join the docs show verbatim"
         );
         // AC3: the structured split stays machine-readable inside the envelope — `feature` names
         // WHICH backend failed, which is the door's entire value and must not be flattened away.
         assert_eq!(json["errors"][0]["feature"], "flowState");
-        assert_eq!(json["errors"][0]["detail"], "redis connection refused");
+        assert_eq!(json["errors"][0]["detail"], "store connection refused");
     }
 
     #[tokio::test]

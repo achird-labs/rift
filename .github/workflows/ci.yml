@@ -117,9 +117,7 @@ jobs:
   # job runs the whole integration surface with `--tests`. `--workspace` covers only the six
   # `crates/*` members, so the docker-bound `rift-compatibility-tests` crate and the benchmark are
   # excluded automatically (they keep their own dedicated jobs); mountebank_compatibility spawns its
-  # own server, so it runs on the Docker-enabled runner without extra setup. The Redis suite moved to
-  # `rift-store-redis` with the store itself (#853) and is no longer `#[ignore]`d, so it both
-  # compiles and *runs* here as well as in the dedicated `redis-integration` job below. Runs on
+  # own server, so it runs on the Docker-enabled runner without extra setup. Runs on
   # stable only (the unit and doctest surfaces already cover beta) to keep the heavier integration
   # run off the critical path.
   integration-tests:
@@ -156,7 +154,7 @@ jobs:
   # matrix `test` job never runs them and the PKCS#12/JKS JVM-loadability guarantee has no CI
   # enforcement — a regression that breaks the container structure (e.g. dropping the Oracle
   # TrustedKeyUsage attribute added in #417) would pass CI green. This job installs a JDK and runs
-  # them. --no-default-features avoids the Redis system deps the truststore module doesn't use.
+  # them. --no-default-features keeps the build to what the truststore module uses.
   jvm-truststore:
     name: JVM Truststore Integration
     runs-on: ubuntu-latest
@@ -392,7 +390,7 @@ jobs:
         run: |
           RUSTFLAGS="-C target-feature=-crt-static" \
             cross build --release --package rift-ffi --target x86_64-unknown-linux-musl \
-            --no-default-features --features javascript,redis-backend
+            --no-default-features --features javascript
 
       - name: Assert a shared object exporting the C-ABI
         run: |
@@ -432,7 +430,7 @@ jobs:
       - name: Build rift-http-proxy for musl
         run: |
           cross build --release --package rift-http-proxy --target x86_64-unknown-linux-musl \
-            --no-default-features --features javascript,redis-backend
+            --no-default-features --features javascript
 
       - name: Assemble the build context
         run: |
@@ -594,56 +592,6 @@ jobs:
 
       - name: Build
         run: cargo build --workspace --all-features --release
-
-  # The container-backed Redis suite. It lives in `rift-store-redis` since #853 extracted the store
-  # there; before that it sat in rift-http-proxy and this job was gated off with `if: false` while
-  # the move was pending. Both the gate and the suite's `#[ignore]`s are gone, so this job runs the
-  # real containers again. `--all-features` is kept for symmetry with the rest of CI even though
-  # `rift-store-redis` has no features of its own — redis is unconditional there.
-  redis-integration:
-    name: Redis Integration Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo build
-        uses: actions/cache@v6
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Run Redis integration tests
-        run: |
-          set -euo pipefail
-          cargo test --package rift-store-redis --test redis_backend --all-features 2>&1 \
-            | tee /tmp/redis-tests.log
-          # libtest reports success for a suite whose tests are all `#[ignore]`d, and for a filter
-          # that matches nothing — the exact shape that let this job sit green with zero coverage
-          # while #853 was pending. Assert the tests actually ran, so re-parking the suite (or a
-          # filter typo) fails loudly instead of quietly certifying nothing. The suite is 16
-          # container-backed tests plus 7 Docker-free `probe_gate` ones; the floor leaves a little
-          # slack without becoming a second copy of the test list.
-          passed=$(awk '/^test result:/ { for (i = 1; i <= NF; i++) if ($i == "passed;") s += $(i-1) } END { print s+0 }' /tmp/redis-tests.log)
-          echo "redis suite tests passed: $passed"
-          if [ "$passed" -lt 20 ]; then
-            echo "::error::the Redis suite ran only $passed tests (expected >= 20) — is it \`#[ignore]\`d again?"
-            exit 1
-          fi
 
   compatibility-test:
     name: Compatibility Tests

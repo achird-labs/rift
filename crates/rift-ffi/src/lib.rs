@@ -60,7 +60,7 @@ use tracing::warn;
 
 /// Log an `anyhow`-typed failure from an FFI entry point, whole chain included (issue #683).
 ///
-/// `{e}` renders only the outermost context, so a `flow_set` that failed on a Redis timeout and one
+/// `{e}` renders only the outermost context, so a `flow_set` that failed on a store timeout and one
 /// that failed on a bad URL logged the same line. These callers all take the same shape — an
 /// `anyhow::Error` from `rift_mock_core::imposter::core`, plus the port — so they share one format
 /// specifier here rather than repeating `%format_args!("{e:#}")` eight times and drifting apart.
@@ -295,8 +295,7 @@ pub extern "C" fn rift_start() -> *mut RiftHandle {
             Ok(runtime) => Box::into_raw(Box::new(RiftHandle {
                 runtime,
                 // Register the shipped flow-state backends (issue #853) so an embedded host gets
-                // the same `_rift.flowState.backend` vocabulary as the binary — `"redis"` included
-                // under the default `redis-backend` feature.
+                // the same `_rift.flowState.backend` vocabulary as the binary.
                 manager: Arc::new(
                     ImposterManager::new()
                         .with_flow_store_backends(rift_http_proxy::default_flow_store_backends()),
@@ -2290,9 +2289,6 @@ pub extern "C" fn rift_build_info() -> *const c_char {
     static INFO: OnceLock<CString> = OnceLock::new();
     INFO.get_or_init(|| {
         let mut features: Vec<&str> = Vec::new();
-        if cfg!(feature = "redis-backend") {
-            features.push("redis-backend");
-        }
         if cfg!(feature = "javascript") {
             features.push("javascript");
         }
@@ -2302,7 +2298,7 @@ pub extern "C" fn rift_build_info() -> *const c_char {
             "builtAt": option_env!("RIFT_BUILT_AT"),
             "features": features,
             // Serve-option capability list (issue #877), deliberately a sibling of `features`:
-            // that array means compiled cfg features, and an SDK checking for `redis-backend`
+            // that array means compiled cfg features, and an SDK checking for `javascript`
             // asks a different question from one checking whether `requireAdminAuth` is accepted.
             "serveOptions": SERVE_OPTION_KEYS,
         });
@@ -2456,7 +2452,7 @@ mod anyhow_chain_log_tests {
     /// The shape #683 exists for: the outermost context names *what* failed, the causes name *why*.
     fn chained_error() -> anyhow::Error {
         anyhow::anyhow!("connection refused (os error 61)")
-            .context("redis flow store unreachable")
+            .context("flow store unreachable")
             .context("flow_set failed")
     }
 
@@ -2469,7 +2465,7 @@ mod anyhow_chain_log_tests {
             "message survives"
         );
         assert!(
-            logs_contain("redis flow store unreachable"),
+            logs_contain("flow store unreachable"),
             "the log must name the CAUSE — the whole point of #683"
         );
         assert!(
@@ -2637,7 +2633,7 @@ mod serve_option_capability_tests {
 
     // AC2: the list is published where an SDK can read it, and is kept out of `features`.
     // `features` means compiled cfg features; conflating the two namespaces would make an SDK
-    // checking for `redis-backend` and one checking for `requireAdminAuth` read the same array.
+    // checking for `javascript` and one checking for `requireAdminAuth` read the same array.
     #[test]
     fn build_info_publishes_the_capability_list_separately_from_features() {
         let raw = unsafe { CStr::from_ptr(rift_build_info()) }

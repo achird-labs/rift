@@ -10,7 +10,7 @@
 
 mod scripting;
 
-pub use scripting::{FlowStateConfig, RedisConfig};
+pub use scripting::FlowStateConfig;
 
 #[cfg(test)]
 mod tests {
@@ -18,23 +18,21 @@ mod tests {
 
     // NB: unlike `ImposterConfig`, none of these carry `rename_all = "camelCase"`, so their
     // wire names are snake_case. That asymmetry is easy to "fix" by accident.
-    // Issue #975: the survivors of the reverse-proxy `Config` removal. `FlowStateConfig` /
-    // `RedisConfig` are read by the flow-state path; the fault types are retained public API with
+    // Issue #975: the survivors of the reverse-proxy `Config` removal. `FlowStateConfig` is
+    // read by the flow-state path; the fault types are retained public API with
     // no in-tree reader. Pinning the wire shapes with literal expectations guards the one plausible
     // way the deletion could go wrong — taking a live type with it, or silently changing what its
     // serde attributes accept.
+    // A config-file `flowState` written before the Redis backend was removed still decodes: the
+    // removal is an admission refusal (`create_flow_store`), never a decode failure (#1337).
     #[test]
-    fn flow_state_config_still_deserializes_with_a_nested_redis_block() {
+    fn flow_state_config_still_decodes_a_leftover_redis_block() {
         let cfg: FlowStateConfig = serde_norway::from_str(
-            "backend: redis\nttl_seconds: 42\nredis:\n  url: redis://127.0.0.1:6379\n  pool_size: 3\n  key_prefix: 'rift:'\n",
+            "backend: redis\nttl_seconds: 42\nredis:\n  url: redis://127.0.0.1:6379\n  pool_size: 3\n",
         )
         .expect("FlowStateConfig parses");
         assert_eq!(cfg.backend, "redis");
         assert_eq!(cfg.ttl_seconds, 42);
-        let redis = cfg.redis.expect("redis block present");
-        assert_eq!(redis.url, "redis://127.0.0.1:6379");
-        assert_eq!(redis.pool_size, 3);
-        assert_eq!(redis.key_prefix, "rift:");
     }
 
     #[test]
@@ -42,6 +40,5 @@ mod tests {
         let cfg: FlowStateConfig = serde_norway::from_str("{}").expect("empty parses");
         assert_eq!(cfg.backend, "inmemory");
         assert_eq!(cfg.ttl_seconds, 300);
-        assert!(cfg.redis.is_none());
     }
 }

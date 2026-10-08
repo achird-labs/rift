@@ -444,7 +444,7 @@ impl Imposter {
     /// journal keys by port, and unresolved ports would silently multiplex onto slot 0.
     ///
     /// Fails (issue #325) when an explicitly-requested `_rift.flowState.backend` cannot be
-    /// built (e.g. `"redis"` with no config block, or without the `redis-backend` feature) —
+    /// built (e.g. an unregistered backend name, including the removed `"redis"`) —
     /// such requests must not silently downgrade to `NoOpFlowStore`. The implicit NoOp (no
     /// `_rift.flowState` configured) still succeeds.
     pub fn new_with_hooks_and_journal(
@@ -466,11 +466,11 @@ impl Imposter {
     /// registry (issue #853).
     ///
     /// `backends` supplies every `_rift.flowState.backend` beyond the built-in `"inmemory"` — most
-    /// importantly `"redis"`, which lives in the separate `rift-store-redis` crate. With an empty
-    /// registry (what [`Self::new_with_hooks_and_journal`] passes) a config naming `"redis"` fails
-    /// construction with an error listing what *is* available, rather than downgrading to
-    /// `NoOpFlowStore`. The `rift` binary and the C-ABI register the shipped backends, so their
-    /// behaviour is unchanged.
+    /// if any. With an empty
+    /// registry (what [`Self::new_with_hooks_and_journal`] passes) a config naming an unregistered
+    /// backend fails construction with an error listing what *is* available, rather than
+    /// downgrading to `NoOpFlowStore`. The removed `"redis"` gets its own removal message.
+    /// This is admission, not decode: the same bytes still deserialize.
     pub fn new_with_hooks_journal_and_backends(
         config: ImposterConfig,
         provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
@@ -503,7 +503,7 @@ impl Imposter {
         //
         // Metered here rather than inside `create_flow_store` (issue #999): this is the single
         // point every selection path funnels through — provider, `inmemory`, the `failing` test
-        // backend, a registered backend such as `redis`, and the NoOp fallback — so one wrap
+        // backend, a registered backend, and the NoOp fallback — so one wrap
         // counts `rift_flow_state_ops_total` for all of them. The decorator forwards every trait
         // method, including `is_blocking`, so backend behaviour is unchanged.
         let flow_store: Arc<dyn FlowStore> =
@@ -712,7 +712,7 @@ impl Imposter {
         }
         if let Some(flow_state_config) = config.rift.as_ref().and_then(|r| r.flow_state.as_ref()) {
             // Fail-loud config validation (issue #530): a non-positive default TTL misbehaves late
-            // and inconsistently (in-memory → instant expiry of every write; Redis → SETEX error on
+            // and inconsistently (in-memory → instant expiry of every write; a networked store → error on
             // the first write), so reject it at construction. This surfaces as a 400 via
             // ImposterError::FlowStoreConfig, matching the unrecognized-backend rule (#377).
             crate::extensions::flow_state::validate_ttl_seconds(flow_state_config.ttl_seconds)?;
@@ -732,7 +732,7 @@ impl Imposter {
                     Ok(Arc::new(crate::extensions::flow_state::FailingFlowStore))
                 }
                 // Any other name is resolved through the registered backends (issue #853) — that
-                // is how `"redis"`, which now lives in the `rift-store-redis` crate, is selected
+                // is how an embedder's store is selected
                 // without this crate depending on it. An unregistered name is a config error, not
                 // a reason to silently downgrade to NoOp (issue #377).
                 other => match backends.get(other) {
@@ -1225,33 +1225,29 @@ mod tests {
         );
     }
 
-    // Issue #853 (was #325): with the Redis store extracted to `rift-store-redis`, this crate
-    // registers no `"redis"` backend at all — so an imposter naming it must fail construction with
-    // an error that names the backend and lists what IS selectable, never a silent NoOp downgrade
-    // (#377). This is the "factory absent" half of the old cfg-gated pair.
+    // Issue #1337: the Redis backend was removed. An imposter naming it must fail construction
+    // (admission) with the removal text pointing at rift-cluster, never a silent NoOp downgrade
+    // (#377). That the same bytes still DECODE is pinned in tests/replay_floor.rs.
     #[test]
-    fn explicit_redis_without_a_registered_factory_fails_construction() {
-        let cfg = serde_json::from_value(json!({
+    fn explicit_redis_is_refused_at_admission() {
+        let raw = json!({
             "port": 0, "protocol": "http", "stubs": [],
             "_rift": { "flowState": { "backend": "redis", "redis": { "url": "redis://localhost:6379" } } }
-        }))
-        .expect("valid imposter config");
+        });
+        let cfg: crate::imposter::ImposterConfig =
+            serde_json::from_value(raw).expect("naming redis must still decode");
         let err = match Imposter::new_with_hooks_and_journal(cfg, None, None, None) {
-            Ok(_) => panic!("an unregistered redis backend must fail construction, not NoOp"),
+            Ok(_) => panic!("the removed redis backend must fail construction, not NoOp"),
             Err(e) => format!("{e:#}"),
         };
         assert!(
-            err.contains("redis") && err.contains("no such backend is registered"),
-            "the error must name the missing backend, got: {err}"
-        );
-        assert!(
-            err.contains("available: \"inmemory\""),
-            "the error must list what IS selectable, got: {err}"
+            err.contains("removed in 0.22.0") && err.contains("rift-cluster"),
+            "the error must say the backend was removed and point at rift-cluster, got: {err}"
         );
     }
 
     // Issue #853: the "factory registered" half. A registered backend is built through its factory
-    // — proving the seam works with no redis dependency anywhere in this crate.
+    // — proving the seam works with no store dependency anywhere in this crate.
     #[test]
     fn a_registered_backend_factory_is_consulted_for_its_name() {
         use crate::extensions::flow_state::{
@@ -1402,7 +1398,7 @@ mod tests {
     }
 
     // Issue #377: an explicitly-set but unrecognized backend (a typo) must fail construction, not
-    // silently downgrade to NoOp — the same fail-loud contract #325 gave the redis arm.
+    // silently downgrade to NoOp — the same fail-loud contract #325 gave the (since removed) redis arm.
     #[test]
     fn explicit_unknown_backend_fails_construction() {
         let cfg = serde_json::from_value(json!({

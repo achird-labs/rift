@@ -103,6 +103,25 @@ record.
   request, and an `ignore`d whole field is recorded with `equals`. See
   [What Gets Recorded](docs/mountebank/proxy.md#what-gets-recorded).
 
+- **Behaviour change: `_rift.flowState.backend: "redis"` is now refused at admission** (#1337).
+  Creating or applying an imposter that names it returns `400` (`ImposterError::FlowStoreConfig`)
+  with `flowState backend "redis" was removed in 0.22.0; state shared across processes is a
+  rift-cluster deployment`, from the admin API and the C-ABI.
+  It is an admission refusal, not a decode one: a stored config that still names `redis` (and
+  carries a `redis` block) keeps deserializing, including through `deserialize_replayed`, so a
+  rift-cluster replay of old bytes is unaffected. State shared across processes is a rift-cluster
+  deployment; see `docs/deployment/kubernetes.md`.
+
+### Removed
+
+- **The Redis flow-state backend** (#1337): the `rift-store-redis` crate (no longer published; its
+  old versions stay on crates.io), the `redis-backend` cargo feature on `rift-http-proxy` and
+  `rift-ffi` (`"redis-backend"` leaves `rift_build_info().features`), the typed
+  `_rift.flowState.redis` block (`RiftRedisConfig`, and `RedisConfig` on the server-level
+  `FlowStateConfig`), the `redis` capability from the SDK-conformance `requires` set, and the Redis
+  CI job, compose service and docs. `FlowStore`, `FlowStoreProvider` and `FlowStoreBackendFactory`
+  stay: an embedder can still bring any store.
+
 ## [0.21.0] - 2026-10-07
 
 ### Added
