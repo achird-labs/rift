@@ -798,6 +798,78 @@ async fn stub_by_id_admin_endpoints() {
     let _ = manager.delete_imposter(19776).await;
 }
 
+// Issue #1334: Mountebank's imposterPrinter prints `defaultResponse` in every form (create body,
+// detail, list and `?list=true`), not only `?replayable=true`.
+#[tokio::test]
+async fn default_response_printed_in_every_imposter_form() {
+    let manager = std::sync::Arc::new(ImposterManager::new());
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(
+        "127.0.0.1:0".parse().unwrap(),
+        manager.clone(),
+        None,
+    );
+    let admin = bind_admin(server).await;
+    let c = reqwest::Client::new();
+
+    let created = c
+        .post(format!("{admin}/imposters"))
+        .json(&serde_json::json!({
+            "protocol": "http",
+            "defaultResponse": { "statusCode": 400, "body": "nope" },
+            "stubs": []
+        }))
+        .send()
+        .await
+        .expect("POST /imposters");
+    assert_eq!(created.status(), 201);
+    let created: serde_json::Value = created.json().await.expect("201 json");
+    // `headers: {}` is how `IsResponse` serializes everywhere, `?replayable=true` included.
+    let expected = serde_json::json!({ "statusCode": 400, "headers": {}, "body": "nope" });
+    assert_eq!(created["defaultResponse"], expected, "201 body: {created}");
+    let port = created["port"].as_u64().expect("assigned port");
+
+    let plain = c
+        .post(format!("{admin}/imposters"))
+        .json(&serde_json::json!({ "protocol": "http", "stubs": [] }))
+        .send()
+        .await
+        .expect("POST /imposters");
+    let plain: serde_json::Value = plain.json().await.expect("201 json");
+    assert!(
+        plain.get("defaultResponse").is_none(),
+        "unset defaultResponse must be absent: {plain}"
+    );
+    let plain_port = plain["port"].as_u64().expect("assigned port");
+
+    let detail = json(&c, format!("{admin}/imposters/{port}")).await;
+    assert_eq!(detail["defaultResponse"], expected, "detail: {detail}");
+    let replayable = json(&c, format!("{admin}/imposters/{port}?replayable=true")).await;
+    assert_eq!(replayable["defaultResponse"], expected);
+    let plain_detail = json(&c, format!("{admin}/imposters/{plain_port}")).await;
+    assert!(plain_detail.get("defaultResponse").is_none());
+
+    for query in ["", "?list=true"] {
+        let list = json(&c, format!("{admin}/imposters{query}")).await;
+        let entries = list["imposters"].as_array().expect("imposters array");
+        let entry = |p: u64| {
+            entries
+                .iter()
+                .find(|e| e["port"].as_u64() == Some(p))
+                .unwrap_or_else(|| panic!("port {p} missing from GET /imposters{query}: {list}"))
+        };
+        assert_eq!(
+            entry(port)["defaultResponse"],
+            expected,
+            "GET /imposters{query}: {list}"
+        );
+        assert!(entry(plain_port).get("defaultResponse").is_none());
+    }
+
+    for p in [port, plain_port] {
+        let _ = manager.delete_imposter(p as u16).await;
+    }
+}
+
 // Issue #206: an imposter declared `protocol: "https"` terminates TLS on its own port.
 mod https {
     use super::*;
@@ -2881,5 +2953,111 @@ mod mutual_tls {
             .await
             .expect("mutualAuth: false must remain valid on http");
         let _ = manager.delete_imposter(19879).await;
+    }
+
+    // Issue #1334: Mountebank prints an https imposter's TLS metadata (`httpsServer.js` metadata:
+    // key, cert, mutualAuth, rejectUnauthorized, ca) on the detail; an http detail carries none.
+    #[tokio::test]
+    async fn https_detail_prints_tls_metadata_and_http_detail_does_not() {
+        let (ca, _, _) = ca_and_client_cert();
+        let manager = Arc::new(ImposterManager::new());
+        let server = rift_http_proxy::admin_api::AdminApiServer::new(
+            "127.0.0.1:0".parse().unwrap(),
+            manager.clone(),
+            None,
+        );
+        let admin = bind_admin(server).await;
+        let c = reqwest::Client::new();
+
+        let mut https_cfg = cfg(
+            0,
+            serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true, "ca": ca}),
+        );
+        https_cfg.as_object_mut().expect("object").remove("port");
+        let (cert, key) = (https_cfg["cert"].clone(), https_cfg["key"].clone());
+        let created: serde_json::Value = c
+            .post(format!("{admin}/imposters"))
+            .json(&https_cfg)
+            .send()
+            .await
+            .expect("POST https imposter")
+            .json()
+            .await
+            .expect("201 json");
+        let port = created["port"].as_u64().expect("assigned port");
+
+        let detail = json(&c, format!("{admin}/imposters/{port}")).await;
+        assert_eq!(detail["cert"], cert, "detail: {detail}");
+        assert_eq!(detail["key"], key);
+        assert_eq!(detail["mutualAuth"], true);
+        assert_eq!(detail["rejectUnauthorized"], true);
+        // A single anchor prints as the string it was given, as `?replayable=true` does.
+        assert_eq!(detail["ca"], serde_json::json!(ca));
+        let replayable = json(&c, format!("{admin}/imposters/{port}?replayable=true")).await;
+        for k in ["cert", "key", "mutualAuth", "rejectUnauthorized", "ca"] {
+            assert_eq!(
+                detail[k], replayable[k],
+                "{k}: detail and replayable must agree"
+            );
+        }
+
+        let listed = json(&c, format!("{admin}/imposters")).await;
+        let entry = listed["imposters"]
+            .as_array()
+            .expect("imposters")
+            .iter()
+            .find(|e| e["port"].as_u64() == Some(port))
+            .expect("listed")
+            .clone();
+        for k in ["cert", "key", "mutualAuth", "rejectUnauthorized", "ca"] {
+            assert!(
+                entry.get(k).is_none(),
+                "list entry must not carry {k}: {entry}"
+            );
+        }
+
+        let zero: serde_json::Value = c
+            .post(format!("{admin}/imposters"))
+            .json(&serde_json::json!({"protocol": "https", "stubs": []}))
+            .send()
+            .await
+            .expect("POST zero-config https")
+            .json()
+            .await
+            .expect("201 json");
+        assert_eq!(zero["mutualAuth"], false, "zero-config https: {zero}");
+        assert_eq!(zero["rejectUnauthorized"], false);
+        for k in ["cert", "key", "ca"] {
+            assert!(zero.get(k).is_none(), "no configured {k} to print: {zero}");
+        }
+        let zero_port = zero["port"].as_u64().expect("assigned port");
+
+        let http: serde_json::Value = c
+            .post(format!("{admin}/imposters"))
+            .json(&serde_json::json!({"protocol": "http", "stubs": []}))
+            .send()
+            .await
+            .expect("POST http imposter")
+            .json()
+            .await
+            .expect("201 json");
+        for k in ["cert", "key", "mutualAuth", "rejectUnauthorized", "ca"] {
+            assert!(
+                http.get(k).is_none(),
+                "http detail must not carry {k}: {http}"
+            );
+        }
+        let http_port = http["port"].as_u64().expect("assigned port");
+        let http_detail = json(&c, format!("{admin}/imposters/{http_port}")).await;
+        for k in ["cert", "key", "mutualAuth", "rejectUnauthorized", "ca"] {
+            assert!(http_detail.get(k).is_none(), "http GET must not carry {k}");
+        }
+        let zero_detail = json(&c, format!("{admin}/imposters/{zero_port}")).await;
+        assert_eq!(zero_detail["mutualAuth"], false, "zero-config https GET");
+        assert!(zero_detail.get("cert").is_none());
+
+        for p in [port, zero_port, http_port] {
+            let _ = manager.delete_imposter(p as u16).await;
+        }
     }
 }

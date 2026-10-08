@@ -433,9 +433,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     outln!();
 
     // Fetch imposters
-    let imposters = fetch_imposters(&client, &args.admin_url, args.port).await?;
+    let FetchedImposters {
+        imposters,
+        unfetched,
+    } = fetch_imposters(&client, &args.admin_url, args.port).await?;
 
-    if imposters.is_empty() {
+    if imposters.is_empty() && unfetched.is_empty() {
         outln!("{yellow}Warning:{reset} No imposters found");
         if json {
             let payload = serde_json::json!({
@@ -447,9 +450,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut summary = VerificationSummary {
-        total_imposters: imposters.len(),
+        total_imposters: imposters.len() + unfetched.len(),
         ..Default::default()
     };
+
+    // A listed imposter whose detail could not be fetched was never verified: a FAILURE, visible
+    // in the exit code, not a silent omission from the run.
+    for (port, detail) in unfetched {
+        outln!("{red}FAIL{reset} imposter {port} — {detail}");
+        outln!();
+        summary.failed += 1;
+        summary.failures.push(FailureDetails {
+            imposter_port: port,
+            imposter_name: None,
+            stub_index: 0,
+            stub_id: None,
+            test_description: "imposter fetch".to_string(),
+            expected: "imposter detail fetched for verification".to_string(),
+            actual: detail,
+            curl_command: None,
+            failure_reasons: vec![],
+        });
+    }
 
     // Process each imposter
     for imposter in &imposters {
@@ -651,8 +673,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Run the opt-in dynamic-behavior assertions (issue #251) for every imposter and fold the
-/// resulting checks into the summary. Operates on the raw `GET /imposters/:port` JSON so all
-/// engine-preserved fields (`_verify`, `proxy`, `_rift.fault`) are visible.
+/// resulting checks into the summary. Operates on the raw `GET /imposters/:port?replayable=true`
+/// JSON: all engine-preserved stub fields (`_verify`, `proxy`, `_rift.fault`) are visible, and a
+/// `_verify` recreate carries the whole config — `defaultResponse`, `defaultForward`, `_rift`,
+/// TLS — which the plain detail does not print in full (issue #1334).
 async fn run_dynamic_verification(
     client: &Client,
     admin_url: &str,
@@ -677,10 +701,22 @@ async fn run_dynamic_verification(
         // here is anomalous — its dynamic checks could not run. Count it as a FAILURE (visible in
         // the exit code) rather than a silent skip that still exits 0.
         let fetch = client
-            .get(format!("{admin_url}/imposters/{}", imposter.port))
+            .get(format!(
+                "{admin_url}/imposters/{}?replayable=true",
+                imposter.port
+            ))
             .send()
             .await
-            .map_err(|e| format!("fetch: {e}"));
+            .map_err(|e| format!("fetch: {e}"))
+            .and_then(|resp| {
+                // A 4xx/5xx error body is JSON too; parsed as an imposter it has no stubs, so the
+                // imposter's dynamic checks would vanish instead of failing.
+                if resp.status().is_success() {
+                    Ok(resp)
+                } else {
+                    Err(format!("fetch: HTTP {}", resp.status()))
+                }
+            });
         let raw: serde_json::Value = match fetch {
             Ok(resp) => match resp.json().await {
                 Ok(value) => value,
@@ -751,11 +787,18 @@ fn record_dynamic_fetch_failure(
 // Imposter Fetching
 // ============================================================================
 
+/// The listed imposters whose details were fetched, and the `(port, why)` of each that was listed
+/// but whose detail answered an HTTP error.
+struct FetchedImposters {
+    imposters: Vec<ImposterDetails>,
+    unfetched: Vec<(u16, String)>,
+}
+
 async fn fetch_imposters(
     client: &Client,
     admin_url: &str,
     filter_port: Option<u16>,
-) -> Result<Vec<ImposterDetails>, Box<dyn std::error::Error>> {
+) -> Result<FetchedImposters, Box<dyn std::error::Error>> {
     // Get list of imposters
     let imposters_url = format!("{admin_url}/imposters");
     let response = client.get(&imposters_url).send().await?;
@@ -780,6 +823,7 @@ async fn fetch_imposters(
         };
 
     let mut imposters = Vec::new();
+    let mut unfetched = Vec::new();
 
     for link in imposter_links {
         if let Some(port) = filter_port
@@ -795,10 +839,18 @@ async fn fetch_imposters(
         if detail_response.status().is_success() {
             let details: ImposterDetails = detail_response.json().await?;
             imposters.push(details);
+        } else {
+            unfetched.push((
+                link.port,
+                format!("fetch {detail_url}: HTTP {}", detail_response.status()),
+            ));
         }
     }
 
-    Ok(imposters)
+    Ok(FetchedImposters {
+        imposters,
+        unfetched,
+    })
 }
 
 // ============================================================================

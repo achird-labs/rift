@@ -421,8 +421,11 @@ mechanisms applies:
 1. **`proxy` stubs** — an embedded mock upstream is stood up and the proxy stub is recreated pointing
    at it; the verifier asserts the proxied response comes back, and (when the stub's `proxy` config
    sets `predicateGenerators`) that a recorded stub is prepended.
-2. **`_verify`-annotated stubs** — the stub is recreated on a fresh throwaway imposter (clean
-   cyclic/FSM state) and the declared request/expectation `sequence` is driven against it. This is
+2. **`_verify`-annotated stubs** — the imposter is recreated on a fresh throwaway port (clean
+   cyclic/FSM state) from its full `?replayable=true` config, so `defaultResponse`,
+   `defaultForward`, `_rift` and TLS settings carry over, and the declared request/expectation
+   `sequence` is driven against it. A step may therefore expect the imposter's `defaultResponse`
+   for a request no stub matches. This is
    the mechanism for `inject`/`script`/`decorate`/`copy`/`lookup`/cycling/repeat/stateful stubs, none
    of which the verifier can infer an expected response for on its own.
 3. **Deterministic `_rift.fault` stubs** — a fault whose `probability` is `1.0` or unset always

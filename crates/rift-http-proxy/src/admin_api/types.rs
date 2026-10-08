@@ -1,7 +1,7 @@
 //! Response types and HATEOAS structures for the Admin API.
 
 use crate::extensions::stub_analysis::StubWarning;
-use crate::imposter::{RecordedRequest, Stub};
+use crate::imposter::{IsResponse, RecordedRequest, Stub};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -37,6 +37,8 @@ pub struct ImposterSummary {
     pub port: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_response: Option<IsResponse>,
     pub number_of_requests: u64,
     pub stub_count: usize,
     pub enabled: bool,
@@ -68,9 +70,14 @@ pub struct ImposterDetail {
     pub port: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_response: Option<IsResponse>,
     pub number_of_requests: u64,
     pub enabled: bool,
     pub record_requests: bool,
+    /// The https listener's TLS metadata; `None` (nothing printed) for every other protocol.
+    #[serde(flatten)]
+    pub tls: Option<TlsHeader>,
     pub requests: Vec<RecordedRequest>,
     pub stubs: Vec<StubWithLinks>,
     #[serde(rename = "_links")]
@@ -78,6 +85,36 @@ pub struct ImposterDetail {
     /// Rift extensions - includes stub analysis warnings
     #[serde(rename = "_rift", skip_serializing_if = "Option::is_none")]
     pub rift: Option<RiftImposterExtensions>,
+}
+
+/// The TLS keys Mountebank prints on an https imposter's detail (its `httpsServer` metadata).
+///
+/// The two flags are always printed, as Mountebank does; `cert`, `key` and `ca` only when the
+/// imposter configured them (a self-signed or server-default certificate is not imposter config).
+/// The values are exactly what `?replayable=true` already exports.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TlsHeader {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub mutual_auth: bool,
+    pub reject_unauthorized: bool,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_ca"
+    )]
+    pub ca: Option<Vec<String>>,
+}
+
+/// A single trust anchor prints as the string it was configured as, several as an array — the
+/// shape `ImposterConfig` serializes in the replayable form.
+fn serialize_ca<S: serde::Serializer>(ca: &Option<Vec<String>>, s: S) -> Result<S::Ok, S::Error> {
+    match ca.as_deref() {
+        Some([single]) => s.serialize_str(single),
+        other => other.serialize(s),
+    }
 }
 
 /// Rift-specific extensions in API responses
@@ -150,6 +187,8 @@ pub struct ImposterListEntry {
     pub port: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_response: Option<IsResponse>,
     pub number_of_requests: u64,
     #[serde(rename = "_links")]
     pub links: ImposterLinks,
@@ -456,6 +495,9 @@ mod tests {
             port: 8080,
             name: None,
             number_of_requests: 0,
+            default_response: Some(
+                serde_json::from_value(serde_json::json!({"statusCode": 400})).unwrap(),
+            ),
             links: make_imposter_links("http://localhost:2525", 8080),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -463,8 +505,28 @@ mod tests {
             json.get("enabled").is_none(),
             "list entry must not include 'enabled'"
         );
+        assert_eq!(json["defaultResponse"]["statusCode"], 400);
         assert!(json.get("numberOfRequests").is_some());
         assert!(json.get("_links").is_some());
+    }
+
+    #[test]
+    fn tls_header_prints_one_ca_as_a_string_and_several_as_an_array() {
+        let header = |ca: Vec<&str>| TlsHeader {
+            cert: None,
+            key: None,
+            mutual_auth: true,
+            reject_unauthorized: true,
+            ca: Some(ca.into_iter().map(String::from).collect()),
+        };
+        assert_eq!(
+            serde_json::to_value(header(vec!["A"])).unwrap(),
+            serde_json::json!({"mutualAuth": true, "rejectUnauthorized": true, "ca": "A"})
+        );
+        assert_eq!(
+            serde_json::to_value(header(vec!["A", "B"])).unwrap()["ca"],
+            serde_json::json!(["A", "B"])
+        );
     }
 
     #[test]

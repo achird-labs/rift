@@ -3440,3 +3440,62 @@ fn ffi_config_file_intercept_block_is_judged_under_require_admin_auth() {
         rift_stop(h);
     }
 }
+
+// Issue #1334: the C-ABI detail and summary print what the admin API prints — `defaultResponse`
+// when set, and an https imposter's TLS flags on the detail — so the embedded and HTTP transports
+// see one shape.
+#[test]
+fn ffi_imposter_views_print_default_response_and_tls() {
+    unsafe {
+        let h = rift_start();
+        assert!(!h.is_null());
+        let config = cstr(
+            r#"{ "protocol": "http", "defaultResponse": { "statusCode": 400, "body": "nope" },
+                 "stubs": [] }"#,
+        );
+        let port = rift_create_imposter(h, config.as_ptr());
+        assert_ne!(port, 0, "{}", take_last_error());
+        let https = cstr(r#"{ "protocol": "https", "stubs": [] }"#);
+        let https_port = rift_create_imposter(h, https.as_ptr());
+        assert_ne!(https_port, 0, "{}", take_last_error());
+
+        let expected = serde_json::json!({ "statusCode": 400, "headers": {}, "body": "nope" });
+        let det: serde_json::Value =
+            serde_json::from_str(&take_json(rift_get_imposter(h, port, std::ptr::null()))).unwrap();
+        assert_eq!(det["defaultResponse"], expected, "detail: {det}");
+        assert!(
+            det.get("mutualAuth").is_none(),
+            "http detail has no TLS keys"
+        );
+
+        let list: serde_json::Value =
+            serde_json::from_str(&take_json(rift_list_imposters(h, std::ptr::null()))).unwrap();
+        let entry = |p: u16| {
+            list["imposters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["port"] == p)
+                .cloned()
+                .unwrap_or_else(|| panic!("port {p} missing: {list}"))
+        };
+        assert_eq!(entry(port)["defaultResponse"], expected, "list: {list}");
+        assert!(entry(https_port).get("defaultResponse").is_none());
+        assert!(
+            entry(https_port).get("mutualAuth").is_none(),
+            "summary has no TLS keys"
+        );
+
+        let hdet: serde_json::Value = serde_json::from_str(&take_json(rift_get_imposter(
+            h,
+            https_port,
+            std::ptr::null(),
+        )))
+        .unwrap();
+        assert_eq!(hdet["mutualAuth"], false, "https detail: {hdet}");
+        assert_eq!(hdet["rejectUnauthorized"], false);
+        assert!(hdet.get("cert").is_none(), "no configured cert to print");
+
+        rift_stop(h);
+    }
+}
