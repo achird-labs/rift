@@ -94,4 +94,4 @@ is stable across versions. Add a new fixture with the next free number, register
 (`corpus_replay.rs`) will enforce that it serves and its `_verify` transcripts hold before it can
 ship. A second gate (`issue_1343_unread_keys.rs`) fails when the fixture carries a key the
 engine accepts but never reads, so a fixture cannot assert behaviour through a key that does
-nothing. Seed material for new fixtures lives in the engine's `tests/compatibility` and `examples/`.
+nothing. Seed material for new fixtures lives in the engine's `conformance/differential/cases/` and `examples/`.

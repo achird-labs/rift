@@ -1,0 +1,704 @@
+{
+  "source": "tests/compatibility/features/complex_scenarios.feature (retired in #1341)",
+  "cases": [
+    {
+      "name": "complex_scenarios: Create, modify, and delete imposter workflow",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": 404,
+              "body": "not found"
+            },
+            "stubs": []
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters/4545/stubs",
+          "body": {
+            "stub": {
+              "predicates": [
+                {
+                  "equals": {
+                    "path": "/v1"
+                  }
+                }
+              ],
+              "responses": [
+                {
+                  "is": {
+                    "statusCode": 200,
+                    "body": "version 1"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/v1"
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs/0",
+          "body": {
+            "predicates": [
+              {
+                "equals": {
+                  "path": "/v2"
+                }
+              }
+            ],
+            "responses": [
+              {
+                "is": {
+                  "statusCode": 200,
+                  "body": "version 2"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/v2"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/v1"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545"
+        }
+      ]
+    },
+    {
+      "name": "complex_scenarios: First matching stub wins",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/api"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "general api"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/api/specific"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "specific api"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/api/specific"
+        }
+      ]
+    },
+    {
+      "name": "complex_scenarios: Add stub at specific index",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/api"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "general"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters/4545/stubs",
+          "body": {
+            "index": 0,
+            "stub": {
+              "predicates": [
+                {
+                  "equals": {
+                    "path": "/api/priority"
+                  }
+                }
+              ],
+              "responses": [
+                {
+                  "is": {
+                    "statusCode": 200,
+                    "body": "priority"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/api/priority"
+        }
+      ]
+    },
+    {
+      "name": "complex_scenarios: Stateful response sequence",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/order"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 202,
+                      "body": "pending"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "processing"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "completed"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/order"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/order"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/order"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/order"
+        }
+      ]
+    },
+    {
+      "name": "complex_scenarios: Handle concurrent requests",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "ok"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "concurrent",
+          "port": 4545,
+          "path": "/concurrent",
+          "times": 10
+        }
+      ]
+    },
+    {
+      "name": "complex_scenarios: Handle large request body",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "bodyOfSize": 102400
+        }
+      ]
+    },
+    {
+      "name": "complex_scenarios: Return large response body",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "<LARGE_BODY_PLACEHOLDER>"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
+    },
+    {
+      "name": "complex_scenarios: Handle unicode in path",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/users/%E6%97%A5%E6%9C%AC%E8%AA%9E"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "unicode path"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/users/日本語"
+        }
+      ]
+    },
+    {
+      "name": "complex_scenarios: Handle special characters in headers",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "X-Special": "value with spaces & symbols!"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
+    },
+    {
+      "name": "complex_scenarios: Handle JSON with escaped characters",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": {
+                        "message": "Hello \"World\"",
+                        "path": "C:\\Users\\test"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
+    },
+    {
+      "name": "complex_scenarios: Recover from invalid stub addition",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "original"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters/4545/stubs",
+          "body": {
+            "stub": {
+              "invalid": "not a valid stub"
+            }
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
+    },
+    {
+      "name": "complex_scenarios: Port conflict handling",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http"
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http"
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545"
+        }
+      ]
+    },
+    {
+      "name": "complex_scenarios: Proxy mode forwards unmatched requests",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/local"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "local response"
+                    }
+                  }
+                ]
+              }
+            ],
+            "defaultResponse": {
+              "proxy": {
+                "to": "http://httpbin.org"
+              }
+            }
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/local"
+        }
+      ]
+    },
+    {
+      "name": "complex_scenarios: Export and reimport imposters",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters?replayable=true"
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters"
+        },
+        {
+          "do": "reimport"
+        }
+      ]
+    },
+    {
+      "name": "complex_scenarios: Verify which stub matched a request",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "matched a"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "matched b"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b"
+        }
+      ]
+    }
+  ]
+}

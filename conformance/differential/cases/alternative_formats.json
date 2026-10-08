@@ -1,0 +1,887 @@
+{
+  "source": "tests/compatibility/features/alternative_formats.feature (retired in #1341)",
+  "cases": [
+    {
+      "name": "alternative_formats: StatusCode as string in response",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/string-status"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": "200",
+                      "body": "status code was string"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/string-status"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: StatusCode as string with non-200 status",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/string-404"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": "404",
+                      "body": "not found"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/string-404"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: Behaviors field with underscore prefix",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/with-underscore"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "_behaviors": {
+                      "wait": 100
+                    },
+                    "is": {
+                      "statusCode": 200,
+                      "body": "waited"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/with-underscore"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: Behaviors as object with single behavior",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/object-behavior"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "_behaviors": {
+                      "wait": 50
+                    },
+                    "is": {
+                      "statusCode": 200,
+                      "body": "object format"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/object-behavior"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: Behaviors as object with multiple behaviors",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/multi-object-behavior"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "_behaviors": {
+                      "wait": 50,
+                      "decorate": "function(request, response) { response.body = response.body + ' decorated'; }"
+                    },
+                    "is": {
+                      "statusCode": 200,
+                      "body": "original"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/multi-object-behavior"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: Proxy null alongside is response",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/proxy-null"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "is response with proxy null"
+                    },
+                    "proxy": null
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/proxy-null"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: Full alternative format with behaviors array and proxy null",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/full-alt"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "behaviors": [
+                      {
+                        "wait": 0
+                      }
+                    ],
+                    "is": {
+                      "statusCode": "201",
+                      "headers": {
+                        "Content-Type": "application/json"
+                      },
+                      "body": "{\"created\": true}"
+                    },
+                    "proxy": null
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/full-alt"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: ScenarioName field in stub is accepted",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "scenarioName": "TestScenario-001",
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/scenario"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "scenario test"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/scenario"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: AllowCORS field in imposter config is accepted",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "allowCORS": true,
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/cors"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "cors enabled"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/cors"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: Service name and info fields are accepted",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "service_name": "LenderDetails_v1_lenders",
+            "service_info": {
+              "virtualServiceInfo": {
+                "serviceName": "LenderDetails-v1-lenders",
+                "realEndpoint": "https://api.example.com/lenders"
+              }
+            },
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/service-info"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "service info test"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/service-info"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: Complex real-world format with all alternative features",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "allowCORS": true,
+            "protocol": "http",
+            "port": 4545,
+            "stubs": [
+              {
+                "scenarioName": "LenderDetails-v1-lenders_test",
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "lenderIds": "TEST123"
+                      }
+                    }
+                  },
+                  {
+                    "deepEquals": {
+                      "method": "GET"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "behaviors": [
+                      {
+                        "wait": " function() { var min = Math.ceil(0); var max = Math.floor(0); var num = Math.floor(Math.random() * (max - min + 1)); var wait = (num + min); return wait; } "
+                      }
+                    ],
+                    "is": {
+                      "statusCode": "200",
+                      "headers": {
+                        "Accept": "application/json",
+                        "Content-Type": "application/json"
+                      },
+                      "body": "{\"lenders\": [{\"lenderId\": \"TEST123\"}]}"
+                    },
+                    "proxy": null
+                  }
+                ]
+              }
+            ],
+            "service_name": "LenderDetails_v1_lenders"
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?lenderIds=TEST123"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: Contains predicate matches substring in query parameter value",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "contains": {
+                      "query": {
+                        "lenderIds": "CofTest"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "contains matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?lenderIds=CofTestWL"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: Contains predicate matches partial query value",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "contains": {
+                      "query": {
+                        "filter": "active"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "filter matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?filter=is_active_user"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: DeepEquals predicate matches method exactly",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "method": "GET"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "method matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: DeepEquals predicate matches empty body",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": ""
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "empty body matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: DeepEquals predicate matches path exactly",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "path": "/api/auto/financing/lender-information/lenders"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "path matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/api/auto/financing/lender-information/lenders"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: EndsWith predicate matches path suffix",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "endsWith": {
+                      "path": "lender-details"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "endswith matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/api/financing/lender-details"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: Multiple predicate types combined as implicit AND",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "endsWith": {
+                      "path": "lender-details"
+                    }
+                  },
+                  {
+                    "contains": {
+                      "query": {
+                        "lenderIds": "ALL"
+                      }
+                    }
+                  },
+                  {
+                    "deepEquals": {
+                      "method": "GET"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "all predicates matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/api/lender-details?lenderIds=ALL"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: Multiple predicates fail when one doesn't match",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": 404
+            },
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "endsWith": {
+                      "path": "lender-details"
+                    }
+                  },
+                  {
+                    "contains": {
+                      "query": {
+                        "lenderIds": "ALL"
+                      }
+                    }
+                  },
+                  {
+                    "deepEquals": {
+                      "method": "GET"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/api/lender-details?lenderIds=ALL"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: Wait behavior with JavaScript function returning zero",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/js-wait"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "behaviors": [
+                      {
+                        "wait": " function() { var min = Math.ceil(0); var max = Math.floor(0); var num = Math.floor(Math.random() * (max - min + 1)); var wait = (num + min); return wait; } "
+                      }
+                    ],
+                    "is": {
+                      "statusCode": 200,
+                      "body": "js wait completed"
+                    },
+                    "proxy": null
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/js-wait"
+        }
+      ]
+    },
+    {
+      "name": "alternative_formats: Proxy response with proxyTransparent mode is accepted",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/proxy-redirect"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:9999",
+                      "mode": "proxyTransparent"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/proxy-redirect"
+        }
+      ]
+    }
+  ]
+}

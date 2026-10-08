@@ -8,11 +8,11 @@ members = [
     "crates/rift-http-proxy",
     "crates/rift-lint",
     "crates/rift-tui",
+    "conformance/differential",
 ]
 exclude = [
     "examples/apps/*",
     "benchmarks/*",
-    "tests/compatibility",
 ]
 
 [workspace.package]

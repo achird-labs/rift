@@ -1,0 +1,2328 @@
+[
+  {
+    "id": "marker-x-rift-imposter",
+    "case": "*",
+    "location": "step*.header.x-rift-imposter",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Every response an imposter serves carries `x-rift-imposter: true`.",
+    "reason": "Rift marks every served response",
+    "mountebank": "(absent)",
+    "riftMatches": "true( \\| true)?"
+  },
+  {
+    "id": "marker-x-rift-proxy",
+    "case": "*",
+    "location": "step*.header.x-rift-proxy",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "| `x-rift-proxy: true` | The response came from a `proxy` |",
+    "reason": "Rift marker header x-rift-proxy",
+    "mountebank": "(absent)",
+    "rift": "true"
+  },
+  {
+    "id": "marker-x-rift-inject",
+    "case": "*",
+    "location": "step*.header.x-rift-inject",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "| `x-rift-inject: true` | An `inject` response produced it |",
+    "reason": "Rift marker header x-rift-inject",
+    "mountebank": "(absent)",
+    "rift": "true"
+  },
+  {
+    "id": "marker-x-rift-default-response",
+    "case": "*",
+    "location": "step*.header.x-rift-default-response",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "| `x-rift-default-response: true` | No stub matched and the imposter's `defaultResponse` answered |",
+    "reason": "Rift marker header x-rift-default-response",
+    "mountebank": "(absent)",
+    "rift": "true"
+  },
+  {
+    "id": "marker-x-rift-no-match",
+    "case": "*",
+    "location": "step*.header.x-rift-no-match",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "| `x-rift-no-match: true` | No stub matched and the imposter has no `defaultResponse` |",
+    "reason": "Rift marker header x-rift-no-match",
+    "mountebank": "(absent)",
+    "rift": "true"
+  },
+  {
+    "id": "marker-x-rift-proxy-error",
+    "case": "*",
+    "location": "step*.header.x-rift-proxy-error",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "| `x-rift-proxy-error: true` | The proxy could not reach the upstream (see [Proxy](proxy.md)) |",
+    "reason": "Rift marker header x-rift-proxy-error",
+    "mountebank": "(absent)",
+    "rift": "true"
+  },
+  {
+    "id": "marker-x-rift-proxy-latency",
+    "case": "*",
+    "location": "step*.header.x-rift-proxy-latency",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "| `x-rift-proxy-latency: <ms>` | A proxied response, with the upstream's time in milliseconds |",
+    "reason": "Rift marker header with the upstream time",
+    "mountebank": "(absent)",
+    "riftMatches": "\\d+"
+  },
+  {
+    "id": "recorded-marker-x-rift-imposter",
+    "case": "*",
+    "location": "*/stubs/*/responses/*/is/headers/x-rift-imposter",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy whose upstream is itself a Rift imposter therefore records that imposter's markers in the saved response's `headers`, like any other upstream header.",
+    "reason": "the harness's upstreams are Rift imposters, whose markers a Rift proxy records",
+    "mountebank": "(absent)",
+    "rift": "\"true\""
+  },
+  {
+    "id": "recorded-marker-x-rift-inject",
+    "case": "*",
+    "location": "*/stubs/*/responses/*/is/headers/x-rift-inject",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "A proxy whose upstream is itself a Rift imposter therefore records that imposter's markers in the saved response's `headers`, like any other upstream header.",
+    "reason": "the harness's upstreams are Rift imposters, whose markers a Rift proxy records",
+    "mountebank": "(absent)",
+    "rift": "\"true\""
+  },
+  {
+    "id": "admin-no-vary-accept",
+    "case": "*",
+    "location": "step*.admin*.header.vary",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "it sends no `Vary: Accept` header",
+    "reason": "Rift's admin API does not content-negotiate",
+    "mountebank": "Accept",
+    "rift": "(absent)"
+  },
+  {
+    "id": "replayable-recordMatches",
+    "case": "*",
+    "location": "*recordMatches",
+    "kind": "documented",
+    "doc": "docs/api/index.md",
+    "quote": "Rift-only config keys — `defaultForward`, `allowCORS`, `strictBehaviors`, `recordMatches`, `serviceName`, `serviceInfo` and the config `_rift` block — appear only with `?replayable=true`",
+    "reason": "Rift prints its recordMatches default in replayable forms",
+    "mountebank": "(absent)",
+    "riftMatches": "true|false"
+  },
+  {
+    "id": "recorded-from",
+    "case": "*",
+    "location": "*/stubs/*/recordedFrom",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `recordedFrom` | string | No | Upstream a recorded stub came from (written by proxy recording) |",
+    "reason": "a proxy-recorded stub names its upstream",
+    "mountebank": "(absent)",
+    "riftMatches": "\"http://localhost:\\d+\""
+  },
+  {
+    "id": "error-envelope-code",
+    "case": "*",
+    "location": "step*.body/errors/*/code",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Error envelopes carry `code` (the HTTP status), `type` and `message`",
+    "reason": "Rift's error code is the HTTP status; Mountebank's code is Rift's type",
+    "mountebankMatches": "\"[A-Za-z ]+\"",
+    "riftMatches": "\"\\d{3}\""
+  },
+  {
+    "id": "error-envelope-type",
+    "case": "*",
+    "location": "step*.body/errors/*/type",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Error envelopes carry `code` (the HTTP status), `type` and `message`",
+    "reason": "Rift adds type (Mountebank's code)",
+    "mountebank": "(absent)",
+    "riftMatches": "\"[a-z ]+\""
+  },
+  {
+    "id": "error-envelope-message",
+    "case": "*",
+    "location": "step*.body/errors/*/message",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "its messages are worded differently",
+    "reason": "error message wording is Rift's own",
+    "mountebankMatches": "(?s:\".+\")",
+    "riftMatches": "(?s:\".+\")"
+  },
+  {
+    "id": "error-envelope-no-source",
+    "case": "*",
+    "location": "step*.body/errors/*/source",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift does not add Mountebank's `source`, `name` or `stack` fields",
+    "reason": "Rift does not echo the offending source",
+    "mountebankMatches": "(?s:.+)",
+    "rift": "(absent)"
+  },
+  {
+    "id": "error-envelope-no-name",
+    "case": "*",
+    "location": "step*.body/errors/*/name",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift does not add Mountebank's `source`, `name` or `stack` fields",
+    "reason": "Rift does not add a JavaScript error name",
+    "mountebankMatches": "(?s:\".+\")",
+    "rift": "(absent)"
+  },
+  {
+    "id": "error-envelope-no-stack",
+    "case": "*",
+    "location": "step*.body/errors/*/stack",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Rift does not add Mountebank's `source`, `name` or `stack` fields",
+    "reason": "Rift does not leak a stack trace",
+    "mountebankMatches": "(?s:\".+\")",
+    "rift": "(absent)"
+  },
+  {
+    "id": "admin-json-no-charset/steps",
+    "case": "*",
+    "location": "step*.admin*.header.content-type",
+    "kind": "known-bug",
+    "reason": "admin JSON responses say `application/json`; Mountebank says `application/json; charset=utf-8` (#1361)",
+    "mountebank": "application/json; charset=utf-8",
+    "rift": "application/json"
+  },
+  {
+    "id": "admin-json-no-charset/stored",
+    "case": "*",
+    "location": "stored[*].header.content-type",
+    "kind": "known-bug",
+    "reason": "admin JSON responses say `application/json`; Mountebank says `application/json; charset=utf-8` (#1361)",
+    "mountebank": "application/json; charset=utf-8",
+    "rift": "application/json"
+  },
+  {
+    "id": "admin-json-no-charset/replayable",
+    "case": "*",
+    "location": "replayable[*].header.content-type",
+    "kind": "known-bug",
+    "reason": "admin JSON responses say `application/json`; Mountebank says `application/json; charset=utf-8` (#1361)",
+    "mountebank": "application/json; charset=utf-8",
+    "rift": "application/json"
+  },
+  {
+    "id": "status-code-printed-as-string",
+    "case": "*",
+    "location": "*/is/statusCode",
+    "kind": "known-bug",
+    "reason": "IsResponseOut serialises statusCode as a string (types.rs serialize_status_code_as_string); Mountebank echoes the number it was given (#1361)",
+    "relation": "rift-quotes-mountebank"
+  },
+  {
+    "id": "status-code-default-printed",
+    "case": "*",
+    "location": "*/is/statusCode",
+    "kind": "known-bug",
+    "reason": "an `is` without statusCode is printed with the default \"200\"; Mountebank prints only what was posted (#1361)",
+    "mountebank": "(absent)",
+    "rift": "\"200\""
+  },
+  {
+    "id": "is-headers-default-printed",
+    "case": "*",
+    "location": "*/is/headers",
+    "kind": "known-bug",
+    "reason": "an `is` without headers is printed with `headers: {}`; Mountebank omits it (#1361)",
+    "mountebank": "(absent)",
+    "rift": "{}"
+  },
+  {
+    "id": "default-response-headers-default-printed",
+    "case": "*",
+    "location": "*/defaultResponse/headers",
+    "kind": "known-bug",
+    "reason": "a defaultResponse without headers is printed with `headers: {}` (#1361)",
+    "mountebank": "(absent)",
+    "rift": "{}"
+  },
+  {
+    "id": "stub-predicates-default-printed",
+    "case": "*",
+    "location": "*/stubs/*/predicates",
+    "kind": "known-bug",
+    "reason": "a stub without predicates is printed with `predicates: []`; Mountebank omits it (#1361)",
+    "mountebank": "(absent)",
+    "rift": "[]"
+  },
+  {
+    "id": "proxy-default-addWaitBehavior",
+    "case": "*",
+    "location": "*/proxy/addWaitBehavior",
+    "kind": "known-bug",
+    "reason": "a proxy response is printed with its default `addWaitBehavior: false`; Mountebank prints only what was posted (#1361)",
+    "mountebank": "(absent)",
+    "rift": "false"
+  },
+  {
+    "id": "proxy-default-injectHeaders",
+    "case": "*",
+    "location": "*/proxy/injectHeaders",
+    "kind": "known-bug",
+    "reason": "a proxy response is printed with its default `injectHeaders: {}`; Mountebank prints only what was posted (#1361)",
+    "mountebank": "(absent)",
+    "rift": "{}"
+  },
+  {
+    "id": "proxy-default-predicateGenerators",
+    "case": "*",
+    "location": "*/proxy/predicateGenerators",
+    "kind": "known-bug",
+    "reason": "a proxy response is printed with its default `predicateGenerators: []`; Mountebank prints only what was posted (#1361)",
+    "mountebank": "(absent)",
+    "rift": "[]"
+  },
+  {
+    "id": "proxy-default-mode",
+    "case": "*",
+    "location": "*/proxy/mode",
+    "kind": "known-bug",
+    "reason": "a proxy response is printed with its default `mode: \"\"`; Mountebank prints only what was posted (and the omitted mode prints as an empty string, though it behaves as proxyOnce) (#1361)",
+    "mountebank": "(absent)",
+    "rift": "\"\""
+  },
+  {
+    "id": "recorded-request-empty-body",
+    "case": "*",
+    "location": "*/requests/*/body",
+    "kind": "known-bug",
+    "reason": "a recorded request without a body has no `body`; Mountebank records `\"\"` (#1365)",
+    "mountebank": "\"\"",
+    "rift": "(absent)"
+  },
+  {
+    "id": "recorded-response-text-mode",
+    "case": "*",
+    "location": "*/is/_mode",
+    "kind": "known-bug",
+    "reason": "a proxy-recorded response omits `_mode: text`, which Mountebank records (#1366)",
+    "mountebank": "\"text\"",
+    "rift": "(absent)"
+  },
+  {
+    "id": "stub-name-dropped",
+    "case": "*",
+    "location": "*/stubs/*/name",
+    "kind": "known-bug",
+    "reason": "a stub's `name` is accepted and dropped from every printed form; Mountebank keeps it (#1362)",
+    "mountebankMatches": "\".*\"",
+    "rift": "(absent)"
+  },
+  {
+    "id": "empty-behaviors-dropped",
+    "case": "*",
+    "location": "*/responses/*/behaviors",
+    "kind": "known-bug",
+    "reason": "an empty `behaviors: []` is dropped from the printed response; Mountebank echoes it (#1362)",
+    "mountebank": "[]",
+    "rift": "(absent)"
+  },
+  {
+    "id": "null-proxy-dropped",
+    "case": "*",
+    "location": "*/responses/*/proxy",
+    "kind": "known-bug",
+    "reason": "`proxy: null` next to `is` is dropped from the printed response; Mountebank echoes it (#1362)",
+    "mountebank": "null",
+    "rift": "(absent)"
+  },
+  {
+    "id": "served-json-text",
+    "case": "*",
+    "location": "*",
+    "class": "json-text",
+    "kind": "documented",
+    "doc": "docs/mountebank/responses.md",
+    "quote": "Object keys are served **sorted** (by byte), at every depth, not in the order the stub wrote them",
+    "reason": "Rift serves a JSON body compact and key-sorted; Mountebank indents it by four spaces in the stub's key order"
+  },
+  {
+    "id": "auto-json-content-type",
+    "case": "*",
+    "location": "step*.header.content-type",
+    "kind": "documented",
+    "doc": "docs/mountebank/responses.md",
+    "quote": "When a response has a **JSON** body (an object or array, not a string) and the stub sets **no** `Content-Type` header, Rift adds `Content-Type: application/json`.",
+    "reason": "Rift labels a JSON body it serialised",
+    "mountebank": "(absent)",
+    "rift": "application/json"
+  },
+  {
+    "id": "apply-report-created",
+    "case": "*",
+    "location": "step*.admin*.body/created",
+    "kind": "documented",
+    "doc": "docs/api/index.md",
+    "quote": "arrays are always present and mirror `POST /admin/reload`: `created`, `replaced`, `stubPatched`,",
+    "reason": "PUT /imposters also reports the per-port apply outcome",
+    "mountebank": "(absent)",
+    "riftMatches": "\\[[0-9,]*\\]"
+  },
+  {
+    "id": "apply-report-replaced",
+    "case": "*",
+    "location": "step*.admin*.body/replaced",
+    "kind": "documented",
+    "doc": "docs/api/index.md",
+    "quote": "arrays are always present and mirror `POST /admin/reload`: `created`, `replaced`, `stubPatched`,",
+    "reason": "PUT /imposters also reports the per-port apply outcome",
+    "mountebank": "(absent)",
+    "riftMatches": "\\[[0-9,]*\\]"
+  },
+  {
+    "id": "apply-report-stubPatched",
+    "case": "*",
+    "location": "step*.admin*.body/stubPatched",
+    "kind": "documented",
+    "doc": "docs/api/index.md",
+    "quote": "arrays are always present and mirror `POST /admin/reload`: `created`, `replaced`, `stubPatched`,",
+    "reason": "PUT /imposters also reports the per-port apply outcome",
+    "mountebank": "(absent)",
+    "riftMatches": "\\[[0-9,]*\\]"
+  },
+  {
+    "id": "apply-report-deleted",
+    "case": "*",
+    "location": "step*.admin*.body/deleted",
+    "kind": "documented",
+    "doc": "docs/api/index.md",
+    "quote": "arrays are always present and mirror `POST /admin/reload`: `created`, `replaced`, `stubPatched`,",
+    "reason": "PUT /imposters also reports the per-port apply outcome",
+    "mountebank": "(absent)",
+    "riftMatches": "\\[[0-9,]*\\]"
+  },
+  {
+    "id": "apply-report-toggled",
+    "case": "*",
+    "location": "step*.admin*.body/toggled",
+    "kind": "documented",
+    "doc": "docs/api/index.md",
+    "quote": "arrays are always present and mirror `POST /admin/reload`: `created`, `replaced`, `stubPatched`,",
+    "reason": "PUT /imposters also reports the per-port apply outcome",
+    "mountebank": "(absent)",
+    "riftMatches": "\\[[0-9,]*\\]"
+  },
+  {
+    "id": "auto-stub-id",
+    "case": "*",
+    "location": "*/stubs/*/id",
+    "kind": "documented",
+    "doc": "docs/api/index.md",
+    "quote": "Every stub has a stable `id` (auto-generated as a UUID when omitted).",
+    "reason": "Rift gives a stub added through the API a stable id",
+    "mountebank": "(absent)",
+    "riftMatches": "\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\""
+  },
+  {
+    "id": "list-prints-record-requests",
+    "case": "*",
+    "location": "*.body/imposters/*/recordRequests",
+    "kind": "known-bug",
+    "reason": "the imposter list (GET /imposters, PUT /imposters) prints recordRequests, which Mountebank prints only in the detail (#1361)",
+    "mountebank": "(absent)",
+    "riftMatches": "true|false"
+  },
+  {
+    "id": "deleted-imposter-name-null",
+    "case": "*",
+    "location": "step*.body/name",
+    "kind": "known-bug",
+    "reason": "DELETE /imposters/:port of an unnamed imposter prints `name: null`; Mountebank omits it (#1361)",
+    "mountebank": "(absent)",
+    "rift": "null"
+  },
+  {
+    "id": "replayable-allowCORS",
+    "case": "*",
+    "location": "replayable[*]/allowCORS",
+    "kind": "documented",
+    "doc": "docs/api/index.md",
+    "quote": "Rift-only config keys — `defaultForward`, `allowCORS`, `strictBehaviors`, `recordMatches`, `serviceName`, `serviceInfo` and the config `_rift` block — appear only with `?replayable=true`",
+    "reason": "allowCORS is a Rift-only key printed with ?replayable=true",
+    "mountebank": "(absent)",
+    "rift": "true"
+  },
+  {
+    "case": "alternative_formats: Service name and info fields are accepted",
+    "kind": "documented",
+    "doc": "docs/api/index.md",
+    "quote": "Rift-only config keys — `defaultForward`, `allowCORS`, `strictBehaviors`, `recordMatches`, `serviceName`, `serviceInfo` and the config `_rift` block — appear only with `?replayable=true`",
+    "reason": "serviceName is a Rift-only key printed with ?replayable=true",
+    "id": "replayable-serviceName/service-info#0",
+    "location": "replayable[4545]/serviceName",
+    "mountebank": "(absent)",
+    "rift": "\"LenderDetails_v1_lenders\""
+  },
+  {
+    "case": "alternative_formats: Complex real-world format with all alternative features",
+    "kind": "documented",
+    "doc": "docs/api/index.md",
+    "quote": "Rift-only config keys — `defaultForward`, `allowCORS`, `strictBehaviors`, `recordMatches`, `serviceName`, `serviceInfo` and the config `_rift` block — appear only with `?replayable=true`",
+    "reason": "serviceName is a Rift-only key printed with ?replayable=true",
+    "id": "replayable-serviceName/complex-format#0",
+    "location": "replayable[4545]/serviceName",
+    "mountebank": "(absent)",
+    "rift": "\"LenderDetails_v1_lenders\""
+  },
+  {
+    "case": "alternative_formats: Service name and info fields are accepted",
+    "kind": "documented",
+    "doc": "docs/api/index.md",
+    "quote": "Rift-only config keys — `defaultForward`, `allowCORS`, `strictBehaviors`, `recordMatches`, `serviceName`, `serviceInfo` and the config `_rift` block — appear only with `?replayable=true`",
+    "reason": "serviceInfo is a Rift-only key printed with ?replayable=true",
+    "id": "replayable-serviceInfo/service-info#0",
+    "location": "replayable[4545]/serviceInfo",
+    "mountebank": "(absent)",
+    "rift": "{\"virtualServiceInfo\":{\"realEndpoint\":\"https://api.example.com/lenders\",\"serviceName\":\"LenderDetails-v1-lenders\"}}"
+  },
+  {
+    "id": "cors-access-control-allow-origin",
+    "case": "*",
+    "location": "step*.header.access-control-allow-origin",
+    "kind": "documented",
+    "doc": "docs/configuration/mountebank.md",
+    "quote": "| `allowCORS` | boolean | Add CORS headers to responses |",
+    "reason": "allowCORS adds CORS headers to every response",
+    "mountebank": "(absent)",
+    "rift": "*"
+  },
+  {
+    "id": "cors-access-control-allow-methods",
+    "case": "*",
+    "location": "step*.header.access-control-allow-methods",
+    "kind": "documented",
+    "doc": "docs/configuration/mountebank.md",
+    "quote": "| `allowCORS` | boolean | Add CORS headers to responses |",
+    "reason": "allowCORS adds CORS headers to every response",
+    "mountebank": "(absent)",
+    "rift": "*"
+  },
+  {
+    "id": "cors-access-control-allow-headers",
+    "case": "*",
+    "location": "step*.header.access-control-allow-headers",
+    "kind": "documented",
+    "doc": "docs/configuration/mountebank.md",
+    "quote": "| `allowCORS` | boolean | Add CORS headers to responses |",
+    "reason": "allowCORS adds CORS headers to every response",
+    "mountebank": "(absent)",
+    "rift": "*"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "Mountebank refuses an imposter without protocol; Rift creates it as http, so every answer about it differs",
+    "id": "protocol-optional#0",
+    "location": "step[0].admin.status",
+    "mountebank": "400",
+    "rift": "201"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "Mountebank refuses an imposter without protocol; Rift creates it as http, so every answer about it differs",
+    "id": "protocol-optional#1",
+    "location": "step[0].admin.header.location",
+    "mountebank": "(absent)",
+    "riftMatches": "http://127\\.0\\.0\\.1:2525/imposters/\\d{4,5}"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "Mountebank refuses an imposter without protocol; Rift creates it as http, so every answer about it differs",
+    "id": "protocol-optional#2",
+    "location": "step[0].admin.body/errors",
+    "mountebank": "[{\"code\":\"bad data\",\"message\":\"'protocol' is a required field\"}]",
+    "rift": "(absent)"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "Mountebank refuses an imposter without protocol; Rift creates it as http, so every answer about it differs",
+    "id": "protocol-optional#3",
+    "location": "step[0].admin.body/numberOfRequests",
+    "mountebank": "(absent)",
+    "rift": "0"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "Mountebank refuses an imposter without protocol; Rift creates it as http, so every answer about it differs",
+    "id": "protocol-optional#4",
+    "location": "step[0].admin.body/port",
+    "mountebank": "(absent)",
+    "riftMatches": "\\d{4,5}"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "Mountebank refuses an imposter without protocol; Rift creates it as http, so every answer about it differs",
+    "id": "protocol-optional#5",
+    "location": "step[0].admin.body/protocol",
+    "mountebank": "(absent)",
+    "rift": "\"http\""
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "Mountebank refuses an imposter without protocol; Rift creates it as http, so every answer about it differs",
+    "id": "protocol-optional#6",
+    "location": "step[0].admin.body/recordRequests",
+    "mountebank": "(absent)",
+    "rift": "false"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "Mountebank refuses an imposter without protocol; Rift creates it as http, so every answer about it differs",
+    "id": "protocol-optional#7",
+    "location": "step[0].admin.body/requests",
+    "mountebank": "(absent)",
+    "rift": "[]"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "Mountebank refuses an imposter without protocol; Rift creates it as http, so every answer about it differs",
+    "id": "protocol-optional#8",
+    "location": "step[0].admin.body/stubs",
+    "mountebank": "(absent)",
+    "rift": "[]"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/stored#0",
+    "location": "stored[64000].status",
+    "mountebank": "404",
+    "rift": "200"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/stored#1",
+    "location": "stored[64000].body/_links",
+    "mountebank": "(absent)",
+    "riftMatches": "\\{\"self\":\\{\"href\":\"http://127\\.0\\.0\\.1:2525/imposters/\\d{4,5}\"\\},\"stubs\":\\{\"href\":\"http://127\\.0\\.0\\.1:2525/imposters/\\d{4,5}/stubs\"\\}\\}"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/stored#2",
+    "location": "stored[64000].body/enabled",
+    "mountebank": "(absent)",
+    "rift": "true"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/stored#3",
+    "location": "stored[64000].body/errors",
+    "mountebank": "[{\"code\":\"no such resource\",\"message\":\"Try POSTing to /imposters first?\"}]",
+    "rift": "(absent)"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/stored#4",
+    "location": "stored[64000].body/numberOfRequests",
+    "mountebank": "(absent)",
+    "rift": "0"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/stored#5",
+    "location": "stored[64000].body/port",
+    "mountebank": "(absent)",
+    "riftMatches": "\\d{4,5}"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/stored#6",
+    "location": "stored[64000].body/protocol",
+    "mountebank": "(absent)",
+    "rift": "\"http\""
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/stored#7",
+    "location": "stored[64000].body/recordRequests",
+    "mountebank": "(absent)",
+    "rift": "false"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/stored#8",
+    "location": "stored[64000].body/requests",
+    "mountebank": "(absent)",
+    "rift": "[]"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/stored#9",
+    "location": "stored[64000].body/stubs",
+    "mountebank": "(absent)",
+    "rift": "[]"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/replayable#0",
+    "location": "replayable[64000].status",
+    "mountebank": "404",
+    "rift": "200"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/replayable#1",
+    "location": "replayable[64000].body/errors",
+    "mountebank": "[{\"code\":\"no such resource\",\"message\":\"Try POSTing to /imposters first?\"}]",
+    "rift": "(absent)"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/replayable#2",
+    "location": "replayable[64000].body/port",
+    "mountebank": "(absent)",
+    "riftMatches": "\\d{4,5}"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/replayable#3",
+    "location": "replayable[64000].body/protocol",
+    "mountebank": "(absent)",
+    "rift": "\"http\""
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/replayable#4",
+    "location": "replayable[64000].body/recordRequests",
+    "mountebank": "(absent)",
+    "rift": "false"
+  },
+  {
+    "case": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+    "kind": "documented",
+    "doc": "docs/mountebank/imposters.md",
+    "quote": "| `protocol` | string | No | `http` or `https` (default: `http`) |",
+    "reason": "the imposter only Rift created",
+    "id": "protocol-optional/replayable#5",
+    "location": "replayable[64000].body/stubs",
+    "mountebank": "(absent)",
+    "rift": "[]"
+  },
+  {
+    "id": "proxy-upstream-502/unavailable",
+    "case": "proxy: Proxy returns error when backend unavailable",
+    "location": "step[1].status",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "client `502` with an `x-rift-proxy-error: true` header and a JSON error envelope (`type` `upstream failure`)",
+    "reason": "an unreachable upstream answers 502 (Mountebank: 500)",
+    "mountebank": "500",
+    "rift": "502"
+  },
+  {
+    "id": "proxy-upstream-502/transparent",
+    "case": "alternative_formats: Proxy response with proxyTransparent mode is accepted",
+    "location": "step[1].status",
+    "kind": "documented",
+    "doc": "docs/mountebank/proxy.md",
+    "quote": "client `502` with an `x-rift-proxy-error: true` header and a JSON error envelope (`type` `upstream failure`)",
+    "reason": "an unreachable upstream answers 502 (Mountebank: 500)",
+    "mountebank": "500",
+    "rift": "502"
+  },
+  {
+    "id": "config-shape",
+    "case": "admin_api: Get server config",
+    "location": "step[0].admin.body",
+    "kind": "documented",
+    "doc": "docs/api/index.md",
+    "quote": "`process` mirrors Mountebank's shape: only `architecture`, `platform` and `cwd` carry real values.",
+    "reason": "GET /config describes the engine that answers it"
+  },
+  {
+    "case": "admin_api: Get server logs",
+    "kind": "documented",
+    "doc": "docs/api/index.md",
+    "quote": "Rift writes its logs through `tracing` (stderr), not to an in-memory buffer, so this always returns an empty list",
+    "reason": "Rift's /logs is always empty",
+    "id": "logs-empty/plain#0",
+    "location": "step[0].admin.body/logs/0",
+    "mountebank": "{\"level\":\"error\",\"message\":\"No logfile\"}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "admin_api: Get logs with pagination",
+    "kind": "documented",
+    "doc": "docs/api/index.md",
+    "quote": "Rift writes its logs through `tracing` (stderr), not to an in-memory buffer, so this always returns an empty list",
+    "reason": "Rift's /logs is always empty",
+    "id": "logs-empty/pagination#0",
+    "location": "step[0].admin.body/logs/0",
+    "mountebank": "{\"level\":\"error\",\"message\":\"No logfile\"}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "complex_scenarios: Port conflict handling",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Error envelopes carry `code` (the HTTP status), `type` and `message`",
+    "reason": "Mountebank's port-conflict error is node's EADDRINUSE object; Rift answers its own envelope",
+    "id": "port-conflict-envelope#0",
+    "location": "step[1].admin.body/errors/0/address",
+    "mountebank": "\"::\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "complex_scenarios: Port conflict handling",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Error envelopes carry `code` (the HTTP status), `type` and `message`",
+    "reason": "Mountebank's port-conflict error is node's EADDRINUSE object; Rift answers its own envelope",
+    "id": "port-conflict-envelope#1",
+    "location": "step[1].admin.body/errors/0/errno",
+    "mountebankMatches": "-\\d+",
+    "rift": "(absent)"
+  },
+  {
+    "case": "complex_scenarios: Port conflict handling",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Error envelopes carry `code` (the HTTP status), `type` and `message`",
+    "reason": "Mountebank's port-conflict error is node's EADDRINUSE object; Rift answers its own envelope",
+    "id": "port-conflict-envelope#2",
+    "location": "step[1].admin.body/errors/0/message",
+    "mountebank": "(absent)",
+    "riftMatches": "\"Port \\d{4,5} is already in use\""
+  },
+  {
+    "case": "complex_scenarios: Port conflict handling",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Error envelopes carry `code` (the HTTP status), `type` and `message`",
+    "reason": "Mountebank's port-conflict error is node's EADDRINUSE object; Rift answers its own envelope",
+    "id": "port-conflict-envelope#3",
+    "location": "step[1].admin.body/errors/0/port",
+    "mountebank": "4545",
+    "rift": "(absent)"
+  },
+  {
+    "case": "complex_scenarios: Port conflict handling",
+    "kind": "documented",
+    "doc": "docs/mountebank/differences.md",
+    "quote": "Error envelopes carry `code` (the HTTP status), `type` and `message`",
+    "reason": "Mountebank's port-conflict error is node's EADDRINUSE object; Rift answers its own envelope",
+    "id": "port-conflict-envelope#4",
+    "location": "step[1].admin.body/errors/0/syscall",
+    "mountebank": "\"listen\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "sdk-corpus: 03-behaviors.json",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "`response.body` arrives as a **string**, even when the stub's `body` is a JSON object",
+    "reason": "the decorate calls `response.body.replace(...)`: Rift hands decorate the body as a string, Mountebank as the object, which has no replace and fails with 500",
+    "id": "decorate-body-is-text#0",
+    "location": "step[6].status",
+    "mountebank": "500",
+    "rift": "200"
+  },
+  {
+    "case": "sdk-corpus: 03-behaviors.json",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "`response.body` arrives as a **string**, even when the stub's `body` is a JSON object",
+    "reason": "the decorate calls `response.body.replace(...)`: Rift hands decorate the body as a string, Mountebank as the object, which has no replace and fails with 500",
+    "id": "decorate-body-is-text#1",
+    "location": "step[6].header.x-decorated-by",
+    "mountebank": "(absent)",
+    "rift": "rift"
+  },
+  {
+    "case": "sdk-corpus: 03-behaviors.json",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "`response.body` arrives as a **string**, even when the stub's `body` is a JSON object",
+    "reason": "the decorate calls `response.body.replace(...)`: Rift hands decorate the body as a string, Mountebank as the object, which has no replace and fails with 500",
+    "id": "decorate-body-is-text#2",
+    "location": "step[6].body/decorated",
+    "mountebank": "(absent)",
+    "rift": "true"
+  },
+  {
+    "case": "sdk-corpus: 03-behaviors.json",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "`response.body` arrives as a **string**, even when the stub's `body` is a JSON object",
+    "reason": "the decorate calls `response.body.replace(...)`: Rift hands decorate the body as a string, Mountebank as the object, which has no replace and fails with 500",
+    "id": "decorate-body-is-text#3",
+    "location": "step[6].body/errors",
+    "mountebankMatches": "\\[\\{\"message\":\"Converting circular structure to JS(?s:.*)",
+    "rift": "(absent)"
+  },
+  {
+    "case": "sdk-corpus: 14-verify-annotations.json",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "Rift returns the first capture group where Mountebank returns the whole regex match",
+    "reason": "copy/lookup with a regex selector: Rift takes the first capture group, Mountebank the whole match (step[9] is a lookup keyed by that copy)",
+    "id": "copy-regex-capture-group/14-step[5].body#0",
+    "location": "step[5].body",
+    "mountebank": "id=/orders/77",
+    "rift": "id=77"
+  },
+  {
+    "case": "sdk-corpus: 03-behaviors.json",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "Rift returns the first capture group where Mountebank returns the whole regex match",
+    "reason": "copy/lookup with a regex selector: Rift takes the first capture group, Mountebank the whole match (step[9] is a lookup keyed by that copy)",
+    "id": "copy-regex-capture-group/03-step[7]#0",
+    "location": "step[7].header.x-order-id",
+    "mountebank": "/orders/42",
+    "rift": "42"
+  },
+  {
+    "case": "sdk-corpus: 03-behaviors.json",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "Rift returns the first capture group where Mountebank returns the whole regex match",
+    "reason": "copy/lookup with a regex selector: Rift takes the first capture group, Mountebank the whole match (step[9] is a lookup keyed by that copy)",
+    "id": "copy-regex-capture-group/03-step[7]#1",
+    "location": "step[7].body/orderId",
+    "mountebank": "\"/orders/42\"",
+    "rift": "\"42\""
+  },
+  {
+    "case": "sdk-corpus: 03-behaviors.json",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "Rift returns the first capture group where Mountebank returns the whole regex match",
+    "reason": "copy/lookup with a regex selector: Rift takes the first capture group, Mountebank the whole match (step[9] is a lookup keyed by that copy)",
+    "id": "copy-regex-capture-group/03-step[9].body#0",
+    "location": "step[9].body/category",
+    "mountebank": "\"${row}[category]\"",
+    "rift": "\"tools\""
+  },
+  {
+    "case": "sdk-corpus: 03-behaviors.json",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "Rift returns the first capture group where Mountebank returns the whole regex match",
+    "reason": "copy/lookup with a regex selector: Rift takes the first capture group, Mountebank the whole match (step[9] is a lookup keyed by that copy)",
+    "id": "copy-regex-capture-group/03-step[9].body#1",
+    "location": "step[9].body/id",
+    "mountebank": "\"${row}[id]\"",
+    "rift": "\"123\""
+  },
+  {
+    "case": "sdk-corpus: 03-behaviors.json",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "Rift returns the first capture group where Mountebank returns the whole regex match",
+    "reason": "copy/lookup with a regex selector: Rift takes the first capture group, Mountebank the whole match (step[9] is a lookup keyed by that copy)",
+    "id": "copy-regex-capture-group/03-step[9].body#2",
+    "location": "step[9].body/name",
+    "mountebank": "\"${row}[name]\"",
+    "rift": "\"Widget\""
+  },
+  {
+    "case": "sdk-corpus: 03-behaviors.json",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "Rift returns the first capture group where Mountebank returns the whole regex match",
+    "reason": "copy/lookup with a regex selector: Rift takes the first capture group, Mountebank the whole match (step[9] is a lookup keyed by that copy)",
+    "id": "copy-regex-capture-group/03-step[9].body#3",
+    "location": "step[9].body/price",
+    "mountebank": "\"${row}[price]\"",
+    "rift": "\"9.99\""
+  },
+  {
+    "case": "sdk-corpus: 16-behaviors-advanced.json",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "Rift returns the first capture group where Mountebank returns the whole regex match",
+    "reason": "copy/lookup with a regex selector: Rift takes the first capture group, Mountebank the whole match (step[9] is a lookup keyed by that copy)",
+    "id": "copy-regex-capture-group/16-step[3].body#0",
+    "location": "step[3].body/name",
+    "mountebank": "\"${row}[name]\"",
+    "rift": "\"Gadget\""
+  },
+  {
+    "case": "sdk-corpus: 16-behaviors-advanced.json",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "Rift returns the first capture group where Mountebank returns the whole regex match",
+    "reason": "copy/lookup with a regex selector: Rift takes the first capture group, Mountebank the whole match (step[9] is a lookup keyed by that copy)",
+    "id": "copy-regex-capture-group/16-step[3].body#1",
+    "location": "step[3].body/price",
+    "mountebank": "\"${row}[price]\"",
+    "rift": "\"19.99\""
+  },
+  {
+    "id": "ascii-folding",
+    "case": "targeted: string operators fold ASCII case only, matches folds Unicode",
+    "location": "step[1].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/predicates.md",
+    "quote": "Mountebank folds Unicode for *all* of these operators, so it has no such split.",
+    "reason": "equals folds ASCII only in Rift, so the matches stub answers; Mountebank's equals folds Unicode",
+    "mountebank": "equals folded",
+    "rift": "matches folded"
+  },
+  {
+    "case": "targeted: shellTransform stdout is the body in Rift and a response object in Mountebank",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "This differs from Mountebank, which reads the output as a response object.",
+    "reason": "Rift serves the command's stdout as the body; Mountebank reads it as a response object",
+    "id": "shell-transform-output#0",
+    "location": "step[1].status",
+    "mountebank": "201",
+    "rift": "200"
+  },
+  {
+    "case": "targeted: shellTransform stdout is the body in Rift and a response object in Mountebank",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "This differs from Mountebank, which reads the output as a response object.",
+    "reason": "Rift serves the command's stdout as the body; Mountebank reads it as a response object",
+    "id": "shell-transform-output#1",
+    "location": "step[1].body",
+    "mountebank": "from-shell",
+    "rift": "{\"statusCode\": 201, \"body\": \"from-shell\"}\n"
+  },
+  {
+    "id": "copy-then-lookup",
+    "case": "targeted: a lookup after a copy expands a token the client put in the copied field (Mountebank only)",
+    "location": "step[1].body",
+    "kind": "documented",
+    "doc": "docs/mountebank/behaviors.md",
+    "quote": "Mountebank 2.9.1 expands a lookup token the client put in the copied field. Rift serves it as sent.",
+    "reason": "Rift does not expand a lookup token that came in through a copy",
+    "mountebank": "copied=Widget",
+    "rift": "copied=${row}[name]"
+  },
+  {
+    "case": "admin_api: Delete non-existent imposter",
+    "kind": "known-bug",
+    "reason": "DELETE /imposters/:port of a port with no imposter answers 404; Mountebank answers 200 with an empty body (#1371)",
+    "id": "delete-missing-imposter-404#0",
+    "location": "step[0].admin.status",
+    "mountebank": "200",
+    "rift": "404"
+  },
+  {
+    "case": "admin_api: Delete non-existent imposter",
+    "kind": "known-bug",
+    "reason": "DELETE /imposters/:port of a port with no imposter answers 404; Mountebank answers 200 with an empty body (#1371)",
+    "id": "delete-missing-imposter-404#1",
+    "location": "step[0].admin.body/errors",
+    "mountebank": "(absent)",
+    "riftMatches": "\\[\\{\"code\":\"404\",\"message\":\"No imposter exists on port \\d{4,5}\",\"type\":\"no such resource\"\\}\\]"
+  },
+  {
+    "case": "admin_api: DELETE requests path is alias for savedRequests",
+    "kind": "known-bug",
+    "reason": "DELETE /imposters/:port/requests clears recorded requests; in Mountebank it is the deprecated alias of savedProxyResponses and leaves requests alone (docs/api/index.md documents Rift's reading) (#1370)",
+    "id": "requests-alias-clears-requests/step#0",
+    "location": "step[2].admin.body/numberOfRequests",
+    "mountebank": "3",
+    "rift": "0"
+  },
+  {
+    "case": "admin_api: DELETE requests path is alias for savedRequests",
+    "kind": "known-bug",
+    "reason": "DELETE /imposters/:port/requests clears recorded requests; in Mountebank it is the deprecated alias of savedProxyResponses and leaves requests alone (docs/api/index.md documents Rift's reading) (#1370)",
+    "id": "requests-alias-clears-requests/step#1",
+    "location": "step[2].admin.body/requests/0",
+    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "admin_api: DELETE requests path is alias for savedRequests",
+    "kind": "known-bug",
+    "reason": "DELETE /imposters/:port/requests clears recorded requests; in Mountebank it is the deprecated alias of savedProxyResponses and leaves requests alone (docs/api/index.md documents Rift's reading) (#1370)",
+    "id": "requests-alias-clears-requests/step#2",
+    "location": "step[2].admin.body/requests/1",
+    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "admin_api: DELETE requests path is alias for savedRequests",
+    "kind": "known-bug",
+    "reason": "DELETE /imposters/:port/requests clears recorded requests; in Mountebank it is the deprecated alias of savedProxyResponses and leaves requests alone (docs/api/index.md documents Rift's reading) (#1370)",
+    "id": "requests-alias-clears-requests/step#3",
+    "location": "step[2].admin.body/requests/2",
+    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "admin_api: DELETE requests path is alias for savedRequests",
+    "kind": "known-bug",
+    "reason": "DELETE /imposters/:port/requests clears recorded requests; in Mountebank it is the deprecated alias of savedProxyResponses and leaves requests alone (docs/api/index.md documents Rift's reading) (#1370)",
+    "id": "requests-alias-clears-requests/stored#0",
+    "location": "stored[4545]/numberOfRequests",
+    "mountebank": "3",
+    "rift": "0"
+  },
+  {
+    "case": "admin_api: DELETE requests path is alias for savedRequests",
+    "kind": "known-bug",
+    "reason": "DELETE /imposters/:port/requests clears recorded requests; in Mountebank it is the deprecated alias of savedProxyResponses and leaves requests alone (docs/api/index.md documents Rift's reading) (#1370)",
+    "id": "requests-alias-clears-requests/stored#1",
+    "location": "stored[4545]/requests/0",
+    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "admin_api: DELETE requests path is alias for savedRequests",
+    "kind": "known-bug",
+    "reason": "DELETE /imposters/:port/requests clears recorded requests; in Mountebank it is the deprecated alias of savedProxyResponses and leaves requests alone (docs/api/index.md documents Rift's reading) (#1370)",
+    "id": "requests-alias-clears-requests/stored#2",
+    "location": "stored[4545]/requests/1",
+    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "admin_api: DELETE requests path is alias for savedRequests",
+    "kind": "known-bug",
+    "reason": "DELETE /imposters/:port/requests clears recorded requests; in Mountebank it is the deprecated alias of savedProxyResponses and leaves requests alone (docs/api/index.md documents Rift's reading) (#1370)",
+    "id": "requests-alias-clears-requests/stored#3",
+    "location": "stored[4545]/requests/2",
+    "mountebank": "{\"body\":\"\",\"headers\":{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"},\"method\":\"GET\",\"path\":\"/test\",\"query\":{}}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "complex_scenarios: Recover from invalid stub addition",
+    "kind": "known-bug",
+    "reason": "POST /imposters/:port/stubs with a stub that has no responses (`{\"invalid\": ...}`) is accepted; Mountebank refuses it: 'responses' must be a non-empty array (#1372)",
+    "id": "stub-without-responses-accepted#0",
+    "location": "step[1].admin.status",
+    "mountebank": "400",
+    "rift": "200"
+  },
+  {
+    "case": "complex_scenarios: Recover from invalid stub addition",
+    "kind": "known-bug",
+    "reason": "POST /imposters/:port/stubs with a stub that has no responses (`{\"invalid\": ...}`) is accepted; Mountebank refuses it: 'responses' must be a non-empty array (#1372)",
+    "id": "stub-without-responses-accepted#1",
+    "location": "step[1].admin.body/errors",
+    "mountebank": "[{\"code\":\"bad data\",\"message\":\"'responses' must be a non-empty array\",\"source\":{\"invalid\":\"not a valid stub\"}}]",
+    "rift": "(absent)"
+  },
+  {
+    "case": "complex_scenarios: Recover from invalid stub addition",
+    "kind": "known-bug",
+    "reason": "POST /imposters/:port/stubs with a stub that has no responses (`{\"invalid\": ...}`) is accepted; Mountebank refuses it: 'responses' must be a non-empty array (#1372)",
+    "id": "stub-without-responses-accepted#2",
+    "location": "step[1].admin.body/numberOfRequests",
+    "mountebank": "(absent)",
+    "rift": "0"
+  },
+  {
+    "case": "complex_scenarios: Recover from invalid stub addition",
+    "kind": "known-bug",
+    "reason": "POST /imposters/:port/stubs with a stub that has no responses (`{\"invalid\": ...}`) is accepted; Mountebank refuses it: 'responses' must be a non-empty array (#1372)",
+    "id": "stub-without-responses-accepted#3",
+    "location": "step[1].admin.body/port",
+    "mountebank": "(absent)",
+    "rift": "4545"
+  },
+  {
+    "case": "complex_scenarios: Recover from invalid stub addition",
+    "kind": "known-bug",
+    "reason": "POST /imposters/:port/stubs with a stub that has no responses (`{\"invalid\": ...}`) is accepted; Mountebank refuses it: 'responses' must be a non-empty array (#1372)",
+    "id": "stub-without-responses-accepted#4",
+    "location": "step[1].admin.body/protocol",
+    "mountebank": "(absent)",
+    "rift": "\"http\""
+  },
+  {
+    "case": "complex_scenarios: Recover from invalid stub addition",
+    "kind": "known-bug",
+    "reason": "POST /imposters/:port/stubs with a stub that has no responses (`{\"invalid\": ...}`) is accepted; Mountebank refuses it: 'responses' must be a non-empty array (#1372)",
+    "id": "stub-without-responses-accepted#5",
+    "location": "step[1].admin.body/recordRequests",
+    "mountebank": "(absent)",
+    "rift": "false"
+  },
+  {
+    "case": "complex_scenarios: Recover from invalid stub addition",
+    "kind": "known-bug",
+    "reason": "POST /imposters/:port/stubs with a stub that has no responses (`{\"invalid\": ...}`) is accepted; Mountebank refuses it: 'responses' must be a non-empty array (#1372)",
+    "id": "stub-without-responses-accepted#6",
+    "location": "step[1].admin.body/requests",
+    "mountebank": "(absent)",
+    "rift": "[]"
+  },
+  {
+    "case": "complex_scenarios: Recover from invalid stub addition",
+    "kind": "known-bug",
+    "reason": "POST /imposters/:port/stubs with a stub that has no responses (`{\"invalid\": ...}`) is accepted; Mountebank refuses it: 'responses' must be a non-empty array (#1372)",
+    "id": "stub-without-responses-accepted#7",
+    "location": "step[1].admin.body/stubs",
+    "mountebank": "(absent)",
+    "riftMatches": "\\[\\{\"predicates\":\\[\\],\"responses\":\\[\\{\"is\":\\{\"body\":\"original\",\"headers\":\\{\\},\"statusCode\":\"200\"\\}\\}\\]\\},\\{\"id\":\"[0-9a-f-]{36}\",\"predicates\":\\[\\],\"responses\":\\[\\]\\}\\]"
+  },
+  {
+    "case": "complex_scenarios: Recover from invalid stub addition",
+    "kind": "known-bug",
+    "reason": "the stub only Rift accepted (#1372)",
+    "id": "stub-without-responses-accepted/stored#0",
+    "location": "stored[4545]/stubs/1",
+    "mountebank": "(absent)",
+    "riftMatches": "\\{\"id\":\"[0-9a-f-]{36}\",\"predicates\":\\[\\],\"responses\":\\[\\]\\}"
+  },
+  {
+    "case": "complex_scenarios: Recover from invalid stub addition",
+    "kind": "known-bug",
+    "reason": "the stub only Rift accepted (#1372)",
+    "id": "stub-without-responses-accepted/replayable#0",
+    "location": "replayable[4545]/stubs/1",
+    "mountebank": "(absent)",
+    "riftMatches": "\\{\"id\":\"[0-9a-f-]{36}\",\"predicates\":\\[\\],\"responses\":\\[\\]\\}"
+  },
+  {
+    "case": "complex_scenarios: Create, modify, and delete imposter workflow",
+    "kind": "known-bug",
+    "reason": "the DELETE /imposters/:port response omits defaultResponse and reports numberOfRequests 0; Mountebank answers the imposter as it was (#1361)",
+    "id": "delete-response-not-final-state#0",
+    "location": "step[6].admin.body/defaultResponse",
+    "mountebank": "{\"body\":\"not found\",\"statusCode\":404}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "complex_scenarios: Create, modify, and delete imposter workflow",
+    "kind": "known-bug",
+    "reason": "the DELETE /imposters/:port response omits defaultResponse and reports numberOfRequests 0; Mountebank answers the imposter as it was (#1361)",
+    "id": "delete-response-not-final-state#1",
+    "location": "step[6].admin.body/numberOfRequests",
+    "mountebank": "3",
+    "rift": "0"
+  },
+  {
+    "case": "complex_scenarios: Proxy mode forwards unmatched requests",
+    "kind": "known-bug",
+    "reason": "a defaultResponse holding a proxy loses it (printed as statusCode 200); Mountebank keeps it (#1369)",
+    "id": "default-response-proxy-dropped/step#0",
+    "location": "step[0].admin.body/defaultResponse/proxy",
+    "mountebank": "{\"to\":\"http://httpbin.org\"}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "complex_scenarios: Proxy mode forwards unmatched requests",
+    "kind": "known-bug",
+    "reason": "a defaultResponse holding a proxy loses it (printed as statusCode 200); Mountebank keeps it (#1369)",
+    "id": "default-response-proxy-dropped/step#1",
+    "location": "step[0].admin.body/defaultResponse/statusCode",
+    "mountebank": "(absent)",
+    "rift": "200"
+  },
+  {
+    "case": "complex_scenarios: Proxy mode forwards unmatched requests",
+    "kind": "known-bug",
+    "reason": "a defaultResponse holding a proxy loses it (printed as statusCode 200); Mountebank keeps it (#1369)",
+    "id": "default-response-proxy-dropped/stored#0",
+    "location": "stored[4545]/defaultResponse/proxy",
+    "mountebank": "{\"to\":\"http://httpbin.org\"}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "complex_scenarios: Proxy mode forwards unmatched requests",
+    "kind": "known-bug",
+    "reason": "a defaultResponse holding a proxy loses it (printed as statusCode 200); Mountebank keeps it (#1369)",
+    "id": "default-response-proxy-dropped/stored#1",
+    "location": "stored[4545]/defaultResponse/statusCode",
+    "mountebank": "(absent)",
+    "rift": "200"
+  },
+  {
+    "case": "complex_scenarios: Proxy mode forwards unmatched requests",
+    "kind": "known-bug",
+    "reason": "a defaultResponse holding a proxy loses it (printed as statusCode 200); Mountebank keeps it (#1369)",
+    "id": "default-response-proxy-dropped/replayable#0",
+    "location": "replayable[4545]/defaultResponse/proxy",
+    "mountebank": "{\"to\":\"http://httpbin.org\"}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "complex_scenarios: Proxy mode forwards unmatched requests",
+    "kind": "known-bug",
+    "reason": "a defaultResponse holding a proxy loses it (printed as statusCode 200); Mountebank keeps it (#1369)",
+    "id": "default-response-proxy-dropped/replayable#1",
+    "location": "replayable[4545]/defaultResponse/statusCode",
+    "mountebank": "(absent)",
+    "rift": "200"
+  },
+  {
+    "case": "predicates: Inject predicate accessing multiple request fields",
+    "kind": "known-bug",
+    "reason": "inject sees request header names Title-Cased (X-Custom); Mountebank passes them as the client sent them (reqwest sends x-custom), so the predicate matches only in Rift (#1368)",
+    "id": "inject-header-names-title-cased#0",
+    "location": "step[1].body",
+    "mountebank": "",
+    "rift": "multi-field match"
+  },
+  {
+    "id": "inject-header-names-title-cased/targeted",
+    "case": "targeted: an inject function reads request headers by the name the client sent",
+    "location": "step[1].body",
+    "kind": "known-bug",
+    "reason": "inject sees request header names Title-Cased; Mountebank passes them as sent (#1368)",
+    "mountebank": "lower=abc title=undefined",
+    "rift": "lower=undefined title=abc"
+  },
+  {
+    "id": "key-case-sensitive-true",
+    "case": "targeted: keyCaseSensitive makes a query key comparison exact",
+    "location": "step[2].body",
+    "kind": "known-bug",
+    "reason": "keyCaseSensitive: true compares names exactly in Rift; in Mountebank 2.9.1 it only takes effect with caseSensitive: true (predicates.js normalize), so the lower-case key still matches (#1367)",
+    "mountebank": "exact key",
+    "rift": ""
+  },
+  {
+    "case": "sdk-corpus: 02-predicates.json",
+    "kind": "known-bug",
+    "reason": "same keyCaseSensitive divergence, in the corpus's own kcs-nomatch-lower stub (#1367)",
+    "id": "key-case-sensitive-true/corpus#0",
+    "location": "step[14].status",
+    "mountebank": "200",
+    "rift": "400"
+  },
+  {
+    "case": "sdk-corpus: 02-predicates.json",
+    "kind": "known-bug",
+    "reason": "same keyCaseSensitive divergence, in the corpus's own kcs-nomatch-lower stub (#1367)",
+    "id": "key-case-sensitive-true/corpus#1",
+    "location": "step[14].body/error",
+    "mountebank": "(absent)",
+    "rift": "\"no predicate matched\""
+  },
+  {
+    "case": "sdk-corpus: 02-predicates.json",
+    "kind": "known-bug",
+    "reason": "same keyCaseSensitive divergence, in the corpus's own kcs-nomatch-lower stub (#1367)",
+    "id": "key-case-sensitive-true/corpus#2",
+    "location": "step[14].body/hint",
+    "mountebank": "(absent)",
+    "rift": "\"see README §02 for matching requests\""
+  },
+  {
+    "case": "sdk-corpus: 02-predicates.json",
+    "kind": "known-bug",
+    "reason": "same keyCaseSensitive divergence, in the corpus's own kcs-nomatch-lower stub (#1367)",
+    "id": "key-case-sensitive-true/corpus#3",
+    "location": "step[14].body/matched",
+    "mountebank": "\"kcs-lower\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: Basic proxy forwards requests to backend",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/basic-proxy-forwards-req/stored#0",
+    "location": "stored[4545]/stubs/0/responses/0/is",
+    "mountebank": "{\"_mode\":\"text\",\"body\":\"backend response\",\"headers\":{},\"statusCode\":200}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: Basic proxy forwards requests to backend",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/basic-proxy-forwards-req/stored#1",
+    "location": "stored[4545]/stubs/0/responses/0/proxy",
+    "mountebank": "(absent)",
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+  },
+  {
+    "case": "proxy: Basic proxy forwards requests to backend",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/basic-proxy-forwards-req/stored#2",
+    "location": "stored[4545]/stubs/1",
+    "mountebank": "{\"responses\":[{\"proxy\":{\"to\":\"http://localhost:4546\"}}]}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: Basic proxy forwards requests to backend",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/basic-proxy-forwards-req/replayable#0",
+    "location": "replayable[4545]/stubs/0/responses/0/is",
+    "mountebank": "{\"_mode\":\"text\",\"body\":\"backend response\",\"headers\":{},\"statusCode\":200}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: Basic proxy forwards requests to backend",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/basic-proxy-forwards-req/replayable#1",
+    "location": "replayable[4545]/stubs/0/responses/0/proxy",
+    "mountebank": "(absent)",
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+  },
+  {
+    "case": "proxy: Basic proxy forwards requests to backend",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/basic-proxy-forwards-req/replayable#2",
+    "location": "replayable[4545]/stubs/1",
+    "mountebank": "{\"responses\":[{\"proxy\":{\"to\":\"http://localhost:4546\"}}]}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: Proxy records requests when recordRequests enabled",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/proxy-records-requests-w/stored#0",
+    "location": "stored[4545]/stubs/0/responses/0/is",
+    "mountebank": "{\"_mode\":\"text\",\"body\":\"backend response\",\"headers\":{},\"statusCode\":200}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: Proxy records requests when recordRequests enabled",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/proxy-records-requests-w/stored#1",
+    "location": "stored[4545]/stubs/0/responses/0/proxy",
+    "mountebank": "(absent)",
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+  },
+  {
+    "case": "proxy: Proxy records requests when recordRequests enabled",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/proxy-records-requests-w/stored#2",
+    "location": "stored[4545]/stubs/1",
+    "mountebank": "{\"responses\":[{\"proxy\":{\"to\":\"http://localhost:4546\"}}]}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: Proxy records requests when recordRequests enabled",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/proxy-records-requests-w/replayable#0",
+    "location": "replayable[4545]/stubs/0/responses/0/is",
+    "mountebank": "{\"_mode\":\"text\",\"body\":\"backend response\",\"headers\":{},\"statusCode\":200}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: Proxy records requests when recordRequests enabled",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/proxy-records-requests-w/replayable#1",
+    "location": "replayable[4545]/stubs/0/responses/0/proxy",
+    "mountebank": "(absent)",
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+  },
+  {
+    "case": "proxy: Proxy records requests when recordRequests enabled",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/proxy-records-requests-w/replayable#2",
+    "location": "replayable[4545]/stubs/1",
+    "mountebank": "{\"responses\":[{\"proxy\":{\"to\":\"http://localhost:4546\"}}]}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: proxyOnce mode saves response and replays",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/proxyonce-mode-saves-res/stored#0",
+    "location": "stored[4545]/stubs/0/responses/0/is",
+    "mountebank": "{\"_mode\":\"text\",\"body\":\"tracked\",\"headers\":{},\"statusCode\":200}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: proxyOnce mode saves response and replays",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/proxyonce-mode-saves-res/stored#1",
+    "location": "stored[4545]/stubs/0/responses/0/proxy",
+    "mountebank": "(absent)",
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+  },
+  {
+    "case": "proxy: proxyOnce mode saves response and replays",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/proxyonce-mode-saves-res/stored#2",
+    "location": "stored[4545]/stubs/1",
+    "mountebank": "{\"responses\":[{\"proxy\":{\"mode\":\"proxyOnce\",\"to\":\"http://localhost:4546\"}}]}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: proxyOnce mode saves response and replays",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/proxyonce-mode-saves-res/replayable#0",
+    "location": "replayable[4545]/stubs/0/responses/0/is",
+    "mountebank": "{\"_mode\":\"text\",\"body\":\"tracked\",\"headers\":{},\"statusCode\":200}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: proxyOnce mode saves response and replays",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/proxyonce-mode-saves-res/replayable#1",
+    "location": "replayable[4545]/stubs/0/responses/0/proxy",
+    "mountebank": "(absent)",
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+  },
+  {
+    "case": "proxy: proxyOnce mode saves response and replays",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/proxyonce-mode-saves-res/replayable#2",
+    "location": "replayable[4545]/stubs/1",
+    "mountebank": "{\"responses\":[{\"proxy\":{\"mode\":\"proxyOnce\",\"to\":\"http://localhost:4546\"}}]}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: injectHeaders adds headers to proxied request",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/injectheaders-adds-heade/stored#0",
+    "location": "stored[4545]/stubs/0/responses/0/is",
+    "mountebank": "{\"_mode\":\"text\",\"body\":\"echo\",\"headers\":{},\"statusCode\":200}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: injectHeaders adds headers to proxied request",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/injectheaders-adds-heade/stored#1",
+    "location": "stored[4545]/stubs/0/responses/0/proxy",
+    "mountebank": "(absent)",
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{\"X-Injected\":\"header-value\"},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+  },
+  {
+    "case": "proxy: injectHeaders adds headers to proxied request",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/injectheaders-adds-heade/stored#2",
+    "location": "stored[4545]/stubs/1",
+    "mountebank": "{\"responses\":[{\"proxy\":{\"injectHeaders\":{\"X-Injected\":\"header-value\"},\"to\":\"http://localhost:4546\"}}]}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: injectHeaders adds headers to proxied request",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/injectheaders-adds-heade/replayable#0",
+    "location": "replayable[4545]/stubs/0/responses/0/is",
+    "mountebank": "{\"_mode\":\"text\",\"body\":\"echo\",\"headers\":{},\"statusCode\":200}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: injectHeaders adds headers to proxied request",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/injectheaders-adds-heade/replayable#1",
+    "location": "replayable[4545]/stubs/0/responses/0/proxy",
+    "mountebank": "(absent)",
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{\"X-Injected\":\"header-value\"},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+  },
+  {
+    "case": "proxy: injectHeaders adds headers to proxied request",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/injectheaders-adds-heade/replayable#2",
+    "location": "replayable[4545]/stubs/1",
+    "mountebank": "{\"responses\":[{\"proxy\":{\"injectHeaders\":{\"X-Injected\":\"header-value\"},\"to\":\"http://localhost:4546\"}}]}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: proxyAlways mode always forwards to backend",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/proxyalways-mode-always-/stored#0",
+    "location": "stored[4545]/stubs/1",
+    "mountebank": "{\"predicates\":[],\"responses\":[{\"is\":{\"_mode\":\"text\",\"body\":\"tracked\",\"headers\":{},\"statusCode\":200}},{\"is\":{\"_mode\":\"text\",\"body\":\"tracked\",\"headers\":{},\"statusCode\":200}}]}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: proxyAlways mode always forwards to backend",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/proxyalways-mode-always-/replayable#0",
+    "location": "replayable[4545]/stubs/1",
+    "mountebank": "{\"predicates\":[],\"responses\":[{\"is\":{\"_mode\":\"text\",\"body\":\"tracked\",\"headers\":{},\"statusCode\":200}},{\"is\":{\"_mode\":\"text\",\"body\":\"tracked\",\"headers\":{},\"statusCode\":200}}]}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: Stubs take priority over proxy",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/stubs-take-priority-over/stored#0",
+    "location": "stored[4545]/stubs/1/responses/0/is",
+    "mountebank": "{\"_mode\":\"text\",\"body\":\"from backend\",\"headers\":{},\"statusCode\":200}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: Stubs take priority over proxy",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/stubs-take-priority-over/stored#1",
+    "location": "stored[4545]/stubs/1/responses/0/proxy",
+    "mountebank": "(absent)",
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+  },
+  {
+    "case": "proxy: Stubs take priority over proxy",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/stubs-take-priority-over/stored#2",
+    "location": "stored[4545]/stubs/2",
+    "mountebank": "{\"responses\":[{\"proxy\":{\"to\":\"http://localhost:4546\"}}]}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: Stubs take priority over proxy",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/stubs-take-priority-over/replayable#0",
+    "location": "replayable[4545]/stubs/1/responses/0/is",
+    "mountebank": "{\"_mode\":\"text\",\"body\":\"from backend\",\"headers\":{},\"statusCode\":200}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: Stubs take priority over proxy",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/stubs-take-priority-over/replayable#1",
+    "location": "replayable[4545]/stubs/1/responses/0/proxy",
+    "mountebank": "(absent)",
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"\",\"predicateGenerators\":[],\"to\":\"http://localhost:4546\"}"
+  },
+  {
+    "case": "proxy: Stubs take priority over proxy",
+    "kind": "known-bug",
+    "reason": "a proxy without predicateGenerators records into no stub: the printed and exported imposter has no recorded response, where Mountebank inserts it as a stub (before the proxy for proxyOnce, after it for proxyAlways) (#1363)",
+    "id": "proxy-recording-not-a-stub/stubs-take-priority-over/replayable#2",
+    "location": "replayable[4545]/stubs/2",
+    "mountebank": "{\"responses\":[{\"proxy\":{\"to\":\"http://localhost:4546\"}}]}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/step[4].body#0",
+    "location": "step[4].body",
+    "mountebank": "upstream saw POST /items {\"id\":1,\"note\":\"third\"}",
+    "rift": "upstream saw POST /items {\"id\":1,\"note\":\"first\"}"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#0",
+    "location": "stored[4545]/stubs/0/predicates/0/deepEquals/body",
+    "mountebank": "1",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#1",
+    "location": "stored[4545]/stubs/0/predicates/0/deepEquals/path",
+    "mountebank": "(absent)",
+    "rift": "\"/items\""
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#2",
+    "location": "stored[4545]/stubs/0/predicates/0/jsonpath",
+    "mountebank": "{\"selector\":\"$.id\"}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#3",
+    "location": "stored[4545]/stubs/0/predicates/1/deepEquals/body",
+    "mountebank": "(absent)",
+    "rift": "\"1\""
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#4",
+    "location": "stored[4545]/stubs/0/predicates/1/deepEquals/path",
+    "mountebank": "\"\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#5",
+    "location": "stored[4545]/stubs/1/predicates/0/deepEquals/body",
+    "mountebank": "2",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#6",
+    "location": "stored[4545]/stubs/1/predicates/0/deepEquals/path",
+    "mountebank": "(absent)",
+    "rift": "\"/items\""
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#7",
+    "location": "stored[4545]/stubs/1/predicates/0/jsonpath",
+    "mountebank": "{\"selector\":\"$.id\"}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#8",
+    "location": "stored[4545]/stubs/1/predicates/1/deepEquals/body",
+    "mountebank": "(absent)",
+    "rift": "\"2\""
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#9",
+    "location": "stored[4545]/stubs/1/predicates/1/deepEquals/path",
+    "mountebank": "\"\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#10",
+    "location": "stored[4545]/stubs/2/predicates/0",
+    "mountebank": "{\"deepEquals\":{\"body\":1},\"jsonpath\":{\"selector\":\"$.id\"}}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#11",
+    "location": "stored[4545]/stubs/2/predicates/1",
+    "mountebank": "{\"deepEquals\":{\"path\":\"\"},\"jsonpath\":{\"selector\":\"$.id\"}}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#12",
+    "location": "stored[4545]/stubs/2/responses/0/is",
+    "mountebank": "{\"_mode\":\"text\",\"body\":\"upstream saw POST /items {\\\"id\\\":1,\\\"note\\\":\\\"third\\\"}\",\"headers\":{},\"statusCode\":200}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#13",
+    "location": "stored[4545]/stubs/2/responses/0/proxy",
+    "mountebank": "(absent)",
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[{\"jsonpath\":{\"selector\":\"$.id\"},\"matches\":{\"body\":true,\"path\":true}}],\"to\":\"http://localhost:4546\"}"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4545]/stubs#14",
+    "location": "stored[4545]/stubs/3",
+    "mountebank": "{\"responses\":[{\"proxy\":{\"mode\":\"proxyOnce\",\"predicateGenerators\":[{\"jsonpath\":{\"selector\":\"$.id\"},\"matches\":{\"body\":true,\"path\":true}}],\"to\":\"http://localhost:4546\"}}]}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#0",
+    "location": "replayable[4545]/stubs/0/predicates/0/deepEquals/body",
+    "mountebank": "1",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#1",
+    "location": "replayable[4545]/stubs/0/predicates/0/deepEquals/path",
+    "mountebank": "(absent)",
+    "rift": "\"/items\""
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#2",
+    "location": "replayable[4545]/stubs/0/predicates/0/jsonpath",
+    "mountebank": "{\"selector\":\"$.id\"}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#3",
+    "location": "replayable[4545]/stubs/0/predicates/1/deepEquals/body",
+    "mountebank": "(absent)",
+    "rift": "\"1\""
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#4",
+    "location": "replayable[4545]/stubs/0/predicates/1/deepEquals/path",
+    "mountebank": "\"\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#5",
+    "location": "replayable[4545]/stubs/1/predicates/0/deepEquals/body",
+    "mountebank": "2",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#6",
+    "location": "replayable[4545]/stubs/1/predicates/0/deepEquals/path",
+    "mountebank": "(absent)",
+    "rift": "\"/items\""
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#7",
+    "location": "replayable[4545]/stubs/1/predicates/0/jsonpath",
+    "mountebank": "{\"selector\":\"$.id\"}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#8",
+    "location": "replayable[4545]/stubs/1/predicates/1/deepEquals/body",
+    "mountebank": "(absent)",
+    "rift": "\"2\""
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#9",
+    "location": "replayable[4545]/stubs/1/predicates/1/deepEquals/path",
+    "mountebank": "\"\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#10",
+    "location": "replayable[4545]/stubs/2/predicates/0",
+    "mountebank": "{\"deepEquals\":{\"body\":1},\"jsonpath\":{\"selector\":\"$.id\"}}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#11",
+    "location": "replayable[4545]/stubs/2/predicates/1",
+    "mountebank": "{\"deepEquals\":{\"path\":\"\"},\"jsonpath\":{\"selector\":\"$.id\"}}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#12",
+    "location": "replayable[4545]/stubs/2/responses/0/is",
+    "mountebank": "{\"_mode\":\"text\",\"body\":\"upstream saw POST /items {\\\"id\\\":1,\\\"note\\\":\\\"third\\\"}\",\"headers\":{},\"statusCode\":200}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#13",
+    "location": "replayable[4545]/stubs/2/responses/0/proxy",
+    "mountebank": "(absent)",
+    "rift": "{\"addWaitBehavior\":false,\"injectHeaders\":{},\"mode\":\"proxyOnce\",\"predicateGenerators\":[{\"jsonpath\":{\"selector\":\"$.id\"},\"matches\":{\"body\":true,\"path\":true}}],\"to\":\"http://localhost:4546\"}"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/replayable[4545]/stubs#14",
+    "location": "replayable[4545]/stubs/3",
+    "mountebank": "{\"responses\":[{\"proxy\":{\"mode\":\"proxyOnce\",\"predicateGenerators\":[{\"jsonpath\":{\"selector\":\"$.id\"},\"matches\":{\"body\":true,\"path\":true}}],\"to\":\"http://localhost:4546\"}}]}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/proxyonce-with-a-jsonpath-pred/stored[4546]/numberOfRequests#0",
+    "location": "stored[4546]/numberOfRequests",
+    "mountebank": "3",
+    "rift": "2"
+  },
+  {
+    "case": "proxy: predicateGenerators with jsonpath",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-jsonp/stored[4545]/stubs/0/predicates#0",
+    "location": "stored[4545]/stubs/0/predicates/0/deepEquals/body",
+    "mountebank": "123",
+    "rift": "\"123\""
+  },
+  {
+    "case": "proxy: predicateGenerators with jsonpath",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-jsonp/replayable[4545]/stubs/0/predicates#0",
+    "location": "replayable[4545]/stubs/0/predicates/0/deepEquals/body",
+    "mountebank": "123",
+    "rift": "\"123\""
+  },
+  {
+    "case": "proxy: predicateGenerators with method and headers",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-metho/stored[4545]/stubs/0/predicates#0",
+    "location": "stored[4545]/stubs/0/predicates/0/deepEquals",
+    "mountebank": "(absent)",
+    "rift": "{\"method\":\"GET\"}"
+  },
+  {
+    "case": "proxy: predicateGenerators with method and headers",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-metho/stored[4545]/stubs/0/predicates#1",
+    "location": "stored[4545]/stubs/0/predicates/0/equals",
+    "mountebank": "{\"headers\":{}}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with method and headers",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-metho/stored[4545]/stubs/0/predicates#2",
+    "location": "stored[4545]/stubs/0/predicates/1/deepEquals",
+    "mountebank": "{\"method\":\"GET\"}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with method and headers",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-metho/stored[4545]/stubs/0/predicates#3",
+    "location": "stored[4545]/stubs/0/predicates/1/equals",
+    "mountebank": "(absent)",
+    "rift": "{\"headers\":{\"Accept\":\"application/json\"}}"
+  },
+  {
+    "case": "proxy: predicateGenerators with method and headers",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-metho/replayable[4545]/stubs/0/predicates#0",
+    "location": "replayable[4545]/stubs/0/predicates/0/deepEquals",
+    "mountebank": "(absent)",
+    "rift": "{\"method\":\"GET\"}"
+  },
+  {
+    "case": "proxy: predicateGenerators with method and headers",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-metho/replayable[4545]/stubs/0/predicates#1",
+    "location": "replayable[4545]/stubs/0/predicates/0/equals",
+    "mountebank": "{\"headers\":{}}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with method and headers",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-metho/replayable[4545]/stubs/0/predicates#2",
+    "location": "replayable[4545]/stubs/0/predicates/1/deepEquals",
+    "mountebank": "{\"method\":\"GET\"}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with method and headers",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-metho/replayable[4545]/stubs/0/predicates#3",
+    "location": "replayable[4545]/stubs/0/predicates/1/equals",
+    "mountebank": "(absent)",
+    "rift": "{\"headers\":{\"Accept\":\"application/json\"}}"
+  },
+  {
+    "case": "proxy: predicateGenerators with predicateOperator",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-predi/stored[4545]/stubs/0/predicates#0",
+    "location": "stored[4545]/stubs/0/predicates/0/contains/body",
+    "mountebank": "\"\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with predicateOperator",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-predi/stored[4545]/stubs/0/predicates#1",
+    "location": "stored[4545]/stubs/0/predicates/0/contains/headers",
+    "mountebank": "{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with predicateOperator",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-predi/stored[4545]/stubs/0/predicates#2",
+    "location": "stored[4545]/stubs/0/predicates/0/contains/ip",
+    "mountebankMatches": "\"(?:::ffff:)?127\\.0\\.0\\.1\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with predicateOperator",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-predi/stored[4545]/stubs/0/predicates#3",
+    "location": "stored[4545]/stubs/0/predicates/0/contains/method",
+    "mountebank": "\"GET\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with predicateOperator",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-predi/stored[4545]/stubs/0/predicates#4",
+    "location": "stored[4545]/stubs/0/predicates/0/contains/query",
+    "mountebank": "{}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with predicateOperator",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-predi/stored[4545]/stubs/0/predicates#5",
+    "location": "stored[4545]/stubs/0/predicates/0/contains/requestFrom",
+    "mountebankMatches": "\"(?:::ffff:)?127\\.0\\.0\\.1:\\d{4,5}\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with predicateOperator",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-predi/replayable[4545]/stubs/0/predicates#0",
+    "location": "replayable[4545]/stubs/0/predicates/0/contains/body",
+    "mountebank": "\"\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with predicateOperator",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-predi/replayable[4545]/stubs/0/predicates#1",
+    "location": "replayable[4545]/stubs/0/predicates/0/contains/headers",
+    "mountebank": "{\"accept\":\"*/*\",\"host\":\"127.0.0.1:4545\"}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with predicateOperator",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-predi/replayable[4545]/stubs/0/predicates#2",
+    "location": "replayable[4545]/stubs/0/predicates/0/contains/ip",
+    "mountebankMatches": "\"(?:::ffff:)?127\\.0\\.0\\.1\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with predicateOperator",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-predi/replayable[4545]/stubs/0/predicates#3",
+    "location": "replayable[4545]/stubs/0/predicates/0/contains/method",
+    "mountebank": "\"GET\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with predicateOperator",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-predi/replayable[4545]/stubs/0/predicates#4",
+    "location": "replayable[4545]/stubs/0/predicates/0/contains/query",
+    "mountebank": "{}",
+    "rift": "(absent)"
+  },
+  {
+    "case": "proxy: predicateGenerators with predicateOperator",
+    "kind": "known-bug",
+    "reason": "predicateGenerators: Mountebank 2.9.1 records the selected jsonpath value as JSON (1) and carries the jsonpath onto every generated predicate, so its path predicate selects \"\" and never matches again; it orders generated predicates by the matches object, and predicateOperator captures every request field. Rift records strings, scopes only the body, orders method/path/query/headers/body. docs/mountebank/proxy.md claims Mountebank's order (#1364)",
+    "id": "generator-shape/predicategenerators-with-predi/replayable[4545]/stubs/0/predicates#5",
+    "location": "replayable[4545]/stubs/0/predicates/0/contains/requestFrom",
+    "mountebankMatches": "\"(?:::ffff:)?127\\.0\\.0\\.1:\\d{4,5}\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "targeted: predicateGenerator except strips the varying part so the second id replays the recording (#1329)",
+    "kind": "known-bug",
+    "reason": "an inject sees request.body undefined for a request without a body; Mountebank passes \"\" (the upstream here echoes it) (#1365)",
+    "id": "inject-empty-body-undefined#0",
+    "location": "step[2].body",
+    "mountebank": "upstream saw GET /users/1 ",
+    "rift": "upstream saw GET /users/1 undefined"
+  },
+  {
+    "case": "targeted: predicateGenerator except strips the varying part so the second id replays the recording (#1329)",
+    "kind": "known-bug",
+    "reason": "the recorded upstream answer carries the same undefined (#1365)",
+    "id": "inject-empty-body-undefined/step[3].body#0",
+    "location": "step[3].body",
+    "mountebank": "upstream saw GET /users/1 ",
+    "rift": "upstream saw GET /users/1 undefined"
+  },
+  {
+    "case": "targeted: predicateGenerator except strips the varying part so the second id replays the recording (#1329)",
+    "kind": "known-bug",
+    "reason": "the recorded upstream answer carries the same undefined (#1365)",
+    "id": "inject-empty-body-undefined/stored[4545]/stubs/0/responses/0/is/body#0",
+    "location": "stored[4545]/stubs/0/responses/0/is/body",
+    "mountebank": "\"upstream saw GET /users/1 \"",
+    "rift": "\"upstream saw GET /users/1 undefined\""
+  },
+  {
+    "case": "targeted: predicateGenerator except strips the varying part so the second id replays the recording (#1329)",
+    "kind": "known-bug",
+    "reason": "the recorded upstream answer carries the same undefined (#1365)",
+    "id": "inject-empty-body-undefined/replayable[4545]/stubs/0/responses/0/is/body#0",
+    "location": "replayable[4545]/stubs/0/responses/0/is/body",
+    "mountebank": "\"upstream saw GET /users/1 \"",
+    "rift": "\"upstream saw GET /users/1 undefined\""
+  },
+  {
+    "id": "default-response-not-merged",
+    "case": "targeted: defaultResponse is served and printed in every imposter form (#1334)",
+    "location": "step[1].header.x-default",
+    "kind": "known-bug",
+    "reason": "Mountebank's defaultResponse also supplies the defaults of every stub response (its X-Default header reaches the matched stub's answer); Rift uses it only when no stub matches (#1369)",
+    "mountebank": "yes",
+    "rift": "(absent)"
+  },
+  {
+    "case": "sdk-corpus: 13-js-config-decorate.json",
+    "kind": "known-bug",
+    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500) (#1373)",
+    "id": "decorate-without-headers#0",
+    "location": "step[1].status",
+    "mountebank": "500",
+    "rift": "202"
+  },
+  {
+    "case": "sdk-corpus: 13-js-config-decorate.json",
+    "kind": "known-bug",
+    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500) (#1373)",
+    "id": "decorate-without-headers#1",
+    "location": "step[1].header.content-type",
+    "mountebank": "application/json",
+    "rift": "(absent)"
+  },
+  {
+    "case": "sdk-corpus: 13-js-config-decorate.json",
+    "kind": "known-bug",
+    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500) (#1373)",
+    "id": "decorate-without-headers#2",
+    "location": "step[1].header.x-decorated-by",
+    "mountebank": "(absent)",
+    "rift": "config-arrow"
+  },
+  {
+    "case": "sdk-corpus: 13-js-config-decorate.json",
+    "kind": "known-bug",
+    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500) (#1373)",
+    "id": "decorate-without-headers#3",
+    "location": "step[1].body/errors",
+    "mountebankMatches": "\\[\\{\"message\":\"Converting circular structure to JS(?s:.*)",
+    "rift": "(absent)"
+  },
+  {
+    "case": "sdk-corpus: 13-js-config-decorate.json",
+    "kind": "known-bug",
+    "reason": "the decorate writes config.response.headers[...] on an `is` with no headers: Rift's response always has a headers object, Mountebank's is undefined and the decorate throws (500) (#1373)",
+    "id": "decorate-without-headers#4",
+    "location": "step[1].body/v",
+    "mountebank": "(absent)",
+    "rift": "1"
+  },
+  {
+    "case": "sdk-corpus: 07-proxy-record.json",
+    "kind": "known-bug",
+    "reason": "a proxy records upstream header names lower-cased (content-type); Mountebank records them as the upstream sent them (Content-Type) (#1366)",
+    "id": "recorded-header-names-lowercased/stored#0",
+    "location": "stored[4507]/stubs/0/responses/0/is/headers/Content-Type",
+    "mountebank": "\"application/json\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "sdk-corpus: 07-proxy-record.json",
+    "kind": "known-bug",
+    "reason": "a proxy records upstream header names lower-cased (content-type); Mountebank records them as the upstream sent them (Content-Type) (#1366)",
+    "id": "recorded-header-names-lowercased/stored#1",
+    "location": "stored[4507]/stubs/0/responses/0/is/headers/content-type",
+    "mountebank": "(absent)",
+    "rift": "\"application/json\""
+  },
+  {
+    "case": "sdk-corpus: 07-proxy-record.json",
+    "kind": "known-bug",
+    "reason": "a proxy records upstream header names lower-cased (content-type); Mountebank records them as the upstream sent them (Content-Type) (#1366)",
+    "id": "recorded-header-names-lowercased/replayable#0",
+    "location": "replayable[4507]/stubs/0/responses/0/is/headers/Content-Type",
+    "mountebank": "\"application/json\"",
+    "rift": "(absent)"
+  },
+  {
+    "case": "sdk-corpus: 07-proxy-record.json",
+    "kind": "known-bug",
+    "reason": "a proxy records upstream header names lower-cased (content-type); Mountebank records them as the upstream sent them (Content-Type) (#1366)",
+    "id": "recorded-header-names-lowercased/replayable#1",
+    "location": "replayable[4507]/stubs/0/responses/0/is/headers/content-type",
+    "mountebank": "(absent)",
+    "rift": "\"application/json\""
+  },
+  {
+    "id": "replayable-prints-host",
+    "case": "targeted: an imposter with host 127.0.0.1 binds and serves",
+    "location": "replayable[4545]/host",
+    "kind": "known-bug",
+    "reason": "the replayable form prints the imposter's host; Mountebank 2.9.1's does not (arguably its export is the lossy one — decide whether to document instead) (#1361)",
+    "mountebank": "(absent)",
+    "rift": "\"127.0.0.1\""
+  }
+]

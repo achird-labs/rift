@@ -148,10 +148,10 @@ significant digits than a double holds, is served rounded; send such a value as 
 it must be exact.
 
 Object keys are served **sorted** (by byte), at every depth, not in the order the stub wrote them:
-`{"f": 0.1, "big": 7e23}` is served as `{"big":7e+23,"f":0.1}`. Mountebank serves
-`JSON.stringify(body)`, which keeps the order the stub declared, so a client or snapshot that
-compares the body *text* sees a different document from each engine; one that parses the JSON sees
-the same one. This is a deliberate divergence: Rift's JSON values are key-sorted throughout, and the
+`{"f": 0.1, "big": 7e23}` is served as `{"big":7e+23,"f":0.1}`, compact. Mountebank serves
+`JSON.stringify(body, null, 4)`, which keeps the order the stub declared and indents by four spaces,
+so a client or snapshot that compares the body *text* sees a different document from each engine;
+one that parses the JSON sees the same one. This is a deliberate divergence: Rift's JSON values are key-sorted throughout, and the
 stable stub identity used by incremental reload relies on that. When the exact bytes matter, write
 the body as a string (`"body": "{\"f\":0.1,\"big\":7e23}"`), which is served verbatim.
 

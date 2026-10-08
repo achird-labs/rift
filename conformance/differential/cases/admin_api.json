@@ -1,0 +1,652 @@
+{
+  "source": "tests/compatibility/features/admin_api.feature (retired in #1341)",
+  "cases": [
+    {
+      "name": "admin_api: Root endpoint returns service information",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: List imposters when empty",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Create a simple imposter",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "name": "Test Imposter"
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Create imposter with stubs",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/test"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "hello"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/test"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Get imposter by port",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "name": "My Imposter"
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Get non-existent imposter returns 404",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/9999"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Delete imposter by port",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http"
+          }
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Delete non-existent imposter",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/9999"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Replace all imposters with PUT",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http"
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters",
+          "body": {
+            "imposters": [
+              {
+                "port": 4546,
+                "protocol": "http"
+              },
+              {
+                "port": 4547,
+                "protocol": "http"
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4546"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4547"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Delete all imposters",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http"
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http"
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4547,
+            "protocol": "http"
+          }
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Get imposters with replayable format",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/test"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters?replayable=true"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Get imposter without requests",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/test1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/test2"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545?removeProxies=true"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Delete stub by index",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/first"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "first"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/second"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "second"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545/stubs/0"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/first"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/second"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Replace all stubs",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/old"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "old"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "PUT",
+          "path": "/imposters/4545/stubs",
+          "body": {
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/new1"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "new1"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/new2"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "new2"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/old"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/new1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/new2"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Get server config",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/config"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Get server logs",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/logs"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Get logs with pagination",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/logs?startIndex=0&endIndex=10"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Delete saved proxy responses",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:9999"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545/savedProxyResponses"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Invalid JSON returns 400",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": "{ this is not valid json }"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Invalid imposter config returns 400 (Mountebank only)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "invalid": "config"
+          }
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Get imposters with both replayable and removeProxies",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:9999"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters?replayable=true&removeProxies=true"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: Get single imposter with both query params",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:9999"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545?replayable=true&removeProxies=true"
+        }
+      ]
+    },
+    {
+      "name": "admin_api: DELETE requests path is alias for savedRequests",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/test",
+          "times": 3
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545/requests"
+        }
+      ]
+    }
+  ]
+}

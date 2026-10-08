@@ -161,3 +161,4 @@ DELETE /imposters
 - [Responses]({{ site.baseurl }}/mountebank/responses/) - Response configuration
 - [Behaviors]({{ site.baseurl }}/mountebank/behaviors/) - Response modification
 - [Proxy Mode]({{ site.baseurl }}/mountebank/proxy/) - Recording and replaying
+- [Differences from Mountebank]({{ site.baseurl }}/mountebank/differences/) - Every deliberate deviation, each pinned by a test

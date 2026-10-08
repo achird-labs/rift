@@ -1,0 +1,1022 @@
+{
+  "source": "tests/compatibility/features/responses.feature (retired in #1341)",
+  "cases": [
+    {
+      "name": "responses: Return configured status code",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/status"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 418
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/status"
+        }
+      ]
+    },
+    {
+      "name": "responses: Return configured headers",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/headers"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "X-Custom-Header": "custom-value",
+                        "Content-Type": "application/json"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/headers"
+        }
+      ]
+    },
+    {
+      "name": "responses: Return string body",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/string"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "plain text response"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/string"
+        }
+      ]
+    },
+    {
+      "name": "responses: Return JSON object body",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/json"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "Content-Type": "application/json"
+                      },
+                      "body": {
+                        "key": "value",
+                        "nested": {
+                          "a": 1
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/json"
+        }
+      ]
+    },
+    {
+      "name": "responses: Cycle through multiple responses",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/cycle"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "first"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "second"
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "third"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/cycle",
+          "times": 6
+        }
+      ]
+    },
+    {
+      "name": "responses: Wait behavior delays response",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/slow"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "delayed"
+                    },
+                    "_behaviors": {
+                      "wait": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/slow"
+        }
+      ]
+    },
+    {
+      "name": "responses: Wait behavior with function (random delay)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/random-wait"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    },
+                    "_behaviors": {
+                      "wait": "function() { return Math.floor(Math.random() * 100) + 50; }"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/random-wait"
+        }
+      ]
+    },
+    {
+      "name": "responses: Repeat behavior repeats response before cycling",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/repeat"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "repeated"
+                    },
+                    "_behaviors": {
+                      "repeat": 3
+                    }
+                  },
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "after"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/repeat",
+          "times": 5
+        }
+      ]
+    },
+    {
+      "name": "responses: Decorate behavior modifies response",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/decorate"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "original"
+                    },
+                    "_behaviors": {
+                      "decorate": "function(request, response) { response.body = response.body + ' decorated'; }"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/decorate"
+        }
+      ]
+    },
+    {
+      "name": "responses: Copy behavior copies from request",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "X-Request-Id": "${REQUEST_ID}"
+                      },
+                      "body": "copied"
+                    },
+                    "_behaviors": {
+                      "copy": {
+                        "from": {
+                          "headers": "X-Request-Id"
+                        },
+                        "into": "${REQUEST_ID}",
+                        "using": {
+                          "method": "regex",
+                          "selector": ".*"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "headers": [
+            [
+              "X-Request-Id",
+              "abc123"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "responses: Default response when no stub matches",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": 503,
+              "body": "Service Unavailable"
+            },
+            "stubs": []
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/unmatched"
+        }
+      ]
+    },
+    {
+      "name": "responses: Fault injection returns error",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/fault"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "fault": "CONNECTION_RESET_BY_PEER"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/fault"
+        }
+      ]
+    },
+    {
+      "name": "responses: RANDOM_DATA_THEN_CLOSE fault sends garbage and closes",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/random-fault"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "fault": "RANDOM_DATA_THEN_CLOSE"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/random-fault"
+        }
+      ]
+    },
+    {
+      "name": "responses: Inject response generates dynamic response",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "inject": "function(request) { return { statusCode: 200, body: 'Path: ' + request.path }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/dynamic"
+        }
+      ]
+    },
+    {
+      "name": "responses: Inject response with state",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "inject": "function(request, state) { state.count = (state.count || 0) + 1; return { statusCode: 200, body: 'Count: ' + state.count }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/count"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/count"
+        }
+      ]
+    },
+    {
+      "name": "responses: Inject response with async callback",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "inject": "function(request, state, logger, callback) { callback({ statusCode: 201, body: 'async response' }); }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/async"
+        }
+      ]
+    },
+    {
+      "name": "responses: Copy behavior with JSONPath extraction",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "User: ${USER_NAME}"
+                    },
+                    "_behaviors": {
+                      "copy": {
+                        "from": "body",
+                        "into": "${USER_NAME}",
+                        "using": {
+                          "method": "jsonpath",
+                          "selector": "$.user.name"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"user\": {\"name\": \"Alice\"}}"
+        }
+      ]
+    },
+    {
+      "name": "responses: Copy behavior with XPath extraction",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "Name: ${NAME}"
+                    },
+                    "_behaviors": {
+                      "copy": {
+                        "from": "body",
+                        "into": "${NAME}",
+                        "using": {
+                          "method": "xpath",
+                          "selector": "//user/name/text()"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "body": "<root><user><name>Bob</name></user></root>"
+        }
+      ]
+    },
+    {
+      "name": "responses: Copy behavior from query parameters",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "Search: ${QUERY}"
+                    },
+                    "_behaviors": {
+                      "copy": {
+                        "from": {
+                          "query": "q"
+                        },
+                        "into": "${QUERY}",
+                        "using": {
+                          "method": "regex",
+                          "selector": ".*"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?q=hello"
+        }
+      ]
+    },
+    {
+      "name": "responses: Multiple copy behaviors",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "X-Request-Id": "${ID}"
+                      },
+                      "body": "Method: ${METHOD}"
+                    },
+                    "_behaviors": {
+                      "copy": [
+                        {
+                          "from": {
+                            "headers": "X-Request-Id"
+                          },
+                          "into": "${ID}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        },
+                        {
+                          "from": "method",
+                          "into": "${METHOD}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "headers": [
+            [
+              "X-Request-Id",
+              "req-123"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "responses: Decorate behavior adds custom headers",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "test"
+                    },
+                    "_behaviors": {
+                      "decorate": "function(request, response) { response.headers = response.headers || {}; response.headers['X-Request-Path'] = request.path; }"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/decorated"
+        }
+      ]
+    },
+    {
+      "name": "responses: Decorate behavior modifies status code conditionally",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "test"
+                    },
+                    "_behaviors": {
+                      "decorate": "function(request, response) { var h = request.headers['x-force-error'] || request.headers['X-Force-Error']; if (h) { response.statusCode = 500; response.body = 'Forced error'; } }"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "headers": [
+            [
+              "X-Force-Error",
+              "true"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "responses: Wait behavior with JavaScript function returning random delay",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "waited"
+                    },
+                    "_behaviors": {
+                      "wait": "function() { return Math.floor(Math.random() * 50) + 100; }"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
+    },
+    {
+      "name": "responses: Lookup behavior basic structure is accepted",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "User: ${row}['name']"
+                    },
+                    "_behaviors": {
+                      "lookup": {
+                        "key": {
+                          "from": {
+                            "query": "id"
+                          },
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        },
+                        "fromDataSource": {
+                          "csv": {
+                            "path": "/data/users.csv",
+                            "keyColumn": "id"
+                          }
+                        },
+                        "into": "${row}"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?id=1"
+        }
+      ]
+    },
+    {
+      "name": "responses: Multiple behaviors execute in order",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "start"
+                    },
+                    "_behaviors": {
+                      "wait": 50,
+                      "decorate": "function(request, response) { response.body = response.body + '-decorated'; }",
+                      "repeat": 2
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
+    }
+  ]
+}

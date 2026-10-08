@@ -74,4 +74,4 @@ RIFT_SERVER_BIN=$PWD/target/debug/rift-http-proxy \
 Fixtures are numbered and append-only (`NN-name.json`, never renumbered). Add the next free number,
 register it in `sdk-conformance/manifest.json`, and the engine gate enforces that it serves and its
 `_verify` transcripts hold before it can ship. Seed material lives in the engine's
-`tests/compatibility` and `examples/`.
+`conformance/differential/cases` and `examples/`.

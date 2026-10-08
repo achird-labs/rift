@@ -1,0 +1,574 @@
+{
+  "source": "#1341 — the miss classes the retired suite could not see, plus one case per documented deviation the allow-list cites",
+  "cases": [
+    {
+      "name": "targeted: proxyOnce with a jsonpath predicateGenerator records one stub per selected value (#1333)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "function (config) { return { statusCode: 200, body: 'upstream saw ' + config.request.method + ' ' + config.request.path + ' ' + config.request.body }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "path": true,
+                            "body": true
+                          },
+                          "jsonpath": {
+                            "selector": "$.id"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/items",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"id\":1,\"note\":\"first\"}"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/items",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"id\":2,\"note\":\"second\"}"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/items",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"id\":1,\"note\":\"third\"}"
+        }
+      ]
+    },
+    {
+      "name": "targeted: predicateGenerator except strips the varying part so the second id replays the recording (#1329)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4546,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "function (config) { return { statusCode: 200, body: 'upstream saw ' + config.request.method + ' ' + config.request.path + ' ' + config.request.body }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://localhost:4546",
+                      "mode": "proxyOnce",
+                      "predicateGenerators": [
+                        {
+                          "matches": {
+                            "path": true
+                          },
+                          "except": "\\d+$"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/users/1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/users/2"
+        }
+      ]
+    },
+    {
+      "name": "targeted: defaultResponse is served and printed in every imposter form (#1334)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": 404,
+              "body": "nope",
+              "headers": {
+                "X-Default": "yes"
+              }
+            },
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/known"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "known"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/known"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/unknown"
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters"
+        }
+      ]
+    },
+    {
+      "name": "targeted: deepEquals on query matches only the exact query",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "query": {
+                        "a": "1"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "exact"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q?a=1"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q?a=1&b=2"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/q"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a served JSON body keeps the stub's key order in Mountebank and is key-sorted in Rift",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "headers": {
+                        "Content-Type": "application/json"
+                      },
+                      "body": {
+                        "zeta": 1,
+                        "alpha": {
+                          "y": 2,
+                          "x": 3
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
+    },
+    {
+      "name": "targeted: string operators fold ASCII case only, matches folds Unicode",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "josé"
+                    },
+                    "caseSensitive": false
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "equals folded"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "body": "^josé$"
+                    },
+                    "caseSensitive": false
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "matches folded"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "text/plain; charset=utf-8"
+            ]
+          ],
+          "body": "JOSÉ"
+        }
+      ]
+    },
+    {
+      "name": "targeted: shellTransform stdout is the body in Rift and a response object in Mountebank",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "original"
+                    },
+                    "behaviors": [
+                      {
+                        "shellTransform": "echo '{\"statusCode\": 201, \"body\": \"from-shell\"}' #"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/"
+        }
+      ]
+    },
+    {
+      "name": "targeted: a lookup after a copy expands a token the client put in the copied field (Mountebank only)",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "copied=${COPIED}"
+                    },
+                    "behaviors": [
+                      {
+                        "copy": {
+                          "from": {
+                            "query": "v"
+                          },
+                          "into": "${COPIED}",
+                          "using": {
+                            "method": "regex",
+                            "selector": ".*"
+                          }
+                        }
+                      },
+                      {
+                        "lookup": {
+                          "key": {
+                            "from": {
+                              "query": "k"
+                            },
+                            "using": {
+                              "method": "regex",
+                              "selector": ".*"
+                            }
+                          },
+                          "fromDataSource": {
+                            "csv": {
+                              "path": "data/products.csv",
+                              "keyColumn": "id"
+                            }
+                          },
+                          "into": "${row}"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?v=${row}[name]&k=123"
+        }
+      ]
+    },
+    {
+      "name": "targeted: an inject function reads request headers by the name the client sent",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "inject": "function (config) { return { statusCode: 200, body: 'lower=' + config.request.headers['x-client-id'] + ' title=' + config.request.headers['X-Client-Id'] }; }"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "headers": [
+            [
+              "X-Client-ID",
+              "abc"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "targeted: keyCaseSensitive makes a query key comparison exact",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "MyKey": "value"
+                      }
+                    },
+                    "keyCaseSensitive": true
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "body": "exact key"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?MyKey=value"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?mykey=value"
+        }
+      ]
+    },
+    {
+      "name": "targeted: an imposter with host 127.0.0.1 binds and serves",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "host": "127.0.0.1",
+            "stubs": [
+              {
+                "responses": [
+                  {
+                    "is": {
+                      "body": "bound"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
+    }
+  ]
+}

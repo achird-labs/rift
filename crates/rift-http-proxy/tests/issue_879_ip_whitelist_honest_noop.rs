@@ -3,7 +3,7 @@
 //! the Mountebank compatibility matrix marking it ✅ Complete — told operators it worked.
 //!
 //! The resolution is to make it an **honest no-op** rather than to implement it: a prior decision
-//! already exists (`tests/compatibility/COMPATIBILITY_COVERAGE.md` records "use Kubernetes
+//! already exists (`tests/compatibility/COMPATIBILITY_COVERAGE.md`, retired in #1341, recorded "use Kubernetes
 //! NetworkPolicy instead"), the repo already has a house pattern for accepted-but-unimplemented
 //! Mountebank flags (`--formatter`, `--protofile`), and a network ACL enforced inside the mock
 //! server is strictly weaker than the same ACL in the network — behind any proxy or container NAT

@@ -1,0 +1,22 @@
+[package]
+name = "rift-differential"
+description = "Mountebank-oracle differential harness: every case runs on Mountebank and Rift and must answer the same"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = "1.11"
+similar = "3"
+futures = { workspace = true }
+# `rustls` only gives reqwest a crypto provider so a client can be built in a binary with no `main`
+# to install one; every request this harness sends is plain HTTP to 127.0.0.1.
+reqwest = { workspace = true, features = ["rustls"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "time", "net"] }
