@@ -65,12 +65,14 @@ jobs:
       # test timeout. Uncapped, that took the whole runner down ("runner has received a shutdown
       # signal") and lost every result. Inside a cgroup with MemoryMax the kernel OOM-kills the
       # runaway test process instead, which cargo-mutants records as a failed test: caught.
+      # OOMPolicy=continue matters: the scope default (stop) answers that one kill by signalling
+      # every process in the scope, which interrupted cargo-mutants itself and ended the shard.
       - name: Run cargo-mutants
         run: |
           set +e
           sudo --preserve-env=PATH,HOME,CARGO_HOME,RUSTUP_HOME,CARGO_TERM_COLOR,CARGO_INCREMENTAL \
             systemd-run --scope --quiet --uid="$(id -u)" --gid="$(id -g)" \
-              -p MemoryMax=12G -p MemorySwapMax=0 \
+              -p MemoryMax=12G -p MemorySwapMax=0 -p OOMPolicy=continue \
               env PATH="$PATH" HOME="$HOME" CARGO_HOME="$CARGO_HOME" \
                   RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
           cargo mutants \
