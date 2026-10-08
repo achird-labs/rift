@@ -90,11 +90,26 @@ A key that is unread by choice goes in the test's `ALLOWED` list, with the reaso
 
 A scheduled workflow, [`mutants.yml`](.github/workflows/mutants.yml), runs `cargo-mutants` weekly over
 predicate matching, behaviors, proxy generation and `rift-types`' predicate model. It is not a PR
-check (it takes tens of minutes) and never blocks a merge: it reports surviving mutants, meaning
-code a test claims to cover but cannot tell was changed. The counts land in the job summary and the
-full `mutants.out/` is attached as an artifact. Trigger it by hand from the Actions tab
-(`workflow_dispatch`), or locally with `cargo install cargo-mutants --locked` and the same `-p`/`-f`
-arguments the workflow uses; [`.cargo/mutants.toml`](.cargo/mutants.toml) holds the exclusions.
+check (it runs one mutant at a time, a rebuild and a test run each, so it takes hours) and never
+blocks a merge: it reports surviving mutants, meaning code a test claims to cover but cannot tell
+was changed. The counts land in the job summary and the full `mutants.out/` is attached as an
+artifact. Trigger it by hand from the Actions tab (`workflow_dispatch`), or locally with
+`cargo install cargo-mutants --locked` and the same `-p`/`-f` arguments the workflow uses; add
+`--list` to see the mutants without running them, or narrow `-f` to one file to iterate quickly.
+[`.cargo/mutants.toml`](.cargo/mutants.toml) holds the exclusions.
+
+A surviving mutant (a line of `mutants.out/missed.txt`) is one of three things:
+
+- **A test gap.** Write the test that fails on that mutant. In matching, behavior or proxy code,
+  prefer a case in `conformance/differential/cases/`: the mutant says *where* a test is missing and
+  Mountebank says what the right answer is, so one case kills the mutant and pins parity. Group a
+  cluster of survivors in one function into one test, not one per mutant.
+- **An equivalent mutant**, which changes no observable behaviour (`>=` against `>` where equality
+  cannot happen). Mark the function `#[mutants::skip]` with a comment saying why.
+- **Unobservable by design.** Add an `exclude_re` entry to `.cargo/mutants.toml` with a reason.
+
+A survivor that replaces a value with `Default::default()` on a data path deserves a look first: it
+means nothing tests the case where that value is wrong, which is where silent fallbacks hide.
 
 ## Fixed test ports
 

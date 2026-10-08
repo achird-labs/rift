@@ -4,7 +4,7 @@ name: Mutation testing
 # proxy-generation code. Mutation testing finds a test that cannot kill a mutant in the code it
 # claims to cover (the shape that let #1329 ship next to three generator tests that never replayed).
 #
-# Deliberately NOT a PR check: the run takes tens of minutes. It is scheduled + manual only, so it
+# Deliberately NOT a PR check: the run takes hours (one mutant at a time). It is scheduled + manual only, so it
 # can never block a merge. It reports; it does not gate. Surviving mutants are triaged into test
 # gaps by hand.
 on:
