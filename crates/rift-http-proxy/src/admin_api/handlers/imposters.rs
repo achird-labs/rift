@@ -157,6 +157,14 @@ pub async fn handle_create(
             let (parts, body) = response.into_parts();
             let mut new_parts = parts;
             new_parts.status = StatusCode::CREATED;
+            // Mountebank answers a create with `Location: <imposter URL>` (the `self` link the
+            // body also carries). A base URL that is not a valid header value (it echoes the
+            // request's Host) simply gets no Location; the body still names the imposter.
+            if let Ok(location) = hyper::header::HeaderValue::from_str(&format!(
+                "{base_url}/imposters/{assigned_port}"
+            )) {
+                new_parts.headers.insert(hyper::header::LOCATION, location);
+            }
             Response::from_parts(new_parts, body)
         }
         Err(e) => e.into(),

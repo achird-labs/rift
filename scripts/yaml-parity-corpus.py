@@ -150,7 +150,10 @@ def main(out):
                 add(rel, k, lit)
                 k += 1
 
-    compose = ["tests/compatibility/docker-compose.yml"] + sorted(
+    # tests/compatibility/docker-compose.yml was a source too until #1341 deleted it; its golden
+    # (tests-compatibility-docker-compose-yml-00.json) stays as frozen corpus, so keep it when
+    # regenerating rather than deleting it with the other old goldens.
+    compose = sorted(
         os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, "docs/demo/docker-compose*.yml"))
     )
     for rel in compose:

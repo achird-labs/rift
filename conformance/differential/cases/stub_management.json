@@ -1,0 +1,503 @@
+{
+  "source": "tests/compatibility/features/stub_management.feature (retired in #1341)",
+  "cases": [
+    {
+      "name": "stub_management: First matching stub is used when multiple stubs could match",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/api"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "general api"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/api/users"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "specific users"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/api/users"
+        }
+      ]
+    },
+    {
+      "name": "stub_management: More specific stub matches when placed first",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/api/users"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "specific users"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/api"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "general api"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/api/users"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/api/orders"
+        }
+      ]
+    },
+    {
+      "name": "stub_management: Stubs with same path but different methods work independently",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/resource",
+                      "method": "GET"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "GET response"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/resource",
+                      "method": "POST"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "POST response"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/resource",
+                      "method": "DELETE"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 204,
+                      "body": ""
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/resource"
+        }
+      ]
+    },
+    {
+      "name": "stub_management: Duplicate predicates are allowed - first wins",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/test"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "first"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/test"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "second"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/test"
+        }
+      ]
+    },
+    {
+      "name": "stub_management: Empty predicates match all requests",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "catch all"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/any/path"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/another"
+        }
+      ]
+    },
+    {
+      "name": "stub_management: Catch-all stub shadows all subsequent stubs",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "catch all"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/specific"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "specific"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/specific"
+        }
+      ]
+    },
+    {
+      "name": "stub_management: Delete stub shifts subsequent indexes",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/a"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "A"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/b"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "B"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/c"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "C"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "DELETE",
+          "path": "/imposters/4545/stubs/0"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/a"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/b"
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/c"
+        }
+      ]
+    },
+    {
+      "name": "stub_management: Add stub at specific index",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/first"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "first"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/last"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "last"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters/4545/stubs",
+          "body": {
+            "index": 1,
+            "stub": {
+              "predicates": [
+                {
+                  "equals": {
+                    "path": "/middle"
+                  }
+                }
+              ],
+              "responses": [
+                {
+                  "is": {
+                    "statusCode": 200,
+                    "body": "middle"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/middle"
+        }
+      ]
+    }
+  ]
+}

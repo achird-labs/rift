@@ -1,0 +1,1518 @@
+{
+  "source": "tests/compatibility/features/predicates.feature (retired in #1341)",
+  "cases": [
+    {
+      "name": "predicates: Equals predicate matches exact path",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/exact/path"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/exact/path"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Equals predicate does not match different path",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": 404,
+              "body": "not found"
+            },
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/exact/path"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/different/path"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Equals predicate matches method",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "method": "POST"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201,
+                      "body": "created"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/any"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Equals predicate matches headers",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "headers": {
+                        "X-Custom": "value"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "header matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "headers": [
+            [
+              "X-Custom",
+              "value"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "predicates: Equals predicate matches query parameters",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "query": {
+                        "key": "value"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "query matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?key=value"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Equals predicate matches request body",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "exact body"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "body matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "body": "exact body"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Contains predicate matches substring in path",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "contains": {
+                      "path": "search"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "found"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/api/search/query"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Contains predicate matches substring in body",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "contains": {
+                      "body": "needle"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "found needle"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "body": "haystack needle haystack"
+        }
+      ]
+    },
+    {
+      "name": "predicates: StartsWith predicate matches path prefix",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/api/v1"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "v1 api"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/api/v1/users"
+        }
+      ]
+    },
+    {
+      "name": "predicates: StartsWith does not match non-prefix",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": 404,
+              "body": "not found"
+            },
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "startsWith": {
+                      "path": "/api/v1"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/other/api/v1"
+        }
+      ]
+    },
+    {
+      "name": "predicates: EndsWith predicate matches path suffix",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "endsWith": {
+                      "path": ".json"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "json response"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/data/users.json"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Matches predicate with regex pattern",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "path": "^/users/[0-9]+$"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "user found"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/users/123"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Matches predicate does not match non-matching string",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": 404,
+              "body": "not found"
+            },
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "path": "^/users/[0-9]+$"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/users/abc"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Matches predicate with complex regex",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "path": "^/api/(v[0-9]+)/.*"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "versioned api"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/api/v2/resource"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Exists predicate matches when header present",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "headers": {
+                        "Authorization": true
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "authorized"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "headers": [
+            [
+              "Authorization",
+              "Bearer token"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "predicates: Exists predicate with false checks absence",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "headers": {
+                        "X-Debug": false
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "no debug"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
+    },
+    {
+      "name": "predicates: AND predicate requires all conditions",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "and": [
+                      {
+                        "equals": {
+                          "method": "POST"
+                        }
+                      },
+                      {
+                        "equals": {
+                          "path": "/api"
+                        }
+                      },
+                      {
+                        "exists": {
+                          "headers": {
+                            "Content-Type": true
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 201
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "path": "/api",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "predicates: OR predicate matches any condition",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "or": [
+                      {
+                        "equals": {
+                          "path": "/path1"
+                        }
+                      },
+                      {
+                        "equals": {
+                          "path": "/path2"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/path2"
+        }
+      ]
+    },
+    {
+      "name": "predicates: NOT predicate inverts match",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "not": {
+                      "equals": {
+                        "path": "/excluded"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "allowed"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/other"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Case insensitive matching with caseSensitive false",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/API/Users"
+                    },
+                    "caseSensitive": false
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/api/users"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Multiple predicates act as AND",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "method": "GET"
+                    }
+                  },
+                  {
+                    "startsWith": {
+                      "path": "/api/"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/api/resource"
+        }
+      ]
+    },
+    {
+      "name": "predicates: DeepEquals predicate matches nested objects",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "query": {
+                        "filter": "active",
+                        "sort": "name"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "deep matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?filter=active&sort=name"
+        }
+      ]
+    },
+    {
+      "name": "predicates: DeepEquals fails with extra fields",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": 404
+            },
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "query": {
+                        "filter": "active"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/?filter=active&extra=field"
+        }
+      ]
+    },
+    {
+      "name": "predicates: DeepEquals matches JSON body",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "deepEquals": {
+                      "body": {
+                        "user": {
+                          "name": "john",
+                          "age": 30
+                        }
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "json matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"user\": {\"name\": \"john\", \"age\": 30}}"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Except parameter strips pattern before matching",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "api/users"
+                    },
+                    "except": "^/v[0-9]+/"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "version stripped"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/v1/api/users"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Except parameter with body matching",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "content"
+                    },
+                    "except": "\\s+"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "body": "  content  "
+        }
+      ]
+    },
+    {
+      "name": "predicates: JSONPath predicate matches nested JSON field",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "john"
+                    },
+                    "jsonpath": {
+                      "selector": "$.user.name"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "jsonpath matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"user\": {\"name\": \"john\", \"email\": \"john@example.com\"}}"
+        }
+      ]
+    },
+    {
+      "name": "predicates: JSONPath predicate with array selector",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "item1"
+                    },
+                    "jsonpath": {
+                      "selector": "$.items[0].name"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "array item matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"items\": [{\"name\": \"item1\"}, {\"name\": \"item2\"}]}"
+        }
+      ]
+    },
+    {
+      "name": "predicates: JSONPath predicate with wildcard",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "contains": {
+                      "body": "active"
+                    },
+                    "jsonpath": {
+                      "selector": "$.users[*].status"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "wildcard matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"users\": [{\"status\": \"disabled\"}, {\"status\": \"active\"}]}"
+        }
+      ]
+    },
+    {
+      "name": "predicates: XPath predicate matches XML element",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "john"
+                    },
+                    "xpath": {
+                      "selector": "//user/name"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "xpath matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "body": "<root><user><name>john</name></user></root>"
+        }
+      ]
+    },
+    {
+      "name": "predicates: XPath predicate with namespace",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "test"
+                    },
+                    "xpath": {
+                      "selector": "//ns:item/ns:value",
+                      "ns": {
+                        "ns": "http://example.com/ns"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "namespaced xpath matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "body": "<root xmlns:ns=\"http://example.com/ns\"><ns:item><ns:value>test</ns:value></ns:item></root>"
+        }
+      ]
+    },
+    {
+      "name": "predicates: XPath predicate with attribute",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "body": "active"
+                    },
+                    "xpath": {
+                      "selector": "//user/@status"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "attribute matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "body": "<root><user status=\"active\">John</user></root>"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Inject predicate with custom JavaScript logic",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "inject": "function(request) { return request.path.length > 10; }"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "inject matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/very/long/path"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Inject predicate accessing multiple request fields",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "inject": "function(request) { return request.method === 'POST' && request.headers['X-Custom'] === 'check'; }"
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "multi-field match"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "headers": [
+            [
+              "X-Custom",
+              "check"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "predicates: Case insensitive matching is default",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "defaultResponse": {
+              "statusCode": 404
+            },
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/API"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/api"
+        }
+      ]
+    },
+    {
+      "name": "predicates: Case insensitive header matching",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "headers": {
+                        "X-Custom": "VALUE"
+                      }
+                    },
+                    "caseSensitive": false
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "header matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "headers": [
+            [
+              "x-custom",
+              "value"
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

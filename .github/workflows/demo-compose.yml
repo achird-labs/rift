@@ -2,8 +2,8 @@ name: Demo Compose
 
 # Issue #669: boot every docs/demo/docker-compose*.yml and prove it still works. These files are
 # the copy-paste starting point for new users and nothing ran them — the docs-examples gate boots
-# the binary without docker, and the only `docker compose up --wait` job targets
-# tests/compatibility/docker-compose.yml. So a wrong tag, a stale flag, a renamed env var or a
+# the binary without docker, and the only `docker compose up --wait` job targeted the
+# tests/compatibility/docker-compose.yml that #1341 later retired. So a wrong tag, a stale flag, a renamed env var or a
 # broken probe reached users unnoticed. Issue #664 had to hand-edit the healthcheck in five of
 # these; it missed the sixth (retry-proxy had no healthcheck at all) and CI had nothing to say.
 #

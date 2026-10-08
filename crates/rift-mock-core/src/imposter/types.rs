@@ -1879,11 +1879,14 @@ pub struct ImposterConfig {
     /// Takes precedence over `defaultResponse`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_forward: Option<String>,
-    /// Allow CORS headers (Mountebank compatible)
+    /// Allow CORS headers (Mountebank compatible). Written as Mountebank spells it, `allowCORS`;
+    /// `allowCors` — what releases before #1341 wrote into replayable exports and `--datadir`
+    /// files — still reads.
     #[serde(
         default,
+        rename = "allowCORS",
         skip_serializing_if = "std::ops::Not::not",
-        alias = "allowCORS"
+        alias = "allowCors"
     )]
     pub allow_cors: bool,
     /// Strict behavior mode (issue #375): when true, a requested response behavior that FAILS
@@ -3522,6 +3525,21 @@ mod tests {
         });
         let stub: Stub = serde_json::from_value(stub_json).unwrap();
         assert_eq!(stub.predicates.len(), 1);
+    }
+
+    /// #1341: the differential harness found replayable exports spelling Mountebank's `allowCORS`
+    /// as `allowCors`. It is written as Mountebank spells it, and both spellings still read.
+    #[test]
+    fn allow_cors_is_written_as_mountebank_spells_it_and_reads_either_spelling() {
+        for spelling in ["allowCORS", "allowCors"] {
+            let config: ImposterConfig =
+                serde_json::from_value(json!({"protocol": "http", spelling: true}))
+                    .expect("imposter parses");
+            assert!(config.allow_cors, "{spelling} is read");
+            let written = serde_json::to_value(&config).expect("imposter serialises");
+            assert_eq!(written.get("allowCORS"), Some(&json!(true)), "{spelling}");
+            assert_eq!(written.get("allowCors"), None, "{spelling}");
+        }
     }
 
     #[test]

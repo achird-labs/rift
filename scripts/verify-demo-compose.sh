@@ -4,7 +4,8 @@
 #
 # These files are the copy-paste starting point for new users, and nothing ran them: the
 # docs-examples gate boots the binary against config files without docker, and the only job that
-# ran `docker compose up --wait` targeted tests/compatibility/docker-compose.yml. So a wrong image
+# ran `docker compose up --wait` targeted tests/compatibility/docker-compose.yml (retired in #1341,
+# with nothing composed in its place). So a wrong image
 # tag, a stale flag, a renamed env var, or a broken healthcheck would reach users unnoticed —
 # issue #664 had to hand-edit the healthcheck in five of these and nothing would have caught a miss
 # (it did miss one: docker-compose-retry-proxy.yml had no healthcheck at all).

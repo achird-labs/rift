@@ -114,9 +114,9 @@ jobs:
   # Issue #510: the matrix `test` job runs `--lib` and `--doc` only, so every `tests/*.rs` binary
   # (admin_api_integration, verify_dynamic, the issue_* handler contracts, the FFI round-trip, the
   # corpus-replay gate, …) never ran in CI — a regression in those contracts would ship green. This
-  # job runs the whole integration surface with `--tests`. `--workspace` covers only the six
-  # `crates/*` members, so the docker-bound `rift-compatibility-tests` crate and the benchmark are
-  # excluded automatically (they keep their own dedicated jobs); mountebank_compatibility spawns its
+  # job runs the whole integration surface with `--tests`. `--workspace` includes
+  # conformance/differential, whose oracle test skips here (no `mb`) and runs in the `differential`
+  # job; the benchmark is excluded and keeps its own job. mountebank_compatibility spawns its
   # own server, so it runs on the Docker-enabled runner without extra setup. Runs on
   # stable only (the unit and doctest surfaces already cover beta) to keep the heavier integration
   # run off the critical path.
@@ -593,17 +593,31 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-features --release
 
-  compatibility-test:
-    name: Compatibility Tests
+  # Issue #1341: Mountebank is the oracle. conformance/differential replays every case (the cases
+  # ported from the retired tests/compatibility features, the Mountebank-drivable SDK-corpus
+  # fixtures, and targeted cases) on a real Mountebank and on this PR's Rift, and fails on any
+  # difference in a response or a stored imposter that conformance/differential/allowlist.json
+  # does not name. No Docker: Mountebank runs from npm, Rift from this build. No `needs`, so it
+  # runs beside the other jobs instead of after them. RIFT_DIFFERENTIAL_REQUIRE_MB turns a missing
+  # oracle into a failure (elsewhere, with no `mb` installed, the test skips).
+  differential:
+    name: Differential (Mountebank oracle)
     runs-on: ubuntu-latest
-    # Only run on pull requests to master/main
     if: github.event_name == 'pull_request'
-    needs: [test, lint, build]
+    env:
+      # One Mountebank version for the oracle and the published benchmark
+      # (benchmark-publish.yml's mb_version default). 2.9.2 exists only as a Docker image; npm's
+      # latest release is 2.9.1.
+      MB_VERSION: "2.9.1"
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -623,49 +637,16 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Start test environment
-        working-directory: tests/compatibility
+      - name: Install Mountebank ${{ env.MB_VERSION }}
         run: |
-          docker compose up -d --build --wait
-          # Wait for both services to be healthy
-          echo "Waiting for services to be healthy..."
-          for i in {1..30}; do
-            mb_health=$(docker inspect --format='{{.State.Health.Status}}' mb-original 2>/dev/null || echo "not ready")
-            rift_health=$(docker inspect --format='{{.State.Health.Status}}' rift-proxy 2>/dev/null || echo "not ready")
-            echo "  Mountebank: $mb_health, Rift: $rift_health"
-            if [ "$mb_health" = "healthy" ] && [ "$rift_health" = "healthy" ]; then
-              echo "Both services are healthy!"
-              break
-            fi
-            sleep 2
-          done
+          npm install --prefix "$HOME/bench-mb" "mountebank@$MB_VERSION"
+          "$HOME/bench-mb/node_modules/.bin/mb" --version
 
-      - name: Run shared compatibility tests (Rift + Mountebank)
-        working-directory: tests/compatibility
-        run: cargo test --test compatibility --release
+      - name: Build the Rift server under test
+        run: cargo build -p rift-http-proxy --bin rift-http-proxy
+
+      - name: Run the differential harness
         env:
-          RUST_LOG: info
-
-      - name: Run Rift-only feature tests
-        working-directory: tests/compatibility
-        run: cargo test --test rift_only --release
-        env:
-          RUST_LOG: info
-
-      - name: Show container logs on failure
-        if: failure()
-        working-directory: tests/compatibility
-        run: |
-          echo "=== Mountebank logs ==="
-          docker logs mb-original --tail 100
-          echo ""
-          echo "=== Rift logs ==="
-          docker logs rift-proxy --tail 100
-
-      - name: Stop test environment
-        if: always()
-        working-directory: tests/compatibility
-        run: docker compose down -v
+          RIFT_DIFFERENTIAL_REQUIRE_MB: "1"
+          RIFT_SERVER_BIN: ${{ github.workspace }}/target/debug/rift-http-proxy
+        run: cargo test -p rift-differential -- --nocapture

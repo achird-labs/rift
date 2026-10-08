@@ -1,0 +1,94 @@
+{
+  "source": "sdk-conformance/corpus/imposters — the Mountebank-drivable fixtures, loaded from the corpus itself so a corpus change is diffed too",
+  "fixtures": [
+    {
+      "file": "01-basic-rest.json"
+    },
+    {
+      "file": "02-predicates.json",
+      "dropStubs": [
+        {
+          "name": "xpath — XML body where //user/@role == 'admin'",
+          "reason": "Mountebank 2.9.1 refuses an XPath selector that evaluates to a string (`string(//user/@role)`); its xpath predicate handles node-sets only, so the imposter is not created at all"
+        }
+      ]
+    },
+    {
+      "file": "03-behaviors.json",
+      "dropStubs": [
+        {
+          "name": "wait — random delay between 200ms and 1200ms",
+          "reason": "a `wait` written as a `{\"min\", \"max\"}` range is a Rift extension Mountebank refuses (docs/mountebank/behaviors.md)"
+        }
+      ]
+    },
+    {
+      "file": "05-scripting-engines.json",
+      "dropStubs": [
+        {
+          "name": "Rhai — stateful counter (ctx.state)",
+          "reason": "a `_rift.script` rhai response; Mountebank has no rhai engine"
+        }
+      ],
+      "dropKeys": [
+        "_rift"
+      ]
+    },
+    {
+      "file": "07-proxy-record.json",
+      "with": [
+        "01-basic-rest.json"
+      ]
+    },
+    {
+      "file": "13-js-config-decorate.json",
+      "dropStubs": [
+        {
+          "name": "Rhai decorate (Rift-native) — unchanged",
+          "reason": "a Rhai decorate script; Mountebank evaluates every decorate as JavaScript"
+        }
+      ]
+    },
+    {
+      "file": "14-verify-annotations.json"
+    },
+    {
+      "file": "15-predicate-modifiers.json"
+    },
+    {
+      "file": "16-behaviors-advanced.json",
+      "dropStubs": [
+        {
+          "name": "decorate — Rhai native, mutate response body in place",
+          "reason": "a Rhai decorate script; Mountebank evaluates every decorate as JavaScript"
+        }
+      ]
+    }
+  ],
+  "notDriven": [
+    {
+      "file": "04-fault-injection.json",
+      "reason": "`_rift.fault` responses (Rift-only)"
+    },
+    {
+      "file": "06-stateful-retry.json",
+      "reason": "`_rift` flow state and Rhai scripts (Rift-only)"
+    },
+    {
+      "file": "10-correlated-isolation.json",
+      "reason": "`space` (Rift-only)"
+    },
+    {
+      "file": "11-headers-and-templates.json",
+      "reason": "`{{...}}` response templating (Rift-only)"
+    },
+    {
+      "file": "17-faults-and-binary.json",
+      "reason": "`_rift.fault` responses (Rift-only)"
+    },
+    {
+      "file": "20-migration-compat.json",
+      "reason": "`_rift` blocks and Rift-only aliases"
+    }
+  ]
+}

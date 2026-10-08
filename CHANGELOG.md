@@ -37,7 +37,15 @@ record.
   `statusCode`, `headers` or `body` with no `is` wrapper is served as an `is` response (#304), but
   the linter called it a response with no type, so `docs/mountebank/responses.md`'s own example
   linted red.
-
+- **`POST /imposters` answers `201` with a `Location` header** naming the new imposter
+  (`http://<host>/imposters/<port>`), as Mountebank does (#1341). Rift sent none.
+- **`allowCORS` is written as Mountebank spells it** (#1341). `?replayable=true` exports and
+  `--datadir` files wrote `allowCors`, which Mountebank does not read, so an export re-imported into
+  Mountebank lost CORS. Both spellings still load.
+- **Docs: Mountebank's JSON body text** (#1341). `docs/mountebank/responses.md` said Mountebank serves
+  `JSON.stringify(body)`; it serves `JSON.stringify(body, null, 4)`, indented. The new
+  [Differences from Mountebank](docs/mountebank/differences.md) page lists every deliberate
+  deviation, each pinned by the new Mountebank-differential CI job.
 - **`rift-lint` no longer reports `keyCaseSensitive` as an unknown operator (E009)** (#1325): the engine decodes and honours the predicate modifier, but the linter's modifier set omitted it, so valid configs failed lint.
 - **An XPath with an unbound namespace prefix no longer fails the request** (#1326). A predicate,
   `copy` or `lookup` selector such as `//mb:name` without an `ns` binding for `mb` panicked inside

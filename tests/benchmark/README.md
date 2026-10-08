@@ -707,5 +707,5 @@ transcribing, and add the host and sha by hand.
 
 ## Related
 
-- [Compatibility Tests](../compatibility/) — functional compatibility
+- [Differential conformance](../../conformance/differential/) — every case on Mountebank and Rift, diffed
 - [Integration Tests](../integration/) — integration suite

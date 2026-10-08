@@ -122,6 +122,24 @@ The guard checks *cross-file* uniqueness. Two tests in the **same** file sharing
 collision too — those do run concurrently, on a thread pool — but a literal in a shared helper is
 legitimate, and nothing in the literal distinguishes the two. That one stays a review rule.
 
+## Mountebank is the oracle
+
+[`conformance/differential/`](conformance/differential/) runs every case on a real Mountebank and on
+your build, and fails on any difference in a response or a stored imposter. If you touched
+Mountebank-visible behaviour, run it:
+
+```sh
+npm install --prefix ~/bench-mb mountebank@2.9.1   # once
+cargo test -p rift-differential -- --nocapture
+```
+
+Without Mountebank installed the test skips; the `differential` CI job always runs it. A difference
+it reports is either a bug to fix or a deliberate deviation: then document it (most belong in
+[`docs/mountebank/differences.md`](docs/mountebank/differences.md)) and add an entry to
+`conformance/differential/allowlist.json` that quotes the doc line. A case for new behaviour is a
+few lines of JSON in `conformance/differential/cases/` — no expected values, the other engine is the
+expectation.
+
 ## What a good PR looks like
 
 - **One concern.** A PR that fixes a bug and reformats a module is two PRs.

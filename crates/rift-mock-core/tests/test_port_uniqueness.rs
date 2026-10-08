@@ -46,6 +46,7 @@ const RESERVED: &[(u16, u16, &str)] = &[
     (18000, 18021, "rift_extensions.rs"),
     (19000, 19091, "mountebank_compatibility.rs"),
     (15100, 15299, "apply_config_bench.rs"),
+    (20100, 20199, "compat_rift_only.rs"),
 ];
 
 /// Ports allowed in more than one file, with the reason. Keep this list short: a growing one means

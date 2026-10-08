@@ -1,0 +1,542 @@
+{
+  "source": "tests/compatibility/features/mountebank_compatibility_gaps.feature (retired in #1341)",
+  "cases": [
+    {
+      "name": "mountebank_compatibility_gaps: removeProxies filters proxy stubs from single imposter response",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/static"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "static response"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/proxy"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://example.com"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters/4545?removeProxies=true"
+        }
+      ]
+    },
+    {
+      "name": "mountebank_compatibility_gaps: removeProxies filters proxy stubs from all imposters response",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/static"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "static"
+                    }
+                  }
+                ]
+              },
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/proxy"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "proxy": {
+                      "to": "http://example.com"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "admin",
+          "method": "GET",
+          "path": "/imposters?replayable=true&removeProxies=true"
+        }
+      ]
+    },
+    {
+      "name": "mountebank_compatibility_gaps: Binary mode decodes base64 body",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/binary"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "headers": {
+                        "Content-Type": "application/octet-stream"
+                      },
+                      "body": "SGVsbG8gV29ybGQh",
+                      "_mode": "binary"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/binary"
+        }
+      ]
+    },
+    {
+      "name": "mountebank_compatibility_gaps: Text mode (default) returns body as-is",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/text"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "Plain text body"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/text"
+        }
+      ]
+    },
+    {
+      "name": "mountebank_compatibility_gaps: Form predicate matches URL-encoded form data",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "form": {
+                        "username": "admin",
+                        "password": "secret"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "form matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "username=admin&password=secret"
+        }
+      ]
+    },
+    {
+      "name": "mountebank_compatibility_gaps: Form predicate with contains operator",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "contains": {
+                      "form": {
+                        "email": "@example.com"
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "email matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "email=user@example.com&name=Test"
+        }
+      ]
+    },
+    {
+      "name": "mountebank_compatibility_gaps: keyCaseSensitive false allows case-insensitive header keys",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "headers": {
+                        "X-CUSTOM-HEADER": "value"
+                      }
+                    },
+                    "caseSensitive": false,
+                    "keyCaseSensitive": false
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "header matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "headers": [
+            [
+              "x-custom-header",
+              "value"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "mountebank_compatibility_gaps: IP predicate matches client IP address",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "ip": "."
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "local client"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
+    },
+    {
+      "name": "mountebank_compatibility_gaps: RequestFrom predicate matches client IP:port",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "matches": {
+                      "requestFrom": ":[0-9]+$"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "request from matched"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545
+        }
+      ]
+    },
+    {
+      "name": "mountebank_compatibility_gaps: recordMatches field is accepted in configuration",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "recordMatches": true,
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "equals": {
+                      "path": "/test"
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "test"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "path": "/test"
+        }
+      ]
+    },
+    {
+      "name": "mountebank_compatibility_gaps: Multiple new predicate fields work together",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "and": [
+                      {
+                        "equals": {
+                          "method": "POST"
+                        }
+                      },
+                      {
+                        "matches": {
+                          "ip": "."
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "combined match"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST"
+        }
+      ]
+    },
+    {
+      "name": "mountebank_compatibility_gaps: Exists predicate with form field",
+      "steps": [
+        {
+          "do": "admin",
+          "method": "POST",
+          "path": "/imposters",
+          "body": {
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+              {
+                "predicates": [
+                  {
+                    "exists": {
+                      "form": {
+                        "token": true
+                      }
+                    }
+                  }
+                ],
+                "responses": [
+                  {
+                    "is": {
+                      "statusCode": 200,
+                      "body": "token exists"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "do": "send",
+          "port": 4545,
+          "method": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "token=abc123&other=value"
+        }
+      ]
+    }
+  ]
+}
