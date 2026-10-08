@@ -31,7 +31,7 @@ Forward every request to a backend server:
 ```
 
 Without `"mode": "proxyTransparent"` the proxy is `proxyOnce`: it forwards the first request for
-each method, path and query, then replays that response (see [Proxy Modes](#proxy-modes)).
+each method, path, query and body, then replays that response (see [Proxy Modes](#proxy-modes)).
 
 ---
 
@@ -41,7 +41,10 @@ What a proxy records depends on whether it has `predicateGenerators` (or `addWai
 `addDecorateBehavior`):
 
 - **With generators**, the proxy records each response as a new stub in the imposter, which then
-  answers later matching requests. This is the Mountebank behaviour.
+  answers later matching requests. Under `proxyOnce` a request that matches no recorded stub is
+  forwarded and recorded as another stub, as in Mountebank — a second body under a `body`
+  generator, a second `X-Tenant` under a `headers` generator. Concurrent first requests for the
+  same generated predicates record once.
 - **Without generators**, the imposter's `stubs` never change. `"mode": "proxyOnce"` still replays:
   it keeps the first response for each request in an internal store, so the upstream sees each
   request once. A request is identified by its method, path, query string and request body;

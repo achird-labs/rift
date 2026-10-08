@@ -200,11 +200,27 @@ pub trait ProxyRecordingStore: Send + Sync {
 Its typed error is `ProxyStoreError`, `#[non_exhaustive]`. Inject with
 `.with_proxy_store(Arc<dyn ProxyRecordingStore>)`.
 
-`RequestSignature` is `#[non_exhaustive]`: build it with `RequestSignature::new` (and `.with_body(&[u8])`),
-not a struct literal. It carries `body_hash: Option<u64>` (FNV-1a 64 of the request body, `None` for a
-body-less request, omitted from the serialized form when `None`). The engine sets it only for a proxy
-without `predicateGenerators` (issue #1317). A store that serializes the signature as its key misses
-pre-upgrade recordings of requests that had a body, once.
+`RequestSignature` is `#[non_exhaustive]`: build it with `RequestSignature::new` (and `.with_body(&[u8])`
+or `.with_predicates(&[Value])`), not a struct literal. It carries two optional hashes, each omitted
+from the serialized form when `None`:
+
+- `body_hash: Option<u64>` — FNV-1a 64 of the request body, `None` for a body-less request. The
+  engine sets it only for a proxy without `predicateGenerators` (issue #1317).
+- `predicates_hash: Option<u64>` — FNV-1a 64 of the predicates the proxy's `predicateGenerators`
+  produced for the request, `None` without generators (issue #1333). A request that reaches a
+  `proxyOnce` proxy stub with generators missed every stub recorded before it, so it has to be
+  forwarded and recorded, not answered with another identity's recording; keying the claim on the
+  generated predicates does that and keeps each identity recorded exactly once. When generation
+  fails the engine does not consult the store at all: it forwards, tags the response
+  `x-rift-generator-error` and records nothing.
+
+A store that serializes the signature as its key misses pre-upgrade recordings once: requests that
+had a body (since #1317), and every recording made under `predicateGenerators` (since #1333). With
+generators that miss is visible only for a request no recorded stub matches; it is forwarded and
+recorded again under the new key. During a rolling upgrade an old and a new node use different keys
+for the same generated identity, so each may record it once; an old node that decodes a new node's
+signature drops `predicates_hash` and keys it the old way, so until every node is upgraded a miss
+can still be answered with another identity's recording.
 
 | Variant | Engine response |
 |:--|:--|
@@ -234,8 +250,9 @@ nothing to replay.
 succeeded), and always **before** the stub is published — so a store can make its own commit
 conditional on its publication ack. Returning `Err` releases the claim, leaving the signature
 retryable; the client still receives the upstream response, because the upstream call succeeded and
-only recording failed. When no stub is generated — nothing configured to generate one, or predicate
-generation failed — there is nothing to publish and the engine calls `record` as before.
+only recording failed. When nothing is configured to generate a stub there is nothing to publish
+and the engine calls `record` as before. When predicate generation fails the engine takes no claim
+at all, so neither is called.
 
 `publishes_stubs() == true` additionally makes the engine skip its own in-process stub insertion, so
 the store is the sole publisher. It must then honour the position the engine resolved, which arrives
@@ -268,11 +285,9 @@ Two consequences worth knowing before you set `publishes_stubs() == true`:
   `try_claim` reporting the backend unavailable — there is no `complete` call *and* no local
   insertion, so that request's stub is published nowhere. The engine will not quietly keep a private
   copy your store's peers do not have.
-- **The claim is held across predicate generation.** Negligible for the ordinary generators, but a
-  `predicateGenerators.inject` script runs under the script timeout (5s by default), and a
-  concurrent `proxyOnce` request arriving inside that window sees `InFlight` rather than
-  `AlreadyRecorded`, so it proxies upstream instead of replaying. The signature is still recorded
-  exactly once.
+- **Predicates are generated before the claim.** With `predicateGenerators` they are part of the
+  signature, so `try_claim` runs after them and the claim is not held across a
+  `predicateGenerators.inject` script (issue #1333).
 
 ## `ImposterEventListener` — observe reconciliation
 

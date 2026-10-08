@@ -6602,11 +6602,12 @@ mod tests {
         }
 
         // AC1/AC6 + issue #498: when predicate generation FAILS there is no stub, so nothing may be
-        // published — the claim settles through `record` even for a publishing store, and the
-        // client still gets the generator-error marker.
+        // published, and the client still gets the generator-error marker. Since #1333 no claim is
+        // taken either: without generated predicates the request has no identity to record or
+        // replay under.
         #[cfg(feature = "javascript")]
         #[tokio::test]
-        async fn failed_generation_settles_through_record_and_publishes_nothing() {
+        async fn failed_generation_takes_no_claim_and_publishes_nothing() {
             raise_fd_limit();
             let spy = Arc::new(PublishingProxyStore::new(true, false));
             let manager = ImposterManager::new()
@@ -6638,10 +6639,9 @@ mod tests {
                 spy.completions.lock().is_empty(),
                 "no stub was built, so nothing may be offered for publication"
             );
-            assert_eq!(
-                spy.records.lock().len(),
-                1,
-                "the claim still settles exactly once, through record()"
+            assert!(
+                spy.records.lock().is_empty(),
+                "no claim was taken, so nothing is recorded under a key without the identity"
             );
             assert_eq!(
                 manager.get_imposter(proxy_port).unwrap().stub_count(),

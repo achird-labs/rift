@@ -64,6 +64,20 @@ record.
   `127.0.0.1`). A per-imposter fetch that answers an HTTP error is now a FAIL instead of an
   imposter with no dynamic checks, and so is a listed imposter whose `GET /imposters/{port}`
   errors in the main pass — it was dropped from the run without a word.
+- **`proxyOnce` with `predicateGenerators` forwards and records a request no recorded stub
+  matches** (#1333), as Mountebank's `proxyAndRecord` does. The proxy store keyed a generator's
+  recording on method, path and query only, so a second body under a `body`/`jsonpath`/`xpath`
+  generator, or a second tenant under a `headers` generator, was answered with the first
+  recording: never forwarded, never recorded. The claim now keys on the generated predicates, so
+  each identity is forwarded and recorded exactly once. A concurrent loser for an identity no
+  longer inserts its own duplicate stub, and a request whose generation fails (tagged
+  `x-rift-generator-error`, issue #498) is always forwarded instead of replaying another failed
+  request's response. Embedders: `RequestSignature` gains `predicates_hash: Option<u64>` (omitted
+  from the serialized form when `None`) and `with_predicates`; a store that serializes the
+  signature as its key misses generator recordings made before the upgrade once, and until every
+  node of a cluster is upgraded an old node keys a new node's claim the old way. Predicates are now
+  generated before the claim, so a `predicateGenerators.inject` script no longer runs while the
+  claim is held, but does run before a replay from the store.
 
 ### Changed
 
